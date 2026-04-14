@@ -1,0 +1,18 @@
+node_modules/
+.claude/
+dist/
+# WASM build output (regenerate with: npm run build:wasm)
+src/wasm/
+# Rust build artifacts
+pptx-parser/target/
+# Storybook build
+storybook-static/
+# Log files
+*.log
+# Visual regression test output (generated; not committed)
+tests/visual/screenshots/
+tests/visual/diffs/
+tests/visual/report/
+# Playwright
+playwright-report/
+test-results/

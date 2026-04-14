@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #ffffff; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+
+  <script type="module">
+    import { PptxViewer } from '/src/index.ts';
+
+    const params   = new URLSearchParams(location.search);
+    const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
+
+    const viewer = new PptxViewer(document.getElementById('container'), {
+      width: 960,
+      onSlideChange: (_index, _total) => {
+        // Signal Playwright that the current slide finished rendering
+        document.body.dataset.status = 'ready';
+      },
+      onError: (err) => {
+        document.body.dataset.status = 'error';
+        document.body.dataset.errorMessage = err.message;
+        console.error('[fixture] error:', err);
+      },
+    });
+
+    try {
+      const resp = await fetch('/sample.pptx');
+      if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      // load() renders slide 0 and fires onSlideChange.
+      // goToSlide() re-renders the target and fires onSlideChange again.
+      await viewer.load(buf);
+      if (slideIdx !== 0) {
+        await viewer.goToSlide(slideIdx);
+      }
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = String(err);
+      console.error('[fixture] fatal:', err);
+    }
+  </script>
+</body>
+</html>
