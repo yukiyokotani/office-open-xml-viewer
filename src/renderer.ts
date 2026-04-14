@@ -37,8 +37,17 @@ function resolveFill(fill: Fill | null): string | null {
 
 // ===== Text layout helpers =====
 
+type LayoutSegment = { text: string; font: string; sizePx: number; color: string; underline: boolean };
+
 interface LayoutLine {
-  segments: Array<{ text: string; font: string; sizePx: number; color: string; underline: boolean }>;
+  segments: LayoutSegment[];
+  /** Segments right-aligned at a tab stop (set when paragraph contains \t and a right-aligned tabStop) */
+  tabStop?: {
+    /** Tab stop position in px from the left edge of the text area (bx + lPad + tabStop.px = canvas X) */
+    px: number;
+    algn: string;
+    segments: LayoutSegment[];
+  };
 }
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string): string {
@@ -53,6 +62,9 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
  *  - Explicit line breaks (TextRun type='break')
  *  - Space-based word wrap (Latin text)
  *  - Character-level wrap fallback for CJK / words wider than container
+ *  - Tab stops (right-aligned and left-aligned)
+ *
+ * @param marLPx  Paragraph left margin in canvas px (used for tab stop position calculation)
  */
 function layoutParagraph(
   ctx: CanvasRenderingContext2D,
@@ -60,28 +72,45 @@ function layoutParagraph(
   maxWidthPx: number,
   defaultFontSizePx: number,
   defaultColor: string,
-  scale: number
+  scale: number,
+  marLPx: number
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
   let lineW = 0; // current line's accumulated width
 
+  // Tab stop state: once we hit a \t we switch to collecting tabStop.segments
+  let tabActive = false;
+  let tabStopPx = 0;   // position of tab stop from text area left (px)
+
   const newLine = () => {
     lines.push(currentLine);
     currentLine = { segments: [] };
     lineW = 0;
+    tabActive = false; // reset tab state per line
   };
 
-  // Append text to the current line, merging with the last segment when possible
+  // Push to the active segment list (main or tab-stop group)
   const push = (text: string, font: string, sizePx: number, color: string, underline: boolean) => {
     if (!text) return;
     ctx.font = font;
-    lineW += ctx.measureText(text).width;
-    const last = currentLine.segments.at(-1);
-    if (last && last.font === font && last.color === color && last.underline === underline) {
-      last.text += text;
+    const w = ctx.measureText(text).width;
+    if (tabActive && currentLine.tabStop) {
+      const segs = currentLine.tabStop.segments;
+      const last = segs.at(-1);
+      if (last && last.font === font && last.color === color && last.underline === underline) {
+        last.text += text;
+      } else {
+        segs.push({ text, font, sizePx, color, underline });
+      }
     } else {
-      currentLine.segments.push({ text, font, sizePx, color, underline });
+      lineW += w;
+      const last = currentLine.segments.at(-1);
+      if (last && last.font === font && last.color === color && last.underline === underline) {
+        last.text += text;
+      } else {
+        currentLine.segments.push({ text, font, sizePx, color, underline });
+      }
     }
   };
 
@@ -102,18 +131,46 @@ function layoutParagraph(
 
     for (const token of tokens) {
       if (!token) continue;
+
+      // ── Tab character ────────────────────────────────────────────────────
+      if (/^\t+$/.test(token)) {
+        // Find first tab stop whose position (from text area left) is beyond the current pen
+        const currentAbsW = marLPx + lineW; // current position from text area left
+        const ts = (para.tabStops ?? []).find(
+          t => emuToPx(t.pos, scale) > currentAbsW
+        );
+        if (ts) {
+          tabStopPx = emuToPx(ts.pos, scale);
+          if (ts.algn === 'r' || ts.algn === 'ctr') {
+            // Switch to tab-stop accumulation mode
+            tabActive = true;
+            currentLine.tabStop = { px: tabStopPx, algn: ts.algn, segments: [] };
+          } else {
+            // Left-aligned tab: advance lineW to the tab stop
+            lineW = tabStopPx - marLPx;
+          }
+        } else {
+          // No matching tab stop — treat as a single space
+          push(' ', font, sizePx, color, run.underline);
+        }
+        continue;
+      }
+
       ctx.font = font;
       const tokW = ctx.measureText(token).width;
       const isWhitespace = /^\s+$/.test(token);
 
+      // If already in tab mode, collect all text into tabStop.segments (no wrap)
+      if (tabActive) {
+        push(token, font, sizePx, color, run.underline);
+        continue;
+      }
+
       if (lineW + tokW <= maxWidthPx) {
-        // Token fits on the current line
         push(token, font, sizePx, color, run.underline);
       } else if (isWhitespace) {
-        // Whitespace that would overflow → break here, discard leading space
         if (lineW > 0) newLine();
       } else if (tokW > maxWidthPx) {
-        // Token is wider than the whole container → character-level wrap
         if (lineW > 0) newLine();
         for (const ch of token) {
           ctx.font = font;
@@ -122,7 +179,6 @@ function layoutParagraph(
           push(ch, font, sizePx, color, run.underline);
         }
       } else {
-        // Token fits on a fresh line but not on the current one → word wrap
         newLine();
         push(token, font, sizePx, color, run.underline);
       }
@@ -154,9 +210,11 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const h = emuToPx(el.height, scale);
 
   ctx.save();
-  if (el.rotation !== 0) {
+  if (el.rotation !== 0 || el.flipH || el.flipV) {
     ctx.translate(x + w / 2, y + h / 2);
     ctx.rotate((el.rotation * Math.PI) / 180);
+    if (el.flipH) ctx.scale(-1, 1);
+    if (el.flipV) ctx.scale(1, -1);
     ctx.translate(-(x + w / 2), -(y + h / 2));
   }
 
@@ -167,7 +225,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (el.custGeom && el.custGeom.length > 0) {
     buildCustomPath(ctx, el.custGeom, x, y, w, h);
   } else {
-    buildShapePath(ctx, geom, x, y, w, h);
+    buildShapePath(ctx, geom, x, y, w, h, el.adj);
   }
 
   if (fillColor) {
@@ -184,7 +242,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor);
+    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV);
   }
 }
 
@@ -242,14 +300,17 @@ function buildCustomPath(
   }
 }
 
-/** Build the canvas path for a given OOXML preset geometry. */
+/** Build the canvas path for a given OOXML preset geometry.
+ * @param adj  First adjustment value from avLst (0–100000 range), used by shapes like trapezoid.
+ */
 function buildShapePath(
   ctx: CanvasRenderingContext2D,
   geom: string,
   x: number,
   y: number,
   w: number,
-  h: number
+  h: number,
+  adj: number | null = null
 ) {
   const cx = x + w / 2;
   const cy = y + h / 2;
@@ -293,7 +354,8 @@ function buildShapePath(
     }
 
     case 'trapezoid': {
-      const inset = w * 0.25;
+      // adj is in [0, 100000]; clamp to [0, 50000] (50000 = triangle, default 25000)
+      const inset = Math.min(0.5, (adj ?? 25000) / 100000) * w;
       ctx.moveTo(x + inset, y);
       ctx.lineTo(x + w - inset, y);
       ctx.lineTo(x + w, y + h);
@@ -404,8 +466,30 @@ function renderTextBody(
   bw: number,
   bh: number,
   scale: number,
-  shapeDefaultTextColor: string | null = null
+  shapeDefaultTextColor: string | null = null,
+  shapeRotation = 0,
+  shapeFlipH = false,
+  shapeFlipV = false
 ) {
+  // Vertical text: rotate rendering context so text flows top-to-bottom.
+  // "vert" and "eaVert" both approximate to 90° clockwise rotation.
+  // "vert270" rotates 270° (= 90° counterclockwise).
+  const isVert    = body.vert === 'vert' || body.vert === 'eaVert';
+  const isVert270 = body.vert === 'vert270';
+
+  if (isVert || isVert270) {
+    // Set up a rotated coordinate space:
+    // Centre of the bounding box remains fixed; swap w and h for the text layout.
+    const cx = bx + bw / 2;
+    const cy = by + bh / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
+    // After rotation the "width" direction of the new frame is the original height
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor);
+    ctx.restore();
+    return;
+  }
   const lPad = emuToPx(body.lIns, scale);
   const rPad = emuToPx(body.rIns, scale);
   const tPad = emuToPx(body.tIns, scale);
@@ -490,7 +574,7 @@ function renderTextBody(
     const textMaxW = bw - lPad - rPad - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale);
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale : 0;
@@ -609,6 +693,31 @@ function renderTextBody(
       penX += ctx.measureText(seg.text).width;
     }
 
+    // ── Tab-stop segments (right-aligned or centred at tab stop position) ──
+    if (line.tabStop && line.tabStop.segments.length > 0) {
+      const tabAbsX = bx + lPad + line.tabStop.px;
+      let totalTabW = 0;
+      for (const seg of line.tabStop.segments) {
+        ctx.font = seg.font;
+        totalTabW += ctx.measureText(seg.text).width;
+      }
+      let tabPenX: number;
+      if (line.tabStop.algn === 'r') {
+        tabPenX = tabAbsX - totalTabW;
+      } else if (line.tabStop.algn === 'ctr') {
+        tabPenX = tabAbsX - totalTabW / 2;
+      } else {
+        tabPenX = tabAbsX;
+      }
+      for (const seg of line.tabStop.segments) {
+        ctx.font = seg.font;
+        ctx.fillStyle = seg.color;
+        ctx.fillText(seg.text, tabPenX, baseline);
+        ctx.font = seg.font;
+        tabPenX += ctx.measureText(seg.text).width;
+      }
+    }
+
     cursorY += linePx;
   }
 
@@ -628,9 +737,11 @@ async function renderPicture(
       const y = emuToPx(el.y, scale);
       const w = emuToPx(el.width, scale);
       const h = emuToPx(el.height, scale);
-      if (el.rotation !== 0) {
+      if (el.rotation !== 0 || el.flipH || el.flipV) {
         ctx.translate(x + w / 2, y + h / 2);
         ctx.rotate((el.rotation * Math.PI) / 180);
+        if (el.flipH) ctx.scale(-1, 1);
+        if (el.flipV) ctx.scale(1, -1);
         ctx.translate(-(x + w / 2), -(y + h / 2));
       }
       ctx.drawImage(img, x, y, w, h);

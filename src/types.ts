@@ -32,6 +32,10 @@ export interface ShapeElement {
   height: number;
   /** Rotation in degrees, clockwise */
   rotation: number;
+  /** Horizontal mirror (a:xfrm flipH) */
+  flipH: boolean;
+  /** Vertical mirror (a:xfrm flipV) */
+  flipV: boolean;
   /** OOXML preset name or "custGeom" when custom paths are used */
   geometry: string;
   fill: Fill | null;
@@ -42,6 +46,8 @@ export interface ShapeElement {
   /** Custom geometry sub-paths (set only when geometry === "custGeom").
    *  Outer array: one entry per <a:path>; inner: path commands with coords in [0,1]. */
   custGeom: PathCmd[][] | null;
+  /** First adjustment value from prstGeom avLst (e.g. trapezoid inset). Range 0–100000. */
+  adj: number | null;
 }
 
 export interface TableElement {
@@ -85,6 +91,8 @@ export interface PictureElement {
   width: number;
   height: number;
   rotation: number;
+  flipH: boolean;
+  flipV: boolean;
   /** Data URL, e.g. "data:image/png;base64,..." */
   dataUrl: string;
 }
@@ -119,6 +127,8 @@ export interface TextBody {
   bIns: number;
   /** "square" = wrap, "none" = no wrap */
   wrap: string;
+  /** Text direction: "horz" | "vert" | "vert270" | "eaVert" etc. */
+  vert: string;
 }
 
 export type SpaceLine =
@@ -130,6 +140,13 @@ export type Bullet =
   | { type: 'inherit' }
   | { type: 'char'; char: string; color: string | null; sizePct: number | null; fontFamily: string | null }
   | { type: 'autoNum'; numType: string; startAt: number | null };
+
+export interface TabStop {
+  /** Position in EMU from the left edge of the text area (after lIns) */
+  pos: number;
+  /** Alignment: "l" | "r" | "ctr" | "dec" */
+  algn: string;
+}
 
 export interface Paragraph {
   /** Alignment: "l" | "ctr" | "r" | "just" */
@@ -151,6 +168,8 @@ export interface Paragraph {
   defBold: boolean | null;
   defItalic: boolean | null;
   defFontFamily: string | null;
+  /** Tab stops from pPr > tabLst */
+  tabStops: TabStop[];
   runs: TextRun[];
 }
 

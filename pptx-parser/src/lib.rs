@@ -91,6 +91,8 @@ struct ShapeElement {
     width: i64,
     height: i64,
     rotation: f64,
+    flip_h: bool,
+    flip_v: bool,
     /// OOXML preset name (e.g. "rect", "ellipse") or "custGeom" when custom paths are used.
     geometry: String,
     fill: Option<Fill>,
@@ -102,6 +104,9 @@ struct ShapeElement {
     /// Custom geometry paths (only set when geometry == "custGeom").
     /// Outer vec: one entry per <a:path>; inner vec: path commands with coords in [0,1].
     cust_geom: Option<Vec<Vec<PathCmd>>>,
+    /// First adjustment value from prstGeom avLst (e.g. trapezoid inset).
+    /// Value is in OOXML units (0–100000 range).
+    adj: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -112,6 +117,8 @@ struct PictureElement {
     width: i64,
     height: i64,
     rotation: f64,
+    flip_h: bool,
+    flip_v: bool,
     data_url: String,
 }
 
@@ -157,6 +164,8 @@ struct TextBody {
     b_ins: i64,
     /// Whether text wraps inside the bounding box ("square") or not ("none")
     wrap: String,
+    /// Text direction from bodyPr vert attribute: "horz" | "vert" | "vert270" | "eaVert" etc.
+    vert: String,
 }
 
 /// Line spacing specification
@@ -193,6 +202,16 @@ enum Bullet {
     },
 }
 
+/// A tab stop defined in a paragraph's pPr > tabLst.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TabStop {
+    /// Position in EMU from the left edge of the text area (after lIns)
+    pos: i64,
+    /// Alignment: "l" | "r" | "ctr" | "dec"
+    algn: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Paragraph {
@@ -215,6 +234,8 @@ struct Paragraph {
     def_bold: Option<bool>,
     def_italic: Option<bool>,
     def_font_family: Option<String>,
+    /// Tab stops from pPr > tabLst
+    tab_stops: Vec<TabStop>,
     runs: Vec<TextRun>,
 }
 
@@ -662,10 +683,14 @@ struct Transform {
     cy: i64,
     /// Degrees, clockwise
     rot: f64,
+    flip_h: bool,
+    flip_v: bool,
 }
 
 fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
-    let rot = attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0;
+    let rot    = attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0;
+    let flip_h = attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let flip_v = attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false);
     let off = child(xfrm, "off");
     let ext = child(xfrm, "ext");
     Transform {
@@ -673,7 +698,7 @@ fn parse_xfrm(xfrm: roxmltree::Node<'_, '_>) -> Transform {
         y:  off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
         cx: ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
         cy: ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
-        rot,
+        rot, flip_h, flip_v,
     }
 }
 
@@ -687,18 +712,35 @@ struct GroupTransform {
     cx: i64, cy: i64,
     ch_x: i64, ch_y: i64,
     ch_cx: i64, ch_cy: i64,
+    flip_h: bool,
+    flip_v: bool,
 }
 
 impl GroupTransform {
     fn apply_to_transform(&self, t: Transform) -> Transform {
         let sx = if self.ch_cx != 0 { self.cx as f64 / self.ch_cx as f64 } else { 1.0 };
         let sy = if self.ch_cy != 0 { self.cy as f64 / self.ch_cy as f64 } else { 1.0 };
+        // If the group is flipped, mirror child positions in child coordinate space
+        // before applying the normal scale+translate.
+        let child_x = if self.flip_h {
+            self.ch_x + self.ch_cx - t.x - t.cx
+        } else {
+            t.x
+        };
+        let child_y = if self.flip_v {
+            self.ch_y + self.ch_cy - t.y - t.cy
+        } else {
+            t.y
+        };
         Transform {
-            x:  ((t.x - self.ch_x) as f64 * sx + self.x as f64).round() as i64,
-            y:  ((t.y - self.ch_y) as f64 * sy + self.y as f64).round() as i64,
+            x:  ((child_x - self.ch_x) as f64 * sx + self.x as f64).round() as i64,
+            y:  ((child_y - self.ch_y) as f64 * sy + self.y as f64).round() as i64,
             cx: (t.cx as f64 * sx).round() as i64,
             cy: (t.cy as f64 * sy).round() as i64,
             rot: t.rot,
+            // Propagate group flip to child element flip flags
+            flip_h: t.flip_h ^ self.flip_h,
+            flip_v: t.flip_v ^ self.flip_v,
         }
     }
 }
@@ -706,17 +748,19 @@ impl GroupTransform {
 fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) {
     match el {
         SlideElement::Shape(s) => {
-            let t = Transform { x: s.x, y: s.y, cx: s.width, cy: s.height, rot: s.rotation };
+            let t = Transform { x: s.x, y: s.y, cx: s.width, cy: s.height, rot: s.rotation, flip_h: s.flip_h, flip_v: s.flip_v };
             let nt = gt.apply_to_transform(t);
             s.x = nt.x; s.y = nt.y; s.width = nt.cx; s.height = nt.cy;
+            s.flip_h = nt.flip_h; s.flip_v = nt.flip_v;
         }
         SlideElement::Picture(p) => {
-            let t = Transform { x: p.x, y: p.y, cx: p.width, cy: p.height, rot: p.rotation };
+            let t = Transform { x: p.x, y: p.y, cx: p.width, cy: p.height, rot: p.rotation, flip_h: p.flip_h, flip_v: p.flip_v };
             let nt = gt.apply_to_transform(t);
             p.x = nt.x; p.y = nt.y; p.width = nt.cx; p.height = nt.cy;
+            p.flip_h = nt.flip_h; p.flip_v = nt.flip_v;
         }
         SlideElement::Table(tbl) => {
-            let t = Transform { x: tbl.x, y: tbl.y, cx: tbl.width, cy: tbl.height, rot: 0.0 };
+            let t = Transform { x: tbl.x, y: tbl.y, cx: tbl.width, cy: tbl.height, rot: 0.0, flip_h: false, flip_v: false };
             let nt = gt.apply_to_transform(t);
             tbl.x = nt.x; tbl.y = nt.y; tbl.width = nt.cx; tbl.height = nt.cy;
         }
@@ -808,7 +852,8 @@ fn parse_text_body(
     let r_ins = body_pr.and_then(|n| attr_i64(&n, "rIns")).unwrap_or(91_440);
     let t_ins = body_pr.and_then(|n| attr_i64(&n, "tIns")).unwrap_or(45_720);
     let b_ins = body_pr.and_then(|n| attr_i64(&n, "bIns")).unwrap_or(45_720);
-    let wrap  = body_pr.and_then(|n| attr(&n, "wrap")).unwrap_or_else(|| "square".into());
+    let wrap = body_pr.and_then(|n| attr(&n, "wrap")).unwrap_or_else(|| "square".into());
+    let vert = body_pr.and_then(|n| attr(&n, "vert")).unwrap_or_else(|| "horz".into());
 
     // Default font size from lstStyle > lvl1pPr > defRPr sz
     let default_font_size = child(tx_body, "lstStyle")
@@ -822,7 +867,7 @@ fn parse_text_body(
         .map(|p| parse_paragraph(p, theme))
         .collect();
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, l_ins, r_ins, t_ins, b_ins, wrap }
+    TextBody { vertical_anchor, paragraphs, default_font_size, l_ins, r_ins, t_ins, b_ins, wrap, vert }
 }
 
 fn parse_paragraph(
@@ -857,6 +902,22 @@ fn parse_paragraph(
 
     let bullet = parse_bullet(p_pr, theme);
 
+    // Tab stops from pPr > tabLst
+    let tab_stops: Vec<TabStop> = p_pr
+        .and_then(|n| child(n, "tabLst"))
+        .map(|tab_lst| {
+            tab_lst
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "tab")
+                .filter_map(|tab| {
+                    let pos  = attr_i64(&tab, "pos")?;
+                    let algn = attr(&tab, "algn").unwrap_or_else(|| "l".into());
+                    Some(TabStop { pos, algn })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Paragraph-level default run properties (pPr > defRPr)
     let def_rpr        = p_pr.and_then(|n| child(n, "defRPr"));
     let def_font_size  = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
@@ -883,7 +944,7 @@ fn parse_paragraph(
         space_before, space_after, space_line,
         lvl, bullet,
         def_font_size, def_color, def_bold, def_italic, def_font_family,
-        runs,
+        tab_stops, runs,
     }
 }
 
@@ -971,23 +1032,23 @@ fn parse_run(
 fn default_placeholder_transform(ph_type: &str) -> Transform {
     match ph_type {
         "title" | "ctrTitle" => Transform {
-            x: 457200,   y: 274638,   cx: 8229600, cy: 1143000, rot: 0.0,
+            x: 457200,   y: 274638,   cx: 8229600, cy: 1143000, rot: 0.0, flip_h: false, flip_v: false,
         },
         "subTitle" => Transform {
-            x: 457200,   y: 1600200,  cx: 8229600, cy: 899160,  rot: 0.0,
+            x: 457200,   y: 1600200,  cx: 8229600, cy: 899160,  rot: 0.0, flip_h: false, flip_v: false,
         },
         "dt" => Transform {
-            x: 0,        y: 6261600,  cx: 2286000, cy: 596900,  rot: 0.0,
+            x: 0,        y: 6261600,  cx: 2286000, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
         },
         "ftr" => Transform {
-            x: 2972400,  y: 6261600,  cx: 3086100, cy: 596900,  rot: 0.0,
+            x: 2972400,  y: 6261600,  cx: 3086100, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
         },
         "sldNum" => Transform {
-            x: 6629400,  y: 6261600,  cx: 2057400, cy: 596900,  rot: 0.0,
+            x: 6629400,  y: 6261600,  cx: 2057400, cy: 596900,  rot: 0.0, flip_h: false, flip_v: false,
         },
         // "body" and everything else: full-width content area below title
         _ => Transform {
-            x: 457200,   y: 1600200,  cx: 8229600, cy: 4525963, rot: 0.0,
+            x: 457200,   y: 1600200,  cx: 8229600, cy: 4525963, rot: 0.0, flip_h: false, flip_v: false,
         },
     }
 }
@@ -1010,6 +1071,7 @@ fn parse_shape(
     sp_node: roxmltree::Node<'_, '_>,
     lph: &LayoutPlaceholders,
     theme: &HashMap<String, String>,
+    group_fill: Option<&Fill>,
 ) -> Option<ShapeElement> {
     // --- Placeholder info (for layout fallback) ---
     let ph_node = sp_node
@@ -1047,15 +1109,30 @@ fn parse_shape(
 
     // custGeom takes priority over prstGeom
     let cust_geom_node = sp_pr.and_then(|p| child(p, "custGeom"));
+    let prst_geom_node = sp_pr.and_then(|p| child(p, "prstGeom"));
     let geometry = if cust_geom_node.is_some() {
         "custGeom".into()
     } else {
-        sp_pr
-            .and_then(|p| child(p, "prstGeom"))
+        prst_geom_node
             .and_then(|n| attr(&n, "prst"))
             .unwrap_or_else(|| "rect".into())
     };
     let cust_geom = cust_geom_node.map(|n| parse_cust_geom(n));
+
+    // First adjustment value from prstGeom avLst (e.g. trapezoid inset)
+    let adj: Option<f64> = prst_geom_node
+        .and_then(|n| child(n, "avLst"))
+        .and_then(|av| {
+            av.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                .find(|n| attr(n, "name").as_deref() == Some("adj"))
+        })
+        .and_then(|gd| {
+            // fmla is like "val 25000"; extract the numeric part
+            attr(&gd, "fmla")
+                .and_then(|f| f.strip_prefix("val ").map(|s| s.to_owned()))
+                .and_then(|s| s.parse::<f64>().ok())
+        });
 
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
@@ -1087,9 +1164,14 @@ fn parse_shape(
         .and_then(|s| child(s, "fontRef"))
         .and_then(|fr| parse_color_node(fr, theme));
 
-    // spPr fill: if explicit, use it; otherwise fall back to style fill.
+    // spPr fill: grpFill means inherit from parent group; explicit fill overrides style.
     // Note: Some(Fill::None) (noFill in spPr) must NOT be overridden by style.
-    let fill = sp_pr.and_then(|p| parse_fill(p, theme)).or(style_fill);
+    let sp_pr_has_grp_fill = sp_pr.and_then(|p| child(p, "grpFill")).is_some();
+    let fill = if sp_pr_has_grp_fill {
+        group_fill.cloned()
+    } else {
+        sp_pr.and_then(|p| parse_fill(p, theme)).or(style_fill)
+    };
 
     // spPr stroke: if ln element is present, respect it (even if noFill → None);
     // only fall back to style when spPr has no ln at all.
@@ -1103,8 +1185,8 @@ fn parse_shape(
 
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
-        rotation: t.rot, geometry, fill, stroke, text_body,
-        default_text_color, cust_geom,
+        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj,
     })
 }
 
@@ -1138,7 +1220,8 @@ fn parse_picture(
     let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
 
     Some(PictureElement {
-        x: t.x, y: t.y, width: t.cx, height: t.cy, rotation: t.rot, data_url,
+        x: t.x, y: t.y, width: t.cx, height: t.cy,
+        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v, data_url,
     })
 }
 
@@ -1304,6 +1387,7 @@ fn parse_slide(
                         node, &empty_lph, layout_dir, layout_rels,
                         zip, theme, &mut elements,
                         true, // skip placeholder shapes
+                        None, // no inherited group fill at top level
                     );
                 }
             }
@@ -1312,7 +1396,7 @@ fn parse_slide(
 
     // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
-        parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements, false);
+        parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements, false, None);
     }
 
     Ok(Slide { index, background, elements })
@@ -1327,13 +1411,14 @@ fn parse_sp_tree_node(
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
     skip_placeholders: bool,
+    group_fill: Option<&Fill>,
 ) {
     match node.tag_name().name() {
         "sp" => {
             if skip_placeholders && is_placeholder(node) {
                 return;
             }
-            if let Some(shape) = parse_shape(node, lph, theme) {
+            if let Some(shape) = parse_shape(node, lph, theme, group_fill) {
                 out.push(SlideElement::Shape(shape));
             }
         }
@@ -1355,7 +1440,8 @@ fn parse_sp_tree_node(
             }
         }
         "grpSp" => {
-            let gt: Option<GroupTransform> = child(node, "grpSpPr")
+            let grp_sp_pr = child(node, "grpSpPr");
+            let gt: Option<GroupTransform> = grp_sp_pr
                 .and_then(|pr| child(pr, "xfrm"))
                 .map(|xfrm| {
                     let off    = child(xfrm, "off");
@@ -1371,12 +1457,31 @@ fn parse_sp_tree_node(
                         ch_y:  ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
                         ch_cx: ch_ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
                         ch_cy: ch_ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
+                        flip_h: attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false),
+                        flip_v: attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false),
                     }
                 });
 
+            // Determine the fill to propagate to child shapes that use grpFill.
+            // - Group has solidFill/noFill → use that as child group fill
+            // - Group has grpFill → inherit from parent
+            // - Group has no fill → inherit from parent
+            let grp_has_grp_fill = grp_sp_pr.and_then(|pr| child(pr, "grpFill")).is_some();
+            let grp_explicit_fill = grp_sp_pr.and_then(|pr| parse_fill(pr, theme));
+            let child_group_fill: Option<Fill> = if grp_has_grp_fill {
+                group_fill.cloned()
+            } else if let Some(f) = grp_explicit_fill {
+                Some(f)
+            } else {
+                group_fill.cloned()
+            };
+
             let start = out.len();
             for child_node in node.children().filter(|n| n.is_element()) {
-                parse_sp_tree_node(child_node, lph, slide_dir, rels, zip, theme, out, skip_placeholders);
+                parse_sp_tree_node(
+                    child_node, lph, slide_dir, rels, zip, theme, out,
+                    skip_placeholders, child_group_fill.as_ref(),
+                );
             }
             if let Some(gt) = gt {
                 for el in &mut out[start..] {
