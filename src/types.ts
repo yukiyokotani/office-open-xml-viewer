@@ -16,6 +16,14 @@ export interface Slide {
 
 export type SlideElement = ShapeElement | PictureElement | TableElement;
 
+/** A single command in a custom geometry path (coordinates normalised to [0,1]). */
+export type PathCmd =
+  | { cmd: 'moveTo';     x: number; y: number }
+  | { cmd: 'lineTo';     x: number; y: number }
+  | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { cmd: 'arcTo';      wr: number; hr: number; stAng: number; swAng: number }
+  | { cmd: 'close' };
+
 export interface ShapeElement {
   type: 'shape';
   x: number;
@@ -24,12 +32,16 @@ export interface ShapeElement {
   height: number;
   /** Rotation in degrees, clockwise */
   rotation: number;
+  /** OOXML preset name or "custGeom" when custom paths are used */
   geometry: string;
   fill: Fill | null;
   stroke: Stroke | null;
   textBody: TextBody | null;
   /** Default text color from p:style > fontRef (hex). Used when run/para has no explicit color. */
   defaultTextColor: string | null;
+  /** Custom geometry sub-paths (set only when geometry === "custGeom").
+   *  Outer array: one entry per <a:path>; inner: path commands with coords in [0,1]. */
+  custGeom: PathCmd[][] | null;
 }
 
 export interface TableElement {

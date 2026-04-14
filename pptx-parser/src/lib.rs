@@ -91,6 +91,7 @@ struct ShapeElement {
     width: i64,
     height: i64,
     rotation: f64,
+    /// OOXML preset name (e.g. "rect", "ellipse") or "custGeom" when custom paths are used.
     geometry: String,
     fill: Option<Fill>,
     stroke: Option<Stroke>,
@@ -98,6 +99,9 @@ struct ShapeElement {
     /// Default text color from p:style > fontRef (hex). Overrides renderer default
     /// when present; individual run colors still take precedence.
     default_text_color: Option<String>,
+    /// Custom geometry paths (only set when geometry == "custGeom").
+    /// Outer vec: one entry per <a:path>; inner vec: path commands with coords in [0,1].
+    cust_geom: Option<Vec<Vec<PathCmd>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -123,6 +127,21 @@ enum Fill {
 struct Stroke {
     color: String,
     width: i64,
+}
+
+/// A single path command inside a custGeom pathLst.
+/// Coordinates are normalised to [0.0, 1.0] relative to the path's w/h,
+/// so the renderer can map them directly to shape-local pixel coordinates.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "cmd", rename_all = "camelCase")]
+enum PathCmd {
+    MoveTo { x: f64, y: f64 },
+    LineTo { x: f64, y: f64 },
+    /// Cubic Bézier: two control points + endpoint
+    CubicBezTo { x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64 },
+    /// Elliptical arc (all angles in degrees)
+    ArcTo { wr: f64, hr: f64, st_ang: f64, sw_ang: f64 },
+    Close,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -563,6 +582,75 @@ fn parse_stroke(
 }
 
 // ===========================
+//  Custom geometry parsing
+// ===========================
+
+/// Parse a single path command node; coordinates are normalised to [0,1].
+fn parse_path_cmd(
+    cmd_node: roxmltree::Node<'_, '_>,
+    path_w: f64,
+    path_h: f64,
+) -> Option<PathCmd> {
+    match cmd_node.tag_name().name() {
+        "moveTo" => {
+            let pt = child(cmd_node, "pt")?;
+            let x = attr_f64(&pt, "x")? / path_w;
+            let y = attr_f64(&pt, "y")? / path_h;
+            Some(PathCmd::MoveTo { x, y })
+        }
+        "lnTo" => {
+            let pt = child(cmd_node, "pt")?;
+            let x = attr_f64(&pt, "x")? / path_w;
+            let y = attr_f64(&pt, "y")? / path_h;
+            Some(PathCmd::LineTo { x, y })
+        }
+        "cubicBezTo" => {
+            let pts: Vec<_> = children_vec(cmd_node, "pt");
+            if pts.len() < 3 { return None; }
+            let x1 = attr_f64(&pts[0], "x")? / path_w;
+            let y1 = attr_f64(&pts[0], "y")? / path_h;
+            let x2 = attr_f64(&pts[1], "x")? / path_w;
+            let y2 = attr_f64(&pts[1], "y")? / path_h;
+            let x  = attr_f64(&pts[2], "x")? / path_w;
+            let y  = attr_f64(&pts[2], "y")? / path_h;
+            Some(PathCmd::CubicBezTo { x1, y1, x2, y2, x, y })
+        }
+        "arcTo" => {
+            // wR/hR are radii in path-local units; stAng/swAng in 60000ths of a degree
+            let wr     = attr_f64(&cmd_node, "wR").unwrap_or(0.0) / path_w;
+            let hr     = attr_f64(&cmd_node, "hR").unwrap_or(0.0) / path_h;
+            let st_ang = attr_f64(&cmd_node, "stAng").unwrap_or(0.0) / 60000.0;
+            let sw_ang = attr_f64(&cmd_node, "swAng").unwrap_or(0.0) / 60000.0;
+            Some(PathCmd::ArcTo { wr, hr, st_ang, sw_ang })
+        }
+        "close" => Some(PathCmd::Close),
+        _ => None,
+    }
+}
+
+/// Parse custGeom > pathLst into a list of sub-paths (one per <a:path> element).
+fn parse_cust_geom(cust_geom: roxmltree::Node<'_, '_>) -> Vec<Vec<PathCmd>> {
+    let path_lst = match child(cust_geom, "pathLst") {
+        Some(n) => n,
+        None => return vec![],
+    };
+
+    path_lst
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "path")
+        .map(|path_node| {
+            let path_w = attr_f64(&path_node, "w").unwrap_or(1.0).max(1.0);
+            let path_h = attr_f64(&path_node, "h").unwrap_or(1.0).max(1.0);
+            path_node
+                .children()
+                .filter(|n| n.is_element())
+                .filter_map(|cmd| parse_path_cmd(cmd, path_w, path_h))
+                .collect()
+        })
+        .collect()
+}
+
+// ===========================
 //  Transform (a:xfrm)
 // ===========================
 
@@ -905,6 +993,16 @@ fn default_placeholder_transform(ph_type: &str) -> Transform {
 }
 
 // ===========================
+//  Placeholder detection
+// ===========================
+
+/// Returns true if the node contains a `p:ph` descendant.
+fn is_placeholder(node: roxmltree::Node<'_, '_>) -> bool {
+    node.descendants()
+        .any(|n| n.is_element() && n.tag_name().name() == "ph")
+}
+
+// ===========================
 //  Shape parsing  (p:sp)
 // ===========================
 
@@ -947,10 +1045,17 @@ fn parse_shape(
     }
     let cy = if t.cy == 0 { 2_000_000_i64 } else { t.cy };
 
-    let geometry = sp_pr
-        .and_then(|p| child(p, "prstGeom"))
-        .and_then(|n| attr(&n, "prst"))
-        .unwrap_or_else(|| "rect".into());
+    // custGeom takes priority over prstGeom
+    let cust_geom_node = sp_pr.and_then(|p| child(p, "custGeom"));
+    let geometry = if cust_geom_node.is_some() {
+        "custGeom".into()
+    } else {
+        sp_pr
+            .and_then(|p| child(p, "prstGeom"))
+            .and_then(|n| attr(&n, "prst"))
+            .unwrap_or_else(|| "rect".into())
+    };
+    let cust_geom = cust_geom_node.map(|n| parse_cust_geom(n));
 
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
@@ -999,7 +1104,7 @@ fn parse_shape(
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, geometry, fill, stroke, text_body,
-        default_text_color,
+        default_text_color, cust_geom,
     })
 }
 
@@ -1151,6 +1256,8 @@ fn parse_table_cell(
 fn parse_slide(
     xml: &str,
     layout_xml: Option<&str>,
+    layout_rels: &HashMap<String, String>,
+    layout_dir: &str,
     master_bg: Option<Fill>,
     index: usize,
     rels: &HashMap<String, String>,
@@ -1184,8 +1291,28 @@ fn parse_slide(
     let slide_dir = "ppt/slides";
     let mut elements = Vec::new();
 
+    // ── Layout non-placeholder shapes (rendered BEFORE slide shapes) ──────
+    // These are decorative background elements defined in the slide layout
+    // (e.g. coloured bands, logos) that are not placeholder anchors.
+    if let Some(lxml) = layout_xml {
+        if let Ok(ldoc) = roxmltree::Document::parse(lxml) {
+            let lroot = ldoc.root_element();
+            if let Some(lsp_tree) = child(lroot, "cSld").and_then(|n| child(n, "spTree")) {
+                let empty_lph = LayoutPlaceholders::default();
+                for node in lsp_tree.children().filter(|n| n.is_element()) {
+                    parse_sp_tree_node(
+                        node, &empty_lph, layout_dir, layout_rels,
+                        zip, theme, &mut elements,
+                        true, // skip placeholder shapes
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
-        parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements);
+        parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements, false);
     }
 
     Ok(Slide { index, background, elements })
@@ -1199,9 +1326,13 @@ fn parse_sp_tree_node(
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
+    skip_placeholders: bool,
 ) {
     match node.tag_name().name() {
         "sp" => {
+            if skip_placeholders && is_placeholder(node) {
+                return;
+            }
             if let Some(shape) = parse_shape(node, lph, theme) {
                 out.push(SlideElement::Shape(shape));
             }
@@ -1245,7 +1376,7 @@ fn parse_sp_tree_node(
 
             let start = out.len();
             for child_node in node.children().filter(|n| n.is_element()) {
-                parse_sp_tree_node(child_node, lph, slide_dir, rels, zip, theme, out);
+                parse_sp_tree_node(child_node, lph, slide_dir, rels, zip, theme, out, skip_placeholders);
             }
             if let Some(gt) = gt {
                 for el in &mut out[start..] {
@@ -1305,12 +1436,14 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 .and_then(|n| parse_background(n, &theme))
         });
 
-    // Pre-collect slide XMLs, their rels, and the layout XML
+    // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
         slide_xml: String,
         slide_rels: HashMap<String, String>,
         layout_xml: Option<String>,
+        layout_rels: HashMap<String, String>,
+        layout_dir: String,
     }
 
     let mut raw_slides: Vec<SlideRaw> = Vec::new();
@@ -1328,11 +1461,32 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let slide_rels_xml = read_zip_str(&mut zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
 
-        let layout_xml = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
-            .map(|target| resolve_path("ppt/slides", &target))
-            .and_then(|path| read_zip_str(&mut zip, &path).ok());
+        // Layout XML
+        let layout_path = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
+            .map(|target| resolve_path("ppt/slides", &target));
 
-        raw_slides.push(SlideRaw { index: idx, slide_xml, slide_rels, layout_xml });
+        let layout_xml = layout_path.as_deref()
+            .and_then(|path| read_zip_str(&mut zip, path).ok());
+
+        // Layout rels (for resolving images inside the layout)
+        let layout_rels = layout_path.as_deref()
+            .and_then(|path| {
+                let file = path.split('/').last().unwrap_or("layout.xml");
+                let rels_p = format!("ppt/slideLayouts/_rels/{file}.rels");
+                read_zip_str(&mut zip, &rels_p).ok()
+            })
+            .map(|xml| parse_rels(&xml))
+            .unwrap_or_default();
+
+        let layout_dir = layout_path
+            .as_deref()
+            .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
+            .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
+
+        raw_slides.push(SlideRaw {
+            index: idx, slide_xml, slide_rels,
+            layout_xml, layout_rels, layout_dir,
+        });
     }
 
     let mut slides = Vec::new();
@@ -1340,6 +1494,8 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let slide = parse_slide(
             &raw.slide_xml,
             raw.layout_xml.as_deref(),
+            &raw.layout_rels,
+            &raw.layout_dir,
             master_bg.clone(),
             raw.index,
             &raw.slide_rels,

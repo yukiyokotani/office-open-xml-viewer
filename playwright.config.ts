@@ -18,8 +18,10 @@ export default defineConfig({
       name: 'chromium',
       use: {
         ...devices['Desktop Chrome'],
-        // Force dpr=1 so canvas physical size == CSS size == 960×540
+        // Viewport must be at least as wide as the canvas (1920px); height ≥ 1080px.
+        // Force dpr=1 so canvas physical size == CSS size == 1920×1080.
         deviceScaleFactor: 1,
+        viewport: { width: 1920, height: 1080 },
       },
     },
   ],

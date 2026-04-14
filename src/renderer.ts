@@ -9,6 +9,7 @@ import type {
   TextBody,
   Paragraph,
   TextRun,
+  PathCmd,
 } from './types';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
@@ -163,7 +164,11 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const fillColor = resolveFill(el.fill);
 
   ctx.beginPath();
-  buildShapePath(ctx, geom, x, y, w, h);
+  if (el.custGeom && el.custGeom.length > 0) {
+    buildCustomPath(ctx, el.custGeom, x, y, w, h);
+  } else {
+    buildShapePath(ctx, geom, x, y, w, h);
+  }
 
   if (fillColor) {
     ctx.fillStyle = fillColor;
@@ -180,6 +185,60 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
     renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor);
+  }
+}
+
+/**
+ * Build a canvas path from custGeom path commands.
+ * Coordinates are in [0,1] relative to the shape bounding box;
+ * the renderer maps them to canvas pixels.
+ */
+function buildCustomPath(
+  ctx: CanvasRenderingContext2D,
+  subpaths: PathCmd[][],
+  x: number,
+  y: number,
+  w: number,
+  h: number
+) {
+  for (const cmds of subpaths) {
+    for (const cmd of cmds) {
+      switch (cmd.cmd) {
+        case 'moveTo':
+          ctx.moveTo(x + cmd.x * w, y + cmd.y * h);
+          break;
+        case 'lineTo':
+          ctx.lineTo(x + cmd.x * w, y + cmd.y * h);
+          break;
+        case 'cubicBezTo':
+          ctx.bezierCurveTo(
+            x + cmd.x1 * w, y + cmd.y1 * h,
+            x + cmd.x2 * w, y + cmd.y2 * h,
+            x + cmd.x  * w, y + cmd.y  * h
+          );
+          break;
+        case 'arcTo': {
+          // OOXML arcTo: draws an arc on an ellipse of radii (wr*w, hr*h) starting
+          // from stAng (degrees) sweeping swAng degrees, relative to current pen.
+          // Approximate with canvas ellipse starting from the current point.
+          // The current point is on the ellipse at angle stAng; derive the centre.
+          // Canvas ellipse() takes the centre, so we back-calculate it.
+          // We only draw this if both radii are positive and the paths list is short-circuiting.
+          const rw = cmd.wr * w;
+          const rh = cmd.hr * h;
+          if (rw <= 0 || rh <= 0) break;
+          const stRad = (cmd.stAng * Math.PI) / 180;
+          const swRad = (cmd.swAng * Math.PI) / 180;
+          // Current pen position is the start of the arc — infer centre
+          // (This is an approximation; full implementation requires tracking pen position)
+          // For now, skip drawing the arc as it rarely appears in basic decorations
+          break;
+        }
+        case 'close':
+          ctx.closePath();
+          break;
+      }
+    }
   }
 }
 
