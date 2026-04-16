@@ -37,9 +37,15 @@ test.describe('visual regression', () => {
       // Give the browser one extra frame to flush composite layers
       await page.waitForTimeout(200);
 
-      // ── Capture the canvas ───────────────────────────────────────────────
-      const canvas = page.locator('canvas');
-      const actualBuf = await canvas.screenshot({ type: 'png' });
+      // ── Capture the canvas via toDataURL (more reliable than screenshot API) ─
+      const dataUrl = await page.evaluate(() => {
+        const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+        return canvas ? canvas.toDataURL('image/png') : null;
+      });
+      if (!dataUrl) throw new Error(`No canvas element found on slide ${slideNum}`);
+      // dataUrl is "data:image/png;base64,<base64data>"
+      const base64 = dataUrl.split(',')[1];
+      const actualBuf = Buffer.from(base64, 'base64');
       writeFileSync(`tests/visual/screenshots/slide-${slideNum}.png`, actualBuf);
 
       // ── Load reference ───────────────────────────────────────────────────

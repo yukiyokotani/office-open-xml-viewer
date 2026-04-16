@@ -107,6 +107,10 @@ struct ShapeElement {
     /// First adjustment value from prstGeom avLst (e.g. trapezoid inset).
     /// Value is in OOXML units (0–100000 range).
     adj: Option<f64>,
+    /// Second adjustment value from prstGeom avLst (e.g. arrow-head width).
+    adj2: Option<f64>,
+    /// Drop shadow from spPr > effectLst > outerShdw (None if not present).
+    shadow: Option<Shadow>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -123,13 +127,45 @@ struct PictureElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GradStop {
+    /// 0.0–1.0
+    position: f64,
+    /// hex color (6 chars = opaque, 8 chars = RRGGBBAA with alpha)
+    color: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Shadow {
+    /// hex color (6 chars)
+    color: String,
+    /// opacity 0.0–1.0
+    alpha: f64,
+    /// blur radius in EMU
+    blur: i64,
+    /// distance from shape in EMU
+    dist: i64,
+    /// direction in degrees, clockwise from East
+    dir: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 enum Fill {
     Solid { color: String },
     None,
+    #[serde(rename_all = "camelCase")]
+    Gradient {
+        stops: Vec<GradStop>,
+        /// degrees, 0 = left→right, 90 = top→bottom
+        angle: f64,
+        /// "linear" | "radial"
+        grad_type: String,
+    },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Stroke {
     color: String,
@@ -157,6 +193,10 @@ struct TextBody {
     vertical_anchor: String,
     paragraphs: Vec<Paragraph>,
     default_font_size: Option<f64>,
+    /// Inherited bold from layout/master lstStyle defRPr (None = not inherited)
+    default_bold: Option<bool>,
+    /// Inherited italic from layout/master lstStyle defRPr (None = not inherited)
+    default_italic: Option<bool>,
     /// Text insets in EMU. Defaults: lIns=rIns=91440, tIns=bIns=45720
     l_ins: i64,
     r_ins: i64,
@@ -166,6 +206,8 @@ struct TextBody {
     wrap: String,
     /// Text direction from bodyPr vert attribute: "horz" | "vert" | "vert270" | "eaVert" etc.
     vert: String,
+    /// Auto-fit mode from bodyPr: "sp" = spAutoFit (shape grows), "norm" = normAutoFit (font shrinks), "none" = noAutofit
+    auto_fit: String,
 }
 
 /// Line spacing specification
@@ -250,9 +292,13 @@ enum TextRun {
 #[serde(rename_all = "camelCase")]
 struct TextRunData {
     text: String,
-    bold: bool,
-    italic: bool,
+    /// None = not set (inherit from paragraph/body/layout defaults); Some(true/false) = explicit
+    bold: Option<bool>,
+    /// None = not set; Some(true/false) = explicit
+    italic: Option<bool>,
     underline: bool,
+    /// true when strike == "sngStrike" or "dblStrike"
+    strikethrough: bool,
     font_size: Option<f64>,
     color: Option<String>,
     font_family: Option<String>,
@@ -418,8 +464,14 @@ fn parse_color_node(
 ) -> Option<String> {
     for c in node.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
-            "srgbClr" => return attr(&c, "val"),
-            "sysClr"  => return attr(&c, "lastClr"),
+            "srgbClr" => {
+                let hex = attr(&c, "val")?;
+                return Some(apply_color_transforms(&hex, c));
+            }
+            "sysClr"  => {
+                let hex = attr(&c, "lastClr")?;
+                return Some(apply_color_transforms(&hex, c));
+            }
             "prstClr" => return preset_color(attr(&c, "val")?.as_str()),
             "schemeClr" => {
                 let scheme_name = attr(&c, "val")?;
@@ -443,7 +495,8 @@ fn parse_color_node(
     None
 }
 
-/// Apply OOXML color transforms (lumMod, lumOff, shade, tint) to a base hex color.
+/// Apply OOXML color transforms (lumMod, lumOff, shade, tint, alpha) to a base hex color.
+/// Returns 6-char hex when fully opaque, or 8-char hex (RRGGBBAA) when alpha < 1.
 fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
     if hex.len() < 6 {
         return hex.to_owned();
@@ -455,6 +508,7 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
     let mut rf = r as f64 / 255.0;
     let mut gf = g as f64 / 255.0;
     let mut bf = b as f64 / 255.0;
+    let mut alpha = 1.0_f64;
 
     for t in node.children().filter(|n| n.is_element()) {
         match t.tag_name().name() {
@@ -482,6 +536,10 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
                 gf = gf * val + (1.0 - val);
                 bf = bf * val + (1.0 - val);
             }
+            "alpha" => {
+                // alpha=100000 → fully opaque, alpha=0 → fully transparent
+                alpha = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
+            }
             _ => {}
         }
     }
@@ -489,7 +547,12 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
     let r = (rf.clamp(0.0, 1.0) * 255.0).round() as u8;
     let g = (gf.clamp(0.0, 1.0) * 255.0).round() as u8;
     let b = (bf.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("{:02X}{:02X}{:02X}", r, g, b)
+    if (alpha - 1.0).abs() < 0.004 {
+        format!("{:02X}{:02X}{:02X}", r, g, b)
+    } else {
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!("{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
+    }
 }
 
 fn rgb_to_hls(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
@@ -571,14 +634,36 @@ fn parse_fill(
             }
             "noFill" => return Some(Fill::None),
             "gradFill" => {
-                // Use the first gradient stop's color as a solid-fill approximation.
-                let first_gs = c
-                    .descendants()
-                    .find(|n| n.is_element() && n.tag_name().name() == "gs");
-                if let Some(gs) = first_gs {
-                    if let Some(color) = parse_color_node(gs, theme) {
-                        return Some(Fill::Solid { color });
-                    }
+                let mut stops: Vec<GradStop> = child(c, "gsLst")
+                    .map(|gs_lst| {
+                        gs_lst
+                            .children()
+                            .filter(|n| n.is_element() && n.tag_name().name() == "gs")
+                            .filter_map(|gs| {
+                                let position = attr_f64(&gs, "pos").unwrap_or(0.0) / 100_000.0;
+                                let color = parse_color_node(gs, theme)?;
+                                Some(GradStop { position, color })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if stops.is_empty() {
+                    // No valid stops — continue scanning other fill elements
+                } else {
+                    stops.sort_by(|a, b| {
+                        a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let (grad_type, angle) = if let Some(lin) = child(c, "lin") {
+                        // OOXML ang: 60000ths of degree, 0 = left→right, 5400000 = top→bottom
+                        let ang = attr_f64(&lin, "ang").unwrap_or(0.0) / 60_000.0;
+                        ("linear".to_owned(), ang)
+                    } else if child(c, "path").is_some() {
+                        ("radial".to_owned(), 0.0)
+                    } else {
+                        ("linear".to_owned(), 0.0)
+                    };
+                    return Some(Fill::Gradient { stops, angle, grad_type });
                 }
             }
             _ => {}
@@ -600,6 +685,33 @@ fn parse_stroke(
     let color = child(ln_node, "solidFill")
         .and_then(|n| parse_color_node(n, theme))?;
     Some(Stroke { color, width })
+}
+
+// ===========================
+//  Shadow parsing
+// ===========================
+
+/// Parse spPr > effectLst > outerShdw into a Shadow.
+fn parse_shadow(
+    effect_lst: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<Shadow> {
+    let outer_shdw = child(effect_lst, "outerShdw")?;
+    let blur = attr_i64(&outer_shdw, "blurRad").unwrap_or(0);
+    let dist = attr_i64(&outer_shdw, "dist").unwrap_or(0);
+    // dir: 60000ths of a degree, clockwise from East (positive x-axis)
+    let dir = attr_f64(&outer_shdw, "dir").unwrap_or(0.0) / 60_000.0;
+
+    // Color with optional alpha (8-char hex when alpha != 1)
+    let color_str = parse_color_node(outer_shdw, theme).unwrap_or_else(|| "000000".to_owned());
+    let (color, alpha) = if color_str.len() >= 8 {
+        let a = u8::from_str_radix(&color_str[6..8], 16).unwrap_or(255) as f64 / 255.0;
+        (color_str[..6].to_owned(), a)
+    } else {
+        (color_str, 1.0)
+    };
+
+    Some(Shadow { color, alpha, blur, dist, dir })
 }
 
 // ===========================
@@ -714,6 +826,8 @@ struct GroupTransform {
     ch_cx: i64, ch_cy: i64,
     flip_h: bool,
     flip_v: bool,
+    /// Group rotation in degrees, clockwise
+    rot: f64,
 }
 
 impl GroupTransform {
@@ -722,22 +836,54 @@ impl GroupTransform {
         let sy = if self.ch_cy != 0 { self.cy as f64 / self.ch_cy as f64 } else { 1.0 };
         // If the group is flipped, mirror child positions in child coordinate space
         // before applying the normal scale+translate.
+        // Mirror formula: new_left = (ch_x + ch_cx) - (t.x - ch_x) - t.cx
+        //                          = 2*ch_x + ch_cx - t.x - t.cx
         let child_x = if self.flip_h {
-            self.ch_x + self.ch_cx - t.x - t.cx
+            2 * self.ch_x + self.ch_cx - t.x - t.cx
         } else {
             t.x
         };
         let child_y = if self.flip_v {
-            self.ch_y + self.ch_cy - t.y - t.cy
+            2 * self.ch_y + self.ch_cy - t.y - t.cy
         } else {
             t.y
         };
+
+        // Child position and size in parent space (before group rotation)
+        let new_x = (child_x - self.ch_x) as f64 * sx + self.x as f64;
+        let new_y = (child_y - self.ch_y) as f64 * sy + self.y as f64;
+        let new_cx = (t.cx as f64 * sx).round() as i64;
+        let new_cy = (t.cy as f64 * sy).round() as i64;
+
+        // Apply group rotation: rotate child center around group center (clockwise, screen coords)
+        let (final_x, final_y) = if self.rot != 0.0 {
+            let rot_rad = self.rot.to_radians();
+            let cos_r = rot_rad.cos();
+            let sin_r = rot_rad.sin();
+            let group_cx = self.x as f64 + self.cx as f64 / 2.0;
+            let group_cy = self.y as f64 + self.cy as f64 / 2.0;
+            let child_cx = new_x + new_cx as f64 / 2.0;
+            let child_cy = new_y + new_cy as f64 / 2.0;
+            let dx = child_cx - group_cx;
+            let dy = child_cy - group_cy;
+            // Clockwise rotation in screen coords (y-axis down): x' = x*cos - y*sin, y' = x*sin + y*cos
+            let dx_new = dx * cos_r - dy * sin_r;
+            let dy_new = dx * sin_r + dy * cos_r;
+            (group_cx + dx_new - new_cx as f64 / 2.0, group_cy + dy_new - new_cy as f64 / 2.0)
+        } else {
+            (new_x, new_y)
+        };
+
+        // When the group has a net flip, the child's own rotation direction is negated
+        // before the group rotation is added (scale→flip→rotate OOXML order).
+        // GF (group net flip) = flip_h XOR flip_v.
+        let gf = self.flip_h ^ self.flip_v;
         Transform {
-            x:  ((child_x - self.ch_x) as f64 * sx + self.x as f64).round() as i64,
-            y:  ((child_y - self.ch_y) as f64 * sy + self.y as f64).round() as i64,
-            cx: (t.cx as f64 * sx).round() as i64,
-            cy: (t.cy as f64 * sy).round() as i64,
-            rot: t.rot,
+            x:  final_x.round() as i64,
+            y:  final_y.round() as i64,
+            cx: new_cx,
+            cy: new_cy,
+            rot: self.rot + if gf { -t.rot } else { t.rot },
             // Propagate group flip to child element flip flags
             flip_h: t.flip_h ^ self.flip_h,
             flip_v: t.flip_v ^ self.flip_v,
@@ -751,13 +897,13 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             let t = Transform { x: s.x, y: s.y, cx: s.width, cy: s.height, rot: s.rotation, flip_h: s.flip_h, flip_v: s.flip_v };
             let nt = gt.apply_to_transform(t);
             s.x = nt.x; s.y = nt.y; s.width = nt.cx; s.height = nt.cy;
-            s.flip_h = nt.flip_h; s.flip_v = nt.flip_v;
+            s.rotation = nt.rot; s.flip_h = nt.flip_h; s.flip_v = nt.flip_v;
         }
         SlideElement::Picture(p) => {
             let t = Transform { x: p.x, y: p.y, cx: p.width, cy: p.height, rot: p.rotation, flip_h: p.flip_h, flip_v: p.flip_v };
             let nt = gt.apply_to_transform(t);
             p.x = nt.x; p.y = nt.y; p.width = nt.cx; p.height = nt.cy;
-            p.flip_h = nt.flip_h; p.flip_v = nt.flip_v;
+            p.rotation = nt.rot; p.flip_h = nt.flip_h; p.flip_v = nt.flip_v;
         }
         SlideElement::Table(tbl) => {
             let t = Transform { x: tbl.x, y: tbl.y, cx: tbl.width, cy: tbl.height, rot: 0.0, flip_h: false, flip_v: false };
@@ -776,6 +922,14 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
 struct LayoutPlaceholders {
     by_idx:  HashMap<u32, Transform>,
     by_type: HashMap<String, Transform>,
+    /// Default font size (pt) per placeholder idx, from layout/master lstStyle
+    by_idx_font_size:  HashMap<u32, f64>,
+    /// Default font size (pt) per placeholder type, from layout/master lstStyle
+    by_type_font_size: HashMap<String, f64>,
+    /// Default bold per placeholder type, from layout lstStyle defRPr b attribute
+    by_type_bold: HashMap<String, bool>,
+    /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
+    by_type_italic: HashMap<String, bool>,
 }
 
 impl LayoutPlaceholders {
@@ -787,9 +941,90 @@ impl LayoutPlaceholders {
                 if ph_type == "body" { self.by_type.get("") } else { None }
             })
     }
+
+    /// Look up the inherited default font size for a placeholder (layout then master fallback).
+    fn lookup_font_size(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
+        ph_idx
+            .and_then(|i| self.by_idx_font_size.get(&i).copied())
+            .or_else(|| self.by_type_font_size.get(ph_type).copied())
+            .or_else(|| {
+                if ph_type == "body" { self.by_type_font_size.get("").copied() } else { None }
+            })
+    }
+
+    /// Look up inherited bold for this placeholder type.
+    fn lookup_bold(&self, ph_type: &str) -> Option<bool> {
+        self.by_type_bold.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_bold.get("").copied() } else { None })
+    }
+
+    /// Look up inherited italic for this placeholder type.
+    fn lookup_italic(&self, ph_type: &str) -> Option<bool> {
+        self.by_type_italic.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_italic.get("").copied() } else { None })
+    }
 }
 
-fn parse_layout_placeholders(layout_xml: &str) -> LayoutPlaceholders {
+/// Extract the lvl1pPr defRPr font size from a txBody node.
+fn extract_lvl1_font_size(tx_body: roxmltree::Node<'_, '_>) -> Option<f64> {
+    child(tx_body, "lstStyle")
+        .and_then(|ls| child(ls, "lvl1pPr"))
+        .and_then(|lp| child(lp, "defRPr"))
+        .and_then(|rp| attr_f64(&rp, "sz"))
+        .map(|v| v / 100.0)
+}
+
+/// Parse master-level default font sizes from txStyles (titleStyle / bodyStyle / otherStyle)
+/// and from individual placeholder shapes in the master spTree.
+fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
+    let mut map = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+
+    // p:txStyles > a:titleStyle / a:bodyStyle / a:otherStyle
+    if let Some(tx_styles) = child(root, "txStyles") {
+        let style_ph_map: &[(&str, &[&str])] = &[
+            ("titleStyle",  &["title", "ctrTitle"]),
+            ("bodyStyle",   &["body", "subTitle", ""]),
+            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ];
+        for (style_name, ph_types) in style_ph_map {
+            let sz = child(tx_styles, style_name)
+                .and_then(|sn| child(sn, "lvl1pPr"))
+                .and_then(|lp| child(lp, "defRPr"))
+                .and_then(|rp| attr_f64(&rp, "sz"))
+                .map(|v| v / 100.0);
+            if let Some(fs) = sz {
+                for ph_type in *ph_types {
+                    map.entry(ph_type.to_string()).or_insert(fs);
+                }
+            }
+        }
+    }
+
+    // Also scan master spTree placeholder shapes for per-type lstStyle font sizes
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            let ph_node = sp.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    if let Some(sz) = extract_lvl1_font_size(tx_body) {
+                        map.entry(ph_type).or_insert(sz);
+                    }
+                }
+            }
+        }
+    }
+
+    map
+}
+
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
@@ -822,12 +1057,40 @@ fn parse_layout_placeholders(layout_xml: &str) -> LayoutPlaceholders {
         };
         let t = parse_xfrm(xfrm);
 
+        // Extract layout-level defaults from the placeholder's txBody > lstStyle > lvl1pPr > defRPr
+        let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = child(sp, "txBody")
+            .and_then(|tb| child(tb, "lstStyle"))
+            .and_then(|ls| child(ls, "lvl1pPr"))
+            .and_then(|lp| child(lp, "defRPr"));
+        let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
+        let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
+        let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+
+        // Note: layout spPr > ln is an edit-mode indicator only; do not inherit it as a real border.
+
         if let Some(ph) = ph_node {
             let ph_type = attr(&ph, "type").unwrap_or_default();
             let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
 
             if let Some(idx) = ph_idx {
                 lph.by_idx.entry(idx).or_insert_with(|| t.clone());
+                // Prefer layout font size; fall back to master
+                let fs = layout_font_size
+                    .or_else(|| master_font_sizes.get(&ph_type).copied());
+                if let Some(fs) = fs {
+                    lph.by_idx_font_size.entry(idx).or_insert(fs);
+                }
+            }
+            let effective_fs = layout_font_size
+                .or_else(|| master_font_sizes.get(&ph_type).copied());
+            if let Some(fs) = effective_fs {
+                lph.by_type_font_size.entry(ph_type.clone()).or_insert(fs);
+            }
+            if let Some(b) = layout_bold {
+                lph.by_type_bold.entry(ph_type.clone()).or_insert(b);
+            }
+            if let Some(i) = layout_italic {
+                lph.by_type_italic.entry(ph_type.clone()).or_insert(i);
             }
             lph.by_type.entry(ph_type).or_insert(t);
         }
@@ -842,6 +1105,9 @@ fn parse_layout_placeholders(layout_xml: &str) -> LayoutPlaceholders {
 fn parse_text_body(
     tx_body: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    inherited_font_size: Option<f64>,
+    inherited_bold: Option<bool>,
+    inherited_italic: Option<bool>,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     let vertical_anchor = body_pr
@@ -854,20 +1120,32 @@ fn parse_text_body(
     let b_ins = body_pr.and_then(|n| attr_i64(&n, "bIns")).unwrap_or(45_720);
     let wrap = body_pr.and_then(|n| attr(&n, "wrap")).unwrap_or_else(|| "square".into());
     let vert = body_pr.and_then(|n| attr(&n, "vert")).unwrap_or_else(|| "horz".into());
+    let auto_fit = body_pr.map(|n| {
+        if child(n, "spAutoFit").is_some() { "sp".to_owned() }
+        else if child(n, "normAutoFit").is_some() { "norm".to_owned() }
+        else { "none".to_owned() }
+    }).unwrap_or_else(|| "none".to_owned());
 
-    // Default font size from lstStyle > lvl1pPr > defRPr sz
-    let default_font_size = child(tx_body, "lstStyle")
+    // Own lstStyle > lvl1pPr > defRPr, then fall back to layout/master inherited values
+    let own_def_rpr = child(tx_body, "lstStyle")
         .and_then(|ls| child(ls, "lvl1pPr"))
-        .and_then(|lp| child(lp, "defRPr"))
-        .and_then(|rp| attr_f64(&rp, "sz"))
-        .map(|v| v / 100.0);
+        .and_then(|lp| child(lp, "defRPr"));
+    let default_font_size = own_def_rpr.and_then(|rp| attr_f64(&rp, "sz"))
+        .map(|v| v / 100.0)
+        .or(inherited_font_size);
+    let default_bold = own_def_rpr
+        .and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true")
+        .or(inherited_bold);
+    let default_italic = own_def_rpr
+        .and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true")
+        .or(inherited_italic);
 
     let paragraphs = children_vec(tx_body, "p")
         .into_iter()
         .map(|p| parse_paragraph(p, theme))
         .collect();
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, l_ins, r_ins, t_ins, b_ins, wrap, vert }
+    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit }
 }
 
 fn parse_paragraph(
@@ -939,6 +1217,18 @@ fn parse_paragraph(
         }
     }
 
+    // For paragraphs with no visible text content, use endParaRPr sz to set line height.
+    // This ensures empty spacer paragraphs have the correct height (e.g. between sections).
+    let end_rpr = child(p_node, "endParaRPr");
+    let has_text = runs.iter().any(|r| matches!(r, TextRun::Text(_)));
+    let def_font_size = def_font_size.or_else(|| {
+        if !has_text {
+            end_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0)
+        } else {
+            None
+        }
+    });
+
     Paragraph {
         alignment, mar_l, mar_r, indent,
         space_before, space_after, space_line,
@@ -994,16 +1284,22 @@ fn parse_run(
     let text  = t_node.text().unwrap_or("").to_owned();
     let r_pr  = child(r_node, "rPr");
 
-    // Attribute with rPr → defRPr fallback
+    // Attribute with rPr → defRPr fallback; None means "not set" (inherit from body/layout defaults)
     let bold = r_pr.and_then(|n| attr(&n, "b"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "b")))
-        .map(|v| v == "1" || v == "true").unwrap_or(false);
+        .map(|v| v == "1" || v == "true");
     let italic = r_pr.and_then(|n| attr(&n, "i"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "i")))
-        .map(|v| v == "1" || v == "true").unwrap_or(false);
+        .map(|v| v == "1" || v == "true");
     let underline = r_pr.and_then(|n| attr(&n, "u"))
         .or_else(|| def_rpr.and_then(|n| attr(&n, "u")))
         .map(|v| v != "none").unwrap_or(false);
+
+    // strikethrough: "sngStrike" or "dblStrike" → true
+    let strikethrough = r_pr.and_then(|n| attr(&n, "strike"))
+        .or_else(|| def_rpr.and_then(|n| attr(&n, "strike")))
+        .map(|v| v == "sngStrike" || v == "dblStrike")
+        .unwrap_or(false);
 
     // sz in hundredths of a point
     let font_size = r_pr.and_then(|n| attr_f64(&n, "sz"))
@@ -1020,7 +1316,7 @@ fn parse_run(
     let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
         .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")));
 
-    Some(TextRunData { text, bold, italic, underline, font_size, color, font_family })
+    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family })
 }
 
 // ===========================
@@ -1119,20 +1415,29 @@ fn parse_shape(
     };
     let cust_geom = cust_geom_node.map(|n| parse_cust_geom(n));
 
-    // First adjustment value from prstGeom avLst (e.g. trapezoid inset)
-    let adj: Option<f64> = prst_geom_node
-        .and_then(|n| child(n, "avLst"))
-        .and_then(|av| {
-            av.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
-                .find(|n| attr(n, "name").as_deref() == Some("adj"))
-        })
-        .and_then(|gd| {
-            // fmla is like "val 25000"; extract the numeric part
-            attr(&gd, "fmla")
-                .and_then(|f| f.strip_prefix("val ").map(|s| s.to_owned()))
-                .and_then(|s| s.parse::<f64>().ok())
-        });
+    // Parse adjustment values from prstGeom avLst (e.g. trapezoid inset)
+    // Collect all gd elements; first is adj (name="adj" or "adj1"), second is adj2
+    let parse_gd_val = |gd: roxmltree::Node<'_, '_>| -> Option<f64> {
+        attr(&gd, "fmla")
+            .and_then(|f| f.strip_prefix("val ").map(|s| s.to_owned()))
+            .and_then(|s| s.parse::<f64>().ok())
+    };
+    let av_node = prst_geom_node.and_then(|n| child(n, "avLst"));
+    let gd_nodes: Vec<_> = av_node
+        .map(|av| av.children().filter(|n| n.is_element() && n.tag_name().name() == "gd").collect())
+        .unwrap_or_default();
+    // First gd = adj (match by name "adj" or "adj1", fallback to position 0)
+    let adj: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| matches!(attr(n, "name").as_deref(), Some("adj") | Some("adj1")))
+        .or_else(|| gd_nodes.first())
+        .and_then(|n| parse_gd_val(*n));
+    // Second gd = adj2 (match by name "adj2", fallback to position 1)
+    let adj2: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj2"))
+        .or_else(|| gd_nodes.get(1))
+        .and_then(|n| parse_gd_val(*n));
 
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
@@ -1174,19 +1479,36 @@ fn parse_shape(
     };
 
     // spPr stroke: if ln element is present, respect it (even if noFill → None);
-    // only fall back to style when spPr has no ln at all.
+    // fall back to layout stroke for placeholder shapes, then style stroke.
     let stroke = if sp_pr.and_then(|p| child(p, "ln")).is_some() {
         sp_pr.and_then(|p| child(p, "ln")).and_then(|n| parse_stroke(n, theme))
     } else {
         style_stroke
     };
 
-    let text_body = child(sp_node, "txBody").map(|n| parse_text_body(n, theme));
+    // Inherited defaults from layout/master for this placeholder type/idx
+    let (inherited_font_size, inherited_bold, inherited_italic) = if ph_node.is_some() {
+        (
+            lph.lookup_font_size(&ph_type, ph_idx),
+            lph.lookup_bold(&ph_type),
+            lph.lookup_italic(&ph_type),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let text_body = child(sp_node, "txBody")
+        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic));
+
+    // Shadow from spPr > effectLst > outerShdw
+    let shadow = sp_pr
+        .and_then(|p| child(p, "effectLst"))
+        .and_then(|n| parse_shadow(n, theme));
 
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj,
+        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj, adj2, shadow,
     })
 }
 
@@ -1310,7 +1632,7 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> TableCell {
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None));
 
     let tc_pr = child(tc, "tcPr");
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
@@ -1342,13 +1664,14 @@ fn parse_slide(
     layout_rels: &HashMap<String, String>,
     layout_dir: &str,
     master_bg: Option<Fill>,
+    master_font_sizes: &HashMap<String, f64>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x))
+        .map(|x| parse_layout_placeholders(x, master_font_sizes, theme))
         .unwrap_or_default();
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -1459,6 +1782,7 @@ fn parse_sp_tree_node(
                         ch_cy: ch_ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
                         flip_h: attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false),
                         flip_v: attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false),
+                        rot: attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0,
                     }
                 });
 
@@ -1489,8 +1813,66 @@ fn parse_sp_tree_node(
                 }
             }
         }
+        "cxnSp" => {
+            // Connector shape: parse as a line/shape element
+            if skip_placeholders && is_placeholder(node) {
+                return;
+            }
+            if let Some(shape) = parse_connector(node, theme) {
+                out.push(SlideElement::Shape(shape));
+            }
+        }
         _ => {}
     }
+}
+
+/// Parse a connector shape (p:cxnSp) as a ShapeElement with line geometry.
+fn parse_connector(
+    node: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> Option<ShapeElement> {
+    let sp_pr = child(node, "spPr")?;
+    let xfrm = child(sp_pr, "xfrm")?;
+    let t = parse_xfrm(xfrm);
+    if t.cx == 0 && t.cy == 0 {
+        return None;
+    }
+
+    // Style-based stroke fallback
+    let style_node = child(node, "style");
+    let style_stroke: Option<Stroke> = style_node
+        .and_then(|s| child(s, "lnRef"))
+        .and_then(|lr| {
+            let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
+            if idx == 0 { None } else {
+                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525 })
+            }
+        });
+
+    let stroke = if child(sp_pr, "ln").is_some() {
+        child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme))
+    } else {
+        style_stroke
+    };
+
+    let shadow = child(sp_pr, "effectLst")
+        .and_then(|n| parse_shadow(n, theme));
+
+    let cy = if t.cy == 0 { 1 } else { t.cy };
+
+    Some(ShapeElement {
+        x: t.x, y: t.y, width: t.cx, height: cy,
+        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+        geometry: "line".to_owned(),
+        fill: None,
+        stroke,
+        text_body: None,
+        default_text_color: None,
+        cust_geom: None,
+        adj: None,
+        adj2: None,
+        shadow,
+    })
 }
 
 // ===========================
@@ -1531,15 +1913,21 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .unwrap_or_default();
     let theme = parse_theme_colors(&theme_xml);
 
-    // --- First slide master background (fallback for slides without their own bg) ---
-    let master_bg: Option<Fill> = find_rel_target_by_type(&pres_rels_xml, "/slideMaster")
+    // --- First slide master: background + font size defaults ---
+    let master_xml_opt: Option<String> = find_rel_target_by_type(&pres_rels_xml, "/slideMaster")
         .map(|t| resolve_path("ppt", &t))
-        .and_then(|path| read_zip_str(&mut zip, &path).ok())
-        .and_then(|master_xml| {
-            let doc = roxmltree::Document::parse(&master_xml).ok()?;
-            child(doc.root_element(), "cSld")
-                .and_then(|n| parse_background(n, &theme))
-        });
+        .and_then(|path| read_zip_str(&mut zip, &path).ok());
+
+    let master_bg: Option<Fill> = master_xml_opt.as_deref().and_then(|master_xml| {
+        let doc = roxmltree::Document::parse(master_xml).ok()?;
+        child(doc.root_element(), "cSld")
+            .and_then(|n| parse_background(n, &theme))
+    });
+
+    let master_font_sizes: HashMap<String, f64> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_font_sizes(xml))
+        .unwrap_or_default();
 
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
@@ -1602,6 +1990,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &raw.layout_rels,
             &raw.layout_dir,
             master_bg.clone(),
+            &master_font_sizes,
             raw.index,
             &raw.slide_rels,
             &mut zip,

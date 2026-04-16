@@ -15,13 +15,15 @@ export default defineConfig({
   },
   projects: [
     {
-      name: 'chromium',
+      name: 'chrome',
       use: {
-        ...devices['Desktop Chrome'],
-        // Viewport must be at least as wide as the canvas (1920px); height ≥ 1080px.
-        // Force dpr=1 so canvas physical size == CSS size == 1920×1080.
+        // Use the system-installed Google Chrome so fonts (Hiragino etc.)
+        // and rendering exactly match what the user sees in the browser.
+        channel: 'chrome',
+        // Force DPR=1 so canvas physical size matches the 1280×720
+        // PowerPoint reference images (toDataURL returns canvas.width × canvas.height).
         deviceScaleFactor: 1,
-        viewport: { width: 1920, height: 1080 },
+        viewport: { width: 1280, height: 720 },
       },
     },
   ],

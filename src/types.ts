@@ -48,6 +48,10 @@ export interface ShapeElement {
   custGeom: PathCmd[][] | null;
   /** First adjustment value from prstGeom avLst (e.g. trapezoid inset). Range 0–100000. */
   adj: number | null;
+  /** Second adjustment value from prstGeom avLst (e.g. arrow head width). Range 0–100000. */
+  adj2: number | null;
+  /** Drop shadow from effectLst > outerShdw (null if not present). */
+  shadow: Shadow | null;
 }
 
 export interface TableElement {
@@ -97,15 +101,38 @@ export interface PictureElement {
   dataUrl: string;
 }
 
-export type Fill = SolidFill | NoFill;
+export type Fill = SolidFill | NoFill | GradientFill;
 
 export interface SolidFill {
   fillType: 'solid';
-  color: string; // hex, e.g. "FF0000"
+  color: string; // hex 6-char or 8-char (RRGGBBAA with alpha)
 }
 
 export interface NoFill {
   fillType: 'none';
+}
+
+export interface GradientStop {
+  position: number; // 0.0–1.0
+  color: string;    // hex 6 or 8 chars
+}
+
+export interface GradientFill {
+  fillType: 'gradient';
+  stops: GradientStop[];
+  /** degrees: 0 = left→right, 90 = top→bottom */
+  angle: number;
+  /** 'linear' | 'radial' */
+  gradType: string;
+}
+
+export interface Shadow {
+  color: string;  // hex 6 chars
+  alpha: number;  // 0.0–1.0
+  blur: number;   // EMU
+  dist: number;   // EMU
+  /** degrees clockwise from East */
+  dir: number;
 }
 
 export interface Stroke {
@@ -120,6 +147,10 @@ export interface TextBody {
   paragraphs: Paragraph[];
   /** Default pt size from lstStyle (overrides renderer default when present) */
   defaultFontSize: number | null;
+  /** Inherited bold from layout/master defRPr (null = not set, use false as final default) */
+  defaultBold: boolean | null;
+  /** Inherited italic from layout/master defRPr (null = not set, use false as final default) */
+  defaultItalic: boolean | null;
   /** Text insets in EMU (defaults: lIns=rIns=91440, tIns=bIns=45720) */
   lIns: number;
   rIns: number;
@@ -129,6 +160,8 @@ export interface TextBody {
   wrap: string;
   /** Text direction: "horz" | "vert" | "vert270" | "eaVert" etc. */
   vert: string;
+  /** Auto-fit: "sp" = shape grows to fit text, "norm" = font shrinks, "none" = no fit */
+  autoFit: string;
 }
 
 export type SpaceLine =
@@ -178,9 +211,13 @@ export type TextRun = TextRunData | LineBreak;
 export interface TextRunData {
   type: 'text';
   text: string;
-  bold: boolean;
-  italic: boolean;
+  /** null = not set, inherit from paragraph/body defaults */
+  bold: boolean | null;
+  /** null = not set, inherit from paragraph/body defaults */
+  italic: boolean | null;
   underline: boolean;
+  /** true when rPr strike = "sngStrike" or "dblStrike" */
+  strikethrough: boolean;
   /** Font size in points */
   fontSize: number | null;
   color: string | null;

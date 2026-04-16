@@ -18,7 +18,7 @@
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
 
     const viewer = new PptxViewer(document.getElementById('container'), {
-      width: 1920,
+      width: 1280,
       onSlideChange: (_index, _total) => {
         // Signal Playwright that the current slide finished rendering
         document.body.dataset.status = 'ready';
