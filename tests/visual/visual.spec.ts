@@ -7,11 +7,12 @@ import pixelmatch from 'pixelmatch';
 const SLIDE_COUNT = 5;
 
 // Per-pixel color tolerance for pixelmatch (0 = exact, 1 = fully lenient)
-const PIXEL_THRESHOLD = 0.15;
+// 0.20 absorbs font hinting / sub-pixel differences between PowerPoint and Canvas
+const PIXEL_THRESHOLD = 0.20;
 
 // Set to a number (e.g. 5) to fail the test when diff exceeds that percentage.
 // Set to null to always pass (report-only mode).
-const FAIL_ABOVE_PCT: number | null = null;
+const FAIL_ABOVE_PCT: number | null = 20;
 
 test.describe('visual regression', () => {
   for (let i = 0; i < SLIDE_COUNT; i++) {

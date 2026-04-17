@@ -113,10 +113,18 @@ function normalizeFontFamily(family: string): string {
   return family;
 }
 
+/** CSS generic font families — must NOT be quoted in a canvas font string. */
+const CSS_GENERIC_FAMILIES = new Set([
+  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+]);
+
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
-  return `${style}${weight}${sizePx}px "${normalizeFontFamily(family)}"`;
+  const normalized = normalizeFontFamily(family);
+  // Generic families must be unquoted; named families must be quoted.
+  const quotedFamily = CSS_GENERIC_FAMILIES.has(normalized) ? normalized : `"${normalized}"`;
+  return `${style}${weight}${sizePx}px ${quotedFamily}`;
 }
 
 /**
@@ -139,6 +147,7 @@ function layoutParagraph(
   marLPx: number,
   defaultBold: boolean = false,
   defaultItalic: boolean = false,
+  fontScale: number = 1.0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
@@ -185,7 +194,7 @@ function layoutParagraph(
       continue;
     }
 
-    const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale : defaultFontSizePx;
+    const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
     const family = normalizeFontFamily(run.fontFamily ?? 'sans-serif');
     const color  = run.color ? hexToRgba(run.color) : defaultColor;
     // Cascade: run → paragraph defRPr → body/layout default → false
@@ -1226,7 +1235,6 @@ function renderTextBody(
   const bPad = emuToPx(body.bIns, scale);
   const doWrap = body.wrap !== 'none';
 
-  const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale;
   const bodyDefaultBold   = body.defaultBold   ?? false;
   const bodyDefaultItalic = body.defaultItalic ?? false;
   const bodyDefaultColor = shapeDefaultTextColor ?? '#000000';
@@ -1235,7 +1243,8 @@ function renderTextBody(
 
   interface LineEntry {
     line: LayoutLine;
-    linePx: number;       // line height (baseline-to-baseline)
+    linePx: number;       // spacing advancement (lineHeight + spaceAfter for last line)
+    lineHeight: number;   // pure line height used for baseline positioning (without spaceAfter)
     topGapPx: number;     // spaceBefore for first line of paragraph
     textXOffset: number;  // additional X offset for first-line indent (non-bullet)
     bulletLabel: string;  // text to render as bullet ('' = none)
@@ -1248,6 +1257,9 @@ function renderTextBody(
     para: Paragraph;
   }
 
+  // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
+  const buildLayout = (fontScale: number): { allLines: LineEntry[], totalHeight: number } => {
+  const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale * fontScale;
   const allLines: LineEntry[] = [];
   let totalHeight = 0;
 
@@ -1261,7 +1273,7 @@ function renderTextBody(
 
     // Para-level defaults (cascade: para defRPr → body default)
     const paraDefaultFontSizePx = para.defFontSize != null
-      ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontSizePx;
+      ? para.defFontSize * PT_TO_EMU * scale * fontScale : bodyDefaultFontSizePx;
     const paraDefaultColor = para.defColor
       ? hexToRgba(para.defColor) : bodyDefaultColor;
 
@@ -1306,11 +1318,11 @@ function renderTextBody(
     const textMaxW = bw - lPad - rPad - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic);
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
-    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale : 0;
-    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale : 0;
+    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
+    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -1346,7 +1358,7 @@ function renderTextBody(
       const textXOffset = (!hasBullet && isFirst) ? indentPx : 0;
 
       allLines.push({
-        line, linePx, topGapPx: topGap,
+        line, linePx, lineHeight, topGapPx: topGap,
         textXOffset,
         bulletLabel: isFirst ? bulletLabel : '',
         bulletFont, bulletColor, bulletX,
@@ -1355,6 +1367,24 @@ function renderTextBody(
         para,
       });
       totalHeight += linePx + topGap;
+    }
+  }
+
+  return { allLines, totalHeight };
+  }; // end buildLayout
+
+  let { allLines, totalHeight } = buildLayout(1.0);
+
+  // ── normAutoFit: shrink font until text fits ─────────────────────────────
+  if (body.autoFit === 'norm') {
+    const maxContentH = bh - tPad - bPad;
+    if (totalHeight > maxContentH && maxContentH > 0) {
+      let lo = 0.1, hi = 1.0;
+      for (let i = 0; i < 6; i++) {
+        const mid = (lo + hi) / 2;
+        if (buildLayout(mid).totalHeight <= maxContentH) lo = mid; else hi = mid;
+      }
+      ({ allLines, totalHeight } = buildLayout(lo));
     }
   }
 
@@ -1384,10 +1414,10 @@ function renderTextBody(
   ctx.clip();
 
   for (const entry of allLines) {
-    const { line, linePx, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
+    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
     cursorY += topGapPx;
 
-    const baseline = cursorY + linePx * 0.8;
+    const baseline = cursorY + lineHeight * 0.8;
 
     // Draw bullet
     if (bulletLabel) {

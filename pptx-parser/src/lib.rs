@@ -988,7 +988,7 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
             ("titleStyle",  &["title", "ctrTitle"]),
-            ("bodyStyle",   &["body", "subTitle", ""]),
+            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
             ("otherStyle",  &["dt", "ftr", "sldNum"]),
         ];
         for (style_name, ph_types) in style_ph_map {
