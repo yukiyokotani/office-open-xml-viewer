@@ -27,6 +27,8 @@ struct Presentation {
     slide_width: i64,
     slide_height: i64,
     slides: Vec<Slide>,
+    /// Default text color from theme dk1 (hex 6 chars, e.g. "383838").
+    default_text_color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -43,6 +45,27 @@ enum SlideElement {
     Shape(ShapeElement),
     Picture(PictureElement),
     Table(TableElement),
+    Chart(ChartElement),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ChartSeriesData {
+    name: String,
+    values: Vec<Option<f64>>,
+    color: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ChartElement {
+    x: i64, y: i64, width: i64, height: i64,
+    chart_type: String,
+    title: Option<String>,
+    categories: Vec<String>,
+    series: Vec<ChartSeriesData>,
+    val_max: Option<f64>,
+    subtotal_indices: Vec<u32>,
 }
 
 // ===== Table data model =====
@@ -910,6 +933,11 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             let nt = gt.apply_to_transform(t);
             tbl.x = nt.x; tbl.y = nt.y; tbl.width = nt.cx; tbl.height = nt.cy;
         }
+        SlideElement::Chart(chart) => {
+            let t = Transform { x: chart.x, y: chart.y, cx: chart.width, cy: chart.height, rot: 0.0, flip_h: false, flip_v: false };
+            let nt = gt.apply_to_transform(t);
+            chart.x = nt.x; chart.y = nt.y; chart.width = nt.cx; chart.height = nt.cy;
+        }
     }
 }
 
@@ -930,6 +958,12 @@ struct LayoutPlaceholders {
     by_type_bold: HashMap<String, bool>,
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
     by_type_italic: HashMap<String, bool>,
+    /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
+    by_type_anchor: HashMap<String, String>,
+    /// Stroke per placeholder type from layout spPr > ln
+    by_type_stroke: HashMap<String, Stroke>,
+    /// Stroke per placeholder idx from layout spPr > ln
+    by_idx_stroke: HashMap<u32, Stroke>,
 }
 
 impl LayoutPlaceholders {
@@ -963,6 +997,20 @@ impl LayoutPlaceholders {
         self.by_type_italic.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_italic.get("").copied() } else { None })
     }
+
+    /// Look up inherited vertical anchor for this placeholder type.
+    fn lookup_anchor(&self, ph_type: &str) -> Option<String> {
+        self.by_type_anchor.get(ph_type).cloned()
+            .or_else(|| if ph_type == "body" { self.by_type_anchor.get("").cloned() } else { None })
+    }
+
+    /// Look up inherited stroke from the layout placeholder spPr > ln.
+    fn lookup_stroke(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<Stroke> {
+        ph_idx
+            .and_then(|i| self.by_idx_stroke.get(&i).cloned())
+            .or_else(|| self.by_type_stroke.get(ph_type).cloned())
+            .or_else(|| if ph_type == "body" { self.by_type_stroke.get("").cloned() } else { None })
+    }
 }
 
 /// Extract the lvl1pPr defRPr font size from a txBody node.
@@ -972,6 +1020,32 @@ fn extract_lvl1_font_size(tx_body: roxmltree::Node<'_, '_>) -> Option<f64> {
         .and_then(|lp| child(lp, "defRPr"))
         .and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
+}
+
+/// Parse bodyPr anchor ("t"/"ctr"/"b") from master placeholder shapes.
+fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            let ph_node = sp.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(anchor) = child(sp, "txBody")
+                    .and_then(|tb| child(tb, "bodyPr"))
+                    .and_then(|bp| attr(&bp, "anchor"))
+                {
+                    map.entry(ph_type).or_insert(anchor.to_string());
+                }
+            }
+        }
+    }
+    map
 }
 
 /// Parse master-level default font sizes from txStyles (titleStyle / bodyStyle / otherStyle)
@@ -1024,7 +1098,7 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
@@ -1066,7 +1140,15 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
 
-        // Note: layout spPr > ln is an edit-mode indicator only; do not inherit it as a real border.
+        // Layout bodyPr anchor; fall back to master anchor map
+        let layout_anchor: Option<String> = child(sp, "txBody")
+            .and_then(|tb| child(tb, "bodyPr"))
+            .and_then(|bp| attr(&bp, "anchor"))
+            .map(|a| a.to_string());
+
+        // Layout spPr > ln stroke (real visible border, not edit-mode indicator when solidFill is present)
+        let layout_stroke: Option<Stroke> = child(sp_pr, "ln")
+            .and_then(|n| parse_stroke(n, theme));
 
         if let Some(ph) = ph_node {
             let ph_type = attr(&ph, "type").unwrap_or_default();
@@ -1080,6 +1162,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if let Some(fs) = fs {
                     lph.by_idx_font_size.entry(idx).or_insert(fs);
                 }
+                if let Some(ref s) = layout_stroke {
+                    lph.by_idx_stroke.entry(idx).or_insert(s.clone());
+                }
             }
             let effective_fs = layout_font_size
                 .or_else(|| master_font_sizes.get(&ph_type).copied());
@@ -1091,6 +1176,15 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             }
             if let Some(i) = layout_italic {
                 lph.by_type_italic.entry(ph_type.clone()).or_insert(i);
+            }
+            // Anchor: layout bodyPr > fall back to master anchor map
+            let effective_anchor = layout_anchor.clone()
+                .or_else(|| master_anchors.get(&ph_type).cloned());
+            if let Some(a) = effective_anchor {
+                lph.by_type_anchor.entry(ph_type.clone()).or_insert(a);
+            }
+            if let Some(s) = layout_stroke {
+                lph.by_type_stroke.entry(ph_type.clone()).or_insert(s);
             }
             lph.by_type.entry(ph_type).or_insert(t);
         }
@@ -1108,10 +1202,13 @@ fn parse_text_body(
     inherited_font_size: Option<f64>,
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
+    inherited_anchor: Option<String>,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     let vertical_anchor = body_pr
         .and_then(|n| attr(&n, "anchor"))
+        .map(|a| a.to_string())
+        .or(inherited_anchor)
         .unwrap_or_else(|| "t".into());
     // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720
     let l_ins = body_pr.and_then(|n| attr_i64(&n, "lIns")).unwrap_or(91_440);
@@ -1320,6 +1417,217 @@ fn parse_run(
 }
 
 // ===========================
+//  Chart parsing
+// ===========================
+
+/// Parse a legacy OOXML chart (c: namespace) — barChart / lineChart etc.
+fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElement> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let root = doc.root_element();
+
+    // Determine chart type
+    let bar_chart = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "barChart");
+    let chart_type = if let Some(bc) = bar_chart {
+        let grouping = bc.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "grouping")
+            .and_then(|n| attr(&n, "val"))
+            .unwrap_or_else(|| "clustered".into());
+        let bar_dir = bc.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "barDir")
+            .and_then(|n| attr(&n, "val"))
+            .unwrap_or_else(|| "col".into());
+        let horizontal = bar_dir == "bar";
+        match (grouping.as_str(), horizontal) {
+            ("stacked" | "percentStacked", false) => "stackedBar".to_string(),
+            ("stacked" | "percentStacked", true)  => "stackedBarH".to_string(),
+            (_, false) => "clusteredBar".to_string(),
+            (_, true)  => "clusteredBarH".to_string(),
+        }
+    } else {
+        "bar".to_string()
+    };
+
+    // Title text
+    let title = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "title")
+        .and_then(|title_node| {
+            let texts: Vec<String> = title_node.descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "t")
+                .filter_map(|n| n.text().map(|t| t.to_string()))
+                .collect();
+            if texts.is_empty() { None } else { Some(texts.join("")) }
+        });
+
+    // val axis max
+    let val_max = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+        .and_then(|ax| ax.descendants().find(|n| n.is_element() && n.tag_name().name() == "max"))
+        .and_then(|n| attr(&n, "val"))
+        .and_then(|v| v.parse::<f64>().ok());
+
+    // Series
+    let plot_area = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "plotArea")?;
+
+    let ser_nodes: Vec<_> = plot_area.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "ser")
+        .collect();
+
+    if ser_nodes.is_empty() {
+        return None;
+    }
+
+    // Categories from first series's <c:cat>
+    let categories: Vec<String> = ser_nodes[0]
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "cat")
+        .and_then(|cat| cat.descendants().find(|n| n.is_element() && n.tag_name().name() == "strCache"))
+        .map(|cache| {
+            cache.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .filter_map(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
+                .filter_map(|v| v.text().map(|t| t.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let pt_count = categories.len().max(1);
+
+    let series: Vec<ChartSeriesData> = ser_nodes.iter().map(|ser| {
+        // Series name from <c:tx><c:strRef><c:strCache><c:pt>
+        let name = ser.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "tx")
+            .and_then(|tx| tx.descendants().find(|n| n.is_element() && n.tag_name().name() == "strCache"))
+            .and_then(|cache| {
+                cache.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "pt")
+                    .and_then(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
+                    .and_then(|v| v.text().map(|t| t.to_string()))
+            })
+            .unwrap_or_default();
+
+        // Values (sparse by idx attribute)
+        let mut values: Vec<Option<f64>> = vec![None; pt_count];
+        if let Some(num_cache) = ser.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "numCache") {
+            for pt in num_cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
+                let idx: usize = attr(&pt, "idx")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let val: Option<f64> = pt.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "v")
+                    .and_then(|v| v.text())
+                    .and_then(|t| t.parse().ok());
+                if idx < values.len() {
+                    values[idx] = val;
+                }
+            }
+        }
+
+        // Series color from spPr > solidFill
+        let color = ser.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+            .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+            .and_then(|fill| parse_color_node(fill, theme));
+
+        ChartSeriesData { name, values, color }
+    }).collect();
+
+    Some(ChartElement {
+        x: 0, y: 0, width: 0, height: 0,
+        chart_type,
+        title,
+        categories,
+        series,
+        val_max,
+        subtotal_indices: vec![],
+    })
+}
+
+/// Parse a modern chartEx (cx: namespace) — waterfall, treemap, etc.
+fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElement> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let root = doc.root_element();
+
+    // Chart type from series layoutId attribute
+    let series_node = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "series")?;
+    let layout_id = attr(&series_node, "layoutId").unwrap_or_default();
+    let chart_type = layout_id; // "waterfall", "treemap", etc.
+
+    // Categories from chartData > data > strDim[@type="cat"] > lvl > pt
+    let categories: Vec<String> = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "strDim"
+            && attr(n, "type").as_deref() == Some("cat"))
+        .and_then(|dim| dim.descendants().find(|n| n.is_element() && n.tag_name().name() == "lvl"))
+        .map(|lvl| {
+            lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .filter_map(|pt| pt.text().map(|t| t.replace('\n', " ")))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let pt_count = categories.len().max(1);
+
+    // Values from chartData > data > numDim[@type="val"] > lvl > pt
+    let raw_values: Vec<Option<f64>> = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "numDim"
+            && attr(n, "type").as_deref() == Some("val"))
+        .and_then(|dim| dim.descendants().find(|n| n.is_element() && n.tag_name().name() == "lvl"))
+        .map(|lvl| {
+            let mut vals: Vec<Option<f64>> = vec![None; pt_count];
+            for (i, pt) in lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+                .enumerate()
+            {
+                if i < vals.len() {
+                    vals[i] = pt.text().and_then(|t| t.parse().ok());
+                }
+            }
+            vals
+        })
+        .unwrap_or_else(|| vec![None; pt_count]);
+
+    // Subtotal indices (idx=0 is always implicit; add from cx:subtotals)
+    let mut subtotal_indices: Vec<u32> = vec![0];
+    if let Some(subtotals_node) = series_node.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "subtotals") {
+        for idx_node in subtotals_node.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "idx") {
+            if let Some(v) = attr(&idx_node, "val").and_then(|v| v.parse::<u32>().ok()) {
+                if v != 0 {
+                    subtotal_indices.push(v);
+                }
+            }
+        }
+    }
+
+    // Series color (first dataPt or series spPr)
+    let color = series_node.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|fill| parse_color_node(fill, theme));
+
+    let series = vec![ChartSeriesData {
+        name: String::new(),
+        values: raw_values,
+        color,
+    }];
+
+    Some(ChartElement {
+        x: 0, y: 0, width: 0, height: 0,
+        chart_type,
+        title: None,
+        categories,
+        series,
+        val_max: None,
+        subtotal_indices,
+    })
+}
+
+// ===========================
 //  Placeholder defaults
 // ===========================
 
@@ -1397,11 +1705,28 @@ fn parse_shape(
         return None; // non-placeholder with no xfrm — skip
     };
 
-    // cx=0 → skip. cy=0 means "auto-height" in OOXML; use a generous fallback.
+    // cx=0 → skip.
+    // cy=0 means "auto-height": keep 0 when anchor="b" (renderer grows shape upward from off_y),
+    // otherwise use a generous fallback so text has room to render.
     if t.cx == 0 {
         return None;
     }
-    let cy = if t.cy == 0 { 2_000_000_i64 } else { t.cy };
+    let inherited_anchor: Option<String> = if ph_node.is_some() {
+        lph.lookup_anchor(&ph_type)
+    } else {
+        None
+    };
+    let is_bottom_anchor = inherited_anchor.as_deref() == Some("b")
+        || child(sp_node, "txBody")
+            .and_then(|tb| child(tb, "bodyPr"))
+            .and_then(|bp| attr(&bp, "anchor"))
+            .map(|a| a == "b")
+            .unwrap_or(false);
+    let cy = if t.cy == 0 {
+        if is_bottom_anchor { 0_i64 } else { 2_000_000_i64 }
+    } else {
+        t.cy
+    };
 
     // custGeom takes priority over prstGeom
     let cust_geom_node = sp_pr.and_then(|p| child(p, "custGeom"));
@@ -1479,26 +1804,29 @@ fn parse_shape(
     };
 
     // spPr stroke: if ln element is present, respect it (even if noFill → None);
-    // fall back to layout stroke for placeholder shapes, then style stroke.
+    // otherwise fall back to layout placeholder stroke, then style stroke.
     let stroke = if sp_pr.and_then(|p| child(p, "ln")).is_some() {
         sp_pr.and_then(|p| child(p, "ln")).and_then(|n| parse_stroke(n, theme))
+    } else if ph_node.is_some() {
+        lph.lookup_stroke(&ph_type, ph_idx).or(style_stroke)
     } else {
         style_stroke
     };
 
     // Inherited defaults from layout/master for this placeholder type/idx
-    let (inherited_font_size, inherited_bold, inherited_italic) = if ph_node.is_some() {
+    let (inherited_font_size, inherited_bold, inherited_italic, inherited_anchor) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
+            lph.lookup_anchor(&ph_type),
         )
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic));
+        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor));
 
     // Shadow from spPr > effectLst > outerShdw
     let shadow = sp_pr
@@ -1632,7 +1960,7 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> TableCell {
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, None));
 
     let tc_pr = child(tc, "tcPr");
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
@@ -1665,13 +1993,14 @@ fn parse_slide(
     layout_dir: &str,
     master_bg: Option<Fill>,
     master_font_sizes: &HashMap<String, f64>,
+    master_anchors: &HashMap<String, String>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x, master_font_sizes, theme))
+        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, theme))
         .unwrap_or_default();
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -1741,6 +2070,31 @@ fn parse_sp_tree_node(
             if skip_placeholders && is_placeholder(node) {
                 return;
             }
+            // Image-filled shape: spPr > blipFill > blip r:embed → render as PictureElement
+            let sp_pr_node = child(node, "spPr");
+            let blip_rid = sp_pr_node
+                .and_then(|p| child(p, "blipFill"))
+                .and_then(|bf| child(bf, "blip"))
+                .and_then(|b| attr_r(&b, "embed"));
+            if let Some(rid) = blip_rid {
+                if let Some(xfrm_node) = sp_pr_node.and_then(|p| child(p, "xfrm")) {
+                    let t = parse_xfrm(xfrm_node);
+                    if t.cx > 0 && t.cy > 0 {
+                        if let Some(target) = rels.get(&rid) {
+                            let image_path = resolve_path(slide_dir, target);
+                            if let Some(bytes) = read_zip_bytes(zip, &image_path) {
+                                let mime = mime_from_ext(&image_path);
+                                let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+                                out.push(SlideElement::Picture(PictureElement {
+                                    x: t.x, y: t.y, width: t.cx, height: t.cy,
+                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v, data_url,
+                                }));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(shape) = parse_shape(node, lph, theme, group_fill) {
                 out.push(SlideElement::Shape(shape));
             }
@@ -1750,15 +2104,57 @@ fn parse_sp_tree_node(
                 out.push(SlideElement::Picture(pic));
             }
         }
+        "AlternateContent" => {
+            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp).
+            // Process mc:Choice first; mc:Fallback is a lower-fidelity version we skip.
+            let choice = node.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
+                .or_else(|| node.children().find(|n| n.is_element() && n.tag_name().name() == "Fallback"));
+            if let Some(choice_node) = choice {
+                for child_node in choice_node.children().filter(|n| n.is_element()) {
+                    parse_sp_tree_node(child_node, lph, slide_dir, rels, zip, theme, out, skip_placeholders, group_fill);
+                }
+            }
+        }
         "graphicFrame" => {
             let xfrm_node = child(node, "xfrm");
             let t = xfrm_node.map(parse_xfrm).unwrap_or_default();
+
+            // Table
             let tbl_node = node
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
                 if let Some(table) = parse_table(tbl_node, &t, theme) {
                     out.push(SlideElement::Table(table));
+                }
+                return;
+            }
+
+            // Chart
+            if let Some(gd) = node.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "graphicData") {
+                let uri = attr(&gd, "uri").unwrap_or_default();
+                // Both <c:chart> and <cx:chart> share the local name "chart"
+                let chart_rid = gd.descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "chart")
+                    .and_then(|n| attr_r(&n, "id"));
+                if let Some(rid) = chart_rid {
+                    if let Some(rel_target) = rels.get(&rid) {
+                        let chart_path = resolve_path(slide_dir, rel_target);
+                        if let Ok(chart_xml) = read_zip_str(zip, &chart_path) {
+                            let chart_opt = if uri.contains("chartex") || uri.contains("chartEx") {
+                                parse_chartex(&chart_xml, theme)
+                            } else {
+                                parse_legacy_chart(&chart_xml, theme)
+                            };
+                            if let Some(mut chart) = chart_opt {
+                                chart.x = t.x; chart.y = t.y;
+                                chart.width = t.cx; chart.height = t.cy;
+                                out.push(SlideElement::Chart(chart));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1929,6 +2325,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_font_sizes(xml))
         .unwrap_or_default();
 
+    let master_anchors: HashMap<String, String> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_anchors(xml))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -1991,6 +2392,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &raw.layout_dir,
             master_bg.clone(),
             &master_font_sizes,
+            &master_anchors,
             raw.index,
             &raw.slide_rels,
             &mut zip,
@@ -1999,5 +2401,106 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         slides.push(slide);
     }
 
-    Ok(Presentation { slide_width, slide_height, slides })
+    let default_text_color = theme.get("dk1").cloned();
+    Ok(Presentation { slide_width, slide_height, slides, default_text_color })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_parse_chartex() {
+        let xml = std::fs::read_to_string("../public/sample-2.pptx").ok()
+            .and_then(|_| None::<String>)
+            .unwrap_or_else(|| {
+                // read from zip directly
+                let data = std::fs::read("../public/sample-2.pptx").unwrap();
+                let cursor = std::io::Cursor::new(data.as_slice());
+                let mut zip = zip::ZipArchive::new(cursor).unwrap();
+                let mut s = String::new();
+                zip.by_name("ppt/charts/chartEx1.xml").unwrap().read_to_string(&mut s).unwrap();
+                s
+            });
+        let theme = HashMap::new();
+        let result = parse_chartex(&xml, &theme);
+        println!("parse_chartex result: {:?}", result.is_some());
+        if let Some(ref c) = result {
+            println!("  chart_type: {}", c.chart_type);
+            println!("  categories: {:?}", c.categories);
+            println!("  series len: {}", c.series.len());
+            if !c.series.is_empty() {
+                println!("  values: {:?}", c.series[0].values);
+            }
+            println!("  subtotal_indices: {:?}", c.subtotal_indices);
+        }
+        assert!(result.is_some(), "parse_chartex should succeed");
+    }
+
+    #[test]
+    fn test_slide8_chart_rid() {
+        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let cursor = std::io::Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        let mut slide_xml = String::new();
+        zip.by_name("ppt/slides/slide8.xml").unwrap().read_to_string(&mut slide_xml).unwrap();
+        
+        let doc = roxmltree::Document::parse(&slide_xml).unwrap();
+        let root = doc.root_element();
+        
+        for gf in root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "graphicFrame") {
+            println!("Found graphicFrame");
+            if let Some(gd) = gf.descendants().find(|n| n.is_element() && n.tag_name().name() == "graphicData") {
+                let uri = attr(&gd, "uri").unwrap_or_default();
+                println!("  graphicData uri: {}", uri);
+                if let Some(chart_node) = gd.descendants().find(|n| n.is_element() && n.tag_name().name() == "chart") {
+                    println!("  chart node found, tag: {:?}", chart_node.tag_name());
+                    for a in chart_node.attributes() {
+                        println!("  attr: name={} ns={:?} val={}", a.name(), a.namespace(), a.value());
+                    }
+                    let rid = attr_r(&chart_node, "id");
+                    println!("  attr_r id: {:?}", rid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_slide8_full_parse() {
+        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let pres = parse_presentation(&data).unwrap();
+        let slide = &pres.slides[7]; // 0-indexed, slide 8
+        println!("Slide 8 elements: {}", slide.elements.len());
+        for (i, el) in slide.elements.iter().enumerate() {
+            match el {
+                SlideElement::Chart(c) => println!("  [{}] CHART type={} cats={}", i, c.chart_type, c.categories.len()),
+                SlideElement::Shape(s) => println!("  [{}] shape x={}", i, s.x),
+                SlideElement::Table(_) => println!("  [{}] table", i),
+                SlideElement::Picture(_) => println!("  [{}] picture", i),
+            }
+        }
+    }
+
+    #[test]
+    fn test_slide8_chartex_pipeline() {
+        let data = std::fs::read("../public/sample-2.pptx").unwrap();
+        let cursor = std::io::Cursor::new(data.as_slice());
+        let mut zip = zip::ZipArchive::new(cursor).unwrap();
+        
+        let mut rels_xml = String::new();
+        zip.by_name("ppt/slides/_rels/slide8.xml.rels").unwrap().read_to_string(&mut rels_xml).unwrap();
+        let rels = parse_rels(&rels_xml);
+        println!("rels: {:?}", rels);
+        
+        let chart_path = resolve_path("ppt/slides", "../charts/chartEx1.xml");
+        println!("chart_path: {}", chart_path);
+        
+        let result = read_zip_str(&mut zip, &chart_path);
+        println!("read_zip_str ok: {}", result.is_ok());
+        
+        if let Ok(chart_xml) = result {
+            let theme = HashMap::new();
+            let r = parse_chartex(&chart_xml, &theme);
+            println!("parse_chartex: {:?}", r.is_some());
+        }
+    }
 }

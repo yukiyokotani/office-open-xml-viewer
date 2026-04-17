@@ -135,7 +135,7 @@ export class PptxViewer {
       slide,
       this.presentation.slideWidth,
       this.presentation.slideHeight,
-      { width: this.opts.width }
+      { width: this.opts.width, defaultTextColor: this.presentation.defaultTextColor }
     );
     this.opts.onSlideChange?.(this.currentSlide, this.presentation.slides.length);
   }

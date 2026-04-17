@@ -4,6 +4,8 @@ import type {
   ShapeElement,
   PictureElement,
   TableElement,
+  ChartElement,
+  ChartSeriesData,
   Fill,
   Stroke,
   TextBody,
@@ -312,11 +314,31 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number) {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000') {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
+
+  // anchor="b" + h=0: shape grows upward from y; render stroke as bottom border,
+  // then let renderTextBody handle positioning.
+  if (h === 0 && el.textBody?.verticalAnchor === 'b') {
+    if (el.stroke) {
+      ctx.save();
+      ctx.strokeStyle = hexToRgba(el.stroke.color);
+      ctx.lineWidth = Math.max(1, emuToPx(el.stroke.width, scale));
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (el.textBody) {
+      const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor);
+    }
+    return;
+  }
 
   ctx.save();
   if (el.rotation !== 0 || el.flipH || el.flipV) {
@@ -361,7 +383,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV);
+    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor);
   }
 }
 
@@ -1166,6 +1188,51 @@ function buildShapePath(
       break;
     }
 
+    // ── Math operator shapes ───────────────────────────────────────────────────
+    case 'mathequal': {
+      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
+      const gap  = 17490 / 100000 * h;
+      ctx.rect(x, cy - gap / 2 - barH, w, barH);
+      ctx.rect(x, cy + gap / 2,        w, barH);
+      break;
+    }
+
+    case 'mathmultiply': {
+      // "×": a "+" shape rotated 45°
+      const t  = (adj ?? 23520) / 100000 * Math.min(w, h) * 0.5;
+      const hl = Math.max(w, h) * 0.72;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(Math.PI / 4);
+      ctx.rect(-t, -hl, 2 * t, 2 * hl);
+      ctx.rect(-hl, -t, 2 * hl, 2 * t);
+      ctx.restore();
+      break;
+    }
+
+    case 'mathplus': {
+      const t = (adj ?? 23520) / 100000 * Math.min(w, h) * 0.5;
+      ctx.rect(cx - t, y, 2 * t, h);
+      ctx.rect(x, cy - t, w, 2 * t);
+      break;
+    }
+
+    case 'mathminus': {
+      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
+      ctx.rect(x, cy - barH / 2, w, barH);
+      break;
+    }
+
+    case 'mathdivide': {
+      const barH  = Math.max(1, (adj ?? 23520) / 100000 * h);
+      const dotR  = barH * 1.1;
+      const dotGap = h * 0.22;
+      ctx.rect(x, cy - barH / 2, w, barH);
+      ctx.arc(cx, cy - dotGap, dotR, 0, Math.PI * 2);
+      ctx.arc(cx, cy + dotGap, dotR, 0, Math.PI * 2);
+      break;
+    }
+
     default:
       // rect and everything else
       ctx.rect(x, y, w, h);
@@ -1208,7 +1275,8 @@ function renderTextBody(
   shapeDefaultTextColor: string | null = null,
   shapeRotation = 0,
   shapeFlipH = false,
-  shapeFlipV = false
+  shapeFlipV = false,
+  themeDefaultColor = '#000000'
 ) {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -1225,7 +1293,7 @@ function renderTextBody(
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor);
     ctx.restore();
     return;
   }
@@ -1237,7 +1305,7 @@ function renderTextBody(
 
   const bodyDefaultBold   = body.defaultBold   ?? false;
   const bodyDefaultItalic = body.defaultItalic ?? false;
-  const bodyDefaultColor = shapeDefaultTextColor ?? '#000000';
+  const bodyDefaultColor = shapeDefaultTextColor ?? themeDefaultColor;
 
   // ── Pass 1: lay out all paragraphs ──────────────────────────────────────
 
@@ -1388,29 +1456,36 @@ function renderTextBody(
     }
   }
 
-  // ── Effective height (spAutoFit: shape expands to fit text) ─────────────
-  // When autoFit === 'sp', the shape grows to fit all text — no clipping.
-  // Use the larger of the declared height and the computed content height.
-  const isSpAutoFit = body.autoFit === 'sp';
-  const effectiveBh = isSpAutoFit
-    ? Math.max(bh, tPad + totalHeight + bPad)
-    : bh;
+  // ── anchor="b" with bh=0: auto-height growing upward from by ────────────
+  // When cy=0 and anchor="b", off_y is the bottom anchor; shape grows upward.
+  const anchor = body.verticalAnchor ?? 't';
+  let effectiveBy = by;
+  let effectiveBh: number;
+  if (bh === 0 && anchor === 'b') {
+    effectiveBh = tPad + totalHeight + bPad;
+    effectiveBy = by - effectiveBh;
+  } else {
+    // ── Effective height (spAutoFit: shape expands to fit text) ─────────────
+    const isSpAutoFit = body.autoFit === 'sp';
+    effectiveBh = isSpAutoFit
+      ? Math.max(bh, tPad + totalHeight + bPad)
+      : bh;
+  }
 
   // ── Vertical anchor ─────────────────────────────────────────────────────
   let cursorY: number;
-  const anchor = body.verticalAnchor ?? 't';
   if (anchor === 'ctr') {
-    cursorY = by + (effectiveBh - totalHeight) / 2;
+    cursorY = effectiveBy + (effectiveBh - totalHeight) / 2;
   } else if (anchor === 'b') {
-    cursorY = by + effectiveBh - totalHeight - bPad;
+    cursorY = effectiveBy + effectiveBh - totalHeight - bPad;
   } else {
-    cursorY = by + tPad;
+    cursorY = effectiveBy + tPad;
   }
 
   // ── Pass 2: render ───────────────────────────────────────────────────────
   ctx.save();
   ctx.beginPath();
-  ctx.rect(bx, by, bw, effectiveBh);
+  ctx.rect(bx, effectiveBy, bw, effectiveBh);
   ctx.clip();
 
   for (const entry of allLines) {
@@ -1544,6 +1619,386 @@ function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale
   ctx.lineWidth = Math.max(0.5, emuToPx(stroke.width, scale));
 }
 
+// ─── Chart rendering ────────────────────────────────────────────────────────
+
+function niceStep(range: number, targetSteps = 5): number {
+  const raw = range / targetSteps;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const normed = raw / mag;
+  const nice = normed < 1.5 ? 1 : normed < 3.5 ? 2 : normed < 7.5 ? 5 : 10;
+  return nice * mag;
+}
+
+function renderStackedBarChart(
+  ctx: CanvasRenderingContext2D, el: ChartElement, scale: number
+) {
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+
+  const hasTitle = el.title && el.title.trim().length > 0;
+  const titleH = hasTitle ? h * 0.09 : 0;
+  const padL = w * 0.11;
+  const padR = w * 0.04;
+  const padT = h * 0.06 + titleH;
+  const padB = h * 0.13;
+  const px0 = x + padL;
+  const py0 = y + padT;
+  const pw  = w - padL - padR;
+  const ph  = h - padT - padB;
+
+  const cats = el.categories;
+  const n = cats.length;
+  if (n === 0) return;
+
+  // Compute stacked totals to find axis scale
+  const totals = Array.from({ length: n }, (_, i) =>
+    el.series.reduce((s, ser) => s + (ser.values[i] ?? 0), 0)
+  );
+  const dataMax = el.valMax ?? Math.max(...totals) * 1.05;
+  if (dataMax <= 0) return;
+
+  ctx.save();
+
+  // Chart title
+  if (hasTitle) {
+    ctx.font = `bold ${Math.round(h * 0.062)}px sans-serif`;
+    ctx.fillStyle = '#222';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(el.title!, x + w / 2, y + titleH / 2 + h * 0.015);
+  }
+
+  // Grid lines + Y-axis labels
+  const step = niceStep(dataMax);
+  const labelFontSize = Math.round(h * 0.045);
+  ctx.font = `${labelFontSize}px sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#666';
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 0.7;
+  for (let v = 0; v <= dataMax + step * 0.5; v += step) {
+    const gy = py0 + ph * (1 - v / dataMax);
+    ctx.beginPath();
+    ctx.moveTo(px0, gy);
+    ctx.lineTo(px0 + pw, gy);
+    ctx.stroke();
+    ctx.fillText(v.toLocaleString(), px0 - 4, gy);
+  }
+
+  // Y-axis line and X-axis baseline
+  ctx.strokeStyle = '#bbb';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px0, py0);
+  ctx.lineTo(px0, py0 + ph);
+  ctx.lineTo(px0 + pw, py0 + ph);
+  ctx.stroke();
+
+  // Bars
+  const barW = (pw / n) * 0.55;
+  const gapW = pw / n;
+
+  el.series.forEach((ser, si) => {
+    ctx.fillStyle = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
+    for (let i = 0; i < n; i++) {
+      const v = ser.values[i] ?? 0;
+      if (v === 0) continue;
+      const base = el.series.slice(0, si).reduce((s, ps) => s + (ps.values[i] ?? 0), 0);
+      const barH = ph * (v / dataMax);
+      const bx = px0 + gapW * i + (gapW - barW) / 2;
+      const by = py0 + ph * (1 - (base + v) / dataMax);
+      ctx.fillRect(bx, by, barW, barH);
+    }
+  });
+
+  // X-axis category labels
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#666';
+  ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
+  for (let i = 0; i < n; i++) {
+    const cx = px0 + gapW * i + gapW / 2;
+    ctx.fillText(cats[i], cx, py0 + ph + 4);
+  }
+
+  // Legend (top, below title)
+  if (el.series.length > 1) {
+    const legY = y + titleH + h * 0.03;
+    const legFontSize = Math.round(h * 0.042);
+    ctx.font = `${legFontSize}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    let legX = px0;
+    el.series.forEach((ser, si) => {
+      const col = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
+      ctx.fillStyle = col;
+      ctx.fillRect(legX, legY - legFontSize / 2, legFontSize, legFontSize);
+      ctx.fillStyle = '#444';
+      ctx.fillText(ser.name, legX + legFontSize + 4, legY);
+      legX += legFontSize + 4 + ctx.measureText(ser.name).width + 16;
+    });
+  }
+
+  ctx.restore();
+}
+
+function renderStackedBarHChart(
+  ctx: CanvasRenderingContext2D, el: ChartElement, scale: number
+) {
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+
+  const padL = w * 0.22;  // category labels on left
+  const padR = w * 0.04;
+  const padT = h * 0.12;  // legend + top labels
+  const padB = h * 0.10;  // x-axis labels
+  const px0 = x + padL;
+  const py0 = y + padT;
+  const pw  = w - padL - padR;
+  const ph  = h - padT - padB;
+
+  const cats = el.categories;
+  const n = cats.length;
+  if (n === 0) return;
+
+  const totals = Array.from({ length: n }, (_, i) =>
+    el.series.reduce((s, ser) => s + (ser.values[i] ?? 0), 0)
+  );
+  const dataMax = el.valMax ?? Math.max(...totals) * 1.05;
+  if (dataMax <= 0) return;
+
+  ctx.save();
+
+  // Grid lines + X-axis (value) labels
+  const step = niceStep(dataMax);
+  ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#666';
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 0.7;
+  for (let v = 0; v <= dataMax + step * 0.5; v += step) {
+    const gx = px0 + pw * (v / dataMax);
+    ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+    ctx.fillText(v.toLocaleString(), gx, py0 + ph + 4);
+  }
+
+  // X-axis line and Y-axis baseline
+  ctx.strokeStyle = '#bbb';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px0, py0);
+  ctx.lineTo(px0, py0 + ph);
+  ctx.lineTo(px0 + pw, py0 + ph);
+  ctx.stroke();
+
+  // Bars
+  const barH = (ph / n) * 0.55;
+  const gapH = ph / n;
+
+  el.series.forEach((ser, si) => {
+    ctx.fillStyle = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
+    for (let i = 0; i < n; i++) {
+      const v = ser.values[i] ?? 0;
+      if (v === 0) continue;
+      const base = el.series.slice(0, si).reduce((s, ps) => s + (ps.values[i] ?? 0), 0);
+      const segW = pw * (v / dataMax);
+      const bx = px0 + pw * (base / dataMax);
+      const by = py0 + gapH * i + (gapH - barH) / 2;
+      ctx.fillRect(bx, by, segW, barH);
+    }
+  });
+
+  // Y-axis (category) labels
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#444';
+  ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
+  for (let i = 0; i < n; i++) {
+    const cy = py0 + gapH * i + gapH / 2;
+    ctx.fillText(cats[i], px0 - 6, cy);
+  }
+
+  // Legend (top)
+  if (el.series.length > 1) {
+    const legY = y + padT * 0.4;
+    const legFontSize = Math.round(h * 0.042);
+    ctx.font = `${legFontSize}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    let legX = px0;
+    el.series.forEach((ser, si) => {
+      const col = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
+      ctx.fillStyle = col;
+      ctx.fillRect(legX, legY - legFontSize / 2, legFontSize, legFontSize);
+      ctx.fillStyle = '#444';
+      ctx.fillText(ser.name, legX + legFontSize + 4, legY);
+      legX += legFontSize + 4 + ctx.measureText(ser.name).width + 16;
+    });
+  }
+
+  ctx.restore();
+}
+
+function renderWaterfallChart(
+  ctx: CanvasRenderingContext2D, el: ChartElement, scale: number
+) {
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+
+  const padL = w * 0.11;
+  const padR = w * 0.04;
+  const padT = h * 0.08;
+  const padB = h * 0.18;
+  const px0 = x + padL;
+  const py0 = y + padT;
+  const pw  = w - padL - padR;
+  const ph  = h - padT - padB;
+
+  const vals = el.series[0]?.values ?? [];
+  const cats = el.categories;
+  const n = cats.length;
+  if (n === 0) return;
+
+  const subSet = new Set(el.subtotalIndices);
+
+  // Build bar segments: {start, end, isSub, isPos}
+  let running = 0;
+  const bars: Array<{ start: number; end: number; isSub: boolean; isPos: boolean }> = [];
+  for (let i = 0; i < n; i++) {
+    const v = vals[i] ?? 0;
+    const isSub = i === 0 || subSet.has(i);
+    if (isSub) {
+      bars.push({ start: 0, end: v, isSub: true, isPos: true });
+      running = v;
+    } else {
+      const start = v >= 0 ? running : running + v;
+      const end   = v >= 0 ? running + v : running;
+      bars.push({ start, end, isSub: false, isPos: v >= 0 });
+      running += v;
+    }
+  }
+
+  // Axis range
+  const allEnds = bars.map(b => b.end);
+  const allStarts = bars.map(b => b.start);
+  const rawMax = Math.max(...allEnds, ...allStarts);
+  const rawMin = Math.min(...allStarts, 0);
+  const dataRange = rawMax - rawMin;
+  if (dataRange <= 0) return;
+  const padded = dataRange * 1.1;
+  const dataMin = rawMin - dataRange * 0.05;
+  const dataMax = dataMin + padded;
+
+  // Grid
+  const step = niceStep(padded);
+  ctx.save();
+  const fontSize = Math.round(h * 0.042);
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.strokeStyle = '#e8e8e8';
+  ctx.lineWidth = 0.7;
+  ctx.fillStyle = '#666';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let v = Math.ceil(dataMin / step) * step; v <= dataMax; v += step) {
+    const gy = py0 + ph * (1 - (v - dataMin) / padded);
+    ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+    ctx.fillText(v.toLocaleString(), px0 - 4, gy);
+  }
+
+  // Y-axis line and X-axis baseline (at dataMin level = y-axis origin)
+  ctx.strokeStyle = '#bbb';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px0, py0);
+  ctx.lineTo(px0, py0 + ph);
+  ctx.lineTo(px0 + pw, py0 + ph);
+  ctx.stroke();
+
+  // Colors
+  const colorSub = '#196ECA';
+  const colorPos = '#5BA4E6';
+  const colorNeg = '#E46970';
+
+  const barW = (pw / n) * 0.55;
+  const gapW = pw / n;
+
+  bars.forEach((bar, i) => {
+    const bx = px0 + gapW * i + (gapW - barW) / 2;
+    const yTop = py0 + ph * (1 - (bar.end - dataMin) / padded);
+    const yBot = py0 + ph * (1 - (bar.start - dataMin) / padded);
+    const bh = Math.max(1, yBot - yTop);
+
+    if (bar.isSub) {
+      ctx.fillStyle = colorSub;
+      ctx.fillRect(bx, yTop, barW, bh);
+    } else {
+      // Delta bars: outlined (hollow) style
+      ctx.strokeStyle = bar.isPos ? colorPos : colorNeg;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx + 0.75, yTop + 0.75, barW - 1.5, bh - 1.5);
+    }
+
+    // Connector line to next bar
+    if (i < n - 1) {
+      const nextBx = px0 + gapW * (i + 1) + (gapW - barW) / 2;
+      const connY = bar.isPos ? yTop : yBot;
+      ctx.strokeStyle = '#ccc';
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(bx + barW, connY);
+      ctx.lineTo(nextBx, connY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Value label above each bar
+    const rawVal = vals[i] ?? 0;
+    const labelText = rawVal < 0
+      ? `△ ${Math.abs(rawVal).toLocaleString()}`
+      : rawVal.toLocaleString();
+    ctx.fillStyle = '#595959';
+    ctx.font = `bold ${Math.round(h * 0.044)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(labelText, bx + barW / 2, yTop - 3);
+  });
+
+  // X-axis labels (may contain newlines → split)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#666';
+  ctx.font = `${Math.round(h * 0.038)}px sans-serif`;
+  const labelY = py0 + ph + 4;
+  for (let i = 0; i < n; i++) {
+    const cx = px0 + gapW * i + gapW / 2;
+    const lines = cats[i].split(/\s+/);
+    lines.forEach((line, li) => ctx.fillText(line, cx, labelY + li * (fontSize + 2)));
+  }
+
+  ctx.restore();
+}
+
+function renderChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
+  if (el.chartType === 'stackedBar' || el.chartType === 'clusteredBar') {
+    renderStackedBarChart(ctx, el, scale);
+  } else if (el.chartType === 'stackedBarH' || el.chartType === 'clusteredBarH') {
+    renderStackedBarHChart(ctx, el, scale);
+  } else if (el.chartType === 'waterfall') {
+    renderWaterfallChart(ctx, el, scale);
+  }
+}
+
+// ─── Table rendering ─────────────────────────────────────────────────────────
+
 function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number) {
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
@@ -1632,6 +2087,8 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 export interface RenderOptions {
   /** Target canvas width in CSS pixels (height is computed from slide aspect ratio) */
   width?: number;
+  /** Theme default text color (dk1), used as fallback when shapes have no explicit color */
+  defaultTextColor?: string | null;
 }
 
 /**
@@ -1663,13 +2120,19 @@ export async function renderSlide(
 
   renderBackground(ctx, slide.background, canvasW, canvasH);
 
+  const themeDefaultColor = opts.defaultTextColor
+    ? `#${opts.defaultTextColor}`
+    : '#000000';
+
   for (const el of slide.elements) {
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale);
+      renderShape(ctx, el, scale, themeDefaultColor);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale);
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale);
+    } else if (el.type === 'chart') {
+      renderChart(ctx, el, scale);
     }
   }
 

@@ -4,6 +4,7 @@ import init, { parse_pptx } from './wasm/pptx_parser.js';
 
 type Args = {
   width: number;
+  pptxFile: string;
 };
 
 const meta: Meta<Args> = {
@@ -13,8 +14,13 @@ const meta: Meta<Args> = {
       control: { type: 'range', min: 400, max: 1600, step: 40 },
       description: 'Canvas render width (px)',
     },
+    pptxFile: {
+      control: { type: 'select' },
+      options: ['sample-1', 'sample-2', 'sample-3'],
+      description: 'PPTX file to load from public/',
+    },
   },
-  args: { width: 960 },
+  args: { width: 960, pptxFile: 'sample-1' },
 };
 export default meta;
 type Story = StoryObj<Args>;
@@ -87,14 +93,29 @@ function buildViewerUI(
   return { root, viewer };
 }
 
-// ---------------------------------------------------------------------------
-// Auto-load from public/sample.pptx  (place a file at public/sample.pptx)
-// ---------------------------------------------------------------------------
-export const SampleFile: Story = {
-  name: 'Sample file (public/sample.pptx)',
-  args: { width: 960 },
+export const Sample1: Story = {
+  name: 'sample-1.pptx (5 slides)',
+  args: { width: 960, pptxFile: 'sample-1' },
   render(args) {
-    const { root } = buildViewerUI(args, '/sample.pptx');
+    const { root } = buildViewerUI(args, '/sample-1.pptx');
+    return root;
+  },
+};
+
+export const Sample2: Story = {
+  name: 'sample-2.pptx (17 slides)',
+  args: { width: 960, pptxFile: 'sample-2' },
+  render(args) {
+    const { root } = buildViewerUI(args, '/sample-2.pptx');
+    return root;
+  },
+};
+
+export const Sample3: Story = {
+  name: 'sample-3.pptx (8 slides)',
+  args: { width: 960, pptxFile: 'sample-3' },
+  render(args) {
+    const { root } = buildViewerUI(args, '/sample-3.pptx');
     return root;
   },
 };

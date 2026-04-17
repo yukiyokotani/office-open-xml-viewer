@@ -11,6 +11,7 @@ import pixelmatch from 'pixelmatch';
 const PPTX_FILES: { name: string; slideCount: number }[] = [
   { name: 'sample-1', slideCount: 5 },
   { name: 'sample-2', slideCount: 17 },
+  { name: 'sample-3', slideCount: 8 },
 ];
 
 // Per-pixel color tolerance for pixelmatch (0 = exact, 1 = fully lenient)

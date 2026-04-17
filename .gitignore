@@ -1,3 +1,5 @@
+# PPTX files are not redistributable
+*.pptx
 node_modules/
 .claude/
 dist/

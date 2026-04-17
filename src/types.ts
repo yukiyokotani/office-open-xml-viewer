@@ -6,6 +6,8 @@ export interface Presentation {
   slideWidth: number;
   slideHeight: number;
   slides: Slide[];
+  /** Theme dk1 color (e.g. "383838"). Used as fallback text color when no explicit color is set. */
+  defaultTextColor: string | null;
 }
 
 export interface Slide {
@@ -14,7 +16,7 @@ export interface Slide {
   elements: SlideElement[];
 }
 
-export type SlideElement = ShapeElement | PictureElement | TableElement;
+export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement;
 
 /** A single command in a custom geometry path (coordinates normalised to [0,1]). */
 export type PathCmd =
@@ -86,6 +88,26 @@ export interface TableCell {
   hMerge: boolean;
   /** Vertical merge continuation */
   vMerge: boolean;
+}
+
+export interface ChartSeriesData {
+  name: string;
+  values: (number | null)[];
+  color: string | null;
+}
+
+export interface ChartElement {
+  type: 'chart';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  chartType: string;      // "stackedBar" | "waterfall"
+  title: string | null;
+  categories: string[];
+  series: ChartSeriesData[];
+  valMax: number | null;
+  subtotalIndices: number[];
 }
 
 export interface PictureElement {
