@@ -29,8 +29,8 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npx vite dev --port 5173',
-    // /sample.pptx is a static file that always returns 200 — use it as the ready check
-    url: 'http://localhost:5173/sample.pptx',
+    // /sample-1.pptx is a static file that always returns 200 — use it as the ready check
+    url: 'http://localhost:5173/sample-1.pptx',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },
