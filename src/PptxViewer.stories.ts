@@ -16,7 +16,7 @@ const meta: Meta<Args> = {
     },
     pptxFile: {
       control: { type: 'select' },
-      options: ['sample-1', 'sample-2', 'sample-3'],
+      options: ['sample-1', 'sample-2', 'sample-3', 'sample-4'],
       description: 'PPTX file to load from public/',
     },
   },
@@ -107,6 +107,15 @@ export const Sample2: Story = {
   args: { width: 960, pptxFile: 'sample-2' },
   render(args) {
     const { root } = buildViewerUI(args, '/sample-2.pptx');
+    return root;
+  },
+};
+
+export const Sample4: Story = {
+  name: 'sample-4.pptx (15 slides)',
+  args: { width: 960, pptxFile: 'sample-4' },
+  render(args) {
+    const { root } = buildViewerUI(args, '/sample-4.pptx');
     return root;
   },
 };

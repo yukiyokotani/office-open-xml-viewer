@@ -106,6 +106,23 @@ interface LayoutLine {
  * Canvas will silently ignore an invalid CSS font string, keeping whatever font was set before —
  * leading to wrong text size. Map theme references to generic families as a safe fallback.
  */
+const WINGDINGS_MAP: Record<number, string> = {
+  0x21: '✏', 0x22: '✂', 0x23: '✁', 0x24: '👁',
+  0x4A: '☺', 0x4B: '☻', 0x4C: '☹',
+  0x76: '✔', 0xFC: '✓', 0xFB: '✗', 0xFE: '■',
+  0xA7: '▪', 0xB7: '•', 0xB8: '◦', 0xB9: '–',
+  0xF0A7: '▪', 0xF0B7: '•',
+};
+
+function applySymbolFont(char: string, fontFamily: string): string {
+  const lower = fontFamily.toLowerCase();
+  if (lower.includes('wingdings') || lower === 'symbol') {
+    const code = char.charCodeAt(0);
+    return WINGDINGS_MAP[code] ?? char;
+  }
+  return char;
+}
+
 function normalizeFontFamily(family: string): string {
   if (!family || family.startsWith('+')) {
     // +mn-lt = minor Latin, +mj-lt = major Latin, +mn-ea = minor East Asian, +mj-ea = major East Asian
@@ -1233,6 +1250,501 @@ function buildShapePath(
       break;
     }
 
+    // ── 4-direction arrow ────────────────────────────────────────────────────
+    case 'quadarrow': {
+      const sw  = w * (adj  ?? 23000) / 100000;
+      const ahw = w * (adj2 ?? 30000) / 100000;
+      const sx  = x + (w - sw) / 2;
+      const sy2 = y + (h - sw) / 2;
+      ctx.moveTo(cx, y);
+      ctx.lineTo(x + w - ahw, y + ahw);
+      ctx.lineTo(x + w - ahw, sy2);
+      ctx.lineTo(sx + sw, sy2);
+      ctx.lineTo(sx + sw, y + ahw);
+      ctx.lineTo(x + ahw, y + ahw);
+      ctx.lineTo(x + w, cy);
+      ctx.lineTo(x + w - ahw, y + h - ahw);
+      ctx.lineTo(sx + sw, y + h - ahw);
+      ctx.lineTo(sx + sw, sy2 + sw);
+      ctx.lineTo(x + w - ahw, sy2 + sw);
+      ctx.lineTo(x + w - ahw, y + h - ahw);
+      ctx.lineTo(cx, y + h);
+      ctx.lineTo(x + ahw, y + h - ahw);
+      ctx.lineTo(x + ahw, sy2 + sw);
+      ctx.lineTo(sx, sy2 + sw);
+      ctx.lineTo(sx, y + h - ahw);
+      ctx.lineTo(x, cy);
+      ctx.lineTo(x + ahw, y + ahw);
+      ctx.lineTo(sx, y + ahw);
+      ctx.lineTo(sx, sy2);
+      ctx.lineTo(x + ahw, sy2);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Quad-arrow callout ────────────────────────────────────────────────────
+    case 'quadarrowcallout': {
+      const t = Math.min(w, h) * 0.25;
+      ctx.rect(x + t, y + t, w - 2 * t, h - 2 * t);
+      ctx.moveTo(cx, y); ctx.lineTo(x + t, y + t); ctx.lineTo(x + w - t, y + t); ctx.closePath();
+      ctx.moveTo(cx, y + h); ctx.lineTo(x + t, y + h - t); ctx.lineTo(x + w - t, y + h - t); ctx.closePath();
+      ctx.moveTo(x, cy); ctx.lineTo(x + t, y + t); ctx.lineTo(x + t, y + h - t); ctx.closePath();
+      ctx.moveTo(x + w, cy); ctx.lineTo(x + w - t, y + t); ctx.lineTo(x + w - t, y + h - t); ctx.closePath();
+      break;
+    }
+
+    // ── Wave ──────────────────────────────────────────────────────────────────
+    case 'wave': {
+      const wAmp = h * (adj ?? 12500) / 100000;
+      ctx.moveTo(x, cy - wAmp);
+      ctx.bezierCurveTo(x + w * 0.25, cy - wAmp * 2, x + w * 0.25, cy, x + w * 0.5, cy);
+      ctx.bezierCurveTo(x + w * 0.75, cy, x + w * 0.75, cy - wAmp * 2, x + w, cy - wAmp);
+      ctx.lineTo(x + w, cy + wAmp);
+      ctx.bezierCurveTo(x + w * 0.75, cy + wAmp * 2, x + w * 0.75, cy, x + w * 0.5, cy);
+      ctx.bezierCurveTo(x + w * 0.25, cy, x + w * 0.25, cy + wAmp * 2, x, cy + wAmp);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Sun ───────────────────────────────────────────────────────────────────
+    case 'sun': {
+      const outerR = Math.min(w, h) / 2;
+      const innerR = outerR * 0.55;
+      const rayLen = outerR * 0.35;
+      const rayW   = outerR * 0.1;
+      ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+      for (let i = 0; i < 8; i++) {
+        const angle = (i / 8) * Math.PI * 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.rect(innerR + 2, -rayW / 2, rayLen, rayW);
+        ctx.restore();
+      }
+      break;
+    }
+
+    // ── Lightning bolt ────────────────────────────────────────────────────────
+    case 'lightningbolt': {
+      ctx.moveTo(cx + w * 0.1, y);
+      ctx.lineTo(x, cy - h * 0.05);
+      ctx.lineTo(cx + w * 0.05, cy - h * 0.05);
+      ctx.lineTo(cx - w * 0.1, y + h);
+      ctx.lineTo(x + w, cy + h * 0.05);
+      ctx.lineTo(cx - w * 0.05, cy + h * 0.05);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Frame (hollow rectangle) ──────────────────────────────────────────────
+    case 'frame': {
+      const th = Math.min(w, h) * (adj ?? 12500) / 100000;
+      ctx.rect(x, y, w, h);
+      ctx.rect(x + th, y + th, w - 2 * th, h - 2 * th);
+      break;
+    }
+
+    // ── Bracket pair [] ───────────────────────────────────────────────────────
+    case 'bracketpair': {
+      const a   = Math.min(50000, Math.max(0, adj ?? 8333));
+      const arcH = h * a / 100000;
+      ctx.moveTo(x + w * 0.4, y);
+      ctx.quadraticCurveTo(x, y, x, y + arcH);
+      if (h - 2 * arcH > 0) ctx.lineTo(x, y + h - arcH);
+      ctx.quadraticCurveTo(x, y + h, x + w * 0.4, y + h);
+      ctx.moveTo(x + w * 0.6, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + arcH);
+      if (h - 2 * arcH > 0) ctx.lineTo(x + w, y + h - arcH);
+      ctx.quadraticCurveTo(x + w, y + h, x + w * 0.6, y + h);
+      break;
+    }
+
+    // ── Brace pair {} ─────────────────────────────────────────────────────────
+    case 'bracepair': {
+      const nb = w * 0.2;
+      ctx.moveTo(x + w * 0.4, y);
+      ctx.bezierCurveTo(x + w * 0.4 - nb, y, x + w * 0.4 - nb, cy - h * 0.08, x, cy);
+      ctx.bezierCurveTo(x + w * 0.4 - nb, cy + h * 0.08, x + w * 0.4 - nb, y + h, x + w * 0.4, y + h);
+      ctx.moveTo(x + w * 0.6, y);
+      ctx.bezierCurveTo(x + w * 0.6 + nb, y, x + w * 0.6 + nb, cy - h * 0.08, x + w, cy);
+      ctx.bezierCurveTo(x + w * 0.6 + nb, cy + h * 0.08, x + w * 0.6 + nb, y + h, x + w * 0.6, y + h);
+      break;
+    }
+
+    // ── Chord (arc + closing line) ────────────────────────────────────────────
+    case 'chord': {
+      const startA = -Math.PI / 2 + (adj  ?? 2700000)  / 21600000 * Math.PI * 2;
+      const endA   = -Math.PI / 2 + (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
+      ctx.arc(cx, cy, Math.min(w, h) / 2, startA, endA);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Block arc ─────────────────────────────────────────────────────────────
+    case 'blockarc': {
+      const outerR   = Math.min(w, h) / 2;
+      const innerFrac = (adj2 ?? 25000) / 100000;
+      const innerR   = outerR * (1 - innerFrac);
+      const startA   = -Math.PI / 2 + (adj ?? 10800000) / 21600000 * Math.PI * 2;
+      const endA     = Math.PI / 2;
+      ctx.arc(cx, cy, outerR, startA, endA);
+      ctx.arc(cx, cy, innerR, endA, startA, true);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Teardrop ──────────────────────────────────────────────────────────────
+    case 'teardrop': {
+      const r   = Math.min(w, h) * 0.4;
+      const bCx = x + r;
+      const bCy = y + h - r;
+      ctx.arc(bCx, bCy, r, 0, Math.PI * 2 * 0.75);
+      ctx.bezierCurveTo(bCx - r * 0.1, bCy - r, x + w - r, y + r, x + w, y);
+      ctx.bezierCurveTo(x + w - r * 0.2, y + r * 0.5, bCx + r, bCy - r * 1.1, bCx + r, bCy);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Diagonal stripe ───────────────────────────────────────────────────────
+    case 'diagstripe': {
+      const t = Math.min(w, h) * (adj ?? 50000) / 100000;
+      ctx.moveTo(x, y + h - t);
+      ctx.lineTo(x + t, y + h);
+      ctx.lineTo(x + w, y + t);
+      ctx.lineTo(x + w - t, y);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Wedge round-rect callout ──────────────────────────────────────────────
+    case 'wedgeroundrectcallout': {
+      const r2 = Math.min(w, h) * 0.1;
+      ctx.roundRect(x, y, w, h * 0.85, r2);
+      ctx.moveTo(x + w * 0.1, y + h * 0.85);
+      ctx.lineTo(x + w * 0.2, y + h);
+      ctx.lineTo(x + w * 0.3, y + h * 0.85);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Arrow callouts ────────────────────────────────────────────────────────
+    case 'rightarrowcallout': {
+      const shH = h * (adj  ?? 50000) / 100000;
+      const shW = w * (adj2 ?? 50000) / 100000;
+      const sy  = y + (h - shH) / 2;
+      ctx.rect(x, sy, shW, shH);
+      ctx.moveTo(x + shW, y); ctx.lineTo(x + w, cy); ctx.lineTo(x + shW, y + h); ctx.closePath();
+      break;
+    }
+    case 'leftarrowcallout': {
+      const shH = h * (adj  ?? 50000) / 100000;
+      const shW = w * (adj2 ?? 50000) / 100000;
+      const sy  = y + (h - shH) / 2;
+      ctx.rect(x + w - shW, sy, shW, shH);
+      ctx.moveTo(x + w - shW, y); ctx.lineTo(x, cy); ctx.lineTo(x + w - shW, y + h); ctx.closePath();
+      break;
+    }
+    case 'uparrowcallout': {
+      const shW = w * (adj  ?? 50000) / 100000;
+      const shH = h * (adj2 ?? 50000) / 100000;
+      const sx  = x + (w - shW) / 2;
+      ctx.rect(sx, y + shH, shW, h - shH);
+      ctx.moveTo(x, y + shH); ctx.lineTo(cx, y); ctx.lineTo(x + w, y + shH); ctx.closePath();
+      break;
+    }
+    case 'downarrowcallout': {
+      const shW = w * (adj  ?? 50000) / 100000;
+      const shH = h * (adj2 ?? 50000) / 100000;
+      const sx  = x + (w - shW) / 2;
+      ctx.rect(sx, y, shW, h - shH);
+      ctx.moveTo(x, y + h - shH); ctx.lineTo(cx, y + h); ctx.lineTo(x + w, y + h - shH); ctx.closePath();
+      break;
+    }
+    case 'leftrightarrowcallout': {
+      const shH = h * (adj  ?? 50000) / 100000;
+      const shW = w * (adj2 ?? 25000) / 100000;
+      const sy  = y + (h - shH) / 2;
+      ctx.rect(x + shW, sy, w - 2 * shW, shH);
+      ctx.moveTo(x + shW, y); ctx.lineTo(x, cy); ctx.lineTo(x + shW, y + h); ctx.closePath();
+      ctx.moveTo(x + w - shW, y); ctx.lineTo(x + w, cy); ctx.lineTo(x + w - shW, y + h); ctx.closePath();
+      break;
+    }
+
+    // ── Left-right-up arrow ───────────────────────────────────────────────────
+    case 'leftrightuparrow': {
+      const sw  = w * (adj  ?? 25000) / 100000;
+      const ahh = h * (adj2 ?? 30000) / 100000;
+      const sx  = x + (w - sw) / 2;
+      ctx.moveTo(cx, y);
+      ctx.lineTo(x + w, y + ahh);
+      ctx.lineTo(sx + sw, y + ahh);
+      ctx.lineTo(sx + sw, y + h);
+      ctx.lineTo(sx, y + h);
+      ctx.lineTo(sx, y + ahh);
+      ctx.lineTo(x, y + ahh);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Left-up arrow ─────────────────────────────────────────────────────────
+    case 'leftuparrow': {
+      const ahLen = Math.min(w, h) * (adj ?? 30000) / 100000;
+      const sw    = Math.min(w, h) * (adj2 ?? 25000) / 100000;
+      ctx.moveTo(x, cy);
+      ctx.lineTo(x + ahLen, y);
+      ctx.lineTo(x + ahLen, y + h - ahLen - sw);
+      ctx.lineTo(cx + sw / 2, y + h - ahLen - sw);
+      ctx.lineTo(cx + sw / 2, y + h);
+      ctx.lineTo(x + w, y + h - ahLen);
+      ctx.lineTo(cx + sw / 2 + sw, y + h - ahLen);
+      ctx.lineTo(cx + sw / 2 + sw, y + ahLen);
+      ctx.lineTo(x + ahLen, y + ahLen);
+      ctx.lineTo(x + ahLen, cy + sw / 2);
+      ctx.closePath();
+      break;
+    }
+
+    // ── U-turn arrow ──────────────────────────────────────────────────────────
+    case 'uturnarrow': {
+      const t   = w * 0.22;
+      const tip = w * 0.15;
+      ctx.moveTo(x, y + h);
+      ctx.lineTo(x, y + t);
+      ctx.arc(cx, y + t, w / 2 - t * 0.5, Math.PI, 0);
+      ctx.lineTo(x + w, y + h - tip * 2);
+      ctx.lineTo(x + w + tip, y + h - tip);
+      ctx.lineTo(x + w + tip * 0.5, y + h - tip * 2.5);
+      ctx.lineTo(x + w - tip * 0.5, y + h - tip * 2.5);
+      ctx.lineTo(x + w - tip, y + h - tip * 2);
+      ctx.lineTo(x + w - t, y + h - tip * 2);
+      ctx.lineTo(x + w - t, y + t);
+      ctx.arc(cx, y + t, w / 2 - t * 1.5, 0, Math.PI, true);
+      ctx.lineTo(x + t, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Bent arrow / bent-up arrow ────────────────────────────────────────────
+    case 'bentarrow':
+    case 'bentuparrow': {
+      const t = Math.min(w, h) * 0.25;
+      ctx.moveTo(x, cy - t / 2);
+      ctx.lineTo(x + w - t * 2, cy - t / 2);
+      ctx.lineTo(x + w - t * 2, y + t);
+      ctx.lineTo(x + w, cy);
+      ctx.lineTo(x + w - t * 2, y + h - t);
+      ctx.lineTo(x + w - t * 2, cy + t / 2);
+      ctx.lineTo(x, cy + t / 2);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Plus shape (non-math) ─────────────────────────────────────────────────
+    case 'plus': {
+      const t = Math.min(w, h) * (adj ?? 25000) / 100000;
+      ctx.rect(cx - t, y, 2 * t, h);
+      ctx.rect(x, cy - t, w, 2 * t);
+      break;
+    }
+
+    // ── Math not-equal ────────────────────────────────────────────────────────
+    case 'mathnotequal': {
+      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
+      const gap  = 17490 / 100000 * h;
+      ctx.rect(x, cy - gap / 2 - barH, w, barH);
+      ctx.rect(x, cy + gap / 2,        w, barH);
+      ctx.moveTo(cx - w * 0.15, y + h * 0.1);
+      ctx.lineTo(cx + w * 0.15, y + h * 0.9);
+      break;
+    }
+
+    // ── Flowchart: connector (circle) ─────────────────────────────────────────
+    case 'flowchartconnector': {
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      break;
+    }
+
+    // ── Flowchart: delay (D-shape) ────────────────────────────────────────────
+    case 'flowchartdelay': {
+      const r = h / 2;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.arc(x + w - r, cy, r, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: display (pentagon-like) ────────────────────────────────────
+    case 'flowchartdisplay': {
+      const lx = w * 0.2;
+      const rx = w * 0.15;
+      ctx.moveTo(x + lx, y);
+      ctx.lineTo(x + w - rx, y);
+      ctx.arc(x + w - rx, cy, h / 2, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(x + lx, y + h);
+      ctx.lineTo(x, cy);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: input/output (parallelogram) ───────────────────────────────
+    case 'flowchartinputoutput':
+    case 'flowchartpunchedcard': {
+      const sl = w * 0.2;
+      ctx.moveTo(x + sl, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w - sl, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: merge (inverted triangle) ──────────────────────────────────
+    case 'flowchartmerge': {
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(cx, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: extract (upward triangle) ─────────────────────────────────
+    case 'flowchartextract': {
+      ctx.moveTo(cx, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: off-page connector (pentagon pointing down) ────────────────
+    case 'flowchartoffpageconnector': {
+      const tipH = h * 0.3;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h - tipH);
+      ctx.lineTo(cx, y + h);
+      ctx.lineTo(x, y + h - tipH);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: online storage / manual label (rect fallback) ─────────────
+    case 'flowchartonlinestorage':
+    case 'flowchartmanuallabel':
+    case 'flowchartpuncheddisk': {
+      ctx.rect(x, y, w, h);
+      break;
+    }
+
+    // ── Horizontal scroll ─────────────────────────────────────────────────────
+    case 'horizontalscroll': {
+      const r = Math.min(w, h) * 0.15;
+      ctx.roundRect(x + r, y, w - r, h, r);
+      ctx.moveTo(x + r, y + r * 2);
+      ctx.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 2.5);
+      break;
+    }
+
+    // ── Vertical scroll ───────────────────────────────────────────────────────
+    case 'verticalscroll': {
+      const r = Math.min(w, h) * 0.15;
+      ctx.roundRect(x, y + r, w, h - r, r);
+      ctx.moveTo(x + r * 2, y + r);
+      ctx.arc(x + r, y + r, r, 0, Math.PI * 2);
+      break;
+    }
+
+    // ── Ribbon (fold at top) ──────────────────────────────────────────────────
+    case 'ribbon': {
+      const foldH = h * 0.25;
+      const notch = w * 0.08;
+      ctx.moveTo(x, y + foldH);
+      ctx.lineTo(x + notch, y);
+      ctx.lineTo(cx, y + foldH * 0.5);
+      ctx.lineTo(x + w - notch, y);
+      ctx.lineTo(x + w, y + foldH);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Ribbon2 (fold at bottom) ──────────────────────────────────────────────
+    case 'ribbon2': {
+      const foldH = h * 0.25;
+      const notch = w * 0.08;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h - foldH);
+      ctx.lineTo(x + w - notch, y + h);
+      ctx.lineTo(cx, y + h - foldH * 0.5);
+      ctx.lineTo(x + notch, y + h);
+      ctx.lineTo(x, y + h - foldH);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Ellipse ribbon / ellipse ribbon 2 (simplified) ───────────────────────
+    case 'ellipseribbon':
+    case 'ellipseribbon2': {
+      ctx.rect(x, y, w, h);
+      break;
+    }
+
+    // ── Circular arrow ────────────────────────────────────────────────────────
+    case 'circulararrow': {
+      const outerR = Math.min(w, h) / 2;
+      const innerR = outerR * 0.5;
+      ctx.arc(cx, cy, outerR, -Math.PI * 0.8, Math.PI * 0.4);
+      ctx.arc(cx, cy, innerR, Math.PI * 0.4, -Math.PI * 0.8, true);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Curved directional arrows (simplified) ────────────────────────────────
+    case 'curveduparrow': {
+      ctx.moveTo(cx, y);
+      ctx.lineTo(x + w, y + h * 0.45);
+      ctx.lineTo(x + w * 0.65, y + h * 0.45);
+      ctx.quadraticCurveTo(x + w * 0.65, y + h, cx, y + h);
+      ctx.quadraticCurveTo(x + w * 0.35, y + h, x + w * 0.35, y + h * 0.45);
+      ctx.lineTo(x, y + h * 0.45);
+      ctx.closePath();
+      break;
+    }
+    case 'curveddownarrow': {
+      ctx.moveTo(cx, y + h);
+      ctx.lineTo(x + w, y + h * 0.55);
+      ctx.lineTo(x + w * 0.65, y + h * 0.55);
+      ctx.quadraticCurveTo(x + w * 0.65, y, cx, y);
+      ctx.quadraticCurveTo(x + w * 0.35, y, x + w * 0.35, y + h * 0.55);
+      ctx.lineTo(x, y + h * 0.55);
+      ctx.closePath();
+      break;
+    }
+    case 'curvedleftarrow': {
+      ctx.moveTo(x, cy);
+      ctx.lineTo(x + w * 0.45, y);
+      ctx.lineTo(x + w * 0.45, y + h * 0.35);
+      ctx.quadraticCurveTo(x + w, y + h * 0.35, x + w, cy);
+      ctx.quadraticCurveTo(x + w, y + h * 0.65, x + w * 0.45, y + h * 0.65);
+      ctx.lineTo(x + w * 0.45, y + h);
+      ctx.closePath();
+      break;
+    }
+    case 'curvedrightarrow': {
+      ctx.moveTo(x + w, cy);
+      ctx.lineTo(x + w * 0.55, y);
+      ctx.lineTo(x + w * 0.55, y + h * 0.35);
+      ctx.quadraticCurveTo(x, y + h * 0.35, x, cy);
+      ctx.quadraticCurveTo(x, y + h * 0.65, x + w * 0.55, y + h * 0.65);
+      ctx.lineTo(x + w * 0.55, y + h);
+      ctx.closePath();
+      break;
+    }
+
     default:
       // rect and everything else
       ctx.rect(x, y, w, h);
@@ -1357,7 +1869,7 @@ function renderTextBody(
       const bSizePx = b.sizePct != null
         ? paraDefaultFontSizePx * (b.sizePct / 100)
         : paraDefaultFontSizePx;
-      bulletLabel = b.char;
+      bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
       bulletFont  = buildFont(false, false, bSizePx, normalizeFontFamily(b.fontFamily ?? 'sans-serif'));
       bulletColor = b.color ? hexToRgba(b.color) : paraDefaultColor;
       // Reset counters when switching to char bullets

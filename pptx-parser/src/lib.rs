@@ -2103,6 +2103,33 @@ fn parse_sp_tree_node(
         "pic" => {
             if let Some(pic) = parse_picture(node, slide_dir, rels, zip) {
                 out.push(SlideElement::Picture(pic));
+            } else {
+                // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
+                let ph_idx = node.descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "ph")
+                    .and_then(|ph| attr(&ph, "idx"))
+                    .and_then(|s| s.parse::<u32>().ok());
+                if let Some(idx) = ph_idx {
+                    if let Some(t) = lph.by_idx.get(&idx) {
+                        let r_id = child(node, "blipFill")
+                            .and_then(|bf| child(bf, "blip"))
+                            .and_then(|b| attr_r(&b, "embed"));
+                        if let Some(rid) = r_id {
+                            if let Some(rel_target) = rels.get(&rid) {
+                                let image_path = resolve_path(slide_dir, rel_target);
+                                if let Some(image_bytes) = read_zip_bytes(zip, &image_path) {
+                                    let mime = mime_from_ext(&image_path);
+                                    let data_url = format!("data:{mime};base64,{}", B64.encode(&image_bytes));
+                                    out.push(SlideElement::Picture(PictureElement {
+                                        x: t.x, y: t.y, width: t.cx, height: t.cy,
+                                        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+                                        data_url,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         "AlternateContent" => {
