@@ -862,13 +862,42 @@ function buildShapePath(
     }
 
     // ── Donut / ring ──────────────────────────────────────────────────────────
-    case 'donut':
-    case 'nosmokingsign': {
+    case 'donut': {
       ctx.arc(cx, cy, w / 2, 0, Math.PI * 2);
-      // inner hole (filled via evenodd winding)
       const ir = Math.min(w, h) * (adj != null ? (adj / 100000) * 0.5 : 0.25);
       ctx.moveTo(cx + ir, cy);
       ctx.arc(cx, cy, ir, 0, Math.PI * 2, true);
+      break;
+    }
+
+    // ── No smoking / prohibition sign ─────────────────────────────────────────
+    // OOXML spec: outer ellipse ring (evenodd hole) + two diagonal arc segments
+    case 'nosmoking':
+    case 'nosmokingsign': {
+      const iwd2 = w / 2 * (1 - (adj ?? 18750) / 100000 * 2);
+      const ihd2 = h / 2 * (1 - (adj ?? 18750) / 100000 * 2);
+      // outer ring: outer circle CCW + inner circle CW (evenodd creates ring)
+      ctx.arc(cx, cy, w / 2, 0, Math.PI * 2);
+      ctx.moveTo(cx + iwd2, cy);
+      ctx.arc(cx, cy, iwd2, 0, Math.PI * 2, true);
+      // diagonal bar: two thick arc segments that form a slash
+      // stAng1 ≈ 225°, stAng2 ≈ 45°, swAng ≈ calculated from ring width
+      const ang = Math.atan2(ihd2, iwd2);
+      const stAng1 = Math.PI + ang;
+      const stAng2 = ang;
+      const swAng  = Math.PI - 2 * ang;
+      // first arc segment (upper-left to lower-right chord, outer radius)
+      ctx.moveTo(cx + (w / 2) * Math.cos(stAng1), cy + (h / 2) * Math.sin(stAng1));
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, stAng1, stAng1 + swAng);
+      ctx.lineTo(cx + iwd2 * Math.cos(stAng1 + swAng), cy + ihd2 * Math.sin(stAng1 + swAng));
+      ctx.ellipse(cx, cy, iwd2, ihd2, 0, stAng1 + swAng, stAng1, true);
+      ctx.closePath();
+      // second arc segment (lower-left to upper-right)
+      ctx.moveTo(cx + (w / 2) * Math.cos(stAng2), cy + (h / 2) * Math.sin(stAng2));
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, stAng2, stAng2 + swAng);
+      ctx.lineTo(cx + iwd2 * Math.cos(stAng2 + swAng), cy + ihd2 * Math.sin(stAng2 + swAng));
+      ctx.ellipse(cx, cy, iwd2, ihd2, 0, stAng2 + swAng, stAng2, true);
+      ctx.closePath();
       break;
     }
 
@@ -907,9 +936,24 @@ function buildShapePath(
       break;
     }
 
-    // ── Smiley face (simplified) ───────────────────────────────────────────────
+    // ── Smiley face ───────────────────────────────────────────────────────────
+    // Spec: filled circle body + two filled eye circles + smile quadratic arc
     case 'smileyface': {
+      // Body circle
       ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      ctx.closePath();
+      // Left eye (filled sub-path, evenodd makes it a hole in fill)
+      const eyeRx = w * 0.05;
+      const eyeRy = h * 0.05;
+      const eyeY  = cy - h * 0.12;
+      ctx.moveTo(cx - w * 0.2 + eyeRx, eyeY);
+      ctx.ellipse(cx - w * 0.2, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+      // Right eye
+      ctx.moveTo(cx + w * 0.2 + eyeRx, eyeY);
+      ctx.ellipse(cx + w * 0.2, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+      // Smile: open arc rendered as stroke sub-path
+      ctx.moveTo(cx - w * 0.25, cy + h * 0.05);
+      ctx.quadraticCurveTo(cx, cy + h * 0.3, cx + w * 0.25, cy + h * 0.05);
       break;
     }
 
@@ -1505,21 +1549,28 @@ function buildShapePath(
     }
 
     // ── U-turn arrow ──────────────────────────────────────────────────────────
+    // Spec (ECMA-376): outer half-arc on top, arrowhead on right side pointing down
     case 'uturnarrow': {
-      const t   = w * 0.22;
-      const tip = w * 0.15;
+      const sw     = w * (adj ?? 25000) / 100000;   // shaft width
+      const outerR = (w - sw) / 2;                   // outer bend radius
+      const innerR = Math.max(0, outerR - sw);        // inner bend radius
+      const arcCX  = x + sw + outerR;                // arc center X
+      const arcCY  = y + sw + outerR;                // arc center Y
+      const ahW    = sw * 2;                          // arrowhead full width
+      const ahBase = y + h - sw * 2.5;               // where arrowhead base starts
+      // shaft: left side down, U-arc across top, right side down to arrowhead
       ctx.moveTo(x, y + h);
-      ctx.lineTo(x, y + t);
-      ctx.arc(cx, y + t, w / 2 - t * 0.5, Math.PI, 0);
-      ctx.lineTo(x + w, y + h - tip * 2);
-      ctx.lineTo(x + w + tip, y + h - tip);
-      ctx.lineTo(x + w + tip * 0.5, y + h - tip * 2.5);
-      ctx.lineTo(x + w - tip * 0.5, y + h - tip * 2.5);
-      ctx.lineTo(x + w - tip, y + h - tip * 2);
-      ctx.lineTo(x + w - t, y + h - tip * 2);
-      ctx.lineTo(x + w - t, y + t);
-      ctx.arc(cx, y + t, w / 2 - t * 1.5, 0, Math.PI, true);
-      ctx.lineTo(x + t, y + h);
+      ctx.lineTo(x, arcCY);
+      ctx.arc(arcCX, arcCY, outerR, Math.PI, 0);
+      ctx.lineTo(x + w, ahBase);
+      // arrowhead (pointing downward on right side)
+      ctx.lineTo(x + w + (ahW - sw) / 2, ahBase);
+      ctx.lineTo(arcCX + sw / 2, y + h);  // tip
+      ctx.lineTo(x + w - (ahW - sw) / 2 - sw, ahBase);
+      ctx.lineTo(x + w - sw, ahBase);
+      ctx.lineTo(x + w - sw, arcCY);
+      ctx.arc(arcCX, arcCY, innerR, 0, Math.PI, true);
+      ctx.lineTo(x + sw, y + h);
       ctx.closePath();
       break;
     }
@@ -1686,10 +1737,46 @@ function buildShapePath(
       break;
     }
 
-    // ── Ellipse ribbon / ellipse ribbon 2 (simplified) ───────────────────────
-    case 'ellipseribbon':
+    // ── Ellipse ribbon (curved bottom) ───────────────────────────────────────
+    case 'ellipseribbon': {
+      const adj1 = (adj ?? 25000) / 100000;
+      const foldH = h * adj1;
+      const notch = w * 0.08;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h - foldH);
+      // curved bottom via ellipse arc
+      ctx.ellipse(cx, y + h - foldH, w / 2, foldH, 0, 0, Math.PI);
+      ctx.lineTo(x, y + h - foldH);
+      ctx.closePath();
+      // fold triangles
+      ctx.moveTo(x, y + foldH * 0.5);
+      ctx.lineTo(x + notch, y);
+      ctx.lineTo(x + notch * 2, y + foldH * 0.5);
+      ctx.moveTo(x + w - notch * 2, y + foldH * 0.5);
+      ctx.lineTo(x + w - notch, y);
+      ctx.lineTo(x + w, y + foldH * 0.5);
+      break;
+    }
+
+    // ── Ellipse ribbon 2 (curved top) ────────────────────────────────────────
     case 'ellipseribbon2': {
-      ctx.rect(x, y, w, h);
+      const adj1 = (adj  ?? 25000) / 100000;
+      const notch = w * 0.08;
+      const foldH = h * adj1;
+      ctx.moveTo(x, y + foldH);
+      // curved top via ellipse arc
+      ctx.ellipse(cx, y + foldH, w / 2, foldH, 0, Math.PI, 0);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      // fold triangles
+      ctx.moveTo(x, y + foldH * 1.5);
+      ctx.lineTo(x + notch, y + h * 1.0);
+      ctx.lineTo(x + notch * 2, y + foldH * 1.5);
+      ctx.moveTo(x + w - notch * 2, y + foldH * 1.5);
+      ctx.lineTo(x + w - notch, y + h);
+      ctx.lineTo(x + w, y + foldH * 1.5);
       break;
     }
 
@@ -1741,6 +1828,166 @@ function buildShapePath(
       ctx.quadraticCurveTo(x, y + h * 0.35, x, cy);
       ctx.quadraticCurveTo(x, y + h * 0.65, x + w * 0.55, y + h * 0.65);
       ctx.lineTo(x + w * 0.55, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Striped right arrow (3 stripes + arrowhead) ───────────────────────────
+    // Spec: ssd = min(w,h), ssd32=ssd/32, ssd8=ssd/8 etc. adj=arrowhead length
+    case 'stripedrightarrow': {
+      const ssd   = Math.min(w, h);
+      const ssd32 = ssd / 32;
+      const ssd16 = ssd / 16;
+      const ssd8  = ssd / 8;
+      const shH   = ssd * (adj ?? 50000) / 100000;  // shaft height
+      const ahW   = w * (adj2 ?? 50000) / 100000;   // arrowhead width
+      const y1    = cy - shH / 2;
+      const y2    = cy + shH / 2;
+      const x4    = x + w - ahW;
+      // stripe 1
+      ctx.rect(x, y1, ssd32, shH);
+      // stripe 2
+      ctx.rect(x + ssd16, y1, ssd16, shH);
+      // stripe 3 (narrower, bridging to arrowhead)
+      ctx.rect(x + ssd8, y1, ssd8, shH);
+      // arrow body + head
+      ctx.moveTo(x4, y1);
+      ctx.lineTo(x4, y);
+      ctx.lineTo(x + w, cy);
+      ctx.lineTo(x4, y + h);
+      ctx.lineTo(x4, y2);
+      ctx.lineTo(x + ssd8 * 2, y2);
+      ctx.lineTo(x + ssd8 * 2, y1);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: preparation (hexagon with angled sides) ────────────────────
+    case 'flowchartpreparation': {
+      const sl = w * 0.2;
+      ctx.moveTo(x + sl, y);
+      ctx.lineTo(x + w - sl, y);
+      ctx.lineTo(x + w, cy);
+      ctx.lineTo(x + w - sl, y + h);
+      ctx.lineTo(x + sl, y + h);
+      ctx.lineTo(x, cy);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: collate (hourglass) ────────────────────────────────────────
+    case 'flowchartcollate': {
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x, y + h);
+      ctx.lineTo(x + w, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: magnetic disk (vertical cylinder) ──────────────────────────
+    case 'flowchartmagneticdisk': {
+      const ry = h * 0.15;
+      ctx.moveTo(x, y + ry);
+      ctx.ellipse(cx, y + ry, w / 2, ry, 0, Math.PI, 0);
+      ctx.lineTo(x + w, y + h - ry);
+      ctx.ellipse(cx, y + h - ry, w / 2, ry, 0, 0, Math.PI);
+      ctx.lineTo(x, y + ry);
+      ctx.closePath();
+      // top cap stroke line
+      ctx.moveTo(x + w, y + ry);
+      ctx.ellipse(cx, y + ry, w / 2, ry, 0, 0, Math.PI);
+      break;
+    }
+
+    // ── Flowchart: internal storage (rect with two inner lines) ───────────────
+    case 'flowchartinternalstorage': {
+      ctx.rect(x, y, w, h);
+      const bw = w * 0.15;
+      const bh = h * 0.15;
+      ctx.moveTo(x + bw, y);
+      ctx.lineTo(x + bw, y + h);
+      ctx.moveTo(x, y + bh);
+      ctx.lineTo(x + w, y + bh);
+      break;
+    }
+
+    // ── Flowchart: magnetic drum (cylinder on its side with left cap) ─────────
+    case 'flowchartmagneticdrum': {
+      const rx = w * 0.15;
+      ctx.moveTo(x + rx, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x + rx, y + h);
+      ctx.ellipse(x + rx, cy, rx, h / 2, 0, Math.PI / 2, -Math.PI / 2, true);
+      ctx.closePath();
+      // right cap open arc
+      ctx.moveTo(x + w, y);
+      ctx.ellipse(x + w, cy, rx, h / 2, 0, -Math.PI / 2, Math.PI / 2);
+      break;
+    }
+
+    // ── Flowchart: summing junction (circle + X) ──────────────────────────────
+    case 'flowchartsumingjunction': {
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      const r = Math.min(w, h) / 2 * 0.65;
+      ctx.moveTo(cx - r, cy - r);
+      ctx.lineTo(cx + r, cy + r);
+      ctx.moveTo(cx + r, cy - r);
+      ctx.lineTo(cx - r, cy + r);
+      break;
+    }
+
+    // ── Flowchart: magnetic tape (circle with tail) ───────────────────────────
+    case 'flowchartmagnetictape': {
+      // circle from bottom going around, with a small tail at bottom-right
+      const r = Math.min(w, h) / 2;
+      const tailX = cx + r * 0.5;
+      ctx.moveTo(cx, y + h);
+      ctx.arc(cx, cy, r, Math.PI / 2, Math.PI / 2 + Math.PI * 2 * 0.875);
+      ctx.lineTo(tailX, cy + r * 0.5);
+      ctx.lineTo(tailX, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: punched tape (wave bottom) ─────────────────────────────────
+    case 'flowchartpunchedtape': {
+      const waveH = h * 0.12;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h - waveH);
+      ctx.bezierCurveTo(x + w * 0.75, y + h, x + w * 0.25, y + h - waveH * 2, x, y + h - waveH);
+      ctx.closePath();
+      // second wave on top for symmetry
+      ctx.moveTo(x, y + waveH);
+      ctx.bezierCurveTo(x + w * 0.25, y, x + w * 0.75, y + waveH * 2, x + w, y + waveH);
+      break;
+    }
+
+    // ── Flowchart: manual operation (inverted trapezoid) ─────────────────────
+    case 'flowchartmanualoperation': {
+      const sl = w * 0.15;
+      ctx.moveTo(x + sl, y);
+      ctx.lineTo(x + w - sl, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Flowchart: multidocument (stacked wave documents) ────────────────────
+    case 'flowchartmultidocument': {
+      const waveH = h * 0.1;
+      const shiftX = w * 0.04;
+      // back documents (offset rects)
+      ctx.rect(x + shiftX * 2, y - h * 0.08, w - shiftX * 2, h * 0.1);
+      ctx.rect(x + shiftX, y - h * 0.04, w - shiftX, h * 0.06);
+      // main document with wave bottom
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y);
+      ctx.lineTo(x + w, y + h - waveH);
+      ctx.bezierCurveTo(x + w * 0.75, y + h, x + w * 0.25, y + h - waveH * 2, x, y + h - waveH);
       ctx.closePath();
       break;
     }
