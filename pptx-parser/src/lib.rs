@@ -1125,11 +1125,8 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             Some(n) => n,
             None => continue,
         };
-        let xfrm = match child(sp_pr, "xfrm") {
-            Some(n) => n,
-            None => continue,
-        };
-        let t = parse_xfrm(xfrm);
+        // xfrm may be absent (placeholder inherits transform from master); parse if present
+        let t_opt: Option<Transform> = child(sp_pr, "xfrm").map(parse_xfrm);
 
         // Extract layout-level defaults from the placeholder's txBody > lstStyle > lvl1pPr > defRPr
         let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = child(sp, "txBody")
@@ -1155,7 +1152,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
 
             if let Some(idx) = ph_idx {
-                lph.by_idx.entry(idx).or_insert_with(|| t.clone());
+                if let Some(ref t) = t_opt {
+                    lph.by_idx.entry(idx).or_insert_with(|| t.clone());
+                }
                 // Prefer layout font size; fall back to master
                 let fs = layout_font_size
                     .or_else(|| master_font_sizes.get(&ph_type).copied());
@@ -1186,7 +1185,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             if let Some(s) = layout_stroke {
                 lph.by_type_stroke.entry(ph_type.clone()).or_insert(s);
             }
-            lph.by_type.entry(ph_type).or_insert(t);
+            if let Some(t) = t_opt {
+                lph.by_type.entry(ph_type).or_insert(t);
+            }
         }
     }
     lph
