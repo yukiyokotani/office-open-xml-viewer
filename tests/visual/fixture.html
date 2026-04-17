@@ -16,6 +16,7 @@
 
     const params   = new URLSearchParams(location.search);
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
+    const pptxName = params.get('pptx') ?? 'sample';
 
     const viewer = new PptxViewer(document.getElementById('container'), {
       width: 1280,
@@ -31,7 +32,7 @@
     });
 
     try {
-      const resp = await fetch('/sample.pptx');
+      const resp = await fetch(`/${pptxName}.pptx`);
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();
       // load() renders slide 0 and fires onSlideChange.
