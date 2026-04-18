@@ -1,9 +1,17 @@
-import type { Document, RenderPageOptions } from './types';
-import { renderDocumentToCanvas } from './renderer';
+import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
+import type { Document, RenderPageOptions, WorkerResponse } from './types';
+import { renderDocumentToCanvas } from './renderer';
 
 export class DocxDocument {
   private _document: Document | null = null;
+  private _worker: Worker;
+
+  private constructor() {
+    this._worker = new InlineWorker();
+    const wasmUrl = new URL(wasmAssetUrl, location.href).href;
+    this._worker.postMessage({ type: 'init', wasmUrl });
+  }
 
   static async load(source: string | ArrayBuffer): Promise<DocxDocument> {
     const doc = new DocxDocument();
@@ -19,14 +27,24 @@ export class DocxDocument {
     return doc;
   }
 
-  private async _parse(buffer: ArrayBuffer): Promise<void> {
-    const wasmModule = await import('./wasm/docx_parser.js');
-    await wasmModule.default(new URL(wasmAssetUrl, location.href).href);
-    const bytes = new Uint8Array(buffer);
-    const json = wasmModule.parse_docx(bytes);
-    const parsed = JSON.parse(json);
-    if (parsed.error) throw new Error(`Parse error: ${parsed.error}`);
-    this._document = parsed as Document;
+  private _parse(buffer: ArrayBuffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const handler = (e: MessageEvent<WorkerResponse>) => {
+        this._worker.removeEventListener('message', handler);
+        if (e.data.type === 'error') {
+          reject(new Error(e.data.message));
+        } else if (e.data.type === 'parsed') {
+          this._document = e.data.document;
+          resolve();
+        }
+      };
+      this._worker.addEventListener('message', handler);
+      this._worker.postMessage({ type: 'parse', data: buffer }, [buffer]);
+    });
+  }
+
+  destroy(): void {
+    this._worker.terminate();
   }
 
   get pageCount(): number {

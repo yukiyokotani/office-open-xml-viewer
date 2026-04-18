@@ -172,6 +172,16 @@ export interface CellBorders {
   right: BorderSpec | null;
 }
 
+// ===== Worker message protocol =====
+
+export type WorkerRequest =
+  | { type: 'init'; wasmUrl: string }
+  | { type: 'parse'; data: ArrayBuffer };
+
+export type WorkerResponse =
+  | { type: 'parsed'; document: Document }
+  | { type: 'error'; message: string };
+
 // ===== Public API types =====
 
 export interface RenderPageOptions {
