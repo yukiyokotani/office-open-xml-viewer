@@ -68,18 +68,168 @@ function formatCellValue(cell: Cell, styles: Styles): string {
   return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
 }
 
-/** Returns true if a custom formatCode describes a date/time value. */
+// ────────────────────────────────────────────────────────────────
+// Date / time formatting  (ECMA-376 §18.8.30)
+// ────────────────────────────────────────────────────────────────
+
+// Built-in numFmtId → format code (US English locale, as per the spec)
+const BUILTIN_DATE_FMT: Record<number, string> = {
+  14: 'm/d/yyyy',
+  15: 'd-mmm-yy',
+  16: 'd-mmm',
+  17: 'mmm-yy',
+  18: 'h:mm AM/PM',
+  19: 'h:mm:ss AM/PM',
+  20: 'h:mm',
+  21: 'h:mm:ss',
+  22: 'm/d/yyyy h:mm',
+};
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Convert an Excel date serial to a UTC Date (avoids local-timezone off-by-one errors). */
+function excelSerialToUTCDate(serial: number): Date {
+  return new Date((serial - 25569) * 86400 * 1000);
+}
+
+/**
+ * Format an Excel date serial using an ECMA-376 format code.
+ * Supports: y/yy/yyy/yyyy, m/mm/mmm/mmmm/mmmmm, d/dd/ddd/dddd,
+ *           h/hh, m/mm (minutes when after h), s/ss, AM/PM, A/P,
+ *           quoted literals, bracket escapes, _ padding, * fill.
+ */
+function formatExcelDateCode(serial: number, fmtCode: string): string {
+  const date = excelSerialToUTCDate(serial);
+  const yr = date.getUTCFullYear();
+  const mo = date.getUTCMonth() + 1;   // 1-12
+  const dy = date.getUTCDate();
+  const wd = date.getUTCDay();          // 0=Sun
+  const hr = date.getUTCHours();
+  const mi = date.getUTCMinutes();
+  const sc = date.getUTCSeconds();
+
+  // Take the first section (positive / no-sign section)
+  const section = fmtCode.split(';')[0];
+  const hasAmPm = /am\/pm|a\/p/i.test(section);
+
+  let result = '';
+  let i = 0;
+  let prevWasHour = false;
+
+  while (i < section.length) {
+    const ch = section[i];
+
+    if (ch === '"') {
+      // Quoted string literal
+      i++;
+      while (i < section.length && section[i] !== '"') result += section[i++];
+      if (i < section.length) i++;
+      prevWasHour = false;
+
+    } else if (ch === '[') {
+      // Locale / colour / condition bracket — skip entirely
+      while (i < section.length && section[i] !== ']') i++;
+      if (i < section.length) i++;
+
+    } else if (ch === '_') {
+      i += 2; // _ followed by a padding character — skip both
+
+    } else if (ch === '*') {
+      i += 2; // * followed by fill character — skip both
+
+    } else if (ch === '\\') {
+      if (i + 1 < section.length) result += section[i + 1];
+      i += 2;
+      prevWasHour = false;
+
+    } else if (ch === 'y' || ch === 'Y') {
+      let n = 0;
+      while (i < section.length && section[i].toLowerCase() === 'y') { n++; i++; }
+      result += n <= 2 ? String(yr).slice(-2) : String(yr).padStart(4, '0');
+      prevWasHour = false;
+
+    } else if (ch === 'm' || ch === 'M') {
+      let n = 0;
+      while (i < section.length && section[i].toLowerCase() === 'm') { n++; i++; }
+      // Determine month vs minutes:
+      //   minutes when immediately after h/hh, OR immediately before :s/:ss
+      const rest = section.slice(i).replace(/\[[^\]]*\]/g, '');
+      const isMinutes = prevWasHour || /^:s/i.test(rest);
+      if (isMinutes) {
+        result += n >= 2 ? String(mi).padStart(2, '0') : String(mi);
+      } else {
+        if      (n === 1) result += String(mo);
+        else if (n === 2) result += String(mo).padStart(2, '0');
+        else if (n === 3) result += MONTH_NAMES[mo - 1].slice(0, 3);
+        else if (n === 4) result += MONTH_NAMES[mo - 1];
+        else              result += MONTH_NAMES[mo - 1][0]; // mmmmm = first letter
+      }
+      prevWasHour = false;
+
+    } else if (ch === 'd' || ch === 'D') {
+      let n = 0;
+      while (i < section.length && section[i].toLowerCase() === 'd') { n++; i++; }
+      if      (n === 1) result += String(dy);
+      else if (n === 2) result += String(dy).padStart(2, '0');
+      else if (n === 3) result += WEEKDAY_NAMES[wd].slice(0, 3);
+      else              result += WEEKDAY_NAMES[wd];
+      prevWasHour = false;
+
+    } else if (ch === 'h' || ch === 'H') {
+      let n = 0;
+      while (i < section.length && section[i].toLowerCase() === 'h') { n++; i++; }
+      const h = hasAmPm ? (hr % 12 || 12) : hr;
+      result += n >= 2 ? String(h).padStart(2, '0') : String(h);
+      prevWasHour = true;
+
+    } else if (ch === 's' || ch === 'S') {
+      let n = 0;
+      while (i < section.length && section[i].toLowerCase() === 's') { n++; i++; }
+      result += n >= 2 ? String(sc).padStart(2, '0') : String(sc);
+      prevWasHour = false;
+
+    } else if (ch === 'A' || ch === 'a') {
+      const upper = section.slice(i).toUpperCase();
+      if (upper.startsWith('AM/PM')) {
+        result += hr < 12 ? 'AM' : 'PM'; i += 5;
+      } else if (upper.startsWith('A/P')) {
+        result += hr < 12 ? 'A' : 'P'; i += 3;
+      } else {
+        result += ch; i++;
+      }
+      prevWasHour = false;
+
+    } else {
+      result += ch;
+      i++;
+      // Separators (:/-. space) don't reset the hour context for m/mm lookahead
+      if (ch !== ':' && ch !== '/' && ch !== '-' && ch !== '.' && ch !== ' ') {
+        prevWasHour = false;
+      }
+    }
+  }
+
+  return result;
+}
+
+/** Returns true if a custom formatCode is a date/time format. */
 function isDateFormatCode(code: string): boolean {
-  // Strip quoted literals and locale/color brackets, then look for year marker 'y'.
+  // Strip quoted literals and bracket content, then look for unambiguous date specifiers.
+  // 'y' = year, 'd' = day — both are unambiguous. 'm' alone is ambiguous (month or minutes).
   const stripped = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '');
-  return /y/i.test(stripped);
+  return /[yd]/i.test(stripped);
 }
 
 function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
-  const isDateFmtId = (id: number) => (id >= 14 && id <= 17) || id === 22;
-  if (isDateFmtId(numFmtId)) return formatExcelDate(num);
+  // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
+  const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
+  if (builtinFmt) return formatExcelDateCode(num, builtinFmt);
   if (formatCode) {
-    if (isDateFormatCode(formatCode)) return formatExcelDate(num);
+    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode);
     return applyFormatCode(num, formatCode);
   }
   switch (numFmtId) {
@@ -102,10 +252,7 @@ function formatThousands(num: number, decimals: number): string {
   return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-function formatExcelDate(serial: number): string {
-  const date = new Date((serial - 25569) * 86400 * 1000);
-  return date.toLocaleDateString();
-}
+// (formatExcelDate removed; all date formatting now goes through formatExcelDateCode)
 
 function countDecimalPlaces(fmt: string): number {
   const m = fmt.match(/\.([0#]+)/);
