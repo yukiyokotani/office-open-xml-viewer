@@ -952,6 +952,8 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
 struct LayoutPlaceholders {
     by_idx:  HashMap<u32, Transform>,
     by_type: HashMap<String, Transform>,
+    /// Fallback transforms from slide master (by ph_type), used when layout has no xfrm
+    master_by_type: HashMap<String, Transform>,
     /// Default font size (pt) per placeholder idx, from layout/master lstStyle
     by_idx_font_size:  HashMap<u32, f64>,
     /// Default font size (pt) per placeholder type, from layout/master lstStyle
@@ -976,6 +978,7 @@ impl LayoutPlaceholders {
             .or_else(|| {
                 if ph_type == "body" { self.by_type.get("") } else { None }
             })
+            .or_else(|| self.master_by_type.get(ph_type))
     }
 
     /// Look up the inherited default font size for a placeholder (layout then master fallback).
@@ -1052,6 +1055,7 @@ fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
 
 /// Parse master-level default font sizes from txStyles (titleStyle / bodyStyle / otherStyle)
 /// and from individual placeholder shapes in the master spTree.
+/// Individual shape lstStyle takes priority over txStyles generic defaults.
 fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
@@ -1060,7 +1064,23 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     };
     let root = doc.root_element();
 
-    // p:txStyles > a:titleStyle / a:bodyStyle / a:otherStyle
+    // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            let ph_node = sp.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    if let Some(sz) = extract_lvl1_font_size(tx_body) {
+                        map.entry(ph_type).or_insert(sz);
+                    }
+                }
+            }
+        }
+    }
+
+    // p:txStyles > a:titleStyle / a:bodyStyle / a:otherStyle as fallback
     if let Some(tx_styles) = child(root, "txStyles") {
         let style_ph_map: &[(&str, &[&str])] = &[
             ("titleStyle",  &["title", "ctrTitle"]),
@@ -1081,27 +1101,34 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
         }
     }
 
-    // Also scan master spTree placeholder shapes for per-type lstStyle font sizes
+    map
+}
+
+fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
+    let mut map = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
     if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
         for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
             let ph_node = sp.descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "ph");
             if let Some(ph) = ph_node {
                 let ph_type = attr(&ph, "type").unwrap_or_default();
-                if let Some(tx_body) = child(sp, "txBody") {
-                    if let Some(sz) = extract_lvl1_font_size(tx_body) {
-                        map.entry(ph_type).or_insert(sz);
-                    }
+                if let Some(xfrm) = child(sp, "spPr").and_then(|p| child(p, "xfrm")) {
+                    map.entry(ph_type).or_insert_with(|| parse_xfrm(xfrm));
                 }
             }
         }
     }
-
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
+    lph.master_by_type = master_transforms.clone();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         Err(_) => return lph,
@@ -2015,13 +2042,14 @@ fn parse_slide(
     master_bg: Option<Fill>,
     master_font_sizes: &HashMap<String, f64>,
     master_anchors: &HashMap<String, String>,
+    master_transforms: &HashMap<String, Transform>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, theme))
+        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, theme))
         .unwrap_or_default();
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -2378,6 +2406,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_anchors(xml))
         .unwrap_or_default();
 
+    let master_transforms: HashMap<String, Transform> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_transforms(xml))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -2441,6 +2474,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             master_bg.clone(),
             &master_font_sizes,
             &master_anchors,
+            &master_transforms,
             raw.index,
             &raw.slide_rels,
             &mut zip,

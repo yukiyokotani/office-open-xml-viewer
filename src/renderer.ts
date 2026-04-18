@@ -400,12 +400,13 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     ctx.stroke();
   }
 
-  ctx.restore();
-
+  // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor);
+    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor);
   }
+
+  ctx.restore();
 }
 
 /**
