@@ -23,6 +23,8 @@ playwright-report/
 test-results/
 # Reference screenshots (PowerPoint screenshots; not redistributable)
 packages/pptx/tests/visual/references/sample-*/
+# Local-only Storybook stories that load sample PPTX files
+packages/pptx/src/*.sample.stories.ts
 # TypeScript build info
 *.tsbuildinfo
 # npm lockfile (using pnpm)

@@ -11,6 +11,7 @@ const config: StorybookConfig = {
     "@storybook/addon-a11y",
     "@storybook/addon-docs"
   ],
-  "framework": "@storybook/html-vite"
+  "framework": "@storybook/html-vite",
+  staticDirs: ["../tests/visual"]
 };
 export default config;
