@@ -14,6 +14,7 @@ export type {
   Border,
   BorderEdge,
   CellXf,
+  NumFmt,
   ParsedWorkbook,
   ViewportRange,
   RenderViewportOptions,

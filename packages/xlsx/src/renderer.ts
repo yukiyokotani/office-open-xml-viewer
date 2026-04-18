@@ -53,6 +53,121 @@ function cellValueText(value: CellValue): string {
   }
 }
 
+// ECMA-376 built-in numFmtId → format category
+function formatCellValue(cell: Cell, styles: Styles): string {
+  if (cell.value.type !== 'number') return cellValueText(cell.value);
+  const xf = styles.cellXfs[cell.styleIndex ?? 0];
+  const numFmtId = xf?.numFmtId ?? 0;
+  const num = cell.value.number;
+
+  // Look up custom format first
+  const customFmt = styles.numFmts?.find(f => f.numFmtId === numFmtId);
+
+  return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
+}
+
+function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
+  // Date serial range: 1 to ~50000 roughly
+  const isDateFmtId = (id: number) => (id >= 14 && id <= 17) || id === 22;
+
+  if (isDateFmtId(numFmtId)) {
+    return formatExcelDate(num);
+  }
+
+  // Try to interpret formatCode for custom formats
+  if (formatCode) {
+    return applyFormatCode(num, formatCode);
+  }
+
+  // Built-in IDs (ECMA-376 §18.8.30)
+  switch (numFmtId) {
+    case 0: return String(num); // General
+    case 1: return Math.round(num).toString(); // 0
+    case 2: return num.toFixed(2); // 0.00
+    case 3: return formatThousands(num, 0); // #,##0
+    case 4: return formatThousands(num, 2); // #,##0.00
+    case 9: return Math.round(num * 100) + '%'; // 0%
+    case 10: return (num * 100).toFixed(2) + '%'; // 0.00%
+    case 11: return num.toExponential(2); // 0.00E+00
+    case 37: return formatThousands(num, 0); // #,##0 ;(#,##0)
+    case 38: return formatThousands(num, 0); // #,##0 ;[Red](#,##0)
+    case 39: return formatThousands(num, 2); // #,##0.00;(#,##0.00)
+    case 40: return formatThousands(num, 2); // #,##0.00;[Red](#,##0.00)
+    case 49: return String(num); // @ (text)
+    default: return String(num);
+  }
+}
+
+function formatThousands(num: number, decimals: number): string {
+  return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+// Excel date serial → locale date string (1900 date system)
+function formatExcelDate(serial: number): string {
+  // Excel serial 1 = 1900-01-01, but Excel incorrectly treats 1900 as leap year
+  // Subtract 25569 to get Unix days from 1970-01-01, then multiply by ms/day
+  const date = new Date((serial - 25569) * 86400 * 1000);
+  return date.toLocaleDateString();
+}
+
+function countDecimalPlaces(fmt: string): number {
+  const m = fmt.match(/\.([0#]+)/);
+  return m ? m[1].length : 0;
+}
+
+function applyFormatCode(num: number, formatCode: string): string {
+  // Handle positive;negative;zero sections (take first section for positive/zero)
+  const sections = formatCode.split(';');
+  const section = num < 0 && sections.length > 1 ? sections[1] : sections[0];
+
+  // Remove color/condition brackets like [Red], [$¥-411]
+  const cleaned = section.replace(/\[.*?\]/g, '').replace(/_./g, '').replace(/\*/g, '');
+
+  // Detect percent
+  if (cleaned.includes('%')) {
+    const dec = countDecimalPlaces(cleaned);
+    return (num * 100).toFixed(dec) + '%';
+  }
+
+  // Detect thousands separator
+  const hasThousands = cleaned.includes(',') && (cleaned.includes('#') || cleaned.includes('0'));
+  const dec = countDecimalPlaces(cleaned);
+
+  if (hasThousands) {
+    return formatThousands(num, dec);
+  }
+
+  // Fixed decimal
+  if (cleaned.includes('.')) {
+    return num.toFixed(dec);
+  }
+
+  // Integer or unknown
+  if (cleaned.match(/[#0]/)) {
+    return Math.round(num).toString();
+  }
+
+  return String(num);
+}
+
+// Wrap text into lines that fit within maxWidth
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.split(' ');
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? `${current} ${word}` : word;
+    if (ctx.measureText(test).width <= maxWidth || !current) {
+      current = test;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
 export function renderViewport(
   ctx: CanvasRenderingContext2D,
   worksheet: Worksheet,
@@ -129,15 +244,17 @@ export function renderViewport(
       renderBorder(ctx, border, cx, cy, cw, ch);
 
       if (!cell) continue;
-      const text = cellValueText(cell.value);
+      const text = formatCellValue(cell, styles);
       if (!text) continue;
 
-      // Text
+      // Text setup
       ctx.font = buildFont(font);
       ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
 
       const paddingX = 2;
+      const paddingY = 2;
       const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
+      const alignV = xf.alignV ?? 'bottom';
 
       let textX: number;
       let textAlign: CanvasTextAlign;
@@ -153,13 +270,46 @@ export function renderViewport(
       }
 
       ctx.textAlign = textAlign;
-      ctx.textBaseline = 'middle';
 
       ctx.save();
       ctx.beginPath();
       ctx.rect(cx, cy, cw, ch);
       ctx.clip();
-      ctx.fillText(text, textX, cy + ch / 2);
+
+      if (xf.wrapText) {
+        const lines = wrapText(ctx, text, cw - paddingX * 2);
+        const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
+        const totalH = lines.length * lineH;
+        let startY: number;
+        if (alignV === 'top') {
+          startY = cy + paddingY;
+          ctx.textBaseline = 'top';
+        } else if (alignV === 'center') {
+          startY = cy + (ch - totalH) / 2;
+          ctx.textBaseline = 'top';
+        } else {
+          startY = cy + ch - totalH - paddingY;
+          ctx.textBaseline = 'top';
+        }
+        for (let li = 0; li < lines.length; li++) {
+          ctx.fillText(lines[li], textX, startY + li * lineH);
+        }
+      } else {
+        let textY: number;
+        if (alignV === 'top') {
+          ctx.textBaseline = 'top';
+          textY = cy + paddingY;
+        } else if (alignV === 'center') {
+          ctx.textBaseline = 'middle';
+          textY = cy + ch / 2;
+        } else {
+          // bottom (Excel default for most cells)
+          ctx.textBaseline = 'bottom';
+          textY = cy + ch - paddingY;
+        }
+        ctx.fillText(text, textX, textY);
+      }
+
       ctx.restore();
     }
   }

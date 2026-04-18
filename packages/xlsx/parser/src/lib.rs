@@ -64,6 +64,7 @@ pub struct Styles {
     pub fills: Vec<Fill>,
     pub borders: Vec<Border>,
     pub cell_xfs: Vec<CellXf>,
+    pub num_fmts: Vec<NumFmt>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -113,6 +114,13 @@ pub struct CellXf {
     pub wrap_text: bool,
 }
 
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NumFmt {
+    pub num_fmt_id: u32,
+    pub format_code: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedWorkbook {
@@ -120,6 +128,19 @@ pub struct ParsedWorkbook {
     pub styles: Styles,
     pub shared_strings: Vec<String>,
 }
+
+// Excel built-in indexed color palette (indices 0-63)
+// Standard Excel 2003 color palette
+const INDEXED_COLORS: &[&str] = &[
+    "#000000", "#FFFFFF", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", // 0-7
+    "#000000", "#FFFFFF", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", // 8-15
+    "#800000", "#008000", "#000080", "#808000", "#800080", "#008080", "#C0C0C0", "#808080", // 16-23
+    "#9999FF", "#993366", "#FFFFCC", "#CCFFFF", "#660066", "#FF8080", "#0066CC", "#CCCCFF", // 24-31
+    "#000080", "#FF00FF", "#FFFF00", "#00FFFF", "#800080", "#800000", "#008080", "#0000FF", // 32-39
+    "#00CCFF", "#CCFFFF", "#CCFFCC", "#FFFF99", "#99CCFF", "#FF99CC", "#CC99FF", "#FFCC99", // 40-47
+    "#3366FF", "#33CCCC", "#99CC00", "#FFCC00", "#FF9900", "#FF6600", "#666699", "#969696", // 48-55
+    "#003366", "#339966", "#003300", "#333300", "#993300", "#993366", "#333399", "#333333", // 56-63
+];
 
 #[wasm_bindgen]
 pub fn parse_xlsx(data: &[u8]) -> Result<String, JsValue> {
@@ -166,7 +187,8 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     let sheets = parse_workbook_sheets(&wb_doc);
 
     let shared_strings = read_shared_strings(&mut archive);
-    let styles = parse_styles(&mut archive)?;
+    let theme_colors = parse_theme_colors(&mut archive);
+    let styles = parse_styles(&mut archive, &theme_colors)?;
 
     Ok(ParsedWorkbook {
         workbook: Workbook { sheets },
@@ -182,6 +204,148 @@ fn read_zip_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> R
     let mut buf = String::new();
     file.read_to_string(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+fn parse_theme_colors(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
+    let Ok(xml) = read_zip_entry(archive, "xl/theme/theme1.xml") else {
+        return Vec::new();
+    };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else {
+        return Vec::new();
+    };
+    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    // Find clrScheme node and collect child color elements in order
+    // OOXML order: dk1, lt1, dk2, lt2, accent1, accent2, accent3, accent4, accent5, accent6, hlink, folHlink
+    let mut colors: Vec<String> = Vec::new();
+    for node in doc.descendants() {
+        if node.tag_name().name() == "clrScheme" && node.tag_name().namespace() == Some(a_ns) {
+            for child in node.children() {
+                if !child.is_element() { continue; }
+                // Each child is a color slot; its first child element holds the actual color
+                for color_node in child.children() {
+                    if !color_node.is_element() { continue; }
+                    let hex = match color_node.tag_name().name() {
+                        "srgbClr" => {
+                            color_node.attribute("val").map(|v| format!("#{}", v.to_uppercase()))
+                        }
+                        "sysClr" => {
+                            color_node.attribute("lastClr").map(|v| format!("#{}", v.to_uppercase()))
+                        }
+                        _ => None,
+                    };
+                    if let Some(h) = hex {
+                        colors.push(h);
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    colors
+}
+
+/// Convert hex color + tint to resulting hex color using HLS model.
+/// tint > 0: lighten; tint < 0: darken.
+fn apply_tint(hex: &str, tint: f64) -> String {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 { return format!("#{}", hex); }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f64 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f64 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f64 / 255.0;
+
+    // RGB → HLS
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let s = if max == min {
+        0.0
+    } else if l < 0.5 {
+        (max - min) / (max + min)
+    } else {
+        (max - min) / (2.0 - max - min)
+    };
+    let h = if max == min {
+        0.0
+    } else if max == r {
+        (g - b) / (max - min) / 6.0
+    } else if max == g {
+        ((b - r) / (max - min) + 2.0) / 6.0
+    } else {
+        ((r - g) / (max - min) + 4.0) / 6.0
+    };
+    let h = if h < 0.0 { h + 1.0 } else { h };
+
+    // Apply tint to luminance
+    let new_l = if tint > 0.0 {
+        l * (1.0 - tint) + tint
+    } else {
+        l * (1.0 + tint)
+    };
+
+    // HLS → RGB
+    let (nr, ng, nb) = hls_to_rgb(h, new_l, s);
+    format!("#{:02X}{:02X}{:02X}", (nr * 255.0).round() as u8, (ng * 255.0).round() as u8, (nb * 255.0).round() as u8)
+}
+
+fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+    (r, g, b)
+}
+
+fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+    if t < 1.0 / 2.0 { return q; }
+    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    p
+}
+
+fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    // rgb attribute (ARGB: 8 chars, drop alpha; or 6-char RGB)
+    if let Some(rgb) = node.attribute("rgb") {
+        if rgb.len() == 8 {
+            return Some(format!("#{}", &rgb[2..].to_uppercase()));
+        }
+        return Some(format!("#{}", rgb.to_uppercase()));
+    }
+
+    // theme attribute → resolve from theme color array + optional tint
+    if let Some(theme_str) = node.attribute("theme") {
+        if let Ok(idx) = theme_str.parse::<usize>() {
+            if let Some(base) = theme_colors.get(idx) {
+                let tint = node.attribute("tint").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                if tint == 0.0 {
+                    return Some(base.clone());
+                }
+                return Some(apply_tint(base, tint));
+            }
+        }
+    }
+
+    // indexed attribute → Excel built-in palette
+    if let Some(indexed_str) = node.attribute("indexed") {
+        if let Ok(idx) = indexed_str.parse::<usize>() {
+            // indices 64 (foreground) and 65 (background) are special: use black/white
+            let color = match idx {
+                64 => "#000000",
+                65 => "#FFFFFF",
+                _ => INDEXED_COLORS.get(idx).copied().unwrap_or("#000000"),
+            };
+            return Some(color.to_string());
+        }
+    }
+
+    None
 }
 
 fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
@@ -242,20 +406,37 @@ fn read_shared_strings(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<Stri
     strings
 }
 
-fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Result<Styles, String> {
+fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[String]) -> Result<Styles, String> {
     let xml = read_zip_entry(archive, "xl/styles.xml")?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
-    let fonts = parse_fonts(&doc, ns);
-    let fills = parse_fills(&doc, ns);
-    let borders = parse_borders(&doc, ns);
+    let num_fmts = parse_num_fmts(&doc, ns);
+    let fonts = parse_fonts(&doc, ns, theme_colors);
+    let fills = parse_fills(&doc, ns, theme_colors);
+    let borders = parse_borders(&doc, ns, theme_colors);
     let cell_xfs = parse_cell_xfs(&doc, ns);
 
-    Ok(Styles { fonts, fills, borders, cell_xfs })
+    Ok(Styles { fonts, fills, borders, cell_xfs, num_fmts })
 }
 
-fn parse_fonts(doc: &roxmltree::Document, ns: &str) -> Vec<Font> {
+fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt> {
+    let mut fmts = Vec::new();
+    for node in doc.descendants() {
+        if node.tag_name().name() == "numFmts" && node.tag_name().namespace() == Some(ns) {
+            for child in node.children() {
+                if child.tag_name().name() != "numFmt" { continue; }
+                let num_fmt_id = child.attribute("numFmtId").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let format_code = child.attribute("formatCode").unwrap_or("").to_string();
+                fmts.push(NumFmt { num_fmt_id, format_code });
+            }
+            break;
+        }
+    }
+    fmts
+}
+
+fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Font> {
     let mut fonts = Vec::new();
     for fonts_node in doc.descendants() {
         if fonts_node.tag_name().name() == "fonts" && fonts_node.tag_name().namespace() == Some(ns) {
@@ -276,7 +457,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str) -> Vec<Font> {
                             f.name = child.attribute("val").map(|s| s.to_string());
                         }
                         "color" => {
-                            f.color = parse_color(&child);
+                            f.color = parse_color(&child, theme_colors);
                         }
                         _ => {}
                     }
@@ -289,7 +470,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str) -> Vec<Font> {
     fonts
 }
 
-fn parse_fills(doc: &roxmltree::Document, ns: &str) -> Vec<Fill> {
+fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Fill> {
     let mut fills = Vec::new();
     for fills_node in doc.descendants() {
         if fills_node.tag_name().name() == "fills" && fills_node.tag_name().namespace() == Some(ns) {
@@ -301,8 +482,8 @@ fn parse_fills(doc: &roxmltree::Document, ns: &str) -> Vec<Fill> {
                         f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
                         for color_node in pf.children() {
                             match color_node.tag_name().name() {
-                                "fgColor" => f.fg_color = parse_color(&color_node),
-                                "bgColor" => f.bg_color = parse_color(&color_node),
+                                "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
+                                "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
                                 _ => {}
                             }
                         }
@@ -316,7 +497,7 @@ fn parse_fills(doc: &roxmltree::Document, ns: &str) -> Vec<Fill> {
     fills
 }
 
-fn parse_borders(doc: &roxmltree::Document, ns: &str) -> Vec<Border> {
+fn parse_borders(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Border> {
     let mut borders = Vec::new();
     for borders_node in doc.descendants() {
         if borders_node.tag_name().name() == "borders" && borders_node.tag_name().namespace() == Some(ns) {
@@ -326,7 +507,7 @@ fn parse_borders(doc: &roxmltree::Document, ns: &str) -> Vec<Border> {
                 for edge_node in border_node.children() {
                     let style = edge_node.attribute("style").unwrap_or("").to_string();
                     if style.is_empty() { continue; }
-                    let color = edge_node.children().next().and_then(|c| parse_color(&c));
+                    let color = edge_node.children().find(|c| c.is_element()).and_then(|c| parse_color(&c, theme_colors));
                     let edge = Some(BorderEdge { style, color });
                     match edge_node.tag_name().name() {
                         "left" => b.left = edge,
@@ -370,17 +551,6 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
         }
     }
     xfs
-}
-
-fn parse_color(node: &roxmltree::Node) -> Option<String> {
-    if let Some(rgb) = node.attribute("rgb") {
-        // ARGB format: drop first 2 chars (alpha) → RRGGBB
-        if rgb.len() == 8 {
-            return Some(format!("#{}", &rgb[2..]));
-        }
-        return Some(format!("#{}", rgb));
-    }
-    None
 }
 
 fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<Worksheet, String> {

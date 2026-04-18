@@ -38,11 +38,17 @@ export type CellValue =
   | { type: 'bool'; bool: boolean }
   | { type: 'error'; error: string };
 
+export interface NumFmt {
+  numFmtId: number;
+  formatCode: string;
+}
+
 export interface Styles {
   fonts: Font[];
   fills: Fill[];
   borders: Border[];
   cellXfs: CellXf[];
+  numFmts: NumFmt[];
 }
 
 export interface Font {
