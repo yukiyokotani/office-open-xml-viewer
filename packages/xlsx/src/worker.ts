@@ -1,7 +1,7 @@
 import init, { parse_xlsx, parse_sheet } from './wasm/xlsx_parser.js';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
-let initPromise: Promise<void> | null = null;
+let initPromise: Promise<unknown> | null = null;
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
