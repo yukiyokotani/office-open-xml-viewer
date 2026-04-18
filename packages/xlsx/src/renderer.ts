@@ -526,12 +526,21 @@ export function renderViewport(
   opts: RenderViewportOptions = {},
 ): void {
   const dpr = opts.dpr ?? 1;
-  const canvasW = ctx.canvas.width / dpr;
-  const canvasH = ctx.canvas.height / dpr;
+  const cs = opts.cellScale ?? 1;
+  const physW = ctx.canvas.width / dpr;
+  const physH = ctx.canvas.height / dpr;
+  // Logical canvas size: the "virtual" coordinate space in which cells are drawn
+  const canvasW = physW / cs;
+  const canvasH = physH / cs;
 
-  ctx.clearRect(0, 0, canvasW, canvasH);
+  // Clear the full physical canvas before applying scale transform
+  ctx.clearRect(0, 0, physW, physH);
   ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvasW, canvasH);
+  ctx.fillRect(0, 0, physW, physH);
+
+  // Apply cell scale: all subsequent drawing is in logical coordinates
+  ctx.save();
+  ctx.scale(cs, cs);
 
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
   const scrollOffsetX = opts.scrollOffsetX ?? 0;
@@ -676,6 +685,9 @@ export function renderViewport(
     ctx.stroke();
     ctx.restore();
   }
+
+  // Restore the cellScale transform applied at the start
+  ctx.restore();
 }
 
 // ────────────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@ const TAB_BAR_H = 30;
 export interface XlsxViewerOptions {
   width?: number;
   height?: number;
+  /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
+  cellScale?: number;
   onReady?: (sheetNames: string[]) => void;
   onSheetChange?: (index: number, name: string) => void;
   onError?: (err: Error) => void;
@@ -123,6 +125,7 @@ export class XlsxViewer {
   }
 
   private updateSpacerSize(ws: Worksheet): void {
+    const cs = this.opts.cellScale ?? 1;
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
 
@@ -148,7 +151,7 @@ export class XlsxViewer {
     maxRow += 30;
     maxCol += 10;
 
-    // Spacer = header + frozen area + scrollable area
+    // Spacer = header + frozen area + scrollable area (all in logical px, then scale)
     let totalW = HEADER_W + frozenW;
     for (let c = freezeCols + 1; c <= maxCol; c++) {
       totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
@@ -158,8 +161,8 @@ export class XlsxViewer {
       totalH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
     }
 
-    this.spacer.style.width = `${totalW}px`;
-    this.spacer.style.height = `${totalH}px`;
+    this.spacer.style.width = `${Math.round(totalW * cs)}px`;
+    this.spacer.style.height = `${Math.round(totalH * cs)}px`;
   }
 
   private async renderCurrentSheet(): Promise<void> {
@@ -167,12 +170,13 @@ export class XlsxViewer {
     const ws = this.currentWorksheet;
     const w = this.opts.width ?? 1200;
     const h = this.opts.height ?? 600;
+    const cs = this.opts.cellScale ?? 1;
     const dpr = window.devicePixelRatio ?? 1;
 
     const freezeRows = ws.freezeRows ?? 0;
     const freezeCols = ws.freezeCols ?? 0;
 
-    // Compute frozen area pixel size (for viewport offset)
+    // Compute frozen area in logical (unscaled) pixels
     let frozenW = 0;
     for (let c = 1; c <= freezeCols; c++) {
       frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
@@ -182,37 +186,38 @@ export class XlsxViewer {
       frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
     }
 
-    // scrollLeft/scrollTop map to offset into the scrollable (non-frozen) cell area
-    const scrollX = this.scrollHost.scrollLeft;
-    const scrollY = this.scrollHost.scrollTop;
+    // DOM scrollLeft/scrollTop are in scaled (physical) CSS pixels.
+    // Convert to logical pixels for cell-finding by dividing by cs.
+    const logicalScrollX = this.scrollHost.scrollLeft / cs;
+    const logicalScrollY = this.scrollHost.scrollTop / cs;
 
-    // Find startCol (within scrollable cols, starting from freezeCols+1)
+    // Find startCol in logical pixel space
     let startCol = freezeCols + 1;
     let xAcc = 0;
     let offsetX = 0;
     while (true) {
       const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth);
-      if (xAcc + cw > scrollX) { offsetX = scrollX - xAcc; break; }
+      if (xAcc + cw > logicalScrollX) { offsetX = logicalScrollX - xAcc; break; }
       xAcc += cw;
       startCol++;
       if (startCol > 16384) break;
     }
 
-    // Find startRow (within scrollable rows, starting from freezeRows+1)
+    // Find startRow in logical pixel space
     let startRow = freezeRows + 1;
     let yAcc = 0;
     let offsetY = 0;
     while (true) {
       const rh = rowHeightToPx(ws.rowHeights[startRow] ?? ws.defaultRowHeight);
-      if (yAcc + rh > scrollY) { offsetY = scrollY - yAcc; break; }
+      if (yAcc + rh > logicalScrollY) { offsetY = logicalScrollY - yAcc; break; }
       yAcc += rh;
       startRow++;
       if (startRow > 1048576) break;
     }
 
-    // Effective scrollable area (canvas minus headers and frozen strips)
-    const cellW = w - HEADER_W - frozenW;
-    const cellH = h - HEADER_H - frozenH;
+    // Effective scrollable area in logical pixels (canvas / cs - headers - frozen)
+    const cellW = w / cs - HEADER_W - frozenW;
+    const cellH = h / cs - HEADER_H - frozenH;
     const avgCW = colWidthToPx(ws.defaultColWidth);
     const avgRH = rowHeightToPx(ws.defaultRowHeight);
     const cols = Math.ceil((cellW + offsetX) / Math.max(avgCW, 1)) + 2;
@@ -224,6 +229,7 @@ export class XlsxViewer {
       width: w,
       height: h,
       dpr,
+      cellScale: cs,
       scrollOffsetX: offsetX,
       scrollOffsetY: offsetY,
       freezeRows,

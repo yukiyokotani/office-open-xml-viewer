@@ -159,6 +159,8 @@ export interface RenderViewportOptions {
   scrollOffsetY?: number;
   freezeRows?: number;
   freezeCols?: number;
+  /** Scale factor applied to all cell/header dimensions (default 1). */
+  cellScale?: number;
 }
 
 export type WorkerRequest =
