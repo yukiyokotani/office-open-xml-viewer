@@ -74,10 +74,30 @@ export interface Cell {
 
 export type CellValue =
   | { type: 'empty' }
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; runs?: Run[] }
   | { type: 'number'; number: number }
   | { type: 'bool'; bool: boolean }
   | { type: 'error'; error: string };
+
+export interface Run {
+  text: string;
+  font?: RunFont;
+}
+
+export interface RunFont {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  size?: number;
+  color?: string | null;
+  name?: string | null;
+}
+
+export interface SharedString {
+  text: string;
+  runs?: Run[];
+}
 
 export interface NumFmt {
   numFmtId: number;
@@ -140,7 +160,7 @@ export interface CellXf {
 export interface ParsedWorkbook {
   workbook: Workbook;
   styles: Styles;
-  sharedStrings: string[];
+  sharedStrings: SharedString[];
 }
 
 export interface ViewportRange {

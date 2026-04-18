@@ -2,6 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf,
+  Run,
 } from './types.js';
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
@@ -37,6 +38,26 @@ function buildFont(font: Font, cs = 1): string {
   const sizePx = Math.max(1, Math.round(font.size * ROW_HEIGHT_TO_PX * cs));
   const family = font.name ? `"${font.name}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
   return `${style}${weight}${sizePx}px ${family}`;
+}
+
+/**
+ * Resolve a Run's font against a base Font. Per ECMA-376, a run's <rPr>
+ * completely specifies bold/italic/underline/strike for that run, while
+ * size/color/name fall back to the base when omitted. A run with no
+ * <rPr> (run.font undefined) inherits the base entirely.
+ */
+function applyRunFont(base: Font, run: Run): Font {
+  const rf = run.font;
+  if (!rf) return base;
+  return {
+    bold: rf.bold,
+    italic: rf.italic,
+    underline: rf.underline,
+    strike: rf.strike,
+    size: rf.size ?? base.size,
+    color: rf.color ?? base.color,
+    name: rf.name ?? base.name,
+  };
 }
 
 function resolveXf(styles: Styles, styleIndex: number): { font: Font; fill: Fill; border: Border; xf: CellXf } {
@@ -649,6 +670,11 @@ function renderQuadrant(
       ctx.rect(cx, cy, drawW, cellH);
       ctx.clip();
 
+      // Rich text: draw each run with its own font. Only supported for the
+      // non-wrap path (wrap with mixed fonts is significantly more complex).
+      const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
+      const hasRichText = runs && runs.length > 0 && !xf.wrapText;
+
       if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
         const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
@@ -659,6 +685,58 @@ function renderQuadrant(
         else { startY = cy + cellH - totalTextH - paddingY; ctx.textBaseline = 'top'; }
         for (let li = 0; li < lines.length; li++) {
           ctx.fillText(lines[li], textX, startY + li * lineH);
+        }
+      } else if (hasRichText) {
+        // Per-run drawing: compute font for each run, measure widths, draw LTR
+        const runFonts = runs.map(r => applyRunFont(fontForDraw, r));
+        const runWidths: number[] = runs.map((r, i) => {
+          ctx.font = buildFont(runFonts[i], cs);
+          return ctx.measureText(r.text).width;
+        });
+        const totalWidth = runWidths.reduce((a, b) => a + b, 0);
+        let startX: number;
+        if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
+        else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
+        else startX = cx + paddingX;
+        // Use left alignment since we position each run ourselves
+        ctx.textAlign = 'left';
+        let textY: number;
+        if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
+        else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
+        else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+        let runX = startX;
+        for (let i = 0; i < runs.length; i++) {
+          const rf = runFonts[i];
+          ctx.font = buildFont(rf, cs);
+          const runColor = cf.fontColor ?? rf.color;
+          ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
+          ctx.fillText(runs[i].text, runX, textY);
+          const rSizePx = Math.round(rf.size * ROW_HEIGHT_TO_PX);
+          if (rf.underline) {
+            const uy = alignV === 'top'
+              ? cy + paddingY + rSizePx + 1
+              : alignV === 'center'
+                ? cy + cellH / 2 + Math.round(rSizePx * 0.55)
+                : cy + cellH - paddingY + 1;
+            ctx.save();
+            ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(runX, uy); ctx.lineTo(runX + runWidths[i], uy); ctx.stroke();
+            ctx.restore();
+          }
+          if (rf.strike) {
+            const sy = alignV === 'top'
+              ? cy + paddingY + Math.round(rSizePx * 0.5)
+              : alignV === 'center'
+                ? cy + cellH / 2
+                : cy + cellH - paddingY - Math.round(rSizePx * 0.35);
+            ctx.save();
+            ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(runX, sy); ctx.lineTo(runX + runWidths[i], sy); ctx.stroke();
+            ctx.restore();
+          }
+          runX += runWidths[i];
         }
       } else {
         // Measure once for both underline and strike

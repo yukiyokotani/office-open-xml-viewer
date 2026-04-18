@@ -105,10 +105,45 @@ pub struct Cell {
 pub enum CellValue {
     #[default]
     Empty,
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runs: Option<Vec<Run>>,
+    },
     Number { number: f64 },
     Bool { bool: bool },
     Error { error: String },
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<RunFont>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFont {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedString {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<Run>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,7 +225,7 @@ pub struct NumFmt {
 pub struct ParsedWorkbook {
     pub workbook: Workbook,
     pub styles: Styles,
-    pub shared_strings: Vec<String>,
+    pub shared_strings: Vec<SharedString>,
 }
 
 // Excel built-in indexed color palette (indices 0-63)
@@ -234,9 +269,10 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
-    let shared_strings = read_shared_strings(&mut archive);
+    let theme_colors = parse_theme_colors(&mut archive);
+    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
-    let ws = parse_worksheet(&sheet_xml, &shared_strings, name)
+    let ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
         .map_err(|e| e.to_string())?;
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
@@ -250,8 +286,8 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
-    let shared_strings = read_shared_strings(&mut archive);
     let theme_colors = parse_theme_colors(&mut archive);
+    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let styles = parse_styles(&mut archive, &theme_colors)?;
 
     Ok(ParsedWorkbook {
@@ -445,7 +481,10 @@ fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     None
 }
 
-fn read_shared_strings(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
+fn read_shared_strings(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    theme_colors: &[String],
+) -> Vec<SharedString> {
     let Ok(xml) = read_zip_entry(archive, "xl/sharedStrings.xml") else {
         return Vec::new();
     };
@@ -456,18 +495,77 @@ fn read_shared_strings(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<Stri
     let mut strings = Vec::new();
     for si in doc.descendants() {
         if si.tag_name().name() == "si" && si.tag_name().namespace() == Some(ns) {
-            let mut text = String::new();
-            for t in si.descendants() {
-                if t.tag_name().name() == "t" && t.tag_name().namespace() == Some(ns) {
-                    if let Some(s) = t.text() {
-                        text.push_str(s);
-                    }
-                }
-            }
-            strings.push(text);
+            strings.push(parse_si_node(&si, ns, theme_colors));
         }
     }
     strings
+}
+
+/// Parse a `<si>` (shared) or `<is>` (inline) node into a SharedString.
+/// The node may contain direct `<t>` text (plain) and/or multiple `<r>`
+/// runs with per-run `<rPr>` font properties.
+fn parse_si_node(
+    node: &roxmltree::Node,
+    ns: &str,
+    theme_colors: &[String],
+) -> SharedString {
+    let mut text = String::new();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut has_runs = false;
+    for child in node.children() {
+        if !child.is_element() { continue; }
+        match child.tag_name().name() {
+            "t" if child.tag_name().namespace() == Some(ns) => {
+                if let Some(s) = child.text() {
+                    text.push_str(s);
+                }
+            }
+            "r" if child.tag_name().namespace() == Some(ns) => {
+                has_runs = true;
+                let mut run_text = String::new();
+                let mut run_font: Option<RunFont> = None;
+                for rc in child.children() {
+                    match rc.tag_name().name() {
+                        "t" => {
+                            if let Some(s) = rc.text() {
+                                run_text.push_str(s);
+                            }
+                        }
+                        "rPr" => {
+                            let mut f = RunFont::default();
+                            for rp in rc.children() {
+                                match rp.tag_name().name() {
+                                    "b" => f.bold = true,
+                                    "i" => f.italic = true,
+                                    "u" => f.underline = true,
+                                    "strike" => f.strike = true,
+                                    "sz" => {
+                                        f.size = rp.attribute("val").and_then(|s| s.parse().ok());
+                                    }
+                                    "color" => {
+                                        f.color = parse_color(&rp, theme_colors);
+                                    }
+                                    "rFont" | "name" => {
+                                        f.name = rp.attribute("val").map(|s| s.to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            run_font = Some(f);
+                        }
+                        _ => {}
+                    }
+                }
+                text.push_str(&run_text);
+                runs.push(Run { text: run_text, font: run_font });
+            }
+            _ => {}
+        }
+    }
+    SharedString {
+        text,
+        runs: if has_runs { Some(runs) } else { None },
+    }
 }
 
 fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[String]) -> Result<Styles, String> {
@@ -702,7 +800,12 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
     xfs
 }
 
-fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<Worksheet, String> {
+fn parse_worksheet(
+    xml: &str,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    name: &str,
+) -> Result<Worksheet, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -778,7 +881,7 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
-                let cells = parse_row_cells(&node, shared_strings, ns);
+                let cells = parse_row_cells(&node, shared_strings, theme_colors, ns);
                 rows.push(Row { index: row_idx, height, cells });
             }
             "conditionalFormatting" if node.tag_name().namespace() == Some(ns) => {
@@ -899,7 +1002,12 @@ fn parse_sqref(s: &str) -> Vec<CellRange> {
     }).collect()
 }
 
-fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &str) -> Vec<Cell> {
+fn parse_row_cells(
+    row_node: &roxmltree::Node,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    ns: &str,
+) -> Vec<Cell> {
     let mut cells = Vec::new();
     for c_node in row_node.children() {
         if c_node.tag_name().name() != "c" || c_node.tag_name().namespace() != Some(ns) {
@@ -910,6 +1018,9 @@ fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &s
         let cell_type = c_node.attribute("t").unwrap_or("");
         let style_index: u32 = c_node.attribute("s").and_then(|s| s.parse().ok()).unwrap_or(0);
 
+        // Inline string: <c t="inlineStr"><is>...</is></c>
+        let is_node = c_node.children().find(|n| n.tag_name().name() == "is");
+
         let v_text = c_node
             .children()
             .find(|n| n.tag_name().name() == "v")
@@ -917,23 +1028,34 @@ fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &s
             .unwrap_or("")
             .to_string();
 
-        let value = if v_text.is_empty() {
+        let value = if cell_type == "inlineStr" {
+            match is_node {
+                Some(is) => {
+                    let ss = parse_si_node(&is, ns, theme_colors);
+                    CellValue::Text { text: ss.text, runs: ss.runs }
+                }
+                None => CellValue::Empty,
+            }
+        } else if v_text.is_empty() {
             CellValue::Empty
         } else {
             match cell_type {
                 "s" => {
                     let idx: usize = v_text.parse().unwrap_or(0);
-                    let text = shared_strings.get(idx).cloned().unwrap_or_default();
-                    CellValue::Text { text }
+                    if let Some(ss) = shared_strings.get(idx) {
+                        CellValue::Text { text: ss.text.clone(), runs: ss.runs.clone() }
+                    } else {
+                        CellValue::Text { text: String::new(), runs: None }
+                    }
                 }
-                "str" | "inlineStr" => CellValue::Text { text: v_text },
+                "str" => CellValue::Text { text: v_text, runs: None },
                 "b" => CellValue::Bool { bool: v_text == "1" || v_text == "true" },
                 "e" => CellValue::Error { error: v_text },
                 _ => {
                     if let Ok(n) = v_text.parse::<f64>() {
                         CellValue::Number { number: n }
                     } else {
-                        CellValue::Text { text: v_text }
+                        CellValue::Text { text: v_text, runs: None }
                     }
                 }
             }
