@@ -2335,20 +2335,27 @@ function renderTextBody(
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
     cursorY += topGapPx;
 
-    const baseline = cursorY + lineHeight * 0.8;
+    // Measure line for alignment AND baseline ascent in one pass.
+    // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,
+    // replacing the 0.8×lineHeight heuristic that over-estimates for CJK and
+    // tall fonts, causing text to sit too low within the line box.
+    let lineWidth = 0;
+    let maxAscent = lineHeight * 0.8; // fallback when no segments
+    for (const seg of line.segments) {
+      ctx.font = seg.font;
+      const m = ctx.measureText(seg.text || 'M');
+      lineWidth += seg.text ? m.width : 0;
+      if (m.actualBoundingBoxAscent > 0) {
+        maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
+      }
+    }
+    const baseline = cursorY + maxAscent;
 
     // Draw bullet
     if (bulletLabel) {
       ctx.font = bulletFont;
       ctx.fillStyle = bulletColor;
       ctx.fillText(bulletLabel, bulletX, baseline);
-    }
-
-    // Measure line for alignment
-    let lineWidth = 0;
-    for (const seg of line.segments) {
-      ctx.font = seg.font;
-      lineWidth += ctx.measureText(seg.text).width;
     }
 
     const effectiveTextX = textX + textXOffset;
