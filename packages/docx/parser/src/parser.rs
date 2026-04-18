@@ -55,7 +55,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     let (section, refs) = parse_section(sect_pr, &rel_map);
 
-    let body = parse_body_elements(body_node, &style_map, &mut num_map, &media_map);
+    let body = parse_body_elements(body_node, &style_map, &mut num_map, &media_map, &rel_map);
 
     let headers = load_header_footer_set(&mut zip, &refs.headers, "hdr", &style_map, &mut num_map);
     let footers = load_header_footer_set(&mut zip, &refs.footers, "ftr", &style_map, &mut num_map);
@@ -68,25 +68,50 @@ fn parse_body_elements(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
+    // The body-level sectPr (the last element) defines the final section and
+    // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
+    let body_level_sect_pr = body_node.children()
+        .filter(|n| n.is_element())
+        .last()
+        .filter(|n| n.tag_name().name() == "sectPr");
+    let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
+
     for child in body_node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(child, style_map, num_map, media_map);
-                if result.runs.len() == 1 {
-                    if let DocRun::Break { break_type: BreakType::Page } = &result.runs[0] {
-                        body.push(BodyElement::PageBreak);
-                        continue;
-                    }
+                let result = parse_paragraph(child, style_map, num_map, media_map, rel_map);
+                let is_page_break_only = result.runs.len() == 1 && matches!(
+                    result.runs[0],
+                    DocRun::Break { break_type: BreakType::Page }
+                );
+                if is_page_break_only {
+                    body.push(BodyElement::PageBreak);
+                    continue;
                 }
                 body.push(BodyElement::Paragraph(result));
+                // A section break inside pPr (that isn't the final body-level sectPr)
+                // terminates the current section and starts a new one on a new page.
+                let has_mid_section_break = child_w(child, "pPr")
+                    .and_then(|ppr| child_w(ppr, "sectPr"))
+                    .is_some();
+                if has_mid_section_break {
+                    body.push(BodyElement::PageBreak);
+                }
             }
             "tbl" => {
-                let tbl = parse_table(child, style_map, num_map, media_map);
+                let tbl = parse_table(child, style_map, num_map, media_map, rel_map);
                 body.push(BodyElement::Table(tbl));
             }
-            "sectPr" => {}
+            "sectPr" => {
+                // Mid-body loose sectPr (rare) would behave like a page break.
+                // The final body-level sectPr only defines section settings — skip it.
+                if Some(child.id()) != body_level_sect_id {
+                    body.push(BodyElement::PageBreak);
+                }
+            }
             _ => {}
         }
     }
@@ -149,7 +174,7 @@ fn load_header_footer_set(
             continue;
         };
 
-        let body = parse_body_elements(root, style_map, num_map, &local_media_map);
+        let body = parse_body_elements(root, style_map, num_map, &local_media_map, &local_rel_map);
         let hf = HeaderFooter { body };
         match kind.as_str() {
             "first" => out.first = Some(hf),
@@ -218,6 +243,7 @@ fn parse_paragraph(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle; fall back to "Normal" (default paragraph style)
     let ppr_node = child_w(node, "pPr");
@@ -272,7 +298,11 @@ fn parse_paragraph(
 
     // Parse runs
     let mut runs = vec![];
-    parse_para_content(node, &base_run, style_map, media_map, &mut runs);
+    parse_para_content(node, &base_run, style_map, media_map, rel_map, &mut runs);
+
+    let tab_stops = base_para.tab_stops.clone().unwrap_or_default().into_iter()
+        .map(|(pos, alignment, leader)| TabStop { pos, alignment, leader })
+        .collect();
 
     DocParagraph {
         alignment,
@@ -283,6 +313,7 @@ fn parse_paragraph(
         space_after,
         line_spacing,
         numbering,
+        tab_stops,
         runs,
     }
 }
@@ -306,6 +337,7 @@ fn parse_para_content(
     base_run: &RunFmt,
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
     runs: &mut Vec<DocRun>,
 ) {
     let mut field = FieldState::default();
@@ -313,15 +345,19 @@ fn parse_para_content(
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "r" => {
-                handle_run_in_para(child, base_run, style_map, media_map, runs, &mut field, false);
+                handle_run_in_para(child, base_run, style_map, media_map, runs, &mut field, None);
             }
             "hyperlink" => {
+                // Resolve URL from r:id via relationships
+                let href = child.attribute((R_NS, "id"))
+                    .or_else(|| child.attribute("id"))
+                    .and_then(|rid| rel_map.get(rid).cloned());
                 for r in child.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                    handle_run_in_para(r, base_run, style_map, media_map, runs, &mut field, true);
+                    handle_run_in_para(r, base_run, style_map, media_map, runs, &mut field, Some(href.clone()));
                 }
             }
             "ins" | "del" | "smartTag" => {
-                parse_para_content(child, base_run, style_map, media_map, runs);
+                parse_para_content(child, base_run, style_map, media_map, rel_map, runs);
             }
             "fldSimple" => {
                 let instr = attr_w(child, "instr").unwrap_or_default();
@@ -347,7 +383,8 @@ fn handle_run_in_para(
     media_map: &HashMap<String, String>,
     runs: &mut Vec<DocRun>,
     field: &mut FieldState,
-    is_link: bool,
+    // Outer None = not inside a hyperlink. Some(None) = hyperlink without URL. Some(Some(url)) = hyperlink with URL.
+    link_href: Option<Option<String>>,
 ) {
     // Inspect this run for field control characters or instruction text first.
     let mut fld_char_type: Option<String> = None;
@@ -417,7 +454,7 @@ fn handle_run_in_para(
     }
 
     // Normal run
-    parse_run_inner(r_node, base_run, style_map, media_map, runs, is_link);
+    parse_run_inner(r_node, base_run, style_map, media_map, runs, link_href);
 }
 
 fn extract_text_from_runs(node: roxmltree::Node) -> String {
@@ -446,6 +483,7 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str) -> DocRun {
         color: fmt.color.clone(),
         font_family: fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone()),
         background: fmt.background.clone(),
+        vert_align: fmt.vert_align.clone(),
     })
 }
 
@@ -464,7 +502,7 @@ fn parse_run_inner(
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
     runs: &mut Vec<DocRun>,
-    is_link: bool,
+    link_href: Option<Option<String>>,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -480,6 +518,9 @@ fn parse_run_inner(
         apply_direct_run(&mut fmt, &direct);
     }
 
+    let is_link = link_href.is_some();
+    let hyperlink = link_href.clone().flatten();
+
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
     let underline = fmt.underline.unwrap_or(false) || is_link;
@@ -491,6 +532,7 @@ fn parse_run_inner(
         fmt.color.clone()
     };
     let font_family = fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone());
+    let vert_align = fmt.vert_align.clone();
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -508,8 +550,27 @@ fn parse_run_inner(
                         font_family: font_family.clone(),
                         is_link,
                         background: fmt.background.clone(),
+                        vert_align: vert_align.clone(),
+                        hyperlink: hyperlink.clone(),
                     }));
                 }
+            }
+            "tab" => {
+                // w:tab emits a horizontal tab character; layout handles tab stop alignment.
+                runs.push(DocRun::Text(TextRun {
+                    text: "\t".to_string(),
+                    bold,
+                    italic,
+                    underline,
+                    strikethrough,
+                    font_size,
+                    color: color.clone(),
+                    font_family: font_family.clone(),
+                    is_link,
+                    background: fmt.background.clone(),
+                    vert_align: vert_align.clone(),
+                    hyperlink: hyperlink.clone(),
+                }));
             }
             "br" => {
                 let break_type = attr_w(child, "type").as_deref().map(|v| match v {
@@ -757,6 +818,7 @@ fn parse_table(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
 ) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
@@ -787,7 +849,7 @@ fn parse_table(
 
     let mut rows = vec![];
     for tr_node in children_w(node, "tr") {
-        let row = parse_table_row(tr_node, style_map, num_map, media_map);
+        let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map);
         rows.push(row);
     }
 
@@ -807,6 +869,7 @@ fn parse_table_row(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let row_height = tr_pr
@@ -817,7 +880,7 @@ fn parse_table_row(
 
     let mut cells = vec![];
     for tc_node in children_w(node, "tc") {
-        let cell = parse_table_cell(tc_node, style_map, num_map, media_map);
+        let cell = parse_table_cell(tc_node, style_map, num_map, media_map, rel_map);
         cells.push(cell);
     }
 
@@ -829,6 +892,7 @@ fn parse_table_cell(
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
+    rel_map: &HashMap<String, String>,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -865,7 +929,7 @@ fn parse_table_cell(
 
     let mut content = vec![];
     for p_node in children_w(node, "p") {
-        content.push(parse_paragraph(p_node, style_map, num_map, media_map));
+        content.push(parse_paragraph(p_node, style_map, num_map, media_map, rel_map));
     }
 
     DocTableCell { content, col_span, v_merge, borders, background, v_align, width_pt }
@@ -922,6 +986,7 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     if direct.line_spacing_rule.is_some() { base.line_spacing_rule = direct.line_spacing_rule.clone(); }
     if direct.num_id.is_some() { base.num_id = direct.num_id; }
     if direct.num_level.is_some() { base.num_level = direct.num_level; }
+    if direct.tab_stops.is_some() { base.tab_stops = direct.tab_stops.clone(); }
 }
 
 fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
@@ -934,6 +999,7 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.font_family_ascii.is_some() { base.font_family_ascii = direct.font_family_ascii.clone(); }
     if direct.font_family_east_asia.is_some() { base.font_family_east_asia = direct.font_family_east_asia.clone(); }
     if direct.background.is_some() { base.background = direct.background.clone(); }
+    if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {

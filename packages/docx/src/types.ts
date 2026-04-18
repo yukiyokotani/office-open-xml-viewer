@@ -44,7 +44,15 @@ export interface DocParagraph {
   spaceAfter: number;   // pt
   lineSpacing: LineSpacing | null;
   numbering: NumberingInfo | null;
+  tabStops: TabStop[];
   runs: DocRun[];
+}
+
+export interface TabStop {
+  /** tab stop position in pt (from the left of paragraph content area) */
+  pos: number;
+  alignment: 'left' | 'center' | 'right' | 'decimal' | 'bar' | 'clear';
+  leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';
 }
 
 export interface LineSpacing {
@@ -80,6 +88,7 @@ export interface FieldRun {
   color: string | null;
   fontFamily: string | null;
   background: string | null;
+  vertAlign: 'super' | 'sub' | null;
 }
 
 export interface TextRun {
@@ -93,6 +102,9 @@ export interface TextRun {
   fontFamily: string | null;
   isLink: boolean;
   background: string | null;
+  vertAlign: 'super' | 'sub' | null;
+  /** Target URL for hyperlinks (resolved from relationships.xml) */
+  hyperlink: string | null;
 }
 
 export interface ImageRun {
