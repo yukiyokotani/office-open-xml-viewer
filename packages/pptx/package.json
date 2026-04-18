@@ -11,7 +11,7 @@
     "dev": "vite",
     "build": "tsc --build && vite build",
     "preview": "vite preview",
-    "storybook": "storybook dev -p 6006",
+    "storybook": "volta run --node 24.11.1 storybook dev -p 6006",
     "build-storybook": "storybook build",
     "wasm": "cd parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/",
     "vrt": "playwright test --config playwright.config.ts"

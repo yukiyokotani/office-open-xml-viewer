@@ -445,7 +445,17 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (el.flipV) ctx.scale(1, -1);
       ctx.translate(-cx, -cy);
     }
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
+    // For ellipses, PowerPoint positions text relative to the inscribed rectangle
+    // (the maximum-area rectangle that fits inside the ellipse: sides = a/√2, b/√2).
+    // This only affects non-ctr anchors; ctr anchor is invariant to this inset.
+    let tx = x, ty = y, tw = w, th = h;
+    if (geom === 'ellipse') {
+      const insetX = w * (1 - 1 / Math.SQRT2) / 2;
+      const insetY = h * (1 - 1 / Math.SQRT2) / 2;
+      tx = x + insetX; ty = y + insetY;
+      tw = w / Math.SQRT2; th = h / Math.SQRT2;
+    }
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
     ctx.restore();
   }
 
