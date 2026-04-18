@@ -1,0 +1,15 @@
+node_modules/
+dist/
+parser/target/
+*.tsbuildinfo
+package-lock.json
+src/wasm/*.wasm
+src/wasm/*.js
+src/wasm/*.ts
+!src/wasm/.gitkeep
+public/*.docx
+tests/visual/references/**/*.png
+tests/visual/screenshots/
+tests/visual/diffs/
+# Local-only Storybook stories that load sample DOCX files
+src/*.sample.stories.ts
