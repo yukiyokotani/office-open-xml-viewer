@@ -2,6 +2,8 @@ import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx } from './renderer.js';
 
+const TAB_BAR_H = 30; // height of the sheet tab bar (px)
+
 export interface XlsxViewerOptions {
   width?: number;
   height?: number;
@@ -15,6 +17,8 @@ export class XlsxViewer {
   private canvas: HTMLCanvasElement;
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
+  private tabBar: HTMLDivElement;
+  private tabs: HTMLButtonElement[] = [];
   private currentSheet = 0;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
@@ -26,27 +30,47 @@ export class XlsxViewer {
     const w = opts.width ?? 1200;
     const h = opts.height ?? 600;
 
-    // Outer wrapper: clips overflow and positions children
+    // Outer wrapper: total height includes the tab bar
     const wrapper = document.createElement('div');
-    wrapper.style.cssText = `position:relative;width:${w}px;height:${h}px;overflow:hidden;border:1px solid #c8ccd0;background:#fff;`;
+    wrapper.style.cssText =
+      `position:relative;width:${w}px;height:${h + TAB_BAR_H}px;` +
+      `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;`;
+
+    // --- Canvas area (top h px) ---
+    const canvasArea = document.createElement('div');
+    canvasArea.style.cssText = `position:relative;width:${w}px;height:${h}px;overflow:hidden;`;
 
     // Canvas rendered underneath (z-index:0)
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
 
-    // Scroll host on top (z-index:1). Transparent background so canvas shows through.
-    // Intercepts scroll events; the spacer inside defines the virtual document size.
+    // Scroll host on top — captures scroll events, transparent so canvas shows through
     this.scrollHost = document.createElement('div');
     this.scrollHost.style.cssText = `position:absolute;inset:0;overflow:auto;z-index:1;background:transparent;`;
 
-    // Spacer defines the virtual scroll range.
-    // Width/height are updated after the worksheet loads.
+    // Spacer inside scroll host — defines virtual scroll range
     this.spacer = document.createElement('div');
     this.spacer.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;pointer-events:none;`;
     this.scrollHost.appendChild(this.spacer);
 
-    wrapper.appendChild(this.canvas);
-    wrapper.appendChild(this.scrollHost);
+    canvasArea.appendChild(this.canvas);
+    canvasArea.appendChild(this.scrollHost);
+
+    // --- Tab bar (bottom TAB_BAR_H px) ---
+    this.tabBar = document.createElement('div');
+    this.tabBar.style.cssText =
+      `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;` +
+      `background:#f0f0f0;border-top:1px solid #c8ccd0;` +
+      `overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:1px;` +
+      `scrollbar-width:none;`;
+    // Hide webkit scrollbar on the tab bar
+    const style = document.createElement('style');
+    style.textContent = `.xlsx-tab-bar::-webkit-scrollbar{display:none}`;
+    document.head.appendChild(style);
+    this.tabBar.classList.add('xlsx-tab-bar');
+
+    wrapper.appendChild(canvasArea);
+    wrapper.appendChild(this.tabBar);
     container.appendChild(wrapper);
 
     this.scrollHost.addEventListener('scroll', () => this.renderCurrentSheet());
@@ -55,6 +79,7 @@ export class XlsxViewer {
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
       await this.wb.load(source);
+      this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(0);
     } catch (err) {
@@ -66,14 +91,47 @@ export class XlsxViewer {
     this.currentSheet = index;
     this.scrollHost.scrollLeft = 0;
     this.scrollHost.scrollTop = 0;
+    this.updateTabActive(index);
     this.currentWorksheet = await this.wb.getWorksheet(index);
     this.updateSpacerSize(this.currentWorksheet);
     await this.renderCurrentSheet();
     this.opts.onSheetChange?.(index, this.wb.sheetNames[index] ?? '');
   }
 
+  private buildTabs(): void {
+    this.tabBar.innerHTML = '';
+    this.tabs = [];
+    this.wb.sheetNames.forEach((name, i) => {
+      const btn = document.createElement('button');
+      btn.textContent = name;
+      btn.title = name;
+      btn.style.cssText = this.tabStyle(false);
+      btn.addEventListener('click', () => this.showSheet(i));
+      this.tabBar.appendChild(btn);
+      this.tabs.push(btn);
+    });
+  }
+
+  private updateTabActive(index: number): void {
+    this.tabs.forEach((btn, i) => {
+      btn.style.cssText = this.tabStyle(i === index);
+    });
+    // Scroll the active tab into view within the tab bar
+    this.tabs[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  private tabStyle(active: boolean): string {
+    const base =
+      `display:inline-block;padding:0 14px;height:${TAB_BAR_H - 2}px;` +
+      `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
+      `font-size:12px;cursor:pointer;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;` +
+      `outline:none;`;
+    return active
+      ? base + `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;position:relative;top:1px;`
+      : base + `background:#e0e0e0;color:#555;`;
+  }
+
   private updateSpacerSize(ws: Worksheet): void {
-    // Find actual data extent from rows
     let maxRow = 50;
     let maxCol = 26;
     for (const row of ws.rows) {
@@ -85,7 +143,6 @@ export class XlsxViewer {
     maxRow = maxRow + 30;
     maxCol = maxCol + 10;
 
-    // Compute total cell data dimensions (not including headers, but add header offset for spacer)
     let totalW = HEADER_W;
     for (let c = 1; c <= maxCol; c++) {
       totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
@@ -106,44 +163,33 @@ export class XlsxViewer {
     const h = this.opts.height ?? 600;
     const dpr = window.devicePixelRatio ?? 1;
 
-    // Scroll position = pixel offset into cell data area (from start of col 1 / row 1)
     const scrollX = this.scrollHost.scrollLeft;
     const scrollY = this.scrollHost.scrollTop;
 
-    // Find startCol and pixel offset within it
     let startCol = 1;
     let xAcc = 0;
     let offsetX = 0;
     while (true) {
       const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth);
-      if (xAcc + cw > scrollX) {
-        offsetX = scrollX - xAcc;
-        break;
-      }
+      if (xAcc + cw > scrollX) { offsetX = scrollX - xAcc; break; }
       xAcc += cw;
       startCol++;
       if (startCol > 16384) break;
     }
 
-    // Find startRow and pixel offset within it
     let startRow = 1;
     let yAcc = 0;
     let offsetY = 0;
     while (true) {
       const rh = rowHeightToPx(ws.rowHeights[startRow] ?? ws.defaultRowHeight);
-      if (yAcc + rh > scrollY) {
-        offsetY = scrollY - yAcc;
-        break;
-      }
+      if (yAcc + rh > scrollY) { offsetY = scrollY - yAcc; break; }
       yAcc += rh;
       startRow++;
       if (startRow > 1048576) break;
     }
 
-    // Effective cell area size (canvas minus headers)
     const cellW = w - HEADER_W;
     const cellH = h - HEADER_H;
-    // Estimate number of rows/cols needed (+2 for partial cells at edges)
     const avgCW = colWidthToPx(ws.defaultColWidth);
     const avgRH = rowHeightToPx(ws.defaultRowHeight);
     const cols = Math.ceil((cellW + offsetX) / Math.max(avgCW, 1)) + 2;

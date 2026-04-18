@@ -34,18 +34,9 @@ function buildViewerUI(
   const root = document.createElement('div');
   root.style.cssText = 'font-family:sans-serif;padding:16px;';
 
-  const toolbar = document.createElement('div');
-  toolbar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;';
-
-  const sheetSelect = document.createElement('select');
-  sheetSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:13px;';
-  sheetSelect.disabled = true;
-
   const status = document.createElement('div');
   status.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
-
-  toolbar.append(sheetSelect);
-  root.append(toolbar, status);
+  root.appendChild(status);
 
   const container = document.createElement('div');
   container.style.cssText = `max-width:100%;`;
@@ -55,25 +46,12 @@ function buildViewerUI(
     width: args.width,
     height: args.height,
     onReady: (names) => {
-      sheetSelect.innerHTML = '';
-      names.forEach((name, i) => {
-        const opt = document.createElement('option');
-        opt.value = String(i);
-        opt.textContent = name;
-        sheetSelect.appendChild(opt);
-      });
-      sheetSelect.disabled = false;
       status.textContent = `Loaded — ${names.length} sheet(s)`;
     },
-    onSheetChange: (idx, name) => {
-      sheetSelect.value = String(idx);
+    onSheetChange: (_idx, name) => {
       status.textContent = `Sheet: ${name}`;
     },
     onError: (err) => { status.textContent = `Error: ${err.message}`; },
-  });
-
-  sheetSelect.addEventListener('change', () => {
-    viewer.showSheet(Number(sheetSelect.value));
   });
 
   if (autoLoadUrl) {
@@ -149,13 +127,6 @@ export const FileUpload: Story = {
     const status = document.createElement('div');
     status.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
 
-    const sheetSelect = document.createElement('select');
-    sheetSelect.style.cssText = 'padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:13px;display:none;';
-
-    const toolbar = document.createElement('div');
-    toolbar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:10px;';
-    toolbar.appendChild(sheetSelect);
-
     const container = document.createElement('div');
     container.style.cssText = `max-width:100%;min-height:200px;`;
     const hint = document.createElement('span');
@@ -163,7 +134,7 @@ export const FileUpload: Story = {
     hint.style.cssText = 'display:block;padding:20px;color:#aaa;';
     container.appendChild(hint);
 
-    root.append(fileInput, status, toolbar, container);
+    root.append(fileInput, status, container);
 
     let viewer: XlsxViewer | null = null;
 
@@ -173,24 +144,10 @@ export const FileUpload: Story = {
       viewer = new XlsxViewer(container, {
         width: args.width,
         height: args.height,
-        onReady: (names) => {
-          sheetSelect.innerHTML = '';
-          names.forEach((name, i) => {
-            const opt = document.createElement('option');
-            opt.value = String(i);
-            opt.textContent = name;
-            sheetSelect.appendChild(opt);
-          });
-          sheetSelect.style.display = 'block';
-          status.textContent = `${names.length} sheet(s)`;
-        },
-        onSheetChange: (idx, name) => {
-          sheetSelect.value = String(idx);
-          status.textContent = `Sheet: ${name}`;
-        },
+        onReady: (names) => { status.textContent = `${names.length} sheet(s)`; },
+        onSheetChange: (_idx, name) => { status.textContent = `Sheet: ${name}`; },
         onError: (err) => { status.textContent = `Error: ${err.message}`; },
       });
-      sheetSelect.onchange = () => viewer?.showSheet(Number(sheetSelect.value));
       await viewer.load(buf);
     }
 
