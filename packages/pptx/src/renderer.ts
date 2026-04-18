@@ -13,6 +13,8 @@ import type {
   TextRun,
   PathCmd,
   Shadow,
+  RenderOptions,
+  TabStop,
 } from './types';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
@@ -268,7 +270,7 @@ function layoutParagraph(
         // Find first tab stop whose position (from text area left) is beyond the current pen
         const currentAbsW = marLPx + lineW; // current position from text area left
         const ts = (para.tabStops ?? []).find(
-          t => emuToPx(t.pos, scale) > currentAbsW
+          (t: TabStop) => emuToPx(t.pos, scale) > currentAbsW
         );
         if (ts) {
           tabStopPx = emuToPx(ts.pos, scale);
@@ -3281,18 +3283,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 
 // ===== Public API =====
 
-export interface RenderOptions {
-  /** Target canvas width in CSS pixels (height is computed from slide aspect ratio) */
-  width?: number;
-  /** Theme default text color (dk1), used as fallback when shapes have no explicit color */
-  defaultTextColor?: string | null;
-  /** Device pixel ratio for HiDPI rendering. Defaults to window.devicePixelRatio on main thread, 1 in workers. */
-  dpr?: number;
-  /** Theme major (heading) font family name — used to resolve "+mj-lt" references */
-  majorFont?: string | null;
-  /** Theme minor (body) font family name — used to resolve "+mn-lt" references */
-  minorFont?: string | null;
-}
+export type { RenderOptions } from './types';
 
 /**
  * Render a single slide onto a <canvas> element.
