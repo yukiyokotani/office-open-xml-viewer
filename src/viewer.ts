@@ -2,6 +2,9 @@ import type { Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type RenderOptions } from './renderer';
 // Inline the worker so the library is self-contained (no separate worker file needed)
 import InlineWorker from './worker.ts?worker&inline';
+// Resolved by Vite at build time; passed to the worker so it can init WASM
+// without relying on import.meta.url (which is blob: in inline workers).
+import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
 export interface PptxViewerOptions extends RenderOptions {
   /** Called when the viewer is ready to display slides */
@@ -39,6 +42,9 @@ export class PptxViewer {
 
   private initWorker() {
     this.worker = new InlineWorker();
+    // Resolve to an absolute URL using the main thread's location (always valid).
+    const wasmUrl = new URL(wasmAssetUrl, location.href).href;
+    this.worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
 
     this.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data;

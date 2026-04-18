@@ -1,12 +1,9 @@
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { parse_pptx } from './wasm/pptx_parser.js';
-// Explicit URL import so Vite resolves it at build time — avoids invalid
-// import.meta.url when the worker is inlined as a blob URL (e.g. Storybook static).
-import wasmUrl from './wasm/pptx_parser_bg.wasm?url';
 
 let ready = false;
 
-async function initWasm() {
+async function initWasm(wasmUrl: string) {
   await init(wasmUrl);
   ready = true;
   const msg: WorkerResponse = { kind: 'ready' };
@@ -15,6 +12,12 @@ async function initWasm() {
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
+  if (req.kind === 'init') {
+    initWasm(req.wasmUrl).catch((err) => {
+      console.error('[pptx-worker] WASM init failed:', err);
+    });
+    return;
+  }
   if (req.kind === 'parse') {
     if (!ready) {
       const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'WASM not initialized' };
@@ -36,7 +39,3 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     }
   }
 };
-
-initWasm().catch((err) => {
-  console.error('[pptx-worker] WASM init failed:', err);
-});

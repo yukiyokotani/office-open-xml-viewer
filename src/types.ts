@@ -257,6 +257,7 @@ export interface LineBreak {
 // ===== Worker message protocol =====
 
 export type WorkerRequest =
+  | { kind: 'init'; wasmUrl: string }
   | { kind: 'parse'; id: number; buffer: ArrayBuffer };
 
 export type WorkerResponse =
