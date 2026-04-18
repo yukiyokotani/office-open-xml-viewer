@@ -103,6 +103,7 @@ export interface Font {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strike: boolean;
   size: number;
   color: string | null;
   name: string | null;
