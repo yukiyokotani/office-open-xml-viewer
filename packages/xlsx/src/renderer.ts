@@ -43,7 +43,7 @@ function resolveXf(styles: Styles, styleIndex: number): { font: Font; fill: Fill
   const xf: CellXf = styles.cellXfs[styleIndex] ?? styles.cellXfs[0] ?? {
     fontId: 0, fillId: 0, borderId: 0, numFmtId: 0, alignH: null, alignV: null, wrapText: false,
   };
-  const font: Font = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
+  const font: Font = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, strike: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
   const fill: Fill = styles.fills[xf.fillId] ?? { patternType: 'none', fgColor: null, bgColor: null };
   const border: Border = styles.borders[xf.borderId] ?? { left: null, right: null, top: null, bottom: null };
   return { font, fill, border, xf };
@@ -661,21 +661,45 @@ function renderQuadrant(
           ctx.fillText(lines[li], textX, startY + li * lineH);
         }
       } else {
+        // Measure once for both underline and strike
+        let overlayMetrics: TextMetrics | null = null;
+        const measureOverlay = () => overlayMetrics ??= ctx.measureText(text);
+        const overlayX = () => {
+          const tW = Math.min(measureOverlay().width, drawW - paddingX * 2);
+          return {
+            x: alignH === 'right' ? cx + cellW - paddingX - tW
+              : alignH === 'center' ? cx + cellW / 2 - tW / 2
+              : cx + paddingX,
+            width: tW,
+          };
+        };
+        const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
+
         if (font.underline) {
-          const metrics = ctx.measureText(text);
-          const tW = Math.min(metrics.width, drawW - paddingX * 2);
+          const { x: ux, width: tW } = overlayX();
           const uy = alignV === 'top'
-            ? cy + paddingY + Math.round(font.size * ROW_HEIGHT_TO_PX) + 1
+            ? cy + paddingY + sizePx + 1
             : alignV === 'center'
-              ? cy + cellH / 2 + Math.round(font.size * ROW_HEIGHT_TO_PX * 0.55)
+              ? cy + cellH / 2 + Math.round(sizePx * 0.55)
               : cy + cellH - paddingY + 1;
-          const ux = alignH === 'right' ? cx + cellW - paddingX - tW
-            : alignH === 'center' ? cx + cellW / 2 - tW / 2
-            : cx + paddingX;
           ctx.save();
           ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
           ctx.lineWidth = 0.5;
           ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
+          ctx.restore();
+        }
+        if (font.strike) {
+          const { x: sx, width: tW } = overlayX();
+          // Strike line sits roughly at the x-height mid-line (~45% up from baseline)
+          const sy = alignV === 'top'
+            ? cy + paddingY + Math.round(sizePx * 0.5)
+            : alignV === 'center'
+              ? cy + cellH / 2
+              : cy + cellH - paddingY - Math.round(sizePx * 0.35);
+          ctx.save();
+          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.lineWidth = 0.5;
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + tW, sy); ctx.stroke();
           ctx.restore();
         }
         let textY: number;

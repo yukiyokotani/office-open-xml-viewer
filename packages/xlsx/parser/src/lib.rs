@@ -136,6 +136,7 @@ pub struct Font {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strike: bool,
     pub size: f64,
     pub color: Option<String>,
     pub name: Option<String>,
@@ -502,6 +503,7 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                                 "b" => f.bold = true,
                                 "i" => f.italic = true,
                                 "u" => f.underline = true,
+                                "strike" => f.strike = true,
                                 "sz" => {
                                     if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
                                         f.size = v;
@@ -594,6 +596,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                         "b" => f.bold = true,
                         "i" => f.italic = true,
                         "u" => f.underline = true,
+                        "strike" => f.strike = true,
                         "sz" => {
                             if let Some(v) = child.attribute("val").and_then(|s| s.parse().ok()) {
                                 f.size = v;
