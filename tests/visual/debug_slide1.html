@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/></head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import init, { parse_pptx } from '/src/wasm/pptx_parser.js';
+    await init();
+    const resp = await fetch('/sample.pptx');
+    const buf = await resp.arrayBuffer();
+    const json = parse_pptx(new Uint8Array(buf));
+    const data = JSON.parse(json);
+
+    const output = [];
+    const scale = 1280 / 12192000;
+    const slide = data.slides[0];
+    output.push(`Slide 1 bg=${JSON.stringify(slide.background)}`);
+    for (const el of slide.elements) {
+      const x = Math.round((el.x ?? 0) * scale);
+      const y = Math.round((el.y ?? 0) * scale);
+      const w = Math.round((el.width ?? 0) * scale);
+      const h = Math.round((el.height ?? 0) * scale);
+      const fill = JSON.stringify(el.fill);
+      const geom = el.geometry ?? el.type;
+      const hasCustGeom = el.custGeom ? `custGeom[${el.custGeom.length}paths]` : 'noCustGeom';
+      output.push(`  ${el.type} x=${x} y=${y} w=${w} h=${h} geom=${geom} ${hasCustGeom} fill=${fill}`);
+    }
+    document.getElementById('output').textContent = output.join('\n');
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

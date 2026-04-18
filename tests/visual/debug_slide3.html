@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/></head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import init, { parse_pptx } from '/src/wasm/pptx_parser.js';
+    await init();
+    const resp = await fetch('/sample.pptx');
+    const buf = await resp.arrayBuffer();
+    const json = parse_pptx(new Uint8Array(buf));
+    const data = JSON.parse(json);
+
+    const output = [];
+    const scale = 1280 / 12192000;
+    for (const [i, slide] of data.slides.entries()) {
+      output.push(`Slide ${i+1} bg=${JSON.stringify(slide.background)}`);
+      for (const el of slide.elements) {
+        if (el.type === 'shape' && el.textBody) {
+          const firstText = el.textBody.paragraphs.flatMap(p => p.runs).find(r => r.type === 'text')?.text?.slice(0,20) ?? '';
+          const x = Math.round(el.x * scale);
+          const y = Math.round(el.y * scale);
+          const w = Math.round(el.width * scale);
+          const h = Math.round(el.height * scale);
+          const anchor = el.textBody.verticalAnchor;
+          const defSz = el.textBody.defaultFontSize;
+          output.push(`  shape x=${x} y=${y} w=${w} h=${h} anchor=${anchor} defSz=${defSz} text="${firstText}"`);
+        }
+      }
+    }
+    document.getElementById('output').textContent = output.join('\n');
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

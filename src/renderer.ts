@@ -88,7 +88,7 @@ function resolveShapeFill(
 
 // ===== Text layout helpers =====
 
-type LayoutSegment = { text: string; font: string; sizePx: number; color: string; underline: boolean; strikethrough: boolean };
+type LayoutSegment = { text: string; font: string; sizePx: number; color: string; underline: boolean; strikethrough: boolean; baseline?: number };
 
 interface LayoutLine {
   segments: LayoutSegment[];
@@ -189,25 +189,25 @@ function layoutParagraph(
   };
 
   // Push to the active segment list (main or tab-stop group)
-  const push = (text: string, font: string, sizePx: number, color: string, underline: boolean, strikethrough: boolean) => {
+  const push = (text: string, font: string, sizePx: number, color: string, underline: boolean, strikethrough: boolean, baseline?: number) => {
     if (!text) return;
     ctx.font = font;
     const w = ctx.measureText(text).width;
     if (tabActive && currentLine.tabStop) {
       const segs = currentLine.tabStop.segments;
       const last = segs.at(-1);
-      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough) {
+      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough && last.baseline === baseline) {
         last.text += text;
       } else {
-        segs.push({ text, font, sizePx, color, underline, strikethrough });
+        segs.push({ text, font, sizePx, color, underline, strikethrough, baseline });
       }
     } else {
       lineW += w;
       const last = currentLine.segments.at(-1);
-      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough) {
+      if (last && last.font === font && last.color === color && last.underline === underline && last.strikethrough === strikethrough && last.baseline === baseline) {
         last.text += text;
       } else {
-        currentLine.segments.push({ text, font, sizePx, color, underline, strikethrough });
+        currentLine.segments.push({ text, font, sizePx, color, underline, strikethrough, baseline });
       }
     }
   };
@@ -268,7 +268,7 @@ function layoutParagraph(
 
       // If already in tab mode, collect all text into tabStop.segments (no wrap)
       if (tabActive) {
-        push(token, font, sizePx, color, run.underline, run.strikethrough);
+        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
         continue;
       }
 
@@ -281,13 +281,13 @@ function layoutParagraph(
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, font, sizePx, color, run.underline, run.strikethrough);
+          push(ch, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
         }
         continue;
       }
 
       if (lineW + tokW <= maxWidthPx) {
-        push(token, font, sizePx, color, run.underline, run.strikethrough);
+        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
       } else if (isWhitespace) {
         if (lineW > 0) newLine();
       } else if (tokW > maxWidthPx) {
@@ -296,11 +296,11 @@ function layoutParagraph(
           ctx.font = font;
           const chW = ctx.measureText(ch).width;
           if (lineW + chW > maxWidthPx && lineW > 0) newLine();
-          push(ch, font, sizePx, color, run.underline, run.strikethrough);
+          push(ch, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
         }
       } else {
         newLine();
-        push(token, font, sizePx, color, run.underline, run.strikethrough);
+        push(token, font, sizePx, color, run.underline, run.strikethrough, run.baseline ?? undefined);
       }
     }
   }
@@ -352,8 +352,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (h === 0 && el.textBody?.verticalAnchor === 'b') {
     if (el.stroke) {
       ctx.save();
-      ctx.strokeStyle = hexToRgba(el.stroke.color);
-      ctx.lineWidth = Math.max(1, emuToPx(el.stroke.width, scale));
+      applyStroke(ctx, el.stroke, scale);
       ctx.beginPath();
       ctx.moveTo(x, y);
       ctx.lineTo(x + w, y);
@@ -386,7 +385,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (el.custGeom && el.custGeom.length > 0) {
     buildCustomPath(ctx, el.custGeom, x, y, w, h);
   } else {
-    buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2);
+    buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
   }
 
   if (fillStyle && geom !== 'arc') {
@@ -401,8 +400,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     clearShadow(ctx);
   }
   if (el.stroke) {
-    ctx.strokeStyle = hexToRgba(el.stroke.color);
-    ctx.lineWidth = Math.max(1, emuToPx(el.stroke.width, scale));
+    applyStroke(ctx, el.stroke, scale);
     ctx.stroke();
   }
 
@@ -541,6 +539,8 @@ function buildShapePath(
   h: number,
   adj: number | null = null,
   adj2: number | null = null,
+  adj3: number | null = null,
+  adj4: number | null = null,
 ) {
   const cx = x + w / 2;
   const cy = y + h / 2;
@@ -845,21 +845,20 @@ function buildShapePath(
     case 'bordercallout1':
     case 'bordercallout2':
     case 'bordercallout3': {
-      // Line callout: rectangle body + single straight line to tip.
-      // adj1/adj2 (not used in simplified version): attachment side on box.
-      // adj3/adj4: tip position as fraction of shape w/h from top-left.
-      // Default tip: bottom-left outside the box.
-      const tipFx = (adj ?? 20000) / 100000;     // adj3 in OOXML
-      const tipFy = (adj2 ?? 120000) / 100000;   // adj4 in OOXML
+      // Line callout: rectangle text area + a single line (tail) to the tip.
+      // In OOXML, the bounding box covers the text area; the tail tip (adj3/adj4) may
+      // extend outside the box. adj1/adj2 define the attachment on the box edge.
+      // The tail base (adj1/adj2) is on the box edge; tail tip may be outside.
+      const attFx = (adj  !== null ? adj  : 44150) / 100000;   // default adj1
+      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;   // default adj2
+      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;   // tip x (may exceed 1.0)
+      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;  // tip y (may exceed 1.0)
+      const attX = x + Math.max(0, Math.min(1, attFx)) * w;
+      const attY = y + Math.max(0, Math.min(1, attFy)) * h;
       const tipX = x + tipFx * w;
       const tipY = y + tipFy * h;
       ctx.rect(x, y, w, h);
-      // Draw the tail line separately (beginPath/stroke after the rect fill)
-      // We store the tail in the path so stroke() renders it.
-      // Determine attachment point: nearest point on box perimeter to tip.
-      const attachX = Math.max(x, Math.min(x + w, tipX));
-      const attachY = Math.max(y, Math.min(y + h, tipY));
-      ctx.moveTo(attachX, attachY);
+      ctx.moveTo(attX, attY);
       ctx.lineTo(tipX, tipY);
       break;
     }
@@ -2021,7 +2020,8 @@ function buildShapePath(
     }
 
     // ── Flowchart: summing junction (circle + X) ──────────────────────────────
-    case 'flowchartsumingjunction': {
+    case 'flowchartsumingjunction':
+    case 'flowchartsummingjunction': {
       ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
       const r = Math.min(w, h) / 2 * 0.65;
       ctx.moveTo(cx - r, cy - r);
@@ -2390,26 +2390,31 @@ function renderTextBody(
     for (const seg of line.segments) {
       ctx.font = seg.font;
       ctx.fillStyle = seg.color;
-      ctx.fillText(seg.text, penX, baseline);
+      // baseline shift: OOXML baseline in thousandths of a point; positive = superscript (up)
+      const baselineShift = seg.baseline ? -(seg.baseline / 100000) * seg.sizePx : 0;
+      const segBaseline = baseline + baselineShift;
+      ctx.fillText(seg.text, penX, segBaseline);
 
       ctx.font = seg.font;
       const segW = ctx.measureText(seg.text).width;
 
       if (seg.underline) {
         ctx.beginPath();
-        ctx.moveTo(penX, baseline + 2);
-        ctx.lineTo(penX + segW, baseline + 2);
+        ctx.moveTo(penX, segBaseline + 2);
+        ctx.lineTo(penX + segW, segBaseline + 2);
         ctx.strokeStyle = seg.color;
         ctx.lineWidth = Math.max(1, seg.sizePx * 0.05);
+        ctx.setLineDash([]);
         ctx.stroke();
       }
 
       if (seg.strikethrough) {
         ctx.beginPath();
-        ctx.moveTo(penX, baseline - seg.sizePx * 0.32);
-        ctx.lineTo(penX + segW, baseline - seg.sizePx * 0.32);
+        ctx.moveTo(penX, segBaseline - seg.sizePx * 0.32);
+        ctx.lineTo(penX + segW, segBaseline - seg.sizePx * 0.32);
         ctx.strokeStyle = seg.color;
         ctx.lineWidth = Math.max(1, seg.sizePx * 0.05);
+        ctx.setLineDash([]);
         ctx.stroke();
       }
 
@@ -2478,14 +2483,30 @@ async function renderPicture(
 
 // ===== Table renderer =====
 
+const DASH_PATTERNS: Record<string, number[]> = {
+  dash:       [6, 3],
+  dot:        [1.5, 3],
+  dashDot:    [6, 3, 1.5, 3],
+  lgDash:     [10, 4],
+  lgDashDot:  [10, 4, 1.5, 4],
+  lgDashDotDot: [10, 4, 1.5, 4, 1.5, 4],
+  sysDash:    [4, 2],
+  sysDot:     [1, 2],
+  sysDashDot: [4, 2, 1, 2],
+};
+
 function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale: number) {
   if (!stroke) {
     ctx.strokeStyle = 'transparent';
     ctx.lineWidth = 0;
+    ctx.setLineDash([]);
     return;
   }
   ctx.strokeStyle = hexToRgba(stroke.color);
-  ctx.lineWidth = Math.max(0.5, emuToPx(stroke.width, scale));
+  const lw = Math.max(0.5, emuToPx(stroke.width, scale));
+  ctx.lineWidth = lw;
+  const pat = stroke.dashStyle ? DASH_PATTERNS[stroke.dashStyle] : null;
+  ctx.setLineDash(pat ? pat.map(v => v * lw) : []);
 }
 
 // ─── Chart rendering ────────────────────────────────────────────────────────
@@ -2570,6 +2591,8 @@ function renderStackedBarChart(
   const barW = (pw / n) * 0.55;
   const gapW = pw / n;
 
+  const labelFontSizeBar = Math.round(h * 0.038);
+
   el.series.forEach((ser, si) => {
     ctx.fillStyle = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
     for (let i = 0; i < n; i++) {
@@ -2580,6 +2603,20 @@ function renderStackedBarChart(
       const bx = px0 + gapW * i + (gapW - barW) / 2;
       const by = py0 + ph * (1 - (base + v) / dataMax);
       ctx.fillRect(bx, by, barW, barH);
+
+      // Data labels: draw value centered in bar segment if it's tall enough
+      if (el.showDataLabels && barH >= labelFontSizeBar * 1.2) {
+        ctx.save();
+        ctx.font = `${labelFontSizeBar}px sans-serif`;
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const labelText = v.toLocaleString();
+        const labelX = bx + barW / 2;
+        const labelY = by + barH / 2;
+        ctx.fillText(labelText, labelX, labelY);
+        ctx.restore();
+      }
     }
   });
 
@@ -2670,6 +2707,8 @@ function renderStackedBarHChart(
   const barH = (ph / n) * 0.55;
   const gapH = ph / n;
 
+  const labelFontSizeH = Math.round(h * 0.038);
+
   el.series.forEach((ser, si) => {
     ctx.fillStyle = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
     for (let i = 0; i < n; i++) {
@@ -2680,6 +2719,20 @@ function renderStackedBarHChart(
       const bx = px0 + pw * (base / dataMax);
       const by = py0 + gapH * i + (gapH - barH) / 2;
       ctx.fillRect(bx, by, segW, barH);
+
+      // Data labels: draw value centered in bar segment if wide enough
+      if (el.showDataLabels && segW >= labelFontSizeH * 2) {
+        ctx.save();
+        ctx.font = `${labelFontSizeH}px sans-serif`;
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const labelText = v.toLocaleString();
+        const labelX = bx + segW / 2;
+        const labelY = by + barH / 2;
+        ctx.fillText(labelText, labelX, labelY);
+        ctx.restore();
+      }
     }
   });
 
@@ -2856,6 +2909,231 @@ function renderWaterfallChart(
   ctx.restore();
 }
 
+// ─── Default color palette for charts without explicit series colors ─────────
+const CHART_PALETTE = [
+  '4472C4','ED7D31','A9D18E','FF0000','70AD47','4BACC6',
+  'FFC000','9E480E','843C0C','636363','255E91','967300',
+];
+function chartColor(idx: number, explicit: string | null | undefined): string {
+  return explicit ? `#${explicit}` : `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
+}
+
+// ─── Line chart ──────────────────────────────────────────────────────────────
+function renderLineChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
+  const x0 = emuToPx(el.x, scale), y0 = emuToPx(el.y, scale);
+  const w  = emuToPx(el.width, scale), h = emuToPx(el.height, scale);
+
+  const allVals = el.series.flatMap(s => s.values).filter((v): v is number => v != null);
+  const dataMax = el.valMax ?? (allVals.length ? Math.max(...allVals) : 1);
+  const dataMin = Math.min(0, ...(allVals.length ? allVals : [0]));
+
+  const LABEL_H = h * 0.12, MARGIN = w * 0.05;
+  const plotX = x0 + MARGIN, plotW = w - MARGIN * 2;
+  const plotY = y0 + LABEL_H * 0.5, plotH = h - LABEL_H * 1.5;
+  const range = dataMax - dataMin || 1;
+
+  const toX = (i: number) => plotX + (el.categories.length > 1 ? (i / (el.categories.length - 1)) * plotW : plotW / 2);
+  const toY = (v: number) => plotY + plotH - ((v - dataMin) / range) * plotH;
+
+  // Axis
+  ctx.save();
+  ctx.strokeStyle = '#AAAAAA'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(plotX, plotY); ctx.lineTo(plotX, plotY + plotH); ctx.lineTo(plotX + plotW, plotY + plotH); ctx.stroke();
+
+  // Category labels
+  ctx.fillStyle = '#444444'; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  ctx.font = `${Math.max(8, h * 0.055)}px sans-serif`;
+  const lblStep = el.categories.length > 8 ? Math.ceil(el.categories.length / 8) : 1;
+  for (let i = 0; i < el.categories.length; i += lblStep) {
+    ctx.fillText(el.categories[i], toX(i), plotY + plotH + 2);
+  }
+
+  // Series
+  for (let si = 0; si < el.series.length; si++) {
+    const ser = el.series[si];
+    const color = chartColor(si, ser.color);
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, h * 0.003); ctx.setLineDash([]);
+    ctx.beginPath();
+    let first = true;
+    for (let i = 0; i < ser.values.length; i++) {
+      const v = ser.values[i];
+      if (v == null) { first = true; continue; }
+      if (first) { ctx.moveTo(toX(i), toY(v)); first = false; } else { ctx.lineTo(toX(i), toY(v)); }
+    }
+    ctx.stroke();
+    // Markers
+    ctx.fillStyle = color;
+    for (let i = 0; i < ser.values.length; i++) {
+      const v = ser.values[i]; if (v == null) continue;
+      ctx.beginPath(); ctx.arc(toX(i), toY(v), Math.max(2, h * 0.012), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Title
+  if (el.title) {
+    ctx.fillStyle = '#333333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.font = `bold ${Math.max(9, h * 0.07)}px sans-serif`;
+    ctx.fillText(el.title, x0 + w / 2, y0 + LABEL_H * 0.4);
+  }
+  ctx.restore();
+}
+
+// ─── Area chart ──────────────────────────────────────────────────────────────
+function renderAreaChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
+  const x0 = emuToPx(el.x, scale), y0 = emuToPx(el.y, scale);
+  const w  = emuToPx(el.width, scale), h = emuToPx(el.height, scale);
+
+  const allVals = el.series.flatMap(s => s.values).filter((v): v is number => v != null);
+  const dataMax = el.valMax ?? (allVals.length ? Math.max(...allVals) : 1);
+  const dataMin = Math.min(0, ...(allVals.length ? allVals : [0]));
+
+  const LABEL_H = h * 0.12, MARGIN = w * 0.05;
+  const plotX = x0 + MARGIN, plotW = w - MARGIN * 2;
+  const plotY = y0 + LABEL_H * 0.5, plotH = h - LABEL_H * 1.5;
+  const range = dataMax - dataMin || 1;
+
+  const toX = (i: number) => plotX + (el.categories.length > 1 ? (i / (el.categories.length - 1)) * plotW : plotW / 2);
+  const toY = (v: number) => plotY + plotH - ((v - dataMin) / range) * plotH;
+  const baseY = toY(dataMin);
+
+  ctx.save();
+  ctx.strokeStyle = '#AAAAAA'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(plotX, plotY); ctx.lineTo(plotX, plotY + plotH); ctx.lineTo(plotX + plotW, plotY + plotH); ctx.stroke();
+
+  // Draw series from back to front
+  for (let si = el.series.length - 1; si >= 0; si--) {
+    const ser = el.series[si];
+    const color = chartColor(si, ser.color);
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    const pts = ser.values.map((v, i) => [toX(i), v != null ? toY(v) : baseY] as [number, number]);
+    ctx.moveTo(pts[0][0], baseY);
+    for (const [px, py] of pts) ctx.lineTo(px, py);
+    ctx.lineTo(pts[pts.length - 1][0], baseY);
+    ctx.closePath();
+    ctx.fillStyle = color; ctx.fill();
+    ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.beginPath(); pts.forEach(([px, py], i) => i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)); ctx.stroke();
+  }
+
+  ctx.fillStyle = '#444444'; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  ctx.font = `${Math.max(8, h * 0.055)}px sans-serif`;
+  for (let i = 0; i < el.categories.length; i++) {
+    ctx.fillText(el.categories[i], toX(i), plotY + plotH + 2);
+  }
+  if (el.title) {
+    ctx.fillStyle = '#333333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.font = `bold ${Math.max(9, h * 0.07)}px sans-serif`;
+    ctx.fillText(el.title, x0 + w / 2, y0 + LABEL_H * 0.4);
+  }
+  ctx.restore();
+}
+
+// ─── Pie / Doughnut chart ────────────────────────────────────────────────────
+function renderPieChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number, isDoughnut = false) {
+  const x0 = emuToPx(el.x, scale), y0 = emuToPx(el.y, scale);
+  const w  = emuToPx(el.width, scale), h = emuToPx(el.height, scale);
+
+  const TITLE_H = el.title ? h * 0.1 : 0;
+  const LEGEND_W = w * 0.22;
+  const pieX = x0 + LEGEND_W / 2, pieY = y0 + TITLE_H;
+  const pieW = w - LEGEND_W, pieH = h - TITLE_H;
+  const cx = pieX + pieW / 2, cy = pieY + pieH / 2;
+  const r = Math.min(pieW, pieH) * 0.42;
+  const innerR = isDoughnut ? r * 0.5 : 0;
+
+  const ser = el.series[0];
+  if (!ser) return;
+
+  const vals = ser.values.map(v => v ?? 0);
+  const total = vals.reduce((a, b) => a + b, 0) || 1;
+
+  ctx.save();
+  let startAngle = -Math.PI / 2;
+  for (let i = 0; i < vals.length; i++) {
+    const sweep = (vals[i] / total) * Math.PI * 2;
+    const color = ser.dataPointColors?.[i] ?? null;
+    ctx.fillStyle = chartColor(i, color ?? ser.color);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, startAngle + sweep);
+    ctx.closePath();
+    ctx.fill();
+    if (isDoughnut) {
+      // Cut out center
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, startAngle + sweep);
+    ctx.closePath(); ctx.stroke();
+    startAngle += sweep;
+  }
+
+  // Legend
+  const legendX = x0 + w - LEGEND_W + 4, legendFontSz = Math.max(8, h * 0.055);
+  ctx.font = `${legendFontSz}px sans-serif`;
+  for (let i = 0; i < Math.min(vals.length, 12); i++) {
+    const lY = pieY + i * (legendFontSz + 4);
+    const color = ser.dataPointColors?.[i] ?? null;
+    ctx.fillStyle = chartColor(i, color ?? ser.color);
+    ctx.fillRect(legendX, lY + 1, legendFontSz * 0.8, legendFontSz * 0.8);
+    ctx.fillStyle = '#333333'; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+    ctx.fillText(el.categories[i] ?? '', legendX + legendFontSz + 2, lY);
+  }
+
+  if (el.title) {
+    ctx.fillStyle = '#333333'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = `bold ${Math.max(9, h * 0.08)}px sans-serif`;
+    ctx.fillText(el.title, x0 + w / 2, y0 + 4);
+  }
+  ctx.restore();
+}
+
+// ─── Scatter chart ───────────────────────────────────────────────────────────
+function renderScatterChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
+  // Scatter: we have Y values only (X positions evenly spaced); render as line without connecting
+  const x0 = emuToPx(el.x, scale), y0 = emuToPx(el.y, scale);
+  const w  = emuToPx(el.width, scale), h = emuToPx(el.height, scale);
+
+  const allVals = el.series.flatMap(s => s.values).filter((v): v is number => v != null);
+  const dataMax = allVals.length ? Math.max(...allVals) : 1;
+  const dataMin = Math.min(0, ...(allVals.length ? allVals : [0]));
+
+  const MARGIN = w * 0.07;
+  const plotX = x0 + MARGIN, plotW = w - MARGIN * 2;
+  const plotY = y0 + MARGIN * 0.5, plotH = h - MARGIN * 1.5;
+  const range = dataMax - dataMin || 1;
+  const toX = (i: number) => plotX + (el.categories.length > 1 ? (i / (el.categories.length - 1)) * plotW : plotW / 2);
+  const toY = (v: number) => plotY + plotH - ((v - dataMin) / range) * plotH;
+
+  ctx.save();
+  ctx.strokeStyle = '#AAAAAA'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(plotX, plotY); ctx.lineTo(plotX, plotY + plotH); ctx.lineTo(plotX + plotW, plotY + plotH); ctx.stroke();
+
+  for (let si = 0; si < el.series.length; si++) {
+    const ser = el.series[si];
+    ctx.fillStyle = chartColor(si, ser.color);
+    for (let i = 0; i < ser.values.length; i++) {
+      const v = ser.values[i]; if (v == null) continue;
+      ctx.beginPath(); ctx.arc(toX(i), toY(v), Math.max(3, h * 0.015), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  if (el.title) {
+    ctx.fillStyle = '#333333'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = `bold ${Math.max(9, h * 0.07)}px sans-serif`;
+    ctx.fillText(el.title, x0 + w / 2, y0 + 2);
+  }
+  ctx.restore();
+}
+
 function renderChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
   if (el.chartType === 'stackedBar' || el.chartType === 'clusteredBar') {
     renderStackedBarChart(ctx, el, scale);
@@ -2863,6 +3141,16 @@ function renderChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: num
     renderStackedBarHChart(ctx, el, scale);
   } else if (el.chartType === 'waterfall') {
     renderWaterfallChart(ctx, el, scale);
+  } else if (el.chartType === 'line' || el.chartType === 'stackedLine' || el.chartType === 'stackedLinePct') {
+    renderLineChart(ctx, el, scale);
+  } else if (el.chartType === 'area' || el.chartType === 'stackedArea') {
+    renderAreaChart(ctx, el, scale);
+  } else if (el.chartType === 'pie') {
+    renderPieChart(ctx, el, scale, false);
+  } else if (el.chartType === 'doughnut') {
+    renderPieChart(ctx, el, scale, true);
+  } else if (el.chartType === 'scatter' || el.chartType === 'bubble') {
+    renderScatterChart(ctx, el, scale);
   }
 }
 

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/></head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import init, { parse_pptx } from '/src/wasm/pptx_parser.js';
+    await init();
+    const params = new URLSearchParams(location.search);
+    const pptxName = params.get('pptx') ?? 'sample-2';
+    const slideIdx = parseInt(params.get('slide') ?? '6', 10); // 0-based
+
+    const resp = await fetch(`/${pptxName}.pptx`);
+    const buf = await resp.arrayBuffer();
+    const json = parse_pptx(new Uint8Array(buf));
+    const data = JSON.parse(json);
+
+    const slide = data.slides[slideIdx];
+    const output = [`${pptxName} slide ${slideIdx + 1} — ${slide.elements.length} elements`];
+    const scale = 1280 / 12192000;
+
+    for (const [i, el] of slide.elements.entries()) {
+      const x = Math.round((el.x ?? 0) * scale);
+      const y = Math.round((el.y ?? 0) * scale);
+      const w = Math.round(((el.width ?? el.w) ?? 0) * scale);
+      const h = Math.round(((el.height ?? el.h) ?? 0) * scale);
+      let detail = '';
+      if (el.type === 'shape') {
+        const firstText = (el.textBody?.paragraphs ?? [])
+          .flatMap(p => p.runs)
+          .find(r => r.type === 'text')?.text?.slice(0, 30) ?? '';
+        const defSz = el.textBody?.defaultFontSize ?? null;
+        const defBold = el.textBody?.defaultBold ?? null;
+        const firstRun = (el.textBody?.paragraphs ?? []).flatMap(p => p.runs).find(r => r.type === 'text');
+        const runFont = firstRun?.fontFamily ?? null;
+        const runBold = firstRun?.bold ?? null;
+        const runSz = firstRun?.fontSize ?? null;
+        detail = `geom=${el.geometry} defSz=${defSz} defBold=${defBold} runFont=${runFont} runBold=${runBold} runSz=${runSz} text="${firstText}"`;
+        // Show paragraph details
+        for (const [pi, para] of (el.textBody?.paragraphs ?? []).entries()) {
+          const spBefore = para.spaceBefore;
+          const spAfter = para.spaceAfter;
+          const spLine = para.spaceLine ? JSON.stringify(para.spaceLine) : null;
+          const defFontSize = para.defFontSize;
+          const runs = para.runs.filter(r => r.type === 'text').map(r => `"${r.text?.slice(0,15)}" sz=${r.fontSize}`).join(', ');
+          output.push(`    para[${pi}] spBefore=${spBefore} spAfter=${spAfter} spLine=${spLine} defFontSize=${defFontSize} | ${runs}`);
+        }
+      } else if (el.type === 'table') {
+        const rows = el.rows?.length ?? 0;
+        const cols = el.cols?.length ?? 0;
+        const firstCellText = el.rows?.[0]?.cells?.[0]?.textBody?.paragraphs
+          ?.flatMap(p => p.runs)?.find(r => r.type === 'text')?.text?.slice(0, 20) ?? '';
+        detail = `${rows}×${cols} cols=[${(el.cols ?? []).join(',')}] first="${firstCellText}"`;
+      } else if (el.type === 'picture') {
+        detail = `img len=${el.dataUrl?.length ?? 0}`;
+      } else if (el.type === 'group') {
+        detail = `${el.elements?.length ?? 0} children`;
+      }
+      output.push(`  [${i}] ${el.type} x=${x} y=${y} w=${w} h=${h}  ${detail}`);
+    }
+
+    document.getElementById('output').textContent = output.join('\n');
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

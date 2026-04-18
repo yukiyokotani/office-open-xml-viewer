@@ -54,6 +54,10 @@ export interface ShapeElement {
   adj: number | null;
   /** Second adjustment value from prstGeom avLst (e.g. arrow head width). Range 0–100000. */
   adj2: number | null;
+  /** Third adjustment value from prstGeom avLst (e.g. callout tip x). Range 0–100000. */
+  adj3: number | null;
+  /** Fourth adjustment value from prstGeom avLst (e.g. callout tip y). Range 0–100000. */
+  adj4: number | null;
   /** Drop shadow from effectLst > outerShdw (null if not present). */
   shadow: Shadow | null;
 }
@@ -96,6 +100,8 @@ export interface ChartSeriesData {
   name: string;
   values: (number | null)[];
   color: string | null;
+  /** Per-data-point colors for pie/doughnut charts */
+  dataPointColors?: (string | null)[] | null;
 }
 
 export interface ChartElement {
@@ -110,6 +116,8 @@ export interface ChartElement {
   series: ChartSeriesData[];
   valMax: number | null;
   subtotalIndices: number[];
+  /** Whether data labels (value numbers) should be shown on bars/segments */
+  showDataLabels: boolean;
 }
 
 export interface PictureElement {
@@ -163,6 +171,8 @@ export interface Stroke {
   color: string;
   /** Width in EMU */
   width: number;
+  /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
+  dashStyle?: string;
 }
 
 export interface TextBody {
@@ -246,6 +256,8 @@ export interface TextRunData {
   fontSize: number | null;
   color: string | null;
   fontFamily: string | null;
+  /** Baseline shift in thousandths of a point. Positive = superscript, negative = subscript. */
+  baseline?: number;
   /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
   fieldType?: string;
 }

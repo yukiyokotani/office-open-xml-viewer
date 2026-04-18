@@ -56,6 +56,9 @@ struct ChartSeriesData {
     name: String,
     values: Vec<Option<f64>>,
     color: Option<String>,
+    /// Per-data-point colors (used for pie/doughnut charts). None if all points use series color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_point_colors: Option<Vec<Option<String>>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,6 +71,8 @@ struct ChartElement {
     series: Vec<ChartSeriesData>,
     val_max: Option<f64>,
     subtotal_indices: Vec<u32>,
+    /// Whether to render data value labels on bars/segments
+    show_data_labels: bool,
 }
 
 // ===== Table data model =====
@@ -134,6 +139,10 @@ struct ShapeElement {
     adj: Option<f64>,
     /// Second adjustment value from prstGeom avLst (e.g. arrow-head width).
     adj2: Option<f64>,
+    /// Third adjustment value from prstGeom avLst (e.g. callout tip x).
+    adj3: Option<f64>,
+    /// Fourth adjustment value from prstGeom avLst (e.g. callout tip y).
+    adj4: Option<f64>,
     /// Drop shadow from spPr > effectLst > outerShdw (None if not present).
     shadow: Option<Shadow>,
 }
@@ -195,6 +204,9 @@ enum Fill {
 struct Stroke {
     color: String,
     width: i64,
+    /// OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", "sysDash", "sysDot", etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dash_style: Option<String>,
 }
 
 /// A single path command inside a custGeom pathLst.
@@ -329,6 +341,9 @@ struct TextRunData {
     font_size: Option<f64>,
     color: Option<String>,
     font_family: Option<String>,
+    /// Baseline shift in thousandths of a point. Positive = superscript, negative = subscript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline: Option<i32>,
     /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
     field_type: Option<String>,
 }
@@ -768,11 +783,12 @@ fn parse_stroke(
         return None;
     }
     let width = attr_i64(&ln_node, "w").unwrap_or(9525);
-    // If no explicit solidFill or color is unresolvable, return None so the
-    // caller can fall back to the shape style stroke color.
     let color = child(ln_node, "solidFill")
         .and_then(|n| parse_color_node(n, theme))?;
-    Some(Stroke { color, width })
+    let dash_style = child(ln_node, "prstDash")
+        .and_then(|n| attr(&n, "val"))
+        .filter(|v| v != "solid");
+    Some(Stroke { color, width, dash_style })
 }
 
 // ===========================
@@ -994,12 +1010,24 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             p.rotation = nt.rot; p.flip_h = nt.flip_h; p.flip_v = nt.flip_v;
         }
         SlideElement::Table(tbl) => {
-            let t = Transform { x: tbl.x, y: tbl.y, cx: tbl.width, cy: tbl.height, rot: 0.0, flip_h: false, flip_v: false };
+            // If the table has no xfrm (zero dimensions), it fills the group's child space.
+            let (ex, ey, ecx, ecy) = if tbl.width == 0 && tbl.height == 0 {
+                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
+            } else {
+                (tbl.x, tbl.y, tbl.width, tbl.height)
+            };
+            let t = Transform { x: ex, y: ey, cx: ecx, cy: ecy, rot: 0.0, flip_h: false, flip_v: false };
             let nt = gt.apply_to_transform(t);
             tbl.x = nt.x; tbl.y = nt.y; tbl.width = nt.cx; tbl.height = nt.cy;
         }
         SlideElement::Chart(chart) => {
-            let t = Transform { x: chart.x, y: chart.y, cx: chart.width, cy: chart.height, rot: 0.0, flip_h: false, flip_v: false };
+            // If the chart graphicFrame has no xfrm (zero dimensions), it fills the group's child space.
+            let (ex, ey, ecx, ecy) = if chart.width == 0 && chart.height == 0 {
+                (gt.ch_x, gt.ch_y, gt.ch_cx, gt.ch_cy)
+            } else {
+                (chart.x, chart.y, chart.width, chart.height)
+            };
+            let t = Transform { x: ex, y: ey, cx: ecx, cy: ecy, rot: 0.0, flip_h: false, flip_v: false };
             let nt = gt.apply_to_transform(t);
             chart.x = nt.x; chart.y = nt.y; chart.width = nt.cx; chart.height = nt.cy;
         }
@@ -1033,6 +1061,10 @@ struct LayoutPlaceholders {
     by_type_space_before: HashMap<String, i64>,
     /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
     by_type_space_after: HashMap<String, i64>,
+    /// Default space-before from master txStyles (fallback when layout has none)
+    by_type_master_space_before: HashMap<String, i64>,
+    /// Default space-after from master txStyles (fallback when layout has none)
+    by_type_master_space_after: HashMap<String, i64>,
     /// Stroke per placeholder type from layout spPr > ln
     by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
@@ -1043,6 +1075,8 @@ struct LayoutPlaceholders {
     by_type_line_spacing: HashMap<String, f64>,
     /// Paragraph alignment per placeholder type from master lstStyle > lvl1pPr algn (fallback)
     by_type_master_alignment: HashMap<String, String>,
+    /// Default line spacing from master txStyles (fallback when layout has none)
+    by_type_master_line_spacing: HashMap<String, f64>,
 }
 
 impl LayoutPlaceholders {
@@ -1095,11 +1129,15 @@ impl LayoutPlaceholders {
     fn lookup_space_before(&self, ph_type: &str) -> Option<i64> {
         self.by_type_space_before.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_space_before.get("").copied() } else { None })
+            .or_else(|| self.by_type_master_space_before.get(ph_type).copied())
+            .or_else(|| if ph_type == "body" { self.by_type_master_space_before.get("").copied() } else { None })
     }
 
     fn lookup_space_after(&self, ph_type: &str) -> Option<i64> {
         self.by_type_space_after.get(ph_type).copied()
             .or_else(|| if ph_type == "body" { self.by_type_space_after.get("").copied() } else { None })
+            .or_else(|| self.by_type_master_space_after.get(ph_type).copied())
+            .or_else(|| if ph_type == "body" { self.by_type_master_space_after.get("").copied() } else { None })
     }
 
     /// Look up inherited stroke from the layout placeholder spPr > ln.
@@ -1116,6 +1154,8 @@ impl LayoutPlaceholders {
             .and_then(|i| self.by_idx_line_spacing.get(&i).copied())
             .or_else(|| self.by_type_line_spacing.get(ph_type).copied())
             .or_else(|| if ph_type == "body" { self.by_type_line_spacing.get("").copied() } else { None })
+            .or_else(|| self.by_type_master_line_spacing.get(ph_type).copied())
+            .or_else(|| if ph_type == "body" { self.by_type_master_line_spacing.get("").copied() } else { None })
     }
 }
 
@@ -1232,6 +1272,56 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     map
 }
 
+/// Parse default paragraph spacing and line spacing from master txStyles.
+/// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
+/// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
+/// line_spacing values are spcPct val (e.g. 120000 = 120%).
+fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, f64>) {
+    let mut before_map: HashMap<String, i64> = HashMap::new();
+    let mut after_map:  HashMap<String, i64> = HashMap::new();
+    let mut line_map:   HashMap<String, f64> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return (before_map, after_map, line_map),
+    };
+    let root = doc.root_element();
+    let tx_styles = match child(root, "txStyles") {
+        Some(n) => n,
+        None => return (before_map, after_map, line_map),
+    };
+    let style_ph_map: &[(&str, &[&str])] = &[
+        ("titleStyle",  &["title", "ctrTitle"]),
+        ("bodyStyle",   &["body", "subTitle", "obj", ""]),
+        ("otherStyle",  &["dt", "ftr", "sldNum"]),
+    ];
+    for (style_name, ph_types) in style_ph_map {
+        let lvl1 = child(tx_styles, style_name).and_then(|sn| child(sn, "lvl1pPr"));
+        let spc_before = lvl1.and_then(|lp| child(lp, "spcBef"))
+            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
+        let spc_after = lvl1.and_then(|lp| child(lp, "spcAft"))
+            .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
+        let ln_spc = lvl1.and_then(|lp| child(lp, "lnSpc"))
+            .and_then(|ls| child(ls, "spcPct"))
+            .and_then(|s| attr_f64(&s, "val"));
+        if let Some(v) = spc_before {
+            for ph_type in *ph_types {
+                before_map.entry(ph_type.to_string()).or_insert(v);
+            }
+        }
+        if let Some(v) = spc_after {
+            for ph_type in *ph_types {
+                after_map.entry(ph_type.to_string()).or_insert(v);
+            }
+        }
+        if let Some(v) = ln_spc {
+            for ph_type in *ph_types {
+                line_map.entry(ph_type.to_string()).or_insert(v);
+            }
+        }
+    }
+    (before_map, after_map, line_map)
+}
+
 fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     let mut map = HashMap::new();
     let doc = match roxmltree::Document::parse(master_xml) {
@@ -1254,10 +1344,13 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     lph.master_by_type = master_transforms.clone();
     lph.by_type_master_alignment = master_alignments.clone();
+    lph.by_type_master_space_before = master_space_before.clone();
+    lph.by_type_master_space_after = master_space_after.clone();
+    lph.by_type_master_line_spacing = master_line_spacing.clone();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         Err(_) => return lph,
@@ -1576,6 +1669,7 @@ fn parse_paragraph(
                     font_size,
                     color,
                     font_family,
+                    baseline: None,
                     field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
                 }));
             }
@@ -1684,7 +1778,12 @@ fn parse_run(
         .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")))
         .map(|tf| resolve_theme_typeface(&tf, theme));
 
-    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, field_type: None })
+    // baseline in thousandths of a point; 30000=superscript, -25000=subscript (OOXML typical)
+    let baseline = r_pr.and_then(|n| attr(&n, "baseline"))
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&v| v != 0);
+
+    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, baseline, field_type: None })
 }
 
 // ===========================
@@ -1696,10 +1795,11 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let doc = roxmltree::Document::parse(xml).ok()?;
     let root = doc.root_element();
 
-    // Determine chart type
-    let bar_chart = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "barChart");
-    let chart_type = if let Some(bc) = bar_chart {
+    // Determine chart type by finding the first recognized chart element
+    let find_chart = |name: &str| root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == name);
+
+    let chart_type = if let Some(bc) = find_chart("barChart") {
         let grouping = bc.children()
             .find(|c| c.is_element() && c.tag_name().name() == "grouping")
             .and_then(|n| attr(&n, "val"))
@@ -1715,8 +1815,37 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             (_, false) => "clusteredBar".to_string(),
             (_, true)  => "clusteredBarH".to_string(),
         }
+    } else if let Some(lc) = find_chart("lineChart") {
+        let grouping = lc.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "grouping")
+            .and_then(|n| attr(&n, "val"))
+            .unwrap_or_else(|| "standard".into());
+        match grouping.as_str() {
+            "stacked" => "stackedLine".to_string(),
+            "percentStacked" => "stackedLinePct".to_string(),
+            _ => "line".to_string(),
+        }
+    } else if find_chart("pieChart").is_some() {
+        "pie".to_string()
+    } else if find_chart("doughnutChart").is_some() {
+        "doughnut".to_string()
+    } else if let Some(ac) = find_chart("areaChart") {
+        let grouping = ac.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "grouping")
+            .and_then(|n| attr(&n, "val"))
+            .unwrap_or_else(|| "standard".into());
+        match grouping.as_str() {
+            "stacked" => "stackedArea".to_string(),
+            _ => "area".to_string(),
+        }
+    } else if find_chart("scatterChart").is_some() {
+        "scatter".to_string()
+    } else if find_chart("bubbleChart").is_some() {
+        "bubble".to_string()
+    } else if find_chart("radarChart").is_some() {
+        "radar".to_string()
     } else {
-        "bar".to_string()
+        "unknown".to_string()
     };
 
     // Title text
@@ -1749,27 +1878,33 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         return None;
     }
 
-    // Categories from first series's <c:cat>
+    // Helper: collect <c:pt> values from a cache node (strCache or numCache)
+    let collect_pt_strings = |cache: roxmltree::Node<'_, '_>| -> Vec<String> {
+        cache.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+            .filter_map(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
+            .filter_map(|v| v.text().map(|t| t.to_string()))
+            .collect()
+    };
+
+    // Categories from first series's <c:cat> — supports strCache and numCache
     let categories: Vec<String> = ser_nodes[0]
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "cat")
-        .and_then(|cat| cat.descendants().find(|n| n.is_element() && n.tag_name().name() == "strCache"))
-        .map(|cache| {
-            cache.children()
-                .filter(|n| n.is_element() && n.tag_name().name() == "pt")
-                .filter_map(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
-                .filter_map(|v| v.text().map(|t| t.to_string()))
-                .collect()
+        .and_then(|cat| {
+            cat.descendants()
+                .find(|n| n.is_element() && (n.tag_name().name() == "strCache" || n.tag_name().name() == "numCache"))
         })
+        .map(|cache| collect_pt_strings(cache))
         .unwrap_or_default();
 
     let pt_count = categories.len().max(1);
 
     let series: Vec<ChartSeriesData> = ser_nodes.iter().map(|ser| {
-        // Series name from <c:tx><c:strRef><c:strCache><c:pt>
+        // Series name from <c:tx>
         let name = ser.children()
             .find(|n| n.is_element() && n.tag_name().name() == "tx")
-            .and_then(|tx| tx.descendants().find(|n| n.is_element() && n.tag_name().name() == "strCache"))
+            .and_then(|tx| tx.descendants().find(|n| n.is_element() && (n.tag_name().name() == "strCache" || n.tag_name().name() == "numCache")))
             .and_then(|cache| {
                 cache.children()
                     .find(|n| n.is_element() && n.tag_name().name() == "pt")
@@ -1778,14 +1913,16 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             })
             .unwrap_or_default();
 
-        // Values (sparse by idx attribute)
+        // Values: use <c:val> or <c:yVal> (scatter), falling back to <c:numCache> anywhere
+        let val_cache = ser.descendants()
+            .find(|n| n.is_element() && (n.tag_name().name() == "val" || n.tag_name().name() == "yVal"))
+            .and_then(|v| v.descendants().find(|n| n.is_element() && n.tag_name().name() == "numCache"))
+            .or_else(|| ser.descendants().find(|n| n.is_element() && n.tag_name().name() == "numCache"));
+
         let mut values: Vec<Option<f64>> = vec![None; pt_count];
-        if let Some(num_cache) = ser.descendants()
-            .find(|n| n.is_element() && n.tag_name().name() == "numCache") {
-            for pt in num_cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
-                let idx: usize = attr(&pt, "idx")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+        if let Some(cache) = val_cache {
+            for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt") {
+                let idx: usize = attr(&pt, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let val: Option<f64> = pt.children()
                     .find(|n| n.is_element() && n.tag_name().name() == "v")
                     .and_then(|v| v.text())
@@ -1802,8 +1939,30 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
             .and_then(|fill| parse_color_node(fill, theme));
 
-        ChartSeriesData { name, values, color }
+        // Per-data-point colors from <c:dPt> (important for pie charts)
+        let data_point_colors: Vec<Option<String>> = (0..pt_count).map(|i| {
+            ser.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "dPt")
+                .find(|dpt| attr(dpt, "idx").and_then(|v| v.parse::<usize>().ok()) == Some(i))
+                .and_then(|dpt| dpt.descendants().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+                .and_then(|fill| parse_color_node(fill, theme))
+        }).collect();
+
+        let has_dpt_colors = data_point_colors.iter().any(|c| c.is_some());
+        ChartSeriesData {
+            name, values, color,
+            data_point_colors: if has_dpt_colors { Some(data_point_colors) } else { None },
+        }
     }).collect();
+
+    // Check if data labels (showVal) are enabled — at chart level or in any series
+    let show_data_labels = root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .any(|dLbls| {
+            dLbls.children()
+                .any(|c| c.is_element() && c.tag_name().name() == "showVal"
+                    && attr(&c, "val").as_deref() == Some("1"))
+        });
 
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
@@ -1813,6 +1972,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         series,
         val_max,
         subtotal_indices: vec![],
+        show_data_labels,
     })
 }
 
@@ -1885,6 +2045,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         name: String::new(),
         values: raw_values,
         color,
+        data_point_colors: None,
     }];
 
     Some(ChartElement {
@@ -1895,6 +2056,7 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         series,
         val_max: None,
         subtotal_indices,
+        show_data_labels: false,
     })
 }
 
@@ -2034,6 +2196,18 @@ fn parse_shape(
         .find(|n| attr(n, "name").as_deref() == Some("adj2"))
         .or_else(|| gd_nodes.get(1))
         .and_then(|n| parse_gd_val(*n));
+    // Third gd = adj3 (match by name "adj3", fallback to position 2)
+    let adj3: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj3"))
+        .or_else(|| gd_nodes.get(2))
+        .and_then(|n| parse_gd_val(*n));
+    // Fourth gd = adj4 (match by name "adj4", fallback to position 3)
+    let adj4: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj4"))
+        .or_else(|| gd_nodes.get(3))
+        .and_then(|n| parse_gd_val(*n));
 
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
@@ -2056,7 +2230,7 @@ fn parse_shape(
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525 })
+                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None })
             }
         });
 
@@ -2112,7 +2286,7 @@ fn parse_shape(
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj, adj2, shadow,
+        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj, adj2, adj3, adj4, shadow,
     })
 }
 
@@ -2373,7 +2547,7 @@ fn parse_table(
                     }
                 }
                 if cell.border_t.is_none() && ri > 0 {
-                    cell.border_t = Some(Stroke { color: "D0CBC0".to_string(), width: 9525 });
+                    cell.border_t = Some(Stroke { color: "D0CBC0".to_string(), width: 9525, dash_style: None });
                 }
             }
         }
@@ -2440,13 +2614,16 @@ fn parse_slide(
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
     master_alignments: &HashMap<String, String>,
+    master_space_before: &HashMap<String, i64>,
+    master_space_after: &HashMap<String, i64>,
+    master_line_spacing: &HashMap<String, f64>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, theme))
+        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme))
         .unwrap_or_default();
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -2714,7 +2891,7 @@ fn parse_connector(
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525 })
+                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None })
             }
         });
 
@@ -2740,6 +2917,8 @@ fn parse_connector(
         cust_geom: None,
         adj: None,
         adj2: None,
+        adj3: None,
+        adj4: None,
         shadow,
     })
 }
@@ -2813,6 +2992,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_alignments(xml))
         .unwrap_or_default();
 
+    let (master_space_before, master_space_after, master_line_spacing): (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, f64>) = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_txstyle_spacing(xml))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -2878,6 +3062,9 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_anchors,
             &master_transforms,
             &master_alignments,
+            &master_space_before,
+            &master_space_after,
+            &master_line_spacing,
             raw.index,
             &raw.slide_rels,
             &mut zip,

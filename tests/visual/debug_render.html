@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/></head>
+<body>
+  <canvas id="c" width="400" height="200" style="border:1px solid red;"></canvas>
+  <pre id="output"></pre>
+  <script type="module">
+    import init, { parse_pptx } from '/src/wasm/pptx_parser.js';
+    import { renderSlide } from '/src/renderer.ts';
+    await init();
+    const resp = await fetch('/sample.pptx');
+    const buf = await resp.arrayBuffer();
+    const json = parse_pptx(new Uint8Array(buf));
+    const data = JSON.parse(json);
+    const slide = data.slides[0];
+    const canvas = document.getElementById('c');
+    const output = [];
+    output.push(`Slide 1: ${slide.elements.length} elements`);
+    output.push(`First 2 elements:`);
+    output.push(JSON.stringify(slide.elements[0], null, 2));
+    output.push(JSON.stringify(slide.elements[1], null, 2));
+
+    // Try rendering
+    try {
+      await renderSlide(canvas, slide, data.slideWidth, data.slideHeight, { width: 400 });
+      // Check pixel at x=10, y=10 (should be inside left sidebar)
+      const ctx = canvas.getContext('2d');
+      const pixel = ctx.getImageData(10, 10, 1, 1).data;
+      output.push(`Pixel at (10,10): r=${pixel[0]} g=${pixel[1]} b=${pixel[2]} a=${pixel[3]}`);
+      output.push(`Expected: r~104 g~167 b~236 a=255 (light blue #68A7EC)`);
+    } catch(e) {
+      output.push(`Error: ${e.message}`);
+    }
+    document.getElementById('output').textContent = output.join('\n');
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>
