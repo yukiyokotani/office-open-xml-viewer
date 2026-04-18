@@ -23,6 +23,8 @@ export interface Worksheet {
   defaultColWidth: number;
   defaultRowHeight: number;
   mergeCells: MergeCell[];
+  freezeRows: number;
+  freezeCols: number;
 }
 
 export interface Row {
@@ -117,6 +119,8 @@ export interface RenderViewportOptions {
   defaultFontSize?: number;
   scrollOffsetX?: number;
   scrollOffsetY?: number;
+  freezeRows?: number;
+  freezeCols?: number;
 }
 
 export type WorkerRequest =

@@ -36,6 +36,8 @@ pub struct Worksheet {
     pub default_col_width: f64,
     pub default_row_height: f64,
     pub merge_cells: Vec<MergeCell>,
+    pub freeze_rows: u32,
+    pub freeze_cols: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -571,6 +573,8 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
     let mut col_widths: HashMap<u32, f64> = HashMap::new();
     let mut row_heights: HashMap<u32, f64> = HashMap::new();
     let mut merge_cells: Vec<MergeCell> = Vec::new();
+    let mut freeze_rows: u32 = 0;
+    let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
     let mut default_row_height = 15.0;
 
@@ -594,6 +598,19 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
                 let width: f64 = node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width);
                 for c in min..=max {
                     col_widths.insert(c, width);
+                }
+            }
+            "pane" if node.tag_name().namespace() == Some(ns) => {
+                let state = node.attribute("state").unwrap_or("");
+                if state == "frozen" || state == "frozenSplit" {
+                    freeze_rows = node.attribute("ySplit")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|v| v as u32)
+                        .unwrap_or(0);
+                    freeze_cols = node.attribute("xSplit")
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|v| v as u32)
+                        .unwrap_or(0);
                 }
             }
             "mergeCell" if node.tag_name().namespace() == Some(ns) => {
@@ -627,6 +644,8 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
         default_col_width,
         default_row_height,
         merge_cells,
+        freeze_rows,
+        freeze_cols,
     })
 }
 

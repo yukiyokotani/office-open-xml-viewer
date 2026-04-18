@@ -3,14 +3,14 @@ import type { Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf, Vi
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
 const MDW = 7;
-const ROW_HEIGHT_TO_PX = 4 / 3; // pt → px at 96 DPI
+const ROW_HEIGHT_TO_PX = 4 / 3;
 
-// Width of the row-number header column (px)
 export const HEADER_W = 50;
-// Height of the column-letter header row (px)
 export const HEADER_H = 22;
 
-// OOXML spec: pixel = trunc(((256*w + 128/MDW) / 256) * MDW)
+// Thin line drawn between frozen and scrollable areas
+const FREEZE_LINE_COLOR = '#7a7a7a';
+
 export function colWidthToPx(w: number): number {
   return Math.trunc(((256 * w + 128 / MDW) / 256) * MDW);
 }
@@ -102,9 +102,7 @@ function applyFormatCode(num: number, formatCode: string): string {
   const sections = formatCode.split(';');
   const section = num < 0 && sections.length > 1 ? sections[1] : sections[0];
   const cleaned = section.replace(/\[.*?\]/g, '').replace(/_./g, '').replace(/\*/g, '');
-  if (cleaned.includes('%')) {
-    return (num * 100).toFixed(countDecimalPlaces(cleaned)) + '%';
-  }
+  if (cleaned.includes('%')) return (num * 100).toFixed(countDecimalPlaces(cleaned)) + '%';
   const hasThousands = cleaned.includes(',') && (cleaned.includes('#') || cleaned.includes('0'));
   const dec = countDecimalPlaces(cleaned);
   if (hasThousands) return formatThousands(num, dec);
@@ -140,6 +138,195 @@ function colToLetter(col: number): string {
   return result;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Shared state for a single renderViewport call
+// ────────────────────────────────────────────────────────────────
+interface RenderContext {
+  worksheet: Worksheet;
+  styles: Styles;
+  cellMap: Map<string, Cell>;
+  mergeAnchorMap: Map<string, { totalW: number; totalH: number }>;
+  mergeSkipSet: Set<string>;
+  colWidths: number[];  // widths of scrollable cols (viewport.col..)
+  rowHeights: number[]; // heights of scrollable rows (viewport.row..)
+  frozenColWidths: number[];  // widths of frozen cols (cols 1..freezeCols)
+  frozenRowHeights: number[]; // heights of frozen rows (rows 1..freezeRows)
+  frozenW: number;
+  frozenH: number;
+  startRow: number;  // first scrollable row index
+  startCol: number;  // first scrollable col index
+}
+
+// ────────────────────────────────────────────────────────────────
+// Render one rectangular region of cells
+// ────────────────────────────────────────────────────────────────
+function renderQuadrant(
+  ctx: CanvasRenderingContext2D,
+  rc: RenderContext,
+  startRow: number, startCol: number,
+  colWidths: number[], rowHeights: number[],
+  pixOffsetX: number, pixOffsetY: number,
+  originX: number, originY: number,
+  clipX: number, clipY: number, clipW: number, clipH: number,
+): void {
+  if (clipW <= 0 || clipH <= 0) return;
+
+  const { worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet } = rc;
+  const numCols = colWidths.length;
+  const numRows = rowHeights.length;
+
+  // Canvas x for each column
+  const colXs: number[] = [];
+  let x = -pixOffsetX;
+  for (let ci = 0; ci < numCols; ci++) {
+    colXs.push(x);
+    x += colWidths[ci];
+  }
+
+  // Canvas y for each row
+  const rowYs: number[] = [];
+  let y = -pixOffsetY;
+  for (let ri = 0; ri < numRows; ri++) {
+    rowYs.push(y);
+    y += rowHeights[ri];
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(clipX, clipY, clipW, clipH);
+  ctx.clip();
+
+  for (let ri = 0; ri < numRows; ri++) {
+    const rowIndex = startRow + ri;
+    const cy = originY + rowYs[ri];
+    const ch = rowHeights[ri];
+    if (cy + ch <= clipY || cy >= clipY + clipH) continue;
+
+    for (let ci = 0; ci < numCols; ci++) {
+      const colIndex = startCol + ci;
+      const cx = originX + colXs[ci];
+      const cw = colWidths[ci];
+      if (cx + cw <= clipX || cx >= clipX + clipW) continue;
+
+      const key = `${rowIndex}:${colIndex}`;
+      if (mergeSkipSet.has(key)) continue;
+
+      const mergeInfo = mergeAnchorMap.get(key);
+      const cellW = mergeInfo ? mergeInfo.totalW : cw;
+      const cellH = mergeInfo ? mergeInfo.totalH : ch;
+
+      const cell = cellMap.get(key);
+      const styleIndex = cell?.styleIndex ?? 0;
+      const { font, fill, border, xf } = resolveXf(styles, styleIndex);
+
+      // Background fill
+      if (fill.patternType !== 'none' && fill.patternType !== '' && fill.fgColor) {
+        ctx.fillStyle = hexToRgba(fill.fgColor);
+        ctx.fillRect(cx, cy, cellW, cellH);
+      }
+
+      // Grid line
+      ctx.strokeStyle = '#d0d0d0';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+
+      // Cell borders
+      renderBorder(ctx, border, cx, cy, cellW, cellH);
+
+      if (!cell) continue;
+      const text = formatCellValue(cell, styles);
+      if (!text) continue;
+
+      ctx.font = buildFont(font);
+      ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
+
+      const paddingX = 3;
+      const paddingY = 2;
+      const isNumeric = cell.value.type === 'number';
+      const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+      const alignV = xf.alignV ?? 'bottom';
+
+      // Text overflow for left-aligned non-merged non-wrap cells
+      let drawW = cellW;
+      if (!mergeInfo && !xf.wrapText && alignH !== 'right' && alignH !== 'center') {
+        const textPx = ctx.measureText(text).width + paddingX * 2;
+        if (textPx > cellW) {
+          for (let oci = ci + 1; oci < numCols; oci++) {
+            const adjKey = `${rowIndex}:${startCol + oci}`;
+            if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
+            const adjCell = cellMap.get(adjKey);
+            if (adjCell && adjCell.value.type !== 'empty') break;
+            drawW += colWidths[oci];
+          }
+        }
+      }
+
+      let textX: number;
+      let textAlign: CanvasTextAlign;
+      if (alignH === 'right') {
+        textX = cx + cellW - paddingX;
+        textAlign = 'right';
+      } else if (alignH === 'center') {
+        textX = cx + cellW / 2;
+        textAlign = 'center';
+      } else {
+        textX = cx + paddingX;
+        textAlign = 'left';
+      }
+
+      ctx.textAlign = textAlign;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cx, cy, drawW, cellH);
+      ctx.clip();
+
+      if (xf.wrapText) {
+        const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
+        const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
+        const totalTextH = lines.length * lineH;
+        let startY: number;
+        if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
+        else if (alignV === 'center') { startY = cy + (cellH - totalTextH) / 2; ctx.textBaseline = 'top'; }
+        else { startY = cy + cellH - totalTextH - paddingY; ctx.textBaseline = 'top'; }
+        for (let li = 0; li < lines.length; li++) {
+          ctx.fillText(lines[li], textX, startY + li * lineH);
+        }
+      } else {
+        if (font.underline) {
+          const metrics = ctx.measureText(text);
+          const tW = Math.min(metrics.width, drawW - paddingX * 2);
+          const uy = alignV === 'top'
+            ? cy + paddingY + Math.round(font.size * ROW_HEIGHT_TO_PX) + 1
+            : alignV === 'center'
+              ? cy + cellH / 2 + Math.round(font.size * ROW_HEIGHT_TO_PX * 0.55)
+              : cy + cellH - paddingY + 1;
+          const ux = alignH === 'right' ? cx + cellW - paddingX - tW
+            : alignH === 'center' ? cx + cellW / 2 - tW / 2
+            : cx + paddingX;
+          ctx.save();
+          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
+          ctx.restore();
+        }
+        let textY: number;
+        if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
+        else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
+        else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+        ctx.fillText(text, textX, textY);
+      }
+
+      ctx.restore();
+    }
+  }
+
+  ctx.restore();
+}
+
+// ────────────────────────────────────────────────────────────────
+// Main render function
+// ────────────────────────────────────────────────────────────────
 export function renderViewport(
   ctx: CanvasRenderingContext2D,
   worksheet: Worksheet,
@@ -147,40 +334,43 @@ export function renderViewport(
   viewport: ViewportRange,
   opts: RenderViewportOptions = {},
 ): void {
-  const canvasW = ctx.canvas.width / (opts.dpr ?? 1);
-  const canvasH = ctx.canvas.height / (opts.dpr ?? 1);
-  const scrollOffsetX = opts.scrollOffsetX ?? 0;
-  const scrollOffsetY = opts.scrollOffsetY ?? 0;
+  const dpr = opts.dpr ?? 1;
+  const canvasW = ctx.canvas.width / dpr;
+  const canvasH = ctx.canvas.height / dpr;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvasW, canvasH);
 
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
+  const scrollOffsetX = opts.scrollOffsetX ?? 0;
+  const scrollOffsetY = opts.scrollOffsetY ?? 0;
+  const freezeRows = opts.freezeRows ?? 0;
+  const freezeCols = opts.freezeCols ?? 0;
 
-  // Column X positions (relative to cell area origin; may start negative due to scroll offset)
-  const colXs: number[] = [];
-  const colWidths: number[] = [];
-  let x = -scrollOffsetX;
+  // ── Compute frozen area pixel sizes ──────────────────────────
+  const frozenColWidths: number[] = [];
+  for (let c = 1; c <= freezeCols; c++) {
+    frozenColWidths.push(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
+  }
+  const frozenRowHeights: number[] = [];
+  for (let r = 1; r <= freezeRows; r++) {
+    frozenRowHeights.push(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
+  }
+  const frozenW = frozenColWidths.reduce((s, w) => s + w, 0);
+  const frozenH = frozenRowHeights.reduce((s, h) => s + h, 0);
+
+  // ── Scrollable col/row pixel widths ──────────────────────────
+  const scrollColWidths: number[] = [];
   for (let c = startCol; c < startCol + numCols; c++) {
-    colXs.push(x);
-    const w = colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth);
-    colWidths.push(w);
-    x += w;
+    scrollColWidths.push(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
   }
-
-  // Row Y positions (relative to cell area origin)
-  const rowYs: number[] = [];
-  const rowHeights: number[] = [];
-  let y = -scrollOffsetY;
+  const scrollRowHeights: number[] = [];
   for (let r = startRow; r < startRow + numRows; r++) {
-    rowYs.push(y);
-    const h = rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight);
-    rowHeights.push(h);
-    y += h;
+    scrollRowHeights.push(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
   }
 
-  // Build cell lookup
+  // ── Build cell & merge lookup ────────────────────────────────
   const cellMap = new Map<string, Cell>();
   for (const row of worksheet.rows) {
     for (const cell of row.cells) {
@@ -188,7 +378,6 @@ export function renderViewport(
     }
   }
 
-  // Build merge lookup
   const mergeAnchorMap = new Map<string, { totalW: number; totalH: number }>();
   const mergeSkipSet = new Set<string>();
   for (const mc of worksheet.mergeCells ?? []) {
@@ -209,170 +398,114 @@ export function renderViewport(
     }
   }
 
-  // --- Render cells (clipped to cell area, excluding headers) ---
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(HEADER_W, HEADER_H, canvasW - HEADER_W, canvasH - HEADER_H);
-  ctx.clip();
+  const rc: RenderContext = {
+    worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet,
+    colWidths: scrollColWidths,
+    rowHeights: scrollRowHeights,
+    frozenColWidths, frozenRowHeights,
+    frozenW, frozenH,
+    startRow, startCol,
+  };
 
-  for (let ri = 0; ri < numRows; ri++) {
-    const rowIndex = startRow + ri;
-    const cy = HEADER_H + rowYs[ri];
-    const ch = rowHeights[ri];
+  // Canvas areas for each quadrant
+  const cellAreaX = HEADER_W;
+  const cellAreaY = HEADER_H;
+  const scrollAreaX = cellAreaX + frozenW;
+  const scrollAreaY = cellAreaY + frozenH;
+  const scrollAreaW = Math.max(0, canvasW - scrollAreaX);
+  const scrollAreaH = Math.max(0, canvasH - scrollAreaY);
 
-    for (let ci = 0; ci < numCols; ci++) {
-      const colIndex = startCol + ci;
-      const cx = HEADER_W + colXs[ci];
-      const cw = colWidths[ci];
-
-      const key = `${rowIndex}:${colIndex}`;
-      if (mergeSkipSet.has(key)) continue;
-
-      const mergeInfo = mergeAnchorMap.get(key);
-      const cellW = mergeInfo ? mergeInfo.totalW : cw;
-      const cellH = mergeInfo ? mergeInfo.totalH : ch;
-
-      const cell = cellMap.get(key);
-      const styleIndex = cell?.styleIndex ?? 0;
-      const { font, fill, border, xf } = resolveXf(styles, styleIndex);
-
-      // Background fill
-      if (fill.patternType !== 'none' && fill.patternType !== '' && fill.fgColor) {
-        ctx.fillStyle = hexToRgba(fill.fgColor);
-        ctx.fillRect(cx, cy, cellW, cellH);
-      }
-
-      // Grid line
-      if (!mergeInfo) {
-        ctx.strokeStyle = '#d0d0d0';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
-      } else {
-        // Draw grid lines for the bounding box of the merge
-        ctx.strokeStyle = '#d0d0d0';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
-      }
-
-      // Border edges
-      renderBorder(ctx, border, cx, cy, cellW, cellH);
-
-      if (!cell) continue;
-      const text = formatCellValue(cell, styles);
-      if (!text) continue;
-
-      ctx.font = buildFont(font);
-      ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
-
-      const paddingX = 3;
-      const paddingY = 2;
-      const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
-      const alignV = xf.alignV ?? 'bottom';
-
-      let textX: number;
-      let textAlign: CanvasTextAlign;
-      if (alignH === 'right') {
-        textX = cx + cellW - paddingX;
-        textAlign = 'right';
-      } else if (alignH === 'center') {
-        textX = cx + cellW / 2;
-        textAlign = 'center';
-      } else {
-        textX = cx + paddingX;
-        textAlign = 'left';
-      }
-
-      ctx.textAlign = textAlign;
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(cx, cy, cellW, cellH);
-      ctx.clip();
-
-      if (xf.wrapText) {
-        const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
-        const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
-        const totalTextH = lines.length * lineH;
-        let startY: number;
-        if (alignV === 'top') {
-          startY = cy + paddingY;
-          ctx.textBaseline = 'top';
-        } else if (alignV === 'center') {
-          startY = cy + (cellH - totalTextH) / 2;
-          ctx.textBaseline = 'top';
-        } else {
-          startY = cy + cellH - totalTextH - paddingY;
-          ctx.textBaseline = 'top';
-        }
-        for (let li = 0; li < lines.length; li++) {
-          ctx.fillText(lines[li], textX, startY + li * lineH);
-        }
-      } else {
-        // Underline via canvas
-        if (font.underline) {
-          const metrics = ctx.measureText(text);
-          const textW = Math.min(metrics.width, cellW - paddingX * 2);
-          const uy = alignV === 'top'
-            ? cy + paddingY + Math.round(font.size * ROW_HEIGHT_TO_PX)
-            : alignV === 'center'
-              ? cy + cellH / 2 + Math.round(font.size * ROW_HEIGHT_TO_PX * 0.5)
-              : cy + cellH - paddingY + 1;
-          const ux = alignH === 'right' ? cx + cellW - paddingX - textW
-            : alignH === 'center' ? cx + cellW / 2 - textW / 2
-            : cx + paddingX;
-          ctx.save();
-          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(ux, uy);
-          ctx.lineTo(ux + textW, uy);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        let textY: number;
-        if (alignV === 'top') {
-          ctx.textBaseline = 'top';
-          textY = cy + paddingY;
-        } else if (alignV === 'center') {
-          ctx.textBaseline = 'middle';
-          textY = cy + cellH / 2;
-        } else {
-          ctx.textBaseline = 'bottom';
-          textY = cy + cellH - paddingY;
-        }
-        ctx.fillText(text, textX, textY);
-      }
-
-      ctx.restore();
-    }
+  // ── Q1: frozen rows × frozen cols ───────────────────────────
+  if (freezeRows > 0 && freezeCols > 0) {
+    renderQuadrant(ctx, rc,
+      1, 1, frozenColWidths, frozenRowHeights,
+      0, 0,
+      cellAreaX, cellAreaY,
+      cellAreaX, cellAreaY, frozenW, frozenH,
+    );
   }
 
-  ctx.restore(); // end cell area clip
+  // ── Q2: frozen rows × scrollable cols ───────────────────────
+  if (freezeRows > 0) {
+    renderQuadrant(ctx, rc,
+      1, startCol, scrollColWidths, frozenRowHeights,
+      scrollOffsetX, 0,
+      scrollAreaX, cellAreaY,
+      scrollAreaX, cellAreaY, scrollAreaW, frozenH,
+    );
+  }
 
-  // --- Render row/column headers (drawn last, always on top) ---
-  renderHeaders(ctx, canvasW, canvasH, startRow, startCol, numRows, numCols, colXs, colWidths, rowYs, rowHeights);
+  // ── Q3: scrollable rows × frozen cols ───────────────────────
+  if (freezeCols > 0) {
+    renderQuadrant(ctx, rc,
+      startRow, 1, frozenColWidths, scrollRowHeights,
+      0, scrollOffsetY,
+      cellAreaX, scrollAreaY,
+      cellAreaX, scrollAreaY, frozenW, scrollAreaH,
+    );
+  }
+
+  // ── Q4: scrollable rows × scrollable cols (main area) ───────
+  renderQuadrant(ctx, rc,
+    startRow, startCol, scrollColWidths, scrollRowHeights,
+    scrollOffsetX, scrollOffsetY,
+    scrollAreaX, scrollAreaY,
+    scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
+  );
+
+  // ── Row/col headers (drawn last, always on top) ──────────────
+  renderHeaders(ctx, canvasW, canvasH,
+    startRow, startCol, numRows, numCols,
+    scrollColWidths, scrollRowHeights,
+    scrollOffsetX, scrollOffsetY,
+    frozenColWidths, frozenRowHeights,
+    frozenW, frozenH,
+  );
+
+  // ── Freeze pane separator lines ──────────────────────────────
+  if (freezeRows > 0) {
+    ctx.save();
+    ctx.strokeStyle = FREEZE_LINE_COLOR;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(HEADER_W, scrollAreaY + 0.5);
+    ctx.lineTo(canvasW, scrollAreaY + 0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+  if (freezeCols > 0) {
+    ctx.save();
+    ctx.strokeStyle = FREEZE_LINE_COLOR;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(scrollAreaX + 0.5, HEADER_H);
+    ctx.lineTo(scrollAreaX + 0.5, canvasH);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
+// ────────────────────────────────────────────────────────────────
+// Headers
+// ────────────────────────────────────────────────────────────────
 function renderHeaders(
   ctx: CanvasRenderingContext2D,
-  canvasW: number,
-  canvasH: number,
-  startRow: number,
-  startCol: number,
-  numRows: number,
-  numCols: number,
-  colXs: number[],
-  colWidths: number[],
-  rowYs: number[],
-  rowHeights: number[],
+  canvasW: number, canvasH: number,
+  startRow: number, startCol: number,
+  numRows: number, numCols: number,
+  scrollColWidths: number[], scrollRowHeights: number[],
+  scrollOffsetX: number, scrollOffsetY: number,
+  frozenColWidths: number[], frozenRowHeights: number[],
+  frozenW: number, frozenH: number,
 ): void {
   const HEADER_BG = '#f8f9fa';
   const HEADER_BORDER = '#c8ccd0';
   const HEADER_TEXT = '#444';
   const HEADER_FONT = `11px ${DEFAULT_FONT_FAMILY}`;
+  const scrollAreaX = HEADER_W + frozenW;
+  const scrollAreaY = HEADER_H + frozenH;
 
-  // Corner cell
+  // Corner
   ctx.fillStyle = HEADER_BG;
   ctx.fillRect(0, 0, HEADER_W, HEADER_H);
   ctx.strokeStyle = HEADER_BORDER;
@@ -381,87 +514,135 @@ function renderHeaders(
 
   ctx.font = HEADER_FONT;
   ctx.fillStyle = HEADER_TEXT;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
 
-  // Column letter headers
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(HEADER_W, 0, canvasW - HEADER_W, HEADER_H);
-  ctx.clip();
-
-  for (let ci = 0; ci < numCols; ci++) {
-    const cx = HEADER_W + colXs[ci];
-    const cw = colWidths[ci];
-    if (cx + cw <= HEADER_W || cx >= canvasW) continue;
-
+  // Helper: draw one column header cell
+  const drawColHeader = (col: number, cx: number, cw: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(cx, 0, cw, HEADER_H);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
     ctx.strokeRect(cx + 0.5, 0.5, cw - 1, HEADER_H - 1);
-
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
-    ctx.fillText(colToLetter(startCol + ci), cx + cw / 2, HEADER_H / 2);
-  }
-  ctx.restore();
+    ctx.textBaseline = 'middle';
+    ctx.fillText(colToLetter(col), cx + cw / 2, HEADER_H / 2);
+  };
 
-  // Row number headers
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, HEADER_H, HEADER_W, canvasH - HEADER_H);
-  ctx.clip();
-
-  for (let ri = 0; ri < numRows; ri++) {
-    const cy = HEADER_H + rowYs[ri];
-    const ch = rowHeights[ri];
-    if (cy + ch <= HEADER_H || cy >= canvasH) continue;
-
+  // Helper: draw one row header cell
+  const drawRowHeader = (row: number, cy: number, ch: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(0, cy, HEADER_W, ch);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
     ctx.strokeRect(0.5, cy + 0.5, HEADER_W - 1, ch - 1);
-
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(startRow + ri), HEADER_W - 4, cy + ch / 2);
+    ctx.fillText(String(row), HEADER_W - 4, cy + ch / 2);
+  };
+
+  // Frozen col headers (no h-scroll, fixed positions)
+  if (frozenColWidths.length > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(HEADER_W, 0, frozenW, HEADER_H);
+    ctx.clip();
+    let cx = HEADER_W;
+    for (let ci = 0; ci < frozenColWidths.length; ci++) {
+      drawColHeader(ci + 1, cx, frozenColWidths[ci]);
+      cx += frozenColWidths[ci];
+    }
+    ctx.restore();
+  }
+
+  // Scrollable col headers
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, HEADER_H);
+  ctx.clip();
+  let cx = scrollAreaX - scrollOffsetX;
+  for (let ci = 0; ci < scrollColWidths.length; ci++) {
+    const cw = scrollColWidths[ci];
+    if (cx + cw > scrollAreaX && cx < canvasW) {
+      drawColHeader(startCol + ci, cx, cw);
+    }
+    cx += cw;
   }
   ctx.restore();
+
+  // Frozen row headers (no v-scroll)
+  if (frozenRowHeights.length > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, HEADER_H, HEADER_W, frozenH);
+    ctx.clip();
+    let cy = HEADER_H;
+    for (let ri = 0; ri < frozenRowHeights.length; ri++) {
+      drawRowHeader(ri + 1, cy, frozenRowHeights[ri]);
+      cy += frozenRowHeights[ri];
+    }
+    ctx.restore();
+  }
+
+  // Scrollable row headers
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, scrollAreaY, HEADER_W, canvasH - scrollAreaY);
+  ctx.clip();
+  let cy = scrollAreaY - scrollOffsetY;
+  for (let ri = 0; ri < scrollRowHeights.length; ri++) {
+    const ch = scrollRowHeights[ri];
+    if (cy + ch > scrollAreaY && cy < canvasH) {
+      drawRowHeader(startRow + ri, cy, ch);
+    }
+    cy += ch;
+  }
+  ctx.restore();
+
+  // Cover frozen area corner (where row/col headers meet)
+  if (frozenW > 0 || frozenH > 0) {
+    ctx.fillStyle = HEADER_BG;
+    if (frozenW > 0) {
+      ctx.fillRect(0, HEADER_H, HEADER_W, frozenH);
+    }
+    if (frozenH > 0) {
+      ctx.fillRect(HEADER_W, 0, frozenW, HEADER_H);
+    }
+    // Redraw these already handled above, just ensure coverage
+  }
 }
 
-function renderBorder(
-  ctx: CanvasRenderingContext2D,
-  border: Border,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): void {
+// ────────────────────────────────────────────────────────────────
+// Border drawing
+// ────────────────────────────────────────────────────────────────
+function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
   const edges = [
-    { edge: border.top, x1: x, y1: y, x2: x + w, y2: y },
-    { edge: border.bottom, x1: x, y1: y + h, x2: x + w, y2: y + h },
-    { edge: border.left, x1: x, y1: y, x2: x, y2: y + h },
-    { edge: border.right, x1: x + w, y1: y, x2: x + w, y2: y + h },
+    { edge: border.top,    x1: x,     y1: y,     x2: x + w, y2: y },
+    { edge: border.bottom, x1: x,     y1: y + h, x2: x + w, y2: y + h },
+    { edge: border.left,   x1: x,     y1: y,     x2: x,     y2: y + h },
+    { edge: border.right,  x1: x + w, y1: y,     x2: x + w, y2: y + h },
   ];
   for (const { edge, x1, y1, x2, y2 } of edges) {
     if (!edge || !edge.style || edge.style === 'none') continue;
     ctx.beginPath();
     ctx.strokeStyle = edge.color ? hexToRgba(edge.color) : '#000000';
     ctx.lineWidth = borderStyleWidth(edge.style);
+    if (edge.style === 'dashed' || edge.style === 'dotted' || edge.style === 'dashDot') {
+      ctx.setLineDash(edge.style === 'dotted' ? [2, 2] : [4, 2]);
+    } else {
+      ctx.setLineDash([]);
+    }
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
+    ctx.setLineDash([]);
   }
 }
 
 function borderStyleWidth(style: string): number {
   switch (style) {
     case 'thick': return 2;
-    case 'medium': return 1.5;
-    case 'thin': return 1;
+    case 'medium': case 'mediumDashed': case 'mediumDashDot': return 1.5;
     default: return 1;
   }
 }

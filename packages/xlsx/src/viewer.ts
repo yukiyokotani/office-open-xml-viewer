@@ -2,7 +2,7 @@ import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx } from './renderer.js';
 
-const TAB_BAR_H = 30; // height of the sheet tab bar (px)
+const TAB_BAR_H = 30;
 
 export interface XlsxViewerOptions {
   width?: number;
@@ -30,25 +30,20 @@ export class XlsxViewer {
     const w = opts.width ?? 1200;
     const h = opts.height ?? 600;
 
-    // Outer wrapper: total height includes the tab bar
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
       `position:relative;width:${w}px;height:${h + TAB_BAR_H}px;` +
       `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;`;
 
-    // --- Canvas area (top h px) ---
     const canvasArea = document.createElement('div');
     canvasArea.style.cssText = `position:relative;width:${w}px;height:${h}px;overflow:hidden;`;
 
-    // Canvas rendered underneath (z-index:0)
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
 
-    // Scroll host on top — captures scroll events, transparent so canvas shows through
     this.scrollHost = document.createElement('div');
     this.scrollHost.style.cssText = `position:absolute;inset:0;overflow:auto;z-index:1;background:transparent;`;
 
-    // Spacer inside scroll host — defines virtual scroll range
     this.spacer = document.createElement('div');
     this.spacer.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;pointer-events:none;`;
     this.scrollHost.appendChild(this.spacer);
@@ -56,14 +51,11 @@ export class XlsxViewer {
     canvasArea.appendChild(this.canvas);
     canvasArea.appendChild(this.scrollHost);
 
-    // --- Tab bar (bottom TAB_BAR_H px) ---
     this.tabBar = document.createElement('div');
     this.tabBar.style.cssText =
       `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;` +
       `background:#f0f0f0;border-top:1px solid #c8ccd0;` +
-      `overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:1px;` +
-      `scrollbar-width:none;`;
-    // Hide webkit scrollbar on the tab bar
+      `overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:1px;scrollbar-width:none;`;
     const style = document.createElement('style');
     style.textContent = `.xlsx-tab-bar::-webkit-scrollbar{display:none}`;
     document.head.appendChild(style);
@@ -116,7 +108,6 @@ export class XlsxViewer {
     this.tabs.forEach((btn, i) => {
       btn.style.cssText = this.tabStyle(i === index);
     });
-    // Scroll the active tab into view within the tab bar
     this.tabs[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
@@ -132,23 +123,38 @@ export class XlsxViewer {
   }
 
   private updateSpacerSize(ws: Worksheet): void {
-    let maxRow = 50;
-    let maxCol = 26;
+    const freezeRows = ws.freezeRows ?? 0;
+    const freezeCols = ws.freezeCols ?? 0;
+
+    // Compute frozen area pixel size
+    let frozenW = 0;
+    for (let c = 1; c <= freezeCols; c++) {
+      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+    }
+    let frozenH = 0;
+    for (let r = 1; r <= freezeRows; r++) {
+      frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    }
+
+    // Find actual scrollable data extent
+    let maxRow = Math.max(50, freezeRows);
+    let maxCol = Math.max(26, freezeCols);
     for (const row of ws.rows) {
       if (row.index > maxRow) maxRow = row.index;
       for (const cell of row.cells) {
         if (cell.col > maxCol) maxCol = cell.col;
       }
     }
-    maxRow = maxRow + 30;
-    maxCol = maxCol + 10;
+    maxRow += 30;
+    maxCol += 10;
 
-    let totalW = HEADER_W;
-    for (let c = 1; c <= maxCol; c++) {
+    // Spacer = header + frozen area + scrollable area
+    let totalW = HEADER_W + frozenW;
+    for (let c = freezeCols + 1; c <= maxCol; c++) {
       totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
     }
-    let totalH = HEADER_H;
-    for (let r = 1; r <= maxRow; r++) {
+    let totalH = HEADER_H + frozenH;
+    for (let r = freezeRows + 1; r <= maxRow; r++) {
       totalH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
     }
 
@@ -163,10 +169,25 @@ export class XlsxViewer {
     const h = this.opts.height ?? 600;
     const dpr = window.devicePixelRatio ?? 1;
 
+    const freezeRows = ws.freezeRows ?? 0;
+    const freezeCols = ws.freezeCols ?? 0;
+
+    // Compute frozen area pixel size (for viewport offset)
+    let frozenW = 0;
+    for (let c = 1; c <= freezeCols; c++) {
+      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+    }
+    let frozenH = 0;
+    for (let r = 1; r <= freezeRows; r++) {
+      frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    }
+
+    // scrollLeft/scrollTop map to offset into the scrollable (non-frozen) cell area
     const scrollX = this.scrollHost.scrollLeft;
     const scrollY = this.scrollHost.scrollTop;
 
-    let startCol = 1;
+    // Find startCol (within scrollable cols, starting from freezeCols+1)
+    let startCol = freezeCols + 1;
     let xAcc = 0;
     let offsetX = 0;
     while (true) {
@@ -177,7 +198,8 @@ export class XlsxViewer {
       if (startCol > 16384) break;
     }
 
-    let startRow = 1;
+    // Find startRow (within scrollable rows, starting from freezeRows+1)
+    let startRow = freezeRows + 1;
     let yAcc = 0;
     let offsetY = 0;
     while (true) {
@@ -188,8 +210,9 @@ export class XlsxViewer {
       if (startRow > 1048576) break;
     }
 
-    const cellW = w - HEADER_W;
-    const cellH = h - HEADER_H;
+    // Effective scrollable area (canvas minus headers and frozen strips)
+    const cellW = w - HEADER_W - frozenW;
+    const cellH = h - HEADER_H - frozenH;
     const avgCW = colWidthToPx(ws.defaultColWidth);
     const avgRH = rowHeightToPx(ws.defaultRowHeight);
     const cols = Math.ceil((cellW + offsetX) / Math.max(avgCW, 1)) + 2;
@@ -203,6 +226,8 @@ export class XlsxViewer {
       dpr,
       scrollOffsetX: offsetX,
       scrollOffsetY: offsetY,
+      freezeRows,
+      freezeCols,
     });
   }
 
