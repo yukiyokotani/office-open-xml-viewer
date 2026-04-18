@@ -12,6 +12,8 @@ export interface Presentation {
 
 export interface Slide {
   index: number;
+  /** 1-based slide number (index + 1); used to render slidenum fields */
+  slideNumber: number;
   background: Fill | null;
   elements: SlideElement[];
 }
@@ -244,6 +246,8 @@ export interface TextRunData {
   fontSize: number | null;
   color: string | null;
   fontFamily: string | null;
+  /** Set for OOXML field runs (e.g. "slidenum"). When set, renderer replaces text with field value. */
+  fieldType?: string;
 }
 
 export interface LineBreak {

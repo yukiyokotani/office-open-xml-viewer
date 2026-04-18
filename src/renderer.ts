@@ -171,6 +171,7 @@ function layoutParagraph(
   defaultBold: boolean = false,
   defaultItalic: boolean = false,
   fontScale: number = 1.0,
+  slideNumber?: number,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
@@ -226,8 +227,13 @@ function layoutParagraph(
     const font   = buildFont(isBold, isItalic, sizePx, family);
     ctx.font = font;
 
+    // Resolve field values (e.g. slidenum → actual slide number)
+    const runText = (run.fieldType === 'slidenum' && slideNumber !== undefined)
+      ? String(slideNumber)
+      : run.text;
+
     // Split on whitespace boundaries, keeping the whitespace tokens
-    const tokens = run.text.split(/(\s+)/);
+    const tokens = runText.split(/(\s+)/);
 
     for (const token of tokens) {
       if (!token) continue;
@@ -335,7 +341,7 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000') {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
@@ -356,7 +362,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.textBody) {
       const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor);
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber);
     }
     return;
   }
@@ -403,7 +409,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor);
+    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber);
   }
 
   ctx.restore();
@@ -2040,7 +2046,8 @@ function renderTextBody(
   shapeRotation = 0,
   shapeFlipH = false,
   shapeFlipV = false,
-  themeDefaultColor = '#000000'
+  themeDefaultColor = '#000000',
+  slideNumber?: number,
 ) {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -2057,7 +2064,7 @@ function renderTextBody(
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber);
     ctx.restore();
     return;
   }
@@ -2153,7 +2160,7 @@ function renderTextBody(
     const textMaxW = bw - lPad - rPad - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale);
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
@@ -2766,7 +2773,7 @@ function renderChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: num
 
 // ─── Table rendering ─────────────────────────────────────────────────────────
 
-function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number) {
+function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number) {
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
@@ -2808,7 +2815,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 
       // Text body
       if (cell.textBody) {
-        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale);
+        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, null, 0, false, false, '#000000', slideNumber);
       }
 
       // Borders
@@ -2891,13 +2898,14 @@ export async function renderSlide(
     ? `#${opts.defaultTextColor}`
     : '#000000';
 
+  const slideNumber = slide.slideNumber;
   for (const el of slide.elements) {
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor);
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale);
     } else if (el.type === 'table') {
-      renderTable(ctx, el, scale);
+      renderTable(ctx, el, scale, slideNumber);
     } else if (el.type === 'chart') {
       renderChart(ctx, el, scale);
     }

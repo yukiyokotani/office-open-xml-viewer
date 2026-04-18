@@ -35,6 +35,8 @@ struct Presentation {
 #[serde(rename_all = "camelCase")]
 struct Slide {
     index: usize,
+    /// 1-based slide number (index + 1); used for slidenum field rendering
+    slide_number: usize,
     background: Option<Fill>,
     elements: Vec<SlideElement>,
 }
@@ -327,6 +329,8 @@ struct TextRunData {
     font_size: Option<f64>,
     color: Option<String>,
     font_family: Option<String>,
+    /// Set for OOXML field elements (e.g. "slidenum" for slide number fields)
+    field_type: Option<String>,
 }
 
 // ===========================
@@ -349,6 +353,25 @@ fn read_zip_bytes(zip: &mut PptxZip<'_>, path: &str) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     Some(buf)
+}
+
+// ===========================
+//  Table style data model
+// ===========================
+
+/// Resolved fills and borders extracted from a single <a:tblStyle> definition.
+#[derive(Debug, Clone, Default)]
+struct TableStyleDef {
+    whole_fill:        Option<Fill>,
+    whole_inside_h:    Option<Stroke>,
+    whole_inside_v:    Option<Stroke>,
+    band1h_fill:       Option<Fill>,
+    band2h_fill:       Option<Fill>,
+    first_row_fill:    Option<Fill>,
+    first_row_border_b: Option<Stroke>,
+    last_row_fill:     Option<Fill>,
+    first_col_fill:    Option<Fill>,
+    last_col_fill:     Option<Fill>,
 }
 
 // ===========================
@@ -1428,6 +1451,28 @@ fn parse_paragraph(
                 }
             }
             "br" => runs.push(TextRun::Break),
+            // Field elements (e.g. slide number, date): parse like a run but tag the field type
+            "fld" => {
+                let fld_type = attr(&node, "type").unwrap_or_default().to_string();
+                let text = child(node, "t").and_then(|t| t.text()).unwrap_or("").to_string();
+                let r_pr = child(node, "rPr");
+                let font_size = r_pr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
+                let color = r_pr.and_then(|n| child(n, "solidFill")).and_then(|n| parse_color_node(n, theme));
+                let bold = r_pr.and_then(|n| attr(&n, "b")).map(|v| v == "1" || v == "true");
+                let italic = r_pr.and_then(|n| attr(&n, "i")).map(|v| v == "1" || v == "true");
+                let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")).map(|s| s.to_string());
+                runs.push(TextRun::Text(TextRunData {
+                    text,
+                    bold,
+                    italic,
+                    underline: false,
+                    strikethrough: false,
+                    font_size,
+                    color,
+                    font_family,
+                    field_type: if fld_type == "slidenum" { Some("slidenum".to_string()) } else { None },
+                }));
+            }
             _ => {}
         }
     }
@@ -1531,7 +1576,7 @@ fn parse_run(
     let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
         .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")));
 
-    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family })
+    Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, field_type: None })
 }
 
 // ===========================
@@ -2033,11 +2078,98 @@ fn parse_background(
 //  Table parsing
 // ===========================
 
+/// Parse ppt/tableStyles.xml into a map of styleId → TableStyleDef.
+fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap<String, TableStyleDef> {
+    let mut map = HashMap::new();
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return map; };
+    let root = doc.root_element();
+    for style_node in root.children().filter(|n| n.is_element() && n.tag_name().name() == "tblStyle") {
+        let Some(style_id) = attr(&style_node, "styleId") else { continue };
+        let style_id = style_id.to_string();
+        let mut def = TableStyleDef::default();
+
+        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> (Option<Fill>, Option<Stroke>, Option<Stroke>, Option<Stroke>) {
+            let tc_style = match child(role, "tcStyle") {
+                Some(n) => n,
+                None    => return (None, None, None, None),
+            };
+            let fill = parse_fill(tc_style, theme);
+            let tc_bdr = child(tc_style, "tcBdr");
+            let inside_h = tc_bdr.and_then(|b| child(b, "insideH"))
+                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
+            let inside_v = tc_bdr.and_then(|b| child(b, "insideV"))
+                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
+            let border_b = tc_bdr.and_then(|b| child(b, "bottom"))
+                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
+            (fill, inside_h, inside_v, border_b)
+        };
+
+        if let Some(whole) = child(style_node, "wholeTbl") {
+            let (fill, ih, iv, _) = parse_tc_style(whole);
+            def.whole_fill = fill;
+            def.whole_inside_h = ih;
+            def.whole_inside_v = iv;
+        }
+        if let Some(band) = child(style_node, "band1H") {
+            let (fill, _, _, _) = parse_tc_style(band);
+            def.band1h_fill = fill;
+        }
+        if let Some(band) = child(style_node, "band2H") {
+            let (fill, _, _, _) = parse_tc_style(band);
+            def.band2h_fill = fill;
+        }
+        if let Some(first) = child(style_node, "firstRow") {
+            let (fill, _, _, border_b) = parse_tc_style(first);
+            def.first_row_fill = fill;
+            def.first_row_border_b = border_b;
+        }
+        if let Some(last) = child(style_node, "lastRow") {
+            let (fill, _, _, _) = parse_tc_style(last);
+            def.last_row_fill = fill;
+        }
+        if let Some(first) = child(style_node, "firstCol") {
+            let (fill, _, _, _) = parse_tc_style(first);
+            def.first_col_fill = fill;
+        }
+        if let Some(last) = child(style_node, "lastCol") {
+            let (fill, _, _, _) = parse_tc_style(last);
+            def.last_col_fill = fill;
+        }
+
+        map.insert(style_id, def);
+    }
+    map
+}
+
 fn parse_table(
     tbl: roxmltree::Node<'_, '_>,
     t: &Transform,
     theme: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
 ) -> Option<TableElement> {
+    // Parse tblPr attributes and look up table style
+    let tbl_pr = child(tbl, "tblPr");
+    let style_id = tbl_pr
+        .and_then(|n| child(n, "tableStyleId"))
+        .and_then(|n| n.text())
+        .map(|s| s.to_string());
+    let flag = |attr_name: &str| -> bool {
+        tbl_pr.and_then(|n| attr(&n, attr_name))
+            .map(|v| v == "1" || v == "true").unwrap_or(false)
+    };
+    let first_row = flag("firstRow");
+    let last_row  = flag("lastRow");
+    let band_row  = flag("bandRow");
+    let first_col = flag("firstCol");
+    let last_col  = flag("lastCol");
+
+    // Load style definitions once
+    let table_styles_xml = read_zip_str(zip, "ppt/tableStyles.xml").ok();
+    let table_styles = table_styles_xml.as_deref()
+        .map(|xml| parse_table_styles_xml(xml, theme))
+        .unwrap_or_default();
+    let style = style_id.as_deref().and_then(|id| table_styles.get(id));
+
     let cols: Vec<i64> = tbl
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "tblGrid")
@@ -2053,11 +2185,90 @@ fn parse_table(
         return None;
     }
 
-    let rows: Vec<TableRow> = tbl
+    let col_count = cols.len();
+    let last_col_idx = col_count.saturating_sub(1);
+
+    let mut rows: Vec<TableRow> = tbl
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "tr")
         .map(|tr| parse_table_row(tr, theme))
         .collect();
+
+    let row_count = rows.len();
+    let last_row_idx = row_count.saturating_sub(1);
+
+    // Apply table style fills and borders to each cell
+    for (ri, row) in rows.iter_mut().enumerate() {
+        for (ci, cell) in row.cells.iter_mut().enumerate() {
+            if let Some(s) = style {
+                // ── Fill cascade ────────────────────────────────────────────
+                let mut effective_fill = s.whole_fill.clone();
+
+                if band_row {
+                    // Determine band index excluding firstRow header if present
+                    let band_ri = ri.saturating_sub(if first_row { 1 } else { 0 });
+                    if !(first_row && ri == 0) {
+                        if band_ri % 2 == 0 {
+                            if let Some(f) = s.band1h_fill.clone() { effective_fill = Some(f); }
+                        } else if let Some(f) = s.band2h_fill.clone() {
+                            effective_fill = Some(f);
+                        }
+                    }
+                }
+                if first_row && ri == 0 {
+                    if let Some(f) = s.first_row_fill.clone() { effective_fill = Some(f); }
+                }
+                if last_row && ri == last_row_idx {
+                    if let Some(f) = s.last_row_fill.clone() { effective_fill = Some(f); }
+                }
+                if first_col && ci == 0 {
+                    if let Some(f) = s.first_col_fill.clone() { effective_fill = Some(f); }
+                }
+                if last_col && ci == last_col_idx {
+                    if let Some(f) = s.last_col_fill.clone() { effective_fill = Some(f); }
+                }
+                // Cell's own tcPr fill wins
+                if cell.fill.is_none() {
+                    cell.fill = effective_fill;
+                }
+
+                // ── Border cascade (style provides inside borders) ──────────
+                // Top border: inside-H between rows (not for first row's top)
+                if cell.border_t.is_none() && ri > 0 {
+                    cell.border_t = s.whole_inside_h.clone();
+                }
+                // Bottom border: inside-H between rows (not for last row's bottom);
+                // firstRow gets its own bottom border definition
+                if cell.border_b.is_none() {
+                    if first_row && ri == 0 {
+                        cell.border_b = s.first_row_border_b.clone()
+                            .or_else(|| s.whole_inside_h.clone());
+                    } else if ri < last_row_idx {
+                        cell.border_b = s.whole_inside_h.clone();
+                    }
+                }
+                // Left border: inside-V between cols (not for first col's left)
+                if cell.border_l.is_none() && ci > 0 {
+                    cell.border_l = s.whole_inside_v.clone();
+                }
+                // Right border: inside-V between cols (not for last col's right)
+                if cell.border_r.is_none() && ci < last_col_idx {
+                    cell.border_r = s.whole_inside_v.clone();
+                }
+            } else {
+                // ── Fallback for built-in styles not defined in tableStyles.xml ──
+                // Apply accent1 fill for firstRow header, thin neutral row separators.
+                if cell.fill.is_none() && first_row && ri == 0 {
+                    if let Some(color) = theme.get("accent1") {
+                        cell.fill = Some(Fill::Solid { color: color.clone() });
+                    }
+                }
+                if cell.border_t.is_none() && ri > 0 {
+                    cell.border_t = Some(Stroke { color: "D0CBC0".to_string(), width: 9525 });
+                }
+            }
+        }
+    }
 
     Some(TableElement {
         x: t.x, y: t.y, width: t.cx, height: t.cy,
@@ -2082,9 +2293,11 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> TableCell {
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, None, None, None, None));
-
     let tc_pr = child(tc, "tcPr");
+    // tcPr > anchor controls vertical text alignment within the cell
+    let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, anchor, None, None, None));
+
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
     let border_l = tc_pr.and_then(|n| child(n, "lnL")).and_then(|n| parse_stroke(n, theme));
@@ -2174,7 +2387,7 @@ fn parse_slide(
         parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements, false, None);
     }
 
-    Ok(Slide { index, background, elements })
+    Ok(Slide { index, slide_number: index + 1, background, elements })
 }
 
 fn parse_sp_tree_node(
@@ -2275,7 +2488,7 @@ fn parse_sp_tree_node(
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "tbl");
             if let Some(tbl_node) = tbl_node {
-                if let Some(table) = parse_table(tbl_node, &t, theme) {
+                if let Some(table) = parse_table(tbl_node, &t, theme, zip) {
                     out.push(SlideElement::Table(table));
                 }
                 return;
