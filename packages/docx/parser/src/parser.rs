@@ -71,23 +71,47 @@ fn parse_body_elements(
     rel_map: &HashMap<String, String>,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
+    // The body-level sectPr (the last element) defines the final section and
+    // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
+    let body_level_sect_pr = body_node.children()
+        .filter(|n| n.is_element())
+        .last()
+        .filter(|n| n.tag_name().name() == "sectPr");
+    let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
+
     for child in body_node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "p" => {
                 let result = parse_paragraph(child, style_map, num_map, media_map, rel_map);
-                if result.runs.len() == 1 {
-                    if let DocRun::Break { break_type: BreakType::Page } = &result.runs[0] {
-                        body.push(BodyElement::PageBreak);
-                        continue;
-                    }
+                let is_page_break_only = result.runs.len() == 1 && matches!(
+                    result.runs[0],
+                    DocRun::Break { break_type: BreakType::Page }
+                );
+                if is_page_break_only {
+                    body.push(BodyElement::PageBreak);
+                    continue;
                 }
                 body.push(BodyElement::Paragraph(result));
+                // A section break inside pPr (that isn't the final body-level sectPr)
+                // terminates the current section and starts a new one on a new page.
+                let has_mid_section_break = child_w(child, "pPr")
+                    .and_then(|ppr| child_w(ppr, "sectPr"))
+                    .is_some();
+                if has_mid_section_break {
+                    body.push(BodyElement::PageBreak);
+                }
             }
             "tbl" => {
                 let tbl = parse_table(child, style_map, num_map, media_map, rel_map);
                 body.push(BodyElement::Table(tbl));
             }
-            "sectPr" => {}
+            "sectPr" => {
+                // Mid-body loose sectPr (rare) would behave like a page break.
+                // The final body-level sectPr only defines section settings — skip it.
+                if Some(child.id()) != body_level_sect_id {
+                    body.push(BodyElement::PageBreak);
+                }
+            }
             _ => {}
         }
     }
