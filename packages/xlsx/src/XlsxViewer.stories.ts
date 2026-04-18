@@ -134,11 +134,6 @@ export const Sample12: Story = {
   render: (args) => buildViewerUI(args, `/${SAMPLES[8]}`).root,
 };
 
-export const SampleCF: Story = {
-  name: 'sample-cf.xlsx (conditional formatting)',
-  render: (args) => buildViewerUI(args, '/sample-cf.xlsx').root,
-};
-
 // ---------------------------------------------------------------------------
 // File upload
 // ---------------------------------------------------------------------------
