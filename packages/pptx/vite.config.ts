@@ -1,11 +1,8 @@
-/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import wasm from 'vite-plugin-wasm';
 import { resolve } from 'path';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { storybookTest } from '@storybook/addon-vitest/vitest-plugin';
-import { playwright } from '@vitest/browser-playwright';
 
 const dirname =
   typeof __dirname !== 'undefined'
@@ -16,7 +13,6 @@ export default defineConfig({
   plugins: [wasm()],
   server: {
     fs: {
-      // Allow serving files from the whole packages/pptx directory
       allow: [dirname],
     },
   },
@@ -37,22 +33,5 @@ export default defineConfig({
   worker: {
     format: 'es',
     plugins: () => [wasm()],
-  },
-  test: {
-    projects: [
-      {
-        extends: true,
-        plugins: [storybookTest({ configDir: path.join(dirname, '.storybook') })],
-        test: {
-          name: 'storybook',
-          browser: {
-            enabled: true,
-            headless: true,
-            provider: playwright({}),
-            instances: [{ browser: 'chromium' }],
-          },
-        },
-      },
-    ],
   },
 });

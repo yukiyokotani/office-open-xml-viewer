@@ -6,7 +6,20 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "tsc --build",
+    "storybook": "volta run --node 24.11.1 storybook dev -p 6006",
+    "build-storybook": "volta run --node 24.11.1 storybook build",
+    "build:wasm": "pnpm --filter @ooxml/pptx wasm && pnpm --filter @ooxml/xlsx wasm && pnpm --filter @ooxml/docx wasm",
     "vrt": "pnpm --filter @ooxml/pptx vrt",
     "wasm:pptx": "pnpm --filter @ooxml/pptx wasm"
+  },
+  "devDependencies": {
+    "@chromatic-com/storybook": "^5.1.2",
+    "@storybook/addon-a11y": "^10.3.5",
+    "@storybook/addon-docs": "^10.3.5",
+    "@storybook/html-vite": "^10.3.5",
+    "storybook": "^10.3.5",
+    "vite": "^8.0.8",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
   }
 }

@@ -36,6 +36,16 @@ cd packages/pptx/parser && wasm-pack build --target web
 cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/
 ```
 
+## Storybook
+
+Storybook はルートに一本化。各パッケージのストーリーは `packages/*/src/*.stories.ts` に置く。
+
+```bash
+pnpm storybook        # dev server (port 6006)
+pnpm build-storybook  # storybook-static/ にビルド
+pnpm build:wasm       # 全パッケージの WASM をビルド（Storybook ビルド前に必要）
+```
+
 ## テスト実行
 
 ```bash

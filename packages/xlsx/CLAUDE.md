@@ -47,6 +47,11 @@ npm run wasm
 cd packages/xlsx/parser && wasm-pack build --target web --out-dir ../src/wasm
 ```
 
+## Storybook
+
+Storybook はルート一本化のため、パッケージ単体では起動しない。
+ルートから `pnpm storybook` で全パッケージのストーリーが参照できる。
+
 ## 編集してよいもの
 - `packages/xlsx/**` すべて
 - `packages/xlsx/parser/src/**`（Rust）

@@ -1,0 +1,28 @@
+import type { StorybookConfig } from '@storybook/html-vite';
+
+const config: StorybookConfig = {
+  stories: [
+    '../packages/*/src/**/*.mdx',
+    '../packages/*/src/**/*.stories.@(js|jsx|mjs|ts|tsx)',
+  ],
+  addons: [
+    '@storybook/addon-a11y',
+    '@storybook/addon-docs',
+    '@chromatic-com/storybook',
+  ],
+  framework: '@storybook/html-vite',
+  staticDirs: [
+    '../packages/pptx/tests/visual',
+    '../packages/xlsx/public',
+    '../packages/docx/public',
+  ],
+  async viteFinal(config) {
+    const { default: wasm } = await import('vite-plugin-wasm');
+    return {
+      ...config,
+      plugins: [...(config.plugins ?? []), wasm()],
+      worker: { format: 'es' as const, plugins: () => [wasm()] },
+    };
+  },
+};
+export default config;

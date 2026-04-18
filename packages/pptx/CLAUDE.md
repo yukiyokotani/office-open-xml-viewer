@@ -48,6 +48,11 @@ cp pptx-parser/pkg/pptx_parser_bg.wasm pptx-parser/pkg/pptx_parser.js src/wasm/
 
 コピー忘れると古い WASM が使われ続ける。
 
+## Storybook
+
+Storybook はルート一本化のため、パッケージ単体では起動しない。
+ルートから `pnpm storybook` で全パッケージのストーリーが参照できる。
+
 ## テスト実行
 
 ```bash

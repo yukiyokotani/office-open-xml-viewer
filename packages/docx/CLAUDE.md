@@ -10,6 +10,11 @@
 - `DocxDocument.renderPage(target, pageIndex)` 公開 API
 - 非対応（後続）: テーブル、画像、ヘッダー/フッター、自動改ページ、脚注
 
+## Storybook
+
+Storybook はルート一本化のため、パッケージ単体では起動しない。
+ルートから `pnpm storybook` で全パッケージのストーリーが参照できる。
+
 ## 編集してよいもの
 - `packages/docx/**` すべて
 - `packages/docx/parser/src/**`（Rust）
