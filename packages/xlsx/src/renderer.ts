@@ -681,7 +681,7 @@ export function renderViewport(
     scrollOffsetX, scrollOffsetY,
     frozenColWidths, frozenRowHeights,
     frozenW, frozenH,
-    hw, hh, cs,
+    hw, hh, cs, dpr,
   );
 
   // ── Freeze pane separator lines ──────────────────────────────
@@ -719,7 +719,7 @@ function renderHeaders(
   scrollOffsetX: number, scrollOffsetY: number,
   frozenColWidths: number[], frozenRowHeights: number[],
   frozenW: number, frozenH: number,
-  hw: number, hh: number, cs: number,
+  hw: number, hh: number, cs: number, dpr: number,
 ): void {
   const HEADER_BG = '#f8f9fa';
   const HEADER_BORDER = '#c8ccd0';
@@ -728,37 +728,51 @@ function renderHeaders(
   const HEADER_FONT = `${headerFontSize}px ${DEFAULT_FONT_FAMILY}`;
   const scrollAreaX = hw + frozenW;
   const scrollAreaY = hh + frozenH;
+  const hp = 0.5 / dpr;  // half device-pixel offset for 1dp crisp lines
 
-  // Corner
+  // Corner – draw all 4 edges (standalone box)
   ctx.fillStyle = HEADER_BG;
   ctx.fillRect(0, 0, hw, hh);
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 0.5;
-  ctx.strokeRect(0.5, 0.5, hw - 1, hh - 1);
+  ctx.beginPath();
+  ctx.moveTo(hp, 0); ctx.lineTo(hp, hh);          // left
+  ctx.moveTo(0, hp); ctx.lineTo(hw, hp);            // top
+  ctx.moveTo(hw + hp, 0); ctx.lineTo(hw + hp, hh);  // right
+  ctx.moveTo(0, hh + hp); ctx.lineTo(hw, hh + hp);  // bottom
+  ctx.stroke();
 
   ctx.font = HEADER_FONT;
   ctx.fillStyle = HEADER_TEXT;
 
-  // Helper: draw one column header cell
+  // Helper: draw one column header cell (right + bottom + top; no left to avoid double-draw)
   const drawColHeader = (col: number, cx: number, cw: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(cx, 0, cw, hh);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
-    ctx.strokeRect(cx + 0.5, 0.5, cw - 1, hh - 1);
+    ctx.beginPath();
+    ctx.moveTo(cx + cw + hp, 0);     ctx.lineTo(cx + cw + hp, hh);  // right
+    ctx.moveTo(cx, hh + hp);          ctx.lineTo(cx + cw, hh + hp);  // bottom
+    ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top
+    ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(colToLetter(col), cx + cw / 2, hh / 2);
   };
 
-  // Helper: draw one row header cell
+  // Helper: draw one row header cell (right + bottom + left; no top to avoid double-draw)
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(0, cy, hw, ch);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
-    ctx.strokeRect(0.5, cy + 0.5, hw - 1, ch - 1);
+    ctx.beginPath();
+    ctx.moveTo(hw + hp, cy);  ctx.lineTo(hw + hp, cy + ch);  // right
+    ctx.moveTo(0, cy + ch + hp); ctx.lineTo(hw, cy + ch + hp); // bottom
+    ctx.moveTo(hp, cy);       ctx.lineTo(hp, cy + ch);         // left
+    ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
@@ -769,7 +783,7 @@ function renderHeaders(
   if (frozenColWidths.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(hw, 0, frozenW, hh);
+    ctx.rect(hw, 0, frozenW, hh + 1);  // +1 to include bottom border line at hh+hp
     ctx.clip();
     let cx = hw;
     for (let ci = 0; ci < frozenColWidths.length; ci++) {
@@ -782,7 +796,7 @@ function renderHeaders(
   // Scrollable col headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh);
+  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh + 1);  // +1 to include bottom border
   ctx.clip();
   let cx = scrollAreaX - scrollOffsetX;
   for (let ci = 0; ci < scrollColWidths.length; ci++) {
@@ -798,7 +812,7 @@ function renderHeaders(
   if (frozenRowHeights.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, hh, hw, frozenH);
+    ctx.rect(0, hh, hw + 1, frozenH);  // +1 to include right border at hw+hp
     ctx.clip();
     let cy = hh;
     for (let ri = 0; ri < frozenRowHeights.length; ri++) {
@@ -811,7 +825,7 @@ function renderHeaders(
   // Scrollable row headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, scrollAreaY, hw, canvasH - scrollAreaY);
+  ctx.rect(0, scrollAreaY, hw + 1, canvasH - scrollAreaY);  // +1 to include right border
   ctx.clip();
   let cy = scrollAreaY - scrollOffsetY;
   for (let ri = 0; ri < scrollRowHeights.length; ri++) {

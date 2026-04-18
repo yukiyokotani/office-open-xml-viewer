@@ -67,6 +67,13 @@ export class XlsxWorkbook {
 
     target.width = Math.round(width * dpr);
     target.height = Math.round(height * dpr);
+    // Set CSS display size so the browser renders at 1:1 device pixels (no browser-level scaling).
+    // Without this, canvas.width=2400 on a DPR=2 display causes the canvas to be laid out at
+    // 2400 CSS px, making all content appear blurry when viewed in a 1200 CSS px container.
+    if (target instanceof HTMLCanvasElement) {
+      target.style.width = `${width}px`;
+      target.style.height = `${height}px`;
+    }
 
     const ctx = (target as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D;
     ctx.scale(dpr, dpr);

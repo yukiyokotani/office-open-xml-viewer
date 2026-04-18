@@ -5,8 +5,6 @@ import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx } from './renderer.js';
 const TAB_BAR_H = 30;
 
 export interface XlsxViewerOptions {
-  width?: number;
-  height?: number;
   /** Scale factor for cell/header dimensions (default 1). 0.5 = half size. */
   cellScale?: number;
   onReady?: (sheetNames: string[]) => void;
@@ -17,6 +15,7 @@ export interface XlsxViewerOptions {
 export class XlsxViewer {
   private wb: XlsxWorkbook;
   private canvas: HTMLCanvasElement;
+  private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
   private tabBar: HTMLDivElement;
@@ -24,21 +23,19 @@ export class XlsxViewer {
   private currentSheet = 0;
   private currentWorksheet: Worksheet | null = null;
   private opts: XlsxViewerOptions;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
     this.wb = new XlsxWorkbook();
 
-    const w = opts.width ?? 1200;
-    const h = opts.height ?? 600;
-
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
-      `position:relative;width:${w}px;height:${h + TAB_BAR_H}px;` +
-      `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;`;
+      `position:relative;width:100%;height:100%;` +
+      `border:1px solid #c8ccd0;background:#fff;box-sizing:border-box;font-family:sans-serif;display:flex;flex-direction:column;`;
 
-    const canvasArea = document.createElement('div');
-    canvasArea.style.cssText = `position:relative;width:${w}px;height:${h}px;overflow:hidden;`;
+    this.canvasArea = document.createElement('div');
+    this.canvasArea.style.cssText = `position:relative;flex:1;min-height:0;overflow:hidden;`;
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.cssText = `position:absolute;top:0;left:0;z-index:0;display:block;`;
@@ -47,15 +44,15 @@ export class XlsxViewer {
     this.scrollHost.style.cssText = `position:absolute;inset:0;overflow:auto;z-index:1;background:transparent;`;
 
     this.spacer = document.createElement('div');
-    this.spacer.style.cssText = `position:absolute;top:0;left:0;width:${w}px;height:${h}px;pointer-events:none;`;
+    this.spacer.style.cssText = `position:absolute;top:0;left:0;pointer-events:none;`;
     this.scrollHost.appendChild(this.spacer);
 
-    canvasArea.appendChild(this.canvas);
-    canvasArea.appendChild(this.scrollHost);
+    this.canvasArea.appendChild(this.canvas);
+    this.canvasArea.appendChild(this.scrollHost);
 
     this.tabBar = document.createElement('div');
     this.tabBar.style.cssText =
-      `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;` +
+      `display:flex;align-items:flex-end;height:${TAB_BAR_H}px;flex-shrink:0;` +
       `background:#f0f0f0;border-top:1px solid #c8ccd0;` +
       `overflow-x:auto;overflow-y:hidden;padding:0 4px;gap:1px;scrollbar-width:none;`;
     const style = document.createElement('style');
@@ -63,11 +60,15 @@ export class XlsxViewer {
     document.head.appendChild(style);
     this.tabBar.classList.add('xlsx-tab-bar');
 
-    wrapper.appendChild(canvasArea);
+    wrapper.appendChild(this.canvasArea);
     wrapper.appendChild(this.tabBar);
     container.appendChild(wrapper);
 
     this.scrollHost.addEventListener('scroll', () => this.renderCurrentSheet());
+
+    // Re-render whenever the canvas area changes size
+    this.resizeObserver = new ResizeObserver(() => this.renderCurrentSheet());
+    this.resizeObserver.observe(this.canvasArea);
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {
@@ -168,8 +169,10 @@ export class XlsxViewer {
   private async renderCurrentSheet(): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
-    const w = this.opts.width ?? 1200;
-    const h = this.opts.height ?? 600;
+    const w = this.canvasArea.clientWidth;
+    const h = this.canvasArea.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
     const cs = this.opts.cellScale ?? 1;
     const dpr = window.devicePixelRatio ?? 1;
 
@@ -255,6 +258,7 @@ export class XlsxViewer {
   }
 
   destroy(): void {
+    this.resizeObserver?.disconnect();
     this.wb.destroy();
   }
 }
