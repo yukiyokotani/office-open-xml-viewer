@@ -1,5 +1,7 @@
 # office-open-xml-viewer
 
+**[Demo (Storybook)](https://yukiyokotani.github.io/office-open-xml-viewer/)**
+
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parser is written in Rust and compiled to WebAssembly; the renderer uses the Canvas 2D API.
 
