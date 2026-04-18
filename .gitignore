@@ -1,15 +1,18 @@
-# PPTX files are not redistributable
+# Office files are not redistributable
 *.pptx
+*.xlsx
 # Office Open XML spec documents
 docs/spec/
 node_modules/
 .claude/
 dist/
-# WASM build output (regenerate with: pnpm wasm:pptx)
+# WASM build output (regenerate with: npm run wasm)
 packages/pptx/src/wasm/
 packages/pptx/parser/pkg/
+packages/xlsx/src/wasm/
 # Rust build artifacts
 target/
+packages/xlsx/parser/target/
 # Storybook build
 storybook-static/
 # Log files

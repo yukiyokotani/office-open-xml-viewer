@@ -1,0 +1,33 @@
+{
+  "name": "@ooxml/xlsx",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/types/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "storybook": "storybook dev -p 6008",
+    "build-storybook": "storybook build",
+    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm",
+    "typecheck": "tsc --noEmit",
+    "vrt": "playwright test --config ../../playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@storybook/addon-a11y": "^10.3.5",
+    "@storybook/addon-docs": "^10.3.5",
+    "@storybook/html-vite": "^10.3.5",
+    "@types/pngjs": "^6.0.5",
+    "pixelmatch": "^7.1.0",
+    "playwright": "^1.59.1",
+    "storybook": "^10.3.5",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vite-plugin-wasm": "^3.6.0"
+  }
+}
