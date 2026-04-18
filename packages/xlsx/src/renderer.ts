@@ -68,10 +68,20 @@ function formatCellValue(cell: Cell, styles: Styles): string {
   return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
 }
 
+/** Returns true if a custom formatCode describes a date/time value. */
+function isDateFormatCode(code: string): boolean {
+  // Strip quoted literals and locale/color brackets, then look for year marker 'y'.
+  const stripped = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '');
+  return /y/i.test(stripped);
+}
+
 function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
   const isDateFmtId = (id: number) => (id >= 14 && id <= 17) || id === 22;
   if (isDateFmtId(numFmtId)) return formatExcelDate(num);
-  if (formatCode) return applyFormatCode(num, formatCode);
+  if (formatCode) {
+    if (isDateFormatCode(formatCode)) return formatExcelDate(num);
+    return applyFormatCode(num, formatCode);
+  }
   switch (numFmtId) {
     case 0: return String(num);
     case 1: return Math.round(num).toString();
@@ -736,24 +746,26 @@ function renderHeaders(
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 0.5;
   ctx.beginPath();
-  ctx.moveTo(hp, 0); ctx.lineTo(hp, hh);          // left
-  ctx.moveTo(0, hp); ctx.lineTo(hw, hp);            // top
-  ctx.moveTo(hw + hp, 0); ctx.lineTo(hw + hp, hh);  // right
-  ctx.moveTo(0, hh + hp); ctx.lineTo(hw, hh + hp);  // bottom
+  ctx.moveTo(hp, 0); ctx.lineTo(hp, hh);          // left  (outward — canvas edge)
+  ctx.moveTo(0, hp); ctx.lineTo(hw, hp);            // top   (outward — canvas edge)
+  ctx.moveTo(hw - hp, 0); ctx.lineTo(hw - hp, hh);  // right  (inset — aligns with row-header right)
+  ctx.moveTo(0, hh - hp); ctx.lineTo(hw, hh - hp);  // bottom (inset — aligns with col-header bottom)
   ctx.stroke();
 
   ctx.font = HEADER_FONT;
   ctx.fillStyle = HEADER_TEXT;
 
-  // Helper: draw one column header cell (right + bottom + top; no left to avoid double-draw)
+  // Helper: draw one column header cell.
+  // Borders are drawn INSET (-hp) so that the next cell's fillRect (which starts at cx+cw)
+  // never overwrites the current cell's right/bottom border line.
   const drawColHeader = (col: number, cx: number, cw: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(cx, 0, cw, hh);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(cx + cw + hp, 0);     ctx.lineTo(cx + cw + hp, hh);  // right
-    ctx.moveTo(cx, hh + hp);          ctx.lineTo(cx + cw, hh + hp);  // bottom
+    ctx.moveTo(cx + cw - hp, 0);     ctx.lineTo(cx + cw - hp, hh);  // right (inset)
+    ctx.moveTo(cx, hh - hp);          ctx.lineTo(cx + cw, hh - hp);  // bottom (inset)
     ctx.moveTo(cx, hp);               ctx.lineTo(cx + cw, hp);        // top
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
@@ -762,16 +774,17 @@ function renderHeaders(
     ctx.fillText(colToLetter(col), cx + cw / 2, hh / 2);
   };
 
-  // Helper: draw one row header cell (right + bottom + left; no top to avoid double-draw)
+  // Helper: draw one row header cell.
+  // Borders drawn inset so adjacent cell's fill never overwrites them.
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(0, cy, hw, ch);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
-    ctx.moveTo(hw + hp, cy);  ctx.lineTo(hw + hp, cy + ch);  // right
-    ctx.moveTo(0, cy + ch + hp); ctx.lineTo(hw, cy + ch + hp); // bottom
-    ctx.moveTo(hp, cy);       ctx.lineTo(hp, cy + ch);         // left
+    ctx.moveTo(hw - hp, cy);  ctx.lineTo(hw - hp, cy + ch);   // right (inset)
+    ctx.moveTo(0, cy + ch - hp); ctx.lineTo(hw, cy + ch - hp); // bottom (inset)
+    ctx.moveTo(hp, cy);       ctx.lineTo(hp, cy + ch);          // left
     ctx.stroke();
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'right';
@@ -783,7 +796,7 @@ function renderHeaders(
   if (frozenColWidths.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(hw, 0, frozenW, hh + 1);  // +1 to include bottom border line at hh+hp
+    ctx.rect(hw, 0, frozenW, hh);
     ctx.clip();
     let cx = hw;
     for (let ci = 0; ci < frozenColWidths.length; ci++) {
@@ -796,7 +809,7 @@ function renderHeaders(
   // Scrollable col headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh + 1);  // +1 to include bottom border
+  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh);
   ctx.clip();
   let cx = scrollAreaX - scrollOffsetX;
   for (let ci = 0; ci < scrollColWidths.length; ci++) {
@@ -812,7 +825,7 @@ function renderHeaders(
   if (frozenRowHeights.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, hh, hw + 1, frozenH);  // +1 to include right border at hw+hp
+    ctx.rect(0, hh, hw, frozenH);
     ctx.clip();
     let cy = hh;
     for (let ri = 0; ri < frozenRowHeights.length; ri++) {
@@ -825,7 +838,7 @@ function renderHeaders(
   // Scrollable row headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, scrollAreaY, hw + 1, canvasH - scrollAreaY);  // +1 to include right border
+  ctx.rect(0, scrollAreaY, hw, canvasH - scrollAreaY);
   ctx.clip();
   let cy = scrollAreaY - scrollOffsetY;
   for (let ri = 0; ri < scrollRowHeights.length; ri++) {
