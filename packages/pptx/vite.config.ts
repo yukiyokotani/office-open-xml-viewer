@@ -14,6 +14,12 @@ const dirname =
 
 export default defineConfig({
   plugins: [wasm()],
+  server: {
+    fs: {
+      // Allow serving files from the whole packages/pptx directory
+      allow: [dirname],
+    },
+  },
   build: {
     lib: {
       entry: resolve(dirname, 'src/index.ts'),

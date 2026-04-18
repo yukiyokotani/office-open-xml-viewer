@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declarationDir": "./dist/types",
+    "emitDeclarationOnly": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "paths": {
+      "@ooxml/core": ["../core/src/index.ts"],
+      "@ooxml/core/*": ["../core/src/*"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "../core" }]
+}

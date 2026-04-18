@@ -1,16 +1,7 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "declaration": true,
-    "declarationDir": "./dist/types",
-    "emitDeclarationOnly": true,
-    "rootDir": "./src",
-    "skipLibCheck": true,
-    "isolatedModules": true
-  },
-  "include": ["src"]
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/pptx" }
+  ]
 }

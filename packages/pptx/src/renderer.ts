@@ -13,18 +13,18 @@ import type {
   TextRun,
   PathCmd,
   Shadow,
+  RenderOptions,
+  TabStop,
 } from './types';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
 
-/**
- * Active theme font context for the current renderSlide call.
- * Set at the start of renderSlide; cleared when done.
- * This avoids threading the fonts through every call in the render chain.
- */
-let _themeMinorFont: string | null = null;
-let _themeMajorFont: string | null = null;
+/** Theme font context threaded through the render call chain. */
+export interface RenderContext {
+  themeMajorFont: string | null;
+  themeMinorFont: string | null;
+}
 
 /**
  * Convert EMU to canvas pixels.
@@ -131,20 +131,20 @@ function applySymbolFont(char: string, fontFamily: string): string {
   return char;
 }
 
-function normalizeFontFamily(family: string | null): string {
-  if (!family) return _themeMinorFont ?? 'sans-serif';
+function normalizeFontFamily(family: string | null, rc: RenderContext): string {
+  if (!family) return rc.themeMinorFont ?? 'sans-serif';
   if (family.startsWith('+')) {
     // +mn-lt = minor Latin, +mj-lt = major Latin, +mn-ea = minor East Asian, +mj-ea = major East Asian
     if (family === '+mj-lt' || family === '+mj-ea' || family === '+mj-cs') {
-      return _themeMajorFont ?? 'sans-serif';
+      return rc.themeMajorFont ?? 'sans-serif';
     }
     // +mn-lt, +mn-ea, +mn-cs, or any other + prefix → minor font
-    return _themeMinorFont ?? 'sans-serif';
+    return rc.themeMinorFont ?? 'sans-serif';
   }
   // OOXML typeface sometimes appends ",<generic>" hint (e.g. "Wingdings,Sans-Serif").
   // Strip it so the CSS font name resolves to the actual named font.
   const primary = family.split(',')[0].trim();
-  if (!primary) return _themeMinorFont ?? 'sans-serif';
+  if (!primary) return rc.themeMinorFont ?? 'sans-serif';
   return primary;
 }
 
@@ -163,10 +163,10 @@ function genericFallback(family: string): string {
   return 'sans-serif';
 }
 
-function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string): string {
+function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
-  const normalized = normalizeFontFamily(family);
+  const normalized = normalizeFontFamily(family, rc);
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
@@ -197,6 +197,7 @@ function layoutParagraph(
   defaultItalic: boolean = false,
   fontScale: number = 1.0,
   slideNumber?: number,
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: LayoutLine = { segments: [] };
@@ -245,12 +246,12 @@ function layoutParagraph(
 
     const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
     // Font family cascade: run → paragraph defFontFamily → theme minor font → 'sans-serif'
-    const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null);
+    const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
     const color  = run.color ? hexToRgba(run.color) : defaultColor;
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
-    const font   = buildFont(isBold, isItalic, sizePx, family);
+    const font   = buildFont(isBold, isItalic, sizePx, family, rc);
     ctx.font = font;
 
     // Resolve field values (e.g. slidenum → actual slide number)
@@ -269,7 +270,7 @@ function layoutParagraph(
         // Find first tab stop whose position (from text area left) is beyond the current pen
         const currentAbsW = marLPx + lineW; // current position from text area left
         const ts = (para.tabStops ?? []).find(
-          t => emuToPx(t.pos, scale) > currentAbsW
+          (t: TabStop) => emuToPx(t.pos, scale) > currentAbsW
         );
         if (ts) {
           tabStopPx = emuToPx(ts.pos, scale);
@@ -367,7 +368,7 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number) {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
@@ -387,7 +388,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.textBody) {
       const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber);
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc);
     }
     return;
   }
@@ -444,7 +445,17 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       if (el.flipV) ctx.scale(1, -1);
       ctx.translate(-cx, -cy);
     }
-    renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber);
+    // For ellipses, PowerPoint positions text relative to the inscribed rectangle
+    // (the maximum-area rectangle that fits inside the ellipse: sides = a/√2, b/√2).
+    // This only affects non-ctr anchors; ctr anchor is invariant to this inset.
+    let tx = x, ty = y, tw = w, th = h;
+    if (geom === 'ellipse') {
+      const insetX = w * (1 - 1 / Math.SQRT2) / 2;
+      const insetY = h * (1 - 1 / Math.SQRT2) / 2;
+      tx = x + insetX; ty = y + insetY;
+      tw = w / Math.SQRT2; th = h / Math.SQRT2;
+    }
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
     ctx.restore();
   }
 
@@ -2158,6 +2169,7 @@ function renderTextBody(
   shapeFlipV = false,
   themeDefaultColor = '#000000',
   slideNumber?: number,
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
 ) {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -2174,7 +2186,7 @@ function renderTextBody(
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
     ctx.restore();
     return;
   }
@@ -2230,7 +2242,7 @@ function renderTextBody(
     const hasBullet = para.bullet.type === 'char' || para.bullet.type === 'autoNum';
 
     let bulletLabel  = '';
-    let bulletFont   = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif');
+    let bulletFont   = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif', rc);
     let bulletColor  = paraDefaultColor;
 
     if (para.bullet.type === 'char') {
@@ -2241,8 +2253,8 @@ function renderTextBody(
       bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
-      const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null);
-      bulletFont  = buildFont(false, false, bSizePx, convertedFamily);
+      const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
+      bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc);
       bulletColor = b.color ? hexToRgba(b.color) : paraDefaultColor;
       // Reset counters when switching to char bullets
       autoNumCounters.clear();
@@ -2255,7 +2267,7 @@ function renderTextBody(
         autoNumCounters.set(lvl, autoNumCounters.get(lvl)! + 1);
       }
       bulletLabel = formatAutoNum(autoNumCounters.get(lvl)!, b.numType);
-      bulletFont  = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif');
+      bulletFont  = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif', rc);
       bulletColor = paraDefaultColor;
     } else {
       // Not a list paragraph — reset autoNum counters
@@ -2270,7 +2282,7 @@ function renderTextBody(
     const textMaxW = bw - lPad - rPad - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber);
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
@@ -3196,7 +3208,7 @@ function renderChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: num
 
 // ─── Table rendering ─────────────────────────────────────────────────────────
 
-function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number) {
+function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: number, slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }) {
   const x0 = emuToPx(el.x, scale);
   const y0 = emuToPx(el.y, scale);
 
@@ -3238,7 +3250,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 
       // Text body
       if (cell.textBody) {
-        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, null, 0, false, false, '#000000', slideNumber);
+        renderTextBody(ctx, cell.textBody, colX, rowY, cellW, cellH, scale, null, 0, false, false, '#000000', slideNumber, rc);
       }
 
       // Borders
@@ -3281,18 +3293,7 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
 
 // ===== Public API =====
 
-export interface RenderOptions {
-  /** Target canvas width in CSS pixels (height is computed from slide aspect ratio) */
-  width?: number;
-  /** Theme default text color (dk1), used as fallback when shapes have no explicit color */
-  defaultTextColor?: string | null;
-  /** Device pixel ratio for HiDPI rendering. Defaults to window.devicePixelRatio on main thread, 1 in workers. */
-  dpr?: number;
-  /** Theme major (heading) font family name — used to resolve "+mj-lt" references */
-  majorFont?: string | null;
-  /** Theme minor (body) font family name — used to resolve "+mn-lt" references */
-  minorFont?: string | null;
-}
+export type { RenderOptions } from './types';
 
 /**
  * Render a single slide onto a <canvas> element.
@@ -3322,9 +3323,10 @@ export async function renderSlide(
   if (!ctx) throw new Error('Could not get 2D context');
   ctx.scale(dpr, dpr);
 
-  // Set module-level theme font context so normalizeFontFamily can resolve +mj-lt / +mn-lt.
-  _themeMajorFont = opts.majorFont ?? null;
-  _themeMinorFont = opts.minorFont ?? null;
+  const rc: RenderContext = {
+    themeMajorFont: opts.majorFont ?? null,
+    themeMinorFont: opts.minorFont ?? null,
+  };
 
   renderBackground(ctx, slide.background, canvasW, canvasH);
 
@@ -3335,19 +3337,15 @@ export async function renderSlide(
   const slideNumber = slide.slideNumber;
   for (const el of slide.elements) {
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber);
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale);
     } else if (el.type === 'table') {
-      renderTable(ctx, el, scale, slideNumber);
+      renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'chart') {
       renderChart(ctx, el, scale);
     }
   }
-
-  // Clear theme font context
-  _themeMajorFont = null;
-  _themeMinorFont = null;
 
   return canvas;
 }
