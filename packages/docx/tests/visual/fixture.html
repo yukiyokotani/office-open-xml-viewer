@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DOCX Viewer – VRT fixture</title>
+  <style>
+    body { margin: 0; background: #888; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script type="module">
+  import { DocxDocument } from '/src/index.ts';
+
+  const params = new URLSearchParams(location.search);
+  const file = params.get('file') ?? 'sample-1.docx';
+  const page = parseInt(params.get('page') ?? '0', 10);
+  const width = parseInt(params.get('width') ?? '612', 10);
+
+  const canvas = document.getElementById('canvas');
+
+  try {
+    const doc = await DocxDocument.load('/' + file);
+    doc.renderPage(canvas, page, { width, dpr: 1 });
+    document.body.dataset.status = 'ready';
+  } catch (e) {
+    document.body.dataset.status = 'error';
+    document.body.dataset.errorMessage = e.message;
+    console.error(e);
+  }
+</script>
+</body>
+</html>

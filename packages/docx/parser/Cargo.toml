@@ -1,0 +1,16 @@
+[package]
+name = "docx-parser"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+zip = { workspace = true }
+roxmltree = { workspace = true }
+base64 = { workspace = true }
+console_error_panic_hook = { workspace = true }
