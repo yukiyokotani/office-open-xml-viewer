@@ -8,6 +8,7 @@ type Args = {
 
 const meta: Meta<Args> = {
   title: 'PptxViewer',
+  excludeStories: ['buildViewerUI'],
   argTypes: {
     width: {
       control: { type: 'range', min: 400, max: 1600, step: 40 },
