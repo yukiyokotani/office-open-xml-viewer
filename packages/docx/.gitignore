@@ -11,3 +11,5 @@ public/*.docx
 tests/visual/references/**/*.png
 tests/visual/screenshots/
 tests/visual/diffs/
+# Local-only Storybook stories that load sample DOCX files
+src/*.sample.stories.ts

@@ -3,6 +3,18 @@
 export interface Document {
   section: SectionProps;
   body: BodyElement[];
+  headers: HeadersFooters;
+  footers: HeadersFooters;
+}
+
+export interface HeadersFooters {
+  default: HeaderFooter | null;
+  first: HeaderFooter | null;
+  even: HeaderFooter | null;
+}
+
+export interface HeaderFooter {
+  body: BodyElement[];
 }
 
 export interface SectionProps {
@@ -12,6 +24,10 @@ export interface SectionProps {
   marginRight: number;
   marginBottom: number;
   marginLeft: number;
+  headerDistance: number;   // pt — top of page to header
+  footerDistance: number;   // pt — bottom of page to footer
+  titlePage: boolean;
+  evenAndOddHeaders: boolean;
 }
 
 export type BodyElement =
@@ -48,7 +64,23 @@ export interface NumberingInfo {
 export type DocRun =
   | { type: 'text' } & TextRun
   | { type: 'image' } & ImageRun
-  | { type: 'break'; breakType: 'line' | 'page' | 'column' };
+  | { type: 'break'; breakType: 'line' | 'page' | 'column' }
+  | { type: 'field' } & FieldRun;
+
+export interface FieldRun {
+  /** "page" | "numPages" | "other" */
+  fieldType: string;
+  instruction: string;
+  fallbackText: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strikethrough: boolean;
+  fontSize: number;  // pt
+  color: string | null;
+  fontFamily: string | null;
+  background: string | null;
+}
 
 export interface TextRun {
   text: string;
@@ -67,6 +99,27 @@ export interface ImageRun {
   dataUrl: string;
   widthPt: number;
   heightPt: number;
+  /** true = wp:anchor (absolute positioned), false/undefined = wp:inline (flows with text) */
+  anchor?: boolean;
+  /** X offset in pt (anchor only) */
+  anchorXPt?: number;
+  /** Y offset in pt (anchor only) */
+  anchorYPt?: number;
+  /**
+   * If true, anchorXPt is relative to the left margin — add section.marginLeft to get page X.
+   * If false/absent, anchorXPt is already page-absolute.
+   */
+  anchorXFromMargin?: boolean;
+  /**
+   * If true, anchorYPt is relative to the paragraph's top Y in the renderer.
+   * If false/absent, anchorYPt is already page-absolute.
+   */
+  anchorYFromPara?: boolean;
+  /**
+   * When set, the renderer replaces all pixels of this hex color (e.g. "FFFFFF") with full
+   * transparency. Implements a:clrChange (make-background-transparent).
+   */
+  colorReplaceFrom?: string;
 }
 
 // ===== Table =====

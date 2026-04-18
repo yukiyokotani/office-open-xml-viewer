@@ -9,7 +9,7 @@ export default defineConfig({
     ['html', { outputFolder: 'tests/visual/report', open: 'never' }],
   ],
   use: {
-    baseURL: 'http://localhost:5179',
+    baseURL: 'http://localhost:5180',
     actionTimeout: 30_000,
   },
   projects: [
@@ -23,10 +23,10 @@ export default defineConfig({
     },
   ],
   // Start the Vite dev server separately before running tests:
-  //   npx vite --port 5179
+  //   npx vite --port 5180
   webServer: {
-    command: 'npx vite --port 5179 --strictPort',
-    url: 'http://localhost:5179/tests/visual/fixture.html',
+    command: 'npx vite --port 5180 --strictPort',
+    url: 'http://localhost:5180/tests/visual/fixture.html',
     reuseExistingServer: true,
     timeout: 120_000,
   },

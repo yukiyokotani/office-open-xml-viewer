@@ -12,6 +12,16 @@ use crate::numbering::NumberingMap;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
+type Zip<'a> = ZipArchive<std::io::Cursor<&'a [u8]>>;
+
+/// Section-level header/footer references collected from sectPr.
+/// Maps reference type ("default" | "first" | "even") to the target xml path (e.g. "header1.xml").
+#[derive(Default)]
+struct SectionRefs {
+    headers: HashMap<String, String>,
+    footers: HashMap<String, String>,
+}
+
 pub fn parse(data: &[u8]) -> Result<Document, String> {
     let cursor = std::io::Cursor::new(data);
     let mut zip = ZipArchive::new(cursor).map_err(|e| e.to_string())?;
@@ -26,29 +36,9 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     let rels = read_zip_entry(&mut zip, "word/_rels/document.xml.rels")
         .unwrap_or_default();
-
-    // Build relationship map: rId → target path
     let rel_map = parse_rels(&rels);
 
-    // Load media images as base64
-    let mut media_map: HashMap<String, String> = HashMap::new();
-    for (rid, target) in &rel_map {
-        if target.contains("media/") || target.contains("image") {
-            let path = if target.starts_with('/') {
-                target.trim_start_matches('/').to_string()
-            } else {
-                format!("word/{}", target)
-            };
-            if let Ok(bytes) = read_zip_bytes(&mut zip, &path) {
-                let mime = if path.ends_with(".png") { "image/png" }
-                    else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" }
-                    else if path.ends_with(".gif") { "image/gif" }
-                    else { "image/png" };
-                let b64 = B64.encode(&bytes);
-                media_map.insert(rid.clone(), format!("data:{};base64,{}", mime, b64));
-            }
-        }
-    }
+    let media_map = load_media_map(&mut zip, &rel_map, "word/");
 
     let doc_xml = read_zip_entry(&mut zip, "word/document.xml")?;
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
@@ -63,15 +53,27 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .last()
         .filter(|n| n.tag_name().name() == "sectPr");
 
-    let section = parse_section(sect_pr);
+    let (section, refs) = parse_section(sect_pr, &rel_map);
 
+    let body = parse_body_elements(body_node, &style_map, &mut num_map, &media_map);
+
+    let headers = load_header_footer_set(&mut zip, &refs.headers, "hdr", &style_map, &mut num_map);
+    let footers = load_header_footer_set(&mut zip, &refs.footers, "ftr", &style_map, &mut num_map);
+
+    Ok(Document { section, body, headers, footers })
+}
+
+fn parse_body_elements(
+    body_node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
-
     for child in body_node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(child, &style_map, &mut num_map, &media_map);
-                // Check if this paragraph contains only a page break
+                let result = parse_paragraph(child, style_map, num_map, media_map);
                 if result.runs.len() == 1 {
                     if let DocRun::Break { break_type: BreakType::Page } = &result.runs[0] {
                         body.push(BodyElement::PageBreak);
@@ -81,18 +83,84 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
                 body.push(BodyElement::Paragraph(result));
             }
             "tbl" => {
-                let tbl = parse_table(child, &style_map, &mut num_map, &media_map);
+                let tbl = parse_table(child, style_map, num_map, media_map);
                 body.push(BodyElement::Table(tbl));
             }
-            "sectPr" => {} // already handled
+            "sectPr" => {}
             _ => {}
         }
     }
-
-    Ok(Document { section, body })
+    body
 }
 
-fn parse_section(sect_pr: Option<roxmltree::Node>) -> SectionProps {
+fn load_media_map(
+    zip: &mut Zip,
+    rel_map: &HashMap<String, String>,
+    base_dir: &str,
+) -> HashMap<String, String> {
+    let mut media_map: HashMap<String, String> = HashMap::new();
+    for (rid, target) in rel_map {
+        if target.contains("media/") || target.contains("image") {
+            let path = if target.starts_with('/') {
+                target.trim_start_matches('/').to_string()
+            } else {
+                format!("{}{}", base_dir, target)
+            };
+            if let Ok(bytes) = read_zip_bytes(zip, &path) {
+                let mime = if path.ends_with(".png") { "image/png" }
+                    else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" }
+                    else if path.ends_with(".gif") { "image/gif" }
+                    else { "image/png" };
+                let b64 = B64.encode(&bytes);
+                media_map.insert(rid.clone(), format!("data:{};base64,{}", mime, b64));
+            }
+        }
+    }
+    media_map
+}
+
+fn load_header_footer_set(
+    zip: &mut Zip,
+    type_to_target: &HashMap<String, String>,
+    root_tag: &str,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+) -> HeadersFooters {
+    let mut out = HeadersFooters::default();
+    for (kind, target) in type_to_target {
+        let path = format!("word/{}", target);
+        let xml = match read_zip_entry(zip, &path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Per-file rels for image resolution
+        let stem = target.trim_end_matches(".xml");
+        let rels_path = format!("word/_rels/{}.xml.rels", stem);
+        let rels_xml = read_zip_entry(zip, &rels_path).unwrap_or_default();
+        let local_rel_map = parse_rels(&rels_xml);
+        let local_media_map = load_media_map(zip, &local_rel_map, "word/");
+
+        let xml_doc = match XmlDoc::parse(&xml) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let Some(root) = xml_doc.root_element().descendants().find(|n| n.tag_name().name() == root_tag) else {
+            continue;
+        };
+
+        let body = parse_body_elements(root, style_map, num_map, &local_media_map);
+        let hf = HeaderFooter { body };
+        match kind.as_str() {
+            "first" => out.first = Some(hf),
+            "even" => out.even = Some(hf),
+            _ => out.default = Some(hf),
+        }
+    }
+    out
+}
+
+fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, String>) -> (SectionProps, SectionRefs) {
     let default = SectionProps {
         page_width: 612.0,
         page_height: 792.0,
@@ -100,9 +168,13 @@ fn parse_section(sect_pr: Option<roxmltree::Node>) -> SectionProps {
         margin_right: 72.0,
         margin_bottom: 72.0,
         margin_left: 72.0,
+        header_distance: 36.0,
+        footer_distance: 36.0,
+        title_page: false,
+        even_and_odd_headers: false,
     };
 
-    let Some(sp) = sect_pr else { return default };
+    let Some(sp) = sect_pr else { return (default, SectionRefs::default()) };
 
     let mut props = default;
     if let Some(pg_sz) = child_w(sp, "pgSz") {
@@ -114,8 +186,31 @@ fn parse_section(sect_pr: Option<roxmltree::Node>) -> SectionProps {
         if let Some(v) = attr_w(pg_mar, "right") { props.margin_right = twips_to_pt(&v); }
         if let Some(v) = attr_w(pg_mar, "bottom") { props.margin_bottom = twips_to_pt(&v); }
         if let Some(v) = attr_w(pg_mar, "left") { props.margin_left = twips_to_pt(&v); }
+        if let Some(v) = attr_w(pg_mar, "header") { props.header_distance = twips_to_pt(&v); }
+        if let Some(v) = attr_w(pg_mar, "footer") { props.footer_distance = twips_to_pt(&v); }
     }
-    props
+    props.title_page = child_w(sp, "titlePg").is_some();
+
+    // Collect header/footer references
+    let mut refs = SectionRefs::default();
+    for child in sp.children().filter(|n| n.is_element()) {
+        let local = child.tag_name().name();
+        if local != "headerReference" && local != "footerReference" { continue; }
+        let kind = attr_w(child, "type").unwrap_or_else(|| "default".to_string());
+        let rid = child.attribute((R_NS, "id"))
+            .or_else(|| child.attribute("id"))
+            .map(|s| s.to_string());
+        let Some(rid) = rid else { continue };
+        let Some(target) = rel_map.get(&rid) else { continue };
+        let target = target.trim_start_matches('/').to_string();
+        if local == "headerReference" {
+            refs.headers.insert(kind, target);
+        } else {
+            refs.footers.insert(kind, target);
+        }
+    }
+
+    (props, refs)
 }
 
 fn parse_paragraph(
@@ -192,6 +287,20 @@ fn parse_paragraph(
     }
 }
 
+#[derive(Default)]
+struct FieldState {
+    /// Currently inside a field (between fldChar begin and end).
+    active: bool,
+    /// Have we passed the `separate` fldChar yet?
+    past_separate: bool,
+    /// Accumulated instruction text (PAGE, NUMPAGES, etc.)
+    instruction: String,
+    /// Formatting from the first instrText run — used as the field's display format.
+    fmt: Option<RunFmt>,
+    /// Fallback text captured between `separate` and `end`.
+    fallback: String,
+}
+
 fn parse_para_content(
     node: roxmltree::Node,
     base_run: &RunFmt,
@@ -199,44 +308,154 @@ fn parse_para_content(
     media_map: &HashMap<String, String>,
     runs: &mut Vec<DocRun>,
 ) {
+    let mut field = FieldState::default();
+
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "r" => {
-                parse_run(child, base_run, style_map, media_map, runs);
+                handle_run_in_para(child, base_run, style_map, media_map, runs, &mut field, false);
             }
             "hyperlink" => {
-                // Recurse into hyperlink, marking runs as links
                 for r in child.children().filter(|n| n.is_element() && n.tag_name().name() == "r") {
-                    parse_run_as_link(r, base_run, style_map, media_map, runs);
+                    handle_run_in_para(r, base_run, style_map, media_map, runs, &mut field, true);
                 }
             }
             "ins" | "del" | "smartTag" => {
-                // Recurse into tracked changes / smart tags
                 parse_para_content(child, base_run, style_map, media_map, runs);
+            }
+            "fldSimple" => {
+                let instr = attr_w(child, "instr").unwrap_or_default();
+                // Collect formatting from the first contained run (if any)
+                let mut fmt = base_run.clone();
+                if let Some(r) = child.children().find(|n| n.is_element() && n.tag_name().name() == "r") {
+                    if let Some(rpr) = child_w(r, "rPr") {
+                        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+                    }
+                }
+                let fallback = extract_text_from_runs(child);
+                runs.push(make_field_run(&instr, &fmt, &fallback));
             }
             _ => {}
         }
     }
 }
 
-fn parse_run(
-    node: roxmltree::Node,
+fn handle_run_in_para(
+    r_node: roxmltree::Node,
     base_run: &RunFmt,
     style_map: &StyleMap,
     media_map: &HashMap<String, String>,
     runs: &mut Vec<DocRun>,
+    field: &mut FieldState,
+    is_link: bool,
 ) {
-    parse_run_inner(node, base_run, style_map, media_map, runs, false);
+    // Inspect this run for field control characters or instruction text first.
+    let mut fld_char_type: Option<String> = None;
+    let mut instr_text = String::new();
+    for c in r_node.children().filter(|n| n.is_element()) {
+        match c.tag_name().name() {
+            "fldChar" => {
+                if let Some(t) = attr_w(c, "fldCharType") {
+                    fld_char_type = Some(t);
+                }
+            }
+            "instrText" => {
+                if let Some(t) = c.text() {
+                    instr_text.push_str(t);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(ct) = fld_char_type {
+        match ct.as_str() {
+            "begin" => {
+                field.active = true;
+                field.past_separate = false;
+                field.instruction.clear();
+                field.fallback.clear();
+                field.fmt = None;
+            }
+            "separate" => {
+                field.past_separate = true;
+            }
+            "end" => {
+                if field.active {
+                    let fmt = field.fmt.clone().unwrap_or_else(|| base_run.clone());
+                    runs.push(make_field_run(&field.instruction, &fmt, &field.fallback));
+                }
+                *field = FieldState::default();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if field.active {
+        if !field.past_separate {
+            // Capture instruction text and remember the formatting of the first instruction run
+            if !instr_text.is_empty() {
+                field.instruction.push_str(&instr_text);
+                if field.fmt.is_none() {
+                    let mut fmt = base_run.clone();
+                    if let Some(rpr) = child_w(r_node, "rPr") {
+                        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+                    }
+                    field.fmt = Some(fmt);
+                }
+            }
+        } else {
+            // Fallback/result text between separate and end — accumulate for "other" fields
+            for c in r_node.children().filter(|n| n.is_element() && n.tag_name().name() == "t") {
+                if let Some(t) = c.text() {
+                    field.fallback.push_str(t);
+                }
+            }
+        }
+        return;
+    }
+
+    // Normal run
+    parse_run_inner(r_node, base_run, style_map, media_map, runs, is_link);
 }
 
-fn parse_run_as_link(
-    node: roxmltree::Node,
-    base_run: &RunFmt,
-    style_map: &StyleMap,
-    media_map: &HashMap<String, String>,
-    runs: &mut Vec<DocRun>,
-) {
-    parse_run_inner(node, base_run, style_map, media_map, runs, true);
+fn extract_text_from_runs(node: roxmltree::Node) -> String {
+    let mut out = String::new();
+    for n in node.descendants() {
+        if n.is_element() && n.tag_name().name() == "t" {
+            if let Some(t) = n.text() {
+                out.push_str(t);
+            }
+        }
+    }
+    out
+}
+
+fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str) -> DocRun {
+    let field_type = classify_field(instr);
+    DocRun::Field(FieldRun {
+        field_type,
+        instruction: instr.trim().to_string(),
+        fallback_text: fallback.to_string(),
+        bold: fmt.bold.unwrap_or(false),
+        italic: fmt.italic.unwrap_or(false),
+        underline: fmt.underline.unwrap_or(false),
+        strikethrough: fmt.strikethrough.unwrap_or(false),
+        font_size: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+        color: fmt.color.clone(),
+        font_family: fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone()),
+        background: fmt.background.clone(),
+    })
+}
+
+fn classify_field(instr: &str) -> String {
+    let token = instr.trim().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    match token.as_str() {
+        "PAGE" => "page".to_string(),
+        "NUMPAGES" => "numPages".to_string(),
+        _ => "other".to_string(),
+    }
 }
 
 fn parse_run_inner(
@@ -301,7 +520,7 @@ fn parse_run_inner(
                 runs.push(DocRun::Break { break_type });
             }
             "drawing" => {
-                if let Some(img) = parse_inline_drawing(child, media_map) {
+                for img in parse_inline_drawing(child, media_map) {
                     runs.push(DocRun::Image(img));
                 }
             }
@@ -310,7 +529,7 @@ fn parse_run_inner(
                 if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
                     for inner in choice.children().filter(|n| n.is_element()) {
                         if inner.tag_name().name() == "drawing" {
-                            if let Some(img) = parse_inline_drawing(inner, media_map) {
+                            for img in parse_inline_drawing(inner, media_map) {
                                 runs.push(DocRun::Image(img));
                             }
                         }
@@ -322,25 +541,213 @@ fn parse_run_inner(
     }
 }
 
-fn parse_inline_drawing(node: roxmltree::Node, media_map: &HashMap<String, String>) -> Option<ImageRun> {
-    // Find wp:inline or wp:anchor
-    let inline = node.descendants().find(|n| n.tag_name().name() == "inline")
-        .or_else(|| node.descendants().find(|n| n.tag_name().name() == "anchor"))?;
+fn parse_inline_drawing(node: roxmltree::Node, media_map: &HashMap<String, String>) -> Vec<ImageRun> {
+    // Distinguish inline vs anchor
+    let is_anchor = node.descendants().any(|n| n.tag_name().name() == "anchor");
 
-    // Get extent
-    let extent = inline.children().find(|n| n.tag_name().name() == "extent")?;
-    let cx: f64 = extent.attribute("cx")?.parse().ok()?;
-    let cy: f64 = extent.attribute("cy")?.parse().ok()?;
-    let width_pt = cx / 12700.0;
-    let height_pt = cy / 12700.0;
+    if !is_anchor {
+        let container = match node.descendants().find(|n| n.tag_name().name() == "inline") {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let extent = match container.children().find(|n| n.tag_name().name() == "extent") {
+            Some(e) => e,
+            None => return vec![],
+        };
+        let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => return vec![],
+        };
+        let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => return vec![],
+        };
+        let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+            Some(b) => b,
+            None => return vec![],
+        };
+        let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+            Some(r) => r,
+            None => return vec![],
+        };
+        let data_url = match media_map.get(r_id) {
+            Some(u) => u.clone(),
+            None => return vec![],
+        };
+        return vec![ImageRun {
+            data_url,
+            width_pt: cx / 12700.0,
+            height_pt: cy / 12700.0,
+            anchor: false,
+            anchor_x_pt: 0.0,
+            anchor_y_pt: 0.0,
+            anchor_x_from_margin: false,
+            anchor_y_from_para: false,
+            color_replace_from: None,
+        }];
+    }
 
-    // Find blip rId
-    let blip = node.descendants().find(|n| n.tag_name().name() == "blip")?;
-    let r_id = blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed"))?;
+    // ── Anchor image ──────────────────────────────────────
+    let container = match node.descendants().find(|n| n.tag_name().name() == "anchor") {
+        Some(c) => c,
+        None => return vec![],
+    };
 
-    let data_url = media_map.get(r_id)?.clone();
+    // Parse positionH / positionV with relativeFrom
+    let (pos_x, x_from_margin) = parse_anchor_pos_h(&container);
+    let (pos_y, y_from_para)   = parse_anchor_pos_v(&container);
 
-    Some(ImageRun { data_url, width_pt, height_pt })
+    // Check for wgp (Word Graphics Group) — expands to multiple per-image entries
+    if let Some(wgp) = container.descendants().find(|n| n.tag_name().name() == "wgp") {
+        return parse_wgp_images(wgp, media_map, pos_x, x_from_margin, pos_y, y_from_para);
+    }
+
+    // Regular single-blip anchor
+    let extent = match container.children().find(|n| n.tag_name().name() == "extent") {
+        Some(e) => e,
+        None => return vec![],
+    };
+    let cx: f64 = match extent.attribute("cx").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => return vec![],
+    };
+    let cy: f64 = match extent.attribute("cy").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => return vec![],
+    };
+    let blip = match node.descendants().find(|n| n.tag_name().name() == "blip") {
+        Some(b) => b,
+        None => return vec![],
+    };
+    let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+        Some(r) => r,
+        None => return vec![],
+    };
+    let data_url = match media_map.get(r_id) {
+        Some(u) => u.clone(),
+        None => return vec![],
+    };
+    vec![ImageRun {
+        data_url,
+        width_pt: cx / 12700.0,
+        height_pt: cy / 12700.0,
+        anchor: true,
+        anchor_x_pt: pos_x,
+        anchor_y_pt: pos_y,
+        anchor_x_from_margin: x_from_margin,
+        anchor_y_from_para: y_from_para,
+        color_replace_from: None,
+    }]
+}
+
+/// Parse positionH — returns (posOffset_pt, needs_margin_offset).
+/// "column" and "margin" relative offsets both mean: add marginLeft in the renderer.
+fn parse_anchor_pos_h(container: &roxmltree::Node) -> (f64, bool) {
+    let pos = match container.children().find(|n| n.tag_name().name() == "positionH") {
+        Some(p) => p,
+        None => return (0.0, false),
+    };
+    let rel = pos.attribute("relativeFrom").unwrap_or("page");
+    let offset = pos.children()
+        .find(|n| n.tag_name().name() == "posOffset")
+        .and_then(|n| n.text())
+        .and_then(|t| t.parse::<f64>().ok())
+        .map(|emu| emu / 12700.0)
+        .unwrap_or(0.0);
+    let from_margin = matches!(rel, "column" | "margin" | "leftMargin" | "insideMargin");
+    (offset, from_margin)
+}
+
+/// Parse positionV — returns (posOffset_pt, is_paragraph_relative).
+fn parse_anchor_pos_v(container: &roxmltree::Node) -> (f64, bool) {
+    let pos = match container.children().find(|n| n.tag_name().name() == "positionV") {
+        Some(p) => p,
+        None => return (0.0, false),
+    };
+    let rel = pos.attribute("relativeFrom").unwrap_or("page");
+    let offset = pos.children()
+        .find(|n| n.tag_name().name() == "posOffset")
+        .and_then(|n| n.text())
+        .and_then(|t| t.parse::<f64>().ok())
+        .map(|emu| emu / 12700.0)
+        .unwrap_or(0.0);
+    let from_para = matches!(rel, "paragraph" | "line");
+    (offset, from_para)
+}
+
+/// Expand a wp:wgp group into individual ImageRun entries.
+/// Each pic child gets page-relative coordinates: group anchor origin + child offset within group.
+fn parse_wgp_images(
+    wgp: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+) -> Vec<ImageRun> {
+    let mut results = Vec::new();
+    // Iterate all pic descendants in the wgp (covers both direct children and nested grpSp)
+    for pic in wgp.descendants().filter(|n| n.tag_name().name() == "pic") {
+        // Position and size come from the pic's spPr > a:xfrm
+        let sp_pr = match pic.children().find(|n| n.tag_name().name() == "spPr") {
+            Some(s) => s,
+            None => continue,
+        };
+        let xfrm = match sp_pr.children().find(|n| n.tag_name().name() == "xfrm") {
+            Some(x) => x,
+            None => continue,
+        };
+        let off = match xfrm.children().find(|n| n.tag_name().name() == "off") {
+            Some(o) => o,
+            None => continue,
+        };
+        let ext = match xfrm.children().find(|n| n.tag_name().name() == "ext") {
+            Some(e) => e,
+            None => continue,
+        };
+        let ox = off.attribute("x").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+        let oy = off.attribute("y").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+        let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+        let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 12700.0;
+
+        if cx <= 0.0 || cy <= 0.0 { continue; }
+
+        // Find the blip inside this pic
+        let blip = match pic.descendants().find(|n| n.tag_name().name() == "blip") {
+            Some(b) => b,
+            None => continue,
+        };
+        let r_id = match blip.attribute((R_NS, "embed")).or_else(|| blip.attribute("r:embed")) {
+            Some(r) => r,
+            None => continue,
+        };
+        let data_url = match media_map.get(r_id) {
+            Some(u) => u.clone(),
+            None => continue,
+        };
+
+        // Parse a:clrChange if present — used to make a specific color transparent.
+        // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
+        let color_replace_from = blip.children()
+            .find(|n| n.tag_name().name() == "clrChange")
+            .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
+            .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
+            .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
+
+        results.push(ImageRun {
+            data_url,
+            width_pt: cx,
+            height_pt: cy,
+            anchor: true,
+            // Combine the group's anchor offset with this pic's offset within the group
+            anchor_x_pt: anchor_pos_x + ox,
+            anchor_y_pt: anchor_pos_y + oy,
+            anchor_x_from_margin: x_from_margin,
+            anchor_y_from_para: y_from_para,
+            color_replace_from,
+        });
+    }
+    results
 }
 
 // ===== Table parsing =====
@@ -541,14 +948,14 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
     map
 }
 
-fn read_zip_entry(zip: &mut ZipArchive<std::io::Cursor<&[u8]>>, path: &str) -> Result<String, String> {
+fn read_zip_entry(zip: &mut Zip, path: &str) -> Result<String, String> {
     let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
     let mut s = String::new();
     entry.read_to_string(&mut s).map_err(|e| e.to_string())?;
     Ok(s)
 }
 
-fn read_zip_bytes(zip: &mut ZipArchive<std::io::Cursor<&[u8]>>, path: &str) -> Result<Vec<u8>, String> {
+fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
     let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
     let mut buf = vec![];
     entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;

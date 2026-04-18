@@ -46,8 +46,11 @@ export class DocxDocument {
     target: HTMLCanvasElement | OffscreenCanvas,
     pageIndex: number,
     opts: RenderPageOptions = {},
-  ): void {
+  ): Promise<void> {
     if (!this._document) throw new Error('Document not loaded');
-    renderDocumentToCanvas(this._document, target, pageIndex, opts);
+    return renderDocumentToCanvas(this._document, target, pageIndex, {
+      ...opts,
+      totalPages: this.pageCount,
+    });
   }
 }

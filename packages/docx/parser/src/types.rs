@@ -5,6 +5,22 @@ use serde::Serialize;
 pub struct Document {
     pub section: SectionProps,
     pub body: Vec<BodyElement>,
+    pub headers: HeadersFooters,
+    pub footers: HeadersFooters,
+}
+
+#[derive(Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadersFooters {
+    pub default: Option<HeaderFooter>,
+    pub first: Option<HeaderFooter>,
+    pub even: Option<HeaderFooter>,
+}
+
+#[derive(Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderFooter {
+    pub body: Vec<BodyElement>,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
@@ -18,6 +34,14 @@ pub struct SectionProps {
     pub margin_right: f64,
     pub margin_bottom: f64,
     pub margin_left: f64,
+    /// distance from top of page to header (pt)
+    pub header_distance: f64,
+    /// distance from bottom of page to footer (pt)
+    pub footer_distance: f64,
+    /// whether first page has its own header/footer
+    pub title_page: bool,
+    /// whether even pages have distinct header/footer
+    pub even_and_odd_headers: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -79,6 +103,27 @@ pub enum DocRun {
     Text(TextRun),
     Image(ImageRun),
     Break { break_type: BreakType },
+    Field(FieldRun),
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldRun {
+    /// "page" | "numPages" | "other"
+    pub field_type: String,
+    /// original instruction text (e.g. "PAGE \\* MERGEFORMAT")
+    pub instruction: String,
+    /// fallback text captured between fldChar separate and end (shown if field_type is "other")
+    pub fallback_text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// pt
+    pub font_size: f64,
+    pub color: Option<String>,
+    pub font_family: Option<String>,
+    pub background: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -106,6 +151,21 @@ pub struct ImageRun {
     pub width_pt: f64,
     /// pt
     pub height_pt: f64,
+    /// true = wp:anchor (absolute page position), false = wp:inline (flows with text)
+    pub anchor: bool,
+    /// X offset in pt (anchor only).  Interpretation depends on anchor_x_from_margin.
+    pub anchor_x_pt: f64,
+    /// Y offset in pt (anchor only).  Interpretation depends on anchor_y_from_para.
+    pub anchor_y_pt: f64,
+    /// If true anchorXPt is relative to the left margin; add section.marginLeft to get page-abs X.
+    /// If false anchorXPt is already page-absolute.
+    pub anchor_x_from_margin: bool,
+    /// If true anchorYPt is relative to the paragraph's top Y in the renderer (add paragraphTopPx).
+    /// If false anchorYPt is already page-absolute.
+    pub anchor_y_from_para: bool,
+    /// When set, the renderer should replace all pixels of this hex color (e.g. "FFFFFF") with
+    /// full transparency. Used to implement a:clrChange (make-background-transparent).
+    pub color_replace_from: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

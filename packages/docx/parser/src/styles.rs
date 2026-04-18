@@ -223,7 +223,8 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         fmt.underline = Some(val != "none");
     }
 
-    // Font size
+    // Font size — w:sz is used for Latin and East Asian (CJK) text.
+    // w:szCs is for complex scripts (Arabic/Hebrew RTL text) only; fall back to it when sz is absent.
     if let Some(sz) = child_w(rpr, "sz").or_else(|| child_w(rpr, "szCs")) {
         if let Some(v) = attr_w(sz, "val") {
             fmt.font_size = Some(half_pt_to_pt(&v));

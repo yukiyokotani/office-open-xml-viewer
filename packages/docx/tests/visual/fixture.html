@@ -22,7 +22,7 @@
 
   try {
     const doc = await DocxDocument.load('/' + file);
-    doc.renderPage(canvas, page, { width, dpr: 1 });
+    await doc.renderPage(canvas, page, { width, dpr: 1 });
     document.body.dataset.status = 'ready';
   } catch (e) {
     document.body.dataset.status = 'error';
