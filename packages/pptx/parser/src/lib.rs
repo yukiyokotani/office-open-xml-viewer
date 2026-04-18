@@ -2385,12 +2385,31 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
                 Some(n) => n,
                 None    => return (None, None, None, None, None, None),
             };
-            let fill = parse_fill(tc_style, theme);
+            // Explicit fill first; fall back to fillRef (table style reference)
+            let fill = parse_fill(tc_style, theme).or_else(|| {
+                child(tc_style, "fillRef").and_then(|fr| {
+                    let idx: u32 = attr(&fr, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if idx == 0 { Some(Fill::None) } else {
+                        parse_color_node(fr, theme).map(|c| Fill::Solid { color: c })
+                    }
+                })
+            });
             let tc_bdr = child(tc_style, "tcBdr");
             let parse_side = |side: &str| -> Option<Stroke> {
-                tc_bdr.and_then(|b| child(b, side))
-                    .and_then(|n| child(n, "ln"))
-                    .and_then(|n| parse_stroke(n, theme))
+                let side_node = tc_bdr.and_then(|b| child(b, side))?;
+                // Explicit <a:ln>
+                if let Some(ln) = child(side_node, "ln") {
+                    return parse_stroke(ln, theme);
+                }
+                // <a:lnRef idx="N">: use standard themed width + provided color
+                if let Some(ln_ref) = child(side_node, "lnRef") {
+                    let idx: u32 = attr(&ln_ref, "idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if idx == 0 { return None; }
+                    let color = parse_color_node(ln_ref, theme)?;
+                    let width: i64 = match idx { 1 => 6350, 2 => 12700, _ => 19050 };
+                    return Some(Stroke { color, width, dash_style: None });
+                }
+                None
             };
             let inside_h = parse_side("insideH");
             let inside_v = parse_side("insideV");

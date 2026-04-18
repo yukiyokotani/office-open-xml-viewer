@@ -1,5 +1,5 @@
 {
-  "name": "@ooxml/pptx",
+  "name": "@ooxml/xlsx",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,33 +9,25 @@
   "files": ["dist", "src"],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --build && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "storybook": "volta run --node 24.11.1 storybook dev -p 6006",
+    "storybook": "storybook dev -p 6008",
     "build-storybook": "storybook build",
-    "wasm": "cd parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/",
-    "vrt": "playwright test --config playwright.config.ts"
+    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm",
+    "typecheck": "tsc --noEmit",
+    "vrt": "playwright test --config ../../playwright.config.ts"
   },
   "devDependencies": {
-    "@chromatic-com/storybook": "^5.1.2",
     "@playwright/test": "^1.59.1",
     "@storybook/addon-a11y": "^10.3.5",
     "@storybook/addon-docs": "^10.3.5",
-    "@storybook/addon-vitest": "^10.3.5",
     "@storybook/html-vite": "^10.3.5",
     "@types/pngjs": "^6.0.5",
-    "@vitest/browser-playwright": "^4.1.4",
-    "@vitest/coverage-v8": "^4.1.4",
     "pixelmatch": "^7.1.0",
     "playwright": "^1.59.1",
     "storybook": "^10.3.5",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.6.0",
-    "vitest": "^4.1.4"
-  },
-  "dependencies": {
-    "@fontsource/nunito-sans": "^5.2.7"
+    "vite-plugin-wasm": "^3.6.0"
   }
 }

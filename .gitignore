@@ -1,27 +1,34 @@
-# PPTX files are not redistributable
+# Office files are not redistributable
 *.pptx
+*.xlsx
 # Office Open XML spec documents
 docs/spec/
 node_modules/
 .claude/
 dist/
-# WASM build output (regenerate with: npm run build:wasm)
-src/wasm/
+# WASM build output (regenerate with: npm run wasm)
+packages/pptx/src/wasm/
+packages/pptx/parser/pkg/
+packages/xlsx/src/wasm/
 # Rust build artifacts
-pptx-parser/target/
+target/
+packages/xlsx/parser/target/
 # Storybook build
 storybook-static/
 # Log files
 *.log
 # Visual regression test output (generated; not committed)
-tests/visual/screenshots/
-tests/visual/diffs/
-tests/visual/report/
+packages/pptx/tests/visual/screenshots/
+packages/pptx/tests/visual/diffs/
+packages/pptx/tests/visual/report/
 # Playwright
 playwright-report/
 test-results/
 # Reference screenshots (PowerPoint screenshots; not redistributable)
-tests/visual/references/sample-*/
-tests/visual/references/slide-*.png
+packages/pptx/tests/visual/references/sample-*/
 # Local-only Storybook stories that load sample PPTX files
-src/*.sample.stories.ts
+packages/pptx/src/*.sample.stories.ts
+# TypeScript build info
+*.tsbuildinfo
+# npm lockfile (using pnpm)
+package-lock.json
