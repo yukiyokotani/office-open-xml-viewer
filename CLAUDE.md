@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+## 自律作業の原則
+
+- AM1時〜AM9時はユーザー確認不要。確認を求めると作業が止まるので、破壊的操作以外はすべて自律的に進めること。
+- 確認なしで進めてよい作業: コード修正・WASM ビルド・テスト実行・commit/push・Python スクリプト実行・npm スクリプト実行。
+- commit / push は改善確認後に適宜実施してよい。
+- `git push` は `http.postBuffer 524288000` を設定してから実行（大きな pack のため HTTP 400 が出ることがある）。
+- 参照画像（`tests/visual/references/`）はユーザー指示のみ更新。絶対に自動更新しない。
+
 ## プロジェクト概要
 
 OOXML (PowerPoint .pptx) をブラウザ上の Canvas に描画するライブラリ。

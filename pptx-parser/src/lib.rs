@@ -252,6 +252,7 @@ enum Bullet {
     /// No bullet element present – inherit from layout/master
     Inherit,
     /// Character bullet (buChar)
+    #[serde(rename_all = "camelCase")]
     Char {
         #[serde(rename = "char")]
         ch: String,
@@ -261,6 +262,7 @@ enum Bullet {
         font_family: Option<String>,
     },
     /// Auto-numbered bullet (buAutoNum)
+    #[serde(rename_all = "camelCase")]
     AutoNum {
         num_type: String,
         start_at: Option<u32>,
@@ -1254,9 +1256,27 @@ fn parse_paragraph(
 
     let alignment  = p_pr.and_then(|n| attr(&n, "algn")).unwrap_or_else(|| "l".into());
     let lvl: u32   = p_pr.and_then(|n| attr(&n, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let mar_l      = p_pr.and_then(|n| attr_i64(&n, "marL")).unwrap_or(0);
-    let mar_r      = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
-    let indent     = p_pr.and_then(|n| attr_i64(&n, "indent")).unwrap_or(0);
+
+    // Detect whether the paragraph has an explicit bullet character (buChar/buAutoNum).
+    // Used to choose between bullet-list defaults and plain-text defaults.
+    let has_explicit_bullet = p_pr.map(|n| {
+        child(n, "buChar").is_some() || child(n, "buAutoNum").is_some()
+    }).unwrap_or(false);
+
+    // marL / indent defaults follow PowerPoint's implicit list style:
+    //   Bullet paragraphs:  marL = (lvl+1)*342900, indent = -342900 (hanging)
+    //   Plain paragraphs:   marL = lvl*457200 (matches presentation.xml defaultTextStyle)
+    let mar_l = p_pr.and_then(|n| attr_i64(&n, "marL")).unwrap_or_else(|| {
+        if has_explicit_bullet {
+            (lvl as i64 + 1) * 342900
+        } else {
+            lvl as i64 * 457200
+        }
+    });
+    let mar_r  = p_pr.and_then(|n| attr_i64(&n, "marR")).unwrap_or(0);
+    let indent = p_pr.and_then(|n| attr_i64(&n, "indent")).unwrap_or_else(|| {
+        if has_explicit_bullet { -342900 } else { 0 }
+    });
 
     let space_before = p_pr.and_then(|n| {
         child(n, "spcBef").and_then(|s| child(s, "spcPts")).and_then(|s| attr_i64(&s, "val"))

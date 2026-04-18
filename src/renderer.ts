@@ -126,9 +126,13 @@ function applySymbolFont(char: string, fontFamily: string): string {
 function normalizeFontFamily(family: string): string {
   if (!family || family.startsWith('+')) {
     // +mn-lt = minor Latin, +mj-lt = major Latin, +mn-ea = minor East Asian, +mj-ea = major East Asian
-    // All fall back to system sans-serif (close enough for layout purposes)
     return 'sans-serif';
   }
+  // OOXML typeface sometimes appends ",<generic>" hint (e.g. "Wingdings,Sans-Serif").
+  // Strip it so the CSS font name resolves to the actual named font.
+  const primary = family.split(',')[0].trim();
+  if (!primary) return 'sans-serif';
+  family = primary;
   return family;
 }
 
@@ -2117,7 +2121,10 @@ function renderTextBody(
         ? paraDefaultFontSizePx * (b.sizePct / 100)
         : paraDefaultFontSizePx;
       bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
-      bulletFont  = buildFont(false, false, bSizePx, normalizeFontFamily(b.fontFamily ?? 'sans-serif'));
+      // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
+      // Otherwise use the specified font (e.g. Wingdings on systems that have it).
+      const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? 'sans-serif');
+      bulletFont  = buildFont(false, false, bSizePx, convertedFamily);
       bulletColor = b.color ? hexToRgba(b.color) : paraDefaultColor;
       // Reset counters when switching to char bullets
       autoNumCounters.clear();
