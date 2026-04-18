@@ -2381,9 +2381,13 @@ function renderTextBody(
   // must be normalized before fillText() or alignment/anchor math will drift.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.beginPath();
-  ctx.rect(bx, effectiveBy, bw, effectiveBh);
-  ctx.clip();
+  // Zero-width shapes (e.g., vertical line annotations with bw=0) must not use a
+  // zero-area clip rect — it would make all text invisible. Only clip when bw > 0.
+  if (bw > 0) {
+    ctx.beginPath();
+    ctx.rect(bx, effectiveBy, bw, effectiveBh);
+    ctx.clip();
+  }
 
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
@@ -2701,10 +2705,11 @@ function renderStackedBarHChart(
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
 
-  const padL = w * 0.22;  // category labels on left
+  // When the value axis is hidden, reclaim its bottom padding to give bars more room.
+  const padL = el.catAxisHidden ? w * 0.04 : w * 0.22;  // category labels on left
   const padR = w * 0.04;
   const padT = h * 0.12;  // legend + top labels
-  const padB = h * 0.10;  // x-axis labels
+  const padB = el.valAxisHidden ? h * 0.02 : h * 0.10;  // x-axis labels
   const px0 = x + padL;
   const py0 = y + padT;
   const pw  = w - padL - padR;
@@ -2722,28 +2727,31 @@ function renderStackedBarHChart(
 
   ctx.save();
 
-  // Grid lines + X-axis (value) labels
-  const step = niceStep(dataMax);
-  ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
-  ctx.strokeStyle = '#e8e8e8';
-  ctx.lineWidth = 0.7;
-  for (let v = 0; v <= dataMax + step * 0.5; v += step) {
-    const gx = px0 + pw * (v / dataMax);
-    ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-    ctx.fillText(v.toLocaleString(), gx, py0 + ph + 4);
-  }
+  // Grid lines + X-axis (value) labels — both follow the value-axis visibility flag,
+  // since gridlines are anchored to the value axis ticks.
+  if (!el.valAxisHidden) {
+    const step = niceStep(dataMax);
+    ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#666';
+    ctx.strokeStyle = '#e8e8e8';
+    ctx.lineWidth = 0.7;
+    for (let v = 0; v <= dataMax + step * 0.5; v += step) {
+      const gx = px0 + pw * (v / dataMax);
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+      ctx.fillText(v.toLocaleString(), gx, py0 + ph + 4);
+    }
 
-  // X-axis line and Y-axis baseline
-  ctx.strokeStyle = '#bbb';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(px0, py0);
-  ctx.lineTo(px0, py0 + ph);
-  ctx.lineTo(px0 + pw, py0 + ph);
-  ctx.stroke();
+    // X-axis line and Y-axis baseline
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px0, py0);
+    ctx.lineTo(px0, py0 + ph);
+    ctx.lineTo(px0 + pw, py0 + ph);
+    ctx.stroke();
+  }
 
   // Bars
   const barH = (ph / n) * 0.55;
@@ -2783,14 +2791,16 @@ function renderStackedBarHChart(
   });
 
   // Y-axis (category) labels — rendered in reverse: cat[n-1] at top, cat[0] at bottom
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#444';
-  ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
-  for (let i = 0; i < n; i++) {
-    const ri = n - 1 - i; // reversed visual row index
-    const cy = py0 + gapH * ri + gapH / 2;
-    ctx.fillText(cats[i], px0 - 6, cy);
+  if (!el.catAxisHidden) {
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#444';
+    ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
+    for (let i = 0; i < n; i++) {
+      const ri = n - 1 - i; // reversed visual row index
+      const cy = py0 + gapH * ri + gapH / 2;
+      ctx.fillText(cats[i], px0 - 6, cy);
+    }
   }
 
   // Legend (top)

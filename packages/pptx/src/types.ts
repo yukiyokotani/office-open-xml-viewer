@@ -131,6 +131,10 @@ export interface ChartElement {
   subtotalIndices: number[];
   /** Whether data labels (value numbers) should be shown on bars/segments */
   showDataLabels: boolean;
+  /** True when the chart's category axis has <c:delete val="1"/> */
+  catAxisHidden: boolean;
+  /** True when the chart's value axis has <c:delete val="1"/> */
+  valAxisHidden: boolean;
 }
 
 export interface PictureElement {

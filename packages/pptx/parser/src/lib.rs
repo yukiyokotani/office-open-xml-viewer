@@ -77,6 +77,10 @@ struct ChartElement {
     subtotal_indices: Vec<u32>,
     /// Whether to render data value labels on bars/segments
     show_data_labels: bool,
+    /// True when <c:catAx><c:delete val="1"/> — hide category axis labels/ticks
+    cat_axis_hidden: bool,
+    /// True when <c:valAx><c:delete val="1"/> — hide value axis labels/ticks
+    val_axis_hidden: bool,
 }
 
 // ===== Table data model =====
@@ -1872,6 +1876,17 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         .and_then(|n| attr(&n, "val"))
         .and_then(|v| v.parse::<f64>().ok());
 
+    // Axis visibility: <c:catAx>/<c:valAx><c:delete val="1"/> hides the entire axis
+    let axis_hidden = |ax_name: &str| -> bool {
+        root.descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == ax_name)
+            .any(|ax| ax.children().any(|c|
+                c.is_element() && c.tag_name().name() == "delete"
+                    && attr(&c, "val").as_deref() == Some("1")))
+    };
+    let cat_axis_hidden = axis_hidden("catAx");
+    let val_axis_hidden = axis_hidden("valAx");
+
     // Series
     let plot_area = root.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "plotArea")?;
@@ -1979,6 +1994,8 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         val_max,
         subtotal_indices: vec![],
         show_data_labels,
+        cat_axis_hidden,
+        val_axis_hidden,
     })
 }
 
@@ -2063,6 +2080,8 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         val_max: None,
         subtotal_indices,
         show_data_labels: false,
+        cat_axis_hidden: false,
+        val_axis_hidden: false,
     })
 }
 
@@ -2144,10 +2163,11 @@ fn parse_shape(
         return None; // non-placeholder with no xfrm — skip
     };
 
-    // cx=0 → skip.
+    // cx=0 AND cy=0 → skip (zero-area invisible shape).
+    // cx=0 alone (vertical line/annotation) is permitted when cy > 0.
     // cy=0 means "auto-height": keep 0 when anchor="b" (renderer grows shape upward from off_y),
     // otherwise use a generous fallback so text has room to render.
-    if t.cx == 0 {
+    if t.cx == 0 && t.cy == 0 {
         return None;
     }
     let inherited_anchor: Option<String> = if ph_node.is_some() {
