@@ -147,32 +147,35 @@ The rendering pipeline is fully off the main thread:
 
 ---
 
-### Excel (.xlsx) — Planned
+### Excel (.xlsx)
 
 | Category | Feature | Status |
 |----------|---------|--------|
-| **Workbook** | Multiple sheets | 🔜 Planned |
-| | Sheet names | 🔜 Planned |
-| **Cells** | Text values | 🔜 Planned |
-| | Number values | 🔜 Planned |
-| | Boolean values | 🔜 Planned |
-| | Formula results (display only) | 🔜 Planned |
-| | Dates | 🔜 Planned |
-| **Formatting** | Bold, italic, underline, strikethrough | 🔜 Planned |
-| | Font family, size, color | 🔜 Planned |
-| | Cell background color | 🔜 Planned |
-| | Borders | 🔜 Planned |
-| | Horizontal / vertical alignment | 🔜 Planned |
-| | Text wrapping | 🔜 Planned |
-| | Number formats | 🔜 Planned |
-| **Structure** | Merged cells | 🔜 Planned |
-| | Frozen panes | 🔜 Planned |
-| | Row / column sizing | 🔜 Planned |
-| | Hidden rows / columns | 🔜 Planned |
-| **Elements** | Images | 🔜 Planned |
-| | Charts | 🔜 Planned |
+| **Workbook** | Multiple sheets | ✅ |
+| | Sheet names | ✅ |
+| **Cells** | Text values | ✅ |
+| | Number values | ✅ |
+| | Boolean values | ✅ |
+| | Error values (`#REF!`, `#DIV/0!` …) | ✅ |
+| | Formula results (display only, from cached `<v>`) | ✅ |
+| | Dates (ECMA-376 §18.8.30 format codes: `y`/`m`/`d`/`h`/`s`/`AM-PM`) | ✅ |
+| | Rich text (`<si>`/`<is>` per-run formatting) | ✅ |
+| **Formatting** | Bold, italic, underline, strikethrough | ✅ |
+| | Font family, size, color | ✅ |
+| | Cell background color | ✅ |
+| | Borders | ✅ |
+| | Horizontal / vertical alignment | ✅ |
+| | Text wrapping | ✅ |
+| | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
+| **Structure** | Merged cells | ✅ |
+| | Frozen panes | ✅ |
+| | Row / column sizing (custom widths and heights) | ✅ |
+| | Hidden rows / columns | ✅ |
+| **Elements** | Images (`<xdr:twoCellAnchor>` with embedded media) | ✅ |
+| | Charts | ❌ |
 | | Sparklines | ❌ Not planned |
-| **Advanced** | Pivot tables | ❌ Not planned |
-| | Conditional formatting | 🔜 Planned |
+| **Advanced** | Conditional formatting (`cellIs` / `colorScale` / `dataBar`) | ✅ |
+| | Conditional formatting (`expression`, `iconSet`, `top10` etc.) | ❌ |
+| | Pivot tables | ❌ Not planned |
 | | Data validation dropdowns | ❌ Not planned |
 | | Comments / notes | ❌ Not planned |
