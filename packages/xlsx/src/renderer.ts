@@ -413,11 +413,11 @@ function renderQuadrant(
 
       // Grid line
       ctx.strokeStyle = '#d0d0d0';
-      ctx.lineWidth = 0.5;
+      ctx.lineWidth = 0.5 * cs;
       ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
 
       // Cell borders
-      renderBorder(ctx, border, cx, cy, cellW, cellH);
+      renderBorder(ctx, border, cx, cy, cellW, cellH, cs);
 
       if (!cell) continue;
       const text = formatCellValue(cell, styles);
@@ -498,7 +498,7 @@ function renderQuadrant(
             : cx + paddingX;
           ctx.save();
           ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
-          ctx.lineWidth = 1;
+          ctx.lineWidth = 1 * cs;
           ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
           ctx.restore();
         }
@@ -668,7 +668,7 @@ export function renderViewport(
   if (freezeRows > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 * cs;
     ctx.beginPath();
     ctx.moveTo(hw, scrollAreaY + 0.5);
     ctx.lineTo(canvasW, scrollAreaY + 0.5);
@@ -678,7 +678,7 @@ export function renderViewport(
   if (freezeCols > 0) {
     ctx.save();
     ctx.strokeStyle = FREEZE_LINE_COLOR;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 * cs;
     ctx.beginPath();
     ctx.moveTo(scrollAreaX + 0.5, hh);
     ctx.lineTo(scrollAreaX + 0.5, canvasH);
@@ -713,7 +713,7 @@ function renderHeaders(
   ctx.fillStyle = HEADER_BG;
   ctx.fillRect(0, 0, hw, hh);
   ctx.strokeStyle = HEADER_BORDER;
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1 * cs;
   ctx.strokeRect(0.5, 0.5, hw - 1, hh - 1);
 
   ctx.font = HEADER_FONT;
@@ -724,7 +724,7 @@ function renderHeaders(
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(cx, 0, cw, hh);
     ctx.strokeStyle = HEADER_BORDER;
-    ctx.lineWidth = 0.5;
+    ctx.lineWidth = 0.5 * cs;
     ctx.strokeRect(cx + 0.5, 0.5, cw - 1, hh - 1);
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
@@ -737,7 +737,7 @@ function renderHeaders(
     ctx.fillStyle = HEADER_BG;
     ctx.fillRect(0, cy, hw, ch);
     ctx.strokeStyle = HEADER_BORDER;
-    ctx.lineWidth = 0.5;
+    ctx.lineWidth = 0.5 * cs;
     ctx.strokeRect(0.5, cy + 0.5, hw - 1, ch - 1);
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'right';
@@ -818,7 +818,7 @@ function renderHeaders(
 // ────────────────────────────────────────────────────────────────
 // Border drawing
 // ────────────────────────────────────────────────────────────────
-function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
+function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number, cs = 1): void {
   const edges = [
     { edge: border.top,    x1: x,     y1: y,     x2: x + w, y2: y },
     { edge: border.bottom, x1: x,     y1: y + h, x2: x + w, y2: y + h },
@@ -829,7 +829,7 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
     if (!edge || !edge.style || edge.style === 'none') continue;
     ctx.beginPath();
     ctx.strokeStyle = edge.color ? hexToRgba(edge.color) : '#000000';
-    ctx.lineWidth = borderStyleWidth(edge.style);
+    ctx.lineWidth = borderStyleWidth(edge.style) * cs;
     if (edge.style === 'dashed' || edge.style === 'dotted' || edge.style === 'dashDot') {
       ctx.setLineDash(edge.style === 'dotted' ? [2, 2] : [4, 2]);
     } else {
