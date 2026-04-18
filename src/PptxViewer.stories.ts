@@ -4,7 +4,6 @@ import init, { parse_pptx } from './wasm/pptx_parser.js';
 
 type Args = {
   width: number;
-  pptxFile: string;
 };
 
 const meta: Meta<Args> = {
@@ -14,21 +13,16 @@ const meta: Meta<Args> = {
       control: { type: 'range', min: 400, max: 1600, step: 40 },
       description: 'Canvas render width (px)',
     },
-    pptxFile: {
-      control: { type: 'select' },
-      options: ['sample-1', 'sample-2', 'sample-3', 'sample-4'],
-      description: 'PPTX file to load from public/',
-    },
   },
-  args: { width: 960, pptxFile: 'sample-1' },
+  args: { width: 960 },
 };
 export default meta;
 type Story = StoryObj<Args>;
 
 // ---------------------------------------------------------------------------
-// Helper: build nav bar + viewer
+// Helper: build nav bar + viewer (exported for use in local-only sample stories)
 // ---------------------------------------------------------------------------
-function buildViewerUI(
+export function buildViewerUI(
   args: Args,
   autoLoadUrl?: string
 ): { root: HTMLElement; viewer: PptxViewer } {
@@ -92,42 +86,6 @@ function buildViewerUI(
 
   return { root, viewer };
 }
-
-export const Sample1: Story = {
-  name: 'sample-1.pptx (5 slides)',
-  args: { width: 960, pptxFile: 'sample-1' },
-  render(args) {
-    const { root } = buildViewerUI(args, '/sample-1.pptx');
-    return root;
-  },
-};
-
-export const Sample2: Story = {
-  name: 'sample-2.pptx (17 slides)',
-  args: { width: 960, pptxFile: 'sample-2' },
-  render(args) {
-    const { root } = buildViewerUI(args, '/sample-2.pptx');
-    return root;
-  },
-};
-
-export const Sample4: Story = {
-  name: 'sample-4.pptx (15 slides)',
-  args: { width: 960, pptxFile: 'sample-4' },
-  render(args) {
-    const { root } = buildViewerUI(args, '/sample-4.pptx');
-    return root;
-  },
-};
-
-export const Sample3: Story = {
-  name: 'sample-3.pptx (8 slides)',
-  args: { width: 960, pptxFile: 'sample-3' },
-  render(args) {
-    const { root } = buildViewerUI(args, '/sample-3.pptx');
-    return root;
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Debug: raw JSON from WASM parser (helps diagnose blank output)

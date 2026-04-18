@@ -1,5 +1,7 @@
 # PPTX files are not redistributable
 *.pptx
+# Office Open XML spec documents
+docs/spec/
 node_modules/
 .claude/
 dist/
@@ -18,3 +20,8 @@ tests/visual/report/
 # Playwright
 playwright-report/
 test-results/
+# Reference screenshots (PowerPoint screenshots; not redistributable)
+tests/visual/references/sample-*/
+tests/visual/references/slide-*.png
+# Local-only Storybook stories that load sample PPTX files
+src/*.sample.stories.ts
