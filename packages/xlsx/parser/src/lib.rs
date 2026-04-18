@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +40,25 @@ pub struct Worksheet {
     pub freeze_rows: u32,
     pub freeze_cols: u32,
     pub conditional_formats: Vec<ConditionalFormat>,
+    pub images: Vec<ImageAnchor>,
+}
+
+/// An image anchored to a rectangular range of cells
+/// (ECMA-376 §20.5, `<xdr:twoCellAnchor>`). Offsets are EMU (English
+/// Metric Unit): 914400 EMU = 1 inch, and 9525 EMU = 1 pixel at 96 DPI.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAnchor {
+    pub from_col: u32,
+    pub from_col_off: i64,
+    pub from_row: u32,
+    pub from_row_off: i64,
+    pub to_col: u32,
+    pub to_col_off: i64,
+    pub to_row: u32,
+    pub to_row_off: i64,
+    /// Data URL: "data:image/png;base64,..."
+    pub data_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,8 +292,11 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     let theme_colors = parse_theme_colors(&mut archive);
     let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
-    let ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
+    let mut ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
         .map_err(|e| e.to_string())?;
+
+    // Attach any drawing-anchored images for this sheet
+    ws.images = load_sheet_images(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -986,7 +1009,190 @@ fn parse_worksheet(
         freeze_rows,
         freeze_cols,
         conditional_formats,
+        images: Vec::new(),
     })
+}
+
+/// Parse a .rels file into rId → Target map.
+fn parse_rels_map(xml: &str) -> HashMap<String, String> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for rel in doc.root_element().children().filter(|n| n.is_element()) {
+        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
+            map.insert(id.to_string(), target.to_string());
+        }
+    }
+    map
+}
+
+/// Read a binary file from the zip.
+fn read_zip_bytes(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &str) -> Option<Vec<u8>> {
+    let mut file = archive.by_name(path).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
+fn resolve_zip_path(base_dir: &str, target: &str) -> String {
+    let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in target.split('/') {
+        match seg {
+            ".." => { parts.pop(); }
+            "." | "" => {}
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn mime_from_ext(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png"  => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif"  => "image/gif",
+        "bmp"  => "image/bmp",
+        "webp" => "image/webp",
+        _      => "application/octet-stream",
+    }
+}
+
+/// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
+/// embedded pictures into data URLs. `drawing_dir` is the folder that
+/// contains `drawing_path` so relative `Target`s resolve correctly.
+fn parse_drawing_anchors(
+    drawing_xml: &str,
+    drawing_rels: &HashMap<String, String>,
+    drawing_dir: &str,
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+) -> Vec<ImageAnchor> {
+    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+        return Vec::new();
+    };
+    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut anchors: Vec<ImageAnchor> = Vec::new();
+
+    for anchor in doc.descendants() {
+        if anchor.tag_name().name() != "twoCellAnchor"
+            || anchor.tag_name().namespace() != Some(xdr_ns)
+        {
+            continue;
+        }
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        let mut pic_rid: Option<String> = None;
+
+        for child in anchor.children() {
+            if !child.is_element() { continue; }
+            match child.tag_name().name() {
+                "from" | "to" => {
+                    let is_from = child.tag_name().name() == "from";
+                    let mut col: u32 = 0;
+                    let mut col_off: i64 = 0;
+                    let mut row: u32 = 0;
+                    let mut row_off: i64 = 0;
+                    for c in child.children() {
+                        match (c.tag_name().name(), c.text()) {
+                            ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                            ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                            ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                            ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    if is_from {
+                        from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off;
+                    } else {
+                        to_col = col; to_col_off = col_off; to_row = row; to_row_off = row_off;
+                    }
+                }
+                "pic" => {
+                    // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
+                    let blip_fill = child.children()
+                        .find(|n| n.tag_name().name() == "blipFill" && n.tag_name().namespace() == Some(xdr_ns));
+                    if let Some(bf) = blip_fill {
+                        let blip = bf.children()
+                            .find(|n| n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns));
+                        if let Some(b) = blip {
+                            // r:embed attribute
+                            pic_rid = b.attributes()
+                                .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
+                                .map(|a| a.value().to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let Some(rid) = pic_rid else { continue; };
+        let Some(target) = drawing_rels.get(&rid) else { continue; };
+        let media_path = resolve_zip_path(drawing_dir, target);
+        let Some(bytes) = read_zip_bytes(archive, &media_path) else { continue; };
+        let mime = mime_from_ext(&media_path);
+        let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+
+        anchors.push(ImageAnchor {
+            from_col, from_col_off, from_row, from_row_off,
+            to_col, to_col_off, to_row, to_row_off,
+            data_url,
+        });
+    }
+    anchors
+}
+
+/// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
+/// its drawing(s), and return all image anchors found.
+fn load_sheet_images(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str, // e.g. "worksheets/sheet1.xml"
+) -> Vec<ImageAnchor> {
+    // sheet rels path:  xl/worksheets/_rels/sheet1.xml.rels
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+
+    // Find all drawing relationships
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+        return Vec::new();
+    };
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        let rel_type = rel.attribute("Type").unwrap_or("");
+        if rel_type.ends_with("/drawing") {
+            if let Some(t) = rel.attribute("Target") {
+                drawing_targets.push(t.to_string());
+            }
+        }
+    }
+    if drawing_targets.is_empty() { return Vec::new(); }
+
+    let mut all_anchors: Vec<ImageAnchor> = Vec::new();
+    for target in drawing_targets {
+        // sheet_dir is "worksheets", target typically "../drawings/drawing1.xml"
+        // base dir for the drawing = "xl/worksheets" + "../drawings" → "xl/drawings"
+        let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        // Drawing rels:  xl/drawings/_rels/drawing1.xml.rels
+        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else { continue; };
+        let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+            .ok()
+            .map(|xml| parse_rels_map(&xml))
+            .unwrap_or_default();
+
+        let mut anchors = parse_drawing_anchors(&drawing_xml, &drawing_rels, drawing_dir, archive);
+        all_anchors.append(&mut anchors);
+    }
+    all_anchors
 }
 
 fn parse_sqref(s: &str) -> Vec<CellRange> {
