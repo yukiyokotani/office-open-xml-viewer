@@ -933,6 +933,17 @@ export function renderViewport(
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
   );
 
+  // ── Anchored images (clipped to scrollable area) ─────────────
+  if (worksheet.images && worksheet.images.length > 0 && opts.loadedImages) {
+    renderImages(
+      ctx, worksheet, opts.loadedImages, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+    );
+  }
+
   // ── Row/col headers (drawn last, always on top) ──────────────
   renderHeaders(ctx, canvasW, canvasH,
     startRow, startCol, numRows, numCols,
@@ -1109,6 +1120,96 @@ function renderHeaders(
       ctx.fillRect(hw, 0, frozenW, hh);
     }
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Image anchors  (ECMA-376 §20.5, <xdr:twoCellAnchor>)
+// ────────────────────────────────────────────────────────────────
+const EMU_PER_PX = 9525;
+
+/** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
+function sheetXForCol(
+  ws: Worksheet,
+  col1: number, // 1-indexed column number
+  cs: number,
+): number {
+  let x = 0;
+  for (let c = 1; c < col1; c++) {
+    x += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth) * cs);
+  }
+  return x;
+}
+
+/** Sum scaled row heights for rows 1..n-1 (sheet-space Y of row n in scaled px). */
+function sheetYForRow(
+  ws: Worksheet,
+  row1: number, // 1-indexed row number
+  cs: number,
+): number {
+  let y = 0;
+  for (let r = 1; r < row1; r++) {
+    y += Math.round(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight) * cs);
+  }
+  return y;
+}
+
+function renderImages(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  loadedImages: Map<string, HTMLImageElement>,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+
+  // Sheet-space origin of the current scroll viewport's first visible cell
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  ctx.clip();
+
+  for (const anchor of ws.images) {
+    const img = loadedImages.get(anchor.dataUrl);
+    if (!img) continue;
+
+    // xdr col/row are 0-indexed; our widths map is 1-indexed.
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    // Image sheet-space rect (in scaled px)
+    const imgSheetX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const imgSheetY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const imgSheetX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const imgSheetY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+
+    const imgW = imgSheetX2 - imgSheetX1;
+    const imgH = imgSheetY2 - imgSheetY1;
+    if (imgW <= 0 || imgH <= 0) continue;
+
+    // Translate to canvas coordinates of the scrollable viewport
+    const canvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasY = scrollAreaY + (imgSheetY1 - scrollOriginSheetY) - scrollOffsetY;
+
+    // Early out when entirely off-screen
+    if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
+
+    ctx.drawImage(img, canvasX, canvasY, imgW, imgH);
+  }
+
+  ctx.restore();
 }
 
 // ────────────────────────────────────────────────────────────────

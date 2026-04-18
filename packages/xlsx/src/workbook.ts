@@ -7,6 +7,8 @@ export class XlsxWorkbook {
   private worker: Worker;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
+  /** Cache of loaded images keyed by their data URL. Shared across sheets. */
+  private imageCache = new Map<string, HTMLImageElement>();
   private rawData: ArrayBuffer | null = null;
 
   constructor() {
@@ -81,7 +83,23 @@ export class XlsxWorkbook {
     const ctx = (target as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D;
     ctx.scale(dpr, dpr);
 
-    renderViewport(ctx, ws, styles, viewport, { ...opts, dpr });
+    // Preload any image bitmaps that this sheet uses (data URLs → HTMLImageElement)
+    if (ws.images && ws.images.length > 0) {
+      await Promise.all(
+        ws.images.map(async (img) => {
+          if (this.imageCache.has(img.dataUrl)) return;
+          const el = new Image();
+          el.src = img.dataUrl;
+          await new Promise<void>((resolve, reject) => {
+            el.onload = () => resolve();
+            el.onerror = () => reject(new Error('image decode failed'));
+          });
+          this.imageCache.set(img.dataUrl, el);
+        }),
+      ).catch(() => { /* swallow image failures so the grid still renders */ });
+    }
+
+    renderViewport(ctx, ws, styles, viewport, { ...opts, dpr, loadedImages: this.imageCache });
   }
 
   destroy(): void {

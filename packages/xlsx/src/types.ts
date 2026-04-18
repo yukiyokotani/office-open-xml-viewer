@@ -26,6 +26,24 @@ export interface Worksheet {
   freezeRows: number;
   freezeCols: number;
   conditionalFormats: ConditionalFormat[];
+  images: ImageAnchor[];
+}
+
+/**
+ * Image anchored to a rectangle of cells (EMU offsets within the anchor cells).
+ * 914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI.
+ */
+export interface ImageAnchor {
+  fromCol: number;
+  fromColOff: number;
+  fromRow: number;
+  fromRowOff: number;
+  toCol: number;
+  toColOff: number;
+  toRow: number;
+  toRowOff: number;
+  /** Data URL (data:image/png;base64,...) */
+  dataUrl: string;
 }
 
 export interface CellRange {
@@ -182,6 +200,8 @@ export interface RenderViewportOptions {
   freezeCols?: number;
   /** Scale factor applied to all cell/header dimensions (default 1). */
   cellScale?: number;
+  /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
+  loadedImages?: Map<string, HTMLImageElement>;
 }
 
 export type WorkerRequest =
