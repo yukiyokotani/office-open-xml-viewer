@@ -10,5 +10,6 @@ const config: StorybookConfig = {
     '@storybook/addon-docs',
   ],
   framework: '@storybook/html-vite',
+  staticDirs: ['../public'],
 };
 export default config;

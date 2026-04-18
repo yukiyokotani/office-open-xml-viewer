@@ -5,6 +5,7 @@ import init, { parse_xlsx } from './wasm/xlsx_parser.js';
 type Args = {
   width: number;
   height: number;
+  scale: number;
 };
 
 const meta: Meta<Args> = {
@@ -18,8 +19,12 @@ const meta: Meta<Args> = {
       control: { type: 'range', min: 200, max: 1200, step: 40 },
       description: 'Canvas render height (px)',
     },
+    scale: {
+      control: { type: 'range', min: 0.25, max: 1, step: 0.05 },
+      description: 'Display scale (CSS transform)',
+    },
   },
-  args: { width: 1200, height: 600 },
+  args: { width: 1200, height: 600, scale: 0.75 },
 };
 export default meta;
 type Story = StoryObj<Args>;
@@ -31,6 +36,7 @@ function buildViewerUI(
   args: Args,
   autoLoadUrl?: string,
 ): { root: HTMLElement; viewer: XlsxViewer } {
+  const scale = args.scale ?? 0.75;
   const root = document.createElement('div');
   root.style.cssText = 'font-family:sans-serif;padding:16px;';
 
@@ -38,9 +44,19 @@ function buildViewerUI(
   status.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
   root.appendChild(status);
 
+  const scaleWrap = document.createElement('div');
+  scaleWrap.style.cssText = `
+    display: inline-block;
+    transform: scale(${scale});
+    transform-origin: top left;
+    width: ${args.width}px;
+    height: ${args.height + 30}px;
+  `.replace(/\n\s+/g, ' ').trim();
+  root.appendChild(scaleWrap);
+
   const container = document.createElement('div');
   container.style.cssText = `max-width:100%;`;
-  root.appendChild(container);
+  scaleWrap.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
     width: args.width,
@@ -53,6 +69,9 @@ function buildViewerUI(
     },
     onError: (err) => { status.textContent = `Error: ${err.message}`; },
   });
+
+  // Shrink the outer wrapper so the scaled content doesn't leave whitespace
+  scaleWrap.style.marginBottom = `${-(args.height + 30) * (1 - scale)}px`;
 
   if (autoLoadUrl) {
     status.textContent = 'Loading…';
@@ -110,12 +129,18 @@ export const Sample6: Story = {
   render: (args) => buildViewerUI(args, `/${SAMPLES[5]}`).root,
 };
 
+export const SampleCF: Story = {
+  name: 'sample-cf.xlsx (conditional formatting)',
+  render: (args) => buildViewerUI(args, '/sample-cf.xlsx').root,
+};
+
 // ---------------------------------------------------------------------------
 // File upload
 // ---------------------------------------------------------------------------
 export const FileUpload: Story = {
   name: 'Load from file',
   render(args) {
+    const scale = args.scale ?? 0.75;
     const root = document.createElement('div');
     root.style.cssText = 'font-family:sans-serif;padding:16px;';
 
@@ -127,14 +152,24 @@ export const FileUpload: Story = {
     const status = document.createElement('div');
     status.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
 
+    const scaleWrap = document.createElement('div');
+    scaleWrap.style.cssText = `
+      display: inline-block;
+      transform: scale(${scale});
+      transform-origin: top left;
+      width: ${args.width}px;
+      margin-bottom: ${-(args.height + 30) * (1 - scale)}px;
+    `.replace(/\n\s+/g, ' ').trim();
+
     const container = document.createElement('div');
     container.style.cssText = `max-width:100%;min-height:200px;`;
+    scaleWrap.appendChild(container);
     const hint = document.createElement('span');
     hint.textContent = 'Select an .xlsx file above';
     hint.style.cssText = 'display:block;padding:20px;color:#aaa;';
     container.appendChild(hint);
 
-    root.append(fileInput, status, container);
+    root.append(fileInput, status, scaleWrap);
 
     let viewer: XlsxViewer | null = null;
 

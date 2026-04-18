@@ -323,6 +323,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlsx-parser"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "zip",
+]
+
+[[package]]
 name = "zip"
 version = "2.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -25,6 +25,37 @@ export interface Worksheet {
   mergeCells: MergeCell[];
   freezeRows: number;
   freezeCols: number;
+  conditionalFormats: ConditionalFormat[];
+}
+
+export interface CellRange {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+}
+
+export interface ConditionalFormat {
+  sqref: CellRange[];
+  rules: CfRule[];
+}
+
+export type CfRule =
+  | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number }
+  | { type: 'expression'; formula: string; dxfId: number | null; priority: number }
+  | { type: 'colorScale'; stops: CfStop[]; priority: number }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number }
+  | { type: 'other'; kind: string; priority: number };
+
+export interface CfStop {
+  kind: string;
+  value: string | null;
+  color: string;
+}
+
+export interface CfValue {
+  kind: string;
+  value: string | null;
 }
 
 export interface Row {
@@ -59,6 +90,13 @@ export interface Styles {
   borders: Border[];
   cellXfs: CellXf[];
   numFmts: NumFmt[];
+  dxfs: Dxf[];
+}
+
+export interface Dxf {
+  font: Font | null;
+  fill: Fill | null;
+  border: Border | null;
 }
 
 export interface Font {

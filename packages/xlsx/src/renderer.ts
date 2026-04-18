@@ -1,4 +1,8 @@
-import type { Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf, ViewportRange, RenderViewportOptions } from './types.js';
+import type {
+  Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf,
+  ViewportRange, RenderViewportOptions,
+  CfRule, CellRange, CfStop, CfValue, Dxf,
+} from './types.js';
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
@@ -139,6 +143,174 @@ function colToLetter(col: number): string {
 }
 
 // ────────────────────────────────────────────────────────────────
+// Conditional formatting
+// ────────────────────────────────────────────────────────────────
+interface CompiledCfRule {
+  rule: CfRule;
+  sqref: CellRange[];
+  scaleMin?: number;
+  scaleMax?: number;
+  scaleStops?: number[];  // numeric values at each color stop
+  barMin?: number;
+  barMax?: number;
+}
+
+interface CfContext {
+  compiled: CompiledCfRule[];
+}
+
+interface CfResult {
+  fill?: Fill;
+  fontColor?: string;
+  fontBold?: boolean;
+  fontItalic?: boolean;
+  dataBar?: { color: string; ratio: number };
+}
+
+function rangeContains(ranges: CellRange[], row: number, col: number): boolean {
+  for (const r of ranges) {
+    if (row >= r.top && row <= r.bottom && col >= r.left && col <= r.right) return true;
+  }
+  return false;
+}
+
+function cellNumericValue(cell: Cell | undefined): number | null {
+  if (!cell) return null;
+  if (cell.value.type === 'number') return cell.value.number;
+  return null;
+}
+
+function collectNumericValuesInRanges(worksheet: Worksheet, ranges: CellRange[]): number[] {
+  const out: number[] = [];
+  for (const row of worksheet.rows) {
+    for (const c of row.cells) {
+      if (c.value.type !== 'number') continue;
+      if (rangeContains(ranges, c.row, c.col)) out.push(c.value.number);
+    }
+  }
+  return out;
+}
+
+function resolveCfvoValue(cfv: CfValue | CfStop, samples: number[]): number {
+  const minv = samples.length ? Math.min(...samples) : 0;
+  const maxv = samples.length ? Math.max(...samples) : 0;
+  const n = cfv.value != null ? parseFloat(cfv.value) : NaN;
+  switch (cfv.kind) {
+    case 'min': return minv;
+    case 'max': return maxv;
+    case 'num': return isNaN(n) ? 0 : n;
+    case 'percent': {
+      const p = isNaN(n) ? 50 : n;
+      return minv + (maxv - minv) * (p / 100);
+    }
+    case 'percentile': {
+      if (!samples.length) return 0;
+      const sorted = [...samples].sort((a, b) => a - b);
+      const p = (isNaN(n) ? 50 : n) / 100;
+      const idx = Math.max(0, Math.min(sorted.length - 1, Math.round(p * (sorted.length - 1))));
+      return sorted[idx];
+    }
+    default: return isNaN(n) ? 0 : n;
+  }
+}
+
+function compileCf(worksheet: Worksheet): CfContext {
+  const compiled: CompiledCfRule[] = [];
+  for (const cf of worksheet.conditionalFormats ?? []) {
+    const samples = collectNumericValuesInRanges(worksheet, cf.sqref);
+    for (const rule of cf.rules) {
+      const entry: CompiledCfRule = { rule, sqref: cf.sqref };
+      if (rule.type === 'colorScale') {
+        entry.scaleStops = rule.stops.map(s => resolveCfvoValue(s, samples));
+      } else if (rule.type === 'dataBar') {
+        entry.barMin = resolveCfvoValue(rule.min, samples);
+        entry.barMax = resolveCfvoValue(rule.max, samples);
+      }
+      compiled.push(entry);
+    }
+  }
+  // Higher priority (lower number) wins
+  compiled.sort((a, b) => {
+    const pa = (a.rule as { priority: number }).priority ?? 0;
+    const pb = (b.rule as { priority: number }).priority ?? 0;
+    return pa - pb;
+  });
+  return { compiled };
+}
+
+function cellIsMatch(num: number, operator: string, args: number[]): boolean {
+  switch (operator) {
+    case 'greaterThan': return num > (args[0] ?? 0);
+    case 'greaterThanOrEqual': return num >= (args[0] ?? 0);
+    case 'lessThan': return num < (args[0] ?? 0);
+    case 'lessThanOrEqual': return num <= (args[0] ?? 0);
+    case 'equal': return num === (args[0] ?? 0);
+    case 'notEqual': return num !== (args[0] ?? 0);
+    case 'between': return num >= (args[0] ?? 0) && num <= (args[1] ?? 0);
+    case 'notBetween': return num < (args[0] ?? 0) || num > (args[1] ?? 0);
+    default: return false;
+  }
+}
+
+function interpolateHex(a: string, b: string, t: number): string {
+  const pa = a.replace('#', '');
+  const pb = b.replace('#', '');
+  const ar = parseInt(pa.slice(0, 2), 16), ag = parseInt(pa.slice(2, 4), 16), ab = parseInt(pa.slice(4, 6), 16);
+  const br = parseInt(pb.slice(0, 2), 16), bg = parseInt(pb.slice(2, 4), 16), bb = parseInt(pb.slice(4, 6), 16);
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bl = Math.round(ab + (bb - ab) * t);
+  return `#${r.toString(16).padStart(2, '0').toUpperCase()}${g.toString(16).padStart(2, '0').toUpperCase()}${bl.toString(16).padStart(2, '0').toUpperCase()}`;
+}
+
+function colorScaleAt(num: number, stops: CfStop[], stopValues: number[]): string {
+  if (!stops.length) return '#FFFFFF';
+  if (num <= stopValues[0]) return stops[0].color;
+  if (num >= stopValues[stopValues.length - 1]) return stops[stops.length - 1].color;
+  for (let i = 1; i < stopValues.length; i++) {
+    if (num <= stopValues[i]) {
+      const lo = stopValues[i - 1];
+      const hi = stopValues[i];
+      const t = hi === lo ? 0 : (num - lo) / (hi - lo);
+      return interpolateHex(stops[i - 1].color, stops[i].color, t);
+    }
+  }
+  return stops[stops.length - 1].color;
+}
+
+function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfContext, dxfs: Dxf[]): CfResult {
+  const result: CfResult = {};
+  if (!cfCtx.compiled.length) return result;
+  for (const entry of cfCtx.compiled) {
+    if (!rangeContains(entry.sqref, row, col)) continue;
+    const rule = entry.rule;
+    const numVal = cellNumericValue(cell);
+
+    if (rule.type === 'cellIs') {
+      if (numVal == null) continue;
+      const args = rule.formulas.map(f => parseFloat(f)).filter(n => !isNaN(n));
+      if (cellIsMatch(numVal, rule.operator, args)) {
+        const dxf = rule.dxfId != null ? dxfs[rule.dxfId] : null;
+        if (dxf?.fill?.fgColor) result.fill = dxf.fill;
+        if (dxf?.font?.color) result.fontColor = dxf.font.color;
+        if (dxf?.font?.bold) result.fontBold = true;
+        if (dxf?.font?.italic) result.fontItalic = true;
+      }
+    } else if (rule.type === 'colorScale') {
+      if (numVal == null || !entry.scaleStops) continue;
+      const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
+      result.fill = { patternType: 'solid', fgColor: color, bgColor: color };
+    } else if (rule.type === 'dataBar') {
+      if (numVal == null || entry.barMin == null || entry.barMax == null) continue;
+      const range = entry.barMax - entry.barMin;
+      const ratio = range === 0 ? 0 : Math.max(0, Math.min(1, (numVal - entry.barMin) / range));
+      result.dataBar = { color: rule.color, ratio };
+    }
+  }
+  return result;
+}
+
+// ────────────────────────────────────────────────────────────────
 // Shared state for a single renderViewport call
 // ────────────────────────────────────────────────────────────────
 interface RenderContext {
@@ -147,6 +319,7 @@ interface RenderContext {
   cellMap: Map<string, Cell>;
   mergeAnchorMap: Map<string, { totalW: number; totalH: number }>;
   mergeSkipSet: Set<string>;
+  cfContext: CfContext;
   colWidths: number[];  // widths of scrollable cols (viewport.col..)
   rowHeights: number[]; // heights of scrollable rows (viewport.row..)
   frozenColWidths: number[];  // widths of frozen cols (cols 1..freezeCols)
@@ -171,7 +344,7 @@ function renderQuadrant(
 ): void {
   if (clipW <= 0 || clipH <= 0) return;
 
-  const { worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet } = rc;
+  const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext } = rc;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
 
@@ -218,11 +391,23 @@ function renderQuadrant(
       const cell = cellMap.get(key);
       const styleIndex = cell?.styleIndex ?? 0;
       const { font, fill, border, xf } = resolveXf(styles, styleIndex);
+      const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
+      const effectiveFill = cf.fill ?? fill;
 
-      // Background fill
-      if (fill.patternType !== 'none' && fill.patternType !== '' && fill.fgColor) {
-        ctx.fillStyle = hexToRgba(fill.fgColor);
+      // Background fill (base or CF override)
+      if (effectiveFill.patternType !== 'none' && effectiveFill.patternType !== '' && effectiveFill.fgColor) {
+        ctx.fillStyle = hexToRgba(effectiveFill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+      }
+
+      // DataBar (drawn inside the cell, left-anchored)
+      if (cf.dataBar && cf.dataBar.ratio > 0) {
+        const barInset = 2;
+        const barW = Math.max(0, (cellW - barInset * 2) * cf.dataBar.ratio);
+        if (barW > 0) {
+          ctx.fillStyle = hexToRgba(cf.dataBar.color, 0.6);
+          ctx.fillRect(cx + barInset, cy + barInset, barW, cellH - barInset * 2);
+        }
       }
 
       // Grid line
@@ -237,8 +422,14 @@ function renderQuadrant(
       const text = formatCellValue(cell, styles);
       if (!text) continue;
 
-      ctx.font = buildFont(font);
-      ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
+      const effectiveBold = font.bold || !!cf.fontBold;
+      const effectiveItalic = font.italic || !!cf.fontItalic;
+      const fontForDraw: Font = effectiveBold !== font.bold || effectiveItalic !== font.italic
+        ? { ...font, bold: effectiveBold, italic: effectiveItalic }
+        : font;
+      ctx.font = buildFont(fontForDraw);
+      const textColor = cf.fontColor ?? font.color;
+      ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;
       const paddingY = 2;
@@ -398,8 +589,10 @@ export function renderViewport(
     }
   }
 
+  const cfContext = compileCf(worksheet);
+
   const rc: RenderContext = {
-    worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet,
+    worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
     rowHeights: scrollRowHeights,
     frozenColWidths, frozenRowHeights,

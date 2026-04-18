@@ -38,6 +38,48 @@ pub struct Worksheet {
     pub merge_cells: Vec<MergeCell>,
     pub freeze_rows: u32,
     pub freeze_cols: u32,
+    pub conditional_formats: Vec<ConditionalFormat>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellRange {
+    pub top: u32,
+    pub left: u32,
+    pub bottom: u32,
+    pub right: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionalFormat {
+    pub sqref: Vec<CellRange>,
+    pub rules: Vec<CfRule>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum CfRule {
+    CellIs { operator: String, formulas: Vec<String>, dxf_id: Option<u32>, priority: i32 },
+    Expression { formula: String, dxf_id: Option<u32>, priority: i32 },
+    ColorScale { stops: Vec<CfStop>, priority: i32 },
+    DataBar { color: String, min: CfValue, max: CfValue, priority: i32 },
+    Other { kind: String, priority: i32 },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CfStop {
+    pub kind: String,
+    pub value: Option<String>,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CfValue {
+    pub kind: String,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +119,15 @@ pub struct Styles {
     pub borders: Vec<Border>,
     pub cell_xfs: Vec<CellXf>,
     pub num_fmts: Vec<NumFmt>,
+    pub dxfs: Vec<Dxf>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Dxf {
+    pub font: Option<Font>,
+    pub fill: Option<Fill>,
+    pub border: Option<Border>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -428,8 +479,91 @@ fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[St
     let fills = parse_fills(&doc, ns, theme_colors);
     let borders = parse_borders(&doc, ns, theme_colors);
     let cell_xfs = parse_cell_xfs(&doc, ns);
+    let dxfs = parse_dxfs(&doc, ns, theme_colors);
 
-    Ok(Styles { fonts, fills, borders, cell_xfs, num_fmts })
+    Ok(Styles { fonts, fills, borders, cell_xfs, num_fmts, dxfs })
+}
+
+fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> Vec<Dxf> {
+    let mut dxfs = Vec::new();
+    for dxfs_node in doc.descendants() {
+        if dxfs_node.tag_name().name() != "dxfs" || dxfs_node.tag_name().namespace() != Some(ns) {
+            continue;
+        }
+        for dxf_node in dxfs_node.children() {
+            if dxf_node.tag_name().name() != "dxf" { continue; }
+            let mut d = Dxf::default();
+            for child in dxf_node.children() {
+                match child.tag_name().name() {
+                    "font" => {
+                        let mut f = Font { size: 11.0, ..Default::default() };
+                        for fc in child.children() {
+                            match fc.tag_name().name() {
+                                "b" => f.bold = true,
+                                "i" => f.italic = true,
+                                "u" => f.underline = true,
+                                "sz" => {
+                                    if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
+                                        f.size = v;
+                                    }
+                                }
+                                "name" => {
+                                    f.name = fc.attribute("val").map(|s| s.to_string());
+                                }
+                                "color" => {
+                                    f.color = parse_color(&fc, theme_colors);
+                                }
+                                _ => {}
+                            }
+                        }
+                        d.font = Some(f);
+                    }
+                    "fill" => {
+                        let mut f = Fill::default();
+                        for pf in child.children() {
+                            if pf.tag_name().name() == "patternFill" {
+                                f.pattern_type = pf.attribute("patternType").unwrap_or("solid").to_string();
+                                for color_node in pf.children() {
+                                    match color_node.tag_name().name() {
+                                        "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
+                                        "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        // In dxf, conditional format fills often only have bgColor; mirror into fgColor
+                        if f.fg_color.is_none() && f.bg_color.is_some() {
+                            f.fg_color = f.bg_color.clone();
+                        }
+                        d.fill = Some(f);
+                    }
+                    "border" => {
+                        let mut b = Border::default();
+                        for edge_node in child.children() {
+                            let style = edge_node.attribute("style").unwrap_or("").to_string();
+                            if style.is_empty() { continue; }
+                            let color = edge_node.children().find(|c| c.is_element())
+                                .and_then(|c| parse_color(&c, theme_colors));
+                            let edge = Some(BorderEdge { style, color });
+                            match edge_node.tag_name().name() {
+                                "left" => b.left = edge,
+                                "right" => b.right = edge,
+                                "top" => b.top = edge,
+                                "bottom" => b.bottom = edge,
+                                _ => {}
+                            }
+                        }
+                        d.border = Some(b);
+                    }
+                    _ => {}
+                }
+            }
+            dxfs.push(d);
+        }
+        break;
+    }
+    dxfs
 }
 
 fn parse_num_fmts(doc: &roxmltree::Document, ns: &str) -> Vec<NumFmt> {
@@ -577,6 +711,7 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
     let mut default_row_height = 15.0;
+    let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
 
     for node in doc.descendants() {
         match node.tag_name().name() {
@@ -632,6 +767,93 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
                 let cells = parse_row_cells(&node, shared_strings, ns);
                 rows.push(Row { index: row_idx, height, cells });
             }
+            "conditionalFormatting" if node.tag_name().namespace() == Some(ns) => {
+                let sqref = node.attribute("sqref")
+                    .map(|s| parse_sqref(s))
+                    .unwrap_or_default();
+                let mut rules: Vec<CfRule> = Vec::new();
+                for cf in node.children() {
+                    if cf.tag_name().name() != "cfRule" { continue; }
+                    let kind = cf.attribute("type").unwrap_or("").to_string();
+                    let priority: i32 = cf.attribute("priority").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let dxf_id: Option<u32> = cf.attribute("dxfId").and_then(|s| s.parse().ok());
+                    match kind.as_str() {
+                        "cellIs" => {
+                            let operator = cf.attribute("operator").unwrap_or("equal").to_string();
+                            let formulas: Vec<String> = cf.children()
+                                .filter(|n| n.tag_name().name() == "formula")
+                                .filter_map(|n| n.text().map(|s| s.to_string()))
+                                .collect();
+                            rules.push(CfRule::CellIs { operator, formulas, dxf_id, priority });
+                        }
+                        "expression" => {
+                            let formula = cf.children()
+                                .find(|n| n.tag_name().name() == "formula")
+                                .and_then(|n| n.text())
+                                .unwrap_or("")
+                                .to_string();
+                            rules.push(CfRule::Expression { formula, dxf_id, priority });
+                        }
+                        "colorScale" => {
+                            let scale = cf.children().find(|n| n.tag_name().name() == "colorScale");
+                            let mut stop_values: Vec<(String, Option<String>)> = Vec::new();
+                            let mut stop_colors: Vec<String> = Vec::new();
+                            if let Some(scale_node) = scale {
+                                for child in scale_node.children() {
+                                    match child.tag_name().name() {
+                                        "cfvo" => {
+                                            stop_values.push((
+                                                child.attribute("type").unwrap_or("num").to_string(),
+                                                child.attribute("val").map(|s| s.to_string()),
+                                            ));
+                                        }
+                                        "color" => {
+                                            stop_colors.push(parse_color(&child, &[]).unwrap_or_else(|| "#FFFFFF".to_string()));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let stops: Vec<CfStop> = stop_values.into_iter().enumerate().map(|(i, (kind, value))| CfStop {
+                                kind,
+                                value,
+                                color: stop_colors.get(i).cloned().unwrap_or_else(|| "#FFFFFF".to_string()),
+                            }).collect();
+                            rules.push(CfRule::ColorScale { stops, priority });
+                        }
+                        "dataBar" => {
+                            let bar = cf.children().find(|n| n.tag_name().name() == "dataBar");
+                            let mut cfvos: Vec<(String, Option<String>)> = Vec::new();
+                            let mut color = "#638EC6".to_string();
+                            if let Some(bar_node) = bar {
+                                for child in bar_node.children() {
+                                    match child.tag_name().name() {
+                                        "cfvo" => {
+                                            cfvos.push((
+                                                child.attribute("type").unwrap_or("min").to_string(),
+                                                child.attribute("val").map(|s| s.to_string()),
+                                            ));
+                                        }
+                                        "color" => {
+                                            if let Some(c) = parse_color(&child, &[]) { color = c; }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let min = cfvos.first().map(|(k, v)| CfValue { kind: k.clone(), value: v.clone() })
+                                .unwrap_or(CfValue { kind: "min".into(), value: None });
+                            let max = cfvos.get(1).map(|(k, v)| CfValue { kind: k.clone(), value: v.clone() })
+                                .unwrap_or(CfValue { kind: "max".into(), value: None });
+                            rules.push(CfRule::DataBar { color, min, max, priority });
+                        }
+                        other => {
+                            rules.push(CfRule::Other { kind: other.to_string(), priority });
+                        }
+                    }
+                }
+                conditional_formats.push(ConditionalFormat { sqref, rules });
+            }
             _ => {}
         }
     }
@@ -646,7 +868,21 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
         merge_cells,
         freeze_rows,
         freeze_cols,
+        conditional_formats,
     })
+}
+
+fn parse_sqref(s: &str) -> Vec<CellRange> {
+    s.split_whitespace().map(|range_str| {
+        if let Some((a, b)) = range_str.split_once(':') {
+            let (left, top) = parse_cell_ref(a);
+            let (right, bottom) = parse_cell_ref(b);
+            CellRange { top, left, bottom, right }
+        } else {
+            let (col, row) = parse_cell_ref(range_str);
+            CellRange { top: row, left: col, bottom: row, right: col }
+        }
+    }).collect()
 }
 
 fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &str) -> Vec<Cell> {
