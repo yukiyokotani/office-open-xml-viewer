@@ -68,6 +68,8 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     renderSlide(offscreenCanvas, slide, storedPresentation.slideWidth, storedPresentation.slideHeight, {
       width: req.targetWidth,
       defaultTextColor: req.defaultTextColor,
+      majorFont: req.majorFont,
+      minorFont: req.minorFont,
       dpr: canvasDpr,
     }).then(() => {
       const msg: WorkerResponse = { kind: 'rendered', id: req.id };

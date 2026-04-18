@@ -6,6 +6,55 @@ import InlineWorker from './worker.ts?worker&inline';
 // without relying on import.meta.url (which is blob: in inline workers).
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
+/**
+ * Fonts that are available via Google Fonts and can be loaded automatically.
+ * Key: font family name (case-insensitive), Value: Google Fonts URL.
+ */
+const GOOGLE_FONTS_MAP: Record<string, string> = {
+  'nunito sans': 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'nunito': 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'open sans': 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'roboto': 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'lato': 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'montserrat': 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'poppins': 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'raleway': 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'playfair display': 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+};
+
+/**
+ * Attempt to load theme fonts from Google Fonts if they are available.
+ * Silently ignores failures (font may be installed locally or unavailable).
+ */
+async function preloadThemeFonts(majorFont: string | null, minorFont: string | null): Promise<void> {
+  if (typeof document === 'undefined') return; // not in browser
+  const loaded = new Set<string>();
+  for (const fontName of [majorFont, minorFont]) {
+    if (!fontName) continue;
+    const key = fontName.toLowerCase();
+    if (loaded.has(key)) continue;
+    loaded.add(key);
+    const url = GOOGLE_FONTS_MAP[key];
+    if (!url) continue;
+    // Check if already loaded
+    const existing = document.querySelector(`link[href="${url}"]`);
+    if (existing) continue;
+    try {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = url;
+      document.head.appendChild(link);
+      // Wait for fonts to load (up to 3s timeout)
+      await Promise.race([
+        document.fonts.ready,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('font timeout')), 3000)),
+      ]).catch(() => {}); // silently ignore timeout
+    } catch {
+      // silently ignore font loading errors
+    }
+  }
+}
+
 export interface PptxViewerOptions extends RenderOptions {
   /** Called when the viewer is ready to display slides */
   onReady?: () => void;
@@ -132,6 +181,8 @@ export class PptxViewer {
     });
     this.presentation = presentation;
     this.currentSlide = 0;
+    // Pre-load theme fonts (e.g. Nunito Sans from Google Fonts) before rendering
+    await preloadThemeFonts(presentation.majorFont, presentation.minorFont);
     await this.renderCurrentSlide();
   }
 
@@ -180,6 +231,8 @@ export class PptxViewer {
         slideIndex: this.currentSlide,
         targetWidth,
         defaultTextColor: this.presentation!.defaultTextColor,
+        majorFont: this.presentation!.majorFont,
+        minorFont: this.presentation!.minorFont,
       };
       this.worker!.postMessage(req);
     });

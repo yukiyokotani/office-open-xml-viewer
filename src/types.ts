@@ -8,6 +8,10 @@ export interface Presentation {
   slides: Slide[];
   /** Theme dk1 color (e.g. "383838"). Used as fallback text color when no explicit color is set. */
   defaultTextColor: string | null;
+  /** Theme major (heading) font family name (e.g. "Aptos Display", "Nunito Sans"). Null if not set. */
+  majorFont: string | null;
+  /** Theme minor (body) font family name (e.g. "Aptos", "Nunito Sans"). Null if not set. */
+  minorFont: string | null;
 }
 
 export interface Slide {
@@ -274,7 +278,7 @@ export type WorkerRequest =
   /** Transfer an OffscreenCanvas so the worker renders directly to it. */
   | { kind: 'transferCanvas'; canvas: OffscreenCanvas; dpr: number }
   /** Render a specific slide using the last parsed presentation. */
-  | { kind: 'render'; id: number; slideIndex: number; targetWidth: number; defaultTextColor: string | null };
+  | { kind: 'render'; id: number; slideIndex: number; targetWidth: number; defaultTextColor: string | null; majorFont: string | null; minorFont: string | null };
 
 export type WorkerResponse =
   | { kind: 'ready' }

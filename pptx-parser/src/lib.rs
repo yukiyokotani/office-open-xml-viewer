@@ -29,6 +29,10 @@ struct Presentation {
     slides: Vec<Slide>,
     /// Default text color from theme dk1 (hex 6 chars, e.g. "383838").
     default_text_color: Option<String>,
+    /// Theme major (heading) font resolved name (e.g. "Aptos Display", "Nunito Sans").
+    major_font: Option<String>,
+    /// Theme minor (body) font resolved name (e.g. "Aptos", "Nunito Sans").
+    minor_font: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -3113,7 +3117,9 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
     }
 
     let default_text_color = theme.get("dk1").cloned();
-    Ok(Presentation { slide_width, slide_height, slides, default_text_color })
+    let major_font = theme.get("+mj-lt").cloned();
+    let minor_font = theme.get("+mn-lt").cloned();
+    Ok(Presentation { slide_width, slide_height, slides, default_text_color, major_font, minor_font })
 }
 
 #[cfg(test)]
