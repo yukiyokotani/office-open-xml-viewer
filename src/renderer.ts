@@ -19,6 +19,14 @@ import type {
 const PT_TO_EMU = 12700;
 
 /**
+ * Active theme font context for the current renderSlide call.
+ * Set at the start of renderSlide; cleared when done.
+ * This avoids threading the fonts through every call in the render chain.
+ */
+let _themeMinorFont: string | null = null;
+let _themeMajorFont: string | null = null;
+
+/**
  * Convert EMU to canvas pixels.
  * scale = canvasWidthPx / slideWidthEMU  (so that slideWidth EMU == canvasWidth px)
  */
@@ -123,17 +131,21 @@ function applySymbolFont(char: string, fontFamily: string): string {
   return char;
 }
 
-function normalizeFontFamily(family: string): string {
-  if (!family || family.startsWith('+')) {
+function normalizeFontFamily(family: string | null): string {
+  if (!family) return _themeMinorFont ?? 'sans-serif';
+  if (family.startsWith('+')) {
     // +mn-lt = minor Latin, +mj-lt = major Latin, +mn-ea = minor East Asian, +mj-ea = major East Asian
-    return 'sans-serif';
+    if (family === '+mj-lt' || family === '+mj-ea' || family === '+mj-cs') {
+      return _themeMajorFont ?? 'sans-serif';
+    }
+    // +mn-lt, +mn-ea, +mn-cs, or any other + prefix → minor font
+    return _themeMinorFont ?? 'sans-serif';
   }
   // OOXML typeface sometimes appends ",<generic>" hint (e.g. "Wingdings,Sans-Serif").
   // Strip it so the CSS font name resolves to the actual named font.
   const primary = family.split(',')[0].trim();
-  if (!primary) return 'sans-serif';
-  family = primary;
-  return family;
+  if (!primary) return _themeMinorFont ?? 'sans-serif';
+  return primary;
 }
 
 /** CSS generic font families — must NOT be quoted in a canvas font string. */
@@ -232,7 +244,8 @@ function layoutParagraph(
     }
 
     const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
-    const family = normalizeFontFamily(run.fontFamily ?? 'sans-serif');
+    // Font family cascade: run → paragraph defFontFamily → theme minor font → 'sans-serif'
+    const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null);
     const color  = run.color ? hexToRgba(run.color) : defaultColor;
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
@@ -573,12 +586,14 @@ function buildShapePath(
       ctx.closePath();
       break;
 
-    case 'triangle':
-      ctx.moveTo(cx, y);
+    case 'triangle': {
+      const apexX = x + (adj ?? 50000) / 100000 * w;
+      ctx.moveTo(apexX, y);
       ctx.lineTo(x + w, y + h);
       ctx.lineTo(x, y + h);
       ctx.closePath();
       break;
+    }
 
     // ── Quadrilaterals ────────────────────────────────────────────────────────
     case 'diamond':
@@ -656,7 +671,7 @@ function buildShapePath(
       drawStar(ctx, cx, cy, w / 2, h / 2, 7, 0.37);
       break;
     case 'star8':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 8, 0.38, -Math.PI / 8);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 100000, -Math.PI / 2);
       break;
     case 'star10':
       drawStar(ctx, cx, cy, w / 2, h / 2, 10, 0.45);
@@ -665,13 +680,13 @@ function buildShapePath(
       drawStar(ctx, cx, cy, w / 2, h / 2, 12, 0.45, 0);
       break;
     case 'star16':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 16, 0.55, -Math.PI / 16);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 100000, -Math.PI / 2);
       break;
     case 'star24':
       drawStar(ctx, cx, cy, w / 2, h / 2, 24, 0.6, 0);
       break;
     case 'star32':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 32, 0.65, -Math.PI / 32);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 100000, -Math.PI / 2);
       break;
 
     // ── Arrows ────────────────────────────────────────────────────────────────
@@ -2226,7 +2241,7 @@ function renderTextBody(
       bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
-      const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? 'sans-serif');
+      const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null);
       bulletFont  = buildFont(false, false, bSizePx, convertedFamily);
       bulletColor = b.color ? hexToRgba(b.color) : paraDefaultColor;
       // Reset counters when switching to char bullets
@@ -2722,15 +2737,19 @@ function renderStackedBarHChart(
 
   const labelFontSizeH = Math.round(h * 0.038);
 
+  // PowerPoint horizontal bar charts display categories bottom-to-top in data order,
+  // so visually the first category (index 0) is at the BOTTOM and the last is at the TOP.
+  // We render in reverse visual order: data index i → visual row (n - 1 - i) from the top.
   el.series.forEach((ser, si) => {
     ctx.fillStyle = ser.color ? `#${ser.color}` : `hsl(${210 + si * 40}, 60%, ${50 - si * 8}%)`;
     for (let i = 0; i < n; i++) {
+      const ri = n - 1 - i; // reversed visual row index
       const v = ser.values[i] ?? 0;
       if (v === 0) continue;
       const base = el.series.slice(0, si).reduce((s, ps) => s + (ps.values[i] ?? 0), 0);
       const segW = pw * (v / dataMax);
       const bx = px0 + pw * (base / dataMax);
-      const by = py0 + gapH * i + (gapH - barH) / 2;
+      const by = py0 + gapH * ri + (gapH - barH) / 2;
       ctx.fillRect(bx, by, segW, barH);
 
       // Data labels: draw value centered in bar segment if wide enough
@@ -2749,13 +2768,14 @@ function renderStackedBarHChart(
     }
   });
 
-  // Y-axis (category) labels
+  // Y-axis (category) labels — rendered in reverse: cat[n-1] at top, cat[0] at bottom
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#444';
   ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
   for (let i = 0; i < n; i++) {
-    const cy = py0 + gapH * i + gapH / 2;
+    const ri = n - 1 - i; // reversed visual row index
+    const cy = py0 + gapH * ri + gapH / 2;
     ctx.fillText(cats[i], px0 - 6, cy);
   }
 
@@ -3261,6 +3281,10 @@ export interface RenderOptions {
   defaultTextColor?: string | null;
   /** Device pixel ratio for HiDPI rendering. Defaults to window.devicePixelRatio on main thread, 1 in workers. */
   dpr?: number;
+  /** Theme major (heading) font family name — used to resolve "+mj-lt" references */
+  majorFont?: string | null;
+  /** Theme minor (body) font family name — used to resolve "+mn-lt" references */
+  minorFont?: string | null;
 }
 
 /**
@@ -3291,6 +3315,10 @@ export async function renderSlide(
   if (!ctx) throw new Error('Could not get 2D context');
   ctx.scale(dpr, dpr);
 
+  // Set module-level theme font context so normalizeFontFamily can resolve +mj-lt / +mn-lt.
+  _themeMajorFont = opts.majorFont ?? null;
+  _themeMinorFont = opts.minorFont ?? null;
+
   renderBackground(ctx, slide.background, canvasW, canvasH);
 
   const themeDefaultColor = opts.defaultTextColor
@@ -3309,6 +3337,10 @@ export async function renderSlide(
       renderChart(ctx, el, scale);
     }
   }
+
+  // Clear theme font context
+  _themeMajorFont = null;
+  _themeMinorFont = null;
 
   return canvas;
 }
