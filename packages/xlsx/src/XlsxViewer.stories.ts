@@ -84,6 +84,9 @@ const SAMPLES = [
   'sample-4.xlsx',
   'sample-5.xlsx',
   'sample-6.xlsx',
+  'sample-7.xlsx',
+  'sample-10.xlsx',
+  'sample-12.xlsx',
 ] as const;
 
 export const Sample1: Story = {
@@ -114,6 +117,21 @@ export const Sample5: Story = {
 export const Sample6: Story = {
   name: 'sample-6.xlsx',
   render: (args) => buildViewerUI(args, `/${SAMPLES[5]}`).root,
+};
+
+export const Sample7: Story = {
+  name: 'sample-7.xlsx (cellIs CF)',
+  render: (args) => buildViewerUI(args, `/${SAMPLES[6]}`).root,
+};
+
+export const Sample10: Story = {
+  name: 'sample-10.xlsx (expression CF)',
+  render: (args) => buildViewerUI(args, `/${SAMPLES[7]}`).root,
+};
+
+export const Sample12: Story = {
+  name: 'sample-12.xlsx',
+  render: (args) => buildViewerUI(args, `/${SAMPLES[8]}`).root,
 };
 
 export const SampleCF: Story = {
