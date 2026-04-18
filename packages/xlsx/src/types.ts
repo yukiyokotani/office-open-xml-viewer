@@ -8,6 +8,13 @@ export interface SheetMeta {
   rId: string;
 }
 
+export interface MergeCell {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+}
+
 export interface Worksheet {
   name: string;
   rows: Row[];
@@ -15,6 +22,7 @@ export interface Worksheet {
   rowHeights: Record<number, number>;
   defaultColWidth: number;
   defaultRowHeight: number;
+  mergeCells: MergeCell[];
 }
 
 export interface Row {
@@ -107,6 +115,8 @@ export interface RenderViewportOptions {
   dpr?: number;
   defaultFontFamily?: string;
   defaultFontSize?: number;
+  scrollOffsetX?: number;
+  scrollOffsetY?: number;
 }
 
 export type WorkerRequest =

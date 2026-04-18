@@ -2,19 +2,21 @@ import type { Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf, Vi
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
-// Max digit width of the default font at 96 DPI.
-// Calibri 11pt ≈ 7px, Meiryo UI 11pt ≈ 8px.
-// Excel stores column width in units of this value.
 const MDW = 7;
-const ROW_HEIGHT_TO_PX = 4 / 3; // pt to px at 96 DPI: 96/72
+const ROW_HEIGHT_TO_PX = 4 / 3; // pt → px at 96 DPI
+
+// Width of the row-number header column (px)
+export const HEADER_W = 50;
+// Height of the column-letter header row (px)
+export const HEADER_H = 22;
 
 // OOXML spec: pixel = trunc(((256*w + 128/MDW) / 256) * MDW)
-function colWidthToPx(w: number): number {
+export function colWidthToPx(w: number): number {
   return Math.trunc(((256 * w + 128 / MDW) / 256) * MDW);
 }
 
-function rowHeightToPx(h: number): number {
-  return Math.round(h * ROW_HEIGHT_TO_PX); // h is in pt
+export function rowHeightToPx(h: number): number {
+  return Math.round(h * ROW_HEIGHT_TO_PX);
 }
 
 function hexToRgba(hex: string, alpha = 1): string {
@@ -53,47 +55,31 @@ function cellValueText(value: CellValue): string {
   }
 }
 
-// ECMA-376 built-in numFmtId → format category
 function formatCellValue(cell: Cell, styles: Styles): string {
   if (cell.value.type !== 'number') return cellValueText(cell.value);
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
   const numFmtId = xf?.numFmtId ?? 0;
   const num = cell.value.number;
-
-  // Look up custom format first
   const customFmt = styles.numFmts?.find(f => f.numFmtId === numFmtId);
-
   return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
 }
 
 function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
-  // Date serial range: 1 to ~50000 roughly
   const isDateFmtId = (id: number) => (id >= 14 && id <= 17) || id === 22;
-
-  if (isDateFmtId(numFmtId)) {
-    return formatExcelDate(num);
-  }
-
-  // Try to interpret formatCode for custom formats
-  if (formatCode) {
-    return applyFormatCode(num, formatCode);
-  }
-
-  // Built-in IDs (ECMA-376 §18.8.30)
+  if (isDateFmtId(numFmtId)) return formatExcelDate(num);
+  if (formatCode) return applyFormatCode(num, formatCode);
   switch (numFmtId) {
-    case 0: return String(num); // General
-    case 1: return Math.round(num).toString(); // 0
-    case 2: return num.toFixed(2); // 0.00
-    case 3: return formatThousands(num, 0); // #,##0
-    case 4: return formatThousands(num, 2); // #,##0.00
-    case 9: return Math.round(num * 100) + '%'; // 0%
-    case 10: return (num * 100).toFixed(2) + '%'; // 0.00%
-    case 11: return num.toExponential(2); // 0.00E+00
-    case 37: return formatThousands(num, 0); // #,##0 ;(#,##0)
-    case 38: return formatThousands(num, 0); // #,##0 ;[Red](#,##0)
-    case 39: return formatThousands(num, 2); // #,##0.00;(#,##0.00)
-    case 40: return formatThousands(num, 2); // #,##0.00;[Red](#,##0.00)
-    case 49: return String(num); // @ (text)
+    case 0: return String(num);
+    case 1: return Math.round(num).toString();
+    case 2: return num.toFixed(2);
+    case 3: return formatThousands(num, 0);
+    case 4: return formatThousands(num, 2);
+    case 9: return Math.round(num * 100) + '%';
+    case 10: return (num * 100).toFixed(2) + '%';
+    case 11: return num.toExponential(2);
+    case 37: case 38: return formatThousands(num, 0);
+    case 39: case 40: return formatThousands(num, 2);
+    case 49: return String(num);
     default: return String(num);
   }
 }
@@ -102,10 +88,7 @@ function formatThousands(num: number, decimals: number): string {
   return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
-// Excel date serial → locale date string (1900 date system)
 function formatExcelDate(serial: number): string {
-  // Excel serial 1 = 1900-01-01, but Excel incorrectly treats 1900 as leap year
-  // Subtract 25569 to get Unix days from 1970-01-01, then multiply by ms/day
   const date = new Date((serial - 25569) * 86400 * 1000);
   return date.toLocaleDateString();
 }
@@ -116,42 +99,21 @@ function countDecimalPlaces(fmt: string): number {
 }
 
 function applyFormatCode(num: number, formatCode: string): string {
-  // Handle positive;negative;zero sections (take first section for positive/zero)
   const sections = formatCode.split(';');
   const section = num < 0 && sections.length > 1 ? sections[1] : sections[0];
-
-  // Remove color/condition brackets like [Red], [$¥-411]
   const cleaned = section.replace(/\[.*?\]/g, '').replace(/_./g, '').replace(/\*/g, '');
-
-  // Detect percent
   if (cleaned.includes('%')) {
-    const dec = countDecimalPlaces(cleaned);
-    return (num * 100).toFixed(dec) + '%';
+    return (num * 100).toFixed(countDecimalPlaces(cleaned)) + '%';
   }
-
-  // Detect thousands separator
   const hasThousands = cleaned.includes(',') && (cleaned.includes('#') || cleaned.includes('0'));
   const dec = countDecimalPlaces(cleaned);
-
-  if (hasThousands) {
-    return formatThousands(num, dec);
-  }
-
-  // Fixed decimal
-  if (cleaned.includes('.')) {
-    return num.toFixed(dec);
-  }
-
-  // Integer or unknown
-  if (cleaned.match(/[#0]/)) {
-    return Math.round(num).toString();
-  }
-
+  if (hasThousands) return formatThousands(num, dec);
+  if (cleaned.includes('.')) return num.toFixed(dec);
+  if (cleaned.match(/[#0]/)) return Math.round(num).toString();
   return String(num);
 }
 
-// Wrap text into lines that fit within maxWidth
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   const words = text.split(' ');
   const lines: string[] = [];
   let current = '';
@@ -168,15 +130,27 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
+function colToLetter(col: number): string {
+  let result = '';
+  while (col > 0) {
+    const rem = (col - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    col = Math.floor((col - 1) / 26);
+  }
+  return result;
+}
+
 export function renderViewport(
   ctx: CanvasRenderingContext2D,
   worksheet: Worksheet,
   styles: Styles,
   viewport: ViewportRange,
-  _opts: RenderViewportOptions = {},
+  opts: RenderViewportOptions = {},
 ): void {
-  const canvasW = ctx.canvas.width;
-  const canvasH = ctx.canvas.height;
+  const canvasW = ctx.canvas.width / (opts.dpr ?? 1);
+  const canvasH = ctx.canvas.height / (opts.dpr ?? 1);
+  const scrollOffsetX = opts.scrollOffsetX ?? 0;
+  const scrollOffsetY = opts.scrollOffsetY ?? 0;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.fillStyle = '#ffffff';
@@ -184,10 +158,10 @@ export function renderViewport(
 
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
 
-  // Pre-compute column X positions
+  // Column X positions (relative to cell area origin; may start negative due to scroll offset)
   const colXs: number[] = [];
   const colWidths: number[] = [];
-  let x = 0;
+  let x = -scrollOffsetX;
   for (let c = startCol; c < startCol + numCols; c++) {
     colXs.push(x);
     const w = colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth);
@@ -195,10 +169,10 @@ export function renderViewport(
     x += w;
   }
 
-  // Pre-compute row Y positions
+  // Row Y positions (relative to cell area origin)
   const rowYs: number[] = [];
   const rowHeights: number[] = [];
-  let y = 0;
+  let y = -scrollOffsetY;
   for (let r = startRow; r < startRow + numRows; r++) {
     rowYs.push(y);
     const h = rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight);
@@ -206,7 +180,7 @@ export function renderViewport(
     y += h;
   }
 
-  // Build cell lookup from worksheet data
+  // Build cell lookup
   const cellMap = new Map<string, Cell>();
   for (const row of worksheet.rows) {
     for (const cell of row.cells) {
@@ -214,44 +188,83 @@ export function renderViewport(
     }
   }
 
-  // Render cells
+  // Build merge lookup
+  const mergeAnchorMap = new Map<string, { totalW: number; totalH: number }>();
+  const mergeSkipSet = new Set<string>();
+  for (const mc of worksheet.mergeCells ?? []) {
+    let totalW = 0;
+    for (let c = mc.left; c <= mc.right; c++) {
+      totalW += colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth);
+    }
+    let totalH = 0;
+    for (let r = mc.top; r <= mc.bottom; r++) {
+      totalH += rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight);
+    }
+    mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH });
+    for (let r = mc.top; r <= mc.bottom; r++) {
+      for (let c = mc.left; c <= mc.right; c++) {
+        if (r === mc.top && c === mc.left) continue;
+        mergeSkipSet.add(`${r}:${c}`);
+      }
+    }
+  }
+
+  // --- Render cells (clipped to cell area, excluding headers) ---
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(HEADER_W, HEADER_H, canvasW - HEADER_W, canvasH - HEADER_H);
+  ctx.clip();
+
   for (let ri = 0; ri < numRows; ri++) {
     const rowIndex = startRow + ri;
-    const cy = rowYs[ri];
+    const cy = HEADER_H + rowYs[ri];
     const ch = rowHeights[ri];
 
     for (let ci = 0; ci < numCols; ci++) {
       const colIndex = startCol + ci;
-      const cx = colXs[ci];
+      const cx = HEADER_W + colXs[ci];
       const cw = colWidths[ci];
 
-      const cell = cellMap.get(`${rowIndex}:${colIndex}`);
+      const key = `${rowIndex}:${colIndex}`;
+      if (mergeSkipSet.has(key)) continue;
+
+      const mergeInfo = mergeAnchorMap.get(key);
+      const cellW = mergeInfo ? mergeInfo.totalW : cw;
+      const cellH = mergeInfo ? mergeInfo.totalH : ch;
+
+      const cell = cellMap.get(key);
       const styleIndex = cell?.styleIndex ?? 0;
       const { font, fill, border, xf } = resolveXf(styles, styleIndex);
 
       // Background fill
       if (fill.patternType !== 'none' && fill.patternType !== '' && fill.fgColor) {
         ctx.fillStyle = hexToRgba(fill.fgColor);
-        ctx.fillRect(cx, cy, cw, ch);
+        ctx.fillRect(cx, cy, cellW, cellH);
       }
 
-      // Grid line (light gray default)
-      ctx.strokeStyle = '#d0d0d0';
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
+      // Grid line
+      if (!mergeInfo) {
+        ctx.strokeStyle = '#d0d0d0';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
+      } else {
+        // Draw grid lines for the bounding box of the merge
+        ctx.strokeStyle = '#d0d0d0';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+      }
 
       // Border edges
-      renderBorder(ctx, border, cx, cy, cw, ch);
+      renderBorder(ctx, border, cx, cy, cellW, cellH);
 
       if (!cell) continue;
       const text = formatCellValue(cell, styles);
       if (!text) continue;
 
-      // Text setup
       ctx.font = buildFont(font);
       ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
 
-      const paddingX = 2;
+      const paddingX = 3;
       const paddingY = 2;
       const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
       const alignV = xf.alignV ?? 'bottom';
@@ -259,10 +272,10 @@ export function renderViewport(
       let textX: number;
       let textAlign: CanvasTextAlign;
       if (alignH === 'right') {
-        textX = cx + cw - paddingX;
+        textX = cx + cellW - paddingX;
         textAlign = 'right';
       } else if (alignH === 'center') {
-        textX = cx + cw / 2;
+        textX = cx + cellW / 2;
         textAlign = 'center';
       } else {
         textX = cx + paddingX;
@@ -273,39 +286,60 @@ export function renderViewport(
 
       ctx.save();
       ctx.beginPath();
-      ctx.rect(cx, cy, cw, ch);
+      ctx.rect(cx, cy, cellW, cellH);
       ctx.clip();
 
       if (xf.wrapText) {
-        const lines = wrapText(ctx, text, cw - paddingX * 2);
+        const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
         const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
-        const totalH = lines.length * lineH;
+        const totalTextH = lines.length * lineH;
         let startY: number;
         if (alignV === 'top') {
           startY = cy + paddingY;
           ctx.textBaseline = 'top';
         } else if (alignV === 'center') {
-          startY = cy + (ch - totalH) / 2;
+          startY = cy + (cellH - totalTextH) / 2;
           ctx.textBaseline = 'top';
         } else {
-          startY = cy + ch - totalH - paddingY;
+          startY = cy + cellH - totalTextH - paddingY;
           ctx.textBaseline = 'top';
         }
         for (let li = 0; li < lines.length; li++) {
           ctx.fillText(lines[li], textX, startY + li * lineH);
         }
       } else {
+        // Underline via canvas
+        if (font.underline) {
+          const metrics = ctx.measureText(text);
+          const textW = Math.min(metrics.width, cellW - paddingX * 2);
+          const uy = alignV === 'top'
+            ? cy + paddingY + Math.round(font.size * ROW_HEIGHT_TO_PX)
+            : alignV === 'center'
+              ? cy + cellH / 2 + Math.round(font.size * ROW_HEIGHT_TO_PX * 0.5)
+              : cy + cellH - paddingY + 1;
+          const ux = alignH === 'right' ? cx + cellW - paddingX - textW
+            : alignH === 'center' ? cx + cellW / 2 - textW / 2
+            : cx + paddingX;
+          ctx.save();
+          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(ux, uy);
+          ctx.lineTo(ux + textW, uy);
+          ctx.stroke();
+          ctx.restore();
+        }
+
         let textY: number;
         if (alignV === 'top') {
           ctx.textBaseline = 'top';
           textY = cy + paddingY;
         } else if (alignV === 'center') {
           ctx.textBaseline = 'middle';
-          textY = cy + ch / 2;
+          textY = cy + cellH / 2;
         } else {
-          // bottom (Excel default for most cells)
           ctx.textBaseline = 'bottom';
-          textY = cy + ch - paddingY;
+          textY = cy + cellH - paddingY;
         }
         ctx.fillText(text, textX, textY);
       }
@@ -313,6 +347,89 @@ export function renderViewport(
       ctx.restore();
     }
   }
+
+  ctx.restore(); // end cell area clip
+
+  // --- Render row/column headers (drawn last, always on top) ---
+  renderHeaders(ctx, canvasW, canvasH, startRow, startCol, numRows, numCols, colXs, colWidths, rowYs, rowHeights);
+}
+
+function renderHeaders(
+  ctx: CanvasRenderingContext2D,
+  canvasW: number,
+  canvasH: number,
+  startRow: number,
+  startCol: number,
+  numRows: number,
+  numCols: number,
+  colXs: number[],
+  colWidths: number[],
+  rowYs: number[],
+  rowHeights: number[],
+): void {
+  const HEADER_BG = '#f8f9fa';
+  const HEADER_BORDER = '#c8ccd0';
+  const HEADER_TEXT = '#444';
+  const HEADER_FONT = `11px ${DEFAULT_FONT_FAMILY}`;
+
+  // Corner cell
+  ctx.fillStyle = HEADER_BG;
+  ctx.fillRect(0, 0, HEADER_W, HEADER_H);
+  ctx.strokeStyle = HEADER_BORDER;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, HEADER_W - 1, HEADER_H - 1);
+
+  ctx.font = HEADER_FONT;
+  ctx.fillStyle = HEADER_TEXT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Column letter headers
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(HEADER_W, 0, canvasW - HEADER_W, HEADER_H);
+  ctx.clip();
+
+  for (let ci = 0; ci < numCols; ci++) {
+    const cx = HEADER_W + colXs[ci];
+    const cw = colWidths[ci];
+    if (cx + cw <= HEADER_W || cx >= canvasW) continue;
+
+    ctx.fillStyle = HEADER_BG;
+    ctx.fillRect(cx, 0, cw, HEADER_H);
+    ctx.strokeStyle = HEADER_BORDER;
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(cx + 0.5, 0.5, cw - 1, HEADER_H - 1);
+
+    ctx.fillStyle = HEADER_TEXT;
+    ctx.textAlign = 'center';
+    ctx.fillText(colToLetter(startCol + ci), cx + cw / 2, HEADER_H / 2);
+  }
+  ctx.restore();
+
+  // Row number headers
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, HEADER_H, HEADER_W, canvasH - HEADER_H);
+  ctx.clip();
+
+  for (let ri = 0; ri < numRows; ri++) {
+    const cy = HEADER_H + rowYs[ri];
+    const ch = rowHeights[ri];
+    if (cy + ch <= HEADER_H || cy >= canvasH) continue;
+
+    ctx.fillStyle = HEADER_BG;
+    ctx.fillRect(0, cy, HEADER_W, ch);
+    ctx.strokeStyle = HEADER_BORDER;
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(0.5, cy + 0.5, HEADER_W - 1, ch - 1);
+
+    ctx.fillStyle = HEADER_TEXT;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(startRow + ri), HEADER_W - 4, cy + ch / 2);
+  }
+  ctx.restore();
 }
 
 function renderBorder(

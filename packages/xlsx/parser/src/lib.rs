@@ -19,6 +19,15 @@ pub struct SheetMeta {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MergeCell {
+    pub top: u32,
+    pub left: u32,
+    pub bottom: u32,
+    pub right: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Worksheet {
     pub name: String,
     pub rows: Vec<Row>,
@@ -26,6 +35,7 @@ pub struct Worksheet {
     pub row_heights: HashMap<u32, f64>,
     pub default_col_width: f64,
     pub default_row_height: f64,
+    pub merge_cells: Vec<MergeCell>,
 }
 
 #[derive(Debug, Serialize)]
@@ -560,6 +570,7 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
     let mut rows = Vec::new();
     let mut col_widths: HashMap<u32, f64> = HashMap::new();
     let mut row_heights: HashMap<u32, f64> = HashMap::new();
+    let mut merge_cells: Vec<MergeCell> = Vec::new();
     let mut default_col_width = 8.43;
     let mut default_row_height = 15.0;
 
@@ -585,6 +596,16 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
                     col_widths.insert(c, width);
                 }
             }
+            "mergeCell" if node.tag_name().namespace() == Some(ns) => {
+                if let Some(r) = node.attribute("ref") {
+                    let parts: Vec<&str> = r.split(':').collect();
+                    if parts.len() == 2 {
+                        let (left, top) = parse_cell_ref(parts[0]);
+                        let (right, bottom) = parse_cell_ref(parts[1]);
+                        merge_cells.push(MergeCell { top, left, bottom, right });
+                    }
+                }
+            }
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
                 let height: Option<f64> = node.attribute("ht").and_then(|s| s.parse().ok());
@@ -605,6 +626,7 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
         row_heights,
         default_col_width,
         default_row_height,
+        merge_cells,
     })
 }
 

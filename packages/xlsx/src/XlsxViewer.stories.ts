@@ -48,8 +48,7 @@ function buildViewerUI(
   root.append(toolbar, status);
 
   const container = document.createElement('div');
-  container.style.cssText =
-    `width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;min-height:120px;`;
+  container.style.cssText = `max-width:100%;`;
   root.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
@@ -158,12 +157,10 @@ export const FileUpload: Story = {
     toolbar.appendChild(sheetSelect);
 
     const container = document.createElement('div');
-    container.style.cssText =
-      `width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;` +
-      `min-height:200px;display:flex;align-items:center;justify-content:center;`;
+    container.style.cssText = `max-width:100%;min-height:200px;`;
     const hint = document.createElement('span');
     hint.textContent = 'Select an .xlsx file above';
-    hint.style.color = '#aaa';
+    hint.style.cssText = 'display:block;padding:20px;color:#aaa;';
     container.appendChild(hint);
 
     root.append(fileInput, status, toolbar, container);
