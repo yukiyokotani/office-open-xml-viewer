@@ -839,14 +839,32 @@ function buildShapePath(
     }
 
     // ── Callouts ──────────────────────────────────────────────────────────────
-    case 'wedgerectcallout':
     case 'callout1':
     case 'callout2':
     case 'callout3':
     case 'bordercallout1':
     case 'bordercallout2':
     case 'bordercallout3': {
-      // Simplified: rect with a small triangular pointer at the bottom-left
+      // Line callout: rectangle body + single straight line to tip.
+      // adj1/adj2 (not used in simplified version): attachment side on box.
+      // adj3/adj4: tip position as fraction of shape w/h from top-left.
+      // Default tip: bottom-left outside the box.
+      const tipFx = (adj ?? 20000) / 100000;     // adj3 in OOXML
+      const tipFy = (adj2 ?? 120000) / 100000;   // adj4 in OOXML
+      const tipX = x + tipFx * w;
+      const tipY = y + tipFy * h;
+      ctx.rect(x, y, w, h);
+      // Draw the tail line separately (beginPath/stroke after the rect fill)
+      // We store the tail in the path so stroke() renders it.
+      // Determine attachment point: nearest point on box perimeter to tip.
+      const attachX = Math.max(x, Math.min(x + w, tipX));
+      const attachY = Math.max(y, Math.min(y + h, tipY));
+      ctx.moveTo(attachX, attachY);
+      ctx.lineTo(tipX, tipY);
+      break;
+    }
+    case 'wedgerectcallout': {
+      // Wedge (triangle-tail) callout: rect + filled triangle pointer.
       ctx.rect(x, y, w, h * 0.8);
       const tipX = x + w * 0.2;
       const tipY = y + h;
