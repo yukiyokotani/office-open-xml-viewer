@@ -31,6 +31,7 @@ packages/pptx/tests/visual/references/sample-*/
 # Local-only Storybook stories that load sample files
 packages/pptx/src/*.sample.stories.ts
 packages/xlsx/src/*.sample.stories.ts
+packages/docx/src/*.sample.stories.ts
 # TypeScript build info
 *.tsbuildinfo
 # npm lockfile (using pnpm)
