@@ -95,20 +95,17 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
   const indRight = para.indentRight * scale;
   const indFirst = para.indentFirst * scale;
 
-  // Numbering prefix
+  // Numbering prefix (indent is already baked into para.indentLeft / para.indentFirst)
   let numPrefix = '';
-  let numIndent = 0;
   let numTab = 0;
   if (para.numbering) {
-    const num = para.numbering;
-    numPrefix = num.text + '\t';
-    numIndent = num.indentLeft * scale;
-    numTab = num.tab * scale;
+    numPrefix = para.numbering.text + '\t';
+    numTab = para.numbering.tab * scale;
   }
 
-  const paraX = contentX + indLeft + numIndent;
+  const paraX = contentX + indLeft;
   const firstLineX = paraX + indFirst;
-  const paraW = contentW - indLeft - numIndent - indRight;
+  const paraW = contentW - indLeft - indRight;
 
   // Collect all text segments with formatting
   const segments = buildSegments(para.runs);
@@ -127,7 +124,7 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
   // Render each line
   let firstLine = true;
   for (const line of lines) {
-    const lineH = line.height * lineSpacingMultiplier(para.lineSpacing);
+    const lineH = line.height * scale * lineSpacingMultiplier(para.lineSpacing);
     const baseline = state.y + line.ascent;
 
     let x = firstLine ? firstLineX : paraX;
@@ -157,7 +154,7 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
       }
       const s = seg as LayoutTextSeg;
       ctx.font = buildFont(s.bold, s.italic, s.fontSize * scale, s.fontFamily);
-      ctx.fillStyle = s.color ?? defaultColor;
+      ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
 
       if (s.strikethrough || s.underline) {
         ctx.save();
@@ -167,7 +164,7 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
 
       if (s.underline) {
         const lw = ctx.measureText(s.text).width;
-        ctx.strokeStyle = s.color ?? defaultColor;
+        ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
         ctx.lineWidth = Math.max(0.5, s.fontSize * scale * 0.05);
         ctx.beginPath();
         ctx.moveTo(x, baseline + s.fontSize * scale * 0.12);
@@ -177,7 +174,7 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
 
       if (s.strikethrough) {
         const lw = ctx.measureText(s.text).width;
-        ctx.strokeStyle = s.color ?? defaultColor;
+        ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
         ctx.lineWidth = Math.max(0.5, s.fontSize * scale * 0.05);
         ctx.beginPath();
         ctx.moveTo(x, baseline - s.fontSize * scale * 0.3);

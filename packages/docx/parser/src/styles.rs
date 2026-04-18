@@ -103,61 +103,34 @@ impl StyleMap {
     }
 
     /// Resolve all formatting for a paragraph style ID, merging inherited chain.
+    /// Priority (lowest to highest): docDefaults → basedOn chain → style itself.
+    /// Within each level: style rPr then pPr/rPr (both are paragraph-level run defaults).
     pub fn resolve_para(&self, style_id: Option<&str>) -> (ParaFmt, RunFmt) {
-        let mut para_chain: Vec<&ParaFmt> = vec![&self.defaults_para];
-        let mut run_chain: Vec<&RunFmt> = vec![&self.defaults_run];
-
-        if let Some(id) = style_id {
-            self.collect_chain(id, &mut para_chain, &mut run_chain);
-        }
-
         let mut merged_para = ParaFmt::default();
         let mut merged_run = RunFmt::default();
-        for p in &para_chain {
-            apply_para(&mut merged_para, p);
-        }
-        for r in &run_chain {
-            apply_run(&mut merged_run, r);
-            apply_run(&mut merged_run, &p_run(para_chain.last().copied().unwrap_or(&self.defaults_para)));
-        }
-        // Also apply style's own rPr (pPr/rPr)
-        for p in &para_chain {
-            apply_run(&mut merged_run, &p.run);
-        }
-        // Apply style-level rPr
+
+        apply_para(&mut merged_para, &self.defaults_para);
+        apply_run(&mut merged_run, &self.defaults_run);
+
         if let Some(id) = style_id {
-            self.collect_run_chain(id, &mut merged_run);
+            self.apply_style_chain(id, &mut merged_para, &mut merged_run);
         }
 
         (merged_para, merged_run)
     }
 
-    fn collect_chain<'a>(
-        &'a self,
-        id: &str,
-        para_chain: &mut Vec<&'a ParaFmt>,
-        run_chain: &mut Vec<&'a RunFmt>,
-    ) {
+    fn apply_style_chain(&self, id: &str, merged_para: &mut ParaFmt, merged_run: &mut RunFmt) {
         if let Some(def) = self.styles.get(id) {
-            if let Some(base) = &def.based_on {
-                self.collect_chain(base, para_chain, run_chain);
+            if let Some(base) = def.based_on.clone() {
+                self.apply_style_chain(&base, merged_para, merged_run);
             }
-            para_chain.push(&def.para);
-            run_chain.push(&def.run);
-        }
-    }
-
-    fn collect_run_chain(&self, id: &str, out: &mut RunFmt) {
-        if let Some(def) = self.styles.get(id) {
-            if let Some(base) = &def.based_on {
-                self.collect_run_chain(base, out);
-            }
-            apply_run(out, &def.run);
+            apply_para(merged_para, &def.para);
+            apply_run(merged_run, &def.run);
+            // pPr/rPr (paragraph mark run properties) also apply to runs
+            apply_run(merged_run, &def.para.run);
         }
     }
 }
-
-fn p_run(p: &ParaFmt) -> &RunFmt { &p.run }
 
 fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.alignment.is_some() { dst.alignment = src.alignment.clone(); }
@@ -219,9 +192,11 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Numbering
     if let Some(pnpr) = child_w(ppr, "numPr") {
-        if let Some(ilv) = child_w(pnpr, "ilvl") {
-            fmt.num_level = attr_w(ilv, "val").and_then(|v| v.parse().ok());
-        }
+        // ilvl defaults to 0 when absent
+        fmt.num_level = child_w(pnpr, "ilvl")
+            .and_then(|n| attr_w(n, "val"))
+            .and_then(|v| v.parse().ok())
+            .or(Some(0));
         if let Some(nid) = child_w(pnpr, "numId") {
             fmt.num_id = attr_w(nid, "val").and_then(|v| v.parse().ok());
         }

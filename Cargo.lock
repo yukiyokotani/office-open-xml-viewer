@@ -83,6 +83,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "docx-parser"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "console_error_panic_hook",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "zip",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,6 +333,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "xlsx-parser"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "zip",
 ]
 
 [[package]]

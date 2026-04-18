@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DOCX Debug</title>
+  <style>
+    body { font-family: monospace; font-size: 12px; margin: 10px; }
+    .para { border: 1px solid #ccc; margin: 4px 0; padding: 4px; }
+    .run { background: #f0f0ff; margin: 2px; padding: 2px; display: inline-block; }
+    .meta { color: #888; font-size: 10px; }
+    .title-style { color: blue; font-weight: bold; }
+  </style>
+</head>
+<body>
+<pre id="out">Loading...</pre>
+<script type="module">
+  import { DocxDocument } from '/src/index.ts';
+
+  const params = new URLSearchParams(location.search);
+  const file = params.get('file') ?? 'sample-1.docx';
+
+  try {
+    const doc = await DocxDocument.load('/' + file);
+    const body = doc.document.body;
+    const lines = [];
+    lines.push(`Section: ${JSON.stringify(doc.document.section)}`);
+    lines.push(`Body elements: ${body.length}`);
+    lines.push('');
+    for (let i = 0; i < Math.min(body.length, 20); i++) {
+      const el = body[i];
+      lines.push(`[${i}] type=${el.type}`);
+      if (el.type === 'paragraph') {
+        lines.push(`  alignment=${el.alignment} indentLeft=${el.indentLeft} spaceBefore=${el.spaceBefore} spaceAfter=${el.spaceAfter}`);
+        if (el.numbering) {
+          lines.push(`  numbering: numId=${el.numbering.numId} level=${el.numbering.level} text="${el.numbering.text}" indentLeft=${el.numbering.indentLeft} tab=${el.numbering.tab}`);
+        }
+        lines.push(`  runs (${el.runs.length}):`);
+        for (const r of el.runs.slice(0, 10)) {
+          if (r.type === 'text') {
+            lines.push(`    text: "${r.text.substring(0,60)}" bold=${r.bold} fontSize=${r.fontSize} color=${r.color}`);
+          } else {
+            lines.push(`    ${r.type}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+    document.getElementById('out').textContent = lines.join('\n');
+  } catch (e) {
+    document.getElementById('out').textContent = 'ERROR: ' + e.message + '\n' + e.stack;
+  }
+</script>
+</body>
+</html>

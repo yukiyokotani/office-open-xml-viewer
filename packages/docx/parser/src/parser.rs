@@ -124,11 +124,12 @@ fn parse_paragraph(
     num_map: &mut NumberingMap,
     media_map: &HashMap<String, String>,
 ) -> DocParagraph {
-    // Get style ID from pPr/pStyle
+    // Get style ID from pPr/pStyle; fall back to "Normal" (default paragraph style)
     let ppr_node = child_w(node, "pPr");
     let style_id = ppr_node
         .and_then(|p| child_w(p, "pStyle"))
-        .and_then(|s| attr_w(s, "val"));
+        .and_then(|s| attr_w(s, "val"))
+        .or_else(|| Some("Normal".to_string()));
 
     // Resolve base formatting from style
     let (mut base_para, mut base_run) = style_map.resolve_para(style_id.as_deref());
@@ -145,9 +146,7 @@ fn parse_paragraph(
     }
 
     let alignment = base_para.alignment.as_deref().map(normalize_align).unwrap_or("left").to_string();
-    let indent_left = base_para.indent_left.unwrap_or(0.0);
     let indent_right = base_para.indent_right.unwrap_or(0.0);
-    let indent_first = base_para.indent_first.unwrap_or(0.0);
     let space_before = base_para.space_before.unwrap_or(0.0);
     let space_after = base_para.space_after.unwrap_or(0.0);
     let line_spacing = base_para.line_spacing_val.map(|v| LineSpacing {
@@ -155,23 +154,26 @@ fn parse_paragraph(
         rule: base_para.line_spacing_rule.clone().unwrap_or_else(|| "auto".to_string()),
     });
 
-    // Numbering
+    // Numbering — extract level data before advancing counter (avoids borrow conflict)
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level) {
         if num_id != 0 {
+            let (format, ind_left, tab) = num_map.get_level(num_id, num_level)
+                .map(|l| (l.format.clone(), l.indent_left, l.tab))
+                .unwrap_or_else(|| ("decimal".to_string(), 36.0, 18.0));
             let counter = num_map.advance(num_id, num_level);
             let text = num_map.resolve_text(num_id, num_level, counter);
-            let lvl = num_map.get_level(num_id, num_level);
-            let (ind_left, tab) = lvl.map(|l| (l.indent_left, l.tab)).unwrap_or((36.0, 36.0));
-            Some(NumberingInfo {
-                num_id,
-                level: num_level,
-                format: lvl.map(|l| l.format.clone()).unwrap_or_else(|| "decimal".to_string()),
-                text,
-                indent_left: ind_left,
-                tab,
-            })
+            Some(NumberingInfo { num_id, level: num_level, format, text, indent_left: ind_left, tab })
         } else { None }
     } else { None };
+
+    // Numbering level's pPr/ind overrides the paragraph style's indent
+    let (indent_left, indent_first) = if let Some(ref num) = numbering {
+        num_map.get_level(num.num_id, num.level)
+            .map(|l| (l.indent_left, -l.tab))
+            .unwrap_or((base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0)))
+    } else {
+        (base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0))
+    };
 
     // Parse runs
     let mut runs = vec![];
@@ -301,6 +303,18 @@ fn parse_run_inner(
             "drawing" => {
                 if let Some(img) = parse_inline_drawing(child, media_map) {
                     runs.push(DocRun::Image(img));
+                }
+            }
+            "AlternateContent" => {
+                // mc:AlternateContent/mc:Choice may contain w:drawing
+                if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
+                    for inner in choice.children().filter(|n| n.is_element()) {
+                        if inner.tag_name().name() == "drawing" {
+                            if let Some(img) = parse_inline_drawing(inner, media_map) {
+                                runs.push(DocRun::Image(img));
+                            }
+                        }
+                    }
                 }
             }
             _ => {}

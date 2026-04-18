@@ -20,7 +20,7 @@ export default defineConfig({
     exclude: ['@ooxml/docx-parser'],
   },
   server: {
-    port: 5174,
+    port: 5179,
     fs: {
       allow: [__dirname],
     },

@@ -62,9 +62,29 @@ test.describe('docx visual regression', () => {
         const w = Math.min(actualPng.width, refW);
         const h = Math.min(actualPng.height, refH);
 
+        // Pad both images to same size so pixelmatch doesn't throw
+        const pad = (png: ReturnType<typeof PNG.sync.read>, tw: number, th: number) => {
+          if (png.width === tw && png.height === th) return png;
+          const out = new PNG({ width: tw, height: th });
+          out.data.fill(255);
+          for (let y = 0; y < Math.min(png.height, th); y++) {
+            for (let x = 0; x < Math.min(png.width, tw); x++) {
+              const src = (y * png.width + x) * 4;
+              const dst = (y * tw + x) * 4;
+              out.data[dst]     = png.data[src];
+              out.data[dst + 1] = png.data[src + 1];
+              out.data[dst + 2] = png.data[src + 2];
+              out.data[dst + 3] = png.data[src + 3];
+            }
+          }
+          return out;
+        };
+        const refPadded    = pad(refPng,    w, h);
+        const actualPadded = pad(actualPng, w, h);
+
         const diff = new PNG({ width: w, height: h });
         const diffPixels = pixelmatch(
-          refPng.data, actualPng.data, diff.data, w, h,
+          refPadded.data, actualPadded.data, diff.data, w, h,
           { threshold: PIXEL_THRESHOLD, includeAA: true }
         );
         mkdirSync(`tests/visual/diffs/${name}`, { recursive: true });
