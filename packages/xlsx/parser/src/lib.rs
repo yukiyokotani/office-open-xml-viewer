@@ -728,12 +728,18 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
                 let custom = node.attribute("customWidth").map(|v| v == "1").unwrap_or(false);
-                if !custom { continue; }
+                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                // Only record widths for custom-widthed columns OR hidden columns
+                if !custom && !hidden { continue; }
                 let min: u32 = node.attribute("min").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let max: u32 = node.attribute("max").and_then(|s| s.parse().ok()).unwrap_or(1);
                 // Cap range to avoid storing 16K entries for max=16384 ranges
                 let max = max.min(min + 255);
-                let width: f64 = node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width);
+                let width: f64 = if hidden {
+                    0.0
+                } else {
+                    node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width)
+                };
                 for c in min..=max {
                     col_widths.insert(c, width);
                 }
@@ -763,7 +769,12 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
             }
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let height: Option<f64> = node.attribute("ht").and_then(|s| s.parse().ok());
+                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                let height: Option<f64> = if hidden {
+                    Some(0.0)
+                } else {
+                    node.attribute("ht").and_then(|s| s.parse().ok())
+                };
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
