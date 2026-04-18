@@ -3,8 +3,7 @@ import init, { parse_pptx } from './wasm/pptx_parser.js';
 import { renderSlide } from './renderer';
 
 let ready = false;
-let offscreenCanvas: OffscreenCanvas | null = null;
-let canvasDpr = 1;
+let internalCanvas: OffscreenCanvas | null = null;
 let storedPresentation: Presentation | null = null;
 
 async function initWasm(wasmUrl: string) {
@@ -21,12 +20,6 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     initWasm(req.wasmUrl).catch((err) => {
       console.error('[pptx-worker] WASM init failed:', err);
     });
-    return;
-  }
-
-  if (req.kind === 'transferCanvas') {
-    offscreenCanvas = req.canvas;
-    canvasDpr = req.dpr;
     return;
   }
 
@@ -54,8 +47,8 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   }
 
   if (req.kind === 'render') {
-    if (!offscreenCanvas || !storedPresentation) {
-      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'Canvas or presentation not ready' };
+    if (!storedPresentation) {
+      const msg: WorkerResponse = { kind: 'error', id: req.id, message: 'Presentation not loaded' };
       self.postMessage(msg);
       return;
     }
@@ -65,15 +58,20 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
       self.postMessage(msg);
       return;
     }
-    renderSlide(offscreenCanvas, slide, storedPresentation.slideWidth, storedPresentation.slideHeight, {
+    if (!internalCanvas) {
+      internalCanvas = new OffscreenCanvas(1, 1);
+    }
+    const canvas = internalCanvas;
+    renderSlide(canvas, slide, storedPresentation.slideWidth, storedPresentation.slideHeight, {
       width: req.targetWidth,
       defaultTextColor: req.defaultTextColor,
       majorFont: req.majorFont,
       minorFont: req.minorFont,
-      dpr: canvasDpr,
+      dpr: req.dpr,
     }).then(() => {
-      const msg: WorkerResponse = { kind: 'rendered', id: req.id };
-      self.postMessage(msg);
+      const bitmap = canvas.transferToImageBitmap();
+      const msg: WorkerResponse = { kind: 'bitmap', id: req.id, bitmap };
+      (self as unknown as Worker).postMessage(msg, [bitmap]);
     }).catch((err) => {
       const msg: WorkerResponse = {
         kind: 'error',
