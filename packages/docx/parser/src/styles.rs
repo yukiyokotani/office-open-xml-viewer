@@ -14,6 +14,8 @@ pub struct RunFmt {
     pub font_family_ascii: Option<String>,
     pub font_family_east_asia: Option<String>,
     pub background: Option<String>,   // hex 6
+    /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
+    pub vert_align: Option<String>,
 }
 
 /// Resolved paragraph formatting.
@@ -29,6 +31,8 @@ pub struct ParaFmt {
     pub line_spacing_rule: Option<String>,
     pub num_id: Option<u32>,
     pub num_level: Option<u32>,
+    /// Explicit tab stops (pos_pt, alignment, leader). None = inherit from parent style chain.
+    pub tab_stops: Option<Vec<(f64, String, String)>>,
     /// merged run defaults from pPr/rPr
     pub run: RunFmt,
     pub based_on: Option<String>,
@@ -143,6 +147,7 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.line_spacing_rule.is_some() { dst.line_spacing_rule = src.line_spacing_rule.clone(); }
     if src.num_id.is_some() { dst.num_id = src.num_id; }
     if src.num_level.is_some() { dst.num_level = src.num_level; }
+    if src.tab_stops.is_some() { dst.tab_stops = src.tab_stops.clone(); }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
@@ -155,6 +160,7 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_ascii.is_some() { dst.font_family_ascii = src.font_family_ascii.clone(); }
     if src.font_family_east_asia.is_some() { dst.font_family_east_asia = src.font_family_east_asia.clone(); }
     if src.background.is_some() { dst.background = src.background.clone(); }
+    if src.vert_align.is_some() { dst.vert_align = src.vert_align.clone(); }
 }
 
 pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
@@ -199,6 +205,26 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             .or(Some(0));
         if let Some(nid) = child_w(pnpr, "numId") {
             fmt.num_id = attr_w(nid, "val").and_then(|v| v.parse().ok());
+        }
+    }
+
+    // Explicit tab stops (pPr/tabs/tab)
+    if let Some(tabs_node) = child_w(ppr, "tabs") {
+        let mut tabs: Vec<(f64, String, String)> = Vec::new();
+        for t in children_w(tabs_node, "tab") {
+            let val = attr_w(t, "val").unwrap_or_else(|| "left".to_string());
+            // val="clear" removes an inherited tab — MVP: skip (no tab to emit)
+            if val == "clear" { continue; }
+            let pos = match attr_w(t, "pos").map(|s| twips_to_pt(&s)) {
+                Some(p) => p,
+                None => continue,
+            };
+            let leader = attr_w(t, "leader").unwrap_or_else(|| "none".to_string());
+            tabs.push((pos, val, leader));
+        }
+        if !tabs.is_empty() {
+            tabs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            fmt.tab_stops = Some(tabs);
         }
     }
 
@@ -251,6 +277,17 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
             if fill != "auto" && fill.len() == 6 {
                 fmt.background = Some(fill.to_lowercase());
             }
+        }
+    }
+
+    // Vertical alignment (superscript / subscript)
+    if let Some(va) = child_w(rpr, "vertAlign") {
+        if let Some(val) = attr_w(va, "val") {
+            fmt.vert_align = match val.as_str() {
+                "superscript" => Some("super".to_string()),
+                "subscript" => Some("sub".to_string()),
+                _ => None,
+            };
         }
     }
 

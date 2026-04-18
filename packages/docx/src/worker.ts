@@ -1,7 +1,7 @@
 import init, { parse_docx } from './wasm/docx_parser.js';
 import type { WorkerRequest, WorkerResponse } from './types';
 
-let initPromise: Promise<void> | null = null;
+let initPromise: Promise<unknown> | null = null;
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;

@@ -70,7 +70,20 @@ pub struct DocParagraph {
     /// None = single (1.0), Some(LineSpacing)
     pub line_spacing: Option<LineSpacing>,
     pub numbering: Option<NumberingInfo>,
+    /// Explicit tab stops from w:tabs. Empty means use default tab interval.
+    pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TabStop {
+    /// tab stop position in pt (from the left of the paragraph content area)
+    pub pos: f64,
+    /// "left" | "center" | "right" | "decimal" | "bar" | "clear"
+    pub alignment: String,
+    /// "none" | "dot" | "hyphen" | "underscore" | "heavy" | "middleDot"
+    pub leader: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -124,6 +137,8 @@ pub struct FieldRun {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub background: Option<String>,
+    /// "super" | "sub" | None
+    pub vert_align: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -140,6 +155,10 @@ pub struct TextRun {
     pub font_family: Option<String>,
     pub is_link: bool,
     pub background: Option<String>,
+    /// "super" | "sub" | None
+    pub vert_align: Option<String>,
+    /// Target URL for hyperlinks (from relationships.xml), None if not a link or no URL
+    pub hyperlink: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

@@ -1,6 +1,7 @@
 import type {
   Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
   DocRun, TextRun, ImageRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  TabStop,
 } from './types';
 
 // 1pt = 96/72 CSS px at screen
@@ -274,7 +275,7 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
     return;
   }
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale);
+  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops);
 
   let firstLine = true;
   for (const line of lines) {
@@ -298,6 +299,11 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
     x += alignOffset;
 
     for (const seg of line.segments) {
+      if ('isTab' in seg) {
+        // Tabs render as blank space; width was resolved during layout.
+        x += seg.measuredWidth;
+        continue;
+      }
       if ('dataUrl' in seg) {
         if (!dryRun) renderInlineImage(ctx, seg as LayoutImageSeg, x, baseline, scale, state.images);
         x += seg.measuredWidth;
@@ -305,28 +311,36 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
       }
       const s = seg as LayoutTextSeg;
       if (!dryRun) {
-        ctx.font = buildFont(s.bold, s.italic, s.fontSize * scale, s.fontFamily);
+        const effSizePx = s.fontSize * scale * (s.vertAlign ? 0.65 : 1);
+        const yOffset = s.vertAlign === 'super'
+          ? -s.fontSize * scale * 0.35
+          : s.vertAlign === 'sub'
+            ? s.fontSize * scale * 0.15
+            : 0;
+        ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily);
         ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
 
-        ctx.fillText(s.text, x, baseline);
+        ctx.fillText(s.text, x, baseline + yOffset);
 
         if (s.underline) {
           const lw = ctx.measureText(s.text).width;
           ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
-          ctx.lineWidth = Math.max(0.5, s.fontSize * scale * 0.05);
+          ctx.lineWidth = Math.max(0.5, effSizePx * 0.05);
+          const uy = baseline + yOffset + effSizePx * 0.12;
           ctx.beginPath();
-          ctx.moveTo(x, baseline + s.fontSize * scale * 0.12);
-          ctx.lineTo(x + lw, baseline + s.fontSize * scale * 0.12);
+          ctx.moveTo(x, uy);
+          ctx.lineTo(x + lw, uy);
           ctx.stroke();
         }
 
         if (s.strikethrough) {
           const lw = ctx.measureText(s.text).width;
           ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
-          ctx.lineWidth = Math.max(0.5, s.fontSize * scale * 0.05);
+          ctx.lineWidth = Math.max(0.5, effSizePx * 0.05);
+          const sy = baseline + yOffset - effSizePx * 0.3;
           ctx.beginPath();
-          ctx.moveTo(x, baseline - s.fontSize * scale * 0.3);
-          ctx.lineTo(x + lw, baseline - s.fontSize * scale * 0.3);
+          ctx.moveTo(x, sy);
+          ctx.lineTo(x + lw, sy);
           ctx.stroke();
         }
       }
@@ -355,7 +369,18 @@ interface LayoutTextSeg {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
+}
+
+/**
+ * Horizontal tab. Width is resolved during layout against paragraph tab stops
+ * (or the default 36pt interval if no explicit stop is configured).
+ */
+interface LayoutTabSeg {
+  isTab: true;
+  fontSize: number;  // pt — for line-height purposes
+  measuredWidth: number;
 }
 
 interface LayoutImageSeg {
@@ -380,32 +405,47 @@ interface LayoutLineBreak {
   measuredWidth: 0;
 }
 
-type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutLineBreak;
+type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutLineBreak | LayoutTabSeg;
 
 interface LayoutLine {
-  segments: (LayoutTextSeg | LayoutImageSeg)[];
+  segments: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[];
   height: number;  // pt
   ascent: number;  // px
 }
 
 function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
+  const pushTextPiece = (
+    text: string,
+    base: TextRun | FieldRun,
+    vertAlign: 'super' | 'sub' | null,
+  ) => {
+    for (const word of splitTextForLayout(text)) {
+      segs.push({
+        text: word,
+        bold: base.bold,
+        italic: base.italic,
+        underline: base.underline,
+        strikethrough: base.strikethrough,
+        fontSize: base.fontSize,
+        color: base.color,
+        fontFamily: base.fontFamily,
+        vertAlign,
+        measuredWidth: 0,
+      });
+    }
+  };
+
   for (const run of runs) {
     if (run.type === 'text') {
       const t = run as unknown as TextRun & { type: 'text' };
-      const words = splitTextForLayout(t.text);
-      for (const w of words) {
-        segs.push({
-          text: w,
-          bold: t.bold,
-          italic: t.italic,
-          underline: t.underline,
-          strikethrough: t.strikethrough,
-          fontSize: t.fontSize,
-          color: t.color,
-          fontFamily: t.fontFamily,
-          measuredWidth: 0,
-        });
+      // Split on tab chars so tab alignment can be resolved during layout.
+      const parts = t.text.split('\t');
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].length > 0) pushTextPiece(parts[i], t, t.vertAlign);
+        if (i < parts.length - 1) {
+          segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0 });
+        }
       }
     } else if (run.type === 'image') {
       const img = run as unknown as ImageRun & { type: 'image' };
@@ -431,19 +471,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
       const text = resolveFieldText(f, state);
-      if (text) {
-        segs.push({
-          text,
-          bold: f.bold,
-          italic: f.italic,
-          underline: f.underline,
-          strikethrough: f.strikethrough,
-          fontSize: f.fontSize,
-          color: f.color,
-          fontFamily: f.fontFamily,
-          measuredWidth: 0,
-        });
-      }
+      if (text) pushTextPiece(text, f, f.vertAlign);
     }
   }
   return segs;
@@ -527,14 +555,18 @@ function layoutLines(
   maxWidth: number,
   firstIndent: number,
   scale: number,
+  tabStops: TabStop[] = [],
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
-  let currentLine: (LayoutTextSeg | LayoutImageSeg)[] = [];
+  let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let isFirst = true;
   const availW = () => maxWidth - (isFirst ? firstIndent : 0);
+
+  // Default tab interval when no matching explicit stop exists (Word's default is 720 twips = 36pt)
+  const DEFAULT_TAB_PT = 36;
 
   const flush = (forceHeight?: number) => {
     lines.push({ segments: currentLine, height: forceHeight !== undefined ? forceHeight : (lineHeight || 10), ascent: lineAscent });
@@ -545,11 +577,20 @@ function layoutLines(
     isFirst = false;
   };
 
-  const addToLine = (s: LayoutTextSeg | LayoutImageSeg, w: number, h: number, asc: number) => {
+  const addToLine = (s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg, w: number, h: number, asc: number) => {
     currentLine.push(s);
     currentWidth += w;
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
+  };
+
+  /** Font size after super/sub scaling, in px. */
+  const effectiveFontPx = (s: LayoutTextSeg): number =>
+    s.fontSize * scale * (s.vertAlign ? 0.65 : 1);
+
+  const measureText = (s: LayoutTextSeg): TextMetrics => {
+    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
+    return ctx.measureText(s.text);
   };
 
   // Use an explicit queue so CJK split-tails can be re-queued
@@ -561,6 +602,36 @@ function layoutLines(
     // ── Line-break sentinel ──────────────────────────────
     if ('lineBreak' in seg) {
       flush(seg.fontSize);
+      continue;
+    }
+
+    // ── Tab segment ──────────────────────────────────────
+    if ('isTab' in seg) {
+      // Absolute position on the line measured from paraX (line origin for continuation lines)
+      const absFromParaX = currentWidth + (isFirst ? firstIndent : 0);
+      // Find the next tab stop strictly greater than the current position
+      const stop = tabStops.find((t) => t.pos * scale > absFromParaX);
+      let tabWidth: number;
+      if (stop) {
+        tabWidth = stop.pos * scale - absFromParaX;
+      } else {
+        // Round up to the next DEFAULT_TAB_PT boundary
+        const nextDefault = Math.ceil((absFromParaX + 0.01) / (DEFAULT_TAB_PT * scale)) * (DEFAULT_TAB_PT * scale);
+        tabWidth = nextDefault - absFromParaX;
+      }
+      // Clamp to avoid negative widths; if tab would overflow the line, wrap instead
+      if (tabWidth <= 0) {
+        flush();
+        queue.unshift(seg);
+        continue;
+      }
+      if (currentWidth + tabWidth > availW() && currentLine.length > 0) {
+        flush();
+        queue.unshift(seg);
+        continue;
+      }
+      seg.measuredWidth = tabWidth;
+      addToLine(seg, tabWidth, seg.fontSize, seg.fontSize * scale * 0.75);
       continue;
     }
 
@@ -578,9 +649,9 @@ function layoutLines(
 
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
-    ctx.font = buildFont(s.bold, s.italic, s.fontSize * scale, s.fontFamily);
-    const m = ctx.measureText(s.text);
+    const m = measureText(s);
     const w = m.width;
+    // Line-height should track the un-scaled font so super/sub don't shrink the line
     const h = s.fontSize;
     const asc = m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.75;
 
@@ -595,6 +666,7 @@ function layoutLines(
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
+      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
       const prefix = fitCJKPrefix(ctx, s.text, available);
       if (prefix.length > 0) {
         const pm = ctx.measureText(prefix);
@@ -746,7 +818,7 @@ function measureParaHeight(
 ): number {
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return getDefaultFontSize(para) * scale;
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale);
+  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
   const mult = lineSpacingMultiplier(para.lineSpacing);
   return lines.reduce((s, l) => s + l.height * scale * mult, 0);
 }
