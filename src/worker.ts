@@ -1,10 +1,13 @@
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { parse_pptx } from './wasm/pptx_parser.js';
+// Explicit URL import so Vite resolves it at build time — avoids invalid
+// import.meta.url when the worker is inlined as a blob URL (e.g. Storybook static).
+import wasmUrl from './wasm/pptx_parser_bg.wasm?url';
 
 let ready = false;
 
 async function initWasm() {
-  await init();
+  await init(wasmUrl);
   ready = true;
   const msg: WorkerResponse = { kind: 'ready' };
   self.postMessage(msg);
