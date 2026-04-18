@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XLSX Viewer Dev</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; }
+    header {
+      background: #1f497d;
+      color: #fff;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    .controls { display: flex; gap: 8px; align-items: center; }
+    select, input[type=file] { padding: 4px 8px; border-radius: 4px; border: 1px solid #ccc; font-size: 13px; }
+    button {
+      padding: 4px 12px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover { background: #e8e8e8; }
+    main { padding: 16px; }
+    #status { font-size: 13px; color: #666; margin-bottom: 8px; min-height: 20px; }
+    canvas {
+      display: block;
+      border: 1px solid #d0d0d0;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>XLSX Viewer</h1>
+    <div class="controls">
+      <input type="file" id="fileInput" accept=".xlsx" />
+      <select id="sheetSelect"></select>
+      <button id="loadSample">Load sample.xlsx</button>
+    </div>
+  </header>
+  <main>
+    <div id="status">Initializing…</div>
+    <canvas id="canvas" width="1200" height="600"></canvas>
+  </main>
+
+  <script type="module">
+    import { XlsxWorkbook } from '/src/index.ts';
+
+    const canvas = document.getElementById('canvas');
+    const sheetSelect = document.getElementById('sheetSelect');
+    const status = document.getElementById('status');
+
+    const wb = new XlsxWorkbook();
+    let loaded = false;
+
+    async function loadFile(source) {
+      status.textContent = 'Loading…';
+      try {
+        await wb.load(source);
+        loaded = true;
+        sheetSelect.innerHTML = '';
+        wb.sheetNames.forEach((name, i) => {
+          const opt = document.createElement('option');
+          opt.value = i;
+          opt.textContent = name;
+          sheetSelect.appendChild(opt);
+        });
+        await renderSheet(0);
+        status.textContent = `Loaded: ${wb.sheetNames.length} sheet(s)`;
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        console.error(e);
+      }
+    }
+
+    async function renderSheet(idx) {
+      if (!loaded) return;
+      const dpr = window.devicePixelRatio || 1;
+      await wb.renderViewport(canvas, idx, { row: 1, col: 1, rows: 30, cols: 10 }, {
+        width: canvas.clientWidth || 1200,
+        height: canvas.clientHeight || 600,
+        dpr,
+      });
+    }
+
+    document.getElementById('loadSample').addEventListener('click', () => {
+      loadFile('/sample.xlsx');
+    });
+
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (file) loadFile(await file.arrayBuffer());
+    });
+
+    sheetSelect.addEventListener('change', () => {
+      renderSheet(Number(sheetSelect.value));
+    });
+
+    // Auto-load sample on startup
+    loadFile('/sample.xlsx');
+  </script>
+</body>
+</html>

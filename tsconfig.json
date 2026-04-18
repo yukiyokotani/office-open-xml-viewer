@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/core" },
-    { "path": "./packages/pptx" }
+    { "path": "./packages/pptx" },
+    { "path": "./packages/xlsx" }
   ]
 }
