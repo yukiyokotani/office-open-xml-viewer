@@ -409,7 +409,19 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
     const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
+    ctx.save();
+    if (el.flipH || el.flipV) {
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      // The shape itself stays mirrored, but text should remain readable.
+      // Apply the same flip again around the shape centre to cancel only the text mirror.
+      ctx.translate(cx, cy);
+      if (el.flipH) ctx.scale(-1, 1);
+      if (el.flipV) ctx.scale(1, -1);
+      ctx.translate(-cx, -cy);
+    }
     renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber);
+    ctx.restore();
   }
 
   ctx.restore();
@@ -2311,6 +2323,10 @@ function renderTextBody(
 
   // ── Pass 2: render ───────────────────────────────────────────────────────
   ctx.save();
+  // penX / baseline are computed manually below, so the canvas text origin
+  // must be normalized before fillText() or alignment/anchor math will drift.
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
   ctx.beginPath();
   ctx.rect(bx, effectiveBy, bw, effectiveBh);
   ctx.clip();
