@@ -418,7 +418,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (fillStyle && geom !== 'arc') {
     ctx.fillStyle = fillStyle;
     // evenodd winding for shapes that use holes (inner path subtracts from outer)
-    if (geom === 'donut' || geom === 'nosmoking' || geom === 'nosmokingsign' || geom === 'smileyface') {
+    if (geom === 'donut' || geom === 'smileyface') {
       ctx.fill('evenodd');
     } else {
       ctx.fill();
@@ -997,32 +997,25 @@ function buildShapePath(
     }
 
     // ── No smoking / prohibition sign ─────────────────────────────────────────
-    // OOXML spec: outer ellipse ring (evenodd hole) + two diagonal arc segments
+    // Ring = outer CW + inner CCW (nonzero creates donut hole).
+    // Bar (UL→LR backslash): single CW path: LR arc (0°→90°) + diagonal line
+    // + UL arc (180°→270°) + diagonal close — fills the bar strip in the inner hole.
     case 'nosmoking':
     case 'nosmokingsign': {
-      const iwd2 = w / 2 * (1 - (adj ?? 18750) / 100000 * 2);
-      const ihd2 = h / 2 * (1 - (adj ?? 18750) / 100000 * 2);
-      // outer ring: outer circle CCW + inner circle CW (evenodd creates ring)
-      ctx.arc(cx, cy, w / 2, 0, Math.PI * 2);
-      ctx.moveTo(cx + iwd2, cy);
-      ctx.arc(cx, cy, iwd2, 0, Math.PI * 2, true);
-      // diagonal bar: two thick arc segments that form a slash
-      // stAng1 ≈ 225°, stAng2 ≈ 45°, swAng ≈ calculated from ring width
-      const ang = Math.atan2(ihd2, iwd2);
-      const stAng1 = Math.PI + ang;
-      const stAng2 = ang;
-      const swAng  = Math.PI - 2 * ang;
-      // first arc segment (upper-left to lower-right chord, outer radius)
-      ctx.moveTo(cx + (w / 2) * Math.cos(stAng1), cy + (h / 2) * Math.sin(stAng1));
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, stAng1, stAng1 + swAng);
-      ctx.lineTo(cx + iwd2 * Math.cos(stAng1 + swAng), cy + ihd2 * Math.sin(stAng1 + swAng));
-      ctx.ellipse(cx, cy, iwd2, ihd2, 0, stAng1 + swAng, stAng1, true);
-      ctx.closePath();
-      // second arc segment (lower-left to upper-right)
-      ctx.moveTo(cx + (w / 2) * Math.cos(stAng2), cy + (h / 2) * Math.sin(stAng2));
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, stAng2, stAng2 + swAng);
-      ctx.lineTo(cx + iwd2 * Math.cos(stAng2 + swAng), cy + ihd2 * Math.sin(stAng2 + swAng));
-      ctx.ellipse(cx, cy, iwd2, ihd2, 0, stAng2 + swAng, stAng2, true);
+      const adjFrac = (adj ?? 18750) / 100000;
+      const rx  = w / 2;
+      const ry  = h / 2;
+      const rix = rx * (1 - 2 * adjFrac);
+      const riy = ry * (1 - 2 * adjFrac);
+      // Outer ring: outer CW + inner CCW
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2, false);
+      ctx.moveTo(cx + rix, cy);
+      ctx.ellipse(cx, cy, rix, riy, 0, 0, Math.PI * 2, true);
+      // Bar fill: LR quad (0°→90°) → diagonal → UL quad (180°→270°) → diagonal close
+      ctx.moveTo(cx + rix, cy);
+      ctx.ellipse(cx, cy, rix, riy, 0, 0, Math.PI / 2, false);
+      ctx.lineTo(cx - rix, cy);
+      ctx.ellipse(cx, cy, rix, riy, 0, Math.PI, 3 * Math.PI / 2, false);
       ctx.closePath();
       break;
     }
@@ -1030,10 +1023,10 @@ function buildShapePath(
     // ── Wedge / pie slice ─────────────────────────────────────────────────────
     case 'pie':
     case 'pieWedge': {
-      const startA = -Math.PI / 2;
-      const sweepA = Math.PI * 1.5; // 270° default
+      const stAng = (adj  ?? 0)        / 21600000 * Math.PI * 2;
+      const enAng = (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
       ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, Math.min(w, h) / 2, startA, startA + sweepA);
+      ctx.arc(cx, cy, Math.min(w, h) / 2, stAng, enAng);
       ctx.closePath();
       break;
     }
@@ -1213,12 +1206,13 @@ function buildShapePath(
       break;
     }
     case 'can': {
-      // Cylinder (top + body ellipse); approximate with top arc + rect sides
       const ry = h * 0.1;
+      // Top face (full ellipse, filled + stroked as outline)
       ctx.ellipse(cx, y + ry, w / 2, ry, 0, 0, Math.PI * 2);
+      // Body (open path; fill() implicitly closes with top chord, stroke() draws open)
       ctx.moveTo(x, y + ry);
       ctx.lineTo(x, y + h - ry);
-      ctx.ellipse(cx, y + h - ry, w / 2, ry, 0, 0, Math.PI);
+      ctx.ellipse(cx, y + h - ry, w / 2, ry, 0, Math.PI, 2 * Math.PI);
       ctx.lineTo(x + w, y + ry);
       break;
     }
@@ -1233,7 +1227,7 @@ function buildShapePath(
       ctx.closePath();
       ctx.moveTo(x + off, y);
       ctx.lineTo(x + off, y + off);
-      ctx.lineTo(x + w, y + off);
+      ctx.lineTo(x + w - off, y + off);
       ctx.moveTo(x + off, y + off);
       ctx.lineTo(x, y + off);
       break;
@@ -1370,12 +1364,10 @@ function buildShapePath(
       break;
     }
     case 'arc': {
-      // OOXML arc: adj = start angle (default 0), adj2 = swing angle (default 16200000 = 270°)
-      // Angles in 1/60000 degree units; 21600000 = full circle
+      // OOXML arc: adj = stAng (default 270°=top), adj2 = swAng (default 90°)
       const FULL = 21600000;
-      const toRad = (v: number) => -Math.PI / 2 + (v / FULL) * Math.PI * 2;
-      const startA = toRad(adj ?? 0);
-      const swingA = ((adj2 ?? 16200000) / FULL) * Math.PI * 2;
+      const startA = (adj  ?? 16200000) / FULL * Math.PI * 2;
+      const swingA = (adj2 ?? 5400000)  / FULL * Math.PI * 2;
       ctx.ellipse(cx, cy, w / 2, h / 2, 0, startA, startA + swingA, swingA < 0);
       break;
     }
@@ -1548,21 +1540,23 @@ function buildShapePath(
 
     // ── Chord (arc + closing line) ────────────────────────────────────────────
     case 'chord': {
-      const startA = -Math.PI / 2 + (adj  ?? 2700000)  / 21600000 * Math.PI * 2;
-      const endA   = -Math.PI / 2 + (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
-      ctx.arc(cx, cy, Math.min(w, h) / 2, startA, endA);
+      const startA = (adj  ?? 2700000)  / 21600000 * Math.PI * 2;
+      const endA   = (adj2 ?? 16200000) / 21600000 * Math.PI * 2;
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, startA, endA);
       ctx.closePath();
       break;
     }
 
     // ── Block arc ─────────────────────────────────────────────────────────────
     case 'blockarc': {
-      const outerR   = Math.min(w, h) / 2;
-      const innerFrac = (adj2 ?? 25000) / 100000;
-      const innerR   = outerR * (1 - innerFrac);
-      const startA   = -Math.PI / 2 + (adj ?? 10800000) / 21600000 * Math.PI * 2;
-      const endA     = Math.PI / 2;
-      ctx.arc(cx, cy, outerR, startA, endA);
+      const outerR    = Math.min(w, h) / 2;
+      const stAngRaw  = adj  ?? 10800000;  // default 180° (left)
+      const enAngRaw  = adj2 ?? 0;          // default 0° (right)
+      const innerFrac = (adj3 ?? 25000) / 100000;
+      const innerR    = outerR * (1 - innerFrac);
+      const startA    = stAngRaw / 21600000 * Math.PI * 2;
+      const endA      = enAngRaw / 21600000 * Math.PI * 2;
+      ctx.arc(cx, cy, outerR, startA, endA, false);
       ctx.arc(cx, cy, innerR, endA, startA, true);
       ctx.closePath();
       break;
@@ -1582,11 +1576,12 @@ function buildShapePath(
 
     // ── Diagonal stripe ───────────────────────────────────────────────────────
     case 'diagstripe': {
-      const t = Math.min(w, h) * (adj ?? 50000) / 100000;
-      ctx.moveTo(x, y + h - t);
-      ctx.lineTo(x + t, y + h);
-      ctx.lineTo(x + w, y + t);
-      ctx.lineTo(x + w - t, y);
+      const thH = h * (adj ?? 50000) / 100000;
+      const x1  = thH * w / h;
+      ctx.moveTo(x + x1, y);
+      ctx.lineTo(x + w,      y);
+      ctx.lineTo(x + w - x1, y + h);
+      ctx.lineTo(x,          y + h);
       ctx.closePath();
       break;
     }
@@ -2386,9 +2381,13 @@ function renderTextBody(
   // must be normalized before fillText() or alignment/anchor math will drift.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.beginPath();
-  ctx.rect(bx, effectiveBy, bw, effectiveBh);
-  ctx.clip();
+  // Zero-width shapes (e.g., vertical line annotations with bw=0) must not use a
+  // zero-area clip rect — it would make all text invisible. Only clip when bw > 0.
+  if (bw > 0) {
+    ctx.beginPath();
+    ctx.rect(bx, effectiveBy, bw, effectiveBh);
+    ctx.clip();
+  }
 
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
@@ -2706,10 +2705,11 @@ function renderStackedBarHChart(
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
 
-  const padL = w * 0.22;  // category labels on left
+  // When the value axis is hidden, reclaim its bottom padding to give bars more room.
+  const padL = el.catAxisHidden ? w * 0.04 : w * 0.22;  // category labels on left
   const padR = w * 0.04;
   const padT = h * 0.12;  // legend + top labels
-  const padB = h * 0.10;  // x-axis labels
+  const padB = el.valAxisHidden ? h * 0.02 : h * 0.10;  // x-axis labels
   const px0 = x + padL;
   const py0 = y + padT;
   const pw  = w - padL - padR;
@@ -2727,28 +2727,31 @@ function renderStackedBarHChart(
 
   ctx.save();
 
-  // Grid lines + X-axis (value) labels
-  const step = niceStep(dataMax);
-  ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
-  ctx.strokeStyle = '#e8e8e8';
-  ctx.lineWidth = 0.7;
-  for (let v = 0; v <= dataMax + step * 0.5; v += step) {
-    const gx = px0 + pw * (v / dataMax);
-    ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
-    ctx.fillText(v.toLocaleString(), gx, py0 + ph + 4);
-  }
+  // Grid lines + X-axis (value) labels — both follow the value-axis visibility flag,
+  // since gridlines are anchored to the value axis ticks.
+  if (!el.valAxisHidden) {
+    const step = niceStep(dataMax);
+    ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#666';
+    ctx.strokeStyle = '#e8e8e8';
+    ctx.lineWidth = 0.7;
+    for (let v = 0; v <= dataMax + step * 0.5; v += step) {
+      const gx = px0 + pw * (v / dataMax);
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+      ctx.fillText(v.toLocaleString(), gx, py0 + ph + 4);
+    }
 
-  // X-axis line and Y-axis baseline
-  ctx.strokeStyle = '#bbb';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(px0, py0);
-  ctx.lineTo(px0, py0 + ph);
-  ctx.lineTo(px0 + pw, py0 + ph);
-  ctx.stroke();
+    // X-axis line and Y-axis baseline
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px0, py0);
+    ctx.lineTo(px0, py0 + ph);
+    ctx.lineTo(px0 + pw, py0 + ph);
+    ctx.stroke();
+  }
 
   // Bars
   const barH = (ph / n) * 0.55;
@@ -2788,14 +2791,16 @@ function renderStackedBarHChart(
   });
 
   // Y-axis (category) labels — rendered in reverse: cat[n-1] at top, cat[0] at bottom
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#444';
-  ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
-  for (let i = 0; i < n; i++) {
-    const ri = n - 1 - i; // reversed visual row index
-    const cy = py0 + gapH * ri + gapH / 2;
-    ctx.fillText(cats[i], px0 - 6, cy);
+  if (!el.catAxisHidden) {
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#444';
+    ctx.font = `${Math.round(h * 0.042)}px sans-serif`;
+    for (let i = 0; i < n; i++) {
+      const ri = n - 1 - i; // reversed visual row index
+      const cy = py0 + gapH * ri + gapH / 2;
+      ctx.fillText(cats[i], px0 - 6, cy);
+    }
   }
 
   // Legend (top)
