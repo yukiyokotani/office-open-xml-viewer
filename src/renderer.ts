@@ -389,10 +389,10 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2);
   }
 
-  if (fillStyle) {
+  if (fillStyle && geom !== 'arc') {
     ctx.fillStyle = fillStyle;
-    // donut/noSmoking use evenodd winding to create a hole
-    if (geom === 'donut' || geom === 'nosmokingsign') {
+    // evenodd winding for shapes that use holes (inner path subtracts from outer)
+    if (geom === 'donut' || geom === 'nosmoking' || geom === 'nosmokingsign' || geom === 'smileyface') {
       ctx.fill('evenodd');
     } else {
       ctx.fill();
@@ -845,6 +845,53 @@ function buildShapePath(
       break;
     }
 
+    case 'wedgeellipsecallout': {
+      // Ellipse body + triangular pointer to tip defined by adj/adj2
+      // adj/adj2 are offsets from center in 1/100000 of shape dimensions
+      const tipDx = (adj ?? -20000) / 100000 * w;
+      const tipDy = (adj2 ?? 120000) / 100000 * h;
+      const tipX = cx + tipDx;
+      const tipY = cy + tipDy;
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      // Triangular pointer
+      const angle = Math.atan2(tipDy, tipDx);
+      const perp = Math.PI / 10;
+      const rx = w / 2, ry = h / 2;
+      const p1x = cx + rx * Math.cos(angle - perp);
+      const p1y = cy + ry * Math.sin(angle - perp);
+      const p2x = cx + rx * Math.cos(angle + perp);
+      const p2y = cy + ry * Math.sin(angle + perp);
+      ctx.moveTo(p1x, p1y);
+      ctx.lineTo(tipX, tipY);
+      ctx.lineTo(p2x, p2y);
+      ctx.closePath();
+      break;
+    }
+    case 'cloudcallout': {
+      // Simplified cloud (series of arcs) + small circular tail
+      const bumpR = Math.min(w, h) * 0.22;
+      const bumps = [
+        [cx - w * 0.25, y + h * 0.35],
+        [cx - w * 0.10, y + h * 0.15],
+        [cx + w * 0.10, y + h * 0.10],
+        [cx + w * 0.28, y + h * 0.20],
+        [cx + w * 0.35, y + h * 0.40],
+      ] as [number, number][];
+      // Draw cloud outline
+      ctx.moveTo(bumps[0][0] - bumpR, bumps[0][1]);
+      for (const [bx2, by2] of bumps) {
+        ctx.arc(bx2, by2, bumpR, Math.PI, 0);
+      }
+      ctx.arc(cx, y + h * 0.65, w * 0.45, 0, Math.PI);
+      ctx.closePath();
+      // Tail: small circle leading to tip
+      const tipX2 = cx + (adj ?? -20000) / 100000 * w;
+      const tipY2 = cy + (adj2 ?? 120000) / 100000 * h;
+      ctx.moveTo(cx + w * 0.05, y + h * 0.8);
+      ctx.arc(tipX2, tipY2, Math.min(w, h) * 0.07, 0, Math.PI * 2);
+      break;
+    }
+
     // ── Connectors ────────────────────────────────────────────────────────────
     case 'line':
     case 'straightconnector1':
@@ -1255,8 +1302,13 @@ function buildShapePath(
       break;
     }
     case 'arc': {
-      // Open arc
-      ctx.arc(cx, cy, Math.min(w, h) / 2, -Math.PI / 2, Math.PI);
+      // OOXML arc: adj = start angle (default 0), adj2 = swing angle (default 16200000 = 270°)
+      // Angles in 1/60000 degree units; 21600000 = full circle
+      const FULL = 21600000;
+      const toRad = (v: number) => -Math.PI / 2 + (v / FULL) * Math.PI * 2;
+      const startA = toRad(adj ?? 0);
+      const swingA = ((adj2 ?? 16200000) / FULL) * Math.PI * 2;
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, startA, startA + swingA, swingA < 0);
       break;
     }
 
@@ -2248,10 +2300,11 @@ function renderTextBody(
 
   // ── Vertical anchor ─────────────────────────────────────────────────────
   let cursorY: number;
+  const contentH = Math.max(0, effectiveBh - tPad - bPad);
   if (anchor === 'ctr') {
-    cursorY = effectiveBy + (effectiveBh - totalHeight) / 2;
+    cursorY = effectiveBy + tPad + (contentH - totalHeight) / 2;
   } else if (anchor === 'b') {
-    cursorY = effectiveBy + effectiveBh - totalHeight - bPad;
+    cursorY = effectiveBy + effectiveBh - bPad - totalHeight;
   } else {
     cursorY = effectiveBy + tPad;
   }
