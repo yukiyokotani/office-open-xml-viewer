@@ -476,8 +476,9 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         Ok(d) => d,
         Err(_) => return map,
     };
-    let clr_scheme = match doc
-        .root_element()
+    let root = doc.root_element();
+
+    let clr_scheme = match root
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "clrScheme")
     {
@@ -501,7 +502,46 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
             }
         }
     }
+
+    // Parse font scheme: majorFont (+mj-lt, +mj-ea, +mj-cs) and minorFont (+mn-lt, +mn-ea, +mn-cs)
+    // Store as special keys in the theme map so the renderer can resolve +mj-lt → actual typeface.
+    if let Some(font_scheme) = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "fontScheme")
+    {
+        let pairs: &[(&str, &[&str])] = &[
+            ("majorFont", &["+mj-lt", "+mj-ea", "+mj-cs"]),
+            ("minorFont", &["+mn-lt", "+mn-ea", "+mn-cs"]),
+        ];
+        let scripts = ["latin", "ea", "cs"];
+        for (element_name, keys) in pairs {
+            if let Some(font_node) = child(font_scheme, element_name) {
+                for (script, key) in scripts.iter().zip(keys.iter()) {
+                    if let Some(typeface) = child(font_node, script)
+                        .and_then(|n| attr(&n, "typeface"))
+                    {
+                        if !typeface.is_empty() {
+                            map.insert(key.to_string(), typeface.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     map
+}
+
+/// Resolve a theme typeface reference (e.g. "+mj-lt") to the actual font family name.
+/// If the typeface starts with '+' and has a matching entry in the theme map (added by
+/// parse_theme_colors from the fontScheme), returns the resolved name; otherwise returns
+/// the original string unchanged.
+fn resolve_theme_typeface(typeface: &str, theme: &HashMap<String, String>) -> String {
+    if typeface.starts_with('+') {
+        if let Some(resolved) = theme.get(typeface) {
+            return resolved.clone();
+        }
+    }
+    typeface.to_string()
 }
 
 /// Resolve a color node (solidFill child / run rPr child) to a hex string.
@@ -1504,7 +1544,8 @@ fn parse_paragraph(
     let def_color      = def_rpr.and_then(|n| child(n, "solidFill")).and_then(|n| parse_color_node(n, theme));
     let def_bold       = def_rpr.and_then(|n| attr(&n, "b")).map(|v| v == "1" || v == "true");
     let def_italic     = def_rpr.and_then(|n| attr(&n, "i")).map(|v| v == "1" || v == "true");
-    let def_font_family = def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"));
+    let def_font_family = def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
+        .map(|tf| resolve_theme_typeface(&tf, theme));
 
     let mut runs = Vec::new();
     for node in p_node.children().filter(|n| n.is_element()) {
@@ -1524,7 +1565,8 @@ fn parse_paragraph(
                 let color = r_pr.and_then(|n| child(n, "solidFill")).and_then(|n| parse_color_node(n, theme));
                 let bold = r_pr.and_then(|n| attr(&n, "b")).map(|v| v == "1" || v == "true");
                 let italic = r_pr.and_then(|n| attr(&n, "i")).map(|v| v == "1" || v == "true");
-                let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")).map(|s| s.to_string());
+                let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
+                    .map(|tf| resolve_theme_typeface(&tf, theme));
                 runs.push(TextRun::Text(TextRunData {
                     text,
                     bold,
@@ -1585,7 +1627,8 @@ fn parse_bullet(
         let size_pct = child(p_pr, "buSzPct")
             .and_then(|n| attr_f64(&n, "val"))
             .map(|v| v / 1000.0);
-        let font_family = child(p_pr, "buFont").and_then(|n| attr(&n, "typeface"));
+        let font_family = child(p_pr, "buFont").and_then(|n| attr(&n, "typeface"))
+            .map(|tf| resolve_theme_typeface(&tf, theme));
         return Bullet::Char { ch, color, size_pct, font_family };
     }
 
@@ -1638,7 +1681,8 @@ fn parse_run(
         });
 
     let font_family = r_pr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface"))
-        .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")));
+        .or_else(|| def_rpr.and_then(|n| child(n, "latin")).and_then(|n| attr(&n, "typeface")))
+        .map(|tf| resolve_theme_typeface(&tf, theme));
 
     Some(TextRunData { text, bold, italic, underline, strikethrough, font_size, color, font_family, field_type: None })
 }

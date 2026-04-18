@@ -35,6 +35,7 @@ export class PptxViewer {
     this.canvas = document.createElement('canvas');
     this.canvas.style.display = 'block';
     this.canvas.style.maxWidth = '100%';
+    this.canvas.style.height = 'auto';
     container.appendChild(this.canvas);
 
     this.initWorker();

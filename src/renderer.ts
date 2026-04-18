@@ -2251,7 +2251,8 @@ function renderTextBody(
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
-          lineHeight = maxSizePx * (para.spaceLine.val / 100000);
+          // spcPct 100% = single line spacing = natural font leading ≈ 1.2× em
+          lineHeight = maxSizePx * 1.2 * (para.spaceLine.val / 100000);
         } else {
           lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
@@ -2961,8 +2962,9 @@ export async function renderSlide(
   const dpr = window.devicePixelRatio || 1;
   canvas.width  = canvasW * dpr;
   canvas.height = canvasH * dpr;
+  // Set intrinsic CSS size; height:auto on the element lets CSS scale it
+  // proportionally when max-width constrains the display width.
   canvas.style.width  = `${canvasW}px`;
-  canvas.style.height = `${canvasH}px`;
 
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Could not get 2D context');
