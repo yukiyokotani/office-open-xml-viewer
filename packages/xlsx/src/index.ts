@@ -1,4 +1,6 @@
 export { XlsxWorkbook } from './workbook.js';
+export { XlsxViewer } from './viewer.js';
+export type { XlsxViewerOptions } from './viewer.js';
 export type {
   Workbook,
   SheetMeta,

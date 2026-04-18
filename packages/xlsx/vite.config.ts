@@ -1,6 +1,5 @@
 import { defineConfig } from 'vite';
 import wasm from 'vite-plugin-wasm';
-import topLevelAwait from 'vite-plugin-top-level-await';
 import { resolve } from 'path';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +10,9 @@ const dirname =
     : path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait()],
+  plugins: [wasm()],
   root: dirname,
+  server: { port: 5175, strictPort: true },
   build: {
     lib: {
       entry: resolve(dirname, 'src/index.ts'),
@@ -29,6 +29,6 @@ export default defineConfig({
   },
   worker: {
     format: 'es',
-    plugins: () => [wasm(), topLevelAwait()],
+    plugins: () => [wasm()],
   },
 });

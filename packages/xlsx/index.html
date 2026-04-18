@@ -43,7 +43,15 @@
     <div class="controls">
       <input type="file" id="fileInput" accept=".xlsx" />
       <select id="sheetSelect"></select>
-      <button id="loadSample">Load sample.xlsx</button>
+      <select id="sampleSelect">
+        <option value="">-- sample --</option>
+        <option value="/sample-1.xlsx">sample-1</option>
+        <option value="/sample-2.xlsx">sample-2</option>
+        <option value="/sample-3.xlsx">sample-3</option>
+        <option value="/sample-4.xlsx">sample-4</option>
+        <option value="/sample-5.xlsx">sample-5</option>
+        <option value="/sample-6.xlsx">sample-6</option>
+      </select>
     </div>
   </header>
   <main>
@@ -91,8 +99,9 @@
       });
     }
 
-    document.getElementById('loadSample').addEventListener('click', () => {
-      loadFile('/sample.xlsx');
+    document.getElementById('sampleSelect').addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val) loadFile(val);
     });
 
     document.getElementById('fileInput').addEventListener('change', async (e) => {
@@ -104,8 +113,8 @@
       renderSheet(Number(sheetSelect.value));
     });
 
-    // Auto-load sample on startup
-    loadFile('/sample.xlsx');
+    // Auto-load first sample on startup
+    loadFile('/sample-1.xlsx');
   </script>
 </body>
 </html>
