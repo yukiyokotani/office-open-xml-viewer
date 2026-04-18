@@ -404,8 +404,12 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
                 }
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
+                let custom = node.attribute("customWidth").map(|v| v == "1").unwrap_or(false);
+                if !custom { continue; }
                 let min: u32 = node.attribute("min").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let max: u32 = node.attribute("max").and_then(|s| s.parse().ok()).unwrap_or(1);
+                // Cap range to avoid storing 16K entries for max=16384 ranges
+                let max = max.min(min + 255);
                 let width: f64 = node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width);
                 for c in min..=max {
                     col_widths.insert(c, width);

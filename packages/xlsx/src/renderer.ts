@@ -2,15 +2,19 @@ import type { Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf, Vi
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
-const COL_WIDTH_TO_PX = 7; // approximate: 1 Excel column width unit ≈ 7px
-const ROW_HEIGHT_TO_PX = 1.333; // pt to px: 96/72
+// Max digit width of the default font at 96 DPI.
+// Calibri 11pt ≈ 7px, Meiryo UI 11pt ≈ 8px.
+// Excel stores column width in units of this value.
+const MDW = 7;
+const ROW_HEIGHT_TO_PX = 4 / 3; // pt to px at 96 DPI: 96/72
 
+// OOXML spec: pixel = trunc(((256*w + 128/MDW) / 256) * MDW)
 function colWidthToPx(w: number): number {
-  return Math.round(w * COL_WIDTH_TO_PX);
+  return Math.trunc(((256 * w + 128 / MDW) / 256) * MDW);
 }
 
 function rowHeightToPx(h: number): number {
-  return Math.round(h * ROW_HEIGHT_TO_PX);
+  return Math.round(h * ROW_HEIGHT_TO_PX); // h is in pt
 }
 
 function hexToRgba(hex: string, alpha = 1): string {
