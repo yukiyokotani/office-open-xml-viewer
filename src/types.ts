@@ -270,9 +270,14 @@ export interface LineBreak {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer };
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer }
+  /** Transfer an OffscreenCanvas so the worker renders directly to it. */
+  | { kind: 'transferCanvas'; canvas: OffscreenCanvas; dpr: number }
+  /** Render a specific slide using the last parsed presentation. */
+  | { kind: 'render'; id: number; slideIndex: number; targetWidth: number; defaultTextColor: string | null };
 
 export type WorkerResponse =
   | { kind: 'ready' }
   | { kind: 'parsed'; id: number; presentation: Presentation }
+  | { kind: 'rendered'; id: number }
   | { kind: 'error'; id: number; message: string };

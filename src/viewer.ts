@@ -1,5 +1,5 @@
 import type { Presentation, WorkerRequest, WorkerResponse } from './types';
-import { renderSlide, type RenderOptions } from './renderer';
+import type { RenderOptions } from './renderer';
 // Inline the worker so the library is self-contained (no separate worker file needed)
 import InlineWorker from './worker.ts?worker&inline';
 // Resolved by Vite at build time; passed to the worker so it can init WASM
@@ -25,9 +25,11 @@ export class PptxViewer {
     number,
     { resolve: (p: Presentation) => void; reject: (e: Error) => void }
   >();
+  private pendingRenderCallbacks = new Map<number, { resolve: () => void; reject: (e: Error) => void }>();
   private nextId = 1;
   private workerReady = false;
   private workerReadyCallbacks: Array<() => void> = [];
+  private canvasTransferred = false;
 
   constructor(container: HTMLElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
@@ -43,19 +45,29 @@ export class PptxViewer {
 
   private initWorker() {
     this.worker = new InlineWorker();
-    // Resolve to an absolute URL using the main thread's location (always valid).
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
     this.worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
 
     this.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data;
+
       if (msg.kind === 'ready') {
+        // Transfer canvas control to the worker so it can render via OffscreenCanvas
+        const offscreen = this.canvas.transferControlToOffscreen();
+        const dpr = window.devicePixelRatio || 1;
+        this.worker!.postMessage(
+          { kind: 'transferCanvas', canvas: offscreen, dpr } satisfies WorkerRequest,
+          [offscreen]
+        );
+        this.canvasTransferred = true;
+
         this.workerReady = true;
         for (const cb of this.workerReadyCallbacks) cb();
         this.workerReadyCallbacks = [];
         this.opts.onReady?.();
         return;
       }
+
       if (msg.kind === 'parsed') {
         const cb = this.pendingCallbacks.get(msg.id);
         if (cb) {
@@ -64,12 +76,27 @@ export class PptxViewer {
         }
         return;
       }
+
+      if (msg.kind === 'rendered') {
+        const cb = this.pendingRenderCallbacks.get(msg.id);
+        if (cb) {
+          this.pendingRenderCallbacks.delete(msg.id);
+          cb.resolve();
+        }
+        return;
+      }
+
       if (msg.kind === 'error') {
-        const cb = this.pendingCallbacks.get(msg.id);
+        const cb = this.pendingCallbacks.get(msg.id) || null;
+        const renderCb = this.pendingRenderCallbacks.get(msg.id) || null;
         const err = new Error(msg.message);
         if (cb) {
           this.pendingCallbacks.delete(msg.id);
           cb.reject(err);
+        }
+        if (renderCb) {
+          this.pendingRenderCallbacks.delete(msg.id);
+          renderCb.reject(err);
         }
         this.opts.onError?.(err);
       }
@@ -94,7 +121,6 @@ export class PptxViewer {
     const presentation = await new Promise<Presentation>((resolve, reject) => {
       this.pendingCallbacks.set(id, { resolve, reject });
       const req: WorkerRequest = { kind: 'parse', id, buffer };
-      // Transfer ownership for performance
       this.worker!.postMessage(req, [buffer]);
     });
 
@@ -103,7 +129,6 @@ export class PptxViewer {
       slideHeight: presentation.slideHeight,
       slideCount: presentation.slides.length,
       slide0elements: presentation.slides[0]?.elements.length ?? 0,
-      slide0: presentation.slides[0],
     });
     this.presentation = presentation;
     this.currentSlide = 0;
@@ -136,14 +161,29 @@ export class PptxViewer {
 
   private async renderCurrentSlide() {
     if (!this.presentation) return;
-    const slide = this.presentation.slides[this.currentSlide];
-    await renderSlide(
-      this.canvas,
-      slide,
-      this.presentation.slideWidth,
-      this.presentation.slideHeight,
-      { width: this.opts.width, defaultTextColor: this.presentation.defaultTextColor }
-    );
+
+    // CSS sizing: set display width on the original canvas element (CSS still applies after transfer)
+    const targetWidth = this.opts.width ?? (this.canvas.offsetWidth || 960);
+    const scale = targetWidth / this.presentation.slideWidth;
+    const canvasH = Math.round(this.presentation.slideHeight * scale);
+    this.canvas.style.width = `${targetWidth}px`;
+    // height:auto is set in constructor; this ensures the correct intrinsic aspect ratio is represented
+    // by setting the CSS height explicitly from the slide dimensions.
+    this.canvas.style.height = `${canvasH}px`;
+
+    const id = this.nextId++;
+    await new Promise<void>((resolve, reject) => {
+      this.pendingRenderCallbacks.set(id, { resolve, reject });
+      const req: WorkerRequest = {
+        kind: 'render',
+        id,
+        slideIndex: this.currentSlide,
+        targetWidth,
+        defaultTextColor: this.presentation!.defaultTextColor,
+      };
+      this.worker!.postMessage(req);
+    });
+
     this.opts.onSlideChange?.(this.currentSlide, this.presentation.slides.length);
   }
 

@@ -141,13 +141,26 @@ const CSS_GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
 ]);
 
+/** Infer a CSS generic fallback from a named font so missing fonts degrade consistently. */
+function genericFallback(family: string): string {
+  const l = family.toLowerCase();
+  if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'monospace';
+  // Serif: mincho (Japanese serif), roman, times, garamond, georgia, palatino, etc.
+  if (/mincho|明朝|roman|times|garamond|georgia|palatino|century|didot/.test(l)) return 'serif';
+  // Everything else (gothic, kaku, round, rounded, sans, grotesk, …) → sans-serif
+  return 'sans-serif';
+}
+
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
   const normalized = normalizeFontFamily(family);
-  // Generic families must be unquoted; named families must be quoted.
-  const quotedFamily = CSS_GENERIC_FAMILIES.has(normalized) ? normalized : `"${normalized}"`;
-  return `${style}${weight}${sizePx}px ${quotedFamily}`;
+  if (CSS_GENERIC_FAMILIES.has(normalized)) {
+    return `${style}${weight}${sizePx}px ${normalized}`;
+  }
+  // Named font + inferred generic fallback so browsers degrade consistently
+  // when the exact typeface is not installed.
+  return `${style}${weight}${sizePx}px "${normalized}", ${genericFallback(normalized)}`;
 }
 
 /**
@@ -2457,28 +2470,28 @@ async function renderPicture(
   el: PictureElement,
   scale: number
 ) {
-  return new Promise<void>((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      ctx.save();
-      const x = emuToPx(el.x, scale);
-      const y = emuToPx(el.y, scale);
-      const w = emuToPx(el.width, scale);
-      const h = emuToPx(el.height, scale);
-      if (el.rotation !== 0 || el.flipH || el.flipV) {
-        ctx.translate(x + w / 2, y + h / 2);
-        ctx.rotate((el.rotation * Math.PI) / 180);
-        if (el.flipH) ctx.scale(-1, 1);
-        if (el.flipV) ctx.scale(1, -1);
-        ctx.translate(-(x + w / 2), -(y + h / 2));
-      }
-      ctx.drawImage(img, x, y, w, h);
-      ctx.restore();
-      resolve();
-    };
-    img.onerror = () => resolve(); // silently skip broken images
-    img.src = el.dataUrl;
-  });
+  try {
+    const resp = await fetch(el.dataUrl);
+    const blob = await resp.blob();
+    const bitmap = await createImageBitmap(blob);
+    ctx.save();
+    const x = emuToPx(el.x, scale);
+    const y = emuToPx(el.y, scale);
+    const w = emuToPx(el.width, scale);
+    const h = emuToPx(el.height, scale);
+    if (el.rotation !== 0 || el.flipH || el.flipV) {
+      ctx.translate(x + w / 2, y + h / 2);
+      ctx.rotate((el.rotation * Math.PI) / 180);
+      if (el.flipH) ctx.scale(-1, 1);
+      if (el.flipV) ctx.scale(1, -1);
+      ctx.translate(-(x + w / 2), -(y + h / 2));
+    }
+    ctx.drawImage(bitmap, x, y, w, h);
+    ctx.restore();
+    bitmap.close();
+  } catch {
+    // silently skip broken images
+  }
 }
 
 // ===== Table renderer =====
@@ -3246,6 +3259,8 @@ export interface RenderOptions {
   width?: number;
   /** Theme default text color (dk1), used as fallback when shapes have no explicit color */
   defaultTextColor?: string | null;
+  /** Device pixel ratio for HiDPI rendering. Defaults to window.devicePixelRatio on main thread, 1 in workers. */
+  dpr?: number;
 }
 
 /**
@@ -3253,26 +3268,26 @@ export interface RenderOptions {
  * Returns the canvas for convenience.
  */
 export async function renderSlide(
-  canvas: HTMLCanvasElement,
+  canvas: HTMLCanvasElement | OffscreenCanvas,
   slide: Slide,
   slideWidth: number,
   slideHeight: number,
   opts: RenderOptions = {}
-): Promise<HTMLCanvasElement> {
-  const targetWidth = opts.width ?? (canvas.offsetWidth || 960);
+): Promise<HTMLCanvasElement | OffscreenCanvas> {
+  const targetWidth = opts.width ?? ((canvas instanceof HTMLCanvasElement ? canvas.offsetWidth : 0) || 960);
   const scale = targetWidth / slideWidth;
   const canvasW = Math.round(targetWidth);
   const canvasH = Math.round(slideHeight * scale);
 
-  // Use devicePixelRatio for crisp rendering on HiDPI screens
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
   canvas.width  = canvasW * dpr;
   canvas.height = canvasH * dpr;
-  // Set intrinsic CSS size; height:auto on the element lets CSS scale it
-  // proportionally when max-width constrains the display width.
-  canvas.style.width  = `${canvasW}px`;
+  // CSS size only applies to the visible HTMLCanvasElement (not OffscreenCanvas)
+  if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
+    canvas.style.width = `${canvasW}px`;
+  }
 
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
   if (!ctx) throw new Error('Could not get 2D context');
   ctx.scale(dpr, dpr);
 

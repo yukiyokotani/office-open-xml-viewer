@@ -18,23 +18,8 @@ test('check parsed data', async ({ page }) => {
     return;
   }
   await page.waitForTimeout(200);
-  // Check pixel at (10,10) - should be inside left sidebar (light blue)
-  const pixel = await page.evaluate(() => {
-    const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-    if (!canvas) return 'no canvas';
-    const ctx = canvas.getContext('2d')!;
-    const d = ctx.getImageData(10, 10, 1, 1).data;
-    return `r=${d[0]} g=${d[1]} b=${d[2]} a=${d[3]}`;
-  });
-  console.log('OUTPUT: Pixel at (10,10):', pixel);
-  // Also check center pixel
-  const centerPixel = await page.evaluate(() => {
-    const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-    const ctx = canvas.getContext('2d')!;
-    const d = ctx.getImageData(640, 360, 1, 1).data;
-    return `r=${d[0]} g=${d[1]} b=${d[2]} a=${d[3]}`;
-  });
-  console.log('OUTPUT: Pixel at center:', centerPixel);
+  // Canvas control is transferred to the worker (OffscreenCanvas), so getContext('2d') is not
+  // available on the main-thread element. Use screenshot-based pixel inspection instead.
   const canvasSize = await page.evaluate(() => {
     const canvas = document.querySelector('canvas') as HTMLCanvasElement;
     return `${canvas.width}x${canvas.height} style=${canvas.style.width}x${canvas.style.height}`;

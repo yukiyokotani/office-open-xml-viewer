@@ -3,6 +3,43 @@
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parser is written in Rust and compiled to WebAssembly; the renderer uses the Canvas 2D API.
 
+## Architecture
+
+```
+Main thread                         Web Worker
+───────────────────────────────     ───────────────────────────────────────────
+PptxViewer                          worker.ts
+  │                                   │
+  │── init(wasmUrl) ──────────────────▶│  load pptx_parser.wasm (Rust/WASM)
+  │◀─ ready ──────────────────────────│
+  │                                   │
+  │── transferCanvas(OffscreenCanvas)─▶│  store OffscreenCanvas
+  │                                   │
+  │── parse(ArrayBuffer) ─────────────▶│  parse_pptx() → Presentation JSON
+  │◀─ parsed(Presentation) ───────────│
+  │                                   │
+  │── render(slideIndex, width) ──────▶│  renderSlide(offscreenCanvas, slide, …)
+  │◀─ rendered ───────────────────────│       │
+  │                                   │       ▼
+  │  (canvas auto-updates via        OffscreenCanvas → visible <canvas>
+  │   OffscreenCanvas transfer)
+```
+
+The rendering pipeline is fully off the main thread:
+- **Parsing**: Rust WASM reads the PPTX ZIP, resolves theme colours, layout/master inheritance, and emits a typed JSON `Presentation` object.
+- **Rendering**: `renderer.ts` draws to an `OffscreenCanvas` inside the worker using the Canvas 2D API, so the main thread is never blocked during slide rendering.
+- **Images**: Pictures are loaded with `fetch` + `createImageBitmap`, which works in both main-thread and worker contexts.
+
+### Key files
+
+| File | Role |
+|------|------|
+| `pptx-parser/src/lib.rs` | Rust WASM parser — OOXML ZIP → `Presentation` JSON |
+| `src/types.ts` | Shared TypeScript types (mirrors Rust structs) |
+| `src/renderer.ts` | Canvas 2D rendering engine |
+| `src/worker.ts` | Web Worker: WASM init, parsing, OffscreenCanvas rendering |
+| `src/viewer.ts` | Public `PptxViewer` API — canvas lifecycle, navigation |
+
 ## Feature Support
 
 ### PowerPoint (.pptx)

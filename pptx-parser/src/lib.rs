@@ -380,6 +380,10 @@ struct TableStyleDef {
     whole_fill:        Option<Fill>,
     whole_inside_h:    Option<Stroke>,
     whole_inside_v:    Option<Stroke>,
+    /// Outer top/bottom edge border (from wholeTbl tcBdr top/bottom)
+    whole_outer_h:     Option<Stroke>,
+    /// Outer left/right edge border (from wholeTbl tcBdr left/right)
+    whole_outer_v:     Option<Stroke>,
     band1h_fill:       Option<Fill>,
     band2h_fill:       Option<Fill>,
     first_row_fill:    Option<Fill>,
@@ -1272,14 +1276,16 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     map
 }
 
-/// Parse default paragraph spacing and line spacing from master txStyles.
+/// Parse default paragraph spacing from master txStyles.
 /// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
 /// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
-/// line_spacing values are spcPct val (e.g. 120000 = 120%).
+/// Note: line_spacing_map is intentionally NOT populated. Inheriting txStyles lnSpc hurts VRT
+/// scores because our font substitutes (sans-serif) have different em-square metrics than the
+/// original Aptos font, so applying the master's 120% line spacing over-expands text layout.
 fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, HashMap<String, i64>, HashMap<String, f64>) {
     let mut before_map: HashMap<String, i64> = HashMap::new();
     let mut after_map:  HashMap<String, i64> = HashMap::new();
-    let mut line_map:   HashMap<String, f64> = HashMap::new();
+    let line_map:       HashMap<String, f64> = HashMap::new(); // intentionally not populated
     let doc = match roxmltree::Document::parse(master_xml) {
         Ok(d) => d,
         Err(_) => return (before_map, after_map, line_map),
@@ -1300,9 +1306,6 @@ fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, Hash
             .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
         let spc_after = lvl1.and_then(|lp| child(lp, "spcAft"))
             .and_then(|s| child(s, "spcPts").and_then(|n| attr_i64(&n, "val")));
-        let ln_spc = lvl1.and_then(|lp| child(lp, "lnSpc"))
-            .and_then(|ls| child(ls, "spcPct"))
-            .and_then(|s| attr_f64(&s, "val"));
         if let Some(v) = spc_before {
             for ph_type in *ph_types {
                 before_map.entry(ph_type.to_string()).or_insert(v);
@@ -1311,11 +1314,6 @@ fn parse_master_txstyle_spacing(master_xml: &str) -> (HashMap<String, i64>, Hash
         if let Some(v) = spc_after {
             for ph_type in *ph_types {
                 after_map.entry(ph_type.to_string()).or_insert(v);
-            }
-        }
-        if let Some(v) = ln_spc {
-            for ph_type in *ph_types {
-                line_map.entry(ph_type.to_string()).or_insert(v);
             }
         }
     }
@@ -2371,51 +2369,59 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
         let style_id = style_id.to_string();
         let mut def = TableStyleDef::default();
 
-        let parse_tc_style = |role: roxmltree::Node<'_, '_>| -> (Option<Fill>, Option<Stroke>, Option<Stroke>, Option<Stroke>) {
+        let parse_tc_style = |role: roxmltree::Node<'_, '_>|
+            -> (Option<Fill>, Option<Stroke>, Option<Stroke>, Option<Stroke>, Option<Stroke>, Option<Stroke>)
+        {
             let tc_style = match child(role, "tcStyle") {
                 Some(n) => n,
-                None    => return (None, None, None, None),
+                None    => return (None, None, None, None, None, None),
             };
             let fill = parse_fill(tc_style, theme);
             let tc_bdr = child(tc_style, "tcBdr");
-            let inside_h = tc_bdr.and_then(|b| child(b, "insideH"))
-                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
-            let inside_v = tc_bdr.and_then(|b| child(b, "insideV"))
-                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
-            let border_b = tc_bdr.and_then(|b| child(b, "bottom"))
-                .and_then(|n| child(n, "ln")).and_then(|n| parse_stroke(n, theme));
-            (fill, inside_h, inside_v, border_b)
+            let parse_side = |side: &str| -> Option<Stroke> {
+                tc_bdr.and_then(|b| child(b, side))
+                    .and_then(|n| child(n, "ln"))
+                    .and_then(|n| parse_stroke(n, theme))
+            };
+            let inside_h = parse_side("insideH");
+            let inside_v = parse_side("insideV");
+            let border_b = parse_side("bottom");
+            let outer_h  = parse_side("top");
+            let outer_v  = parse_side("left");
+            (fill, inside_h, inside_v, border_b, outer_h, outer_v)
         };
 
         if let Some(whole) = child(style_node, "wholeTbl") {
-            let (fill, ih, iv, _) = parse_tc_style(whole);
+            let (fill, ih, iv, _, oh, ov) = parse_tc_style(whole);
             def.whole_fill = fill;
             def.whole_inside_h = ih;
             def.whole_inside_v = iv;
+            def.whole_outer_h  = oh;
+            def.whole_outer_v  = ov;
         }
         if let Some(band) = child(style_node, "band1H") {
-            let (fill, _, _, _) = parse_tc_style(band);
+            let (fill, _, _, _, _, _) = parse_tc_style(band);
             def.band1h_fill = fill;
         }
         if let Some(band) = child(style_node, "band2H") {
-            let (fill, _, _, _) = parse_tc_style(band);
+            let (fill, _, _, _, _, _) = parse_tc_style(band);
             def.band2h_fill = fill;
         }
         if let Some(first) = child(style_node, "firstRow") {
-            let (fill, _, _, border_b) = parse_tc_style(first);
+            let (fill, _, _, border_b, _, _) = parse_tc_style(first);
             def.first_row_fill = fill;
             def.first_row_border_b = border_b;
         }
         if let Some(last) = child(style_node, "lastRow") {
-            let (fill, _, _, _) = parse_tc_style(last);
+            let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_row_fill = fill;
         }
         if let Some(first) = child(style_node, "firstCol") {
-            let (fill, _, _, _) = parse_tc_style(first);
+            let (fill, _, _, _, _, _) = parse_tc_style(first);
             def.first_col_fill = fill;
         }
         if let Some(last) = child(style_node, "lastCol") {
-            let (fill, _, _, _) = parse_tc_style(last);
+            let (fill, _, _, _, _, _) = parse_tc_style(last);
             def.last_col_fill = fill;
         }
 
@@ -2515,13 +2521,20 @@ fn parse_table(
                     cell.fill = effective_fill;
                 }
 
-                // ── Border cascade (style provides inside borders) ──────────
-                // Top border: inside-H between rows (not for first row's top)
+                // ── Border cascade (style provides inside and outer borders) ──
+                // Outer top edge
+                if cell.border_t.is_none() && ri == 0 {
+                    cell.border_t = s.whole_outer_h.clone();
+                }
+                // Inner horizontal separator between rows
                 if cell.border_t.is_none() && ri > 0 {
                     cell.border_t = s.whole_inside_h.clone();
                 }
-                // Bottom border: inside-H between rows (not for last row's bottom);
-                // firstRow gets its own bottom border definition
+                // Outer bottom edge
+                if cell.border_b.is_none() && ri == last_row_idx {
+                    cell.border_b = s.whole_outer_h.clone();
+                }
+                // Inner bottom separator; firstRow gets its own bottom definition
                 if cell.border_b.is_none() {
                     if first_row && ri == 0 {
                         cell.border_b = s.first_row_border_b.clone()
@@ -2530,24 +2543,50 @@ fn parse_table(
                         cell.border_b = s.whole_inside_h.clone();
                     }
                 }
-                // Left border: inside-V between cols (not for first col's left)
+                // Outer left edge
+                if cell.border_l.is_none() && ci == 0 {
+                    cell.border_l = s.whole_outer_v.clone();
+                }
+                // Inner vertical separator between cols
                 if cell.border_l.is_none() && ci > 0 {
                     cell.border_l = s.whole_inside_v.clone();
                 }
-                // Right border: inside-V between cols (not for last col's right)
+                // Outer right edge
+                if cell.border_r.is_none() && ci == last_col_idx {
+                    cell.border_r = s.whole_outer_v.clone();
+                }
+                // Inner right separator
                 if cell.border_r.is_none() && ci < last_col_idx {
                     cell.border_r = s.whole_inside_v.clone();
                 }
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
-                // Apply accent1 fill for firstRow header, thin neutral row separators.
+                // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
+                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None };
                 if cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
                         cell.fill = Some(Fill::Solid { color: color.clone() });
                     }
                 }
+                // Outer top
+                if cell.border_t.is_none() && ri == 0 {
+                    cell.border_t = Some(thin.clone());
+                }
+                // Inner horizontal separators
                 if cell.border_t.is_none() && ri > 0 {
-                    cell.border_t = Some(Stroke { color: "D0CBC0".to_string(), width: 9525, dash_style: None });
+                    cell.border_t = Some(thin.clone());
+                }
+                // Outer bottom
+                if cell.border_b.is_none() && ri == last_row_idx {
+                    cell.border_b = Some(thin.clone());
+                }
+                // Outer left edge
+                if cell.border_l.is_none() && ci == 0 {
+                    cell.border_l = Some(thin.clone());
+                }
+                // Outer right edge
+                if cell.border_r.is_none() && ci == last_col_idx {
+                    cell.border_r = Some(thin.clone());
                 }
             }
         }
