@@ -671,7 +671,7 @@ function buildShapePath(
       drawStar(ctx, cx, cy, w / 2, h / 2, 7, 0.37);
       break;
     case 'star8':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 100000, -Math.PI / 2);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
     case 'star10':
       drawStar(ctx, cx, cy, w / 2, h / 2, 10, 0.45);
@@ -680,13 +680,13 @@ function buildShapePath(
       drawStar(ctx, cx, cy, w / 2, h / 2, 12, 0.45, 0);
       break;
     case 'star16':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 100000, -Math.PI / 2);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
     case 'star24':
       drawStar(ctx, cx, cy, w / 2, h / 2, 24, 0.6, 0);
       break;
     case 'star32':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 100000, -Math.PI / 2);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
 
     // ── Arrows ────────────────────────────────────────────────────────────────
@@ -2500,6 +2500,13 @@ async function renderPicture(
       if (el.flipH) ctx.scale(-1, 1);
       if (el.flipV) ctx.scale(1, -1);
       ctx.translate(-(x + w / 2), -(y + h / 2));
+    }
+    if (el.clipAdjust != null) {
+      const minDim = Math.min(w, h);
+      const r = (el.clipAdjust / 100000) * minDim;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+      ctx.clip();
     }
     ctx.drawImage(bitmap, x, y, w, h);
     ctx.restore();

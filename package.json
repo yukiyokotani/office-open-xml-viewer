@@ -30,5 +30,8 @@
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0",
     "vitest": "^4.1.4"
+  },
+  "dependencies": {
+    "@fontsource/nunito-sans": "^5.2.7"
   }
 }

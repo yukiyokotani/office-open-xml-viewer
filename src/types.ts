@@ -135,6 +135,8 @@ export interface PictureElement {
   flipV: boolean;
   /** Data URL, e.g. "data:image/png;base64,..." */
   dataUrl: string;
+  /** OOXML adj value (0–100000) for roundRect clip, null = plain rectangle */
+  clipAdjust: number | null;
 }
 
 export type Fill = SolidFill | NoFill | GradientFill;

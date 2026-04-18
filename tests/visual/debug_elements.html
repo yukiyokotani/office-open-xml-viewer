@@ -53,6 +53,11 @@
         detail = `${rows}×${cols} cols=[${(el.cols ?? []).join(',')}] first="${firstCellText}"`;
       } else if (el.type === 'picture') {
         detail = `img len=${el.dataUrl?.length ?? 0}`;
+      } else if (el.type === 'chart') {
+        detail = `chartType=${el.chartType} valMax=${el.valMax} showDataLabels=${el.showDataLabels} series=${el.series?.length ?? 0} cats=${el.categories?.length ?? 0}`;
+        for (const [si, ser] of (el.series ?? []).entries()) {
+          output.push(`    ser[${si}] name="${ser.name}" color=${ser.color} vals=[${(ser.values ?? []).slice(0,5).join(',')}...]`);
+        }
       } else if (el.type === 'group') {
         detail = `${el.elements?.length ?? 0} children`;
       }

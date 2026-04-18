@@ -162,6 +162,9 @@ struct PictureElement {
     flip_h: bool,
     flip_v: bool,
     data_url: String,
+    /// OOXML adj value (0–100000) for roundRect clip; None = plain rectangle
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clip_adjust: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1509,7 +1512,8 @@ fn parse_text_body(
     let vert = body_pr.and_then(|n| attr(&n, "vert")).unwrap_or_else(|| "horz".into());
     let auto_fit = body_pr.map(|n| {
         if child(n, "spAutoFit").is_some() { "sp".to_owned() }
-        else if child(n, "normAutoFit").is_some() { "norm".to_owned() }
+        // OOXML uses lowercase 'f': normAutofit (not normAutoFit)
+        else if child(n, "normAutofit").is_some() { "norm".to_owned() }
         else { "none".to_owned() }
     }).unwrap_or_else(|| "none".to_owned());
 
@@ -2323,7 +2327,8 @@ fn parse_picture(
 
     Some(PictureElement {
         x: t.x, y: t.y, width: t.cx, height: t.cy,
-        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v, data_url,
+        rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+        data_url, clip_adjust: None,
     })
 }
 
@@ -2751,9 +2756,18 @@ fn parse_sp_tree_node(
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
                                 let mime = mime_from_ext(&image_path);
                                 let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+                                // If the sp has a roundRect preset geometry, record adj for corner clipping
+                                let clip_adjust = sp_pr_node
+                                    .and_then(|p| child(p, "prstGeom"))
+                                    .filter(|pg| attr(pg, "prst").as_deref() == Some("roundRect"))
+                                    .and_then(|pg| child(pg, "avLst"))
+                                    .and_then(|avlst| avlst.children().find(|n| n.is_element()))
+                                    .and_then(|gd| attr(&gd, "fmla"))
+                                    .and_then(|fmla| fmla.strip_prefix("val ").and_then(|v| v.parse::<i64>().ok()));
                                 out.push(SlideElement::Picture(PictureElement {
                                     x: t.x, y: t.y, width: t.cx, height: t.cy,
-                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v, data_url,
+                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+                                    data_url, clip_adjust,
                                 }));
                                 return;
                             }
@@ -2788,7 +2802,7 @@ fn parse_sp_tree_node(
                                     out.push(SlideElement::Picture(PictureElement {
                                         x: t.x, y: t.y, width: t.cx, height: t.cy,
                                         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-                                        data_url,
+                                        data_url, clip_adjust: None,
                                     }));
                                 }
                             }
