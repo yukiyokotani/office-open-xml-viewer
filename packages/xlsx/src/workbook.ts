@@ -1,4 +1,5 @@
 import InlineWorker from './worker.ts?worker&inline';
+import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 import { renderViewport } from './renderer.js';
 
@@ -10,6 +11,8 @@ export class XlsxWorkbook {
 
   constructor() {
     this.worker = new InlineWorker();
+    const wasmUrl = new URL(wasmAssetUrl, location.href).href;
+    this.worker.postMessage({ type: 'init', wasmUrl });
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {

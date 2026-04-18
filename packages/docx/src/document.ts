@@ -1,5 +1,6 @@
 import type { Document, RenderPageOptions } from './types';
 import { renderDocumentToCanvas } from './renderer';
+import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 
 export class DocxDocument {
   private _document: Document | null = null;
@@ -20,7 +21,7 @@ export class DocxDocument {
 
   private async _parse(buffer: ArrayBuffer): Promise<void> {
     const wasmModule = await import('./wasm/docx_parser.js');
-    await wasmModule.default();
+    await wasmModule.default(new URL(wasmAssetUrl, location.href).href);
     const bytes = new Uint8Array(buffer);
     const json = wasmModule.parse_docx(bytes);
     const parsed = JSON.parse(json);

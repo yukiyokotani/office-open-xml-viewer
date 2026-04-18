@@ -164,6 +164,7 @@ export interface RenderViewportOptions {
 }
 
 export type WorkerRequest =
+  | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; data: ArrayBuffer }
   | { type: 'parseSheet'; data: ArrayBuffer; sheetIndex: number; sheetName: string };
 

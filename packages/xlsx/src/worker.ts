@@ -1,20 +1,18 @@
 import init, { parse_xlsx, parse_sheet } from './wasm/xlsx_parser.js';
 import type { WorkerRequest, WorkerResponse } from './types.js';
 
-let initialized = false;
-
-async function ensureInit(): Promise<void> {
-  if (!initialized) {
-    await init();
-    initialized = true;
-  }
-}
+let initPromise: Promise<void> | null = null;
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
-  try {
-    await ensureInit();
-    const req = e.data;
+  const req = e.data;
 
+  if (req.type === 'init') {
+    initPromise = init(req.wasmUrl);
+    return;
+  }
+
+  try {
+    await initPromise;
     if (req.type === 'parse') {
       const json = parse_xlsx(new Uint8Array(req.data));
       const workbook = JSON.parse(json);
