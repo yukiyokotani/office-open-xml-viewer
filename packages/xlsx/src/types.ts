@@ -32,11 +32,11 @@ export interface Cell {
 }
 
 export type CellValue =
-  | { type: 'Empty' }
-  | { type: 'Text'; text: string }
-  | { type: 'Number'; number: number }
-  | { type: 'Bool'; bool: boolean }
-  | { type: 'Error'; error: string };
+  | { type: 'empty' }
+  | { type: 'text'; text: string }
+  | { type: 'number'; number: number }
+  | { type: 'bool'; bool: boolean }
+  | { type: 'error'; error: string };
 
 export interface Styles {
   fonts: Font[];

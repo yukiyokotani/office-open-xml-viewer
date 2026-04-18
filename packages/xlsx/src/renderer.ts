@@ -21,10 +21,10 @@ function hexToRgba(hex: string, alpha = 1): string {
   return alpha === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
 }
 
-function buildFont(font: Font, scale: number): string {
+function buildFont(font: Font): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
-  const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX * scale);
+  const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
   const family = font.name ? `"${font.name}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
   return `${style}${weight}${sizePx}px ${family}`;
 }
@@ -41,11 +41,11 @@ function resolveXf(styles: Styles, styleIndex: number): { font: Font; fill: Fill
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
-    case 'Empty': return '';
-    case 'Text': return value.text;
-    case 'Number': return String(value.number);
-    case 'Bool': return value.bool ? 'TRUE' : 'FALSE';
-    case 'Error': return value.error;
+    case 'empty': return '';
+    case 'text': return value.text;
+    case 'number': return String(value.number);
+    case 'bool': return value.bool ? 'TRUE' : 'FALSE';
+    case 'error': return value.error;
   }
 }
 
@@ -54,9 +54,8 @@ export function renderViewport(
   worksheet: Worksheet,
   styles: Styles,
   viewport: ViewportRange,
-  opts: RenderViewportOptions = {},
+  _opts: RenderViewportOptions = {},
 ): void {
-  const scale = opts.dpr ?? 1;
   const canvasW = ctx.canvas.width;
   const canvasH = ctx.canvas.height;
 
@@ -119,22 +118,22 @@ export function renderViewport(
 
       // Grid line (light gray default)
       ctx.strokeStyle = '#d0d0d0';
-      ctx.lineWidth = 0.5 * scale;
+      ctx.lineWidth = 0.5;
       ctx.strokeRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
 
       // Border edges
-      renderBorder(ctx, border, cx, cy, cw, ch, scale);
+      renderBorder(ctx, border, cx, cy, cw, ch);
 
       if (!cell) continue;
       const text = cellValueText(cell.value);
       if (!text) continue;
 
       // Text
-      ctx.font = buildFont(font, scale);
+      ctx.font = buildFont(font);
       ctx.fillStyle = font.color ? hexToRgba(font.color) : '#000000';
 
-      const paddingX = 2 * scale;
-      const alignH = xf.alignH ?? (cell.value.type === 'Number' ? 'right' : 'left');
+      const paddingX = 2;
+      const alignH = xf.alignH ?? (cell.value.type === 'number' ? 'right' : 'left');
 
       let textX: number;
       let textAlign: CanvasTextAlign;
@@ -169,7 +168,6 @@ function renderBorder(
   y: number,
   w: number,
   h: number,
-  scale: number,
 ): void {
   const edges = [
     { edge: border.top, x1: x, y1: y, x2: x + w, y2: y },
@@ -181,7 +179,7 @@ function renderBorder(
     if (!edge || !edge.style || edge.style === 'none') continue;
     ctx.beginPath();
     ctx.strokeStyle = edge.color ? hexToRgba(edge.color) : '#000000';
-    ctx.lineWidth = borderStyleWidth(edge.style) * scale;
+    ctx.lineWidth = borderStyleWidth(edge.style);
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
