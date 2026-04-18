@@ -9,8 +9,7 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @ooxml/pptx wasm && pnpm --filter @ooxml/xlsx wasm && pnpm --filter @ooxml/docx wasm",
-    "vrt": "pnpm --filter @ooxml/pptx vrt",
-    "wasm:pptx": "pnpm --filter @ooxml/pptx wasm"
+    "vrt": "pnpm --filter @ooxml/pptx vrt"
   },
   "devDependencies": {
     "@chromatic-com/storybook": "^5.1.2",
