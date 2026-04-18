@@ -964,6 +964,12 @@ struct LayoutPlaceholders {
     by_type_italic: HashMap<String, bool>,
     /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
     by_type_anchor: HashMap<String, String>,
+    /// Default paragraph alignment per placeholder type, from layout/master lstStyle
+    by_type_alignment: HashMap<String, String>,
+    /// Default space-before (hundredths of pt) per placeholder type, from layout lstStyle
+    by_type_space_before: HashMap<String, i64>,
+    /// Default space-after (hundredths of pt) per placeholder type, from layout lstStyle
+    by_type_space_after: HashMap<String, i64>,
     /// Stroke per placeholder type from layout spPr > ln
     by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
@@ -1007,6 +1013,22 @@ impl LayoutPlaceholders {
     fn lookup_anchor(&self, ph_type: &str) -> Option<String> {
         self.by_type_anchor.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_anchor.get("").cloned() } else { None })
+    }
+
+    /// Look up inherited paragraph alignment for this placeholder type.
+    fn lookup_alignment(&self, ph_type: &str) -> Option<String> {
+        self.by_type_alignment.get(ph_type).cloned()
+            .or_else(|| if ph_type == "body" { self.by_type_alignment.get("").cloned() } else { None })
+    }
+
+    fn lookup_space_before(&self, ph_type: &str) -> Option<i64> {
+        self.by_type_space_before.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_space_before.get("").copied() } else { None })
+    }
+
+    fn lookup_space_after(&self, ph_type: &str) -> Option<i64> {
+        self.by_type_space_after.get(ph_type).copied()
+            .or_else(|| if ph_type == "body" { self.by_type_space_after.get("").copied() } else { None })
     }
 
     /// Look up inherited stroke from the layout placeholder spPr > ln.
@@ -1157,14 +1179,26 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         // xfrm may be absent (placeholder inherits transform from master); parse if present
         let t_opt: Option<Transform> = child(sp_pr, "xfrm").map(parse_xfrm);
 
-        // Extract layout-level defaults from the placeholder's txBody > lstStyle > lvl1pPr > defRPr
-        let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = child(sp, "txBody")
+        // Extract layout-level defaults from the placeholder's txBody > lstStyle > lvl1pPr
+        let layout_lvl1_ppr: Option<roxmltree::Node<'_, '_>> = child(sp, "txBody")
             .and_then(|tb| child(tb, "lstStyle"))
-            .and_then(|ls| child(ls, "lvl1pPr"))
+            .and_then(|ls| child(ls, "lvl1pPr"));
+        let layout_def_rpr: Option<roxmltree::Node<'_, '_>> = layout_lvl1_ppr
             .and_then(|lp| child(lp, "defRPr"));
         let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+        let layout_alignment: Option<String> = layout_lvl1_ppr
+            .and_then(|lp| attr(&lp, "algn"))
+            .map(|a| a.to_string());
+        let layout_space_before: Option<i64> = layout_lvl1_ppr
+            .and_then(|lp| child(lp, "spcBef"))
+            .and_then(|s| child(s, "spcPts"))
+            .and_then(|s| attr_i64(&s, "val"));
+        let layout_space_after: Option<i64> = layout_lvl1_ppr
+            .and_then(|lp| child(lp, "spcAft"))
+            .and_then(|s| child(s, "spcPts"))
+            .and_then(|s| attr_i64(&s, "val"));
 
         // Layout bodyPr anchor; fall back to master anchor map
         let layout_anchor: Option<String> = child(sp, "txBody")
@@ -1205,6 +1239,15 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             if let Some(i) = layout_italic {
                 lph.by_type_italic.entry(ph_type.clone()).or_insert(i);
             }
+            if let Some(a) = layout_alignment {
+                lph.by_type_alignment.entry(ph_type.clone()).or_insert(a);
+            }
+            if let Some(v) = layout_space_before {
+                lph.by_type_space_before.entry(ph_type.clone()).or_insert(v);
+            }
+            if let Some(v) = layout_space_after {
+                lph.by_type_space_after.entry(ph_type.clone()).or_insert(v);
+            }
             // Anchor: layout bodyPr > fall back to master anchor map
             let effective_anchor = layout_anchor.clone()
                 .or_else(|| master_anchors.get(&ph_type).cloned());
@@ -1233,6 +1276,9 @@ fn parse_text_body(
     inherited_bold: Option<bool>,
     inherited_italic: Option<bool>,
     inherited_anchor: Option<String>,
+    inherited_alignment: Option<String>,
+    inherited_space_before: Option<i64>,
+    inherited_space_after: Option<i64>,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     let vertical_anchor = body_pr
@@ -1253,10 +1299,10 @@ fn parse_text_body(
         else { "none".to_owned() }
     }).unwrap_or_else(|| "none".to_owned());
 
-    // Own lstStyle > lvl1pPr > defRPr, then fall back to layout/master inherited values
-    let own_def_rpr = child(tx_body, "lstStyle")
-        .and_then(|ls| child(ls, "lvl1pPr"))
-        .and_then(|lp| child(lp, "defRPr"));
+    // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
+    let own_lvl1_ppr = child(tx_body, "lstStyle")
+        .and_then(|ls| child(ls, "lvl1pPr"));
+    let own_def_rpr = own_lvl1_ppr.and_then(|lp| child(lp, "defRPr"));
     let default_font_size = own_def_rpr.and_then(|rp| attr_f64(&rp, "sz"))
         .map(|v| v / 100.0)
         .or(inherited_font_size);
@@ -1266,10 +1312,27 @@ fn parse_text_body(
     let default_italic = own_def_rpr
         .and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true")
         .or(inherited_italic);
+    // Own lstStyle > lvl1pPr > algn overrides inherited alignment
+    let body_default_alignment = own_lvl1_ppr
+        .and_then(|lp| attr(&lp, "algn"))
+        .map(|a| a.to_string())
+        .or(inherited_alignment);
+
+    // Own lstStyle > lvl1pPr spacing overrides inherited
+    let own_lvl1_spcbef: Option<i64> = own_lvl1_ppr
+        .and_then(|lp| child(lp, "spcBef"))
+        .and_then(|s| child(s, "spcPts"))
+        .and_then(|s| attr_i64(&s, "val"));
+    let own_lvl1_spcaft: Option<i64> = own_lvl1_ppr
+        .and_then(|lp| child(lp, "spcAft"))
+        .and_then(|s| child(s, "spcPts"))
+        .and_then(|s| attr_i64(&s, "val"));
+    let body_default_space_before = own_lvl1_spcbef.or(inherited_space_before);
+    let body_default_space_after  = own_lvl1_spcaft.or(inherited_space_after);
 
     let paragraphs = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme))
+        .map(|p| parse_paragraph(p, theme, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after))
         .collect();
 
     TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit }
@@ -1278,10 +1341,17 @@ fn parse_text_body(
 fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
+    body_default_alignment: Option<&str>,
+    body_default_space_before: Option<i64>,
+    body_default_space_after: Option<i64>,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
-    let alignment  = p_pr.and_then(|n| attr(&n, "algn")).unwrap_or_else(|| "l".into());
+    // Paragraph's own algn → body/layout/master default → "l"
+    let alignment = p_pr.and_then(|n| attr(&n, "algn"))
+        .map(|a| a.to_string())
+        .or_else(|| body_default_alignment.map(|a| a.to_string()))
+        .unwrap_or_else(|| "l".into());
     let lvl: u32   = p_pr.and_then(|n| attr(&n, "lvl")).and_then(|v| v.parse().ok()).unwrap_or(0);
 
     // Detect whether the paragraph has an explicit bullet character (buChar/buAutoNum).
@@ -1307,10 +1377,10 @@ fn parse_paragraph(
 
     let space_before = p_pr.and_then(|n| {
         child(n, "spcBef").and_then(|s| child(s, "spcPts")).and_then(|s| attr_i64(&s, "val"))
-    });
+    }).or(body_default_space_before);
     let space_after = p_pr.and_then(|n| {
         child(n, "spcAft").and_then(|s| child(s, "spcPts")).and_then(|s| attr_i64(&s, "val"))
-    });
+    }).or(body_default_space_after);
 
     let space_line = p_pr.and_then(|n| {
         let spc = child(n, "lnSpc")?;
@@ -1862,19 +1932,23 @@ fn parse_shape(
     };
 
     // Inherited defaults from layout/master for this placeholder type/idx
-    let (inherited_font_size, inherited_bold, inherited_italic, inherited_anchor) = if ph_node.is_some() {
+    let (inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment,
+         inherited_space_before, inherited_space_after) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
             lph.lookup_italic(&ph_type),
             lph.lookup_anchor(&ph_type),
+            lph.lookup_alignment(&ph_type),
+            lph.lookup_space_before(&ph_type),
+            lph.lookup_space_after(&ph_type),
         )
     } else {
-        (None, None, None, None)
+        (None, None, None, None, None, None, None)
     };
 
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor));
+        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after));
 
     // Shadow from spPr > effectLst > outerShdw
     let shadow = sp_pr
@@ -2008,7 +2082,7 @@ fn parse_table_cell(
     tc: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> TableCell {
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, None));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, None, None, None, None));
 
     let tc_pr = child(tc, "tcPr");
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
