@@ -997,6 +997,12 @@ struct LayoutPlaceholders {
     by_type_stroke: HashMap<String, Stroke>,
     /// Stroke per placeholder idx from layout spPr > ln
     by_idx_stroke: HashMap<u32, Stroke>,
+    /// Default line spacing (spcPct val, e.g. 90000 = 90%) per placeholder idx, from layout lstStyle
+    by_idx_line_spacing: HashMap<u32, f64>,
+    /// Default line spacing (spcPct val) per placeholder type, from layout lstStyle
+    by_type_line_spacing: HashMap<String, f64>,
+    /// Paragraph alignment per placeholder type from master lstStyle > lvl1pPr algn (fallback)
+    by_type_master_alignment: HashMap<String, String>,
 }
 
 impl LayoutPlaceholders {
@@ -1042,6 +1048,8 @@ impl LayoutPlaceholders {
     fn lookup_alignment(&self, ph_type: &str) -> Option<String> {
         self.by_type_alignment.get(ph_type).cloned()
             .or_else(|| if ph_type == "body" { self.by_type_alignment.get("").cloned() } else { None })
+            .or_else(|| self.by_type_master_alignment.get(ph_type).cloned())
+            .or_else(|| if ph_type == "body" { self.by_type_master_alignment.get("").cloned() } else { None })
     }
 
     fn lookup_space_before(&self, ph_type: &str) -> Option<i64> {
@@ -1060,6 +1068,14 @@ impl LayoutPlaceholders {
             .and_then(|i| self.by_idx_stroke.get(&i).cloned())
             .or_else(|| self.by_type_stroke.get(ph_type).cloned())
             .or_else(|| if ph_type == "body" { self.by_type_stroke.get("").cloned() } else { None })
+    }
+
+    /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
+    fn lookup_line_spacing(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
+        ph_idx
+            .and_then(|i| self.by_idx_line_spacing.get(&i).copied())
+            .or_else(|| self.by_type_line_spacing.get(ph_type).copied())
+            .or_else(|| if ph_type == "body" { self.by_type_line_spacing.get("").copied() } else { None })
     }
 }
 
@@ -1091,6 +1107,33 @@ fn parse_master_anchors(master_xml: &str) -> HashMap<String, String> {
                     .and_then(|bp| attr(&bp, "anchor"))
                 {
                     map.entry(ph_type).or_insert(anchor.to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Parse paragraph alignment from master placeholder shapes' lstStyle > lvl1pPr algn attribute.
+fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            let ph_node = sp.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(algn) = child(sp, "txBody")
+                    .and_then(|tb| child(tb, "lstStyle"))
+                    .and_then(|ls| child(ls, "lvl1pPr"))
+                    .and_then(|lp| attr(&lp, "algn"))
+                {
+                    map.entry(ph_type).or_insert(algn.to_string());
                 }
             }
         }
@@ -1171,9 +1214,10 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     lph.master_by_type = master_transforms.clone();
+    lph.by_type_master_alignment = master_alignments.clone();
     let doc = match roxmltree::Document::parse(layout_xml) {
         Ok(d) => d,
         Err(_) => return lph,
@@ -1222,6 +1266,11 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             .and_then(|lp| child(lp, "spcAft"))
             .and_then(|s| child(s, "spcPts"))
             .and_then(|s| attr_i64(&s, "val"));
+        // lnSpc > spcPct val (e.g. 90000 = 90%)
+        let layout_line_spacing: Option<f64> = layout_lvl1_ppr
+            .and_then(|lp| child(lp, "lnSpc"))
+            .and_then(|ls| child(ls, "spcPct"))
+            .and_then(|s| attr_f64(&s, "val"));
 
         // Layout bodyPr anchor; fall back to master anchor map
         let layout_anchor: Option<String> = child(sp, "txBody")
@@ -1250,6 +1299,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if let Some(ref s) = layout_stroke {
                     lph.by_idx_stroke.entry(idx).or_insert(s.clone());
                 }
+                if let Some(ls) = layout_line_spacing {
+                    lph.by_idx_line_spacing.entry(idx).or_insert(ls);
+                }
             }
             let effective_fs = layout_font_size
                 .or_else(|| master_font_sizes.get(&ph_type).copied());
@@ -1270,6 +1322,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             }
             if let Some(v) = layout_space_after {
                 lph.by_type_space_after.entry(ph_type.clone()).or_insert(v);
+            }
+            if let Some(ls) = layout_line_spacing {
+                lph.by_type_line_spacing.entry(ph_type.clone()).or_insert(ls);
             }
             // Anchor: layout bodyPr > fall back to master anchor map
             let effective_anchor = layout_anchor.clone()
@@ -1302,6 +1357,7 @@ fn parse_text_body(
     inherited_alignment: Option<String>,
     inherited_space_before: Option<i64>,
     inherited_space_after: Option<i64>,
+    inherited_line_spacing: Option<f64>,
 ) -> TextBody {
     let body_pr = child(tx_body, "bodyPr");
     let vertical_anchor = body_pr
@@ -1353,9 +1409,16 @@ fn parse_text_body(
     let body_default_space_before = own_lvl1_spcbef.or(inherited_space_before);
     let body_default_space_after  = own_lvl1_spcaft.or(inherited_space_after);
 
+    // Own lstStyle > lvl1pPr > lnSpc overrides inherited line spacing
+    let own_lvl1_line_spacing: Option<f64> = own_lvl1_ppr
+        .and_then(|lp| child(lp, "lnSpc"))
+        .and_then(|ls| child(ls, "spcPct"))
+        .and_then(|s| attr_f64(&s, "val"));
+    let body_default_line_spacing = own_lvl1_line_spacing.or(inherited_line_spacing);
+
     let paragraphs = children_vec(tx_body, "p")
         .into_iter()
-        .map(|p| parse_paragraph(p, theme, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after))
+        .map(|p| parse_paragraph(p, theme, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
         .collect();
 
     TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit }
@@ -1367,6 +1430,7 @@ fn parse_paragraph(
     body_default_alignment: Option<&str>,
     body_default_space_before: Option<i64>,
     body_default_space_after: Option<i64>,
+    body_default_line_spacing: Option<f64>,
 ) -> Paragraph {
     let p_pr = child(p_node, "pPr");
 
@@ -1414,7 +1478,7 @@ fn parse_paragraph(
                 .and_then(|pts| attr_f64(&pts, "val"))
                 .map(|v| SpaceLine::Pts { val: v / 100.0 }) // hundredths of pt → pt
         }
-    });
+    }).or_else(|| body_default_line_spacing.map(|v| SpaceLine::Pct { val: v }));
 
     let bullet = parse_bullet(p_pr, theme);
 
@@ -1978,7 +2042,7 @@ fn parse_shape(
 
     // Inherited defaults from layout/master for this placeholder type/idx
     let (inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment,
-         inherited_space_before, inherited_space_after) = if ph_node.is_some() {
+         inherited_space_before, inherited_space_after, inherited_line_spacing) = if ph_node.is_some() {
         (
             lph.lookup_font_size(&ph_type, ph_idx),
             lph.lookup_bold(&ph_type),
@@ -1987,13 +2051,14 @@ fn parse_shape(
             lph.lookup_alignment(&ph_type),
             lph.lookup_space_before(&ph_type),
             lph.lookup_space_after(&ph_type),
+            lph.lookup_line_spacing(&ph_type, ph_idx),
         )
     } else {
-        (None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None)
     };
 
     let text_body = child(sp_node, "txBody")
-        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after));
+        .map(|n| parse_text_body(n, theme, inherited_font_size, inherited_bold, inherited_italic, inherited_anchor, inherited_alignment, inherited_space_before, inherited_space_after, inherited_line_spacing));
 
     // Shadow from spPr > effectLst > outerShdw
     let shadow = sp_pr
@@ -2296,7 +2361,7 @@ fn parse_table_cell(
     let tc_pr = child(tc, "tcPr");
     // tcPr > anchor controls vertical text alignment within the cell
     let anchor = tc_pr.and_then(|n| attr(&n, "anchor")).map(|a| a.to_string());
-    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, anchor, None, None, None));
+    let text_body = child(tc, "txBody").map(|n| parse_text_body(n, theme, None, None, None, anchor, None, None, None, None));
 
     let fill = tc_pr.and_then(|n| parse_fill(n, theme));
 
@@ -2330,13 +2395,14 @@ fn parse_slide(
     master_font_sizes: &HashMap<String, f64>,
     master_anchors: &HashMap<String, String>,
     master_transforms: &HashMap<String, Transform>,
+    master_alignments: &HashMap<String, String>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, theme))
+        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, theme))
         .unwrap_or_default();
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -2698,6 +2764,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_transforms(xml))
         .unwrap_or_default();
 
+    let master_alignments: HashMap<String, String> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_alignments(xml))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -2762,6 +2833,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_font_sizes,
             &master_anchors,
             &master_transforms,
+            &master_alignments,
             raw.index,
             &raw.slide_rels,
             &mut zip,
@@ -2872,4 +2944,6 @@ mod tests {
             println!("parse_chartex: {:?}", r.is_some());
         }
     }
+
+
 }
