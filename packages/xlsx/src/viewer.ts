@@ -218,10 +218,23 @@ export class XlsxViewer {
     // Effective scrollable area in logical pixels (canvas / cs - headers - frozen)
     const cellW = w / cs - HEADER_W - frozenW;
     const cellH = h / cs - HEADER_H - frozenH;
-    const avgCW = colWidthToPx(ws.defaultColWidth);
-    const avgRH = rowHeightToPx(ws.defaultRowHeight);
-    const cols = Math.ceil((cellW + offsetX) / Math.max(avgCW, 1)) + 2;
-    const rows = Math.ceil((cellH + offsetY) / Math.max(avgRH, 1)) + 2;
+
+    // Compute exact number of visible columns by walking actual widths (+ 2 buffer)
+    let cols = 0;
+    { let xAcc = -offsetX; let c = startCol;
+      while (xAcc < cellW + offsetX && c <= 16384) {
+        xAcc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth); cols++; c++;
+      }
+      cols += 2;
+    }
+    // Compute exact number of visible rows by walking actual heights (+ 2 buffer)
+    let rows = 0;
+    { let yAcc = -offsetY; let r = startRow;
+      while (yAcc < cellH + offsetY && r <= 1048576) {
+        yAcc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight); rows++; r++;
+      }
+      rows += 2;
+    }
 
     const viewport: ViewportRange = { row: startRow, col: startCol, rows, cols };
 

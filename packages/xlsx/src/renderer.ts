@@ -329,6 +329,7 @@ interface RenderContext {
   startRow: number;  // first scrollable row index
   startCol: number;  // first scrollable col index
   cs: number;        // cell scale factor (default 1)
+  dpr: number;       // device pixel ratio
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -345,7 +346,7 @@ function renderQuadrant(
 ): void {
   if (clipW <= 0 || clipH <= 0) return;
 
-  const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs } = rc;
+  const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs, dpr } = rc;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
 
@@ -411,10 +412,28 @@ function renderQuadrant(
         }
       }
 
-      // Grid line
-      ctx.strokeStyle = '#d0d0d0';
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
+      // Grid lines – draw only right + bottom edges once per cell (avoids double-drawing at
+      // shared cell boundaries). Half-device-pixel offset (0.5/dpr) aligns each line to the
+      // device pixel grid so we get a crisp 1-device-pixel result.
+      {
+        const hp = 0.5 / dpr;
+        ctx.strokeStyle = '#d0d0d0';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(cx + cellW + hp, cy);          // right edge
+        ctx.lineTo(cx + cellW + hp, cy + cellH);
+        ctx.moveTo(cx, cy + cellH + hp);           // bottom edge
+        ctx.lineTo(cx + cellW, cy + cellH + hp);
+        if (ri === 0) {                            // top edge for first row
+          ctx.moveTo(cx, cy + hp);
+          ctx.lineTo(cx + cellW, cy + hp);
+        }
+        if (ci === 0) {                            // left edge for first column
+          ctx.moveTo(cx + hp, cy);
+          ctx.lineTo(cx + hp, cy + cellH);
+        }
+        ctx.stroke();
+      }
 
       // Cell borders
       renderBorder(ctx, border, cx, cy, cellW, cellH);
@@ -606,6 +625,7 @@ export function renderViewport(
     frozenW, frozenH,
     startRow, startCol,
     cs,
+    dpr,
   };
 
   // Canvas areas for each quadrant
