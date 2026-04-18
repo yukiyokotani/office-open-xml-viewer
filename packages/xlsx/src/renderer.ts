@@ -31,10 +31,10 @@ function hexToRgba(hex: string, alpha = 1): string {
   return alpha === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
 }
 
-function buildFont(font: Font): string {
+function buildFont(font: Font, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
-  const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
+  const sizePx = Math.max(1, Math.round(font.size * ROW_HEIGHT_TO_PX * cs));
   const family = font.name ? `"${font.name}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
   return `${style}${weight}${sizePx}px ${family}`;
 }
@@ -328,6 +328,7 @@ interface RenderContext {
   frozenH: number;
   startRow: number;  // first scrollable row index
   startCol: number;  // first scrollable col index
+  cs: number;        // cell scale factor (default 1)
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -344,7 +345,7 @@ function renderQuadrant(
 ): void {
   if (clipW <= 0 || clipH <= 0) return;
 
-  const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext } = rc;
+  const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs } = rc;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
 
@@ -427,7 +428,7 @@ function renderQuadrant(
       const fontForDraw: Font = effectiveBold !== font.bold || effectiveItalic !== font.italic
         ? { ...font, bold: effectiveBold, italic: effectiveItalic }
         : font;
-      ctx.font = buildFont(fontForDraw);
+      ctx.font = buildFont(fontForDraw, cs);
       const textColor = cf.fontColor ?? font.color;
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
@@ -527,47 +528,44 @@ export function renderViewport(
 ): void {
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
-  const physW = ctx.canvas.width / dpr;
-  const physH = ctx.canvas.height / dpr;
-  // Logical canvas size: the "virtual" coordinate space in which cells are drawn
-  const canvasW = physW / cs;
-  const canvasH = physH / cs;
+  const canvasW = ctx.canvas.width / dpr;
+  const canvasH = ctx.canvas.height / dpr;
 
-  // Clear the full physical canvas before applying scale transform
-  ctx.clearRect(0, 0, physW, physH);
+  ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, physW, physH);
+  ctx.fillRect(0, 0, canvasW, canvasH);
 
-  // Apply cell scale: all subsequent drawing is in logical coordinates
-  ctx.save();
-  ctx.scale(cs, cs);
+  // Scaled pixel helper: apply cellScale to all cell/header dimensions
+  const sp = (px: number) => Math.round(px * cs);
+  const hw = sp(HEADER_W);  // scaled header column width
+  const hh = sp(HEADER_H);  // scaled header row height
 
   const { row: startRow, col: startCol, rows: numRows, cols: numCols } = viewport;
-  const scrollOffsetX = opts.scrollOffsetX ?? 0;
-  const scrollOffsetY = opts.scrollOffsetY ?? 0;
+  const scrollOffsetX = (opts.scrollOffsetX ?? 0) * cs;
+  const scrollOffsetY = (opts.scrollOffsetY ?? 0) * cs;
   const freezeRows = opts.freezeRows ?? 0;
   const freezeCols = opts.freezeCols ?? 0;
 
-  // ── Compute frozen area pixel sizes ──────────────────────────
+  // ── Compute frozen area pixel sizes (scaled) ─────────────────
   const frozenColWidths: number[] = [];
   for (let c = 1; c <= freezeCols; c++) {
-    frozenColWidths.push(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
+    frozenColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth)));
   }
   const frozenRowHeights: number[] = [];
   for (let r = 1; r <= freezeRows; r++) {
-    frozenRowHeights.push(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
+    frozenRowHeights.push(sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight)));
   }
   const frozenW = frozenColWidths.reduce((s, w) => s + w, 0);
   const frozenH = frozenRowHeights.reduce((s, h) => s + h, 0);
 
-  // ── Scrollable col/row pixel widths ──────────────────────────
+  // ── Scrollable col/row pixel widths (scaled) ─────────────────
   const scrollColWidths: number[] = [];
   for (let c = startCol; c < startCol + numCols; c++) {
-    scrollColWidths.push(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
+    scrollColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth)));
   }
   const scrollRowHeights: number[] = [];
   for (let r = startRow; r < startRow + numRows; r++) {
-    scrollRowHeights.push(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
+    scrollRowHeights.push(sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight)));
   }
 
   // ── Build cell & merge lookup ────────────────────────────────
@@ -583,11 +581,11 @@ export function renderViewport(
   for (const mc of worksheet.mergeCells ?? []) {
     let totalW = 0;
     for (let c = mc.left; c <= mc.right; c++) {
-      totalW += colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth);
+      totalW += sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
     }
     let totalH = 0;
     for (let r = mc.top; r <= mc.bottom; r++) {
-      totalH += rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight);
+      totalH += sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
     }
     mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH });
     for (let r = mc.top; r <= mc.bottom; r++) {
@@ -607,11 +605,12 @@ export function renderViewport(
     frozenColWidths, frozenRowHeights,
     frozenW, frozenH,
     startRow, startCol,
+    cs,
   };
 
   // Canvas areas for each quadrant
-  const cellAreaX = HEADER_W;
-  const cellAreaY = HEADER_H;
+  const cellAreaX = hw;
+  const cellAreaY = hh;
   const scrollAreaX = cellAreaX + frozenW;
   const scrollAreaY = cellAreaY + frozenH;
   const scrollAreaW = Math.max(0, canvasW - scrollAreaX);
@@ -662,6 +661,7 @@ export function renderViewport(
     scrollOffsetX, scrollOffsetY,
     frozenColWidths, frozenRowHeights,
     frozenW, frozenH,
+    hw, hh, cs,
   );
 
   // ── Freeze pane separator lines ──────────────────────────────
@@ -670,7 +670,7 @@ export function renderViewport(
     ctx.strokeStyle = FREEZE_LINE_COLOR;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(HEADER_W, scrollAreaY + 0.5);
+    ctx.moveTo(hw, scrollAreaY + 0.5);
     ctx.lineTo(canvasW, scrollAreaY + 0.5);
     ctx.stroke();
     ctx.restore();
@@ -680,14 +680,11 @@ export function renderViewport(
     ctx.strokeStyle = FREEZE_LINE_COLOR;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(scrollAreaX + 0.5, HEADER_H);
+    ctx.moveTo(scrollAreaX + 0.5, hh);
     ctx.lineTo(scrollAreaX + 0.5, canvasH);
     ctx.stroke();
     ctx.restore();
   }
-
-  // Restore the cellScale transform applied at the start
-  ctx.restore();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -702,20 +699,22 @@ function renderHeaders(
   scrollOffsetX: number, scrollOffsetY: number,
   frozenColWidths: number[], frozenRowHeights: number[],
   frozenW: number, frozenH: number,
+  hw: number, hh: number, cs: number,
 ): void {
   const HEADER_BG = '#f8f9fa';
   const HEADER_BORDER = '#c8ccd0';
   const HEADER_TEXT = '#444';
-  const HEADER_FONT = `11px ${DEFAULT_FONT_FAMILY}`;
-  const scrollAreaX = HEADER_W + frozenW;
-  const scrollAreaY = HEADER_H + frozenH;
+  const headerFontSize = Math.max(1, Math.round(11 * cs));
+  const HEADER_FONT = `${headerFontSize}px ${DEFAULT_FONT_FAMILY}`;
+  const scrollAreaX = hw + frozenW;
+  const scrollAreaY = hh + frozenH;
 
   // Corner
   ctx.fillStyle = HEADER_BG;
-  ctx.fillRect(0, 0, HEADER_W, HEADER_H);
+  ctx.fillRect(0, 0, hw, hh);
   ctx.strokeStyle = HEADER_BORDER;
   ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, HEADER_W - 1, HEADER_H - 1);
+  ctx.strokeRect(0.5, 0.5, hw - 1, hh - 1);
 
   ctx.font = HEADER_FONT;
   ctx.fillStyle = HEADER_TEXT;
@@ -723,36 +722,36 @@ function renderHeaders(
   // Helper: draw one column header cell
   const drawColHeader = (col: number, cx: number, cw: number) => {
     ctx.fillStyle = HEADER_BG;
-    ctx.fillRect(cx, 0, cw, HEADER_H);
+    ctx.fillRect(cx, 0, cw, hh);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
-    ctx.strokeRect(cx + 0.5, 0.5, cw - 1, HEADER_H - 1);
+    ctx.strokeRect(cx + 0.5, 0.5, cw - 1, hh - 1);
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(colToLetter(col), cx + cw / 2, HEADER_H / 2);
+    ctx.fillText(colToLetter(col), cx + cw / 2, hh / 2);
   };
 
   // Helper: draw one row header cell
   const drawRowHeader = (row: number, cy: number, ch: number) => {
     ctx.fillStyle = HEADER_BG;
-    ctx.fillRect(0, cy, HEADER_W, ch);
+    ctx.fillRect(0, cy, hw, ch);
     ctx.strokeStyle = HEADER_BORDER;
     ctx.lineWidth = 0.5;
-    ctx.strokeRect(0.5, cy + 0.5, HEADER_W - 1, ch - 1);
+    ctx.strokeRect(0.5, cy + 0.5, hw - 1, ch - 1);
     ctx.fillStyle = HEADER_TEXT;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(row), HEADER_W - 4, cy + ch / 2);
+    ctx.fillText(String(row), hw - Math.max(2, Math.round(4 * cs)), cy + ch / 2);
   };
 
   // Frozen col headers (no h-scroll, fixed positions)
   if (frozenColWidths.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(HEADER_W, 0, frozenW, HEADER_H);
+    ctx.rect(hw, 0, frozenW, hh);
     ctx.clip();
-    let cx = HEADER_W;
+    let cx = hw;
     for (let ci = 0; ci < frozenColWidths.length; ci++) {
       drawColHeader(ci + 1, cx, frozenColWidths[ci]);
       cx += frozenColWidths[ci];
@@ -763,7 +762,7 @@ function renderHeaders(
   // Scrollable col headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, HEADER_H);
+  ctx.rect(scrollAreaX, 0, canvasW - scrollAreaX, hh);
   ctx.clip();
   let cx = scrollAreaX - scrollOffsetX;
   for (let ci = 0; ci < scrollColWidths.length; ci++) {
@@ -779,9 +778,9 @@ function renderHeaders(
   if (frozenRowHeights.length > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, HEADER_H, HEADER_W, frozenH);
+    ctx.rect(0, hh, hw, frozenH);
     ctx.clip();
-    let cy = HEADER_H;
+    let cy = hh;
     for (let ri = 0; ri < frozenRowHeights.length; ri++) {
       drawRowHeader(ri + 1, cy, frozenRowHeights[ri]);
       cy += frozenRowHeights[ri];
@@ -792,7 +791,7 @@ function renderHeaders(
   // Scrollable row headers
   ctx.save();
   ctx.beginPath();
-  ctx.rect(0, scrollAreaY, HEADER_W, canvasH - scrollAreaY);
+  ctx.rect(0, scrollAreaY, hw, canvasH - scrollAreaY);
   ctx.clip();
   let cy = scrollAreaY - scrollOffsetY;
   for (let ri = 0; ri < scrollRowHeights.length; ri++) {
@@ -808,12 +807,11 @@ function renderHeaders(
   if (frozenW > 0 || frozenH > 0) {
     ctx.fillStyle = HEADER_BG;
     if (frozenW > 0) {
-      ctx.fillRect(0, HEADER_H, HEADER_W, frozenH);
+      ctx.fillRect(0, hh, hw, frozenH);
     }
     if (frozenH > 0) {
-      ctx.fillRect(HEADER_W, 0, frozenW, HEADER_H);
+      ctx.fillRect(hw, 0, frozenW, hh);
     }
-    // Redraw these already handled above, just ensure coverage
   }
 }
 
