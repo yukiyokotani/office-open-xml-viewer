@@ -12,9 +12,9 @@ const config: StorybookConfig = {
   ],
   framework: '@storybook/html-vite',
   staticDirs: [
-    '../packages/pptx/tests/visual',
-    '../packages/xlsx/public',
-    '../packages/docx/public',
+    { from: '../packages/pptx/tests/visual', to: '/pptx' },
+    { from: '../packages/xlsx/public', to: '/xlsx' },
+    { from: '../packages/docx/public', to: '/docx' },
   ],
   async viteFinal(config) {
     const { default: wasm } = await import('vite-plugin-wasm');
