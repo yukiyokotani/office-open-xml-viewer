@@ -2,6 +2,18 @@
   "name": "@silurus/ooxml-pptx",
   "private": true,
   "version": "0.1.0",
+  "description": "PPTX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
+  "license": "MIT",
+  "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
+    "directory": "packages/pptx"
+  },
+  "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

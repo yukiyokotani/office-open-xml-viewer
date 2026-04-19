@@ -1,46 +1,343 @@
+> **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — was implemented by [Claude](https://claude.ai)** (Anthropic's AI assistant) through iterative prompting. No human-written application code exists in this repository.
+
 # office-open-xml-viewer
 
 **[Demo (Storybook)](https://yukiyokotani.github.io/office-open-xml-viewer/)**
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
-The parser is written in Rust and compiled to WebAssembly; the renderer uses the Canvas 2D API.
+The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 
-## Architecture
-
-```
-Main thread                         Web Worker
-───────────────────────────────     ───────────────────────────────────────────
-PptxViewer                          worker.ts
-  │                                   │
-  │── init(wasmUrl) ──────────────────▶│  load pptx_parser.wasm (Rust/WASM)
-  │◀─ ready ──────────────────────────│
-  │                                   │
-  │── transferCanvas(OffscreenCanvas)─▶│  store OffscreenCanvas
-  │                                   │
-  │── parse(ArrayBuffer) ─────────────▶│  parse_pptx() → Presentation JSON
-  │◀─ parsed(Presentation) ───────────│
-  │                                   │
-  │── render(slideIndex, width) ──────▶│  renderSlide(offscreenCanvas, slide, …)
-  │◀─ rendered ───────────────────────│       │
-  │                                   │       ▼
-  │  (canvas auto-updates via        OffscreenCanvas → visible <canvas>
-  │   OffscreenCanvas transfer)
+```bash
+npm install @silurus/ooxml
+# or
+pnpm add @silurus/ooxml
 ```
 
-The rendering pipeline is fully off the main thread:
-- **Parsing**: Rust WASM reads the PPTX ZIP, resolves theme colours, layout/master inheritance, and emits a typed JSON `Presentation` object.
-- **Rendering**: `renderer.ts` draws to an `OffscreenCanvas` inside the worker using the Canvas 2D API, so the main thread is never blocked during slide rendering.
-- **Images**: Pictures are loaded with `fetch` + `createImageBitmap`, which works in both main-thread and worker contexts.
+> **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
+
+---
+
+## Quick Start
+
+```typescript
+import { PptxViewer } from '@silurus/ooxml/pptx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { DocxViewer } from '@silurus/ooxml/docx';
+
+// PPTX — viewer manages its own <canvas>
+const pptx = new PptxViewer(document.getElementById('pptx-container')!);
+const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
+await pptx.load(buf);
+pptx.nextSlide();
+
+// XLSX — viewer manages its own <canvas> + tab bar
+const xlsx = new XlsxViewer(document.getElementById('xlsx-container')!);
+await xlsx.load('/workbook.xlsx');
+
+// DOCX — caller provides the <canvas>
+const canvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
+const docx = new DocxViewer(canvas);
+await docx.load('/document.docx');
+docx.nextPage();
+```
+
+---
+
+<details>
+<summary><strong>Architecture diagram</strong></summary>
+
+```mermaid
+flowchart TB
+    subgraph build["🦀  Build-time  (Rust → WebAssembly)"]
+        direction LR
+        pptx_rs["packages/pptx/parser/src/lib.rs"]
+        xlsx_rs["packages/xlsx/parser/src/lib.rs"]
+        docx_rs["packages/docx/parser/src/lib.rs"]
+        pptx_rs -- wasm-pack --> pptx_wasm["pptx_parser.wasm"]
+        xlsx_rs -- wasm-pack --> xlsx_wasm["xlsx_parser.wasm"]
+        docx_rs -- wasm-pack --> docx_wasm["docx_parser.wasm"]
+    end
+
+    subgraph browser["🌐  Runtime  (Browser)"]
+        subgraph pptx_pkg["@silurus/ooxml · pptx"]
+            PV["PptxViewer"] --> PP["PptxPresentation"]
+            PP --> PW["worker.ts\n〈Web Worker〉"]
+            PW --> PR["renderer.ts\n〈OffscreenCanvas〉"]
+        end
+        subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
+            XV["XlsxViewer"] --> XR["renderer.ts\n〈Canvas 2D〉"]
+        end
+        subgraph docx_pkg["@silurus/ooxml · docx"]
+            DV["DocxViewer"] --> DD["DocxDocument"]
+            DD --> DR["renderer.ts\n〈Canvas 2D〉"]
+        end
+    end
+
+    pptx_wasm --> PW
+    xlsx_wasm --> XV
+    docx_wasm --> DD
+    PR --> canvas["&lt;canvas&gt;"]
+    XR --> canvas
+    DR --> canvas
+```
 
 ### Key files
 
 | File | Role |
 |------|------|
-| `pptx-parser/src/lib.rs` | Rust WASM parser — OOXML ZIP → `Presentation` JSON |
-| `src/types.ts` | Shared TypeScript types (mirrors Rust structs) |
-| `src/renderer.ts` | Canvas 2D rendering engine |
-| `src/worker.ts` | Web Worker: WASM init, parsing, OffscreenCanvas rendering |
-| `src/viewer.ts` | Public `PptxViewer` API — canvas lifecycle, navigation |
+| `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
+| `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
+| `packages/docx/parser/src/lib.rs` | Rust WASM parser — DOCX ZIP → `Document` JSON |
+| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs in Web Worker) |
+| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll |
+| `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout |
+| `packages/pptx/src/worker.ts` | Web Worker: WASM init, parsing, OffscreenCanvas rendering |
+| `packages/*/src/viewer.ts` | Public Viewer API — canvas lifecycle, navigation |
+
+</details>
+
+---
+
+## Framework Examples
+
+<details>
+<summary><strong>React 19</strong></summary>
+
+```tsx
+// React 19.1 — vite-plugin-wasm required in vite.config.ts
+import { useEffect, useRef, useState } from 'react';
+import { PptxViewer } from '@silurus/ooxml/pptx';
+
+export function PptxViewerComponent({ src }: { src: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const viewerRef   = useRef<PptxViewer | null>(null);
+  const [slide, setSlide] = useState({ current: 0, total: 0 });
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const viewer = new PptxViewer(container, {
+      onSlideChange: (i, total) => setSlide({ current: i, total }),
+    });
+    viewerRef.current = viewer;
+
+    let cancelled = false;
+    fetch(src)
+      .then(r => r.arrayBuffer())
+      .then(buf => { if (!cancelled) viewer.load(buf); });
+
+    return () => { cancelled = true; };
+  }, [src]);
+
+  return (
+    <div>
+      <div ref={containerRef} style={{ width: 800 }} />
+      <button onClick={() => viewerRef.current?.prevSlide()}>‹ Prev</button>
+      <span> {slide.current + 1} / {slide.total} </span>
+      <button onClick={() => viewerRef.current?.nextSlide()}>Next ›</button>
+    </div>
+  );
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Vue 3.5</strong></summary>
+
+```vue
+<!-- Vue 3.5 — useTemplateRef is a 3.5+ feature -->
+<script setup lang="ts">
+import { useTemplateRef, onMounted, ref } from 'vue';
+import { PptxViewer } from '@silurus/ooxml/pptx';
+
+const props = defineProps<{ src: string }>();
+
+const container = useTemplateRef<HTMLDivElement>('container');
+let viewer: PptxViewer | null = null;
+const current = ref(0);
+const total   = ref(0);
+
+onMounted(async () => {
+  viewer = new PptxViewer(container.value!, {
+    onSlideChange: (i, t) => { current.value = i; total.value = t; },
+  });
+  const buf = await fetch(props.src).then(r => r.arrayBuffer());
+  await viewer.load(buf);
+});
+</script>
+
+<template>
+  <div>
+    <div ref="container" style="width: 800px" />
+    <button @click="viewer?.prevSlide()">‹ Prev</button>
+    <span> {{ current + 1 }} / {{ total }} </span>
+    <button @click="viewer?.nextSlide()">Next ›</button>
+  </div>
+</template>
+```
+
+</details>
+
+<details>
+<summary><strong>Angular 19</strong></summary>
+
+```typescript
+// Angular 19 — standalone component with signal-based state
+import {
+  Component, ElementRef, viewChild,
+  signal, AfterViewInit,
+} from '@angular/core';
+import { PptxViewer } from '@silurus/ooxml/pptx';
+
+@Component({
+  selector: 'app-pptx-viewer',
+  standalone: true,
+  template: `
+    <div>
+      <div #container style="width: 800px"></div>
+      <button (click)="prev()">‹ Prev</button>
+      <span> {{ current() + 1 }} / {{ total() }} </span>
+      <button (click)="next()">Next ›</button>
+    </div>
+  `,
+})
+export class PptxViewerComponent implements AfterViewInit {
+  containerEl = viewChild.required<ElementRef<HTMLDivElement>>('container');
+  current = signal(0);
+  total   = signal(0);
+  private viewer?: PptxViewer;
+
+  ngAfterViewInit(): void {
+    this.viewer = new PptxViewer(this.containerEl().nativeElement, {
+      onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
+    });
+    fetch('/deck.pptx')
+      .then(r => r.arrayBuffer())
+      .then(buf => this.viewer!.load(buf));
+  }
+
+  prev(): void { this.viewer?.prevSlide(); }
+  next(): void { this.viewer?.nextSlide(); }
+}
+```
+
+> Add `"allowSyntheticDefaultImports": true` and configure `@angular-builders/custom-webpack` (or use `esbuild` builder) with WASM support in your Angular workspace.
+
+</details>
+
+<details>
+<summary><strong>Svelte 5</strong></summary>
+
+```svelte
+<!-- Svelte 5 — runes syntax ($props, $state) -->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { PptxViewer } from '@silurus/ooxml/pptx';
+
+  let { src }: { src: string } = $props();
+
+  let container: HTMLDivElement;
+  let viewer: PptxViewer;
+  let current = $state(0);
+  let total   = $state(0);
+
+  onMount(async () => {
+    viewer = new PptxViewer(container, {
+      onSlideChange: (i, t) => { current = i; total = t; },
+    });
+    const buf = await fetch(src).then(r => r.arrayBuffer());
+    await viewer.load(buf);
+  });
+</script>
+
+<div>
+  <div bind:this={container} style="width: 800px"></div>
+  <button onclick={() => viewer?.prevSlide()}>‹ Prev</button>
+  <span> {current + 1} / {total} </span>
+  <button onclick={() => viewer?.nextSlide()}>Next ›</button>
+</div>
+```
+
+</details>
+
+<details>
+<summary><strong>SolidJS 1.9</strong></summary>
+
+```tsx
+// SolidJS 1.9
+import { createSignal, onMount, onCleanup } from 'solid-js';
+import { PptxViewer } from '@silurus/ooxml/pptx';
+
+export function PptxViewerComponent(props: { src: string }) {
+  let containerEl!: HTMLDivElement;
+  let viewer: PptxViewer | undefined;
+  const [current, setCurrent] = createSignal(0);
+  const [total,   setTotal  ] = createSignal(0);
+
+  onMount(async () => {
+    viewer = new PptxViewer(containerEl, {
+      onSlideChange: (i, t) => { setCurrent(i); setTotal(t); },
+    });
+    const buf = await fetch(props.src).then(r => r.arrayBuffer());
+    await viewer.load(buf);
+  });
+
+  onCleanup(() => { /* viewer?.destroy?.() */ });
+
+  return (
+    <div>
+      <div ref={containerEl} style={{ width: '800px' }} />
+      <button onClick={() => viewer?.prevSlide()}>‹ Prev</button>
+      <span> {current() + 1} / {total()} </span>
+      <button onClick={() => viewer?.nextSlide()}>Next ›</button>
+    </div>
+  );
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Qwik 2</strong></summary>
+
+```tsx
+// Qwik 2.0 — dynamic import to keep WASM out of SSR bundle
+import { component$, useSignal, useVisibleTask$ } from '@builder.io/qwik';
+import type { PptxViewer as PptxViewerType } from '@silurus/ooxml/pptx';
+
+export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
+  const containerRef = useSignal<HTMLDivElement>();
+  const current = useSignal(0);
+  const total   = useSignal(0);
+  let viewer: PptxViewerType | undefined;
+
+  // useVisibleTask$ runs only in the browser, never during SSR
+  useVisibleTask$(async () => {
+    if (!containerRef.value) return;
+    const { PptxViewer } = await import('@silurus/ooxml/pptx');
+    viewer = new PptxViewer(containerRef.value, {
+      onSlideChange: (i, t) => { current.value = i; total.value = t; },
+    });
+    const buf = await fetch(src).then(r => r.arrayBuffer());
+    await viewer.load(buf);
+  });
+
+  return (
+    <div>
+      <div ref={containerRef} style={{ width: '800px' }} />
+      <button onClick$={() => viewer?.prevSlide()}>‹ Prev</button>
+      <span> {current.value + 1} / {total.value} </span>
+      <button onClick$={() => viewer?.nextSlide()}>Next ›</button>
+    </div>
+  );
+});
+```
+
+</details>
+
+---
 
 ## Feature Support
 
@@ -60,8 +357,8 @@ The rendering pipeline is fully off the main thread:
 | | Groups (`grpSp`) with nested transforms | ✅ |
 | | Connectors (`cxnSp`) | ✅ |
 | | Tables (`tbl` in `graphicFrame`) | ✅ |
-| | Charts (`c:chart` — bar, waterfall) | ✅ |
-| | Charts (line, pie, area, radar, scatter, bubble) | ❌ |
+| | Charts (bar, line, area, radar, waterfall) | ✅ |
+| | Charts (pie, scatter, bubble) | ❌ |
 | | SmartArt | ❌ |
 | | OLE objects | ❌ |
 | | Video / audio | ❌ |
@@ -79,14 +376,9 @@ The rendering pipeline is fully off the main thread:
 | | Arrow heads (`headEnd` / `tailEnd`) | ✅ |
 | | Compound / double lines | ❌ |
 | **Shape effects** | Drop shadow (`outerShdw`) | ✅ |
-| | Inner shadow (`innerShdw`) | ❌ |
-| | Glow | ❌ |
-| | Reflection | ❌ |
-| | Soft edge | ❌ |
+| | Inner shadow / glow / reflection | ❌ |
 | | Bevel / 3D extrusion | ❌ |
-| **Text — characters** | Bold, italic | ✅ |
-| | Underline | ✅ |
-| | Strikethrough | ✅ |
+| **Text — characters** | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
 | | Superscript / subscript | ✅ |
 | | Hyperlinks | ❌ |
@@ -98,23 +390,20 @@ The rendering pipeline is fully off the main thread:
 | | Bullet points (character and auto-numbered) | ✅ |
 | | Tab stops | ✅ |
 | | Indent / margin | ✅ |
-| | Vertical text direction | ❌ |
-| | Right-to-left text | ❌ |
+| | Vertical / RTL text | ❌ |
 | **Text — body** | Text padding (insets) | ✅ |
 | | normAutoFit (shrink to fit) | ✅ |
 | | spAutoFit (expand box) | ✅ |
 | | Word wrap / no wrap | ✅ |
-| | Text overflow clipping | ✅ |
 | **Tables** | Cells, rows, columns | ✅ |
 | | Cell merges (horizontal / vertical) | ✅ |
 | | Cell borders | ✅ |
 | | Cell fills (solid / gradient) | ✅ |
-| | Table theme styles | ❌ |
 | | Cell diagonal lines (`lnTlToBr` / `lnBlToTr`) | ✅ |
-| **Theme** | Scheme colors (dk1/lt1/accent1–6 etc.) | ✅ |
+| | Table theme styles | ❌ |
+| **Theme** | Scheme colors (dk1/lt1/accent1–6) | ✅ |
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
-| | lumMod / lumOff color transforms | ✅ (approx) |
-| | alpha transparency | ✅ |
+| | lumMod / lumOff / alpha transforms | ✅ |
 
 ---
 
@@ -124,25 +413,22 @@ The rendering pipeline is fully off the main thread:
 |----------|---------|--------|
 | **Document** | Page rendering | ✅ |
 | | Page size and margins | ✅ |
-| | Section breaks | ❌ |
 | | Headers / footers (default / first / even) | ✅ |
+| | Section breaks | ❌ |
 | **Text** | Paragraphs | ✅ |
 | | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
-| | Superscript / subscript | ❌ |
 | | Hyperlinks | ✅ |
+| | Superscript / subscript | ❌ |
 | **Formatting** | Paragraph alignment | ✅ |
 | | Line spacing | ✅ |
 | | Indents and tab stops | ✅ |
-| | Paragraph styles (Heading 1–6, Normal, etc.) | 🔜 Planned |
 | | Lists (bullet and numbered) | ✅ |
+| | Paragraph styles (Heading 1–6, Normal) | 🔜 Planned |
 | **Elements** | Tables (with borders, fills, merges) | ✅ |
 | | Images (inline and anchored) | ✅ |
-| | Text boxes / shapes | ❌ |
-| | Drawing shapes | ❌ |
-| **Advanced** | Track changes | ❌ Not planned |
-| | Comments | ❌ Not planned |
-| | Footnotes / endnotes | ❌ |
+| | Text boxes / drawing shapes | ❌ |
+| **Advanced** | Track changes / comments / footnotes | ❌ |
 | | Mail merge fields | ❌ Not planned |
 
 ---
@@ -151,15 +437,11 @@ The rendering pipeline is fully off the main thread:
 
 | Category | Feature | Status |
 |----------|---------|--------|
-| **Workbook** | Multiple sheets | ✅ |
-| | Sheet names | ✅ |
-| **Cells** | Text values | ✅ |
-| | Number values | ✅ |
-| | Boolean values | ✅ |
-| | Error values (`#REF!`, `#DIV/0!` …) | ✅ |
-| | Formula results (display only, from cached `<v>`) | ✅ |
-| | Dates (ECMA-376 §18.8.30 format codes: `y`/`m`/`d`/`h`/`s`/`AM-PM`) | ✅ |
-| | Rich text (`<si>`/`<is>` per-run formatting) | ✅ |
+| **Workbook** | Multiple sheets, sheet names | ✅ |
+| **Cells** | Text, number, boolean, error values | ✅ |
+| | Formula results (from cached `<v>`) | ✅ |
+| | Dates (ECMA-376 date format codes) | ✅ |
+| | Rich text (per-run formatting) | ✅ |
 | **Formatting** | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
 | | Cell background color | ✅ |
@@ -171,11 +453,45 @@ The rendering pipeline is fully off the main thread:
 | | Frozen panes | ✅ |
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
-| **Elements** | Images (`<xdr:twoCellAnchor>` with embedded media) | ✅ |
-| | Charts | ❌ |
+| **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| | Charts (bar, line, area, radar) | ✅ |
 | | Sparklines | ❌ Not planned |
-| **Advanced** | Conditional formatting (`cellIs` / `colorScale` / `dataBar`) | ✅ |
-| | Conditional formatting (`expression`, `iconSet`, `top10` etc.) | ❌ |
+| **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
 | | Pivot tables | ❌ Not planned |
-| | Data validation dropdowns | ❌ Not planned |
-| | Comments / notes | ❌ Not planned |
+| | Data validation / comments | ❌ Not planned |
+
+---
+
+## Development
+
+```bash
+# Install dependencies
+pnpm install
+
+# Build all WASM parsers (requires Rust + wasm-pack)
+pnpm build:wasm
+
+# Start Storybook dev server (port 6006)
+pnpm storybook
+
+# Type-check all packages
+pnpm typecheck
+
+# Run visual regression tests
+pnpm vrt
+
+# Build the library
+pnpm build
+```
+
+### WASM build (individual packages)
+
+```bash
+cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/
+cd packages/xlsx/parser && wasm-pack build --target web && cp pkg/xlsx_parser_bg.wasm  pkg/xlsx_parser.js  ../src/wasm/
+cd packages/docx/parser && wasm-pack build --target web && cp pkg/docx_parser_bg.wasm  pkg/docx_parser.js  ../src/wasm/
+```
+
+## License
+
+MIT
