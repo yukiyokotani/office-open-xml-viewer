@@ -11,13 +11,14 @@ export type {
   Paragraph,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
+  ChartModel, ChartSeries,
 } from '@silurus/ooxml-core';
 
 // ===== Presentation data model =====
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody, Shadow, PathCmd } from '@silurus/ooxml-core';
+import type { Fill, Stroke, TextBody, Shadow, PathCmd, ChartSeries } from '@silurus/ooxml-core';
 
 export interface Presentation {
   slideWidth: number;
@@ -113,34 +114,27 @@ export interface TableCell {
   vMerge: boolean;
 }
 
-export interface ChartSeriesData {
-  name: string;
-  values: (number | null)[];
-  color: string | null;
-  /** Per-data-point colors for pie/doughnut charts */
-  dataPointColors?: (string | null)[] | null;
-}
-
+/**
+ * PPTX chart element. The Rust parser emits ChartModel fields flat at the
+ * top level, alongside the element position (x/y/width/height in EMU).
+ * Pass this straight to `renderChart` from `@silurus/ooxml-core`.
+ */
 export interface ChartElement {
   type: 'chart';
   x: number;
   y: number;
   width: number;
   height: number;
-  chartType: string;      // "stackedBar" | "waterfall"
+  chartType: string;
   title: string | null;
   categories: string[];
-  series: ChartSeriesData[];
+  series: ChartSeries[];
   valMax: number | null;
   valMin: number | null;
   subtotalIndices: number[];
-  /** Whether data labels (value numbers) should be shown on bars/segments */
   showDataLabels: boolean;
-  /** True when the chart's category axis has <c:delete val="1"/> */
   catAxisHidden: boolean;
-  /** True when the chart's value axis has <c:delete val="1"/> */
   valAxisHidden: boolean;
-  /** Plot area background color from <c:plotArea><c:spPr><a:solidFill> (hex without #) */
   plotAreaBg: string | null;
 }
 

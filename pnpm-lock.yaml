@@ -77,6 +77,9 @@ importers:
       '@fontsource/nunito-sans':
         specifier: ^5.2.7
         version: 5.2.7
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1
@@ -110,6 +113,10 @@ importers:
         version: 4.1.4(@types/node@25.6.0)(@vitest/browser-playwright@4.1.4)(@vitest/coverage-v8@4.1.4)(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7))
 
   packages/xlsx:
+    dependencies:
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1

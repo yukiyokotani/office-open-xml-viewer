@@ -40,7 +40,11 @@ export interface Worksheet {
 
 // ─── Chart types ─────────────────────────────────────────────────────────────
 
-export interface ChartSeries {
+/**
+ * XLSX parser's raw chart series (includes XLSX-only `seriesType` for mixed
+ * charts). Adapted to `ChartSeries` from @silurus/ooxml-core before rendering.
+ */
+export interface XlsxChartSeries {
   name: string;
   /** Chart sub-type for this series (allows mixed charts). */
   seriesType: string;
@@ -50,6 +54,11 @@ export interface ChartSeries {
   color?: string | null;
 }
 
+/**
+ * XLSX parser's raw chart output. Retains parser-native `barDir` + `grouping`
+ * which the renderer combines into a canonical `ChartModel.chartType` (e.g.
+ * `clusteredBarH`, `stackedBarPct`) at render time.
+ */
 export interface ChartData {
   /** Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter" */
   chartType: string;
@@ -59,7 +68,7 @@ export interface ChartData {
   grouping: string;
   title: string | null;
   categories: string[];
-  series: ChartSeries[];
+  series: XlsxChartSeries[];
   /** Whether data labels are enabled (c:dLbls showVal/showPercent). */
   showDataLabels?: boolean;
   /** Category axis title (c:catAx/c:title). */

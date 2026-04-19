@@ -4,7 +4,12 @@
     "declarationDir": "./dist/types",
     "emitDeclarationOnly": true,
     "rootDir": "./src",
-    "outDir": "./dist"
+    "outDir": "./dist",
+    "paths": {
+      "@silurus/ooxml-core": ["../core/src/index.ts"],
+      "@silurus/ooxml-core/*": ["../core/src/*"]
+    }
   },
-  "include": ["src"]
+  "include": ["src"],
+  "references": [{ "path": "../core" }]
 }
