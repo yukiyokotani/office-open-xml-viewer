@@ -2,6 +2,7 @@ use wasm_bindgen::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +40,77 @@ pub struct Worksheet {
     pub freeze_rows: u32,
     pub freeze_cols: u32,
     pub conditional_formats: Vec<ConditionalFormat>,
+    pub images: Vec<ImageAnchor>,
+    pub charts: Vec<ChartAnchor>,
+}
+
+// ─── Chart types ────────────────────────────────────────────────────────────
+
+/// A data series inside a chart.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSeries {
+    /// Display name of the series.
+    pub name: String,
+    /// Chart type for this series ("bar"|"line"|"area"|"pie"|"radar"|"scatter").
+    /// Allows mixed charts (e.g. bar + line sharing the same axes).
+    pub series_type: String,
+    /// Category labels (X-axis for most charts).
+    pub categories: Vec<String>,
+    /// Numeric values; `None` = missing data point.
+    pub values: Vec<Option<f64>>,
+}
+
+/// Parsed chart data extracted from `xl/charts/chartN.xml`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartData {
+    /// Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter"
+    pub chart_type: String,
+    /// Bar direction: "col" (vertical) | "row" (horizontal). Only relevant for bar charts.
+    pub bar_dir: String,
+    /// Grouping mode: "clustered"|"stacked"|"standard"|"percentStacked"
+    pub grouping: String,
+    /// Optional chart title.
+    pub title: Option<String>,
+    /// Shared category list (from first series that has categories).
+    pub categories: Vec<String>,
+    /// All series across all chart-type elements in plotArea.
+    pub series: Vec<ChartSeries>,
+}
+
+/// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
+/// Offsets are EMU (914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartAnchor {
+    pub from_col: u32,
+    pub from_col_off: i64,
+    pub from_row: u32,
+    pub from_row_off: i64,
+    pub to_col: u32,
+    pub to_col_off: i64,
+    pub to_row: u32,
+    pub to_row_off: i64,
+    pub chart: ChartData,
+}
+
+/// An image anchored to a rectangular range of cells
+/// (ECMA-376 §20.5, `<xdr:twoCellAnchor>`). Offsets are EMU (English
+/// Metric Unit): 914400 EMU = 1 inch, and 9525 EMU = 1 pixel at 96 DPI.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAnchor {
+    pub from_col: u32,
+    pub from_col_off: i64,
+    pub from_row: u32,
+    pub from_row_off: i64,
+    pub to_col: u32,
+    pub to_col_off: i64,
+    pub to_row: u32,
+    pub to_row_off: i64,
+    /// Data URL: "data:image/png;base64,..."
+    pub data_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,10 +177,45 @@ pub struct Cell {
 pub enum CellValue {
     #[default]
     Empty,
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runs: Option<Vec<Run>>,
+    },
     Number { number: f64 },
     Bool { bool: bool },
     Error { error: String },
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<RunFont>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunFont {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedString {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<Run>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +243,7 @@ pub struct Font {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strike: bool,
     pub size: f64,
     pub color: Option<String>,
     pub name: Option<String>,
@@ -189,7 +297,7 @@ pub struct NumFmt {
 pub struct ParsedWorkbook {
     pub workbook: Workbook,
     pub styles: Styles,
-    pub shared_strings: Vec<String>,
+    pub shared_strings: Vec<SharedString>,
 }
 
 // Excel built-in indexed color palette (indices 0-63)
@@ -233,10 +341,15 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
-    let shared_strings = read_shared_strings(&mut archive);
+    let theme_colors = parse_theme_colors(&mut archive);
+    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
-    let ws = parse_worksheet(&sheet_xml, &shared_strings, name)
+    let mut ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
         .map_err(|e| e.to_string())?;
+
+    // Attach any drawing-anchored images and charts for this sheet
+    ws.images = load_sheet_images(&mut archive, &sheet_path);
+    ws.charts = load_sheet_charts(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -249,8 +362,8 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
-    let shared_strings = read_shared_strings(&mut archive);
     let theme_colors = parse_theme_colors(&mut archive);
+    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let styles = parse_styles(&mut archive, &theme_colors)?;
 
     Ok(ParsedWorkbook {
@@ -444,7 +557,10 @@ fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     None
 }
 
-fn read_shared_strings(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
+fn read_shared_strings(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    theme_colors: &[String],
+) -> Vec<SharedString> {
     let Ok(xml) = read_zip_entry(archive, "xl/sharedStrings.xml") else {
         return Vec::new();
     };
@@ -455,18 +571,77 @@ fn read_shared_strings(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<Stri
     let mut strings = Vec::new();
     for si in doc.descendants() {
         if si.tag_name().name() == "si" && si.tag_name().namespace() == Some(ns) {
-            let mut text = String::new();
-            for t in si.descendants() {
-                if t.tag_name().name() == "t" && t.tag_name().namespace() == Some(ns) {
-                    if let Some(s) = t.text() {
-                        text.push_str(s);
-                    }
-                }
-            }
-            strings.push(text);
+            strings.push(parse_si_node(&si, ns, theme_colors));
         }
     }
     strings
+}
+
+/// Parse a `<si>` (shared) or `<is>` (inline) node into a SharedString.
+/// The node may contain direct `<t>` text (plain) and/or multiple `<r>`
+/// runs with per-run `<rPr>` font properties.
+fn parse_si_node(
+    node: &roxmltree::Node,
+    ns: &str,
+    theme_colors: &[String],
+) -> SharedString {
+    let mut text = String::new();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut has_runs = false;
+    for child in node.children() {
+        if !child.is_element() { continue; }
+        match child.tag_name().name() {
+            "t" if child.tag_name().namespace() == Some(ns) => {
+                if let Some(s) = child.text() {
+                    text.push_str(s);
+                }
+            }
+            "r" if child.tag_name().namespace() == Some(ns) => {
+                has_runs = true;
+                let mut run_text = String::new();
+                let mut run_font: Option<RunFont> = None;
+                for rc in child.children() {
+                    match rc.tag_name().name() {
+                        "t" => {
+                            if let Some(s) = rc.text() {
+                                run_text.push_str(s);
+                            }
+                        }
+                        "rPr" => {
+                            let mut f = RunFont::default();
+                            for rp in rc.children() {
+                                match rp.tag_name().name() {
+                                    "b" => f.bold = true,
+                                    "i" => f.italic = true,
+                                    "u" => f.underline = true,
+                                    "strike" => f.strike = true,
+                                    "sz" => {
+                                        f.size = rp.attribute("val").and_then(|s| s.parse().ok());
+                                    }
+                                    "color" => {
+                                        f.color = parse_color(&rp, theme_colors);
+                                    }
+                                    "rFont" | "name" => {
+                                        f.name = rp.attribute("val").map(|s| s.to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            run_font = Some(f);
+                        }
+                        _ => {}
+                    }
+                }
+                text.push_str(&run_text);
+                runs.push(Run { text: run_text, font: run_font });
+            }
+            _ => {}
+        }
+    }
+    SharedString {
+        text,
+        runs: if has_runs { Some(runs) } else { None },
+    }
 }
 
 fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[String]) -> Result<Styles, String> {
@@ -502,6 +677,7 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                                 "b" => f.bold = true,
                                 "i" => f.italic = true,
                                 "u" => f.underline = true,
+                                "strike" => f.strike = true,
                                 "sz" => {
                                     if let Some(v) = fc.attribute("val").and_then(|s| s.parse().ok()) {
                                         f.size = v;
@@ -594,6 +770,7 @@ fn parse_fonts(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                         "b" => f.bold = true,
                         "i" => f.italic = true,
                         "u" => f.underline = true,
+                        "strike" => f.strike = true,
                         "sz" => {
                             if let Some(v) = child.attribute("val").and_then(|s| s.parse().ok()) {
                                 f.size = v;
@@ -699,7 +876,12 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
     xfs
 }
 
-fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<Worksheet, String> {
+fn parse_worksheet(
+    xml: &str,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    name: &str,
+) -> Result<Worksheet, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -725,12 +907,18 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
                 let custom = node.attribute("customWidth").map(|v| v == "1").unwrap_or(false);
-                if !custom { continue; }
+                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                // Only record widths for custom-widthed columns OR hidden columns
+                if !custom && !hidden { continue; }
                 let min: u32 = node.attribute("min").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let max: u32 = node.attribute("max").and_then(|s| s.parse().ok()).unwrap_or(1);
                 // Cap range to avoid storing 16K entries for max=16384 ranges
                 let max = max.min(min + 255);
-                let width: f64 = node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width);
+                let width: f64 = if hidden {
+                    0.0
+                } else {
+                    node.attribute("width").and_then(|s| s.parse().ok()).unwrap_or(default_col_width)
+                };
                 for c in min..=max {
                     col_widths.insert(c, width);
                 }
@@ -760,11 +948,16 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
             }
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let height: Option<f64> = node.attribute("ht").and_then(|s| s.parse().ok());
+                let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                let height: Option<f64> = if hidden {
+                    Some(0.0)
+                } else {
+                    node.attribute("ht").and_then(|s| s.parse().ok())
+                };
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);
                 }
-                let cells = parse_row_cells(&node, shared_strings, ns);
+                let cells = parse_row_cells(&node, shared_strings, theme_colors, ns);
                 rows.push(Row { index: row_idx, height, cells });
             }
             "conditionalFormatting" if node.tag_name().namespace() == Some(ns) => {
@@ -869,7 +1062,551 @@ fn parse_worksheet(xml: &str, shared_strings: &[String], name: &str) -> Result<W
         freeze_rows,
         freeze_cols,
         conditional_formats,
+        images: Vec::new(),
+        charts: Vec::new(),
     })
+}
+
+/// Parse a .rels file into rId → Target map.
+fn parse_rels_map(xml: &str) -> HashMap<String, String> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for rel in doc.root_element().children().filter(|n| n.is_element()) {
+        if let (Some(id), Some(target)) = (rel.attribute("Id"), rel.attribute("Target")) {
+            map.insert(id.to_string(), target.to_string());
+        }
+    }
+    map
+}
+
+/// Read a binary file from the zip.
+fn read_zip_bytes(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &str) -> Option<Vec<u8>> {
+    let mut file = archive.by_name(path).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
+fn resolve_zip_path(base_dir: &str, target: &str) -> String {
+    let mut parts: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in target.split('/') {
+        match seg {
+            ".." => { parts.pop(); }
+            "." | "" => {}
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn mime_from_ext(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png"  => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif"  => "image/gif",
+        "bmp"  => "image/bmp",
+        "webp" => "image/webp",
+        _      => "application/octet-stream",
+    }
+}
+
+/// Parse `<xdr:twoCellAnchor>` elements from a drawing XML and resolve
+/// embedded pictures into data URLs. `drawing_dir` is the folder that
+/// contains `drawing_path` so relative `Target`s resolve correctly.
+fn parse_drawing_anchors(
+    drawing_xml: &str,
+    drawing_rels: &HashMap<String, String>,
+    drawing_dir: &str,
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+) -> Vec<ImageAnchor> {
+    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else {
+        return Vec::new();
+    };
+    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut anchors: Vec<ImageAnchor> = Vec::new();
+
+    for anchor in doc.descendants() {
+        if anchor.tag_name().name() != "twoCellAnchor"
+            || anchor.tag_name().namespace() != Some(xdr_ns)
+        {
+            continue;
+        }
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        let mut pic_rid: Option<String> = None;
+
+        for child in anchor.children() {
+            if !child.is_element() { continue; }
+            match child.tag_name().name() {
+                "from" | "to" => {
+                    let is_from = child.tag_name().name() == "from";
+                    let mut col: u32 = 0;
+                    let mut col_off: i64 = 0;
+                    let mut row: u32 = 0;
+                    let mut row_off: i64 = 0;
+                    for c in child.children() {
+                        match (c.tag_name().name(), c.text()) {
+                            ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                            ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                            ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                            ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    if is_from {
+                        from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off;
+                    } else {
+                        to_col = col; to_col_off = col_off; to_row = row; to_row_off = row_off;
+                    }
+                }
+                "pic" => {
+                    // <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
+                    let blip_fill = child.children()
+                        .find(|n| n.tag_name().name() == "blipFill" && n.tag_name().namespace() == Some(xdr_ns));
+                    if let Some(bf) = blip_fill {
+                        let blip = bf.children()
+                            .find(|n| n.tag_name().name() == "blip" && n.tag_name().namespace() == Some(a_ns));
+                        if let Some(b) = blip {
+                            // r:embed attribute
+                            pic_rid = b.attributes()
+                                .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
+                                .map(|a| a.value().to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let Some(rid) = pic_rid else { continue; };
+        let Some(target) = drawing_rels.get(&rid) else { continue; };
+        let media_path = resolve_zip_path(drawing_dir, target);
+        let Some(bytes) = read_zip_bytes(archive, &media_path) else { continue; };
+        let mime = mime_from_ext(&media_path);
+        let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+
+        anchors.push(ImageAnchor {
+            from_col, from_col_off, from_row, from_row_off,
+            to_col, to_col_off, to_row, to_row_off,
+            data_url,
+        });
+    }
+    anchors
+}
+
+/// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
+/// its drawing(s), and return all image anchors found.
+fn load_sheet_images(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str, // e.g. "worksheets/sheet1.xml"
+) -> Vec<ImageAnchor> {
+    // sheet rels path:  xl/worksheets/_rels/sheet1.xml.rels
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+
+    // Find all drawing relationships
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+        return Vec::new();
+    };
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        let rel_type = rel.attribute("Type").unwrap_or("");
+        if rel_type.ends_with("/drawing") {
+            if let Some(t) = rel.attribute("Target") {
+                drawing_targets.push(t.to_string());
+            }
+        }
+    }
+    if drawing_targets.is_empty() { return Vec::new(); }
+
+    let mut all_anchors: Vec<ImageAnchor> = Vec::new();
+    for target in drawing_targets {
+        // sheet_dir is "worksheets", target typically "../drawings/drawing1.xml"
+        // base dir for the drawing = "xl/worksheets" + "../drawings" → "xl/drawings"
+        let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        // Drawing rels:  xl/drawings/_rels/drawing1.xml.rels
+        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else { continue; };
+        let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+            .ok()
+            .map(|xml| parse_rels_map(&xml))
+            .unwrap_or_default();
+
+        let mut anchors = parse_drawing_anchors(&drawing_xml, &drawing_rels, drawing_dir, archive);
+        all_anchors.append(&mut anchors);
+    }
+    all_anchors
+}
+
+// ─── Chart loading ──────────────────────────────────────────────────────────
+
+/// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
+/// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
+fn load_sheet_charts(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+) -> Vec<ChartAnchor> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+        return Vec::new();
+    };
+
+    // Collect all drawing relationship targets
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        if rel.attribute("Type").unwrap_or("").ends_with("/drawing") {
+            if let Some(t) = rel.attribute("Target") {
+                drawing_targets.push(t.to_string());
+            }
+        }
+    }
+    if drawing_targets.is_empty() { return Vec::new(); }
+
+    let mut all_charts: Vec<ChartAnchor> = Vec::new();
+    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let a_ns   = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let c_ns   = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    let r_ns   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    for target in drawing_targets {
+        // Resolve drawing path relative to the sheet directory
+        let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        let Ok(draw_doc) = roxmltree::Document::parse(&drawing_xml) else { continue; };
+
+        // Load drawing rels (to resolve chart rIds)
+        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else { continue; };
+        let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+            .ok()
+            .map(|xml| parse_rels_map(&xml))
+            .unwrap_or_default();
+
+        // Iterate over twoCellAnchor elements
+        for anchor in draw_doc.root_element().children().filter(|n| n.is_element()) {
+            if anchor.tag_name().name() != "twoCellAnchor"
+                || anchor.tag_name().namespace() != Some(xdr_ns)
+            {
+                continue;
+            }
+
+            let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+            let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+            let mut chart_rid: Option<String> = None;
+
+            for child in anchor.children() {
+                if !child.is_element() { continue; }
+                match child.tag_name().name() {
+                    "from" | "to" => {
+                        let is_from = child.tag_name().name() == "from";
+                        let mut col: u32 = 0; let mut col_off: i64 = 0;
+                        let mut row: u32 = 0; let mut row_off: i64 = 0;
+                        for c in child.children() {
+                            match (c.tag_name().name(), c.text()) {
+                                ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                                ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                                ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                                ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                                _ => {}
+                            }
+                        }
+                        if is_from { from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off; }
+                        else       { to_col   = col; to_col_off   = col_off; to_row   = row; to_row_off   = row_off; }
+                    }
+                    "graphicFrame" => {
+                        // Look for a:graphic/a:graphicData/c:chart[@r:id]
+                        for gf_child in child.descendants() {
+                            if gf_child.tag_name().name() == "chart"
+                                && gf_child.tag_name().namespace() == Some(c_ns)
+                            {
+                                if let Some(rid) = gf_child.attributes()
+                                    .find(|a| a.name() == "id" && a.namespace() == Some(r_ns))
+                                    .map(|a| a.value().to_string())
+                                {
+                                    chart_rid = Some(rid);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let Some(rid) = chart_rid else { continue; };
+            let Some(chart_target) = drawing_rels.get(&rid) else { continue; };
+            let chart_path = resolve_zip_path(drawing_dir, chart_target);
+            let Ok(chart_xml) = read_zip_entry(archive, &chart_path) else { continue; };
+            let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns) else { continue; };
+
+            all_charts.push(ChartAnchor {
+                from_col, from_col_off, from_row, from_row_off,
+                to_col,   to_col_off,   to_row,   to_row_off,
+                chart: chart_data,
+            });
+        }
+    }
+    all_charts
+}
+
+// ─── Chart XML parser ────────────────────────────────────────────────────────
+
+/// Parse a `xl/charts/chartN.xml` file into a `ChartData`.
+fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+
+    // Find c:chart root element
+    let chart_root = doc.descendants()
+        .find(|n| n.tag_name().name() == "chart" && n.tag_name().namespace() == Some(c_ns))?;
+
+    // Parse optional title
+    let title = extract_chart_title(&chart_root, c_ns, a_ns);
+
+    // Find c:plotArea
+    let plot_area = chart_root.children()
+        .find(|n| n.tag_name().name() == "plotArea" && n.tag_name().namespace() == Some(c_ns))?;
+
+    let mut primary_type = String::new();
+    let mut bar_dir      = "col".to_string();
+    let mut grouping     = "clustered".to_string();
+    let mut all_series: Vec<ChartSeries> = Vec::new();
+    let mut shared_categories: Vec<String> = Vec::new();
+
+    // Recognised chart-type element names → our internal type strings
+    let type_map: &[(&str, &str)] = &[
+        ("barChart",      "bar"),
+        ("lineChart",     "line"),
+        ("areaChart",     "area"),
+        ("pieChart",      "pie"),
+        ("doughnutChart", "doughnut"),
+        ("radarChart",    "radar"),
+        ("scatterChart",  "scatter"),
+        ("bubbleChart",   "scatter"), // treat bubble as scatter
+    ];
+
+    for child in plot_area.children() {
+        if !child.is_element() { continue; }
+        if child.tag_name().namespace() != Some(c_ns) { continue; }
+        let elem_name = child.tag_name().name();
+
+        let ser_type = match type_map.iter().find(|(k, _)| *k == elem_name) {
+            Some((_, v)) => *v,
+            None => continue,
+        };
+
+        if primary_type.is_empty() {
+            primary_type = ser_type.to_string();
+        }
+
+        // barDir / grouping (only meaningful for bar/line/area)
+        for attr_node in child.children().filter(|n| n.is_element()) {
+            match attr_node.tag_name().name() {
+                "barDir"   => { bar_dir  = attr_node.attribute("val").unwrap_or("col").to_string(); }
+                "grouping" => { grouping = attr_node.attribute("val").unwrap_or("clustered").to_string(); }
+                _ => {}
+            }
+        }
+
+        // Parse series
+        for ser_node in child.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "ser" && n.tag_name().namespace() == Some(c_ns))
+        {
+            let s = parse_chart_series(&ser_node, c_ns, ser_type);
+            if shared_categories.is_empty() && !s.categories.is_empty() {
+                shared_categories = s.categories.clone();
+            }
+            all_series.push(s);
+        }
+    }
+
+    if primary_type.is_empty() { return None; }
+
+    // Fill in categories for series that have none (mixed charts share categories)
+    for s in &mut all_series {
+        if s.categories.is_empty() {
+            s.categories = shared_categories.clone();
+        }
+    }
+
+    Some(ChartData {
+        chart_type: primary_type,
+        bar_dir,
+        grouping,
+        title,
+        categories: shared_categories,
+        series: all_series,
+    })
+}
+
+/// Extract plain text from `c:chart/c:title`.
+fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<String> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    // c:title/c:tx/c:rich/a:p/a:r/a:t  or  c:title/c:tx/c:strRef/c:strCache/c:pt/c:v
+    let mut text = String::new();
+    for node in title_node.descendants() {
+        if node.tag_name().name() == "t" && node.tag_name().namespace() == Some(a_ns) {
+            if let Some(t) = node.text() { text.push_str(t); }
+        }
+        if node.tag_name().name() == "v" && node.tag_name().namespace() == Some(c_ns) {
+            if let Some(t) = node.text() { text.push_str(t); }
+        }
+    }
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Parse one `<c:ser>` element.
+fn parse_chart_series(node: &roxmltree::Node, c_ns: &str, ser_type: &str) -> ChartSeries {
+    let name = extract_series_name(node, c_ns);
+
+    // For scatter: xVal → categories (as strings), yVal → values
+    // For others:  cat  → categories,             val  → values
+    let (cat_tag, val_tag) = if ser_type == "scatter" { ("xVal", "yVal") } else { ("cat", "val") };
+
+    let categories = collect_str_cache(node, c_ns, cat_tag);
+    let values     = collect_num_cache(node, c_ns, val_tag);
+
+    ChartSeries {
+        name,
+        series_type: ser_type.to_string(),
+        categories,
+        values,
+    }
+}
+
+/// Extract series name from `c:tx`.
+fn extract_series_name(node: &roxmltree::Node, c_ns: &str) -> String {
+    // c:tx/c:strRef/c:strCache/c:pt[@idx=0]/c:v
+    // or c:tx/c:v
+    if let Some(tx) = node.children().find(|n| n.tag_name().name() == "tx" && n.tag_name().namespace() == Some(c_ns)) {
+        for desc in tx.descendants() {
+            if desc.tag_name().name() == "v" && desc.tag_name().namespace() == Some(c_ns) {
+                if let Some(t) = desc.text() {
+                    if !t.is_empty() { return t.to_string(); }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Collect string values from a cache child element (e.g. `<c:cat>` or `<c:xVal>`).
+/// Reads `c:strRef/c:strCache`, `c:multiLvlStrRef/c:multiLvlStrCache`, or
+/// `c:numRef/c:numCache` (formats numbers as strings).
+fn collect_str_cache(ser_node: &roxmltree::Node, c_ns: &str, child_tag: &str) -> Vec<String> {
+    let Some(child) = ser_node.children()
+        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+    else { return Vec::new(); };
+
+    // Multi-level categories: use only the first (innermost) lvl to get primary labels.
+    if let Some(multi_cache) = child.descendants()
+        .find(|n| n.tag_name().name() == "multiLvlStrCache" && n.tag_name().namespace() == Some(c_ns))
+    {
+        let pt_count: usize = multi_cache.children()
+            .find(|n| n.tag_name().name() == "ptCount" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if let Some(first_lvl) = multi_cache.children()
+            .find(|n| n.tag_name().name() == "lvl" && n.tag_name().namespace() == Some(c_ns))
+        {
+            let mut pts: Vec<(usize, String)> = Vec::new();
+            for pt in first_lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt" && n.tag_name().namespace() == Some(c_ns))
+            {
+                let idx: usize = pt.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let val = pt.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            let len = pt_count.max(pts.iter().map(|(i, _)| i + 1).max().unwrap_or(0));
+            let mut result = vec![String::new(); len];
+            for (idx, val) in pts {
+                if idx < result.len() { result[idx] = val; }
+            }
+            return result;
+        }
+    }
+
+    // Standard strRef/strCache or numRef/numCache
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, String)> = Vec::new();
+    for desc in child.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+                pt_count = desc.attribute("val").and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+                let idx: usize = desc.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let val = desc.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 { pt_count = pts.len(); }
+    let mut result = vec![String::new(); pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() { result[idx] = val; }
+    }
+    result
+}
+
+/// Collect numeric values from a cache child element (e.g. `<c:val>` or `<c:yVal>`).
+fn collect_num_cache(ser_node: &roxmltree::Node, c_ns: &str, child_tag: &str) -> Vec<Option<f64>> {
+    let Some(child) = ser_node.children()
+        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+    else { return Vec::new(); };
+
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, f64)> = Vec::new();
+    for desc in child.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+                pt_count = desc.attribute("val").and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+                let idx: usize = desc.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if let Some(v) = desc.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .and_then(|t| t.parse::<f64>().ok())
+                {
+                    pts.push((idx, v));
+                }
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 { pt_count = pts.len(); }
+    let mut result: Vec<Option<f64>> = vec![None; pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() { result[idx] = Some(val); }
+    }
+    result
 }
 
 fn parse_sqref(s: &str) -> Vec<CellRange> {
@@ -885,7 +1622,12 @@ fn parse_sqref(s: &str) -> Vec<CellRange> {
     }).collect()
 }
 
-fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &str) -> Vec<Cell> {
+fn parse_row_cells(
+    row_node: &roxmltree::Node,
+    shared_strings: &[SharedString],
+    theme_colors: &[String],
+    ns: &str,
+) -> Vec<Cell> {
     let mut cells = Vec::new();
     for c_node in row_node.children() {
         if c_node.tag_name().name() != "c" || c_node.tag_name().namespace() != Some(ns) {
@@ -896,6 +1638,9 @@ fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &s
         let cell_type = c_node.attribute("t").unwrap_or("");
         let style_index: u32 = c_node.attribute("s").and_then(|s| s.parse().ok()).unwrap_or(0);
 
+        // Inline string: <c t="inlineStr"><is>...</is></c>
+        let is_node = c_node.children().find(|n| n.tag_name().name() == "is");
+
         let v_text = c_node
             .children()
             .find(|n| n.tag_name().name() == "v")
@@ -903,23 +1648,34 @@ fn parse_row_cells(row_node: &roxmltree::Node, shared_strings: &[String], ns: &s
             .unwrap_or("")
             .to_string();
 
-        let value = if v_text.is_empty() {
+        let value = if cell_type == "inlineStr" {
+            match is_node {
+                Some(is) => {
+                    let ss = parse_si_node(&is, ns, theme_colors);
+                    CellValue::Text { text: ss.text, runs: ss.runs }
+                }
+                None => CellValue::Empty,
+            }
+        } else if v_text.is_empty() {
             CellValue::Empty
         } else {
             match cell_type {
                 "s" => {
                     let idx: usize = v_text.parse().unwrap_or(0);
-                    let text = shared_strings.get(idx).cloned().unwrap_or_default();
-                    CellValue::Text { text }
+                    if let Some(ss) = shared_strings.get(idx) {
+                        CellValue::Text { text: ss.text.clone(), runs: ss.runs.clone() }
+                    } else {
+                        CellValue::Text { text: String::new(), runs: None }
+                    }
                 }
-                "str" | "inlineStr" => CellValue::Text { text: v_text },
+                "str" => CellValue::Text { text: v_text, runs: None },
                 "b" => CellValue::Bool { bool: v_text == "1" || v_text == "true" },
                 "e" => CellValue::Error { error: v_text },
                 _ => {
                     if let Ok(n) = v_text.parse::<f64>() {
                         CellValue::Number { number: n }
                     } else {
-                        CellValue::Text { text: v_text }
+                        CellValue::Text { text: v_text, runs: None }
                     }
                 }
             }

@@ -429,6 +429,23 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (el.stroke) {
     applyStroke(ctx, el.stroke, scale);
     ctx.stroke();
+
+    // Arrow heads on connector / line shapes
+    const CONNECTOR_GEOMS = new Set([
+      'line', 'straightconnector1',
+      'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
+      'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
+    ]);
+    if (CONNECTOR_GEOMS.has(geom)) {
+      // The shape runs from (x,y) to (x+w, y+h) in local (already-rotated) coords.
+      const angle = Math.atan2(h, w);
+      if (el.stroke.tailEnd) {
+        drawArrowHead(ctx, x + w, y + h, angle, el.stroke.tailEnd, el.stroke, scale);
+      }
+      if (el.stroke.headEnd) {
+        drawArrowHead(ctx, x, y, angle + Math.PI, el.stroke.headEnd, el.stroke, scale);
+      }
+    }
   }
 
   // Render text inside the rotation context so text follows shape rotation
@@ -989,10 +1006,13 @@ function buildShapePath(
 
     // ── Donut / ring ──────────────────────────────────────────────────────────
     case 'donut': {
-      ctx.arc(cx, cy, w / 2, 0, Math.PI * 2);
-      const ir = Math.min(w, h) * (adj != null ? (adj / 100000) * 0.5 : 0.25);
-      ctx.moveTo(cx + ir, cy);
-      ctx.arc(cx, cy, ir, 0, Math.PI * 2, true);
+      // OOXML: dr = min(wd2, hd2) * adj / 100000; iRx = wd2 - dr; iRy = hd2 - dr
+      const rx = w / 2, ry = h / 2;
+      const dr  = Math.min(rx, ry) * (adj ?? 25000) / 100000;
+      const irx = rx - dr, iry = ry - dr;
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2, false);
+      ctx.moveTo(cx + irx, cy);
+      ctx.ellipse(cx, cy, irx, iry, 0, 0, Math.PI * 2, true);
       break;
     }
 
@@ -2541,6 +2561,64 @@ const DASH_PATTERNS: Record<string, number[]> = {
   sysDashDot: [4, 2, 1, 2],
 };
 
+/** Draw an arrowhead at `tip` pointing in `angle` radians (0 = right). */
+function drawArrowHead(
+  ctx: CanvasRenderingContext2D,
+  tipX: number,
+  tipY: number,
+  angle: number,
+  arrowEnd: { type: string; w: string; len: string },
+  stroke: Stroke,
+  scale: number,
+): void {
+  if (arrowEnd.type === 'none') return;
+  const lw = Math.max(0.5, emuToPx(stroke.width, scale));
+  const wMul = arrowEnd.w   === 'sm' ? 2 : arrowEnd.w   === 'lg' ? 4 : 3;
+  const lMul = arrowEnd.len === 'sm' ? 2 : arrowEnd.len === 'lg' ? 4 : 3;
+  const halfW = lw * wMul / 2;
+  const len   = lw * lMul;
+  const color = hexToRgba(stroke.color);
+
+  ctx.save();
+  ctx.translate(tipX, tipY);
+  ctx.rotate(angle);
+  ctx.fillStyle   = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = lw;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  switch (arrowEnd.type) {
+    case 'triangle':
+    case 'stealth':
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len, -halfW);
+      ctx.lineTo(-len,  halfW);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'arrow':
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len, -halfW);
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len,  halfW);
+      ctx.stroke();
+      break;
+    case 'diamond':
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len / 2, -halfW);
+      ctx.lineTo(-len, 0);
+      ctx.lineTo(-len / 2,  halfW);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'oval':
+      ctx.ellipse(-len / 2, 0, len / 2, halfW, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+  ctx.restore();
+}
+
 function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale: number) {
   if (!stroke) {
     ctx.strokeStyle = 'transparent';
@@ -3286,6 +3364,21 @@ function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, scale: num
         ctx.beginPath();
         ctx.moveTo(colX + cellW, rowY);
         ctx.lineTo(colX + cellW, rowY + cellH);
+        ctx.stroke();
+      }
+      // Diagonal borders: top-left→bottom-right and bottom-left→top-right
+      if (cell.diagonalTL) {
+        applyStroke(ctx, cell.diagonalTL, scale);
+        ctx.beginPath();
+        ctx.moveTo(colX, rowY);
+        ctx.lineTo(colX + cellW, rowY + cellH);
+        ctx.stroke();
+      }
+      if (cell.diagonalTR) {
+        applyStroke(ctx, cell.diagonalTR, scale);
+        ctx.beginPath();
+        ctx.moveTo(colX + cellW, rowY);
+        ctx.lineTo(colX, rowY + cellH);
         ctx.stroke();
       }
       ctx.restore();

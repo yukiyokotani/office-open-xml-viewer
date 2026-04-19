@@ -2,6 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf,
+  Run, ChartData,
 } from './types.js';
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
@@ -39,11 +40,31 @@ function buildFont(font: Font, cs = 1): string {
   return `${style}${weight}${sizePx}px ${family}`;
 }
 
+/**
+ * Resolve a Run's font against a base Font. Per ECMA-376, a run's <rPr>
+ * completely specifies bold/italic/underline/strike for that run, while
+ * size/color/name fall back to the base when omitted. A run with no
+ * <rPr> (run.font undefined) inherits the base entirely.
+ */
+function applyRunFont(base: Font, run: Run): Font {
+  const rf = run.font;
+  if (!rf) return base;
+  return {
+    bold: rf.bold,
+    italic: rf.italic,
+    underline: rf.underline,
+    strike: rf.strike,
+    size: rf.size ?? base.size,
+    color: rf.color ?? base.color,
+    name: rf.name ?? base.name,
+  };
+}
+
 function resolveXf(styles: Styles, styleIndex: number): { font: Font; fill: Fill; border: Border; xf: CellXf } {
   const xf: CellXf = styles.cellXfs[styleIndex] ?? styles.cellXfs[0] ?? {
     fontId: 0, fillId: 0, borderId: 0, numFmtId: 0, alignH: null, alignV: null, wrapText: false,
   };
-  const font: Font = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
+  const font: Font = styles.fonts[xf.fontId] ?? { bold: false, italic: false, underline: false, strike: false, size: DEFAULT_FONT_SIZE, color: null, name: null };
   const fill: Fill = styles.fills[xf.fillId] ?? { patternType: 'none', fgColor: null, bgColor: null };
   const border: Border = styles.borders[xf.borderId] ?? { left: null, right: null, top: null, bottom: null };
   return { font, fill, border, xf };
@@ -649,6 +670,11 @@ function renderQuadrant(
       ctx.rect(cx, cy, drawW, cellH);
       ctx.clip();
 
+      // Rich text: draw each run with its own font. Only supported for the
+      // non-wrap path (wrap with mixed fonts is significantly more complex).
+      const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
+      const hasRichText = runs && runs.length > 0 && !xf.wrapText;
+
       if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
         const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
@@ -660,22 +686,98 @@ function renderQuadrant(
         for (let li = 0; li < lines.length; li++) {
           ctx.fillText(lines[li], textX, startY + li * lineH);
         }
+      } else if (hasRichText) {
+        // Per-run drawing: compute font for each run, measure widths, draw LTR
+        const runFonts = runs.map(r => applyRunFont(fontForDraw, r));
+        const runWidths: number[] = runs.map((r, i) => {
+          ctx.font = buildFont(runFonts[i], cs);
+          return ctx.measureText(r.text).width;
+        });
+        const totalWidth = runWidths.reduce((a, b) => a + b, 0);
+        let startX: number;
+        if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
+        else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
+        else startX = cx + paddingX;
+        // Use left alignment since we position each run ourselves
+        ctx.textAlign = 'left';
+        let textY: number;
+        if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
+        else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
+        else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+        let runX = startX;
+        for (let i = 0; i < runs.length; i++) {
+          const rf = runFonts[i];
+          ctx.font = buildFont(rf, cs);
+          const runColor = cf.fontColor ?? rf.color;
+          ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
+          ctx.fillText(runs[i].text, runX, textY);
+          const rSizePx = Math.round(rf.size * ROW_HEIGHT_TO_PX);
+          if (rf.underline) {
+            const uy = alignV === 'top'
+              ? cy + paddingY + rSizePx + 1
+              : alignV === 'center'
+                ? cy + cellH / 2 + Math.round(rSizePx * 0.55)
+                : cy + cellH - paddingY + 1;
+            ctx.save();
+            ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(runX, uy); ctx.lineTo(runX + runWidths[i], uy); ctx.stroke();
+            ctx.restore();
+          }
+          if (rf.strike) {
+            const sy = alignV === 'top'
+              ? cy + paddingY + Math.round(rSizePx * 0.5)
+              : alignV === 'center'
+                ? cy + cellH / 2
+                : cy + cellH - paddingY - Math.round(rSizePx * 0.35);
+            ctx.save();
+            ctx.strokeStyle = runColor ? hexToRgba(runColor) : '#000000';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath(); ctx.moveTo(runX, sy); ctx.lineTo(runX + runWidths[i], sy); ctx.stroke();
+            ctx.restore();
+          }
+          runX += runWidths[i];
+        }
       } else {
+        // Measure once for both underline and strike
+        let overlayMetrics: TextMetrics | null = null;
+        const measureOverlay = () => overlayMetrics ??= ctx.measureText(text);
+        const overlayX = () => {
+          const tW = Math.min(measureOverlay().width, drawW - paddingX * 2);
+          return {
+            x: alignH === 'right' ? cx + cellW - paddingX - tW
+              : alignH === 'center' ? cx + cellW / 2 - tW / 2
+              : cx + paddingX,
+            width: tW,
+          };
+        };
+        const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
+
         if (font.underline) {
-          const metrics = ctx.measureText(text);
-          const tW = Math.min(metrics.width, drawW - paddingX * 2);
+          const { x: ux, width: tW } = overlayX();
           const uy = alignV === 'top'
-            ? cy + paddingY + Math.round(font.size * ROW_HEIGHT_TO_PX) + 1
+            ? cy + paddingY + sizePx + 1
             : alignV === 'center'
-              ? cy + cellH / 2 + Math.round(font.size * ROW_HEIGHT_TO_PX * 0.55)
+              ? cy + cellH / 2 + Math.round(sizePx * 0.55)
               : cy + cellH - paddingY + 1;
-          const ux = alignH === 'right' ? cx + cellW - paddingX - tW
-            : alignH === 'center' ? cx + cellW / 2 - tW / 2
-            : cx + paddingX;
           ctx.save();
           ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
           ctx.lineWidth = 0.5;
           ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
+          ctx.restore();
+        }
+        if (font.strike) {
+          const { x: sx, width: tW } = overlayX();
+          // Strike line sits roughly at the x-height mid-line (~45% up from baseline)
+          const sy = alignV === 'top'
+            ? cy + paddingY + Math.round(sizePx * 0.5)
+            : alignV === 'center'
+              ? cy + cellH / 2
+              : cy + cellH - paddingY - Math.round(sizePx * 0.35);
+          ctx.save();
+          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.lineWidth = 0.5;
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + tW, sy); ctx.stroke();
           ctx.restore();
         }
         let textY: number;
@@ -830,6 +932,28 @@ export function renderViewport(
     scrollAreaX, scrollAreaY,
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
   );
+
+  // ── Anchored images (clipped to scrollable area) ─────────────
+  if (worksheet.images && worksheet.images.length > 0 && opts.loadedImages) {
+    renderImages(
+      ctx, worksheet, opts.loadedImages, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+    );
+  }
+
+  // ── Anchored charts (clipped to scrollable area) ──────────────
+  if (worksheet.charts && worksheet.charts.length > 0) {
+    renderCharts(
+      ctx, worksheet, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+    );
+  }
 
   // ── Row/col headers (drawn last, always on top) ──────────────
   renderHeaders(ctx, canvasW, canvasH,
@@ -1010,6 +1134,96 @@ function renderHeaders(
 }
 
 // ────────────────────────────────────────────────────────────────
+// Image anchors  (ECMA-376 §20.5, <xdr:twoCellAnchor>)
+// ────────────────────────────────────────────────────────────────
+const EMU_PER_PX = 9525;
+
+/** Sum scaled column widths for cols 1..n-1 (sheet-space X of col n in scaled px). */
+function sheetXForCol(
+  ws: Worksheet,
+  col1: number, // 1-indexed column number
+  cs: number,
+): number {
+  let x = 0;
+  for (let c = 1; c < col1; c++) {
+    x += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth) * cs);
+  }
+  return x;
+}
+
+/** Sum scaled row heights for rows 1..n-1 (sheet-space Y of row n in scaled px). */
+function sheetYForRow(
+  ws: Worksheet,
+  row1: number, // 1-indexed row number
+  cs: number,
+): number {
+  let y = 0;
+  for (let r = 1; r < row1; r++) {
+    y += Math.round(rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight) * cs);
+  }
+  return y;
+}
+
+function renderImages(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  loadedImages: Map<string, HTMLImageElement>,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+
+  // Sheet-space origin of the current scroll viewport's first visible cell
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  ctx.clip();
+
+  for (const anchor of ws.images) {
+    const img = loadedImages.get(anchor.dataUrl);
+    if (!img) continue;
+
+    // xdr col/row are 0-indexed; our widths map is 1-indexed.
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    // Image sheet-space rect (in scaled px)
+    const imgSheetX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const imgSheetY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const imgSheetX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const imgSheetY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+
+    const imgW = imgSheetX2 - imgSheetX1;
+    const imgH = imgSheetY2 - imgSheetY1;
+    if (imgW <= 0 || imgH <= 0) continue;
+
+    // Translate to canvas coordinates of the scrollable viewport
+    const canvasX = scrollAreaX + (imgSheetX1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasY = scrollAreaY + (imgSheetY1 - scrollOriginSheetY) - scrollOffsetY;
+
+    // Early out when entirely off-screen
+    if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
+
+    ctx.drawImage(img, canvasX, canvasY, imgW, imgH);
+  }
+
+  ctx.restore();
+}
+
+// ────────────────────────────────────────────────────────────────
 // Border drawing
 // ────────────────────────────────────────────────────────────────
 function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
@@ -1042,4 +1256,746 @@ function borderStyleWidth(style: string): number {
     case 'medium': case 'mediumDashed': case 'mediumDashDot': return 0.5;
     default: return 0.5;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Chart rendering
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Standard Excel chart colour palette (matches Office default theme)
+const CHART_PALETTE = [
+  '4472C4','ED7D31','A9D18E','FF0000','70AD47','4BACC6',
+  'FFC000','9E480E','843C0C','636363','255E91','967300',
+];
+
+function chartColor(idx: number, explicit?: string | null): string {
+  return explicit ? `#${explicit}` : `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
+}
+
+function niceStep(range: number, targetSteps = 5): number {
+  if (range === 0) return 1;
+  const raw = range / targetSteps;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const normed = raw / mag;
+  const nice = normed < 1.5 ? 1 : normed < 3.5 ? 2 : normed < 7.5 ? 5 : 10;
+  return nice * mag;
+}
+
+// ── renderCharts ────────────────────────────────────────────────────────────
+
+function renderCharts(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  for (const anchor of ws.charts) {
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    const shX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const shY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const shX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const shY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+
+    const cw = shX2 - shX1;
+    const ch = shY2 - shY1;
+    if (cw <= 0 || ch <= 0) continue;
+
+    const cx = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const cy = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
+
+    if (cx + cw < scrollAreaX || cx > scrollAreaX + scrollAreaW) continue;
+    if (cy + ch < scrollAreaY || cy > scrollAreaY + scrollAreaH) continue;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.clip();
+
+    renderChartData(ctx, anchor.chart, cx, cy, cw, ch);
+    ctx.restore();
+  }
+}
+
+// ── Dispatcher ──────────────────────────────────────────────────────────────
+
+function renderChartData(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  // White background + light border
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#d0d0d0';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  if (chart.series.length === 0) {
+    ctx.fillStyle = '#888';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('(no data)', x + w / 2, y + h / 2);
+    return;
+  }
+
+  switch (chart.chartType) {
+    case 'bar':     renderBarChart(ctx, chart, x, y, w, h);                break;
+    case 'line':    renderLineChartXlsx(ctx, chart, x, y, w, h);           break;
+    case 'area':    renderAreaChartXlsx(ctx, chart, x, y, w, h);           break;
+    case 'pie':     renderPieChartXlsx(ctx, chart, x, y, w, h, false);     break;
+    case 'doughnut':renderPieChartXlsx(ctx, chart, x, y, w, h, true);      break;
+    case 'radar':   renderRadarChart(ctx, chart, x, y, w, h);              break;
+    case 'scatter': renderScatterChartXlsx(ctx, chart, x, y, w, h);        break;
+    default:
+      ctx.fillStyle = '#888';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`Chart: ${chart.chartType}`, x + w / 2, y + h / 2);
+  }
+}
+
+// ── Legend helper ────────────────────────────────────────────────────────────
+
+function drawLegend(
+  ctx: CanvasRenderingContext2D,
+  series: ChartData['series'],
+  lx: number, ly: number, lw: number, lh: number,
+): void {
+  const fontSize = Math.max(9, Math.min(12, lh / (series.length + 1)));
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  const sw = 10; const gap = 4;
+  const rowH = fontSize + 4;
+  let ry = ly + (lh - rowH * series.length) / 2;
+  for (let i = 0; i < series.length; i++) {
+    const color = chartColor(i, null);
+    ctx.fillStyle = color;
+    ctx.fillRect(lx, ry, sw, fontSize);
+    ctx.fillStyle = '#333';
+    ctx.textAlign = 'left';
+    const label = series[i].name || `Series ${i + 1}`;
+    ctx.fillText(label.slice(0, 20), lx + sw + gap, ry + fontSize / 2);
+    ry += rowH;
+  }
+}
+
+// ── Title helper ─────────────────────────────────────────────────────────────
+
+function drawChartTitle(
+  ctx: CanvasRenderingContext2D,
+  title: string | null,
+  x: number, y: number, w: number, fontSize: number,
+): void {
+  if (!title) return;
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.fillStyle = '#333';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(title, x + w / 2, y);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bar chart (vertical columns + horizontal bars, clustered + stacked)
+// Also handles mixed bar+line series (seriesType per series)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderBarChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  const isH    = chart.barDir === 'bar';
+  const stacked = chart.grouping === 'stacked' || chart.grouping === 'percentStacked';
+  const pct    = chart.grouping === 'percentStacked';
+
+  // Separate bar and line series (for mixed charts)
+  const barSeries  = chart.series.filter(s => s.seriesType !== 'line');
+  const lineSeries = chart.series.filter(s => s.seriesType === 'line');
+  const allSeries  = barSeries; // for axis calculation include bar only
+
+  const cats = chart.categories.length > 0
+    ? chart.categories
+    : (chart.series[0]?.categories ?? []);
+  const n = cats.length;
+  if (n === 0) return;
+
+  // Layout
+  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.03, b: h * 0.14, l: w * 0.12 };
+  if (isH) { pad.l = w * 0.22; pad.b = h * 0.08; }
+
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const px0 = x + pad.l; const py0 = y + pad.t;
+  const pw  = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  if (pw <= 0 || ph <= 0) return;
+
+  // Compute data max
+  let dataMax = 0;
+  for (let ci = 0; ci < n; ci++) {
+    let stackSum = 0;
+    for (const s of allSeries) {
+      const v = s.values[ci] ?? 0;
+      if (stacked) stackSum += Math.abs(v);
+      else dataMax = Math.max(dataMax, Math.abs(v));
+    }
+    if (stacked) dataMax = Math.max(dataMax, stackSum);
+  }
+  if (pct) dataMax = 100;
+  if (dataMax === 0) dataMax = 1;
+
+  const step  = niceStep(dataMax);
+  const axMax = Math.ceil(dataMax / step) * step;
+
+  // Draw grid + value axis
+  const gridColor = '#e0e0e0';
+  const steps = Math.round(axMax / step);
+  ctx.textBaseline = 'middle';
+  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+  ctx.fillStyle = '#555';
+
+  for (let si = 0; si <= steps; si++) {
+    const val = si * step;
+    const label = pct ? `${Math.round(val)}%` : val >= 1000 ? `${(val / 1000).toFixed(1)}k` : String(val);
+    if (!isH) {
+      const gy = py0 + ph - (val / axMax) * ph;
+      ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
+      ctx.lineWidth = si === 0 ? 1 : 0.5;
+      ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      ctx.textAlign = 'right';
+      ctx.fillText(label, px0 - 4, gy);
+    } else {
+      const gx = px0 + (val / axMax) * pw;
+      ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
+      ctx.lineWidth = si === 0 ? 1 : 0.5;
+      ctx.beginPath(); ctx.moveTo(gx, py0); ctx.lineTo(gx, py0 + ph); ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.fillText(label, gx, py0 + ph + 10);
+    }
+  }
+
+  // Draw category axis line
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  if (!isH) {
+    ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+
+  // Draw bars
+  const catGap = !isH ? pw / n : ph / n;
+  const barW   = catGap * (stacked ? 0.6 : 0.6 / Math.max(1, barSeries.length));
+  const clusterGap = stacked ? 0 : catGap * 0.6 / Math.max(1, barSeries.length);
+  const catStart   = stacked ? catGap * 0.2 : catGap * 0.2;
+
+  for (let ci = 0; ci < n; ci++) {
+    let stackOffset = 0;
+    let stackSum = 0;
+    if (pct) {
+      for (const s of barSeries) stackSum += Math.abs(s.values[ci] ?? 0);
+      if (stackSum === 0) stackSum = 1;
+    }
+
+    for (let si = 0; si < barSeries.length; si++) {
+      const s = barSeries[si];
+      const raw = s.values[ci] ?? 0;
+      const val = pct ? (Math.abs(raw) / stackSum) * 100 : Math.abs(raw);
+      const color = chartColor(si, null);
+
+      if (!isH) {
+        const bx = stacked
+          ? px0 + ci * catGap + catStart
+          : px0 + ci * catGap + catStart + si * clusterGap;
+        const barH = (val / axMax) * ph;
+        const by   = py0 + ph - (stacked ? (stackOffset + val) : val) / axMax * ph;
+        ctx.fillStyle = color;
+        ctx.fillRect(bx, by, barW, barH);
+      } else {
+        const by = stacked
+          ? py0 + (n - 1 - ci) * catGap + catStart
+          : py0 + (n - 1 - ci) * catGap + catStart + si * clusterGap;
+        const barL = (val / axMax) * pw;
+        const bx   = stacked ? px0 + (stackOffset / axMax) * pw : px0;
+        ctx.fillStyle = color;
+        ctx.fillRect(bx, by, barL, barW);
+      }
+      if (stacked) stackOffset += val;
+    }
+  }
+
+  // Draw category labels
+  ctx.fillStyle = '#555';
+  ctx.font = `${Math.max(8, Math.min(11, catGap * 0.5))}px sans-serif`;
+  for (let ci = 0; ci < n; ci++) {
+    const label = (cats[ci] ?? '').toString().slice(0, 12);
+    if (!isH) {
+      const lx = px0 + ci * catGap + catGap / 2;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(label, lx, py0 + ph + 3);
+    } else {
+      const ly = py0 + (n - 1 - ci) * catGap + catGap / 2;
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, px0 - 4, ly);
+    }
+  }
+
+  // Overlay line series (mixed bar+line)
+  if (lineSeries.length > 0) {
+    for (let si = 0; si < lineSeries.length; si++) {
+      const s = lineSeries[si];
+      const color = chartColor(barSeries.length + si, null);
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      let started = false;
+      for (let ci = 0; ci < n; ci++) {
+        const v = s.values[ci];
+        if (v == null) { started = false; continue; }
+        const lx = px0 + ci * catGap + catGap / 2;
+        const ly = py0 + ph - (v / axMax) * ph;
+        if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
+      }
+      ctx.stroke();
+      // Markers
+      for (let ci = 0; ci < n; ci++) {
+        const v = s.values[ci];
+        if (v == null) continue;
+        const lx = px0 + ci * catGap + catGap / 2;
+        const ly = py0 + ph - (v / axMax) * ph;
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  // Legend
+  if (legendW > 0) {
+    drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Line chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderLineChartXlsx(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  const cats = chart.categories.length > 0 ? chart.categories : (chart.series[0]?.categories ?? []);
+  const n = cats.length; if (n === 0) return;
+
+  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
+
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const px0 = x + pad.l; const py0 = y + pad.t;
+  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  if (pw <= 0 || ph <= 0) return;
+
+  // Y range
+  let dataMin = Infinity; let dataMax = -Infinity;
+  for (const s of chart.series) for (const v of s.values) if (v != null) { dataMin = Math.min(dataMin, v); dataMax = Math.max(dataMax, v); }
+  if (!isFinite(dataMin)) { dataMin = 0; dataMax = 1; }
+  if (dataMin > 0) dataMin = 0;
+  if (dataMax < 0) dataMax = 0;
+  if (dataMax === dataMin) dataMax = dataMin + 1;
+
+  const step  = niceStep(dataMax - dataMin);
+  const axMin = Math.floor(dataMin / step) * step;
+  const axMax = Math.ceil(dataMax / step) * step;
+  const range = axMax - axMin; if (range === 0) return;
+
+  const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
+  const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+
+  // Grid
+  const steps = Math.round((axMax - axMin) / step);
+  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  for (let si = 0; si <= steps; si++) {
+    const v = axMin + si * step;
+    const gy = toY(v);
+    ctx.strokeStyle = v === 0 ? '#aaa' : '#e0e0e0';
+    ctx.lineWidth = v === 0 ? 1 : 0.5;
+    ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+    ctx.fillText(String(v), px0 - 4, gy);
+  }
+
+  // Baseline
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+
+  // Series
+  const markerR = Math.max(3, ph * 0.015);
+  for (let si = 0; si < chart.series.length; si++) {
+    const s = chart.series[si];
+    const color = chartColor(si, null);
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.beginPath();
+    let started = false;
+    for (let ci = 0; ci < n; ci++) {
+      const v = s.values[ci]; if (v == null) { started = false; continue; }
+      const px = toX(ci); const py = toY(v);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (let ci = 0; ci < n; ci++) {
+      const v = s.values[ci]; if (v == null) continue;
+      ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Category labels
+  const labelInterval = Math.max(1, Math.ceil(n / 8));
+  ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
+  for (let ci = 0; ci < n; ci += labelInterval) {
+    ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
+  }
+
+  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Area chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderAreaChartXlsx(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  const cats = chart.categories.length > 0 ? chart.categories : (chart.series[0]?.categories ?? []);
+  const n = cats.length; if (n === 0) return;
+  const stacked = chart.grouping === 'stacked' || chart.grouping === 'percentStacked';
+
+  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
+
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const px0 = x + pad.l; const py0 = y + pad.t;
+  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  if (pw <= 0 || ph <= 0) return;
+
+  // Compute max (stacked: sum per category)
+  let dataMax = 0;
+  for (let ci = 0; ci < n; ci++) {
+    if (stacked) {
+      let sum = 0;
+      for (const s of chart.series) sum += s.values[ci] ?? 0;
+      dataMax = Math.max(dataMax, sum);
+    } else {
+      for (const s of chart.series) dataMax = Math.max(dataMax, s.values[ci] ?? 0);
+    }
+  }
+  if (dataMax === 0) dataMax = 1;
+  const step  = niceStep(dataMax);
+  const axMax = Math.ceil(dataMax / step) * step;
+
+  const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+  const toY = (v: number) => py0 + ph - (v / axMax) * ph;
+
+  // Grid
+  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  const steps = Math.round(axMax / step);
+  for (let si = 0; si <= steps; si++) {
+    const v = si * step; const gy = toY(v);
+    ctx.strokeStyle = si === 0 ? '#aaa' : '#e0e0e0';
+    ctx.lineWidth = si === 0 ? 1 : 0.5;
+    ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+    ctx.fillText(String(v), px0 - 4, gy);
+  }
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+
+  // Areas (render back-to-front)
+  const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
+  for (let si = chart.series.length - 1; si >= 0; si--) {
+    const s = chart.series[si];
+    const color = chartColor(si, null);
+    const baseY = py0 + ph;
+
+    ctx.beginPath();
+    if (stacked && stackBase) {
+      // top edge: from first to last
+      for (let ci = 0; ci < n; ci++) {
+        const v = (s.values[ci] ?? 0) + stackBase[ci];
+        const px = toX(ci); const py = toY(v);
+        if (ci === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      // bottom edge: base stack values in reverse
+      for (let ci = n - 1; ci >= 0; ci--) {
+        ctx.lineTo(toX(ci), toY(stackBase[ci]));
+      }
+      for (let ci = 0; ci < n; ci++) stackBase[ci] += s.values[ci] ?? 0;
+    } else {
+      ctx.moveTo(toX(0), baseY);
+      for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), toY(s.values[ci] ?? 0));
+      ctx.lineTo(toX(n - 1), baseY);
+    }
+    ctx.closePath();
+    ctx.fillStyle = hexToRgba(color, 0.6);
+    ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.stroke();
+  }
+
+  // Category labels
+  const labelInterval = Math.max(1, Math.ceil(n / 8));
+  ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
+  for (let ci = 0; ci < n; ci += labelInterval) {
+    ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
+  }
+
+  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pie / Doughnut chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderPieChartXlsx(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+  isDoughnut: boolean,
+): void {
+  const s = chart.series[0]; if (!s) return;
+  const cats = s.categories.length > 0 ? s.categories : chart.categories;
+  const vals = s.values.map(v => Math.abs(v ?? 0));
+  const total = vals.reduce((a, b) => a + b, 0);
+  if (total === 0) return;
+
+  const titleH = chart.title ? Math.max(14, h * 0.06) : 0;
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const legendW = Math.max(80, w * 0.28);
+  const pw = w - legendW; const ph = h - titleH - h * 0.04;
+  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
+  const outerR = Math.min(pw, ph) * 0.42;
+  const innerR = isDoughnut ? outerR * 0.5 : 0;
+
+  let angle = -Math.PI / 2;
+  for (let i = 0; i < vals.length; i++) {
+    const slice = (vals[i] / total) * Math.PI * 2;
+    const color = chartColor(i, null);
+    ctx.beginPath();
+    ctx.moveTo(cx2, cy2);
+    ctx.arc(cx2, cy2, outerR, angle, angle + slice);
+    ctx.closePath();
+    ctx.fillStyle = color; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+    angle += slice;
+  }
+
+  if (isDoughnut) {
+    ctx.beginPath(); ctx.arc(cx2, cy2, innerR, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+  }
+
+  // Legend
+  const lx = x + pw + 4;
+  const fontSize = Math.max(9, Math.min(12, h / (vals.length + 2)));
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  const rowH = fontSize + 4;
+  let ry = y + (h - rowH * vals.length) / 2;
+  for (let i = 0; i < vals.length; i++) {
+    ctx.fillStyle = chartColor(i, null);
+    ctx.fillRect(lx, ry, 10, fontSize);
+    ctx.fillStyle = '#333'; ctx.textAlign = 'left';
+    ctx.fillText((cats[i] ?? `Item ${i + 1}`).toString().slice(0, 18), lx + 14, ry + fontSize / 2);
+    ry += rowH;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Radar / Spider chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderRadarChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  const cats = chart.categories.length > 0 ? chart.categories : (chart.series[0]?.categories ?? []);
+  const n = cats.length; if (n < 3) return;
+
+  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW = chart.series.length > 1 ? Math.max(70, w * 0.2) : 0;
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const pw = w - legendW; const ph = h - titleH - h * 0.04;
+  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
+  const r   = Math.min(pw, ph) * 0.38;
+
+  // Find max across all series
+  let dataMax = 0;
+  for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
+  if (dataMax === 0) dataMax = 1;
+  const step  = niceStep(dataMax);
+  const axMax = Math.ceil(dataMax / step) * step;
+
+  const angle0 = -Math.PI / 2;
+  const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
+
+  // Concentric rings (grid)
+  const rings = Math.round(axMax / step);
+  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 0.5;
+  for (let ri = 1; ri <= rings; ri++) {
+    const rr = (ri / rings) * r;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = spoke(i);
+      const px = cx2 + Math.cos(a) * rr; const py = cy2 + Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.stroke();
+  }
+
+  // Spokes
+  ctx.strokeStyle = '#bbb'; ctx.lineWidth = 0.5;
+  for (let i = 0; i < n; i++) {
+    const a = spoke(i);
+    ctx.beginPath(); ctx.moveTo(cx2, cy2);
+    ctx.lineTo(cx2 + Math.cos(a) * r, cy2 + Math.sin(a) * r); ctx.stroke();
+  }
+
+  // Category labels
+  ctx.font = `${Math.max(8, Math.min(11, r * 0.2))}px sans-serif`;
+  ctx.fillStyle = '#444'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const a = spoke(i);
+    const lx = cx2 + Math.cos(a) * (r + 12);
+    const ly = cy2 + Math.sin(a) * (r + 12);
+    ctx.textAlign = Math.cos(a) < -0.1 ? 'right' : Math.cos(a) > 0.1 ? 'left' : 'center';
+    ctx.fillText((cats[i] ?? '').toString().slice(0, 12), lx, ly);
+  }
+
+  // Series polygons
+  for (let si = 0; si < chart.series.length; si++) {
+    const s = chart.series[si];
+    const color = chartColor(si, null);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const v = s.values[i] ?? 0;
+      const frac = v / axMax;
+      const a = spoke(i);
+      const px = cx2 + Math.cos(a) * r * frac;
+      const py = cy2 + Math.sin(a) * r * frac;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  if (legendW > 0) {
+    drawLegend(ctx, chart.series, x + w - legendW + 4, y + titleH + h * 0.04, legendW - 8, ph);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scatter chart
+// ═══════════════════════════════════════════════════════════════════════════
+
+function renderScatterChartXlsx(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartData,
+  x: number, y: number, w: number, h: number,
+): void {
+  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12, l: w * 0.12 };
+
+  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+
+  const px0 = x + pad.l; const py0 = y + pad.t;
+  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  if (pw <= 0 || ph <= 0) return;
+
+  // For scatter: categories hold X values (as strings), values hold Y
+  let allX: number[] = []; let allY: number[] = [];
+  for (const s of chart.series) {
+    for (const c of s.categories) { const v = parseFloat(c); if (!isNaN(v)) allX.push(v); }
+    for (const v of s.values) if (v != null) allY.push(v);
+  }
+  // If no numeric X, use index
+  let useIndexX = allX.length === 0;
+  if (useIndexX) {
+    const maxLen = Math.max(...chart.series.map(s => s.values.length));
+    for (let i = 0; i < maxLen; i++) allX.push(i);
+  }
+
+  let xMin = Math.min(...allX); let xMax = Math.max(...allX);
+  let yMin = Math.min(...allY); let yMax = Math.max(...allY);
+  if (xMin === xMax) { xMin -= 1; xMax += 1; }
+  if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  if (yMin > 0) yMin = 0;
+
+  const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
+  const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
+
+  // Grid lines
+  ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+  const yStep = niceStep(yMax - yMin);
+  const ySteps = Math.round((yMax - yMin) / yStep) + 1;
+  for (let si = 0; si < ySteps; si++) {
+    const v = yMin + si * yStep; if (v > yMax + yStep * 0.01) break;
+    const gy = toY(v);
+    ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+    ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(v), px0 - 4, gy);
+  }
+  // Axes
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+
+  // Points
+  const markerR = Math.max(3, ph * 0.015);
+  for (let si = 0; si < chart.series.length; si++) {
+    const s = chart.series[si];
+    const color = chartColor(si, null);
+    ctx.fillStyle = color;
+    for (let ci = 0; ci < s.values.length; ci++) {
+      const yv = s.values[ci]; if (yv == null) continue;
+      const xv = useIndexX ? ci : parseFloat(s.categories[ci] ?? '0');
+      if (isNaN(xv)) continue;
+      ctx.beginPath(); ctx.arc(toX(xv), toY(yv), markerR, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
 }

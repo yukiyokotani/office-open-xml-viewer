@@ -26,6 +26,55 @@ export interface Worksheet {
   freezeRows: number;
   freezeCols: number;
   conditionalFormats: ConditionalFormat[];
+  images: ImageAnchor[];
+  charts: ChartAnchor[];
+}
+
+// ─── Chart types ─────────────────────────────────────────────────────────────
+
+export interface ChartSeries {
+  name: string;
+  /** Chart sub-type for this series (allows mixed charts). */
+  seriesType: string;
+  categories: string[];
+  values: (number | null)[];
+}
+
+export interface ChartData {
+  /** Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter" */
+  chartType: string;
+  /** "col" (vertical bars) | "row" (horizontal bars) */
+  barDir: string;
+  /** "clustered"|"stacked"|"standard"|"percentStacked" */
+  grouping: string;
+  title: string | null;
+  categories: string[];
+  series: ChartSeries[];
+}
+
+export interface ChartAnchor {
+  fromCol: number; fromColOff: number;
+  fromRow: number; fromRowOff: number;
+  toCol: number;   toColOff: number;
+  toRow: number;   toRowOff: number;
+  chart: ChartData;
+}
+
+/**
+ * Image anchored to a rectangle of cells (EMU offsets within the anchor cells).
+ * 914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI.
+ */
+export interface ImageAnchor {
+  fromCol: number;
+  fromColOff: number;
+  fromRow: number;
+  fromRowOff: number;
+  toCol: number;
+  toColOff: number;
+  toRow: number;
+  toRowOff: number;
+  /** Data URL (data:image/png;base64,...) */
+  dataUrl: string;
 }
 
 export interface CellRange {
@@ -74,10 +123,30 @@ export interface Cell {
 
 export type CellValue =
   | { type: 'empty' }
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; runs?: Run[] }
   | { type: 'number'; number: number }
   | { type: 'bool'; bool: boolean }
   | { type: 'error'; error: string };
+
+export interface Run {
+  text: string;
+  font?: RunFont;
+}
+
+export interface RunFont {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  size?: number;
+  color?: string | null;
+  name?: string | null;
+}
+
+export interface SharedString {
+  text: string;
+  runs?: Run[];
+}
 
 export interface NumFmt {
   numFmtId: number;
@@ -103,6 +172,7 @@ export interface Font {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strike: boolean;
   size: number;
   color: string | null;
   name: string | null;
@@ -139,7 +209,7 @@ export interface CellXf {
 export interface ParsedWorkbook {
   workbook: Workbook;
   styles: Styles;
-  sharedStrings: string[];
+  sharedStrings: SharedString[];
 }
 
 export interface ViewportRange {
@@ -161,6 +231,8 @@ export interface RenderViewportOptions {
   freezeCols?: number;
   /** Scale factor applied to all cell/header dimensions (default 1). */
   cellScale?: number;
+  /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
+  loadedImages?: Map<string, HTMLImageElement>;
 }
 
 export type WorkerRequest =

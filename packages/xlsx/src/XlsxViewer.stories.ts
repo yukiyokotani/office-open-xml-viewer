@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { XlsxViewer } from './viewer';
 import init, { parse_xlsx } from './wasm/xlsx_parser.js';
 
-export type Args = {
+type Args = {
   scale: number;
 };
 
@@ -64,6 +64,48 @@ export function buildViewerUI(
 }
 
 // ---------------------------------------------------------------------------
+// Debug: raw JSON from WASM parser
+// ---------------------------------------------------------------------------
+export const DebugJson: Story = {
+  name: 'Debug – raw parse JSON',
+  render(_args) {
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.xlsx';
+
+    const pre = document.createElement('pre');
+    pre.style.cssText =
+      'font-size:11px;line-height:1.4;max-height:600px;overflow:auto;' +
+      'background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;margin-top:12px;';
+    pre.textContent = 'Load an .xlsx to see the parsed JSON here.';
+
+    root.append(fileInput, pre);
+
+    let wasmReady = false;
+    init().then(() => { wasmReady = true; });
+
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files?.[0];
+      if (!file || !wasmReady) return;
+      try {
+        const buf = await file.arrayBuffer();
+        const json = parse_xlsx(new Uint8Array(buf));
+        const parsed = JSON.parse(json);
+        pre.textContent = JSON.stringify(parsed, null, 2);
+        console.log('[xlsx debug] full JSON:', parsed);
+      } catch (err) {
+        pre.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    });
+
+    return root;
+  },
+};
+
+// ---------------------------------------------------------------------------
 // File upload
 // ---------------------------------------------------------------------------
 export const FileUpload: Story = {
@@ -108,48 +150,6 @@ export const FileUpload: Story = {
       if (!file) return;
       status.textContent = 'Parsing…';
       loadBuffer(await file.arrayBuffer());
-    });
-
-    return root;
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Debug: raw JSON from WASM parser
-// ---------------------------------------------------------------------------
-export const DebugJson: Story = {
-  name: 'Debug – raw parse JSON',
-  render(_args) {
-    const root = document.createElement('div');
-    root.style.cssText = 'font-family:sans-serif;padding:16px;';
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.xlsx';
-
-    const pre = document.createElement('pre');
-    pre.style.cssText =
-      'font-size:11px;line-height:1.4;max-height:600px;overflow:auto;' +
-      'background:#1e1e1e;color:#d4d4d4;padding:12px;border-radius:4px;margin-top:12px;';
-    pre.textContent = 'Load an .xlsx to see the parsed JSON here.';
-
-    root.append(fileInput, pre);
-
-    let wasmReady = false;
-    init().then(() => { wasmReady = true; });
-
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files?.[0];
-      if (!file || !wasmReady) return;
-      try {
-        const buf = await file.arrayBuffer();
-        const json = parse_xlsx(new Uint8Array(buf));
-        const parsed = JSON.parse(json);
-        pre.textContent = JSON.stringify(parsed, null, 2);
-        console.log('[xlsx debug] full JSON:', parsed);
-      } catch (err) {
-        pre.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
     });
 
     return root;
