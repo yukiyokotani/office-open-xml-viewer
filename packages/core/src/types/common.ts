@@ -42,12 +42,25 @@ export interface Shadow {
   dir: number;
 }
 
+export interface ArrowEnd {
+  /** OOXML type: "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow" */
+  type: string;
+  /** Width multiplier: "sm" | "med" | "lg" */
+  w: string;
+  /** Length multiplier: "sm" | "med" | "lg" */
+  len: string;
+}
+
 export interface Stroke {
   color: string;
   /** Width in EMU */
   width: number;
   /** OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", etc. */
   dashStyle?: string;
+  /** Arrow head at the start of the line */
+  headEnd?: ArrowEnd;
+  /** Arrow head at the end of the line */
+  tailEnd?: ArrowEnd;
 }
 
 export interface TextBody {

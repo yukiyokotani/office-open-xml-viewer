@@ -12,7 +12,7 @@ const config: StorybookConfig = {
   ],
   framework: '@storybook/html-vite',
   staticDirs: [
-    { from: '../packages/pptx/tests/visual', to: '/pptx' },
+    { from: '../packages/pptx/public', to: '/pptx' },
     { from: '../packages/xlsx/public', to: '/xlsx' },
     { from: '../packages/docx/public', to: '/docx' },
   ],
