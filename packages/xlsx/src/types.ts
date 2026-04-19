@@ -27,6 +27,37 @@ export interface Worksheet {
   freezeCols: number;
   conditionalFormats: ConditionalFormat[];
   images: ImageAnchor[];
+  charts: ChartAnchor[];
+}
+
+// ─── Chart types ─────────────────────────────────────────────────────────────
+
+export interface ChartSeries {
+  name: string;
+  /** Chart sub-type for this series (allows mixed charts). */
+  seriesType: string;
+  categories: string[];
+  values: (number | null)[];
+}
+
+export interface ChartData {
+  /** Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter" */
+  chartType: string;
+  /** "col" (vertical bars) | "row" (horizontal bars) */
+  barDir: string;
+  /** "clustered"|"stacked"|"standard"|"percentStacked" */
+  grouping: string;
+  title: string | null;
+  categories: string[];
+  series: ChartSeries[];
+}
+
+export interface ChartAnchor {
+  fromCol: number; fromColOff: number;
+  fromRow: number; fromRowOff: number;
+  toCol: number;   toColOff: number;
+  toRow: number;   toRowOff: number;
+  chart: ChartData;
 }
 
 /**
