@@ -73,6 +73,48 @@ pub struct DocParagraph {
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+    /// Paragraph background hex color (w:shd fill on paragraph)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shading: Option<String>,
+    /// Force a page break before this paragraph (w:pageBreakBefore)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub page_break_before: bool,
+    /// Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub contextual_spacing: bool,
+    /// Paragraph borders (w:pBdr)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub borders: Option<ParagraphBorders>,
+    /// Style ID of the applied paragraph style (for contextual spacing resolution)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphBorders {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<ParaBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<ParaBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<ParaBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<ParaBorderEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub between: Option<ParaBorderEdge>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ParaBorderEdge {
+    /// "single" | "double" | "dashed" | ...
+    pub style: String,
+    pub color: Option<String>,
+    /// pt (sz / 8)
+    pub width: f64,
+    /// pt spacing between border and text
+    pub space: f64,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -139,6 +181,14 @@ pub struct FieldRun {
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub all_caps: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub small_caps: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub double_strikethrough: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -159,6 +209,18 @@ pub struct TextRun {
     pub vert_align: Option<String>,
     /// Target URL for hyperlinks (from relationships.xml), None if not a link or no URL
     pub hyperlink: Option<String>,
+    /// Transform all characters to uppercase (w:caps)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub all_caps: bool,
+    /// Render as small capitals (uppercase at ~80% size, w:smallCaps)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub small_caps: bool,
+    /// Double strikethrough (w:dstrike)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub double_strikethrough: bool,
+    /// OOXML highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

@@ -16,6 +16,16 @@ pub struct RunFmt {
     pub background: Option<String>,   // hex 6
     /// "super" | "sub" — mapped from w:vertAlign val="superscript|subscript"
     pub vert_align: Option<String>,
+    /// All caps (w:caps)
+    pub all_caps: Option<bool>,
+    /// Small capitals (w:smallCaps)
+    pub small_caps: Option<bool>,
+    /// Double strikethrough (w:dstrike)
+    pub dstrike: Option<bool>,
+    /// Hidden text — run should not be rendered (w:vanish / w:webHidden)
+    pub vanish: Option<bool>,
+    /// Highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
+    pub highlight: Option<String>,
 }
 
 /// Resolved paragraph formatting.
@@ -36,6 +46,14 @@ pub struct ParaFmt {
     /// merged run defaults from pPr/rPr
     pub run: RunFmt,
     pub based_on: Option<String>,
+    /// Paragraph background hex color (w:shd fill on paragraph)
+    pub shading: Option<String>,
+    /// Force page break before paragraph (w:pageBreakBefore)
+    pub page_break_before: Option<bool>,
+    /// Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing)
+    pub contextual_spacing: Option<bool>,
+    /// Paragraph border edges (w:pBdr)
+    pub para_borders: Option<crate::types::ParagraphBorders>,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +166,10 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.num_id.is_some() { dst.num_id = src.num_id; }
     if src.num_level.is_some() { dst.num_level = src.num_level; }
     if src.tab_stops.is_some() { dst.tab_stops = src.tab_stops.clone(); }
+    if src.shading.is_some() { dst.shading = src.shading.clone(); }
+    if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
+    if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
+    if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
 }
 
 fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
@@ -161,6 +183,11 @@ fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.font_family_east_asia.is_some() { dst.font_family_east_asia = src.font_family_east_asia.clone(); }
     if src.background.is_some() { dst.background = src.background.clone(); }
     if src.vert_align.is_some() { dst.vert_align = src.vert_align.clone(); }
+    if src.all_caps.is_some() { dst.all_caps = src.all_caps; }
+    if src.small_caps.is_some() { dst.small_caps = src.small_caps; }
+    if src.dstrike.is_some() { dst.dstrike = src.dstrike; }
+    if src.vanish.is_some() { dst.vanish = src.vanish; }
+    if src.highlight.is_some() { dst.highlight = src.highlight.clone(); }
 }
 
 pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
@@ -233,6 +260,52 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         fmt.run = parse_run_fmt(rpr);
     }
 
+    // Paragraph shading
+    if let Some(shd) = child_w(ppr, "shd") {
+        if let Some(fill) = attr_w(shd, "fill") {
+            if fill != "auto" && fill.len() == 6 {
+                fmt.shading = Some(fill.to_lowercase());
+            }
+        }
+    }
+
+    // Page break before paragraph
+    fmt.page_break_before = bool_prop(ppr, "pageBreakBefore");
+
+    // Contextual spacing
+    fmt.contextual_spacing = bool_prop(ppr, "contextualSpacing");
+
+    // Paragraph borders (pBdr)
+    if let Some(pbdr) = child_w(ppr, "pBdr") {
+        use crate::types::{ParagraphBorders, ParaBorderEdge};
+        let parse_edge = |name: &str| -> Option<ParaBorderEdge> {
+            let node = child_w(pbdr, name)?;
+            let style = attr_w(node, "val").unwrap_or_else(|| "none".to_string());
+            if style == "none" || style == "nil" { return None; }
+            let width = attr_w(node, "sz")
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|v| v / 8.0)
+                .unwrap_or(0.5);
+            let space = attr_w(node, "space")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let color = attr_w(node, "color")
+                .filter(|c| c != "auto")
+                .map(|c| c.to_lowercase());
+            Some(ParaBorderEdge { style, color, width, space })
+        };
+        let borders = ParagraphBorders {
+            top: parse_edge("top"),
+            bottom: parse_edge("bottom"),
+            left: parse_edge("left"),
+            right: parse_edge("right"),
+            between: parse_edge("between"),
+        };
+        if borders.top.is_some() || borders.bottom.is_some() || borders.left.is_some() || borders.right.is_some() {
+            fmt.para_borders = Some(borders);
+        }
+    }
+
     fmt
 }
 
@@ -289,6 +362,21 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 _ => None,
             };
         }
+    }
+
+    // All caps / small caps
+    fmt.all_caps = bool_prop(rpr, "caps");
+    fmt.small_caps = bool_prop(rpr, "smallCaps");
+
+    // Double strikethrough
+    fmt.dstrike = bool_prop(rpr, "dstrike");
+
+    // Hidden text (vanish or webHidden)
+    fmt.vanish = bool_prop(rpr, "vanish").or_else(|| bool_prop(rpr, "webHidden"));
+
+    // Highlight
+    if let Some(hl) = child_w(rpr, "highlight") {
+        fmt.highlight = attr_w(hl, "val").filter(|v| v != "none");
     }
 
     fmt

@@ -317,6 +317,14 @@ fn parse_paragraph(
         numbering,
         tab_stops,
         runs,
+        shading: base_para.shading.clone(),
+        page_break_before: base_para.page_break_before.unwrap_or(false),
+        contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
+        borders: base_para.para_borders.clone(),
+        style_id: ppr_node
+            .and_then(|p| child_w(p, "pStyle"))
+            .and_then(|s| attr_w(s, "val"))
+            .or_else(|| Some("Normal".to_string())),
     }
 }
 
@@ -486,6 +494,10 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str) -> DocRun {
         font_family: fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone()),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
+        all_caps: fmt.all_caps.unwrap_or(false),
+        small_caps: fmt.small_caps.unwrap_or(false),
+        double_strikethrough: fmt.dstrike.unwrap_or(false),
+        highlight: fmt.highlight.clone(),
     })
 }
 
@@ -520,6 +532,9 @@ fn parse_run_inner(
         apply_direct_run(&mut fmt, &direct);
     }
 
+    // Skip hidden runs entirely
+    if fmt.vanish.unwrap_or(false) { return; }
+
     let is_link = link_href.is_some();
     let hyperlink = link_href.clone().flatten();
 
@@ -535,6 +550,10 @@ fn parse_run_inner(
     };
     let font_family = fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone());
     let vert_align = fmt.vert_align.clone();
+    let all_caps = fmt.all_caps.unwrap_or(false);
+    let small_caps = fmt.small_caps.unwrap_or(false);
+    let double_strikethrough = fmt.dstrike.unwrap_or(false);
+    let highlight = fmt.highlight.clone();
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -554,6 +573,10 @@ fn parse_run_inner(
                         background: fmt.background.clone(),
                         vert_align: vert_align.clone(),
                         hyperlink: hyperlink.clone(),
+                        all_caps,
+                        small_caps,
+                        double_strikethrough,
+                        highlight: highlight.clone(),
                     }));
                 }
             }
@@ -572,6 +595,10 @@ fn parse_run_inner(
                     background: fmt.background.clone(),
                     vert_align: vert_align.clone(),
                     hyperlink: hyperlink.clone(),
+                    all_caps,
+                    small_caps,
+                    double_strikethrough,
+                    highlight: highlight.clone(),
                 }));
             }
             "br" => {
