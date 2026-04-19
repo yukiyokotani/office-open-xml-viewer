@@ -41,6 +41,58 @@ pub struct Worksheet {
     pub freeze_cols: u32,
     pub conditional_formats: Vec<ConditionalFormat>,
     pub images: Vec<ImageAnchor>,
+    pub charts: Vec<ChartAnchor>,
+}
+
+// ─── Chart types ────────────────────────────────────────────────────────────
+
+/// A data series inside a chart.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSeries {
+    /// Display name of the series.
+    pub name: String,
+    /// Chart type for this series ("bar"|"line"|"area"|"pie"|"radar"|"scatter").
+    /// Allows mixed charts (e.g. bar + line sharing the same axes).
+    pub series_type: String,
+    /// Category labels (X-axis for most charts).
+    pub categories: Vec<String>,
+    /// Numeric values; `None` = missing data point.
+    pub values: Vec<Option<f64>>,
+}
+
+/// Parsed chart data extracted from `xl/charts/chartN.xml`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartData {
+    /// Primary chart type: "bar"|"line"|"area"|"pie"|"doughnut"|"radar"|"scatter"
+    pub chart_type: String,
+    /// Bar direction: "col" (vertical) | "row" (horizontal). Only relevant for bar charts.
+    pub bar_dir: String,
+    /// Grouping mode: "clustered"|"stacked"|"standard"|"percentStacked"
+    pub grouping: String,
+    /// Optional chart title.
+    pub title: Option<String>,
+    /// Shared category list (from first series that has categories).
+    pub categories: Vec<String>,
+    /// All series across all chart-type elements in plotArea.
+    pub series: Vec<ChartSeries>,
+}
+
+/// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
+/// Offsets are EMU (914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartAnchor {
+    pub from_col: u32,
+    pub from_col_off: i64,
+    pub from_row: u32,
+    pub from_row_off: i64,
+    pub to_col: u32,
+    pub to_col_off: i64,
+    pub to_row: u32,
+    pub to_row_off: i64,
+    pub chart: ChartData,
 }
 
 /// An image anchored to a rectangular range of cells
@@ -295,8 +347,9 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     let mut ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
         .map_err(|e| e.to_string())?;
 
-    // Attach any drawing-anchored images for this sheet
+    // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(&mut archive, &sheet_path);
+    ws.charts = load_sheet_charts(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1010,6 +1063,7 @@ fn parse_worksheet(
         freeze_cols,
         conditional_formats,
         images: Vec::new(),
+        charts: Vec::new(),
     })
 }
 
@@ -1193,6 +1247,332 @@ fn load_sheet_images(
         all_anchors.append(&mut anchors);
     }
     all_anchors
+}
+
+// ─── Chart loading ──────────────────────────────────────────────────────────
+
+/// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
+/// its drawing(s) for chart anchors (`<xdr:graphicFrame>` elements).
+fn load_sheet_charts(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+) -> Vec<ChartAnchor> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+        return Vec::new();
+    };
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
+        return Vec::new();
+    };
+
+    // Collect all drawing relationship targets
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        if rel.attribute("Type").unwrap_or("").ends_with("/drawing") {
+            if let Some(t) = rel.attribute("Target") {
+                drawing_targets.push(t.to_string());
+            }
+        }
+    }
+    if drawing_targets.is_empty() { return Vec::new(); }
+
+    let mut all_charts: Vec<ChartAnchor> = Vec::new();
+    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let a_ns   = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    let c_ns   = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    let r_ns   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    for target in drawing_targets {
+        // Resolve drawing path relative to the sheet directory
+        let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        let Ok(draw_doc) = roxmltree::Document::parse(&drawing_xml) else { continue; };
+
+        // Load drawing rels (to resolve chart rIds)
+        let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else { continue; };
+        let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+            .ok()
+            .map(|xml| parse_rels_map(&xml))
+            .unwrap_or_default();
+
+        // Iterate over twoCellAnchor elements
+        for anchor in draw_doc.root_element().children().filter(|n| n.is_element()) {
+            if anchor.tag_name().name() != "twoCellAnchor"
+                || anchor.tag_name().namespace() != Some(xdr_ns)
+            {
+                continue;
+            }
+
+            let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+            let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+            let mut chart_rid: Option<String> = None;
+
+            for child in anchor.children() {
+                if !child.is_element() { continue; }
+                match child.tag_name().name() {
+                    "from" | "to" => {
+                        let is_from = child.tag_name().name() == "from";
+                        let mut col: u32 = 0; let mut col_off: i64 = 0;
+                        let mut row: u32 = 0; let mut row_off: i64 = 0;
+                        for c in child.children() {
+                            match (c.tag_name().name(), c.text()) {
+                                ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                                ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                                ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                                ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                                _ => {}
+                            }
+                        }
+                        if is_from { from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off; }
+                        else       { to_col   = col; to_col_off   = col_off; to_row   = row; to_row_off   = row_off; }
+                    }
+                    "graphicFrame" => {
+                        // Look for a:graphic/a:graphicData/c:chart[@r:id]
+                        for gf_child in child.descendants() {
+                            if gf_child.tag_name().name() == "chart"
+                                && gf_child.tag_name().namespace() == Some(c_ns)
+                            {
+                                if let Some(rid) = gf_child.attributes()
+                                    .find(|a| a.name() == "id" && a.namespace() == Some(r_ns))
+                                    .map(|a| a.value().to_string())
+                                {
+                                    chart_rid = Some(rid);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let Some(rid) = chart_rid else { continue; };
+            let Some(chart_target) = drawing_rels.get(&rid) else { continue; };
+            let chart_path = resolve_zip_path(drawing_dir, chart_target);
+            let Ok(chart_xml) = read_zip_entry(archive, &chart_path) else { continue; };
+            let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns) else { continue; };
+
+            all_charts.push(ChartAnchor {
+                from_col, from_col_off, from_row, from_row_off,
+                to_col,   to_col_off,   to_row,   to_row_off,
+                chart: chart_data,
+            });
+        }
+    }
+    all_charts
+}
+
+// ─── Chart XML parser ────────────────────────────────────────────────────────
+
+/// Parse a `xl/charts/chartN.xml` file into a `ChartData`.
+fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+
+    // Find c:chart root element
+    let chart_root = doc.descendants()
+        .find(|n| n.tag_name().name() == "chart" && n.tag_name().namespace() == Some(c_ns))?;
+
+    // Parse optional title
+    let title = extract_chart_title(&chart_root, c_ns, a_ns);
+
+    // Find c:plotArea
+    let plot_area = chart_root.children()
+        .find(|n| n.tag_name().name() == "plotArea" && n.tag_name().namespace() == Some(c_ns))?;
+
+    let mut primary_type = String::new();
+    let mut bar_dir      = "col".to_string();
+    let mut grouping     = "clustered".to_string();
+    let mut all_series: Vec<ChartSeries> = Vec::new();
+    let mut shared_categories: Vec<String> = Vec::new();
+
+    // Recognised chart-type element names → our internal type strings
+    let type_map: &[(&str, &str)] = &[
+        ("barChart",      "bar"),
+        ("lineChart",     "line"),
+        ("areaChart",     "area"),
+        ("pieChart",      "pie"),
+        ("doughnutChart", "doughnut"),
+        ("radarChart",    "radar"),
+        ("scatterChart",  "scatter"),
+        ("bubbleChart",   "scatter"), // treat bubble as scatter
+    ];
+
+    for child in plot_area.children() {
+        if !child.is_element() { continue; }
+        if child.tag_name().namespace() != Some(c_ns) { continue; }
+        let elem_name = child.tag_name().name();
+
+        let ser_type = match type_map.iter().find(|(k, _)| *k == elem_name) {
+            Some((_, v)) => *v,
+            None => continue,
+        };
+
+        if primary_type.is_empty() {
+            primary_type = ser_type.to_string();
+        }
+
+        // barDir / grouping (only meaningful for bar/line/area)
+        for attr_node in child.children().filter(|n| n.is_element()) {
+            match attr_node.tag_name().name() {
+                "barDir"   => { bar_dir  = attr_node.attribute("val").unwrap_or("col").to_string(); }
+                "grouping" => { grouping = attr_node.attribute("val").unwrap_or("clustered").to_string(); }
+                _ => {}
+            }
+        }
+
+        // Parse series
+        for ser_node in child.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "ser" && n.tag_name().namespace() == Some(c_ns))
+        {
+            let s = parse_chart_series(&ser_node, c_ns, ser_type);
+            if shared_categories.is_empty() && !s.categories.is_empty() {
+                shared_categories = s.categories.clone();
+            }
+            all_series.push(s);
+        }
+    }
+
+    if primary_type.is_empty() { return None; }
+
+    // Fill in categories for series that have none (mixed charts share categories)
+    for s in &mut all_series {
+        if s.categories.is_empty() {
+            s.categories = shared_categories.clone();
+        }
+    }
+
+    Some(ChartData {
+        chart_type: primary_type,
+        bar_dir,
+        grouping,
+        title,
+        categories: shared_categories,
+        series: all_series,
+    })
+}
+
+/// Extract plain text from `c:chart/c:title`.
+fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<String> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    // c:title/c:tx/c:rich/a:p/a:r/a:t  or  c:title/c:tx/c:strRef/c:strCache/c:pt/c:v
+    let mut text = String::new();
+    for node in title_node.descendants() {
+        if node.tag_name().name() == "t" && node.tag_name().namespace() == Some(a_ns) {
+            if let Some(t) = node.text() { text.push_str(t); }
+        }
+        if node.tag_name().name() == "v" && node.tag_name().namespace() == Some(c_ns) {
+            if let Some(t) = node.text() { text.push_str(t); }
+        }
+    }
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Parse one `<c:ser>` element.
+fn parse_chart_series(node: &roxmltree::Node, c_ns: &str, ser_type: &str) -> ChartSeries {
+    let name = extract_series_name(node, c_ns);
+
+    // For scatter: xVal → categories (as strings), yVal → values
+    // For others:  cat  → categories,             val  → values
+    let (cat_tag, val_tag) = if ser_type == "scatter" { ("xVal", "yVal") } else { ("cat", "val") };
+
+    let categories = collect_str_cache(node, c_ns, cat_tag);
+    let values     = collect_num_cache(node, c_ns, val_tag);
+
+    ChartSeries {
+        name,
+        series_type: ser_type.to_string(),
+        categories,
+        values,
+    }
+}
+
+/// Extract series name from `c:tx`.
+fn extract_series_name(node: &roxmltree::Node, c_ns: &str) -> String {
+    // c:tx/c:strRef/c:strCache/c:pt[@idx=0]/c:v
+    // or c:tx/c:v
+    if let Some(tx) = node.children().find(|n| n.tag_name().name() == "tx" && n.tag_name().namespace() == Some(c_ns)) {
+        for desc in tx.descendants() {
+            if desc.tag_name().name() == "v" && desc.tag_name().namespace() == Some(c_ns) {
+                if let Some(t) = desc.text() {
+                    if !t.is_empty() { return t.to_string(); }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Collect string values from a cache child element (e.g. `<c:cat>` or `<c:xVal>`).
+/// Reads `c:strRef/c:strCache` and also `c:numRef/c:numCache` (formats numbers as strings).
+fn collect_str_cache(ser_node: &roxmltree::Node, c_ns: &str, child_tag: &str) -> Vec<String> {
+    let Some(child) = ser_node.children()
+        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+    else { return Vec::new(); };
+
+    // Try strCache first, then numCache
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, String)> = Vec::new();
+    for desc in child.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+                pt_count = desc.attribute("val").and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+                let idx: usize = desc.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let val = desc.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 { pt_count = pts.len(); }
+    let mut result = vec![String::new(); pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() { result[idx] = val; }
+    }
+    result
+}
+
+/// Collect numeric values from a cache child element (e.g. `<c:val>` or `<c:yVal>`).
+fn collect_num_cache(ser_node: &roxmltree::Node, c_ns: &str, child_tag: &str) -> Vec<Option<f64>> {
+    let Some(child) = ser_node.children()
+        .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
+    else { return Vec::new(); };
+
+    let mut pt_count: usize = 0;
+    let mut pts: Vec<(usize, f64)> = Vec::new();
+    for desc in child.descendants() {
+        match desc.tag_name().name() {
+            "ptCount" if desc.tag_name().namespace() == Some(c_ns) => {
+                pt_count = desc.attribute("val").and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            "pt" if desc.tag_name().namespace() == Some(c_ns) => {
+                let idx: usize = desc.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if let Some(v) = desc.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .and_then(|t| t.parse::<f64>().ok())
+                {
+                    pts.push((idx, v));
+                }
+            }
+            _ => {}
+        }
+    }
+    if pt_count == 0 { pt_count = pts.len(); }
+    let mut result: Vec<Option<f64>> = vec![None; pt_count];
+    for (idx, val) in pts {
+        if idx < result.len() { result[idx] = Some(val); }
+    }
+    result
 }
 
 fn parse_sqref(s: &str) -> Vec<CellRange> {
