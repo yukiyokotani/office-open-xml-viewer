@@ -88,6 +88,10 @@ pub struct DocParagraph {
     /// Style ID of the applied paragraph style (for contextual spacing resolution)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
+    /// Default font size in pt inherited from style + direct pPr/rPr. Used for
+    /// sizing empty paragraphs (lines with no runs) correctly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_size: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -247,7 +251,31 @@ pub struct ImageRun {
     /// When set, the renderer should replace all pixels of this hex color (e.g. "FFFFFF") with
     /// full transparency. Used to implement a:clrChange (make-background-transparent).
     pub color_replace_from: Option<String>,
+    /// Wrap mode for anchor images. One of:
+    ///   "square" | "topAndBottom" | "none" | "tight" | "through"
+    /// Inline images and anchors without an explicit wrap element use "none".
+    /// "tight" and "through" fall back to "square" rendering in the MVP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_mode: Option<String>,
+    /// distT (top padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_top: f64,
+    /// distB (bottom padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_bottom: f64,
+    /// distL (left padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_left: f64,
+    /// distR (right padding, pt). Anchor-only.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub dist_right: f64,
+    /// wrapSquare/wrapTight "wrapText" attribute: "bothSides" | "left" | "right" | "largest".
+    /// Defaults to "bothSides" (equivalent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_side: Option<String>,
 }
+
+fn is_zero_f64(v: &f64) -> bool { *v == 0.0 }
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]

@@ -1,7 +1,7 @@
 import type {
   Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
   DocRun, TextRun, ImageRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge,
+  TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -14,6 +14,27 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
 
 // 1pt = 96/72 CSS px at screen
 const PT_TO_PX = 96 / 72;
+
+/** Anchor image float that affects text wrap on the current page. */
+interface FloatRect {
+  mode: 'square' | 'topAndBottom';
+  /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
+  imageKey: string;
+  /** Absolute canvas X of the image box (without dist padding). */
+  imageX: number;
+  imageY: number;
+  imageW: number;
+  imageH: number;
+  /** Padded exclusion rectangle for text wrap. */
+  xLeft: number;
+  xRight: number;
+  yTop: number;
+  yBottom: number;
+  /** wrapText: "bothSides" | "left" | "right" | "largest" (only square uses this). */
+  side: string;
+  /** true once the image itself has been drawn (drawn after its paragraph lays out). */
+  drawn: boolean;
+}
 
 interface RenderState {
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -33,6 +54,8 @@ interface RenderState {
   dryRun: boolean;
   /** section left margin in pt — used to convert margin-relative anchor X to page-absolute */
   marginLeft: number;
+  /** Active anchor-image floats that constrain text layout on the current page. */
+  floats: FloatRect[];
 }
 
 export interface RenderDocumentOptions {
@@ -41,6 +64,8 @@ export interface RenderDocumentOptions {
   defaultTextColor?: string;
   /** total pages in the document (used to resolve NUMPAGES fields) */
   totalPages?: number;
+  /** Pre-computed page splits (from computePages). When provided, skips internal pagination. */
+  prebuiltPages?: BodyElement[][];
 }
 
 // ===== Image preloading =====
@@ -162,7 +187,7 @@ export async function renderDocumentToCanvas(
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  const pages = splitPages(doc.body);
+  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -181,6 +206,7 @@ export async function renderDocumentToCanvas(
     images,
     dryRun: false,
     marginLeft: sec.marginLeft,
+    floats: [],
   };
 
   // Header: top of page, starting at headerDistance
@@ -202,22 +228,126 @@ export async function renderDocumentToCanvas(
   renderBodyElements(elements, bodyState);
 }
 
-function splitPages(body: BodyElement[]): BodyElement[][] {
+/**
+ * Split body into pages, honoring explicit page breaks AND measuring content
+ * overflow for automatic pagination. All measurements are done in pt (scale=1).
+ */
+export function computePages(
+  body: BodyElement[],
+  section: SectionProps,
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+): BodyElement[][] {
+  const contentH = section.pageHeight - section.marginTop - section.marginBottom;
+  const contentW = section.pageWidth - section.marginLeft - section.marginRight;
+  const measureState = buildMeasureState(ctx, section);
+
   const pages: BodyElement[][] = [[]];
+  let y = 0;
+  let prevPara: DocParagraph | null = null;
+  const newPage = () => {
+    if (pages[pages.length - 1].length > 0) {
+      pages.push([]);
+      y = 0;
+      prevPara = null;
+    }
+  };
+
   for (const el of body) {
     if (el.type === 'pageBreak') {
       pages.push([]);
-    } else {
-      if (el.type === 'paragraph') {
-        const para = el as unknown as DocParagraph;
-        if (para.pageBreakBefore && pages[pages.length - 1].length > 0) {
-          pages.push([]);
-        }
-      }
+      y = 0;
+      prevPara = null;
+      continue;
+    }
+    if (el.type === 'paragraph') {
+      const para = el as unknown as DocParagraph;
+      if (para.pageBreakBefore) newPage();
+      const suppressBefore = contextualSuppressed(prevPara, para);
+      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore);
+      if (y + h > contentH) newPage();
       pages[pages.length - 1].push(el);
+      y += h;
+      prevPara = para;
+    } else if (el.type === 'table') {
+      const tbl = el as unknown as DocTable;
+      const h = estimateTableHeight(measureState, tbl, contentW);
+      if (y + h > contentH) newPage();
+      pages[pages.length - 1].push(el);
+      y += h;
+      prevPara = null;
     }
   }
   return pages;
+}
+
+function buildMeasureState(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  section: SectionProps,
+): RenderState {
+  return {
+    ctx,
+    scale: 1,
+    contentX: 0,
+    contentW: section.pageWidth - section.marginLeft - section.marginRight,
+    y: 0,
+    pageH: section.pageHeight,
+    defaultColor: '#000000',
+    pageIndex: 0,
+    totalPages: 1,
+    images: new Map(),
+    dryRun: true,
+    marginLeft: section.marginLeft,
+    floats: [],
+  };
+}
+
+function estimateParagraphHeight(
+  state: RenderState,
+  para: DocParagraph,
+  contentWPt: number,
+  suppressSpaceBefore = false,
+): number {
+  const indLeft = para.indentLeft;
+  const indRight = para.indentRight;
+  const paraW = Math.max(1, contentWPt - indLeft - indRight);
+  const segs = buildSegments(para.runs, state);
+  let textH: number;
+  if (segs.length === 0) {
+    textH = getDefaultFontSize(para) * lineSpacingMultiplier(para.lineSpacing);
+  } else {
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops);
+    const mult = lineSpacingMultiplier(para.lineSpacing);
+    textH = lines.reduce((s, l) => s + l.height * mult, 0);
+  }
+  return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
+}
+
+function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
+  const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
+  const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
+  const colWidths = table.colWidths.map((w) => w * colScale);
+  let h = 0;
+  for (const row of table.rows) {
+    if (row.rowHeight != null) {
+      h += row.rowHeight;
+      continue;
+    }
+    let rowH = 10;
+    let ci = 0;
+    for (const cell of row.cells) {
+      const span = Math.min(cell.colSpan, colWidths.length - ci);
+      const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
+      const innerW = Math.max(1, cellW - table.cellMarginLeft - table.cellMarginRight);
+      let ch = table.cellMarginTop + table.cellMarginBottom;
+      for (const para of cell.content) {
+        ch += estimateParagraphHeight(state, para, innerW);
+      }
+      if (ch > rowH) rowH = ch;
+      ci += span;
+    }
+    h += rowH;
+  }
+  return h;
 }
 
 function pickHeaderFooter(
@@ -238,7 +368,7 @@ function renderHeaderFooter(hf: HeaderFooter, topY: number, base: RenderState): 
 }
 
 function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number {
-  const state: RenderState = { ...base, y: 0, dryRun: true };
+  const state: RenderState = { ...base, y: 0, dryRun: true, floats: [] };
   renderBodyElements(hf.body, state);
   return state.y;
 }
@@ -287,6 +417,14 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
   const paragraphStartY = state.y;
 
   if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
+
+  // Register anchor floats from this paragraph (must happen after spaceBefore so that
+  // paragraph-relative Y resolves against the textAreaTop, matching Word).
+  registerAnchorFloats(para, state, state.y);
+
+  // If any topAndBottom float already extends past state.y, skip past it before text starts.
+  state.y = skipPastTopAndBottom(state.y, state.floats);
+
   const textAreaTopY = state.y;
 
   const indLeft = para.indentLeft * scale;
@@ -324,7 +462,15 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     return;
   }
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops);
+  const wrapCtx: WrapLayoutCtx | undefined = state.floats.length > 0 ? {
+    startPageY: state.y,
+    paraX,
+    floats: state.floats,
+    lineSpacingMult: lineSpacingMultiplier(para.lineSpacing),
+    pageH: state.pageH,
+  } : undefined;
+
+  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   if (para.shading && !dryRun) {
     const totalTextH = lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing), 0);
@@ -334,10 +480,16 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
   let firstLine = true;
   for (const line of lines) {
+    // Honor wrap-computed line topY (may push past topAndBottom floats).
+    if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
+
     const lineH = line.height * scale * lineSpacingMultiplier(para.lineSpacing);
     const baseline = state.y + line.ascent;
 
-    let x = firstLine ? firstLineX : paraX;
+    // Per-line X range (may be narrower than paraW when wrapping around floats).
+    const lineLeft = paraX + line.xOffset;
+    const lineAvailW = line.availWidth;
+    let x = firstLine ? lineLeft + indFirst : lineLeft;
 
     if (firstLine && numPrefix && !dryRun) {
       const numFontSize = getDefaultFontSize(para) * scale;
@@ -348,8 +500,8 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
     let alignOffset = 0;
-    if (para.alignment === 'right') alignOffset = paraW - (x - paraX) - lineWidth;
-    else if (para.alignment === 'center') alignOffset = (paraW - (x - paraX) - lineWidth) / 2;
+    if (para.alignment === 'right') alignOffset = lineAvailW - (x - lineLeft) - lineWidth;
+    else if (para.alignment === 'center') alignOffset = (lineAvailW - (x - lineLeft) - lineWidth) / 2;
 
     x += alignOffset;
 
@@ -484,6 +636,22 @@ interface LayoutLine {
   segments: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[];
   height: number;  // pt
   ascent: number;  // px
+  /** Additional horizontal offset (px) from paraX, caused by wrap-around floats. */
+  xOffset: number;
+  /** Effective available width (px) for this line after float exclusion. */
+  availWidth: number;
+  /** When wrap context is active, the absolute canvas Y where this line begins. */
+  topY?: number;
+}
+
+/** Additional context passed to layoutLines so it can honor floats on the current page. */
+interface WrapLayoutCtx {
+  startPageY: number;   // absolute canvas Y where the first line should start
+  paraX: number;        // absolute canvas X of the paragraph's content left edge
+  floats: FloatRect[];  // floats active on the current page
+  lineSpacingMult: number;
+  /** Hard cap on Y to keep layout from running past the page. */
+  pageH: number;
 }
 
 function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
@@ -633,6 +801,7 @@ function layoutLines(
   firstIndent: number,
   scale: number,
   tabStops: TabStop[] = [],
+  wrapCtx?: WrapLayoutCtx,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
@@ -640,18 +809,88 @@ function layoutLines(
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let isFirst = true;
-  const availW = () => maxWidth - (isFirst ? firstIndent : 0);
+  // Effective width/offset for the current line after float exclusion.
+  let lineMaxWidth = maxWidth;
+  let lineXOffset = 0;
+  let currentLineTopY = wrapCtx?.startPageY ?? 0;
+
+  // Compute wrap constraints for a new line about to start. Mutates lineXOffset/lineMaxWidth/currentLineTopY.
+  const startLine = (): void => {
+    lineXOffset = 0;
+    lineMaxWidth = maxWidth;
+    if (!wrapCtx) return;
+    // Probe height: the smallest plausible line height; good enough for float intersection check.
+    const probeH = 10 * scale;
+    // Keep pushing past any topAndBottom block we sit inside.
+    for (let guard = 0; guard < 16; guard++) {
+      const lineBot = currentLineTopY + probeH;
+      let skip: number | null = null;
+      for (const f of wrapCtx.floats) {
+        if (f.mode !== 'topAndBottom') continue;
+        if (lineBot > f.yTop && currentLineTopY < f.yBottom) {
+          skip = skip === null ? f.yBottom : Math.max(skip, f.yBottom);
+        }
+      }
+      if (skip === null) break;
+      currentLineTopY = skip;
+    }
+    // Now compute horizontal constraint from square floats.
+    const paraXLeft = wrapCtx.paraX;
+    const paraXRight = wrapCtx.paraX + maxWidth;
+    let left = paraXLeft;
+    let right = paraXRight;
+    const lineBot = currentLineTopY + probeH;
+    for (const f of wrapCtx.floats) {
+      if (f.mode !== 'square') continue;
+      if (lineBot <= f.yTop || currentLineTopY >= f.yBottom) continue;
+      // Decide which side text should flow on. "left"/"right" refer to the side TEXT occupies.
+      const spaceLeft = f.xLeft - paraXLeft;
+      const spaceRight = paraXRight - f.xRight;
+      let textOnLeft: boolean;
+      switch (f.side) {
+        case 'left':    textOnLeft = true;  break;
+        case 'right':   textOnLeft = false; break;
+        case 'largest':
+        case 'bothSides':
+        default:        textOnLeft = spaceLeft >= spaceRight; break;
+      }
+      if (textOnLeft) {
+        if (f.xLeft < right) right = Math.max(left, f.xLeft);
+      } else {
+        if (f.xRight > left) left = Math.min(right, f.xRight);
+      }
+    }
+    const eff = Math.max(0, right - left);
+    lineXOffset = Math.max(0, left - paraXLeft);
+    lineMaxWidth = Math.min(maxWidth - lineXOffset, eff);
+    if (lineMaxWidth < 0) lineMaxWidth = 0;
+  };
+  startLine();
+
+  const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
 
   // Default tab interval when no matching explicit stop exists (Word's default is 720 twips = 36pt)
   const DEFAULT_TAB_PT = 36;
 
   const flush = (forceHeight?: number) => {
-    lines.push({ segments: currentLine, height: forceHeight !== undefined ? forceHeight : (lineHeight || 10), ascent: lineAscent });
+    const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
+    lines.push({
+      segments: currentLine,
+      height: h,
+      ascent: lineAscent,
+      xOffset: lineXOffset,
+      availWidth: lineMaxWidth,
+      topY: wrapCtx ? currentLineTopY : undefined,
+    });
+    if (wrapCtx) {
+      currentLineTopY += h * scale * wrapCtx.lineSpacingMult;
+    }
     currentLine = [];
     currentWidth = 0;
     lineHeight = 0;
     lineAscent = 0;
     isFirst = false;
+    startLine();
   };
 
   const addToLine = (s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg, w: number, h: number, asc: number) => {
@@ -795,7 +1034,8 @@ function renderInlineImage(
   ctx.drawImage(bmp, x, baseline - h, w, h);
 }
 
-/** Collect and draw all anchor images from a paragraph (called after inline flow). */
+/** Collect and draw anchor images with wrapMode='none' (or unspecified).
+ * Wrap floats (square/topAndBottom/tight/through) are drawn by registerAnchorFloats. */
 function renderAnchorImages(
   para: DocParagraph,
   state: RenderState,
@@ -806,6 +1046,7 @@ function renderAnchorImages(
     if (run.type !== 'image') continue;
     const img = run as unknown as ImageRun;
     if (!img.anchor) continue;
+    if (isWrapFloat(img.wrapMode)) continue;  // drawn as a float
     const bmp = state.images.get(imageKey(img.dataUrl, img.colorReplaceFrom));
     if (!bmp) continue;
     const w = img.widthPt * state.scale;
@@ -823,6 +1064,74 @@ function renderAnchorImages(
 
     state.ctx.drawImage(bmp, pageX, pageY, w, h);
   }
+}
+
+function isWrapFloat(mode?: string): boolean {
+  return mode === 'square' || mode === 'topAndBottom' || mode === 'tight' || mode === 'through';
+}
+
+/** Register floats from a paragraph's anchor images and draw the image bitmap immediately. */
+function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphAnchorY: number): void {
+  for (const run of para.runs) {
+    if (run.type !== 'image') continue;
+    const img = run as unknown as ImageRun;
+    if (!img.anchor) continue;
+    if (!isWrapFloat(img.wrapMode)) continue;
+
+    const mode: 'square' | 'topAndBottom' =
+      img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
+
+    const scale = state.scale;
+    const w = img.widthPt * scale;
+    const h = img.heightPt * scale;
+    const pageX = img.anchorXFromMargin
+      ? (state.marginLeft + (img.anchorXPt ?? 0)) * scale
+      : (img.anchorXPt ?? 0) * scale;
+    const pageY = img.anchorYFromPara
+      ? paragraphAnchorY + (img.anchorYPt ?? 0) * scale
+      : (img.anchorYPt ?? 0) * scale;
+    const dt = (img.distTop    ?? 0) * scale;
+    const db = (img.distBottom ?? 0) * scale;
+    const dl = (img.distLeft   ?? 0) * scale;
+    const dr = (img.distRight  ?? 0) * scale;
+
+    const key = imageKey(img.dataUrl, img.colorReplaceFrom);
+    const rect: FloatRect = {
+      mode,
+      imageKey: key,
+      imageX: pageX,
+      imageY: pageY,
+      imageW: w,
+      imageH: h,
+      xLeft: pageX - dl,
+      xRight: pageX + w + dr,
+      yTop: pageY - dt,
+      yBottom: pageY + h + db,
+      side: img.wrapSide ?? 'bothSides',
+      drawn: false,
+    };
+    state.floats.push(rect);
+
+    if (!state.dryRun) {
+      const bmp = state.images.get(key);
+      if (bmp) state.ctx.drawImage(bmp, rect.imageX, rect.imageY, rect.imageW, rect.imageH);
+      rect.drawn = true;
+    }
+  }
+}
+
+/** If y is inside a topAndBottom float, return the float bottom; otherwise return y. */
+function skipPastTopAndBottom(y: number, floats: FloatRect[]): number {
+  for (let guard = 0; guard < 16; guard++) {
+    let next = y;
+    for (const f of floats) {
+      if (f.mode !== 'topAndBottom') continue;
+      if (y >= f.yTop && y < f.yBottom) next = Math.max(next, f.yBottom);
+    }
+    if (next === y) return y;
+    y = next;
+  }
+  return y;
 }
 
 // ===== Table rendering =====
@@ -1058,6 +1367,7 @@ function getDefaultFontSize(para: DocParagraph): number {
       return (run as unknown as FieldRun).fontSize;
     }
   }
+  if (typeof para.defaultFontSize === 'number') return para.defaultFontSize;
   return 10; // pt fallback
 }
 

@@ -1,4 +1,5 @@
 import type { Presentation, WorkerRequest, WorkerResponse } from './types';
+import { renderSlide } from './renderer';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
@@ -18,11 +19,13 @@ const GOOGLE_FONTS_MAP: Record<string, string> = {
 async function preloadThemeFonts(majorFont: string | null, minorFont: string | null): Promise<void> {
   if (typeof document === 'undefined') return;
   const loaded = new Set<string>();
+  const families: string[] = [];
   for (const fontName of [majorFont, minorFont]) {
     if (!fontName) continue;
     const key = fontName.toLowerCase();
     if (loaded.has(key)) continue;
     loaded.add(key);
+    families.push(fontName);
     const url = GOOGLE_FONTS_MAP[key];
     if (!url) continue;
     if (document.querySelector(`link[href="${url}"]`)) continue;
@@ -31,19 +34,32 @@ async function preloadThemeFonts(majorFont: string | null, minorFont: string | n
       link.rel = 'stylesheet';
       link.href = url;
       document.head.appendChild(link);
-      await Promise.race([
-        document.fonts.ready,
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error('font timeout')), 3000)),
-      ]).catch(() => {});
     } catch {
       // silently ignore font loading errors
     }
   }
+  // @font-face declarations are passive — the font file is only fetched when a
+  // glyph is requested. Trigger an explicit load for the weights we care about
+  // so the canvas does not measure/draw against a system fallback.
+  const loads: Promise<unknown>[] = [];
+  for (const family of families) {
+    for (const weight of ['400', '700']) {
+      for (const style of ['normal', 'italic']) {
+        loads.push(
+          document.fonts.load(`${style} ${weight} 16px "${family}"`).catch(() => undefined)
+        );
+      }
+    }
+  }
+  await Promise.race([
+    Promise.all(loads).then(() => document.fonts.ready),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+  ]);
 }
 
 /** Render target: a canvas plus optional sizing hints. */
 export interface RenderTarget {
-  canvas: HTMLCanvasElement | OffscreenCanvas;
+  canvas: HTMLCanvasElement;
   /** Display width in CSS pixels. Defaults to canvas.offsetWidth or 960. */
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio or 1. */
@@ -60,9 +76,10 @@ export interface PptxPresentationOptions {
 /**
  * Headless PPTX rendering engine.
  *
- * Manages the WASM worker and parsed presentation data. Does not touch the DOM.
- * Renders slides to any HTMLCanvasElement or OffscreenCanvas via renderSlide(),
- * or returns raw ImageBitmaps via renderToBitmap() for custom compositing.
+ * Parses .pptx files in a background worker (WASM) but renders slides
+ * synchronously on the main thread, so text measurement uses the document's
+ * FontFaceSet — avoiding subtle wrap differences between system fallback fonts
+ * and theme-declared webfonts (e.g. Nunito Sans).
  *
  * @example
  * const pres = new PptxPresentation();
@@ -75,10 +92,6 @@ export class PptxPresentation {
   private pendingParseCallbacks = new Map<
     number,
     { resolve: (p: Presentation) => void; reject: (e: Error) => void }
-  >();
-  private pendingBitmapCallbacks = new Map<
-    number,
-    { resolve: (b: ImageBitmap) => void; reject: (e: Error) => void }
   >();
   private nextId = 1;
   private workerReady = false;
@@ -115,26 +128,12 @@ export class PptxPresentation {
         return;
       }
 
-      if (msg.kind === 'bitmap') {
-        const cb = this.pendingBitmapCallbacks.get(msg.id);
-        if (cb) {
-          this.pendingBitmapCallbacks.delete(msg.id);
-          cb.resolve(msg.bitmap);
-        }
-        return;
-      }
-
       if (msg.kind === 'error') {
         const parseCb = this.pendingParseCallbacks.get(msg.id);
-        const bitmapCb = this.pendingBitmapCallbacks.get(msg.id);
         const err = new Error(msg.message);
         if (parseCb) {
           this.pendingParseCallbacks.delete(msg.id);
           parseCb.reject(err);
-        }
-        if (bitmapCb) {
-          this.pendingBitmapCallbacks.delete(msg.id);
-          bitmapCb.reject(err);
         }
         this.opts.onError?.(err);
       }
@@ -171,48 +170,26 @@ export class PptxPresentation {
   /** Slide height in EMU (0 if not loaded). */
   get slideHeight(): number { return this.presentation?.slideHeight ?? 0; }
 
-  /**
-   * Render a slide and return the result as an ImageBitmap.
-   * Caller must call `bitmap.close()` when done to release GPU resources.
-   */
-  async renderToBitmap(
-    slideIndex: number,
-    opts?: { width?: number; dpr?: number },
-  ): Promise<ImageBitmap> {
+  /** Render a slide directly onto a canvas on the main thread. */
+  async renderSlide(target: RenderTarget, slideIndex: number): Promise<void> {
     if (!this.presentation) throw new Error('No presentation loaded. Call load() first.');
     const slide = this.presentation.slides[slideIndex];
     if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
-    const id = this.nextId++;
-    return new Promise<ImageBitmap>((resolve, reject) => {
-      this.pendingBitmapCallbacks.set(id, { resolve, reject });
-      const req: WorkerRequest = {
-        kind: 'render',
-        id,
-        slideIndex,
-        targetWidth: opts?.width ?? 960,
-        dpr: opts?.dpr ?? 1,
-        defaultTextColor: this.presentation!.defaultTextColor,
-        majorFont: this.presentation!.majorFont,
-        minorFont: this.presentation!.minorFont,
-      };
-      this.worker!.postMessage(req);
-    });
-  }
-
-  /**
-   * Render a slide directly onto a canvas.
-   * Sets the canvas physical dimensions to match the rendered bitmap.
-   */
-  async renderSlide(target: RenderTarget, slideIndex: number): Promise<void> {
     const dpr = target.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
-    const width = target.width ?? ((target.canvas as HTMLCanvasElement).offsetWidth || 960);
-    const bitmap = await this.renderToBitmap(slideIndex, { width, dpr });
-    const canvas = target.canvas;
-    (canvas as HTMLCanvasElement).width = bitmap.width;
-    (canvas as HTMLCanvasElement).height = bitmap.height;
-    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
+    const width = target.width ?? (target.canvas.offsetWidth || 960);
+    await renderSlide(
+      target.canvas,
+      slide,
+      this.presentation.slideWidth,
+      this.presentation.slideHeight,
+      {
+        width,
+        dpr,
+        defaultTextColor: this.presentation.defaultTextColor,
+        majorFont: this.presentation.majorFont,
+        minorFont: this.presentation.minorFont,
+      },
+    );
   }
 
   /** Terminate the worker and release all resources. */

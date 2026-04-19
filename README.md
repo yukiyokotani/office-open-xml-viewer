@@ -61,8 +61,8 @@ flowchart TB
     subgraph browser["🌐  Runtime  (Browser)"]
         subgraph pptx_pkg["@silurus/ooxml · pptx"]
             PV["PptxViewer"] --> PP["PptxPresentation"]
-            PP --> PW["worker.ts\n〈Web Worker〉"]
-            PW --> PR["renderer.ts\n〈OffscreenCanvas〉"]
+            PP --> PW["worker.ts\n〈Web Worker — parse only〉"]
+            PP --> PR["renderer.ts\n〈Canvas 2D — main thread〉"]
         end
         subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
             XV["XlsxViewer"] --> XR["renderer.ts\n〈Canvas 2D〉"]
@@ -81,6 +81,8 @@ flowchart TB
     DR --> canvas
 ```
 
+The pptx worker parses the `.pptx` archive via WASM and returns a JSON model to the main thread. Rendering runs on the main thread so the canvas shares the document's `FontFaceSet` — an `OffscreenCanvas` in a worker has its own font registry and would silently fall back to a system font, producing subtly different text measurements (and wrap positions) from the installed theme webfonts.
+
 ### Key files
 
 | File | Role |
@@ -88,10 +90,10 @@ flowchart TB
 | `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
 | `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
 | `packages/docx/parser/src/lib.rs` | Rust WASM parser — DOCX ZIP → `Document` JSON |
-| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs in Web Worker) |
+| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs on main thread) |
 | `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll |
 | `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout |
-| `packages/pptx/src/worker.ts` | Web Worker: WASM init, parsing, OffscreenCanvas rendering |
+| `packages/pptx/src/worker.ts` | Web Worker: WASM init and parsing only |
 | `packages/*/src/viewer.ts` | Public Viewer API — canvas lifecycle, navigation |
 
 </details>
