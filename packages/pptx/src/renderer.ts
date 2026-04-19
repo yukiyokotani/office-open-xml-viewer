@@ -685,33 +685,34 @@ function buildShapePath(
       break;
 
     // ── Stars ─────────────────────────────────────────────────────────────────
+    // Inner-radius defaults from ECMA-376 prstGeom avLst: adj / 50000 = innerR / outerR.
     case 'star4':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 4, 0.38);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 4, (adj ?? 12500) / 50000);
       break;
     case 'star5':
     case 'star':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 5, 0.382);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 5, (adj ?? 19098) / 50000);
       break;
     case 'star6':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 6, 0.5, 0);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 6, (adj ?? 28868) / 50000, 0);
       break;
     case 'star7':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 7, 0.37);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 7, (adj ?? 34142) / 50000);
       break;
     case 'star8':
       drawStar(ctx, cx, cy, w / 2, h / 2, 8, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
     case 'star10':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 10, 0.45);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 10, (adj ?? 41421) / 50000);
       break;
     case 'star12':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 12, 0.45, 0);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 12, (adj ?? 37500) / 50000, 0);
       break;
     case 'star16':
       drawStar(ctx, cx, cy, w / 2, h / 2, 16, (adj ?? 37500) / 50000, -Math.PI / 2);
       break;
     case 'star24':
-      drawStar(ctx, cx, cy, w / 2, h / 2, 24, 0.6, 0);
+      drawStar(ctx, cx, cy, w / 2, h / 2, 24, (adj ?? 37500) / 50000, 0);
       break;
     case 'star32':
       drawStar(ctx, cx, cy, w / 2, h / 2, 32, (adj ?? 37500) / 50000, -Math.PI / 2);
