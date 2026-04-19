@@ -1,5 +1,5 @@
 import type {
-  Worksheet, Styles, Cell, CellValue, Font, Fill, Border, CellXf,
+  Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf,
   Run, ChartData,
@@ -634,11 +634,14 @@ function renderQuadrant(
       const isNumeric = cell.value.type === 'number';
       const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
       const alignV = xf.alignV ?? 'bottom';
+      // Indent: each level ≈ one character width (ECMA-376 §18.8.44)
+      const indentPx = xf.indent ? Math.round(xf.indent * font.size * ROW_HEIGHT_TO_PX * 0.5) : 0;
+      const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
 
       // Text overflow for left-aligned non-merged non-wrap cells
       let drawW = cellW;
       if (!mergeInfo && !xf.wrapText && alignH !== 'right' && alignH !== 'center') {
-        const textPx = ctx.measureText(text).width + paddingX * 2;
+        const textPx = ctx.measureText(text).width + leftPad + paddingX;
         if (textPx > cellW) {
           for (let oci = ci + 1; oci < numCols; oci++) {
             const adjKey = `${rowIndex}:${startCol + oci}`;
@@ -659,16 +662,64 @@ function renderQuadrant(
         textX = cx + cellW / 2;
         textAlign = 'center';
       } else {
-        textX = cx + paddingX;
+        textX = cx + leftPad;
         textAlign = 'left';
       }
 
-      ctx.textAlign = textAlign;
+      const rotation = xf.textRotation ?? 0;
+      const isStacked = rotation === 255;
+      const isRotated = rotation > 0 && rotation !== 255;
 
       ctx.save();
       ctx.beginPath();
       ctx.rect(cx, cy, drawW, cellH);
       ctx.clip();
+
+      // Stacked text (textRotation=255): draw each character on its own line
+      if (isStacked) {
+        const charH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.1);
+        const totalH = text.length * charH;
+        let charY = alignV === 'top' ? cy + paddingY
+          : alignV === 'center' ? cy + (cellH - totalH) / 2
+          : cy + cellH - totalH - paddingY;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        for (const ch of text) {
+          ctx.fillText(ch, cx + cellW / 2, charY);
+          charY += charH;
+        }
+        ctx.restore();
+        continue;
+      }
+
+      // Rotated text: translate to cell center, rotate, draw, restore
+      if (isRotated) {
+        const angleRad = rotation <= 90
+          ? -(rotation * Math.PI / 180)
+          : ((rotation - 90) * Math.PI / 180);
+        ctx.translate(cx + cellW / 2, cy + cellH / 2);
+        ctx.rotate(angleRad);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, 0, 0);
+        ctx.restore();
+        continue;
+      }
+
+      // shrinkToFit: scale context horizontally if text is wider than cell
+      if (xf.shrinkToFit) {
+        const textW = ctx.measureText(text).width;
+        const availW = cellW - leftPad - paddingX;
+        if (textW > availW && textW > 0) {
+          const scale = availW / textW;
+          const pivotX = alignH === 'right' ? cx + cellW - paddingX
+            : alignH === 'center' ? cx + cellW / 2
+            : cx + leftPad;
+          ctx.transform(scale, 0, 0, 1, pivotX * (1 - scale), 0);
+        }
+      }
+
+      ctx.textAlign = textAlign;
 
       // Rich text: draw each run with its own font. Only supported for the
       // non-wrap path (wrap with mixed fonts is significantly more complex).
@@ -676,7 +727,7 @@ function renderQuadrant(
       const hasRichText = runs && runs.length > 0 && !xf.wrapText;
 
       if (xf.wrapText) {
-        const lines = wrapTextLines(ctx, text, cellW - paddingX * 2);
+        const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
         const totalTextH = lines.length * lineH;
         let startY: number;
@@ -697,7 +748,7 @@ function renderQuadrant(
         let startX: number;
         if (alignH === 'right') startX = cx + cellW - paddingX - totalWidth;
         else if (alignH === 'center') startX = cx + cellW / 2 - totalWidth / 2;
-        else startX = cx + paddingX;
+        else startX = cx + leftPad;
         // Use left alignment since we position each run ourselves
         ctx.textAlign = 'left';
         let textY: number;
@@ -743,11 +794,11 @@ function renderQuadrant(
         let overlayMetrics: TextMetrics | null = null;
         const measureOverlay = () => overlayMetrics ??= ctx.measureText(text);
         const overlayX = () => {
-          const tW = Math.min(measureOverlay().width, drawW - paddingX * 2);
+          const tW = Math.min(measureOverlay().width, drawW - leftPad - paddingX);
           return {
             x: alignH === 'right' ? cx + cellW - paddingX - tW
               : alignH === 'center' ? cx + cellW / 2 - tW / 2
-              : cx + paddingX,
+              : cx + leftPad,
             width: tW,
           };
         };
@@ -1227,22 +1278,21 @@ function renderImages(
 // Border drawing
 // ────────────────────────────────────────────────────────────────
 function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
-  const edges = [
-    { edge: border.top,    x1: x,     y1: y,     x2: x + w, y2: y },
-    { edge: border.bottom, x1: x,     y1: y + h, x2: x + w, y2: y + h },
-    { edge: border.left,   x1: x,     y1: y,     x2: x,     y2: y + h },
-    { edge: border.right,  x1: x + w, y1: y,     x2: x + w, y2: y + h },
+  const edges: Array<{ edge: BorderEdge | null | undefined; x1: number; y1: number; x2: number; y2: number }> = [
+    { edge: border.top,         x1: x,     y1: y,     x2: x + w, y2: y },
+    { edge: border.bottom,      x1: x,     y1: y + h, x2: x + w, y2: y + h },
+    { edge: border.left,        x1: x,     y1: y,     x2: x,     y2: y + h },
+    { edge: border.right,       x1: x + w, y1: y,     x2: x + w, y2: y + h },
+    { edge: border.diagonalUp,  x1: x,     y1: y + h, x2: x + w, y2: y },
+    { edge: border.diagonalDown,x1: x,     y1: y,     x2: x + w, y2: y + h },
   ];
   for (const { edge, x1, y1, x2, y2 } of edges) {
     if (!edge || !edge.style || edge.style === 'none') continue;
     ctx.beginPath();
     ctx.strokeStyle = edge.color ? hexToRgba(edge.color) : '#000000';
     ctx.lineWidth = borderStyleWidth(edge.style);
-    if (edge.style === 'dashed' || edge.style === 'dotted' || edge.style === 'dashDot') {
-      ctx.setLineDash(edge.style === 'dotted' ? [2, 2] : [4, 2]);
-    } else {
-      ctx.setLineDash([]);
-    }
+    const dash = borderStyleDash(edge.style);
+    ctx.setLineDash(dash);
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
@@ -1252,9 +1302,21 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
 
 function borderStyleWidth(style: string): number {
   switch (style) {
-    case 'thick': return 0.5;
-    case 'medium': case 'mediumDashed': case 'mediumDashDot': return 0.5;
-    default: return 0.5;
+    case 'thick': return 2;
+    case 'medium': case 'mediumDashed': case 'mediumDashDot': case 'mediumDashDotDot': case 'slantDashDot': return 1.5;
+    case 'hair': return 0.5;
+    default: return 1;
+  }
+}
+
+function borderStyleDash(style: string): number[] {
+  switch (style) {
+    case 'dashed': case 'mediumDashed': return [4, 3];
+    case 'dotted': return [2, 2];
+    case 'dashDot': case 'mediumDashDot': return [4, 2, 1, 2];
+    case 'dashDotDot': case 'mediumDashDotDot': return [4, 2, 1, 2, 1, 2];
+    case 'slantDashDot': return [5, 3, 1, 3];
+    default: return [];
   }
 }
 
