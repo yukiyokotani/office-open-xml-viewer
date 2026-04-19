@@ -9,10 +9,10 @@ import pixelmatch from 'pixelmatch';
 //   name       : filename stem (loads /{name}.pptx, reads references/{name}/)
 //   slideCount : number of slides to test (must have matching reference images)
 const PPTX_FILES: { name: string; slideCount: number }[] = [
-  { name: 'sample-1', slideCount: 5 },
-  { name: 'sample-2', slideCount: 17 },
-  { name: 'sample-3', slideCount: 9 },
-  { name: 'sample-4', slideCount: 15 },
+  { name: 'private/sample-1', slideCount: 5 },
+  { name: 'private/sample-2', slideCount: 17 },
+  { name: 'private/sample-3', slideCount: 9 },
+  { name: 'private/sample-4', slideCount: 15 },
 ];
 
 // Per-pixel color tolerance for pixelmatch (0 = exact, 1 = fully lenient)

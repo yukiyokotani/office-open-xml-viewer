@@ -34,12 +34,12 @@ packages/pptx/tests/visual/report/
 # Playwright
 playwright-report/
 test-results/
-# Reference screenshots (PowerPoint screenshots; not redistributable)
-packages/pptx/tests/visual/references/sample-*/
+# Reference screenshots (not redistributable — private samples only)
+packages/pptx/tests/visual/references/private/
 # Local-only Storybook stories that load sample files
-packages/pptx/src/*.sample.stories.ts
-packages/xlsx/src/*.sample.stories.ts
-packages/docx/src/*.sample.stories.ts
+packages/pptx/src/*.privateDemo.stories.ts
+packages/xlsx/src/*.privateDemo.stories.ts
+packages/docx/src/*.privateDemo.stories.ts
 # TypeScript build info
 *.tsbuildinfo
 # npm lockfile (using pnpm)
