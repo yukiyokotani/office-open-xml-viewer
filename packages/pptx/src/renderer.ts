@@ -900,20 +900,33 @@ function buildShapePath(
     case 'callout3':
     case 'bordercallout1':
     case 'bordercallout2':
-    case 'bordercallout3': {
+    case 'bordercallout3':
+    case 'accentcallout1':
+    case 'accentcallout2':
+    case 'accentcallout3':
+    case 'accentbordercallout1':
+    case 'accentbordercallout2':
+    case 'accentbordercallout3': {
       // Line callout: rectangle text area + a single line (tail) to the tip.
+      // Accent variants add a vertical bar on the left edge of the rectangle.
       // In OOXML, the bounding box covers the text area; the tail tip (adj3/adj4) may
       // extend outside the box. adj1/adj2 define the attachment on the box edge.
-      // The tail base (adj1/adj2) is on the box edge; tail tip may be outside.
-      const attFx = (adj  !== null ? adj  : 44150) / 100000;   // default adj1
-      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;   // default adj2
-      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;   // tip x (may exceed 1.0)
-      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;  // tip y (may exceed 1.0)
+      const attFx = (adj  !== null ? adj  : 44150) / 100000;
+      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;
+      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;
+      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;
       const attX = x + Math.max(0, Math.min(1, attFx)) * w;
       const attY = y + Math.max(0, Math.min(1, attFy)) * h;
       const tipX = x + tipFx * w;
       const tipY = y + tipFy * h;
       ctx.rect(x, y, w, h);
+      // Accent bar: vertical line on left edge (offset by ~8% of width)
+      if (geom.startsWith('accent')) {
+        const barX = x + w * 0.08;
+        ctx.moveTo(barX, y);
+        ctx.lineTo(barX, y + h);
+      }
+      // Callout line from attachment point to tip
       ctx.moveTo(attX, attY);
       ctx.lineTo(tipX, tipY);
       break;
@@ -1481,14 +1494,40 @@ function buildShapePath(
     }
 
     // ── Wave ──────────────────────────────────────────────────────────────────
+    // OOXML: wavy top and bottom filling the bounding box. adj=12500 (12.5% amplitude).
     case 'wave': {
       const wAmp = h * (adj ?? 12500) / 100000;
-      ctx.moveTo(x, cy - wAmp);
-      ctx.bezierCurveTo(x + w * 0.25, cy - wAmp * 2, x + w * 0.25, cy, x + w * 0.5, cy);
-      ctx.bezierCurveTo(x + w * 0.75, cy, x + w * 0.75, cy - wAmp * 2, x + w, cy - wAmp);
-      ctx.lineTo(x + w, cy + wAmp);
-      ctx.bezierCurveTo(x + w * 0.75, cy + wAmp * 2, x + w * 0.75, cy, x + w * 0.5, cy);
-      ctx.bezierCurveTo(x + w * 0.25, cy, x + w * 0.25, cy + wAmp * 2, x, cy + wAmp);
+      const yw1 = y + wAmp;        // top wave baseline (wAmp below top)
+      const yw2 = y + h - wAmp;    // bottom wave baseline (wAmp above bottom)
+      // Top wave (L→R): peaks at y, troughs at y + 2*wAmp
+      ctx.moveTo(x, yw1);
+      ctx.bezierCurveTo(x + w * 0.25, y,             x + w * 0.25, y + wAmp * 2, x + w * 0.5, yw1);
+      ctx.bezierCurveTo(x + w * 0.75, y + wAmp * 2,  x + w * 0.75, y,             x + w, yw1);
+      // Right side
+      ctx.lineTo(x + w, yw2);
+      // Bottom wave (R→L, half-period shift): peaks toward y+h, troughs toward y+h-2*wAmp
+      ctx.bezierCurveTo(x + w * 0.75, y + h,              x + w * 0.75, y + h - wAmp * 2, x + w * 0.5, yw2);
+      ctx.bezierCurveTo(x + w * 0.25, y + h - wAmp * 2,   x + w * 0.25, y + h,             x, yw2);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Double wave (wavy top AND bottom edges) ───────────────────────────────
+    // OOXML default adj=6250 (6.25% amplitude). Bezier CPs stay inside bounding box.
+    case 'doublewave': {
+      const wAmp = h * (adj ?? 6250) / 100000;
+      const y1 = y + wAmp;       // top wave baseline
+      const y2 = y + h - wAmp;   // bottom wave baseline
+      // Top wave (L→R): peaks at y (top), troughs at y + 2*wAmp
+      ctx.moveTo(x, y1);
+      ctx.bezierCurveTo(x + w * 0.25, y,            x + w * 0.25, y + wAmp * 2, x + w * 0.5, y1);
+      ctx.bezierCurveTo(x + w * 0.75, y + wAmp * 2, x + w * 0.75, y,            x + w, y1);
+      // Right side
+      ctx.lineTo(x + w, y2);
+      // Bottom wave (R→L): peaks at y+h (bottom), troughs at y+h - 2*wAmp
+      ctx.bezierCurveTo(x + w * 0.75, y + h,              x + w * 0.75, y + h - wAmp * 2, x + w * 0.5, y2);
+      ctx.bezierCurveTo(x + w * 0.25, y + h - wAmp * 2,   x + w * 0.25, y + h,             x, y2);
+      // Left side (closePath draws left edge)
       ctx.closePath();
       break;
     }
@@ -1853,85 +1892,99 @@ function buildShapePath(
       break;
     }
 
-    // ── Ribbon (fold at top) ──────────────────────────────────────────────────
+    // ── Ribbon (V-notch at bottom center) ────────────────────────────────────
+    // OOXML: x1=w/8, x2=7w/8, y1=h*adj/100000, y2=h-y1; adj default 16667
     case 'ribbon': {
-      const foldH = h * 0.25;
-      const notch = w * 0.08;
-      ctx.moveTo(x, y + foldH);
-      ctx.lineTo(x + notch, y);
-      ctx.lineTo(cx, y + foldH * 0.5);
-      ctx.lineTo(x + w - notch, y);
-      ctx.lineTo(x + w, y + foldH);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
+      const x1r = w / 8, x2r = w * 7 / 8;
+      const y1r = h * (adj ?? 16667) / 100000;
+      const y2r = h - y1r;
+      ctx.moveTo(x + x1r, y);           // top-left body
+      ctx.lineTo(x + x2r, y);           // top-right body
+      ctx.lineTo(x + w,   y + y1r);     // right upper fold
+      ctx.lineTo(x + x2r, y + y2r);     // right lower fold
+      ctx.lineTo(cx,      y + h);        // center bottom V-notch
+      ctx.lineTo(x + x1r, y + y2r);     // left lower fold
+      ctx.lineTo(x,       y + y1r);     // left upper fold
       ctx.closePath();
       break;
     }
 
-    // ── Ribbon2 (fold at bottom) ──────────────────────────────────────────────
+    // ── Ribbon2 (V-notch at top center) ──────────────────────────────────────
     case 'ribbon2': {
-      const foldH = h * 0.25;
-      const notch = w * 0.08;
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + h - foldH);
-      ctx.lineTo(x + w - notch, y + h);
-      ctx.lineTo(cx, y + h - foldH * 0.5);
-      ctx.lineTo(x + notch, y + h);
-      ctx.lineTo(x, y + h - foldH);
+      const x1r = w / 8, x2r = w * 7 / 8;
+      const y1r = h * (adj ?? 16667) / 100000;
+      const y2r = h - y1r;
+      ctx.moveTo(x + x1r, y + h);       // bottom-left body
+      ctx.lineTo(x + x2r, y + h);       // bottom-right body
+      ctx.lineTo(x + w,   y + y2r);     // right lower fold
+      ctx.lineTo(x + x2r, y + y1r);     // right upper fold
+      ctx.lineTo(cx,      y);            // center top V-notch
+      ctx.lineTo(x + x1r, y + y1r);     // left upper fold
+      ctx.lineTo(x,       y + y2r);     // left lower fold
       ctx.closePath();
       break;
     }
 
-    // ── Ellipse ribbon (curved bottom) ───────────────────────────────────────
+    // ── Ellipse ribbon (angled ends + elliptical arch at bottom) ─────────────
+    // OOXML: x1=w/8, x2=7w/8, y1=h*adj/100000, y2=h-y1; adj default 25000
     case 'ellipseribbon': {
-      const adj1 = (adj ?? 25000) / 100000;
-      const foldH = h * adj1;
-      const notch = w * 0.08;
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + h - foldH);
-      // curved bottom via ellipse arc
-      ctx.ellipse(cx, y + h - foldH, w / 2, foldH, 0, 0, Math.PI);
-      ctx.lineTo(x, y + h - foldH);
+      const x1e = w / 8, x2e = w * 7 / 8;
+      const y1e = h * (adj ?? 25000) / 100000;
+      const y2e = h - y1e;
+      ctx.moveTo(x + x1e, y);           // top-left fold crease
+      ctx.lineTo(x + x2e, y);           // top-right fold crease
+      ctx.lineTo(x + w,   y + y1e);     // right upper fold angle
+      ctx.lineTo(x + w,   y + y2e);     // right side down
+      // bottom arch (center=(cx,y+y2e), rx=w/2, ry=y1e, CW from right to left)
+      ctx.ellipse(cx, y + y2e, w / 2, y1e, 0, 0, Math.PI, false);
+      ctx.lineTo(x,       y + y1e);     // left side up to fold crease
       ctx.closePath();
-      // fold triangles
-      ctx.moveTo(x, y + foldH * 0.5);
-      ctx.lineTo(x + notch, y);
-      ctx.lineTo(x + notch * 2, y + foldH * 0.5);
-      ctx.moveTo(x + w - notch * 2, y + foldH * 0.5);
-      ctx.lineTo(x + w - notch, y);
-      ctx.lineTo(x + w, y + foldH * 0.5);
       break;
     }
 
-    // ── Ellipse ribbon 2 (curved top) ────────────────────────────────────────
+    // ── Ellipse ribbon 2 (angled ends + elliptical arch at top) ──────────────
     case 'ellipseribbon2': {
-      const adj1 = (adj  ?? 25000) / 100000;
-      const notch = w * 0.08;
-      const foldH = h * adj1;
-      ctx.moveTo(x, y + foldH);
-      // curved top via ellipse arc
-      ctx.ellipse(cx, y + foldH, w / 2, foldH, 0, Math.PI, 0);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x, y + h);
+      const x1e = w / 8, x2e = w * 7 / 8;
+      const y1e = h * (adj ?? 25000) / 100000;
+      const y2e = h - y1e;
+      ctx.moveTo(x + x1e, y + h);       // bottom-left fold crease
+      ctx.lineTo(x + x2e, y + h);       // bottom-right fold crease
+      ctx.lineTo(x + w,   y + y2e);     // right lower fold angle
+      ctx.lineTo(x + w,   y + y1e);     // right side up
+      // top arch (center=(cx,y+y1e), rx=w/2, ry=y1e, CCW from right to left = upward)
+      ctx.ellipse(cx, y + y1e, w / 2, y1e, 0, 0, Math.PI, true);
+      ctx.lineTo(x,       y + y2e);     // left side down to fold crease
       ctx.closePath();
-      // fold triangles
-      ctx.moveTo(x, y + foldH * 1.5);
-      ctx.lineTo(x + notch, y + h * 1.0);
-      ctx.lineTo(x + notch * 2, y + foldH * 1.5);
-      ctx.moveTo(x + w - notch * 2, y + foldH * 1.5);
-      ctx.lineTo(x + w - notch, y + h);
-      ctx.lineTo(x + w, y + foldH * 1.5);
       break;
     }
 
-    // ── Circular arrow ────────────────────────────────────────────────────────
+    // ── Circular arrow (donut sector + arrowhead) ─────────────────────────────
+    // OOXML defaults: stAng=0 (east), swAng=270°, thickW=50% of radius
     case 'circulararrow': {
+      const stAng  = ((adj2 ?? 0)        / 60000) * Math.PI / 180;
+      const swAng  = ((adj  ?? 16200000) / 60000) * Math.PI / 180;  // default 270°
+      const thkPct = (adj3 ?? 50000) / 100000;
       const outerR = Math.min(w, h) / 2;
-      const innerR = outerR * 0.5;
-      ctx.arc(cx, cy, outerR, -Math.PI * 0.8, Math.PI * 0.4);
-      ctx.arc(cx, cy, innerR, Math.PI * 0.4, -Math.PI * 0.8, true);
+      const innerR = outerR * (1 - thkPct);
+      const midR   = (outerR + innerR) / 2;
+      const arcW   = outerR - innerR;
+      const endAng = stAng + swAng;
+
+      // Arc body (donut sector): outer CW then inner CCW
+      ctx.arc(cx, cy, outerR, stAng, endAng, false);
+      ctx.arc(cx, cy, innerR, endAng, stAng, true);
+      ctx.closePath();
+
+      // Arrowhead at endAng: filled triangle pointing in clockwise tangent direction
+      // Tangent (CW): (sin(endAng), -cos(endAng))
+      const tx = Math.sin(endAng), ty = -Math.cos(endAng);
+      // Tip: extend midR point by ahLen in tangent direction
+      const ahLen = arcW * 1.5;
+      const tipX = cx + midR * Math.cos(endAng) + ahLen * tx;
+      const tipY = cy + midR * Math.sin(endAng) + ahLen * ty;
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(cx + outerR * Math.cos(endAng), cy + outerR * Math.sin(endAng));  // outer base
+      ctx.lineTo(cx + innerR * Math.cos(endAng), cy + innerR * Math.sin(endAng));  // inner base
       ctx.closePath();
       break;
     }
