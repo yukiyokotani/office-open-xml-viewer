@@ -34,8 +34,8 @@ packages/pptx/tests/visual/report/
 # Playwright
 playwright-report/
 test-results/
-# Reference screenshots (PowerPoint screenshots; not redistributable)
-packages/pptx/tests/visual/references/sample-*/
+# Reference screenshots (not redistributable — private samples only)
+packages/pptx/tests/visual/references/private/
 # Local-only Storybook stories that load sample files
 packages/pptx/src/*.sample.stories.ts
 packages/xlsx/src/*.sample.stories.ts
