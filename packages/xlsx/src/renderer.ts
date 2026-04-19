@@ -1739,6 +1739,21 @@ function niceStep(range: number, targetSteps = 5): number {
   return nice * mag;
 }
 
+// Excel's default auto-scale rounds dataMax up to a grid line, but when the
+// data lands exactly on one it extends by one more step for breathing room
+// (e.g. dataMax=20, step=5 → 25, not 20).
+function niceAxisMax(dataMax: number, step: number): number {
+  if (dataMax <= 0) return step;
+  const ax = Math.ceil(dataMax / step) * step;
+  return Math.abs(ax - dataMax) < step * 1e-9 ? ax + step : ax;
+}
+
+function niceAxisMin(dataMin: number, step: number): number {
+  if (dataMin >= 0) return 0;
+  const ax = Math.floor(dataMin / step) * step;
+  return Math.abs(ax - dataMin) < step * 1e-9 ? ax - step : ax;
+}
+
 function formatChartVal(v: number): string {
   if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
   if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
@@ -1958,7 +1973,7 @@ function renderBarChart(
   if (dataMax === 0) dataMax = 1;
 
   const step  = niceStep(dataMax);
-  const axMax = Math.ceil(dataMax / step) * step;
+  const axMax = niceAxisMax(dataMax, step);
 
   // Draw grid + value axis
   const gridColor = '#e0e0e0';
@@ -2137,8 +2152,8 @@ function renderLineChartXlsx(
   if (dataMax === dataMin) dataMax = dataMin + 1;
 
   const step  = niceStep(dataMax - dataMin);
-  const axMin = Math.floor(dataMin / step) * step;
-  const axMax = Math.ceil(dataMax / step) * step;
+  const axMin = niceAxisMin(dataMin, step);
+  const axMax = niceAxisMax(dataMax, step);
   const range = axMax - axMin; if (range === 0) return;
 
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
@@ -2242,7 +2257,7 @@ function renderAreaChartXlsx(
   }
   if (dataMax === 0) dataMax = 1;
   const step  = niceStep(dataMax);
-  const axMax = Math.ceil(dataMax / step) * step;
+  const axMax = niceAxisMax(dataMax, step);
 
   const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
   const toY = (v: number) => py0 + ph - (v / axMax) * ph;
@@ -2404,7 +2419,7 @@ function renderRadarChart(
   for (const s of chart.series) for (const v of s.values) dataMax = Math.max(dataMax, v ?? 0);
   if (dataMax === 0) dataMax = 1;
   const step  = niceStep(dataMax);
-  const axMax = Math.ceil(dataMax / step) * step;
+  const axMax = niceAxisMax(dataMax, step);
 
   const angle0 = -Math.PI / 2;
   const spoke  = (i: number) => angle0 + (i / n) * Math.PI * 2;
