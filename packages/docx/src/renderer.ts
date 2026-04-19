@@ -1,8 +1,16 @@
 import type {
   Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
   DocRun, TextRun, ImageRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop,
+  TabStop, ParagraphBorders, ParaBorderEdge,
 } from './types';
+
+const HIGHLIGHT_COLORS: Record<string, string> = {
+  yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
+  blue: '#0000FF', red: '#FF0000', darkBlue: '#000080', darkCyan: '#008080',
+  darkGreen: '#008000', darkMagenta: '#800080', darkRed: '#800000',
+  darkYellow: '#808000', darkGray: '#808080', lightGray: '#C0C0C0',
+  black: '#000000', white: '#FFFFFF',
+};
 
 // 1pt = 96/72 CSS px at screen
 const PT_TO_PX = 96 / 72;
@@ -190,9 +198,7 @@ export async function renderDocumentToCanvas(
 
   // Body
   const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
-  for (const el of elements) {
-    renderBodyElement(el, bodyState);
-  }
+  renderBodyElements(elements, bodyState);
 }
 
 function splitPages(body: BodyElement[]): BodyElement[][] {
@@ -201,6 +207,12 @@ function splitPages(body: BodyElement[]): BodyElement[][] {
     if (el.type === 'pageBreak') {
       pages.push([]);
     } else {
+      if (el.type === 'paragraph') {
+        const para = el as unknown as DocParagraph;
+        if (para.pageBreakBefore && pages[pages.length - 1].length > 0) {
+          pages.push([]);
+        }
+      }
       pages[pages.length - 1].push(el);
     }
   }
@@ -221,12 +233,12 @@ function pickHeaderFooter(
 
 function renderHeaderFooter(hf: HeaderFooter, topY: number, base: RenderState): void {
   const state: RenderState = { ...base, y: topY };
-  for (const el of hf.body) renderBodyElement(el, state);
+  renderBodyElements(hf.body, state);
 }
 
 function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number {
   const state: RenderState = { ...base, y: 0, dryRun: true };
-  for (const el of hf.body) renderBodyElement(el, state);
+  renderBodyElements(hf.body, state);
   return state.y;
 }
 
@@ -240,14 +252,41 @@ function renderBodyElement(el: BodyElement, state: RenderState): void {
   }
 }
 
+function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): boolean {
+  return !!(prev?.contextualSpacing && curr.contextualSpacing && prev.styleId && prev.styleId === curr.styleId);
+}
+
+function renderBodyElements(elements: BodyElement[], state: RenderState): void {
+  let prevPara: DocParagraph | null = null;
+  for (const el of elements) {
+    if (el.type === 'paragraph') {
+      const para = el as unknown as DocParagraph;
+      renderParagraph(para, state, contextualSuppressed(prevPara, para));
+      prevPara = para;
+    } else if (el.type === 'table') {
+      renderTable(el as unknown as DocTable, state);
+      prevPara = null;
+    }
+  }
+}
+
+function renderParaList(paras: DocParagraph[], state: RenderState): void {
+  let prevPara: DocParagraph | null = null;
+  for (const para of paras) {
+    renderParagraph(para, state, contextualSuppressed(prevPara, para));
+    prevPara = para;
+  }
+}
+
 // ===== Paragraph rendering =====
 
-function renderParagraph(para: DocParagraph, state: RenderState): void {
+function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBefore = false): void {
   const { ctx, scale, contentX, contentW, defaultColor, dryRun } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
 
-  state.y += para.spaceBefore * scale;
+  if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
+  const textAreaTopY = state.y;
 
   const indLeft = para.indentLeft * scale;
   const indRight = para.indentRight * scale;
@@ -270,12 +309,27 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
 
   if (segments.length === 0) {
     const fontSize = getDefaultFontSize(para) * scale;
-    state.y += fontSize * lineSpacingMultiplier(para.lineSpacing);
+    const emptyH = fontSize * lineSpacingMultiplier(para.lineSpacing);
+    if (para.shading && !dryRun) {
+      ctx.fillStyle = `#${para.shading}`;
+      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
+    }
+    state.y += emptyH;
+    if (para.borders && !dryRun) {
+      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
+    }
     state.y += para.spaceAfter * scale;
+    renderAnchorImages(para, state, paragraphStartY);
     return;
   }
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops);
+
+  if (para.shading && !dryRun) {
+    const totalTextH = lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing), 0);
+    ctx.fillStyle = `#${para.shading}`;
+    ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
+  }
 
   let firstLine = true;
   for (const line of lines) {
@@ -311,37 +365,47 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
       }
       const s = seg as LayoutTextSeg;
       if (!dryRun) {
-        const effSizePx = s.fontSize * scale * (s.vertAlign ? 0.65 : 1);
+        const effSizePx = calcEffectiveFontPx(s, scale);
         const yOffset = s.vertAlign === 'super'
           ? -s.fontSize * scale * 0.35
           : s.vertAlign === 'sub'
             ? s.fontSize * scale * 0.15
             : 0;
         ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily);
-        ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
 
+        if (s.highlight) {
+          ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
+          ctx.fillRect(x, baseline + yOffset - effSizePx * 0.85, s.measuredWidth, effSizePx * 1.1);
+        }
+
+        ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
         ctx.fillText(s.text, x, baseline + yOffset);
 
+        const lineColor = s.color ? `#${s.color}` : defaultColor;
+        const lineW = Math.max(0.5, effSizePx * 0.05);
+        const textW = ctx.measureText(s.text).width;
+
         if (s.underline) {
-          const lw = ctx.measureText(s.text).width;
-          ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
-          ctx.lineWidth = Math.max(0.5, effSizePx * 0.05);
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = lineW;
           const uy = baseline + yOffset + effSizePx * 0.12;
-          ctx.beginPath();
-          ctx.moveTo(x, uy);
-          ctx.lineTo(x + lw, uy);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, uy); ctx.lineTo(x + textW, uy); ctx.stroke();
         }
 
         if (s.strikethrough) {
-          const lw = ctx.measureText(s.text).width;
-          ctx.strokeStyle = s.color ? `#${s.color}` : defaultColor;
-          ctx.lineWidth = Math.max(0.5, effSizePx * 0.05);
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = lineW;
           const sy = baseline + yOffset - effSizePx * 0.3;
-          ctx.beginPath();
-          ctx.moveTo(x, sy);
-          ctx.lineTo(x + lw, sy);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x + textW, sy); ctx.stroke();
+        }
+
+        if (s.doubleStrikethrough) {
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = lineW;
+          const sy1 = baseline + yOffset - effSizePx * 0.35;
+          const sy2 = baseline + yOffset - effSizePx * 0.22;
+          ctx.beginPath(); ctx.moveTo(x, sy1); ctx.lineTo(x + textW, sy1); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, sy2); ctx.lineTo(x + textW, sy2); ctx.stroke();
         }
       }
 
@@ -350,6 +414,11 @@ function renderParagraph(para: DocParagraph, state: RenderState): void {
 
     state.y += lineH;
     firstLine = false;
+  }
+
+  if (para.borders && !dryRun) {
+    const textH = state.y - textAreaTopY;
+    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale);
   }
 
   state.y += para.spaceAfter * scale;
@@ -371,6 +440,9 @@ interface LayoutTextSeg {
   fontFamily: string | null;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
+  smallCaps?: boolean;
+  doubleStrikethrough?: boolean;
+  highlight?: string | null;
 }
 
 /**
@@ -420,7 +492,8 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
     base: TextRun | FieldRun,
     vertAlign: 'super' | 'sub' | null,
   ) => {
-    for (const word of splitTextForLayout(text)) {
+    const displayText = (base.allCaps || base.smallCaps) ? text.toUpperCase() : text;
+    for (const word of splitTextForLayout(displayText)) {
       segs.push({
         text: word,
         bold: base.bold,
@@ -432,6 +505,9 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         fontFamily: base.fontFamily,
         vertAlign,
         measuredWidth: 0,
+        smallCaps: base.smallCaps ?? false,
+        doubleStrikethrough: base.doubleStrikethrough ?? false,
+        highlight: base.highlight ?? null,
       });
     }
   };
@@ -584,9 +660,7 @@ function layoutLines(
     if (asc > lineAscent) lineAscent = asc;
   };
 
-  /** Font size after super/sub scaling, in px. */
-  const effectiveFontPx = (s: LayoutTextSeg): number =>
-    s.fontSize * scale * (s.vertAlign ? 0.65 : 1);
+  const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
 
   const measureText = (s: LayoutTextSeg): TextMetrics => {
     ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
@@ -875,9 +949,7 @@ function renderCell(
     else cellState.y = y + h - contentH - mb;
   }
 
-  for (const para of cell.content) {
-    renderParagraph(para, cellState);
-  }
+  renderParaList(cell.content, cellState);
 }
 
 function drawCellBorders(
@@ -914,7 +986,32 @@ function drawBorderLine(
   ctx.restore();
 }
 
+function drawParaBorders(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+  borders: ParagraphBorders,
+  scale: number,
+): void {
+  const drawEdge = (edge: ParaBorderEdge | null, x1: number, y1: number, x2: number, y2: number) => {
+    if (!edge || edge.style === 'none') return;
+    const spec: BorderSpec = { width: edge.width, color: edge.color, style: edge.style };
+    drawBorderLine(ctx, x1, y1, x2, y2, spec, scale);
+  };
+  const sp = (edge: ParaBorderEdge | null) => (edge?.space ?? 0) * scale;
+  drawEdge(borders.top,    x, y - sp(borders.top),         x + w, y - sp(borders.top));
+  drawEdge(borders.bottom, x, y + h + sp(borders.bottom),  x + w, y + h + sp(borders.bottom));
+  drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
+  drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
+}
+
 // ===== Utilities =====
+
+function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
+  let size = s.fontSize * scale;
+  if (s.smallCaps) size *= 0.8;
+  if (s.vertAlign) size *= 0.65;
+  return size;
+}
 
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string | null): string {
   const w = bold ? 'bold' : 'normal';

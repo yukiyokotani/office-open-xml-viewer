@@ -46,6 +46,33 @@ export interface DocParagraph {
   numbering: NumberingInfo | null;
   tabStops: TabStop[];
   runs: DocRun[];
+  /** Paragraph background hex color (w:shd fill) */
+  shading?: string | null;
+  /** Force a page break before this paragraph (w:pageBreakBefore) */
+  pageBreakBefore?: boolean;
+  /** Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing) */
+  contextualSpacing?: boolean;
+  /** Paragraph borders (w:pBdr) */
+  borders?: ParagraphBorders | null;
+  /** Style ID of the applied paragraph style */
+  styleId?: string | null;
+}
+
+export interface ParagraphBorders {
+  top: ParaBorderEdge | null;
+  bottom: ParaBorderEdge | null;
+  left: ParaBorderEdge | null;
+  right: ParaBorderEdge | null;
+  between: ParaBorderEdge | null;
+}
+
+export interface ParaBorderEdge {
+  style: string;
+  color: string | null;
+  /** pt (sz / 8) */
+  width: number;
+  /** pt spacing between border and text */
+  space: number;
 }
 
 export interface TabStop {
@@ -89,6 +116,10 @@ export interface FieldRun {
   fontFamily: string | null;
   background: string | null;
   vertAlign: 'super' | 'sub' | null;
+  allCaps?: boolean;
+  smallCaps?: boolean;
+  doubleStrikethrough?: boolean;
+  highlight?: string | null;
 }
 
 export interface TextRun {
@@ -105,6 +136,10 @@ export interface TextRun {
   vertAlign: 'super' | 'sub' | null;
   /** Target URL for hyperlinks (resolved from relationships.xml) */
   hyperlink: string | null;
+  allCaps?: boolean;
+  smallCaps?: boolean;
+  doubleStrikethrough?: boolean;
+  highlight?: string | null;
 }
 
 export interface ImageRun {
