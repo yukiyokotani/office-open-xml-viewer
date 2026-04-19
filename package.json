@@ -1,10 +1,36 @@
 {
-  "name": "office-open-xml",
-  "private": true,
+  "name": "@silurus/ooxml",
   "version": "0.1.0",
+  "description": "Browser-based OOXML viewer (pptx/xlsx/docx) — Rust/WASM parser + Canvas renderer",
+  "license": "MIT",
+  "type": "module",
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/types/index.d.ts"
+    },
+    "./pptx": {
+      "import": "./dist/pptx.mjs",
+      "require": "./dist/pptx.cjs",
+      "types": "./dist/types/pptx.d.ts"
+    },
+    "./xlsx": {
+      "import": "./dist/xlsx.mjs",
+      "require": "./dist/xlsx.cjs",
+      "types": "./dist/types/xlsx.d.ts"
+    },
+    "./docx": {
+      "import": "./dist/docx.mjs",
+      "require": "./dist/docx.cjs",
+      "types": "./dist/types/docx.d.ts"
+    }
+  },
   "packageManager": "pnpm@9.12.0",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "vite build",
+    "build:packages": "pnpm -r build",
     "typecheck": "tsc --build",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
@@ -18,6 +44,7 @@
     "@storybook/html-vite": "^10.3.5",
     "storybook": "^10.3.5",
     "vite": "^8.0.8",
+    "vite-plugin-dts": "^4.5.4",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
   }
