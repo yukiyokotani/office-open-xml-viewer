@@ -20,6 +20,7 @@ const config: StorybookConfig = {
     const { default: wasm } = await import('vite-plugin-wasm');
     return {
       ...config,
+      base: process.env.GITHUB_ACTIONS ? '/office-open-xml-viewer/' : '/',
       plugins: [...(config.plugins ?? []), wasm()],
       worker: { format: 'es' as const, plugins: () => [wasm()] },
     };
