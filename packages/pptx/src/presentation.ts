@@ -57,145 +57,144 @@ async function preloadThemeFonts(majorFont: string | null, minorFont: string | n
   ]);
 }
 
-/** Render target: a canvas plus optional sizing hints. */
-export interface RenderTarget {
-  canvas: HTMLCanvasElement;
+/** Options for rendering a single slide onto a canvas. */
+export interface RenderSlideOptions {
   /** Display width in CSS pixels. Defaults to canvas.offsetWidth or 960. */
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio or 1. */
   dpr?: number;
 }
 
-export interface PptxPresentationOptions {
-  /** Called when the WASM worker is ready. */
-  onReady?: () => void;
-  /** Called on parse or render errors. */
-  onError?: (err: Error) => void;
-}
-
 /**
  * Headless PPTX rendering engine.
  *
- * Parses .pptx files in a background worker (WASM) but renders slides
- * synchronously on the main thread, so text measurement uses the document's
- * FontFaceSet — avoiding subtle wrap differences between system fallback fonts
- * and theme-declared webfonts (e.g. Nunito Sans).
+ * Parses `.pptx` archives in a background worker (WASM) but renders slides
+ * synchronously on the main thread, so the canvas shares the document's
+ * `FontFaceSet` — avoiding subtle wrap differences between system fallback
+ * fonts and theme-declared webfonts (e.g. Nunito Sans).
+ *
+ * Construct via the static `load` factory. A single instance can drive any
+ * number of canvases (scroll view, thumbnail grid, master-detail, etc.).
  *
  * @example
- * const pres = new PptxPresentation();
- * await pres.load(buffer);
- * await pres.renderSlide({ canvas, width: 960 }, 0);
+ * const pres = await PptxPresentation.load(buffer);
+ * await pres.renderSlide(canvas, 0, { width: 960 });
  */
 export class PptxPresentation {
-  private worker: Worker | null = null;
-  private presentation: Presentation | null = null;
-  private pendingParseCallbacks = new Map<
+  private readonly _worker: Worker;
+  private _presentation: Presentation | null = null;
+  private _pendingParseCallbacks = new Map<
     number,
     { resolve: (p: Presentation) => void; reject: (e: Error) => void }
   >();
-  private nextId = 1;
-  private workerReady = false;
-  private workerReadyCallbacks: Array<() => void> = [];
-  private readonly opts: PptxPresentationOptions;
+  private _nextId = 1;
+  private _workerReady = false;
+  private _workerReadyCallbacks: Array<() => void> = [];
 
-  constructor(opts: PptxPresentationOptions = {}) {
-    this.opts = opts;
-    this.initWorker();
-  }
-
-  private initWorker() {
-    this.worker = new InlineWorker();
+  private constructor() {
+    this._worker = new InlineWorker();
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this.worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
+    this._worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
 
-    this.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
+    this._worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data;
 
       if (msg.kind === 'ready') {
-        this.workerReady = true;
-        for (const cb of this.workerReadyCallbacks) cb();
-        this.workerReadyCallbacks = [];
-        this.opts.onReady?.();
+        this._workerReady = true;
+        for (const cb of this._workerReadyCallbacks) cb();
+        this._workerReadyCallbacks = [];
         return;
       }
 
       if (msg.kind === 'parsed') {
-        const cb = this.pendingParseCallbacks.get(msg.id);
+        const cb = this._pendingParseCallbacks.get(msg.id);
         if (cb) {
-          this.pendingParseCallbacks.delete(msg.id);
+          this._pendingParseCallbacks.delete(msg.id);
           cb.resolve(msg.presentation);
         }
         return;
       }
 
       if (msg.kind === 'error') {
-        const parseCb = this.pendingParseCallbacks.get(msg.id);
+        const parseCb = this._pendingParseCallbacks.get(msg.id);
         const err = new Error(msg.message);
         if (parseCb) {
-          this.pendingParseCallbacks.delete(msg.id);
+          this._pendingParseCallbacks.delete(msg.id);
           parseCb.reject(err);
         }
-        this.opts.onError?.(err);
       }
     };
-
-    this.worker.onerror = (e) => {
-      this.opts.onError?.(new Error(e.message));
-    };
   }
 
-  private waitForWorker(): Promise<void> {
-    if (this.workerReady) return Promise.resolve();
-    return new Promise((resolve) => this.workerReadyCallbacks.push(resolve));
+  /** Parse a PPTX from URL or ArrayBuffer. */
+  static async load(source: string | ArrayBuffer): Promise<PptxPresentation> {
+    const pres = new PptxPresentation();
+    let buffer: ArrayBuffer;
+    if (typeof source === 'string') {
+      const res = await fetch(source);
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
+      buffer = await res.arrayBuffer();
+    } else {
+      buffer = source;
+    }
+    await pres._parse(buffer);
+    await preloadThemeFonts(pres._presentation!.majorFont, pres._presentation!.minorFont);
+    return pres;
   }
 
-  /** Parse a PPTX ArrayBuffer. Resolves when parsing is complete. */
-  async load(buffer: ArrayBuffer): Promise<void> {
-    await this.waitForWorker();
-    const id = this.nextId++;
+  private _waitForWorker(): Promise<void> {
+    if (this._workerReady) return Promise.resolve();
+    return new Promise((resolve) => this._workerReadyCallbacks.push(resolve));
+  }
+
+  private async _parse(buffer: ArrayBuffer): Promise<void> {
+    await this._waitForWorker();
+    const id = this._nextId++;
     const presentation = await new Promise<Presentation>((resolve, reject) => {
-      this.pendingParseCallbacks.set(id, { resolve, reject });
-      this.worker!.postMessage({ kind: 'parse', id, buffer } satisfies WorkerRequest, [buffer]);
+      this._pendingParseCallbacks.set(id, { resolve, reject });
+      this._worker.postMessage({ kind: 'parse', id, buffer } satisfies WorkerRequest, [buffer]);
     });
-    this.presentation = presentation;
-    await preloadThemeFonts(presentation.majorFont, presentation.minorFont);
+    this._presentation = presentation;
   }
 
-  /** Total number of slides in the loaded presentation (0 if not loaded). */
-  get slideCount(): number { return this.presentation?.slides.length ?? 0; }
+  /** Total number of slides in the loaded presentation. */
+  get slideCount(): number { return this._presentation?.slides.length ?? 0; }
 
-  /** Slide width in EMU (0 if not loaded). */
-  get slideWidth(): number { return this.presentation?.slideWidth ?? 0; }
+  /** Slide width in EMU. */
+  get slideWidth(): number { return this._presentation?.slideWidth ?? 0; }
 
-  /** Slide height in EMU (0 if not loaded). */
-  get slideHeight(): number { return this.presentation?.slideHeight ?? 0; }
+  /** Slide height in EMU. */
+  get slideHeight(): number { return this._presentation?.slideHeight ?? 0; }
 
-  /** Render a slide directly onto a canvas on the main thread. */
-  async renderSlide(target: RenderTarget, slideIndex: number): Promise<void> {
-    if (!this.presentation) throw new Error('No presentation loaded. Call load() first.');
-    const slide = this.presentation.slides[slideIndex];
+  /** Render a slide onto the given canvas. */
+  async renderSlide(
+    canvas: HTMLCanvasElement,
+    slideIndex: number,
+    opts: RenderSlideOptions = {},
+  ): Promise<void> {
+    if (!this._presentation) throw new Error('Presentation not loaded');
+    const slide = this._presentation.slides[slideIndex];
     if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
-    const dpr = target.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
-    const width = target.width ?? (target.canvas.offsetWidth || 960);
+    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
+    const width = opts.width ?? (canvas.offsetWidth || 960);
     await renderSlide(
-      target.canvas,
+      canvas,
       slide,
-      this.presentation.slideWidth,
-      this.presentation.slideHeight,
+      this._presentation.slideWidth,
+      this._presentation.slideHeight,
       {
         width,
         dpr,
-        defaultTextColor: this.presentation.defaultTextColor,
-        majorFont: this.presentation.majorFont,
-        minorFont: this.presentation.minorFont,
+        defaultTextColor: this._presentation.defaultTextColor,
+        majorFont: this._presentation.majorFont,
+        minorFont: this._presentation.minorFont,
       },
     );
   }
 
   /** Terminate the worker and release all resources. */
   destroy(): void {
-    this.worker?.terminate();
-    this.worker = null;
-    this.presentation = null;
+    this._worker.terminate();
+    this._presentation = null;
   }
 }
