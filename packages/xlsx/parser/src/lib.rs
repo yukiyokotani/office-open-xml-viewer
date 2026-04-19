@@ -69,6 +69,9 @@ pub struct ChartSeries {
     pub categories: Vec<String>,
     /// Numeric values; `None` = missing data point.
     pub values: Vec<Option<f64>>,
+    /// Explicit fill color hex (from c:spPr/a:solidFill/a:srgbClr). None = use palette.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Parsed chart data extracted from `xl/charts/chartN.xml`.
@@ -87,6 +90,15 @@ pub struct ChartData {
     pub categories: Vec<String>,
     /// All series across all chart-type elements in plotArea.
     pub series: Vec<ChartSeries>,
+    /// Whether data labels are enabled (c:dLbls with showVal or showPercent).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub show_data_labels: bool,
+    /// Category axis title (c:catAx/c:title).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title: Option<String>,
+    /// Value axis title (c:valAx/c:title).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_title: Option<String>,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -1527,6 +1539,9 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     let mut grouping     = "clustered".to_string();
     let mut all_series: Vec<ChartSeries> = Vec::new();
     let mut shared_categories: Vec<String> = Vec::new();
+    let mut show_data_labels = false;
+    let mut cat_axis_title: Option<String> = None;
+    let mut val_axis_title: Option<String> = None;
 
     // Recognised chart-type element names → our internal type strings
     let type_map: &[(&str, &str)] = &[
@@ -1545,6 +1560,23 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         if child.tag_name().namespace() != Some(c_ns) { continue; }
         let elem_name = child.tag_name().name();
 
+        // Axis title extraction
+        match elem_name {
+            "catAx" => {
+                if cat_axis_title.is_none() {
+                    cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                }
+                continue;
+            }
+            "valAx" => {
+                if val_axis_title.is_none() {
+                    val_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                }
+                continue;
+            }
+            _ => {}
+        }
+
         let ser_type = match type_map.iter().find(|(k, _)| *k == elem_name) {
             Some((_, v)) => *v,
             None => continue,
@@ -1554,11 +1586,23 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
             primary_type = ser_type.to_string();
         }
 
-        // barDir / grouping (only meaningful for bar/line/area)
+        // barDir / grouping / dLbls (only meaningful for bar/line/area)
         for attr_node in child.children().filter(|n| n.is_element()) {
             match attr_node.tag_name().name() {
                 "barDir"   => { bar_dir  = attr_node.attribute("val").unwrap_or("col").to_string(); }
                 "grouping" => { grouping = attr_node.attribute("val").unwrap_or("clustered").to_string(); }
+                "dLbls"    => {
+                    for d in attr_node.children().filter(|n| n.is_element()) {
+                        match d.tag_name().name() {
+                            "showVal" | "showPercent" => {
+                                if d.attribute("val").unwrap_or("1") != "0" {
+                                    show_data_labels = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1591,6 +1635,9 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         title,
         categories: shared_categories,
         series: all_series,
+        show_data_labels,
+        cat_axis_title,
+        val_axis_title,
     })
 }
 
@@ -1622,11 +1669,17 @@ fn parse_chart_series(node: &roxmltree::Node, c_ns: &str, ser_type: &str) -> Cha
     let categories = collect_str_cache(node, c_ns, cat_tag);
     let values     = collect_num_cache(node, c_ns, val_tag);
 
+    // c:spPr/a:solidFill/a:srgbClr @val — explicit series fill color
+    let color = node.descendants()
+        .find(|n| n.tag_name().name() == "srgbClr")
+        .and_then(|n| n.attribute("val").map(|v| v.to_lowercase()));
+
     ChartSeries {
         name,
         series_type: ser_type.to_string(),
         categories,
         values,
+        color,
     }
 }
 
