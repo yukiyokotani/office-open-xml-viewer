@@ -310,6 +310,100 @@ function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
   return lines;
 }
 
+interface RichSeg {
+  text: string;
+  font: Font;
+  width: number; // px
+}
+
+interface RichLine {
+  segments: RichSeg[];
+  maxFontSize: number; // pt (line-height source)
+}
+
+/**
+ * Layout rich text runs into wrapped lines. Each run is split into words (and
+ * CJK characters for granular wrapping). Per-run font is preserved so measurement
+ * and drawing use the correct font.
+ *
+ * Follows ECMA-376 §18.3.1.53 (w:r) semantics: runs are inline and share the
+ * paragraph width. wrapText breaks at word boundaries (ASCII spaces) and at any
+ * CJK code point boundary.
+ */
+function layoutRichTextLines(
+  ctx: CanvasRenderingContext2D,
+  runs: Run[],
+  baseFont: Font,
+  cs: number,
+  maxWidth: number,
+): RichLine[] {
+  const lines: RichLine[] = [];
+  let cur: RichSeg[] = [];
+  let curW = 0;
+  let curMaxSize = 0;
+
+  const flush = () => {
+    if (cur.length === 0) return;
+    lines.push({ segments: cur, maxFontSize: curMaxSize });
+    cur = []; curW = 0; curMaxSize = 0;
+  };
+
+  const push = (text: string, font: Font) => {
+    if (!text) return;
+    ctx.font = buildFont(font, cs);
+    const w = ctx.measureText(text).width;
+    if (cur.length > 0 && curW + w > maxWidth) flush();
+    cur.push({ text, font, width: w });
+    curW += w;
+    if (font.size > curMaxSize) curMaxSize = font.size;
+  };
+
+  const isCJK = (cp: number) =>
+    (cp >= 0x3000 && cp <= 0x9FFF) ||
+    (cp >= 0xF900 && cp <= 0xFAFF) ||
+    (cp >= 0xAC00 && cp <= 0xD7AF) ||
+    (cp >= 0xFF00 && cp <= 0xFFEF);
+
+  for (const run of runs) {
+    const font = applyRunFont(baseFont, run);
+    // Tokenize: runs of non-space latin, spaces, or individual CJK chars
+    const tokens: string[] = [];
+    let i = 0;
+    while (i < run.text.length) {
+      const ch = run.text[i];
+      const cp = ch.codePointAt(0) ?? 0;
+      if (cp === 0x000A) {
+        // Explicit newline: force break
+        tokens.push('\n'); i += 1;
+      } else if (isCJK(cp)) {
+        tokens.push(ch);
+        i += cp > 0xFFFF ? 2 : 1;
+      } else if (ch === ' ') {
+        let j = i;
+        while (j < run.text.length && run.text[j] === ' ') j++;
+        tokens.push(run.text.slice(i, j));
+        i = j;
+      } else {
+        let j = i;
+        while (j < run.text.length) {
+          const c = run.text[j];
+          const p = c.codePointAt(0) ?? 0;
+          if (c === ' ' || c === '\n' || isCJK(p)) break;
+          j += p > 0xFFFF ? 2 : 1;
+        }
+        tokens.push(run.text.slice(i, j));
+        i = j;
+      }
+    }
+    for (const tok of tokens) {
+      if (tok === '\n') flush();
+      else push(tok, font);
+    }
+  }
+  flush();
+  return lines;
+}
+
 function colToLetter(col: number): string {
   let result = '';
   while (col > 0) {
@@ -347,6 +441,8 @@ interface CfResult {
   fontColor?: string;
   fontBold?: boolean;
   fontItalic?: boolean;
+  fontUnderline?: boolean;
+  fontStrike?: boolean;
   dataBar?: { color: string; ratio: number };
   iconSet?: { name: string; index: number };
 }
@@ -489,6 +585,8 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   if (dxf.font?.color) result.fontColor = dxf.font.color;
   if (dxf.font?.bold) result.fontBold = true;
   if (dxf.font?.italic) result.fontItalic = true;
+  if (dxf.font?.underline) result.fontUnderline = true;
+  if (dxf.font?.strike) result.fontStrike = true;
 }
 
 function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfContext, dxfs: Dxf[]): CfResult {
@@ -658,6 +756,109 @@ function renderQuadrant(
   ctx.rect(clipX, clipY, clipW, clipH);
   ctx.clip();
 
+  // Pre-pass: merge cells whose anchor lies outside this viewport quadrant but whose
+  // span overlaps it (e.g. scrolled past the anchor row/col, or the anchor is in a
+  // frozen quadrant while we are rendering the scrollable quadrant).
+  for (const mc of rc.worksheet.mergeCells ?? []) {
+    const aRow = mc.top, aCol = mc.left;
+    // If anchor is within the main loop range, skip — handled normally below.
+    if (aRow >= startRow && aRow < startRow + numRows &&
+        aCol >= startCol && aCol < startCol + numCols) continue;
+    // Skip if merge span has no overlap with this viewport.
+    if (mc.bottom < startRow || mc.top >= startRow + numRows) continue;
+    if (mc.right  < startCol || mc.left >= startCol + numCols) continue;
+
+    const info = rc.mergeAnchorMap.get(`${aRow}:${aCol}`);
+    if (!info) continue;
+
+    // Canvas X of anchor col (may be negative = off-screen to the left).
+    let aCx: number;
+    if (aCol >= startCol) {
+      aCx = originX + colXs[aCol - startCol];
+    } else {
+      let dx = 0;
+      for (let c = aCol; c < startCol; c++) {
+        dx += Math.round(colWidthToPx(rc.worksheet.colWidths[c] ?? rc.worksheet.defaultColWidth) * cs);
+      }
+      aCx = originX - pixOffsetX - dx;
+    }
+    // Canvas Y of anchor row (may be negative = off-screen above).
+    let aCy: number;
+    if (aRow >= startRow) {
+      aCy = originY + rowYs[aRow - startRow];
+    } else {
+      let dy = 0;
+      for (let r = aRow; r < startRow; r++) {
+        dy += Math.round(rowHeightToPx(rc.worksheet.rowHeights[r] ?? rc.worksheet.defaultRowHeight) * cs);
+      }
+      aCy = originY - pixOffsetY - dy;
+    }
+
+    const cW = info.totalW, cH = info.totalH;
+    const key = `${aRow}:${aCol}`;
+    const cell = rc.cellMap.get(key);
+    const { font, fill, border, xf } = resolveXf(styles, cell?.styleIndex ?? 0);
+    const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
+    const effectiveFill = cf.fill ?? fill;
+
+    if (effectiveFill.patternType !== 'none' && effectiveFill.patternType !== '' && effectiveFill.fgColor) {
+      ctx.fillStyle = hexToRgba(effectiveFill.fgColor);
+      ctx.fillRect(aCx, aCy, cW, cH);
+    }
+    if (cf.dataBar && cf.dataBar.ratio > 0) {
+      const bInset = 2;
+      const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
+      if (bW > 0) {
+        ctx.fillStyle = hexToRgba(cf.dataBar.color, 0.6);
+        ctx.fillRect(aCx + bInset, aCy + bInset, bW, cH - bInset * 2);
+      }
+    }
+    renderBorder(ctx, border, aCx, aCy, cW, cH);
+
+    if (!cell) continue;
+    const text = formatCellValue(cell, styles);
+    if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
+
+    const effectiveBold = font.bold || !!cf.fontBold;
+    const effectiveItalic = font.italic || !!cf.fontItalic;
+    const effectiveUnderline = font.underline || !!cf.fontUnderline;
+    const effectiveStrike = font.strike || !!cf.fontStrike;
+    const fontForDraw: Font = (
+      effectiveBold !== font.bold || effectiveItalic !== font.italic ||
+      effectiveUnderline !== font.underline || effectiveStrike !== font.strike
+    ) ? { ...font, bold: effectiveBold, italic: effectiveItalic, underline: effectiveUnderline, strike: effectiveStrike }
+      : font;
+    ctx.font = buildFont(fontForDraw, cs);
+    const hyperlinkUrl = rc.hyperlinkMap.get(key);
+    const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? font.color);
+    ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
+
+    const paddingX = 3, paddingY = 2;
+    const isNumeric = cell.value.type === 'number';
+    const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
+    const alignV = xf.alignV ?? 'bottom';
+    const indentPx = xf.indent ? Math.round(xf.indent * font.size * ROW_HEIGHT_TO_PX * 0.5) : 0;
+    const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(aCx, aCy, cW, cH);
+    ctx.clip();
+
+    let textX: number;
+    if (alignH === 'right') { textX = aCx + cW - paddingX; ctx.textAlign = 'right'; }
+    else if (alignH === 'center') { textX = aCx + cW / 2; ctx.textAlign = 'center'; }
+    else { textX = aCx + leftPad; ctx.textAlign = 'left'; }
+
+    let textY: number;
+    if (alignV === 'top') { ctx.textBaseline = 'top'; textY = aCy + paddingY; }
+    else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = aCy + cH / 2; }
+    else { ctx.textBaseline = 'bottom'; textY = aCy + cH - paddingY; }
+
+    ctx.fillText(text, textX, textY);
+    ctx.restore();
+  }
+
   for (let ri = 0; ri < numRows; ri++) {
     const rowIndex = startRow + ri;
     const cy = originY + rowYs[ri];
@@ -736,8 +937,13 @@ function renderQuadrant(
 
       const effectiveBold = font.bold || !!cf.fontBold;
       const effectiveItalic = font.italic || !!cf.fontItalic;
-      const fontForDraw: Font = effectiveBold !== font.bold || effectiveItalic !== font.italic
-        ? { ...font, bold: effectiveBold, italic: effectiveItalic }
+      const effectiveUnderline = font.underline || !!cf.fontUnderline;
+      const effectiveStrike = font.strike || !!cf.fontStrike;
+      const fontForDraw: Font = (
+        effectiveBold !== font.bold || effectiveItalic !== font.italic ||
+        effectiveUnderline !== font.underline || effectiveStrike !== font.strike
+      )
+        ? { ...font, bold: effectiveBold, italic: effectiveItalic, underline: effectiveUnderline, strike: effectiveStrike }
         : font;
       ctx.font = buildFont(fontForDraw, cs);
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
@@ -852,9 +1058,52 @@ function renderQuadrant(
       // Rich text: draw each run with its own font. Only supported for the
       // non-wrap path (wrap with mixed fonts is significantly more complex).
       const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
-      const hasRichText = runs && runs.length > 0 && !xf.wrapText;
+      const hasRichText = runs && runs.length > 0;
 
-      if (xf.wrapText) {
+      if (xf.wrapText && hasRichText) {
+        // Rich text with wrapping: per-run fonts, break on spaces and CJK boundaries
+        const wrapW = cellW - leftPad - paddingX;
+        const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
+        const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * ROW_HEIGHT_TO_PX * 1.2), 0);
+        let yy: number;
+        if (alignV === 'top') yy = cy + paddingY;
+        else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
+        else yy = cy + cellH - totalH - paddingY;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        for (const line of rLines) {
+          const lineH = Math.round(line.maxFontSize * ROW_HEIGHT_TO_PX * 1.2);
+          const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
+          let xx: number;
+          if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
+          else if (alignH === 'center') xx = cx + cellW / 2 - totalW / 2;
+          else xx = cx + leftPad;
+          for (const seg of line.segments) {
+            ctx.font = buildFont(seg.font, cs);
+            const segColor = cf.fontColor ?? seg.font.color;
+            ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
+            ctx.fillText(seg.text, xx, yy);
+            const rSizePx = Math.round(seg.font.size * ROW_HEIGHT_TO_PX);
+            if (seg.font.underline) {
+              ctx.save();
+              ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
+              ctx.lineWidth = 0.5;
+              ctx.beginPath(); ctx.moveTo(xx, yy + rSizePx + 1); ctx.lineTo(xx + seg.width, yy + rSizePx + 1); ctx.stroke();
+              ctx.restore();
+            }
+            if (seg.font.strike) {
+              ctx.save();
+              ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
+              ctx.lineWidth = 0.5;
+              const sy2 = yy + Math.round(rSizePx * 0.5);
+              ctx.beginPath(); ctx.moveTo(xx, sy2); ctx.lineTo(xx + seg.width, sy2); ctx.stroke();
+              ctx.restore();
+            }
+            xx += seg.width;
+          }
+          yy += lineH;
+        }
+      } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
         const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
         const totalTextH = lines.length * lineH;
@@ -932,7 +1181,7 @@ function renderQuadrant(
         };
         const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
 
-        if (font.underline || hyperlinkUrl) {
+        if (fontForDraw.underline || hyperlinkUrl) {
           const { x: ux, width: tW } = overlayX();
           const uy = alignV === 'top'
             ? cy + paddingY + sizePx + 1
@@ -940,12 +1189,12 @@ function renderQuadrant(
               ? cy + cellH / 2 + Math.round(sizePx * 0.55)
               : cy + cellH - paddingY + 1;
           ctx.save();
-          ctx.strokeStyle = hyperlinkUrl ? '#0563C1' : (font.color ? hexToRgba(font.color) : '#000000');
+          ctx.strokeStyle = hyperlinkUrl ? '#0563C1' : (textColor ? hexToRgba(textColor) : '#000000');
           ctx.lineWidth = 0.5;
           ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
           ctx.restore();
         }
-        if (font.strike) {
+        if (fontForDraw.strike) {
           const { x: sx, width: tW } = overlayX();
           // Strike line sits roughly at the x-height mid-line (~45% up from baseline)
           const sy = alignV === 'top'
@@ -954,7 +1203,7 @@ function renderQuadrant(
               ? cy + cellH / 2
               : cy + cellH - paddingY - Math.round(sizePx * 0.35);
           ctx.save();
-          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.strokeStyle = textColor ? hexToRgba(textColor) : '#000000';
           ctx.lineWidth = 0.5;
           ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + tW, sy); ctx.stroke();
           ctx.restore();
