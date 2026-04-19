@@ -28,6 +28,14 @@ export interface Worksheet {
   conditionalFormats: ConditionalFormat[];
   images: ImageAnchor[];
   charts: ChartAnchor[];
+  /** Whether to display zero values (ECMA-376 §18.3.1.94). Defaults to true. */
+  showZeros?: boolean;
+  /** Sheet tab color (ECMA-376 §18.3.1.79). */
+  tabColor?: string | null;
+  /** AutoFilter header range (ECMA-376 §18.3.1.2). */
+  autoFilter?: CellRange | null;
+  /** Hyperlinks in this worksheet (ECMA-376 §18.3.1.47). */
+  hyperlinks?: Hyperlink[];
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────
@@ -84,6 +92,12 @@ export interface CellRange {
   right: number;
 }
 
+export interface Hyperlink {
+  col: number;
+  row: number;
+  url: string | null;
+}
+
 export interface ConditionalFormat {
   sqref: CellRange[];
   rules: CfRule[];
@@ -94,6 +108,9 @@ export type CfRule =
   | { type: 'expression'; formula: string; dxfId: number | null; priority: number }
   | { type: 'colorScale'; stops: CfStop[]; priority: number }
   | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number }
+  | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number }
+  | { type: 'aboveAverage'; aboveAverage: boolean; dxfId: number | null; priority: number }
+  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number }
   | { type: 'other'; kind: string; priority: number };
 
 export interface CfStop {

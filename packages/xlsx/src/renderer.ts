@@ -1,7 +1,7 @@
 import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
-  CfRule, CellRange, CfStop, CfValue, Dxf,
+  CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink,
   Run, ChartData,
 } from './types.js';
 
@@ -328,9 +328,14 @@ interface CompiledCfRule {
   sqref: CellRange[];
   scaleMin?: number;
   scaleMax?: number;
-  scaleStops?: number[];  // numeric values at each color stop
+  scaleStops?: number[];
   barMin?: number;
   barMax?: number;
+  top10Threshold?: number;
+  top10IsTop?: boolean;
+  avgValue?: number;
+  avgIsAbove?: boolean;
+  iconThresholds?: number[];
 }
 
 interface CfContext {
@@ -343,6 +348,7 @@ interface CfResult {
   fontBold?: boolean;
   fontItalic?: boolean;
   dataBar?: { color: string; ratio: number };
+  iconSet?: { name: string; index: number };
 }
 
 function rangeContains(ranges: CellRange[], row: number, col: number): boolean {
@@ -403,6 +409,27 @@ function compileCf(worksheet: Worksheet): CfContext {
       } else if (rule.type === 'dataBar') {
         entry.barMin = resolveCfvoValue(rule.min, samples);
         entry.barMax = resolveCfvoValue(rule.max, samples);
+      } else if (rule.type === 'top10') {
+        const sorted = [...samples].sort((a, b) => a - b);
+        const n = sorted.length;
+        if (n > 0) {
+          const rank = Math.min(rule.rank, n);
+          if (rule.percent) {
+            const p = rule.top ? (1 - rank / 100) : (rank / 100);
+            const idx = Math.max(0, Math.min(n - 1, Math.round(p * (n - 1))));
+            entry.top10Threshold = sorted[idx];
+          } else {
+            entry.top10Threshold = rule.top ? sorted[Math.max(0, n - rank)] : sorted[Math.min(n - 1, rank - 1)];
+          }
+          entry.top10IsTop = rule.top;
+        }
+      } else if (rule.type === 'aboveAverage') {
+        if (samples.length > 0) {
+          entry.avgValue = samples.reduce((a, b) => a + b, 0) / samples.length;
+          entry.avgIsAbove = rule.aboveAverage;
+        }
+      } else if (rule.type === 'iconSet') {
+        entry.iconThresholds = rule.cfvos.map(cfv => resolveCfvoValue(cfv, samples));
       }
       compiled.push(entry);
     }
@@ -456,6 +483,14 @@ function colorScaleAt(num: number, stops: CfStop[], stopValues: number[]): strin
   return stops[stops.length - 1].color;
 }
 
+function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
+  if (!dxf) return;
+  if (dxf.fill?.fgColor) result.fill = dxf.fill;
+  if (dxf.font?.color) result.fontColor = dxf.font.color;
+  if (dxf.font?.bold) result.fontBold = true;
+  if (dxf.font?.italic) result.fontItalic = true;
+}
+
 function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfContext, dxfs: Dxf[]): CfResult {
   const result: CfResult = {};
   if (!cfCtx.compiled.length) return result;
@@ -468,12 +503,26 @@ function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfC
       if (numVal == null) continue;
       const args = rule.formulas.map(f => parseFloat(f)).filter(n => !isNaN(n));
       if (cellIsMatch(numVal, rule.operator, args)) {
-        const dxf = rule.dxfId != null ? dxfs[rule.dxfId] : null;
-        if (dxf?.fill?.fgColor) result.fill = dxf.fill;
-        if (dxf?.font?.color) result.fontColor = dxf.font.color;
-        if (dxf?.font?.bold) result.fontBold = true;
-        if (dxf?.font?.italic) result.fontItalic = true;
+        applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
       }
+    } else if (rule.type === 'top10') {
+      if (numVal == null || entry.top10Threshold == null) continue;
+      const matches = entry.top10IsTop ? numVal >= entry.top10Threshold : numVal <= entry.top10Threshold;
+      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+    } else if (rule.type === 'aboveAverage') {
+      if (numVal == null || entry.avgValue == null) continue;
+      const matches = entry.avgIsAbove ? numVal > entry.avgValue : numVal < entry.avgValue;
+      if (matches) applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
+    } else if (rule.type === 'iconSet') {
+      if (numVal == null || !entry.iconThresholds?.length) continue;
+      const thresholds = entry.iconThresholds;
+      const n = thresholds.length;
+      let iconIdx = 0;
+      for (let i = 1; i < n; i++) {
+        if (numVal >= thresholds[i]) iconIdx = i;
+      }
+      if (rule.reverse) iconIdx = n - 1 - iconIdx;
+      result.iconSet = { name: rule.iconSet, index: iconIdx };
     } else if (rule.type === 'colorScale') {
       if (numVal == null || !entry.scaleStops) continue;
       const color = colorScaleAt(numVal, rule.stops, entry.scaleStops);
@@ -498,16 +547,76 @@ interface RenderContext {
   mergeAnchorMap: Map<string, { totalW: number; totalH: number }>;
   mergeSkipSet: Set<string>;
   cfContext: CfContext;
-  colWidths: number[];  // widths of scrollable cols (viewport.col..)
-  rowHeights: number[]; // heights of scrollable rows (viewport.row..)
-  frozenColWidths: number[];  // widths of frozen cols (cols 1..freezeCols)
-  frozenRowHeights: number[]; // heights of frozen rows (rows 1..freezeRows)
+  colWidths: number[];
+  rowHeights: number[];
+  frozenColWidths: number[];
+  frozenRowHeights: number[];
   frozenW: number;
   frozenH: number;
-  startRow: number;  // first scrollable row index
-  startCol: number;  // first scrollable col index
-  cs: number;        // cell scale factor (default 1)
-  dpr: number;       // device pixel ratio
+  startRow: number;
+  startCol: number;
+  cs: number;
+  dpr: number;
+  autoFilterCells: Set<string>;
+  hyperlinkMap: Map<string, string>;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Icon Set drawing
+// ────────────────────────────────────────────────────────────────
+const ICON_COLORS_3 = ['#FF0000', '#FFFF00', '#00B050'];
+const ICON_COLORS_4 = ['#FF0000', '#FF6600', '#FFFF00', '#00B050'];
+const ICON_COLORS_5 = ['#FF0000', '#FF6600', '#FFFF00', '#92D050', '#00B050'];
+
+function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, x: number, y: number, sz: number): void {
+  const nIcons = parseInt(name[0]) || 3;
+  const palette = nIcons === 5 ? ICON_COLORS_5 : nIcons === 4 ? ICON_COLORS_4 : ICON_COLORS_3;
+  const color = palette[Math.max(0, Math.min(index, palette.length - 1))];
+  ctx.save();
+  ctx.fillStyle = color;
+  if (name.includes('Arrow')) {
+    const half = sz / 2;
+    ctx.beginPath();
+    if (index === nIcons - 1) {
+      ctx.moveTo(x + half, y); ctx.lineTo(x + sz, y + sz); ctx.lineTo(x, y + sz);
+    } else if (index === 0) {
+      ctx.moveTo(x, y); ctx.lineTo(x + sz, y); ctx.lineTo(x + half, y + sz);
+    } else {
+      ctx.moveTo(x, y + sz * 0.3); ctx.lineTo(x + sz, y + half); ctx.lineTo(x, y + sz * 0.7);
+    }
+    ctx.closePath();
+    ctx.fill();
+  } else if (name.includes('Flag')) {
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x + sz, y); ctx.lineTo(x, y + sz);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.arc(x + sz / 2, y + sz / 2, sz / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawAutoFilterArrow(ctx: CanvasRenderingContext2D, cx: number, cy: number, cw: number, ch: number): void {
+  const sz = Math.max(6, Math.round(Math.min(cw, ch) * 0.45));
+  const x = cx + cw - sz - 1;
+  const y = cy + ch - sz - 1;
+  ctx.save();
+  ctx.fillStyle = '#D0D0D0';
+  ctx.fillRect(x, y, sz, sz);
+  ctx.fillStyle = '#444444';
+  const tri = sz * 0.55;
+  const tx = x + (sz - tri) / 2;
+  const ty = y + (sz - tri * 0.5) / 2;
+  ctx.beginPath();
+  ctx.moveTo(tx, ty);
+  ctx.lineTo(tx + tri, ty);
+  ctx.lineTo(tx + tri / 2, ty + tri * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -616,9 +725,14 @@ function renderQuadrant(
       // Cell borders
       renderBorder(ctx, border, cx, cy, cellW, cellH);
 
+      // AutoFilter dropdown indicator
+      if (rc.autoFilterCells.has(key)) {
+        drawAutoFilterArrow(ctx, cx, cy, cw, cellH);
+      }
+
       if (!cell) continue;
       const text = formatCellValue(cell, styles);
-      if (!text) continue;
+      if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
       const effectiveBold = font.bold || !!cf.fontBold;
       const effectiveItalic = font.italic || !!cf.fontItalic;
@@ -626,7 +740,8 @@ function renderQuadrant(
         ? { ...font, bold: effectiveBold, italic: effectiveItalic }
         : font;
       ctx.font = buildFont(fontForDraw, cs);
-      const textColor = cf.fontColor ?? font.color;
+      const hyperlinkUrl = rc.hyperlinkMap.get(key);
+      const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? font.color);
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;
@@ -636,7 +751,10 @@ function renderQuadrant(
       const alignV = xf.alignV ?? 'bottom';
       // Indent: each level ≈ one character width (ECMA-376 §18.8.44)
       const indentPx = xf.indent ? Math.round(xf.indent * font.size * ROW_HEIGHT_TO_PX * 0.5) : 0;
-      const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
+      // IconSet: reserve space on the left for the icon
+      const iconSz = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
+      const iconPad = iconSz > 0 ? iconSz + 4 : 0;
+      const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
 
       // Text overflow for left-aligned non-merged non-wrap cells
       let drawW = cellW;
@@ -669,6 +787,16 @@ function renderQuadrant(
       const rotation = xf.textRotation ?? 0;
       const isStacked = rotation === 255;
       const isRotated = rotation > 0 && rotation !== 255;
+
+      // Draw icon set icon (before text clip block)
+      if (cf.iconSet && iconSz > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(cx, cy, cellW, cellH);
+        ctx.clip();
+        drawCfIcon(ctx, cf.iconSet.name, cf.iconSet.index, cx + 2, cy + (cellH - iconSz) / 2, iconSz);
+        ctx.restore();
+      }
 
       ctx.save();
       ctx.beginPath();
@@ -804,7 +932,7 @@ function renderQuadrant(
         };
         const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
 
-        if (font.underline) {
+        if (font.underline || hyperlinkUrl) {
           const { x: ux, width: tW } = overlayX();
           const uy = alignV === 'top'
             ? cy + paddingY + sizePx + 1
@@ -812,7 +940,7 @@ function renderQuadrant(
               ? cy + cellH / 2 + Math.round(sizePx * 0.55)
               : cy + cellH - paddingY + 1;
           ctx.save();
-          ctx.strokeStyle = font.color ? hexToRgba(font.color) : '#000000';
+          ctx.strokeStyle = hyperlinkUrl ? '#0563C1' : (font.color ? hexToRgba(font.color) : '#000000');
           ctx.lineWidth = 0.5;
           ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(ux + tW, uy); ctx.stroke();
           ctx.restore();
@@ -927,6 +1055,21 @@ export function renderViewport(
 
   const cfContext = compileCf(worksheet);
 
+  // Build autoFilter indicator cell set
+  const autoFilterCells = new Set<string>();
+  if (worksheet.autoFilter) {
+    const af = worksheet.autoFilter;
+    for (let c = af.left; c <= af.right; c++) {
+      autoFilterCells.add(`${af.top}:${c}`);
+    }
+  }
+
+  // Build hyperlink lookup map
+  const hyperlinkMap = new Map<string, string>();
+  for (const hl of worksheet.hyperlinks ?? []) {
+    if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
+  }
+
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
@@ -936,6 +1079,8 @@ export function renderViewport(
     startRow, startCol,
     cs,
     dpr,
+    autoFilterCells,
+    hyperlinkMap,
   };
 
   // Canvas areas for each quadrant
