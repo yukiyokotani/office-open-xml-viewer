@@ -1,4 +1,4 @@
-# @ooxml/docx — DOCX セッション用
+# @silurus/ooxml-docx — DOCX セッション用
 
 ## あなたのロール
 このディレクトリ（`packages/docx/`）の編集責任者。DOCX の parser・renderer を 0 から実装する。

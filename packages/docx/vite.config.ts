@@ -16,9 +16,6 @@ export default defineConfig({
       fileName: (format) => `index.${format === 'es' ? 'mjs' : 'cjs'}`,
     },
   },
-  optimizeDeps: {
-    exclude: ['@ooxml/docx-parser'],
-  },
   server: {
     port: 5179,
     fs: {

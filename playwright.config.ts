@@ -23,7 +23,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm --filter @ooxml/pptx dev --port 5173',
+    command: 'pnpm --filter @silurus/ooxml-pptx dev --port 5173',
     url: 'http://localhost:5173/sample-1.pptx',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

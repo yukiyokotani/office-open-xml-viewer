@@ -1,4 +1,4 @@
-// ===== Shared types re-exported from @ooxml/core =====
+// ===== Shared types re-exported from @silurus/ooxml-core =====
 export type {
   PathCmd,
   Fill, SolidFill, NoFill, GradientFill, GradientStop,
@@ -11,13 +11,13 @@ export type {
   Paragraph,
   TextRun, TextRunData, LineBreak,
   RenderOptions,
-} from '@ooxml/core';
+} from '@silurus/ooxml-core';
 
 // ===== Presentation data model =====
 // All positions and sizes are in EMUs (English Metric Units).
 // 914400 EMU = 1 inch, 12700 EMU = 1 pt
 
-import type { Fill, Stroke, TextBody, Shadow, PathCmd } from '@ooxml/core';
+import type { Fill, Stroke, TextBody, Shadow, PathCmd } from '@silurus/ooxml-core';
 
 export interface Presentation {
   slideWidth: number;

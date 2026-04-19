@@ -8,7 +8,7 @@
     "typecheck": "tsc --build",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "build:wasm": "pnpm --filter @ooxml/pptx wasm && pnpm --filter @ooxml/xlsx wasm && pnpm --filter @ooxml/docx wasm",
+    "build:wasm": "pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-docx wasm",
     "vrt": "pnpm -r vrt"
   },
   "devDependencies": {

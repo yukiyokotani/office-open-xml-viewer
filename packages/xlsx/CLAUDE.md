@@ -1,4 +1,4 @@
-# @ooxml/xlsx — XLSX セッション用
+# @silurus/ooxml-xlsx — XLSX セッション用
 
 ## あなたのロール
 このディレクトリ（`packages/xlsx/`）の編集責任者。XLSX の parser・renderer を 0 から実装する。

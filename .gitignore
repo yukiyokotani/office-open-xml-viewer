@@ -3,6 +3,11 @@
 # Office files are not redistributable
 *.pptx
 *.xlsx
+*.docx
+# Committable demo samples (free-license files provided by maintainer)
+!packages/pptx/public/demo.pptx
+!packages/xlsx/public/demo.xlsx
+!packages/docx/public/demo.docx
 # Office Open XML spec documents
 docs/spec/
 node_modules/
