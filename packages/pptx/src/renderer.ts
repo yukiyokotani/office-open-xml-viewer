@@ -1309,23 +1309,48 @@ function buildShapePath(
       break;
     }
     case 'irregularSeal1':
-    case 'irregularseal1':
+    case 'irregularseal1': {
+      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
+      // 爆発1: 40-point irregular explosion / jagged starburst.
+      const s1: [number, number][] = [
+        [10964, 2358], [12095,    0], [12095, 3192], [14000, 4500],
+        [15648, 2832], [16349, 5225], [19500, 4650], [19350, 7200],
+        [21600, 7650], [19850, 9950], [21150,12400], [18300,13800],
+        [20350,16700], [17150,16700], [19150,20000], [15900,19050],
+        [16300,21600], [13000,19700], [12700,21600], [11150,19800],
+        [ 9100,21150], [ 9100,19200], [ 6550,21400], [ 6550,19150],
+        [ 3900,21250], [ 4350,18800], [ 2100,19850], [ 3300,17200],
+        [ 1250,17100], [ 2100,14650], [    0,13450], [ 1800,12050],
+        [    0, 9550], [ 2950, 9600], [ 1350, 7300], [ 4200, 7650],
+        [ 4100, 5200], [ 6750, 5600], [ 7050, 3450], [ 9800, 4800],
+      ];
+      s1.forEach(([px, py], i) => {
+        const sx = x + w * px / 21600;
+        const sy = y + h * py / 21600;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      });
+      ctx.closePath();
+      break;
+    }
     case 'irregularSeal2':
     case 'irregularseal2': {
-      // Starburst / explosion shape (simplified)
-      const pts = geom.includes('1') ? 6 : 8;
-      const outerR = Math.min(w, h) / 2;
-      const innerR = outerR * 0.5;
-      const angleStep = Math.PI / pts;
-      let first = true;
-      for (let i = 0; i < pts * 2; i++) {
-        const r = i % 2 === 0 ? outerR : innerR;
-        const angle = i * angleStep - Math.PI / 2;
-        const px = cx + r * Math.cos(angle);
-        const py = cy + r * Math.sin(angle);
-        if (first) { ctx.moveTo(px, py); first = false; }
-        else ctx.lineTo(px, py);
-      }
+      // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
+      // 爆発2: 29-point irregular explosion / jagged starburst (more spikes than seal1).
+      const s2: [number, number][] = [
+        [11462, 4342], [14790,    0], [14790, 5155], [18010, 3625],
+        [16380, 6810], [21600, 6810], [18350, 9215], [21600,11355],
+        [18990,11040], [21600,14910], [17800,14070], [18350,17270],
+        [15030,15010], [13810,18520], [12220,15210], [11260,21600],
+        [ 9870,15980], [ 7030,21600], [ 7490,15640], [ 3900,18200],
+        [ 4870,14160], [    0,14340], [ 3460,11610], [    0, 8590],
+        [ 3890, 8020], [ 1290, 4870], [ 5020, 6460], [ 6840, 3250],
+        [ 8820, 6100],
+      ];
+      s2.forEach(([px, py], i) => {
+        const sx = x + w * px / 21600;
+        const sy = y + h * py / 21600;
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      });
       ctx.closePath();
       break;
     }
