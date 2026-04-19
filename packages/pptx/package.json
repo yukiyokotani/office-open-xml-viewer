@@ -39,6 +39,7 @@
     "vitest": "^4.1.4"
   },
   "dependencies": {
-    "@fontsource/nunito-sans": "^5.2.7"
+    "@fontsource/nunito-sans": "^5.2.7",
+    "@silurus/ooxml-core": "workspace:*"
   }
 }
