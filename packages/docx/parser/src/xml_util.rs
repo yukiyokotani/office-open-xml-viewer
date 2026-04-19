@@ -24,6 +24,32 @@ pub fn children_w<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Vec<Node<'a
         .collect()
 }
 
+/// Element children with <w:sdt> wrappers transparently unwrapped. Structured Document
+/// Tag (content control) blocks contain their real content inside <w:sdtContent>, and
+/// most parsing stages should treat them as inline with the surrounding context.
+pub fn element_children_flat<'a, 'input>(node: Node<'a, 'input>) -> Vec<Node<'a, 'input>> {
+    let mut out = Vec::new();
+    for child in node.children().filter(|n| n.is_element()) {
+        let tn = child.tag_name();
+        if tn.namespace() == Some(W_NS) && tn.name() == "sdt" {
+            if let Some(content) = child_w(child, "sdtContent") {
+                out.extend(element_children_flat(content));
+            }
+        } else {
+            out.push(child);
+        }
+    }
+    out
+}
+
+/// Like children_w but transparently descends into <w:sdt>/<w:sdtContent> wrappers.
+pub fn children_w_flat<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Vec<Node<'a, 'input>> {
+    element_children_flat(node)
+        .into_iter()
+        .filter(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(W_NS))
+        .collect()
+}
+
 /// Get attribute in w: namespace, falling back to no-namespace.
 pub fn attr_w(node: Node, name: &str) -> Option<String> {
     node.attribute((W_NS, name))
