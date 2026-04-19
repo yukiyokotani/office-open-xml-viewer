@@ -1507,13 +1507,47 @@ fn extract_series_name(node: &roxmltree::Node, c_ns: &str) -> String {
 }
 
 /// Collect string values from a cache child element (e.g. `<c:cat>` or `<c:xVal>`).
-/// Reads `c:strRef/c:strCache` and also `c:numRef/c:numCache` (formats numbers as strings).
+/// Reads `c:strRef/c:strCache`, `c:multiLvlStrRef/c:multiLvlStrCache`, or
+/// `c:numRef/c:numCache` (formats numbers as strings).
 fn collect_str_cache(ser_node: &roxmltree::Node, c_ns: &str, child_tag: &str) -> Vec<String> {
     let Some(child) = ser_node.children()
         .find(|n| n.tag_name().name() == child_tag && n.tag_name().namespace() == Some(c_ns))
     else { return Vec::new(); };
 
-    // Try strCache first, then numCache
+    // Multi-level categories: use only the first (innermost) lvl to get primary labels.
+    if let Some(multi_cache) = child.descendants()
+        .find(|n| n.tag_name().name() == "multiLvlStrCache" && n.tag_name().namespace() == Some(c_ns))
+    {
+        let pt_count: usize = multi_cache.children()
+            .find(|n| n.tag_name().name() == "ptCount" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if let Some(first_lvl) = multi_cache.children()
+            .find(|n| n.tag_name().name() == "lvl" && n.tag_name().namespace() == Some(c_ns))
+        {
+            let mut pts: Vec<(usize, String)> = Vec::new();
+            for pt in first_lvl.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "pt" && n.tag_name().namespace() == Some(c_ns))
+            {
+                let idx: usize = pt.attribute("idx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let val = pt.children()
+                    .find(|n| n.tag_name().name() == "v")
+                    .and_then(|n| n.text())
+                    .unwrap_or("")
+                    .to_string();
+                pts.push((idx, val));
+            }
+            let len = pt_count.max(pts.iter().map(|(i, _)| i + 1).max().unwrap_or(0));
+            let mut result = vec![String::new(); len];
+            for (idx, val) in pts {
+                if idx < result.len() { result[idx] = val; }
+            }
+            return result;
+        }
+    }
+
+    // Standard strRef/strCache or numRef/numCache
     let mut pt_count: usize = 0;
     let mut pts: Vec<(usize, String)> = Vec::new();
     for desc in child.descendants() {
