@@ -153,6 +153,7 @@ export async function renderDocumentToCanvas(
   if (canvas instanceof HTMLCanvasElement) {
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
+    if (!canvas.style.display) canvas.style.display = 'block';
   }
 
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -733,26 +734,36 @@ function layoutLines(
       // Fits on current line as-is
       s.measuredWidth = w;
       addToLine(s, w, h, asc);
-    } else if (currentLine.length === 0) {
-      // Nothing on the line yet — force-fit (word is wider than the whole column)
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc);
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
       ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
-      const prefix = fitCJKPrefix(ctx, s.text, available);
+      const prefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
       if (prefix.length > 0) {
         const pm = ctx.measureText(prefix);
         const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pm.width };
         addToLine(headSeg, pm.width, h, pm.actualBoundingBoxAscent ?? asc);
         const tail = s.text.slice(prefix.length);
         if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
-      } else {
-        // No prefix fits — start a new line, re-queue the whole segment
+      } else if (currentLine.length > 0) {
+        // No prefix fits but line has content — flush and retry on a fresh line
         flush();
         queue.unshift(s);
+      } else {
+        // Empty line and not even one char fits — force-fit one char to guarantee progress
+        const firstChar = [...s.text][0] ?? '';
+        if (firstChar) {
+          const fm = ctx.measureText(firstChar);
+          const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fm.width };
+          addToLine(headSeg, fm.width, h, fm.actualBoundingBoxAscent ?? asc);
+          const tail = s.text.slice(firstChar.length);
+          if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
+        }
       }
+    } else if (currentLine.length === 0) {
+      // Nothing on the line yet and no CJK break — force-fit (word wider than column)
+      s.measuredWidth = w;
+      addToLine(s, w, h, asc);
     } else {
       // Latin word wrap: flush and put this word on the next line
       flush();

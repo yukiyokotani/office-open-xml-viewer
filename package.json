@@ -3,6 +3,32 @@
   "version": "0.1.0",
   "description": "Browser-based OOXML viewer (pptx/xlsx/docx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
+  "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
+  "keywords": [
+    "ooxml",
+    "pptx",
+    "xlsx",
+    "docx",
+    "powerpoint",
+    "excel",
+    "word",
+    "viewer",
+    "canvas",
+    "wasm",
+    "rust"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git"
+  },
+  "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "files": ["dist"],
   "exports": {
