@@ -1558,6 +1558,25 @@ function buildShapePath(
       break;
     }
 
+    // ── Double wave (wavy top AND bottom edges) ───────────────────────────────
+    case 'doublewave': {
+      const wAmp = h * (adj ?? 6250) / 100000;
+      const y1 = y + wAmp;   // body top (below wave crest)
+      const y2 = y + h - wAmp; // body bottom (above wave trough)
+      // Top wave: goes right to left (visually left-to-right wave, CW path)
+      ctx.moveTo(x, y1);
+      ctx.bezierCurveTo(x + w * 0.25, y1 - wAmp * 2, x + w * 0.25, y1, x + w * 0.5, y1);
+      ctx.bezierCurveTo(x + w * 0.75, y1, x + w * 0.75, y1 - wAmp * 2, x + w, y1);
+      // Right side
+      ctx.lineTo(x + w, y2);
+      // Bottom wave: goes right to left (CCW to close shape)
+      ctx.bezierCurveTo(x + w * 0.75, y2 + wAmp * 2, x + w * 0.75, y2, x + w * 0.5, y2);
+      ctx.bezierCurveTo(x + w * 0.25, y2, x + w * 0.25, y2 + wAmp * 2, x, y2);
+      // Left side
+      ctx.closePath();
+      break;
+    }
+
     // ── Sun ───────────────────────────────────────────────────────────────────
     case 'sun': {
       const outerR = Math.min(w, h) / 2;
