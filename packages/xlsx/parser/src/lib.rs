@@ -42,6 +42,16 @@ pub struct Worksheet {
     pub conditional_formats: Vec<ConditionalFormat>,
     pub images: Vec<ImageAnchor>,
     pub charts: Vec<ChartAnchor>,
+    /// Whether to display zero values in cells (ECMA-376 §18.3.1.94)
+    pub show_zeros: bool,
+    /// Tab color for the sheet tab (ECMA-376 §18.3.1.79)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<String>,
+    /// AutoFilter range (ECMA-376 §18.3.1.2)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<CellRange>,
+    /// Hyperlinks in this worksheet (ECMA-376 §18.3.1.47)
+    pub hyperlinks: Vec<Hyperlink>,
 }
 
 // ─── Chart types ────────────────────────────────────────────────────────────
@@ -136,6 +146,9 @@ pub enum CfRule {
     Expression { formula: String, dxf_id: Option<u32>, priority: i32 },
     ColorScale { stops: Vec<CfStop>, priority: i32 },
     DataBar { color: String, min: CfValue, max: CfValue, priority: i32 },
+    Top10 { top: bool, percent: bool, rank: u32, dxf_id: Option<u32>, priority: i32 },
+    AboveAverage { above_average: bool, dxf_id: Option<u32>, priority: i32 },
+    IconSet { icon_set: String, cfvos: Vec<CfValue>, reverse: bool, priority: i32 },
     Other { kind: String, priority: i32 },
 }
 
@@ -152,6 +165,14 @@ pub struct CfStop {
 pub struct CfValue {
     pub kind: String,
     pub value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hyperlink {
+    pub col: u32,
+    pub row: u32,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -359,12 +380,13 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     let theme_colors = parse_theme_colors(&mut archive);
     let shared_strings = read_shared_strings(&mut archive, &theme_colors);
     let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
-    let mut ws = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
+    let (mut ws, hyperlink_rids) = parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
         .map_err(|e| e.to_string())?;
 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(&mut archive, &sheet_path);
     ws.charts = load_sheet_charts(&mut archive, &sheet_path);
+    ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -906,9 +928,10 @@ fn parse_worksheet(
     shared_strings: &[SharedString],
     theme_colors: &[String],
     name: &str,
-) -> Result<Worksheet, String> {
+) -> Result<(Worksheet, Vec<(u32, u32, String)>), String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     let mut rows = Vec::new();
     let mut col_widths: HashMap<u32, f64> = HashMap::new();
@@ -919,6 +942,10 @@ fn parse_worksheet(
     let mut default_col_width = 8.43;
     let mut default_row_height = 15.0;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
+    let mut show_zeros = true;
+    let mut tab_color: Option<String> = None;
+    let mut auto_filter: Option<CellRange> = None;
+    let mut hyperlink_rids: Vec<(u32, u32, String)> = Vec::new();
 
     for node in doc.descendants() {
         match node.tag_name().name() {
@@ -946,6 +973,40 @@ fn parse_worksheet(
                 };
                 for c in min..=max {
                     col_widths.insert(c, width);
+                }
+            }
+            "sheetView" if node.tag_name().namespace() == Some(ns) => {
+                show_zeros = node.attribute("showZeros").map(|v| v != "0").unwrap_or(true);
+            }
+            "tabColor" if node.tag_name().namespace() == Some(ns) => {
+                tab_color = parse_color(&node, theme_colors);
+            }
+            "autoFilter" if node.tag_name().namespace() == Some(ns) => {
+                if let Some(r) = node.attribute("ref") {
+                    let parts: Vec<&str> = r.split(':').collect();
+                    auto_filter = if parts.len() == 2 {
+                        let (left, top) = parse_cell_ref(parts[0]);
+                        let (right, bottom) = parse_cell_ref(parts[1]);
+                        Some(CellRange { top, left, bottom, right })
+                    } else {
+                        let (col, row) = parse_cell_ref(parts[0]);
+                        Some(CellRange { top: row, left: col, bottom: row, right: col })
+                    };
+                }
+            }
+            "hyperlinks" if node.tag_name().namespace() == Some(ns) => {
+                for hl in node.children() {
+                    if !hl.is_element() || hl.tag_name().name() != "hyperlink" { continue; }
+                    let Some(ref_str) = hl.attribute("ref") else { continue };
+                    // Only first cell of ref range
+                    let ref_single = ref_str.split(':').next().unwrap_or(ref_str);
+                    let (col, row) = parse_cell_ref(ref_single);
+                    if let Some(rid) = hl.attributes()
+                        .find(|a| a.name() == "id" && a.namespace() == Some(r_ns))
+                        .map(|a| a.value().to_string())
+                    {
+                        hyperlink_rids.push((col, row, rid));
+                    }
                 }
             }
             "pane" if node.tag_name().namespace() == Some(ns) => {
@@ -1065,6 +1126,38 @@ fn parse_worksheet(
                                 .unwrap_or(CfValue { kind: "max".into(), value: None });
                             rules.push(CfRule::DataBar { color, min, max, priority });
                         }
+                        "top10" => {
+                            let top = !cf.attribute("bottom").map(|v| v == "1" || v == "true").unwrap_or(false);
+                            let percent = cf.attribute("percent").map(|v| v == "1" || v == "true").unwrap_or(false);
+                            let rank = cf.attribute("rank").and_then(|s| s.parse().ok()).unwrap_or(10);
+                            rules.push(CfRule::Top10 { top, percent, rank, dxf_id, priority });
+                        }
+                        "aboveAverage" => {
+                            let above_average = cf.attribute("aboveAverage").map(|v| v != "0").unwrap_or(true);
+                            rules.push(CfRule::AboveAverage { above_average, dxf_id, priority });
+                        }
+                        "iconSet" => {
+                            let icon_set_node = cf.children().find(|n| n.tag_name().name() == "iconSet");
+                            let icon_set = icon_set_node
+                                .and_then(|n| n.attribute("iconSet"))
+                                .unwrap_or("3TrafficLights1")
+                                .to_string();
+                            let reverse = icon_set_node
+                                .and_then(|n| n.attribute("reverse"))
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
+                            let cfvos: Vec<CfValue> = icon_set_node
+                                .map(|n| n.children()
+                                    .filter(|c| c.is_element() && c.tag_name().name() == "cfvo")
+                                    .map(|c| CfValue {
+                                        kind: c.attribute("type").unwrap_or("percent").to_string(),
+                                        value: c.attribute("val").map(|s| s.to_string()),
+                                    })
+                                    .collect()
+                                )
+                                .unwrap_or_default();
+                            rules.push(CfRule::IconSet { icon_set, cfvos, reverse, priority });
+                        }
                         other => {
                             rules.push(CfRule::Other { kind: other.to_string(), priority });
                         }
@@ -1076,7 +1169,7 @@ fn parse_worksheet(
         }
     }
 
-    Ok(Worksheet {
+    Ok((Worksheet {
         name: name.to_string(),
         rows,
         col_widths,
@@ -1089,7 +1182,11 @@ fn parse_worksheet(
         conditional_formats,
         images: Vec::new(),
         charts: Vec::new(),
-    })
+        show_zeros,
+        tab_color,
+        auto_filter,
+        hyperlinks: Vec::new(),
+    }, hyperlink_rids))
 }
 
 /// Parse a .rels file into rId → Target map.
@@ -1104,6 +1201,24 @@ fn parse_rels_map(xml: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Resolve hyperlink rIds to URLs from the sheet rels file.
+fn load_hyperlinks(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+    hyperlink_rids: Vec<(u32, u32, String)>,
+) -> Vec<Hyperlink> {
+    if hyperlink_rids.is_empty() { return Vec::new(); }
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let rels = read_zip_entry(archive, &rels_path)
+        .ok()
+        .map(|xml| parse_rels_map(&xml))
+        .unwrap_or_default();
+    hyperlink_rids.into_iter().map(|(col, row, rid)| Hyperlink {
+        col, row, url: rels.get(&rid).cloned(),
+    }).collect()
 }
 
 /// Read a binary file from the zip.
