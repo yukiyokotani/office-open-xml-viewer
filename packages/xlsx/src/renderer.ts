@@ -667,12 +667,13 @@ const ICON_COLORS_4 = ['#FF0000', '#FF6600', '#FFFF00', '#00B050'];
 const ICON_COLORS_5 = ['#FF0000', '#FF6600', '#FFFF00', '#92D050', '#00B050'];
 
 function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, x: number, y: number, sz: number): void {
-  const nIcons = parseInt(name[0]) || 3;
+  const safeName = name || '3TrafficLights1';
+  const nIcons = parseInt(safeName[0]) || 3;
   const palette = nIcons === 5 ? ICON_COLORS_5 : nIcons === 4 ? ICON_COLORS_4 : ICON_COLORS_3;
   const color = palette[Math.max(0, Math.min(index, palette.length - 1))];
   ctx.save();
   ctx.fillStyle = color;
-  if (name.includes('Arrow')) {
+  if (safeName.includes('Arrow')) {
     const half = sz / 2;
     ctx.beginPath();
     if (index === nIcons - 1) {
@@ -684,7 +685,7 @@ function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, 
     }
     ctx.closePath();
     ctx.fill();
-  } else if (name.includes('Flag')) {
+  } else if (safeName.includes('Flag')) {
     ctx.beginPath();
     ctx.moveTo(x, y); ctx.lineTo(x + sz, y); ctx.lineTo(x, y + sz);
     ctx.closePath();
