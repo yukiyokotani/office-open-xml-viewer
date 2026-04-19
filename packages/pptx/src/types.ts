@@ -99,6 +99,10 @@ export interface TableCell {
   borderR: Stroke | null;
   borderT: Stroke | null;
   borderB: Stroke | null;
+  /** Diagonal from top-left to bottom-right */
+  diagonalTL?: Stroke | null;
+  /** Diagonal from top-right to bottom-left */
+  diagonalTR?: Stroke | null;
   /** Column span */
   gridSpan: number;
   /** Row span */

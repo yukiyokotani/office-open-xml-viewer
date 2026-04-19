@@ -76,10 +76,23 @@ export class XlsxViewer {
       await this.wb.load(source);
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
-      await this.showSheet(0);
+      await this.showSheet(await this.findInitialSheet());
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
+  }
+
+  /**
+   * Pick the first sheet that contains data rows.
+   * Falls back to sheet 0 if all sheets are empty (e.g. chart-only workbooks).
+   */
+  private async findInitialSheet(): Promise<number> {
+    const count = this.wb.sheetCount;
+    for (let i = 0; i < count; i++) {
+      const ws = await this.wb.getWorksheet(i);
+      if (ws.rows.length > 0) return i;
+    }
+    return 0;
   }
 
   async showSheet(index: number): Promise<void> {

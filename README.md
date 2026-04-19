@@ -73,10 +73,10 @@ The rendering pipeline is fully off the main thread:
 | | Linear / radial gradient (`gradFill`) | ✅ |
 | | No fill (`noFill`) | ✅ |
 | | Pattern fill (`pattFill`) | ❌ |
-| | Image fill on shapes (`blipFill` in `sp`) | ❌ |
+| | Image fill on shapes (`blipFill` in `sp`) | ✅ |
 | **Strokes** | Solid line color and width | ✅ |
-| | Dash / dot styles | ❌ |
-| | Arrow heads | ❌ |
+| | Dash / dot styles | ✅ |
+| | Arrow heads (`headEnd` / `tailEnd`) | ✅ |
 | | Compound / double lines | ❌ |
 | **Shape effects** | Drop shadow (`outerShdw`) | ✅ |
 | | Inner shadow (`innerShdw`) | ❌ |
@@ -88,7 +88,7 @@ The rendering pipeline is fully off the main thread:
 | | Underline | ✅ |
 | | Strikethrough | ✅ |
 | | Font family, size, color | ✅ |
-| | Superscript / subscript | ❌ |
+| | Superscript / subscript | ✅ |
 | | Hyperlinks | ❌ |
 | | Text shadow / outline effects | ❌ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
@@ -110,7 +110,7 @@ The rendering pipeline is fully off the main thread:
 | | Cell borders | ✅ |
 | | Cell fills (solid / gradient) | ✅ |
 | | Table theme styles | ❌ |
-| | Cell diagonal lines | ❌ |
+| | Cell diagonal lines (`lnTlToBr` / `lnBlToTr`) | ✅ |
 | **Theme** | Scheme colors (dk1/lt1/accent1–6 etc.) | ✅ |
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff color transforms | ✅ (approx) |
@@ -118,31 +118,31 @@ The rendering pipeline is fully off the main thread:
 
 ---
 
-### Word (.docx) — Planned
+### Word (.docx)
 
 | Category | Feature | Status |
 |----------|---------|--------|
-| **Document** | Page rendering | 🔜 Planned |
-| | Page size and margins | 🔜 Planned |
-| | Section breaks | 🔜 Planned |
-| | Headers / footers | 🔜 Planned |
-| **Text** | Paragraphs | 🔜 Planned |
-| | Bold, italic, underline, strikethrough | 🔜 Planned |
-| | Font family, size, color | 🔜 Planned |
-| | Superscript / subscript | 🔜 Planned |
-| | Hyperlinks | 🔜 Planned |
-| **Formatting** | Paragraph alignment | 🔜 Planned |
-| | Line spacing | 🔜 Planned |
-| | Indents and tab stops | 🔜 Planned |
+| **Document** | Page rendering | ✅ |
+| | Page size and margins | ✅ |
+| | Section breaks | ❌ |
+| | Headers / footers (default / first / even) | ✅ |
+| **Text** | Paragraphs | ✅ |
+| | Bold, italic, underline, strikethrough | ✅ |
+| | Font family, size, color | ✅ |
+| | Superscript / subscript | ❌ |
+| | Hyperlinks | ✅ |
+| **Formatting** | Paragraph alignment | ✅ |
+| | Line spacing | ✅ |
+| | Indents and tab stops | ✅ |
 | | Paragraph styles (Heading 1–6, Normal, etc.) | 🔜 Planned |
-| | Lists (bullet and numbered) | 🔜 Planned |
-| **Elements** | Tables | 🔜 Planned |
-| | Images | 🔜 Planned |
-| | Text boxes | 🔜 Planned |
-| | Drawing shapes | 🔜 Planned |
+| | Lists (bullet and numbered) | ✅ |
+| **Elements** | Tables (with borders, fills, merges) | ✅ |
+| | Images (inline and anchored) | ✅ |
+| | Text boxes / shapes | ❌ |
+| | Drawing shapes | ❌ |
 | **Advanced** | Track changes | ❌ Not planned |
 | | Comments | ❌ Not planned |
-| | Footnotes / endnotes | 🔜 Planned |
+| | Footnotes / endnotes | ❌ |
 | | Mail merge fields | ❌ Not planned |
 
 ---

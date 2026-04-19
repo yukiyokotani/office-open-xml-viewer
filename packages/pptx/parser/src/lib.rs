@@ -111,6 +111,12 @@ struct TableCell {
     border_r: Option<Stroke>,
     border_t: Option<Stroke>,
     border_b: Option<Stroke>,
+    /// Diagonal from top-left to bottom-right (tl2br)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagonal_tl: Option<Stroke>,
+    /// Diagonal from top-right to bottom-left (tr2bl)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagonal_tr: Option<Stroke>,
     /// Column span (gridSpan attribute)
     grid_span: u32,
     /// Row span
@@ -210,6 +216,19 @@ enum Fill {
     },
 }
 
+/// Arrow end descriptor for headEnd / tailEnd on a line.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArrowEnd {
+    /// OOXML type: "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow"
+    #[serde(rename = "type")]
+    kind: String,
+    /// Width multiplier: "sm" | "med" | "lg"
+    w: String,
+    /// Length multiplier: "sm" | "med" | "lg"
+    len: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Stroke {
@@ -218,6 +237,12 @@ struct Stroke {
     /// OOXML prstDash value: "dash", "dot", "dashDot", "lgDash", "lgDashDot", "sysDash", "sysDot", etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     dash_style: Option<String>,
+    /// Arrow at the start of the line (headEnd)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_end: Option<ArrowEnd>,
+    /// Arrow at the end of the line (tailEnd)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tail_end: Option<ArrowEnd>,
 }
 
 /// A single path command inside a custGeom pathLst.
@@ -790,6 +815,13 @@ fn parse_fill(
     None
 }
 
+fn parse_arrow_end(node: roxmltree::Node<'_, '_>) -> ArrowEnd {
+    let kind = attr(&node, "type").unwrap_or_else(|| "none".to_owned());
+    let w    = attr(&node, "w").unwrap_or_else(|| "med".to_owned());
+    let len  = attr(&node, "len").unwrap_or_else(|| "med".to_owned());
+    ArrowEnd { kind, w, len }
+}
+
 fn parse_stroke(
     ln_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -803,7 +835,14 @@ fn parse_stroke(
     let dash_style = child(ln_node, "prstDash")
         .and_then(|n| attr(&n, "val"))
         .filter(|v| v != "solid");
-    Some(Stroke { color, width, dash_style })
+    // Arrow ends — only emit when type != "none"
+    let head_end = child(ln_node, "headEnd")
+        .map(parse_arrow_end)
+        .filter(|a| a.kind != "none");
+    let tail_end = child(ln_node, "tailEnd")
+        .map(parse_arrow_end)
+        .filter(|a| a.kind != "none");
+    Some(Stroke { color, width, dash_style, head_end, tail_end })
 }
 
 // ===========================
@@ -2256,7 +2295,7 @@ fn parse_shape(
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None })
+                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None, head_end: None, tail_end: None })
             }
         });
 
@@ -2427,7 +2466,7 @@ fn parse_table_styles_xml(xml: &str, theme: &HashMap<String, String>) -> HashMap
                     if idx == 0 { return None; }
                     let color = parse_color_node(ln_ref, theme)?;
                     let width: i64 = match idx { 1 => 6350, 2 => 12700, _ => 19050 };
-                    return Some(Stroke { color, width, dash_style: None });
+                    return Some(Stroke { color, width, dash_style: None, head_end: None, tail_end: None });
                 }
                 None
             };
@@ -2610,7 +2649,7 @@ fn parse_table(
             } else {
                 // ── Fallback for built-in styles not defined in tableStyles.xml ──
                 // Approximate "Medium Style 2": accent1 header fill + thin outer box + row separators.
-                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None };
+                let thin = Stroke { color: "A0A096".to_string(), width: 9525, dash_style: None, head_end: None, tail_end: None };
                 if cell.fill.is_none() && first_row && ri == 0 {
                     if let Some(color) = theme.get("accent1") {
                         cell.fill = Some(Fill::Solid { color: color.clone() });
@@ -2674,6 +2713,10 @@ fn parse_table_cell(
     let border_r = tc_pr.and_then(|n| child(n, "lnR")).and_then(|n| parse_stroke(n, theme));
     let border_t = tc_pr.and_then(|n| child(n, "lnT")).and_then(|n| parse_stroke(n, theme));
     let border_b = tc_pr.and_then(|n| child(n, "lnB")).and_then(|n| parse_stroke(n, theme));
+    // Diagonal borders: lnTlToBr (top-left→bottom-right) and lnBlToTr (bottom-left→top-right)
+    // These are CT_LineProperties elements (same structure as lnL/lnR/lnT/lnB)
+    let diagonal_tl = tc_pr.and_then(|n| child(n, "lnTlToBr")).and_then(|n| parse_stroke(n, theme));
+    let diagonal_tr = tc_pr.and_then(|n| child(n, "lnBlToTr")).and_then(|n| parse_stroke(n, theme));
 
     let grid_span: u32 = attr(&tc, "gridSpan").and_then(|v| v.parse().ok()).unwrap_or(1);
     let row_span: u32  = attr(&tc, "rowSpan").and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -2683,6 +2726,7 @@ fn parse_table_cell(
     TableCell {
         text_body, fill,
         border_l, border_r, border_t, border_b,
+        diagonal_tl, diagonal_tr,
         grid_span, row_span, h_merge, v_merge,
     }
 }
@@ -2987,7 +3031,7 @@ fn parse_connector(
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None })
+                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None, head_end: None, tail_end: None })
             }
         });
 

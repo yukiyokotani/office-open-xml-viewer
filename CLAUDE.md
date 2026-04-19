@@ -54,11 +54,13 @@ pnpm build:wasm
 Storybook はルートに一本化（port 6006）。各パッケージのストーリーは `packages/*/src/*.stories.ts` に置く。
 
 静的ファイルのパスプレフィックス（`.storybook/main.ts` の `staticDirs` で定義）:
-- `packages/pptx/tests/visual/` → `/pptx/`
-- `packages/xlsx/public/`        → `/xlsx/`
-- `packages/docx/public/`        → `/docx/`
+- `packages/pptx/public/` → `/pptx/`
+- `packages/xlsx/public/` → `/xlsx/`
+- `packages/docx/public/` → `/docx/`
 
-サンプルファイルを fetch する際は必ずプレフィックスを付ける（例: `/xlsx/sample-1.xlsx`）。
+サンプルファイルを fetch する際は必ずプレフィックスを付ける（例: `/pptx/sample-1.pptx`, `/xlsx/sample-1.xlsx`）。
+
+ローカル専用のサンプルストーリーは各パッケージの `Samples.sample.stories.ts` に置き、title は `<Viewer>/Samples` でネストさせる（例: `PptxViewer/Samples`）。`.gitignore` 済みなのでコミット対象外。
 
 ```bash
 pnpm storybook        # dev server (port 6006)
