@@ -6,6 +6,7 @@ import pixelmatch from 'pixelmatch';
 const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
   { name: 'sample-1', pageCount: 1, width: 612 },
   { name: 'sample-2', pageCount: 1, width: 595 },
+  { name: 'sample-3', pageCount: 3, width: 595 },
 ];
 
 const PIXEL_THRESHOLD = 0.20;

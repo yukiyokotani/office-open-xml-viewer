@@ -73,13 +73,15 @@ fn parse_body_elements(
     let mut body: Vec<BodyElement> = Vec::new();
     // The body-level sectPr (the last element) defines the final section and
     // is not a page break. Mid-body sectPrs (nested in pPr) DO imply a page break.
-    let body_level_sect_pr = body_node.children()
-        .filter(|n| n.is_element())
+    let body_children = element_children_flat(body_node);
+    let body_level_sect_pr = body_children
+        .iter()
         .last()
+        .copied()
         .filter(|n| n.tag_name().name() == "sectPr");
     let body_level_sect_id = body_level_sect_pr.map(|n| n.id());
 
-    for child in body_node.children().filter(|n| n.is_element()) {
+    for child in body_children {
         match child.tag_name().name() {
             "p" => {
                 let result = parse_paragraph(child, style_map, num_map, media_map, rel_map);
@@ -342,7 +344,7 @@ fn parse_para_content(
 ) {
     let mut field = FieldState::default();
 
-    for child in node.children().filter(|n| n.is_element()) {
+    for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
                 handle_run_in_para(child, base_run, style_map, media_map, runs, &mut field, None);
@@ -848,7 +850,7 @@ fn parse_table(
         .unwrap_or((0.0, 0.0, 3.6, 3.6));
 
     let mut rows = vec![];
-    for tr_node in children_w(node, "tr") {
+    for tr_node in children_w_flat(node, "tr") {
         let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map);
         rows.push(row);
     }
@@ -879,7 +881,7 @@ fn parse_table_row(
     let is_header = tr_pr.and_then(|p| child_w(p, "tblHeader")).is_some();
 
     let mut cells = vec![];
-    for tc_node in children_w(node, "tc") {
+    for tc_node in children_w_flat(node, "tc") {
         let cell = parse_table_cell(tc_node, style_map, num_map, media_map, rel_map);
         cells.push(cell);
     }
@@ -928,7 +930,7 @@ fn parse_table_cell(
         });
 
     let mut content = vec![];
-    for p_node in children_w(node, "p") {
+    for p_node in children_w_flat(node, "p") {
         content.push(parse_paragraph(p_node, style_map, num_map, media_map, rel_map));
     }
 
