@@ -154,13 +154,21 @@ pub struct ConditionalFormat {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
+    #[serde(rename_all = "camelCase")]
     CellIs { operator: String, formulas: Vec<String>, dxf_id: Option<u32>, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     Expression { formula: String, dxf_id: Option<u32>, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     ColorScale { stops: Vec<CfStop>, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     DataBar { color: String, min: CfValue, max: CfValue, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     Top10 { top: bool, percent: bool, rank: u32, dxf_id: Option<u32>, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     AboveAverage { above_average: bool, dxf_id: Option<u32>, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     IconSet { icon_set: String, cfvos: Vec<CfValue>, reverse: bool, priority: i32 },
+    #[serde(rename_all = "camelCase")]
     Other { kind: String, priority: i32 },
 }
 
@@ -545,9 +553,24 @@ fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String
     }
 
     // theme attribute → resolve from theme color array + optional tint
+    //
+    // ECMA-376 §18.8.3 stores the theme clrScheme in the order
+    //   dk1, lt1, dk2, lt2, accent1..accent6, hlink, folHlink
+    // but cell style references (c:color/@theme, c:fgColor/@theme, etc.) use
+    // the Excel-internal index where dk1↔lt1 and dk2↔lt2 are SWAPPED:
+    //   0=lt1, 1=dk1, 2=lt2, 3=dk2, 4..11 unchanged.
+    // This is a well-known interoperability quirk (see Open-XML-SDK issue #46
+    // and ECMA-376 §22.1.2.7 where "index values of 0 and 1 are swapped").
     if let Some(theme_str) = node.attribute("theme") {
         if let Ok(idx) = theme_str.parse::<usize>() {
-            if let Some(base) = theme_colors.get(idx) {
+            let mapped = match idx {
+                0 => 1,
+                1 => 0,
+                2 => 3,
+                3 => 2,
+                n => n,
+            };
+            if let Some(base) = theme_colors.get(mapped) {
                 let tint = node.attribute("tint").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 if tint == 0.0 {
                     return Some(base.clone());
