@@ -900,20 +900,33 @@ function buildShapePath(
     case 'callout3':
     case 'bordercallout1':
     case 'bordercallout2':
-    case 'bordercallout3': {
+    case 'bordercallout3':
+    case 'accentcallout1':
+    case 'accentcallout2':
+    case 'accentcallout3':
+    case 'accentbordercallout1':
+    case 'accentbordercallout2':
+    case 'accentbordercallout3': {
       // Line callout: rectangle text area + a single line (tail) to the tip.
+      // Accent variants add a vertical bar on the left edge of the rectangle.
       // In OOXML, the bounding box covers the text area; the tail tip (adj3/adj4) may
       // extend outside the box. adj1/adj2 define the attachment on the box edge.
-      // The tail base (adj1/adj2) is on the box edge; tail tip may be outside.
-      const attFx = (adj  !== null ? adj  : 44150) / 100000;   // default adj1
-      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;   // default adj2
-      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;   // tip x (may exceed 1.0)
-      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;  // tip y (may exceed 1.0)
+      const attFx = (adj  !== null ? adj  : 44150) / 100000;
+      const attFy = (adj2 !== null ? adj2 : 98050) / 100000;
+      const tipFx = (adj3 !== null ? adj3 : 50000) / 100000;
+      const tipFy = (adj4 !== null ? adj4 : 115000) / 100000;
       const attX = x + Math.max(0, Math.min(1, attFx)) * w;
       const attY = y + Math.max(0, Math.min(1, attFy)) * h;
       const tipX = x + tipFx * w;
       const tipY = y + tipFy * h;
       ctx.rect(x, y, w, h);
+      // Accent bar: vertical line on left edge (offset by ~8% of width)
+      if (geom.startsWith('accent')) {
+        const barX = x + w * 0.08;
+        ctx.moveTo(barX, y);
+        ctx.lineTo(barX, y + h);
+      }
+      // Callout line from attachment point to tip
       ctx.moveTo(attX, attY);
       ctx.lineTo(tipX, tipY);
       break;
@@ -1489,6 +1502,25 @@ function buildShapePath(
       ctx.lineTo(x + w, cy + wAmp);
       ctx.bezierCurveTo(x + w * 0.75, cy + wAmp * 2, x + w * 0.75, cy, x + w * 0.5, cy);
       ctx.bezierCurveTo(x + w * 0.25, cy, x + w * 0.25, cy + wAmp * 2, x, cy + wAmp);
+      ctx.closePath();
+      break;
+    }
+
+    // ── Double wave (wavy top AND bottom edges) ───────────────────────────────
+    case 'doublewave': {
+      const wAmp = h * (adj ?? 6250) / 100000;
+      const y1 = y + wAmp;   // body top (below wave crest)
+      const y2 = y + h - wAmp; // body bottom (above wave trough)
+      // Top wave: goes right to left (visually left-to-right wave, CW path)
+      ctx.moveTo(x, y1);
+      ctx.bezierCurveTo(x + w * 0.25, y1 - wAmp * 2, x + w * 0.25, y1, x + w * 0.5, y1);
+      ctx.bezierCurveTo(x + w * 0.75, y1, x + w * 0.75, y1 - wAmp * 2, x + w, y1);
+      // Right side
+      ctx.lineTo(x + w, y2);
+      // Bottom wave: goes right to left (CCW to close shape)
+      ctx.bezierCurveTo(x + w * 0.75, y2 + wAmp * 2, x + w * 0.75, y2, x + w * 0.5, y2);
+      ctx.bezierCurveTo(x + w * 0.25, y2, x + w * 0.25, y2 + wAmp * 2, x, y2);
+      // Left side
       ctx.closePath();
       break;
     }
