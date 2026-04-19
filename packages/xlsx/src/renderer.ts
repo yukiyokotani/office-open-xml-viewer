@@ -1422,7 +1422,7 @@ function renderBarChart(
   chart: ChartData,
   x: number, y: number, w: number, h: number,
 ): void {
-  const isH    = chart.barDir === 'row';
+  const isH    = chart.barDir === 'bar';
   const stacked = chart.grouping === 'stacked' || chart.grouping === 'percentStacked';
   const pct    = chart.grouping === 'percentStacked';
 
@@ -1439,7 +1439,7 @@ function renderBarChart(
 
   // Layout
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length > 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
   const pad = { t: titleH + h * 0.04, r: legendW + w * 0.03, b: h * 0.14, l: w * 0.12 };
   if (isH) { pad.l = w * 0.22; pad.b = h * 0.08; }
 
@@ -1606,7 +1606,7 @@ function renderLineChartXlsx(
   const n = cats.length; if (n === 0) return;
 
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length > 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
   const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
@@ -1695,7 +1695,7 @@ function renderAreaChartXlsx(
   const stacked = chart.grouping === 'stacked' || chart.grouping === 'percentStacked';
 
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length > 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
   const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
@@ -1935,7 +1935,7 @@ function renderScatterChartXlsx(
   x: number, y: number, w: number, h: number,
 ): void {
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length > 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
   const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12, l: w * 0.12 };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
