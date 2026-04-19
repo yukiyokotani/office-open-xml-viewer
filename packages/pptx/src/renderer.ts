@@ -1494,14 +1494,20 @@ function buildShapePath(
     }
 
     // ── Wave ──────────────────────────────────────────────────────────────────
+    // OOXML: wavy top and bottom filling the bounding box. adj=12500 (12.5% amplitude).
     case 'wave': {
       const wAmp = h * (adj ?? 12500) / 100000;
-      ctx.moveTo(x, cy - wAmp);
-      ctx.bezierCurveTo(x + w * 0.25, cy - wAmp * 2, x + w * 0.25, cy, x + w * 0.5, cy);
-      ctx.bezierCurveTo(x + w * 0.75, cy, x + w * 0.75, cy - wAmp * 2, x + w, cy - wAmp);
-      ctx.lineTo(x + w, cy + wAmp);
-      ctx.bezierCurveTo(x + w * 0.75, cy + wAmp * 2, x + w * 0.75, cy, x + w * 0.5, cy);
-      ctx.bezierCurveTo(x + w * 0.25, cy, x + w * 0.25, cy + wAmp * 2, x, cy + wAmp);
+      const yw1 = y + wAmp;        // top wave baseline (wAmp below top)
+      const yw2 = y + h - wAmp;    // bottom wave baseline (wAmp above bottom)
+      // Top wave (L→R): peaks at y, troughs at y + 2*wAmp
+      ctx.moveTo(x, yw1);
+      ctx.bezierCurveTo(x + w * 0.25, y,             x + w * 0.25, y + wAmp * 2, x + w * 0.5, yw1);
+      ctx.bezierCurveTo(x + w * 0.75, y + wAmp * 2,  x + w * 0.75, y,             x + w, yw1);
+      // Right side
+      ctx.lineTo(x + w, yw2);
+      // Bottom wave (R→L, half-period shift): peaks toward y+h, troughs toward y+h-2*wAmp
+      ctx.bezierCurveTo(x + w * 0.75, y + h,              x + w * 0.75, y + h - wAmp * 2, x + w * 0.5, yw2);
+      ctx.bezierCurveTo(x + w * 0.25, y + h - wAmp * 2,   x + w * 0.25, y + h,             x, yw2);
       ctx.closePath();
       break;
     }
