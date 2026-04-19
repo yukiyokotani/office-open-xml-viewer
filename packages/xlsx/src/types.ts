@@ -46,6 +46,8 @@ export interface ChartSeries {
   seriesType: string;
   categories: string[];
   values: (number | null)[];
+  /** Explicit fill color hex (from c:spPr). Undefined = use palette. */
+  color?: string | null;
 }
 
 export interface ChartData {
@@ -58,6 +60,12 @@ export interface ChartData {
   title: string | null;
   categories: string[];
   series: ChartSeries[];
+  /** Whether data labels are enabled (c:dLbls showVal/showPercent). */
+  showDataLabels?: boolean;
+  /** Category axis title (c:catAx/c:title). */
+  catAxisTitle?: string | null;
+  /** Value axis title (c:valAx/c:title). */
+  valAxisTitle?: string | null;
 }
 
 export interface ChartAnchor {

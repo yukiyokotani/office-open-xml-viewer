@@ -1475,8 +1475,9 @@ const CHART_PALETTE = [
   'FFC000','9E480E','843C0C','636363','255E91','967300',
 ];
 
-function chartColor(idx: number, explicit?: string | null): string {
-  return explicit ? `#${explicit}` : `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
+function chartColor(idx: number, series?: { color?: string | null } | null): string {
+  if (series?.color) return `#${series.color}`;
+  return `#${CHART_PALETTE[idx % CHART_PALETTE.length]}`;
 }
 
 function niceStep(range: number, targetSteps = 5): number {
@@ -1486,6 +1487,34 @@ function niceStep(range: number, targetSteps = 5): number {
   const normed = raw / mag;
   const nice = normed < 1.5 ? 1 : normed < 3.5 ? 2 : normed < 7.5 ? 5 : 10;
   return nice * mag;
+}
+
+function formatChartVal(v: number): string {
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function drawAxisTitle(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  px0: number, py0: number, pw: number, ph: number,
+  axis: 'cat' | 'val',
+  fontSize: number,
+): void {
+  ctx.save();
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.fillStyle = '#555';
+  if (axis === 'cat') {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(text.slice(0, 30), px0 + pw / 2, py0 + ph + fontSize + 2);
+  } else {
+    ctx.translate(px0 - fontSize - 4, py0 + ph / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text.slice(0, 30), 0, 0);
+  }
+  ctx.restore();
 }
 
 // ── renderCharts ────────────────────────────────────────────────────────────
@@ -1593,7 +1622,7 @@ function drawLegend(
   const rowH = fontSize + 4;
   let ry = ly + (lh - rowH * series.length) / 2;
   for (let i = 0; i < series.length; i++) {
-    const color = chartColor(i, null);
+    const color = chartColor(i, series[i]);
     ctx.fillStyle = color;
     ctx.fillRect(lx, ry, sw, fontSize);
     ctx.fillStyle = '#333';
@@ -1645,10 +1674,18 @@ function renderBarChart(
   if (n === 0) return;
 
   // Layout
-  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
-  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.03, b: h * 0.14, l: w * 0.12 };
-  if (isH) { pad.l = w * 0.22; pad.b = h * 0.08; }
+  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
+  const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
+  const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
+  const pad = {
+    t: titleH + h * 0.04,
+    r: legendW + w * 0.03,
+    b: h * 0.14 + catTitleH,
+    l: w * 0.12 + valTitleW,
+  };
+  if (isH) { pad.l = w * 0.22 + valTitleW; pad.b = h * 0.08 + catTitleH; }
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
@@ -1726,7 +1763,7 @@ function renderBarChart(
       const s = barSeries[si];
       const raw = s.values[ci] ?? 0;
       const val = pct ? (Math.abs(raw) / stackSum) * 100 : Math.abs(raw);
-      const color = chartColor(si, null);
+      const color = chartColor(si, s);
 
       if (!isH) {
         const bx = stacked
@@ -1736,6 +1773,12 @@ function renderBarChart(
         const by   = py0 + ph - (stacked ? (stackOffset + val) : val) / axMax * ph;
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barW, barH);
+        if (chart.showDataLabels && val > 0) {
+          const lsz = Math.max(7, Math.min(10, barW * 0.7));
+          ctx.font = `bold ${lsz}px sans-serif`;
+          ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+          ctx.fillText(pct ? `${Math.round(val)}%` : formatChartVal(val), bx + barW / 2, by - 1);
+        }
       } else {
         const by = stacked
           ? py0 + (n - 1 - ci) * catGap + catStart
@@ -1744,6 +1787,12 @@ function renderBarChart(
         const bx   = stacked ? px0 + (stackOffset / axMax) * pw : px0;
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barL, barW);
+        if (chart.showDataLabels && val > 0) {
+          const lsz = Math.max(7, Math.min(10, barW * 0.7));
+          ctx.font = `bold ${lsz}px sans-serif`;
+          ctx.fillStyle = '#333'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+          ctx.fillText(pct ? `${Math.round(val)}%` : formatChartVal(val), bx + barL + 2, by + barW / 2);
+        }
       }
       if (stacked) stackOffset += val;
     }
@@ -1769,7 +1818,7 @@ function renderBarChart(
   if (lineSeries.length > 0) {
     for (let si = 0; si < lineSeries.length; si++) {
       const s = lineSeries[si];
-      const color = chartColor(barSeries.length + si, null);
+      const color = chartColor(barSeries.length + si, s);
       ctx.strokeStyle = color; ctx.lineWidth = 2;
       ctx.setLineDash([]);
       ctx.beginPath();
@@ -1798,6 +1847,10 @@ function renderBarChart(
   if (legendW > 0) {
     drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
   }
+
+  // Axis titles
+  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
+  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1812,9 +1865,12 @@ function renderLineChartXlsx(
   const cats = chart.categories.length > 0 ? chart.categories : (chart.series[0]?.categories ?? []);
   const n = cats.length; if (n === 0) return;
 
-  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
-  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
+  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const axisFontSzL = Math.max(8, Math.min(10, h * 0.045));
+  const catTitleHL  = chart.catAxisTitle ? axisFontSzL + 4 : 0;
+  const valTitleWL  = chart.valAxisTitle ? axisFontSzL + 4 : 0;
+  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14 + catTitleHL, l: w * 0.12 + valTitleWL };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
@@ -1860,7 +1916,7 @@ function renderLineChartXlsx(
   const markerR = Math.max(3, ph * 0.015);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
-    const color = chartColor(si, null);
+    const color = chartColor(si, s);
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
     ctx.beginPath();
     let started = false;
@@ -1874,6 +1930,13 @@ function renderLineChartXlsx(
     for (let ci = 0; ci < n; ci++) {
       const v = s.values[ci]; if (v == null) continue;
       ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
+      if (chart.showDataLabels) {
+        const lsz = Math.max(7, Math.round(markerR * 1.5));
+        ctx.font = `${lsz}px sans-serif`;
+        ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.fillText(formatChartVal(v), toX(ci), toY(v) - markerR - 1);
+        ctx.fillStyle = color;
+      }
     }
   }
 
@@ -1886,6 +1949,8 @@ function renderLineChartXlsx(
   }
 
   if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSzL);
+  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSzL);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1901,9 +1966,12 @@ function renderAreaChartXlsx(
   const n = cats.length; if (n === 0) return;
   const stacked = chart.grouping === 'stacked' || chart.grouping === 'percentStacked';
 
-  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
-  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14, l: w * 0.12 };
+  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const axisFontSzA = Math.max(8, Math.min(10, h * 0.045));
+  const catTitleHA  = chart.catAxisTitle ? axisFontSzA + 4 : 0;
+  const valTitleWA  = chart.valAxisTitle ? axisFontSzA + 4 : 0;
+  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14 + catTitleHA, l: w * 0.12 + valTitleWA };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
@@ -1948,7 +2016,7 @@ function renderAreaChartXlsx(
   const stackBase = stacked ? new Array(n).fill(0) as number[] : null;
   for (let si = chart.series.length - 1; si >= 0; si--) {
     const s = chart.series[si];
-    const color = chartColor(si, null);
+    const color = chartColor(si, s);
     const baseY = py0 + ph;
 
     ctx.beginPath();
@@ -1985,6 +2053,8 @@ function renderAreaChartXlsx(
   }
 
   if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSzA);
+  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSzA);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2022,6 +2092,19 @@ function renderPieChartXlsx(
     ctx.closePath();
     ctx.fillStyle = color; ctx.fill();
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+
+    if (chart.showDataLabels && slice > 0.15) {
+      const midAngle = angle + slice / 2;
+      const labelR = outerR * (isDoughnut ? 0.75 : 0.6);
+      const lx2 = cx2 + Math.cos(midAngle) * labelR;
+      const ly2 = cy2 + Math.sin(midAngle) * labelR;
+      const pct2 = Math.round((vals[i] / total) * 100);
+      const lsz = Math.max(8, outerR * 0.1);
+      ctx.font = `bold ${lsz}px sans-serif`;
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`${pct2}%`, lx2, ly2);
+    }
+
     angle += slice;
   }
 
@@ -2112,7 +2195,7 @@ function renderRadarChart(
   // Series polygons
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
-    const color = chartColor(si, null);
+    const color = chartColor(si, s);
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const v = s.values[i] ?? 0;
@@ -2141,9 +2224,12 @@ function renderScatterChartXlsx(
   chart: ChartData,
   x: number, y: number, w: number, h: number,
 ): void {
-  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
-  const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12, l: w * 0.12 };
+  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const axisFontSzS = Math.max(8, Math.min(10, h * 0.045));
+  const catTitleHS  = chart.catAxisTitle ? axisFontSzS + 4 : 0;
+  const valTitleWS  = chart.valAxisTitle ? axisFontSzS + 4 : 0;
+  const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12 + catTitleHS, l: w * 0.12 + valTitleWS };
 
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
@@ -2194,7 +2280,7 @@ function renderScatterChartXlsx(
   const markerR = Math.max(3, ph * 0.015);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
-    const color = chartColor(si, null);
+    const color = chartColor(si, s);
     ctx.fillStyle = color;
     for (let ci = 0; ci < s.values.length; ci++) {
       const yv = s.values[ci]; if (yv == null) continue;
@@ -2205,4 +2291,6 @@ function renderScatterChartXlsx(
   }
 
   if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSzS);
+  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSzS);
 }
