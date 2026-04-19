@@ -71,6 +71,7 @@ export function buildViewerUI(
     if (!ctx.doc) return;
     await ctx.doc.renderPage(canvas, ctx.page, { width: args.width, dpr: window.devicePixelRatio });
     canvas.style.maxWidth = '100%';
+    canvas.style.display = 'block';
   };
 
   prevBtn.addEventListener('click', async () => {
@@ -208,6 +209,7 @@ export const FileUpload: Story = {
       if (!docRef || !canvas) return;
       await docRef.renderPage(canvas, currentPage, { width: args.width, dpr: window.devicePixelRatio });
       canvas.style.maxWidth = '100%';
+      canvas.style.display = 'block';
     };
 
     async function loadBuffer(name: string, buffer: ArrayBuffer) {
