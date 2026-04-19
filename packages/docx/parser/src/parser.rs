@@ -325,6 +325,7 @@ fn parse_paragraph(
             .and_then(|p| child_w(p, "pStyle"))
             .and_then(|s| attr_w(s, "val"))
             .or_else(|| Some("Normal".to_string())),
+        default_font_size: base_run.font_size,
     }
 }
 
@@ -674,6 +675,12 @@ fn parse_inline_drawing(node: roxmltree::Node, media_map: &HashMap<String, Strin
             anchor_x_from_margin: false,
             anchor_y_from_para: false,
             color_replace_from: None,
+            wrap_mode: None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            wrap_side: None,
         }];
     }
 
@@ -686,10 +693,11 @@ fn parse_inline_drawing(node: roxmltree::Node, media_map: &HashMap<String, Strin
     // Parse positionH / positionV with relativeFrom
     let (pos_x, x_from_margin) = parse_anchor_pos_h(&container);
     let (pos_y, y_from_para)   = parse_anchor_pos_v(&container);
+    let anchor_meta = parse_anchor_wrap(&container);
 
     // Check for wgp (Word Graphics Group) — expands to multiple per-image entries
     if let Some(wgp) = container.descendants().find(|n| n.tag_name().name() == "wgp") {
-        return parse_wgp_images(wgp, media_map, pos_x, x_from_margin, pos_y, y_from_para);
+        return parse_wgp_images(wgp, media_map, pos_x, x_from_margin, pos_y, y_from_para, &anchor_meta);
     }
 
     // Regular single-blip anchor
@@ -727,7 +735,49 @@ fn parse_inline_drawing(node: roxmltree::Node, media_map: &HashMap<String, Strin
         anchor_x_from_margin: x_from_margin,
         anchor_y_from_para: y_from_para,
         color_replace_from: None,
+        wrap_mode: anchor_meta.wrap_mode.clone(),
+        dist_top: anchor_meta.dist_top,
+        dist_bottom: anchor_meta.dist_bottom,
+        dist_left: anchor_meta.dist_left,
+        dist_right: anchor_meta.dist_right,
+        wrap_side: anchor_meta.wrap_side.clone(),
     }]
+}
+
+#[derive(Default, Clone)]
+struct AnchorMeta {
+    wrap_mode: Option<String>,
+    wrap_side: Option<String>,
+    dist_top: f64,
+    dist_bottom: f64,
+    dist_left: f64,
+    dist_right: f64,
+}
+
+/// Parse wrap element and dist* padding from a wp:anchor container.
+fn parse_anchor_wrap(container: &roxmltree::Node) -> AnchorMeta {
+    let to_pt = |s: &str| s.parse::<f64>().ok().map(|v| v / 12700.0).unwrap_or(0.0);
+    let dist_top = container.attribute("distT").map(to_pt).unwrap_or(0.0);
+    let dist_bottom = container.attribute("distB").map(to_pt).unwrap_or(0.0);
+    let dist_left = container.attribute("distL").map(to_pt).unwrap_or(0.0);
+    let dist_right = container.attribute("distR").map(to_pt).unwrap_or(0.0);
+
+    let mut wrap_mode: Option<String> = None;
+    let mut wrap_side: Option<String> = None;
+
+    for child in container.children().filter(|n| n.is_element()) {
+        let name = child.tag_name().name();
+        match name {
+            "wrapSquare"       => { wrap_mode = Some("square".into());       wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
+            "wrapTopAndBottom" => { wrap_mode = Some("topAndBottom".into()); break; }
+            "wrapNone"         => { wrap_mode = Some("none".into());         break; }
+            "wrapTight"        => { wrap_mode = Some("tight".into());        wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
+            "wrapThrough"      => { wrap_mode = Some("through".into());      wrap_side = child.attribute("wrapText").map(|s| s.to_string()); break; }
+            _ => {}
+        }
+    }
+
+    AnchorMeta { wrap_mode, wrap_side, dist_top, dist_bottom, dist_left, dist_right }
 }
 
 /// Parse positionH — returns (posOffset_pt, needs_margin_offset).
@@ -774,6 +824,7 @@ fn parse_wgp_images(
     x_from_margin: bool,
     anchor_pos_y: f64,
     y_from_para: bool,
+    anchor_meta: &AnchorMeta,
 ) -> Vec<ImageRun> {
     let mut results = Vec::new();
     // Iterate all pic descendants in the wgp (covers both direct children and nested grpSp)
@@ -835,6 +886,12 @@ fn parse_wgp_images(
             anchor_x_from_margin: x_from_margin,
             anchor_y_from_para: y_from_para,
             color_replace_from,
+            wrap_mode: anchor_meta.wrap_mode.clone(),
+            dist_top: anchor_meta.dist_top,
+            dist_bottom: anchor_meta.dist_bottom,
+            dist_left: anchor_meta.dist_left,
+            dist_right: anchor_meta.dist_right,
+            wrap_side: anchor_meta.wrap_side.clone(),
         });
     }
     results

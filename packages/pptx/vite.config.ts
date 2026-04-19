@@ -13,7 +13,9 @@ export default defineConfig({
   plugins: [wasm()],
   server: {
     fs: {
-      allow: [dirname],
+      // Include monorepo root so node_modules/.pnpm/ fontsource files can be served
+      // (pnpm symlinks to ../../node_modules/.pnpm/...).
+      allow: [dirname, path.resolve(dirname, '../..')],
     },
   },
   build: {

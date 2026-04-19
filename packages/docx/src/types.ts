@@ -56,6 +56,8 @@ export interface DocParagraph {
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */
   styleId?: string | null;
+  /** Default font size (pt) inherited from style + direct pPr/rPr. Falls back to 10pt. */
+  defaultFontSize?: number;
 }
 
 export interface ParagraphBorders {
@@ -167,6 +169,23 @@ export interface ImageRun {
    * transparency. Implements a:clrChange (make-background-transparent).
    */
   colorReplaceFrom?: string;
+  /**
+   * Wrap mode for anchor images:
+   *   "square" | "topAndBottom" | "none" | "tight" | "through"
+   * Inline images and undetermined cases leave this undefined.
+   * MVP renders "tight" and "through" as "square".
+   */
+  wrapMode?: string;
+  /** Padding top (pt). Anchor-only. */
+  distTop?: number;
+  /** Padding bottom (pt). Anchor-only. */
+  distBottom?: number;
+  /** Padding left (pt). Anchor-only. */
+  distLeft?: number;
+  /** Padding right (pt). Anchor-only. */
+  distRight?: number;
+  /** wrapText attribute: "bothSides" | "left" | "right" | "largest". */
+  wrapSide?: string;
 }
 
 // ===== Table =====

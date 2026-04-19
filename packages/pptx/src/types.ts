@@ -162,12 +162,9 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer }
-  /** Render a slide; worker returns an ImageBitmap via 'bitmap' response. */
-  | { kind: 'render'; id: number; slideIndex: number; targetWidth: number; dpr: number; defaultTextColor: string | null; majorFont: string | null; minorFont: string | null };
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer };
 
 export type WorkerResponse =
   | { kind: 'ready' }
   | { kind: 'parsed'; id: number; presentation: Presentation }
-  | { kind: 'bitmap'; id: number; bitmap: ImageBitmap }
   | { kind: 'error'; id: number; message: string };

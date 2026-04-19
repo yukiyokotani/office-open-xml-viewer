@@ -205,13 +205,27 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         if let Some(v) = attr_w(sp, "line") {
             let rule = attr_w(sp, "lineRule").unwrap_or_else(|| "auto".to_string());
             let raw: f64 = v.parse().unwrap_or(240.0);
-            let val = if rule == "auto" || rule == "atLeast" {
-                raw / 240.0
-            } else {
-                raw / 20.0  // exact: twips → pt
+            // OOXML encodes line spacing as:
+            //   auto      → raw / 240   = multiplier (1.0 = single, 1.5 = 1½, 2.0 = double)
+            //   atLeast   → raw / 20    = pt (minimum line height)
+            //   exact     → raw / 20    = pt (exact line height)
+            // Word tolerates "auto" with very large raw values and treats them as
+            // atLeast-twips in practice (seen in the wild for decorative titles).
+            // Reinterpret raw > 720 (3x single) in the auto rule as atLeast pt so
+            // large fonts render near their natural height instead of 3×+.
+            let (val, effective_rule) = match rule.as_str() {
+                "exact" => (raw / 20.0, "exact".to_string()),
+                "atLeast" => (raw / 20.0, "atLeast".to_string()),
+                _ => {
+                    if raw > 720.0 {
+                        (raw / 20.0, "atLeast".to_string())
+                    } else {
+                        (raw / 240.0, "auto".to_string())
+                    }
+                }
             };
             fmt.line_spacing_val = Some(val);
-            fmt.line_spacing_rule = Some(rule);
+            fmt.line_spacing_rule = Some(effective_rule);
         }
     }
 
