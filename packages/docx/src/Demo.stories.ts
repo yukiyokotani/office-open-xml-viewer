@@ -19,7 +19,7 @@ type Story = StoryObj<Args>;
 export const Demo: Story = {
   name: 'demo.docx',
   render(args) {
-    const { root } = buildViewerUI(args, '/docx/demo.docx');
+    const { root } = buildViewerUI(args, '/docx/demo/sample.docx');
     return root;
   },
 };
