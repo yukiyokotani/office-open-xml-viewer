@@ -74,6 +74,7 @@ struct ChartElement {
     categories: Vec<String>,
     series: Vec<ChartSeriesData>,
     val_max: Option<f64>,
+    val_min: Option<f64>,
     subtotal_indices: Vec<u32>,
     /// Whether to render data value labels on bars/segments
     show_data_labels: bool,
@@ -81,6 +82,8 @@ struct ChartElement {
     cat_axis_hidden: bool,
     /// True when <c:valAx><c:delete val="1"/> — hide value axis labels/ticks
     val_axis_hidden: bool,
+    /// Plot area background color from <c:plotArea><c:spPr><a:solidFill> (hex without #)
+    plot_area_bg: Option<String>,
 }
 
 // ===== Table data model =====
@@ -175,6 +178,48 @@ struct PictureElement {
     /// OOXML adj value (0–100000) for roundRect clip; None = plain rectangle
     #[serde(skip_serializing_if = "Option::is_none")]
     clip_adjust: Option<i64>,
+    /// ECMA-376 §20.1.8.55 a:srcRect — source image crop in 1/100000 fractions of
+    /// source width/height. Only serialized when any edge is non-zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    src_rect: Option<SrcRect>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct SrcRect {
+    /// Crop from left as fraction (e.g. 25100/100000 = 0.251)
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
+    l: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
+    t: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
+    r: f64,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    #[serde(default)]
+    b: f64,
+}
+
+fn is_zero_f64(v: &f64) -> bool { v.abs() < 1e-9 }
+
+/// Parse `<a:srcRect l t r b>` from a `<p:blipFill>` (or `<a:blipFill>`) node.
+/// Returns None if no srcRect or all edges are zero.
+fn parse_src_rect(blip_fill: roxmltree::Node<'_, '_>) -> Option<SrcRect> {
+    let sr = child(blip_fill, "srcRect")?;
+    let read = |name: &str| -> f64 {
+        attr(&sr, name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100_000.0)
+            .unwrap_or(0.0)
+    };
+    let rect = SrcRect { l: read("l"), t: read("t"), r: read("r"), b: read("b") };
+    if is_zero_f64(&rect.l) && is_zero_f64(&rect.t) && is_zero_f64(&rect.r) && is_zero_f64(&rect.b) {
+        None
+    } else {
+        Some(rect)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1908,10 +1953,15 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             if texts.is_empty() { None } else { Some(texts.join("")) }
         });
 
-    // val axis max
-    let val_max = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+    // val axis max / min
+    let val_ax = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "valAx");
+    let val_max = val_ax
         .and_then(|ax| ax.descendants().find(|n| n.is_element() && n.tag_name().name() == "max"))
+        .and_then(|n| attr(&n, "val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    let val_min = val_ax
+        .and_then(|ax| ax.descendants().find(|n| n.is_element() && n.tag_name().name() == "min"))
         .and_then(|n| attr(&n, "val"))
         .and_then(|v| v.parse::<f64>().ok());
 
@@ -1930,6 +1980,12 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let plot_area = root.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "plotArea")?;
 
+    // Plot area background: <c:plotArea><c:spPr><a:solidFill>
+    let plot_area_bg = plot_area.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|fill| parse_color_node(fill, theme));
+
     let ser_nodes: Vec<_> = plot_area.descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "ser")
         .collect();
@@ -1947,13 +2003,18 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             .collect()
     };
 
-    // Categories from first series's <c:cat> — supports strCache and numCache
+    // ECMA-376 §21.2.2: category data may be in a *Cache (backing a *Ref) or a *Lit (inline literal).
+    // Accept strCache/numCache (external refs with cached values) AND strLit/numLit (inline literals).
+    let is_pt_container = |name: &str| {
+        matches!(name, "strCache" | "numCache" | "strLit" | "numLit")
+    };
+
     let categories: Vec<String> = ser_nodes[0]
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "cat")
         .and_then(|cat| {
             cat.descendants()
-                .find(|n| n.is_element() && (n.tag_name().name() == "strCache" || n.tag_name().name() == "numCache"))
+                .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
         })
         .map(|cache| collect_pt_strings(cache))
         .unwrap_or_default();
@@ -1961,23 +2022,31 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let pt_count = categories.len().max(1);
 
     let series: Vec<ChartSeriesData> = ser_nodes.iter().map(|ser| {
-        // Series name from <c:tx>
+        // Series name from <c:tx>  (can be strRef/strCache, strLit, or a bare <c:v>)
         let name = ser.children()
             .find(|n| n.is_element() && n.tag_name().name() == "tx")
-            .and_then(|tx| tx.descendants().find(|n| n.is_element() && (n.tag_name().name() == "strCache" || n.tag_name().name() == "numCache")))
-            .and_then(|cache| {
-                cache.children()
-                    .find(|n| n.is_element() && n.tag_name().name() == "pt")
-                    .and_then(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
-                    .and_then(|v| v.text().map(|t| t.to_string()))
+            .and_then(|tx| {
+                // Preferred: first pt > v inside any cache/lit container
+                tx.descendants()
+                    .find(|n| n.is_element() && is_pt_container(n.tag_name().name()))
+                    .and_then(|cache| {
+                        cache.children()
+                            .find(|n| n.is_element() && n.tag_name().name() == "pt")
+                            .and_then(|pt| pt.children().find(|n| n.is_element() && n.tag_name().name() == "v"))
+                            .and_then(|v| v.text().map(|t| t.to_string()))
+                    })
+                    // Fallback: <c:tx><c:v>Name</c:v></c:tx>
+                    .or_else(|| tx.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "v")
+                        .and_then(|v| v.text().map(|t| t.to_string())))
             })
             .unwrap_or_default();
 
-        // Values: use <c:val> or <c:yVal> (scatter), falling back to <c:numCache> anywhere
+        // Values: use <c:val> or <c:yVal> (scatter); accept numCache (ref) or numLit (inline)
         let val_cache = ser.descendants()
             .find(|n| n.is_element() && (n.tag_name().name() == "val" || n.tag_name().name() == "yVal"))
-            .and_then(|v| v.descendants().find(|n| n.is_element() && n.tag_name().name() == "numCache"))
-            .or_else(|| ser.descendants().find(|n| n.is_element() && n.tag_name().name() == "numCache"));
+            .and_then(|v| v.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")))
+            .or_else(|| ser.descendants().find(|n| n.is_element() && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")));
 
         let mut values: Vec<Option<f64>> = vec![None; pt_count];
         if let Some(cache) = val_cache {
@@ -1993,10 +2062,15 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
             }
         }
 
-        // Series color from spPr > solidFill
+        // Series color from spPr > solidFill (bar/area/pie) or spPr > ln > solidFill (line)
         let color = ser.children()
             .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-            .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+            .and_then(|sp| {
+                sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+                    .or_else(|| sp.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "ln")
+                        .and_then(|ln| ln.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill")))
+            })
             .and_then(|fill| parse_color_node(fill, theme));
 
         // Per-data-point colors from <c:dPt> (important for pie charts)
@@ -2031,10 +2105,12 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         categories,
         series,
         val_max,
+        val_min,
         subtotal_indices: vec![],
         show_data_labels,
         cat_axis_hidden,
         val_axis_hidden,
+        plot_area_bg,
     })
 }
 
@@ -2117,10 +2193,12 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         categories,
         series,
         val_max: None,
+        val_min: None,
         subtotal_indices,
         show_data_labels: false,
         cat_axis_hidden: false,
         val_axis_hidden: false,
+        plot_area_bg: None,
     })
 }
 
@@ -2373,9 +2451,8 @@ fn parse_picture(
         return None; // pictures always need explicit dimensions
     }
 
-    let r_id = child(pic_node, "blipFill")
-        .and_then(|bf| child(bf, "blip"))
-        .and_then(|b| attr_r(&b, "embed"))?;
+    let blip_fill = child(pic_node, "blipFill")?;
+    let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
 
     let rel_target = rels.get(&r_id)?;
     let image_path = resolve_path(slide_dir, rel_target);
@@ -2388,6 +2465,7 @@ fn parse_picture(
         x: t.x, y: t.y, width: t.cx, height: t.cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
         data_url, clip_adjust: None,
+        src_rect: parse_src_rect(blip_fill),
     })
 }
 
@@ -2826,8 +2904,8 @@ fn parse_sp_tree_node(
             }
             // Image-filled shape: spPr > blipFill > blip r:embed → render as PictureElement
             let sp_pr_node = child(node, "spPr");
-            let blip_rid = sp_pr_node
-                .and_then(|p| child(p, "blipFill"))
+            let blip_fill_node = sp_pr_node.and_then(|p| child(p, "blipFill"));
+            let blip_rid = blip_fill_node
                 .and_then(|bf| child(bf, "blip"))
                 .and_then(|b| attr_r(&b, "embed"));
             if let Some(rid) = blip_rid {
@@ -2851,6 +2929,7 @@ fn parse_sp_tree_node(
                                     x: t.x, y: t.y, width: t.cx, height: t.cy,
                                     rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
                                     data_url, clip_adjust,
+                                    src_rect: blip_fill_node.and_then(parse_src_rect),
                                 }));
                                 return;
                             }
@@ -2873,7 +2952,8 @@ fn parse_sp_tree_node(
                     .and_then(|s| s.parse::<u32>().ok());
                 if let Some(idx) = ph_idx {
                     if let Some(t) = lph.by_idx.get(&idx) {
-                        let r_id = child(node, "blipFill")
+                        let blip_fill = child(node, "blipFill");
+                        let r_id = blip_fill
                             .and_then(|bf| child(bf, "blip"))
                             .and_then(|b| attr_r(&b, "embed"));
                         if let Some(rid) = r_id {
@@ -2886,6 +2966,7 @@ fn parse_sp_tree_node(
                                         x: t.x, y: t.y, width: t.cx, height: t.cy,
                                         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
                                         data_url, clip_adjust: None,
+                                        src_rect: blip_fill.and_then(parse_src_rect),
                                     }));
                                 }
                             }

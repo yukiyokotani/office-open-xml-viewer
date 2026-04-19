@@ -132,6 +132,7 @@ export interface ChartElement {
   categories: string[];
   series: ChartSeriesData[];
   valMax: number | null;
+  valMin: number | null;
   subtotalIndices: number[];
   /** Whether data labels (value numbers) should be shown on bars/segments */
   showDataLabels: boolean;
@@ -139,6 +140,8 @@ export interface ChartElement {
   catAxisHidden: boolean;
   /** True when the chart's value axis has <c:delete val="1"/> */
   valAxisHidden: boolean;
+  /** Plot area background color from <c:plotArea><c:spPr><a:solidFill> (hex without #) */
+  plotAreaBg: string | null;
 }
 
 export interface PictureElement {
@@ -154,6 +157,11 @@ export interface PictureElement {
   dataUrl: string;
   /** OOXML adj value (0–100000) for roundRect clip, null = plain rectangle */
   clipAdjust: number | null;
+  /**
+   * ECMA-376 a:srcRect — source image crop as fractions (0..1) of the source
+   * width/height. Omitted when the image is not cropped.
+   */
+  srcRect?: { l?: number; t?: number; r?: number; b?: number };
 }
 
 // ===== Worker message protocol =====

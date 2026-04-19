@@ -2618,7 +2618,24 @@ async function renderPicture(
       ctx.roundRect(x, y, w, h, r);
       ctx.clip();
     }
-    ctx.drawImage(bitmap, x, y, w, h);
+    // ECMA-376 a:srcRect — draw a sub-rectangle of the source image.
+    // Edge values are fractions of source dims (negative values mean extend past
+    // the image, which in OOXML duplicates edge pixels; we clamp to [0,1]).
+    const sr = el.srcRect;
+    if (sr && (sr.l || sr.t || sr.r || sr.b)) {
+      const bw = bitmap.width, bh = bitmap.height;
+      const sl = Math.max(0, Math.min(1, sr.l ?? 0));
+      const st = Math.max(0, Math.min(1, sr.t ?? 0));
+      const srR = Math.max(0, Math.min(1, sr.r ?? 0));
+      const sbB = Math.max(0, Math.min(1, sr.b ?? 0));
+      const sx = sl * bw;
+      const sy = st * bh;
+      const sw = Math.max(1, bw - sx - srR * bw);
+      const sh = Math.max(1, bh - sy - sbB * bh);
+      ctx.drawImage(bitmap, sx, sy, sw, sh, x, y, w, h);
+    } else {
+      ctx.drawImage(bitmap, x, y, w, h);
+    }
     ctx.restore();
     bitmap.close();
   } catch {
@@ -3133,40 +3150,88 @@ function chartColor(idx: number, explicit: string | null | undefined): string {
 }
 
 // ─── Line chart ──────────────────────────────────────────────────────────────
+function niceStepLine(range: number): number {
+  if (range <= 0) return 1;
+  const exp = Math.floor(Math.log10(range));
+  const frac = range / Math.pow(10, exp);
+  const step = frac < 1.5 ? 0.2 : frac < 3 ? 0.5 : frac < 7 ? 1 : 2;
+  return step * Math.pow(10, exp);
+}
+
 function renderLineChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale: number) {
   const x0 = emuToPx(el.x, scale), y0 = emuToPx(el.y, scale);
   const w  = emuToPx(el.width, scale), h = emuToPx(el.height, scale);
 
   const allVals = el.series.flatMap(s => s.values).filter((v): v is number => v != null);
-  const dataMax = el.valMax ?? (allVals.length ? Math.max(...allVals) : 1);
-  const dataMin = Math.min(0, ...(allVals.length ? allVals : [0]));
+  const rawMax = el.valMax ?? (allVals.length ? Math.max(...allVals) : 1);
+  const rawMin = el.valMin ?? (allVals.length ? Math.min(...allVals) : 0);
 
-  const LABEL_H = h * 0.12, MARGIN = w * 0.05;
-  const plotX = x0 + MARGIN, plotW = w - MARGIN * 2;
-  const plotY = y0 + LABEL_H * 0.5, plotH = h - LABEL_H * 1.5;
-  const range = dataMax - dataMin || 1;
+  const titleH = el.title ? Math.max(16, h * 0.09) : 0;
+  const axisFontSz = Math.max(8, Math.min(11, h * 0.05));
+  const yAxisLabelW = el.valAxisHidden ? 4 : axisFontSz * 2.5 + 6;
+  const catLabelH = el.catAxisHidden ? 2 : axisFontSz + 6;
+  const plotX = x0 + yAxisLabelW;
+  const plotY = y0 + titleH + 10;
+  const plotW = w - yAxisLabelW - w * 0.03;
+  const plotH = h - titleH - catLabelH - 8;
+  if (plotW <= 0 || plotH <= 0) return;
+
+  // Axis tick computation: use nice step when user didn't specify valMin/valMax
+  let axMin = rawMin, axMax = rawMax;
+  if (el.valMin == null || el.valMax == null) {
+    const step = niceStepLine(Math.max(1e-9, rawMax - rawMin));
+    axMin = Math.floor(rawMin / step) * step;
+    axMax = Math.ceil(rawMax / step) * step;
+  }
+  if (axMax === axMin) axMax = axMin + 1;
+  const tickStep = niceStepLine(axMax - axMin);
+  const range = axMax - axMin;
 
   const toX = (i: number) => plotX + (el.categories.length > 1 ? (i / (el.categories.length - 1)) * plotW : plotW / 2);
-  const toY = (v: number) => plotY + plotH - ((v - dataMin) / range) * plotH;
+  const toY = (v: number) => plotY + plotH - ((v - axMin) / range) * plotH;
 
-  // Axis
   ctx.save();
-  ctx.strokeStyle = '#AAAAAA'; ctx.lineWidth = 0.5; ctx.setLineDash([]);
-  ctx.beginPath(); ctx.moveTo(plotX, plotY); ctx.lineTo(plotX, plotY + plotH); ctx.lineTo(plotX + plotW, plotY + plotH); ctx.stroke();
+
+  // Plot area background
+  if (el.plotAreaBg) {
+    ctx.fillStyle = `#${el.plotAreaBg}`;
+    ctx.fillRect(plotX, plotY, plotW, plotH);
+  }
+
+  // Gridlines + Y tick labels
+  if (!el.valAxisHidden) {
+    ctx.font = `${axisFontSz}px sans-serif`;
+    ctx.textBaseline = 'middle';
+    const steps = Math.max(1, Math.round(range / tickStep));
+    for (let s = 0; s <= steps; s++) {
+      const v = axMin + s * tickStep;
+      const gy = toY(v);
+      ctx.strokeStyle = '#D8E2D0';
+      ctx.lineWidth = 0.75;
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(plotX, gy); ctx.lineTo(plotX + plotW, gy); ctx.stroke();
+      ctx.fillStyle = '#555'; ctx.textAlign = 'right';
+      const label = Number.isInteger(v) ? String(v) : v.toFixed(1);
+      ctx.fillText(label, plotX - 4, gy);
+    }
+  }
 
   // Category labels
-  ctx.fillStyle = '#444444'; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
-  ctx.font = `${Math.max(8, h * 0.055)}px sans-serif`;
-  const lblStep = el.categories.length > 8 ? Math.ceil(el.categories.length / 8) : 1;
-  for (let i = 0; i < el.categories.length; i += lblStep) {
-    ctx.fillText(el.categories[i], toX(i), plotY + plotH + 2);
+  if (!el.catAxisHidden) {
+    ctx.fillStyle = '#555'; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+    ctx.font = `${axisFontSz}px sans-serif`;
+    const lblStep = el.categories.length > 8 ? Math.ceil(el.categories.length / 8) : 1;
+    for (let i = 0; i < el.categories.length; i += lblStep) {
+      ctx.fillText(el.categories[i], toX(i), plotY + plotH + 3);
+    }
   }
 
   // Series
+  const markerR = Math.max(2, h * 0.012);
   for (let si = 0; si < el.series.length; si++) {
     const ser = el.series[si];
     const color = chartColor(si, ser.color);
-    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, h * 0.003); ctx.setLineDash([]);
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.5, h * 0.004); ctx.setLineDash([]);
     ctx.beginPath();
     let first = true;
     for (let i = 0; i < ser.values.length; i++) {
@@ -3175,19 +3240,29 @@ function renderLineChart(ctx: CanvasRenderingContext2D, el: ChartElement, scale:
       if (first) { ctx.moveTo(toX(i), toY(v)); first = false; } else { ctx.lineTo(toX(i), toY(v)); }
     }
     ctx.stroke();
-    // Markers
+    // Markers + data labels
     ctx.fillStyle = color;
     for (let i = 0; i < ser.values.length; i++) {
       const v = ser.values[i]; if (v == null) continue;
-      ctx.beginPath(); ctx.arc(toX(i), toY(v), Math.max(2, h * 0.012), 0, Math.PI * 2); ctx.fill();
+      const px = toX(i), py = toY(v);
+      ctx.beginPath(); ctx.arc(px, py, markerR, 0, Math.PI * 2); ctx.fill();
+    }
+    if (el.showDataLabels) {
+      ctx.font = `${axisFontSz}px sans-serif`;
+      ctx.fillStyle = '#333'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      for (let i = 0; i < ser.values.length; i++) {
+        const v = ser.values[i]; if (v == null) continue;
+        const label = Number.isInteger(v) ? String(v) : v.toFixed(1);
+        ctx.fillText(label, toX(i) + markerR + 2, toY(v));
+      }
     }
   }
 
   // Title
   if (el.title) {
-    ctx.fillStyle = '#333333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.font = `bold ${Math.max(9, h * 0.07)}px sans-serif`;
-    ctx.fillText(el.title, x0 + w / 2, y0 + LABEL_H * 0.4);
+    ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = `bold ${Math.max(10, h * 0.075)}px sans-serif`;
+    ctx.fillText(el.title, x0 + w / 2, y0 + 2);
   }
   ctx.restore();
 }
