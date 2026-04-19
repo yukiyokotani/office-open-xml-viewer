@@ -1559,20 +1559,21 @@ function buildShapePath(
     }
 
     // ── Double wave (wavy top AND bottom edges) ───────────────────────────────
+    // OOXML default adj=6250 (6.25% amplitude). Bezier CPs stay inside bounding box.
     case 'doublewave': {
       const wAmp = h * (adj ?? 6250) / 100000;
-      const y1 = y + wAmp;   // body top (below wave crest)
-      const y2 = y + h - wAmp; // body bottom (above wave trough)
-      // Top wave: goes right to left (visually left-to-right wave, CW path)
+      const y1 = y + wAmp;       // top wave baseline
+      const y2 = y + h - wAmp;   // bottom wave baseline
+      // Top wave (L→R): peaks at y (top), troughs at y + 2*wAmp
       ctx.moveTo(x, y1);
-      ctx.bezierCurveTo(x + w * 0.25, y1 - wAmp * 2, x + w * 0.25, y1, x + w * 0.5, y1);
-      ctx.bezierCurveTo(x + w * 0.75, y1, x + w * 0.75, y1 - wAmp * 2, x + w, y1);
+      ctx.bezierCurveTo(x + w * 0.25, y,            x + w * 0.25, y + wAmp * 2, x + w * 0.5, y1);
+      ctx.bezierCurveTo(x + w * 0.75, y + wAmp * 2, x + w * 0.75, y,            x + w, y1);
       // Right side
       ctx.lineTo(x + w, y2);
-      // Bottom wave: goes right to left (CCW to close shape)
-      ctx.bezierCurveTo(x + w * 0.75, y2 + wAmp * 2, x + w * 0.75, y2, x + w * 0.5, y2);
-      ctx.bezierCurveTo(x + w * 0.25, y2, x + w * 0.25, y2 + wAmp * 2, x, y2);
-      // Left side
+      // Bottom wave (R→L): peaks at y+h (bottom), troughs at y+h - 2*wAmp
+      ctx.bezierCurveTo(x + w * 0.75, y + h,              x + w * 0.75, y + h - wAmp * 2, x + w * 0.5, y2);
+      ctx.bezierCurveTo(x + w * 0.25, y + h - wAmp * 2,   x + w * 0.25, y + h,             x, y2);
+      // Left side (closePath draws left edge)
       ctx.closePath();
       break;
     }
