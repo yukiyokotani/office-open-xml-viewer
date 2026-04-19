@@ -19,7 +19,7 @@ type Story = StoryObj<Args>;
 export const Demo: Story = {
   name: 'demo.docx',
   render(args) {
-    const { root } = buildViewerUI(args, '/docx/demo/sample-1.docx');
+    const { root } = buildViewerUI(args, `${import.meta.env.BASE_URL}docx/demo/sample-1.docx`);
     return root;
   },
 };
