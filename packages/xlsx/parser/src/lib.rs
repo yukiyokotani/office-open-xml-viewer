@@ -264,9 +264,15 @@ pub struct Border {
     pub right: Option<BorderEdge>,
     pub top: Option<BorderEdge>,
     pub bottom: Option<BorderEdge>,
+    /// Diagonal line from bottom-left to top-right (ECMA-376 §18.8.4 diagonalUp)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagonal_up: Option<BorderEdge>,
+    /// Diagonal line from top-left to bottom-right (ECMA-376 §18.8.4 diagonalDown)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagonal_down: Option<BorderEdge>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BorderEdge {
     pub style: String,
@@ -283,6 +289,15 @@ pub struct CellXf {
     pub align_h: Option<String>,
     pub align_v: Option<String>,
     pub wrap_text: bool,
+    /// Text indentation level (each level ≈ 3 characters wide, ECMA-376 §18.8.44)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent: Option<u32>,
+    /// Text rotation in degrees: 0–90 = counter-clockwise, 91–180 = (value−90)° clockwise, 255 = stacked (ECMA-376 §18.8.44)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_rotation: Option<u32>,
+    /// Shrink text to fit the cell width (ECMA-376 §18.8.44)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub shrink_to_fit: bool,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -826,20 +841,24 @@ fn parse_borders(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -
         if borders_node.tag_name().name() == "borders" && borders_node.tag_name().namespace() == Some(ns) {
             for border_node in borders_node.children() {
                 if border_node.tag_name().name() != "border" { continue; }
+                let has_diag_up = border_node.attribute("diagonalUp").map(|v| v == "1" || v == "true").unwrap_or(false);
+                let has_diag_down = border_node.attribute("diagonalDown").map(|v| v == "1" || v == "true").unwrap_or(false);
                 let mut b = Border::default();
+                let mut diag_edge: Option<BorderEdge> = None;
                 for edge_node in border_node.children() {
                     let style = edge_node.attribute("style").unwrap_or("").to_string();
-                    if style.is_empty() { continue; }
                     let color = edge_node.children().find(|c| c.is_element()).and_then(|c| parse_color(&c, theme_colors));
-                    let edge = Some(BorderEdge { style, color });
                     match edge_node.tag_name().name() {
-                        "left" => b.left = edge,
-                        "right" => b.right = edge,
-                        "top" => b.top = edge,
-                        "bottom" => b.bottom = edge,
+                        "left" if !style.is_empty() => b.left = Some(BorderEdge { style, color }),
+                        "right" if !style.is_empty() => b.right = Some(BorderEdge { style, color }),
+                        "top" if !style.is_empty() => b.top = Some(BorderEdge { style, color }),
+                        "bottom" if !style.is_empty() => b.bottom = Some(BorderEdge { style, color }),
+                        "diagonal" if !style.is_empty() => diag_edge = Some(BorderEdge { style, color }),
                         _ => {}
                     }
                 }
+                if has_diag_up { b.diagonal_up = diag_edge.clone(); }
+                if has_diag_down { b.diagonal_down = diag_edge; }
                 borders.push(b);
             }
             break;
@@ -861,14 +880,20 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
                 let mut align_h = None;
                 let mut align_v = None;
                 let mut wrap_text = false;
+                let mut indent = None;
+                let mut text_rotation = None;
+                let mut shrink_to_fit = false;
                 for child in xf_node.children() {
                     if child.tag_name().name() == "alignment" {
                         align_h = child.attribute("horizontal").map(|s| s.to_string());
                         align_v = child.attribute("vertical").map(|s| s.to_string());
                         wrap_text = child.attribute("wrapText").map(|v| v == "1" || v == "true").unwrap_or(false);
+                        indent = child.attribute("indent").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
+                        text_rotation = child.attribute("textRotation").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
+                        shrink_to_fit = child.attribute("shrinkToFit").map(|v| v == "1" || v == "true").unwrap_or(false);
                     }
                 }
-                xfs.push(CellXf { font_id, fill_id, border_id, num_fmt_id, align_h, align_v, wrap_text });
+                xfs.push(CellXf { font_id, fill_id, border_id, num_fmt_id, align_h, align_v, wrap_text, indent, text_rotation, shrink_to_fit });
             }
             break;
         }

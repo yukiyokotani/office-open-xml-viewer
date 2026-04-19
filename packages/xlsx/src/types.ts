@@ -189,6 +189,8 @@ export interface Border {
   right: BorderEdge | null;
   top: BorderEdge | null;
   bottom: BorderEdge | null;
+  diagonalUp?: BorderEdge | null;
+  diagonalDown?: BorderEdge | null;
 }
 
 export interface BorderEdge {
@@ -204,6 +206,11 @@ export interface CellXf {
   alignH: string | null;
   alignV: string | null;
   wrapText: boolean;
+  /** Indentation level (each level ≈ 3 characters, ECMA-376 §18.8.44) */
+  indent?: number;
+  /** Text rotation: 1–90 = counter-clockwise °, 91–180 = (val−90)° clockwise, 255 = stacked */
+  textRotation?: number;
+  shrinkToFit?: boolean;
 }
 
 export interface ParsedWorkbook {
