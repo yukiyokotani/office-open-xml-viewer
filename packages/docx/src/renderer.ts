@@ -1,8 +1,9 @@
 import type {
   Document, BodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell,
-  DocRun, TextRun, ImageRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, TextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
+import { buildCustomPath, hexToRgba } from '@silurus/ooxml-core';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -421,6 +422,9 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
   // Register anchor floats from this paragraph (must happen after spaceBefore so that
   // paragraph-relative Y resolves against the textAreaTop, matching Word).
   registerAnchorFloats(para, state, state.y);
+
+  // behindDoc shapes must render before text so they appear behind it.
+  renderAnchorImages(para, state, paragraphStartY, 'behind');
 
   // If any topAndBottom float already extends past state.y, skip past it before text starts.
   state.y = skipPastTopAndBottom(state.y, state.floats);
@@ -1035,14 +1039,34 @@ function renderInlineImage(
 }
 
 /** Collect and draw anchor images with wrapMode='none' (or unspecified).
- * Wrap floats (square/topAndBottom/tight/through) are drawn by registerAnchorFloats. */
+ * Wrap floats (square/topAndBottom/tight/through) are drawn by registerAnchorFloats.
+ *
+ * `phase` = 'behind' draws only shapes with behindDoc=true (sorted by zOrder asc);
+ * `phase` = 'front' draws shapes without behindDoc + all anchor images. */
 function renderAnchorImages(
   para: DocParagraph,
   state: RenderState,
   paragraphTopPx: number,
+  phase: 'behind' | 'front' = 'front',
 ): void {
   if (state.dryRun) return;
+  if (phase === 'behind') {
+    const shapes = para.runs
+      .filter((r): r is ShapeRun & { type: 'shape' } =>
+        r.type === 'shape' && !!(r as unknown as ShapeRun).behindDoc)
+      .slice()
+      .sort((a, b) =>
+        ((a as unknown as ShapeRun).zOrder ?? 0) - ((b as unknown as ShapeRun).zOrder ?? 0));
+    for (const s of shapes) renderAnchorShape(s as unknown as ShapeRun, state, paragraphTopPx);
+    return;
+  }
   for (const run of para.runs) {
+    if (run.type === 'shape') {
+      const s = run as unknown as ShapeRun;
+      if (s.behindDoc) continue;
+      renderAnchorShape(s, state, paragraphTopPx);
+      continue;
+    }
     if (run.type !== 'image') continue;
     const img = run as unknown as ImageRun;
     if (!img.anchor) continue;
@@ -1064,6 +1088,73 @@ function renderAnchorImages(
 
     state.ctx.drawImage(bmp, pageX, pageY, w, h);
   }
+}
+
+/** Draw a wps:wsp shape via core's custGeom primitive. */
+function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
+  const { ctx, scale } = state;
+  const w = shape.widthPt * scale;
+  const h = shape.heightPt * scale;
+  if (w <= 0 || h <= 0) return;
+  const x = shape.anchorXFromMargin
+    ? (state.marginLeft + shape.anchorXPt) * scale
+    : shape.anchorXPt * scale;
+  const y = shape.anchorYFromPara
+    ? paragraphTopPx + shape.anchorYPt * scale
+    : shape.anchorYPt * scale;
+
+  const rot = shape.rotation ?? 0;
+  ctx.save();
+  if (rot !== 0) {
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate((rot * Math.PI) / 180);
+    ctx.translate(-(x + w / 2), -(y + h / 2));
+  }
+  ctx.beginPath();
+  buildCustomPath(ctx as CanvasRenderingContext2D, shape.subpaths, x, y, w, h);
+  const fillStyle = resolveShapeFillStyle(shape.fill, ctx as CanvasRenderingContext2D, x, y, w, h);
+  if (fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+  }
+  if (shape.stroke && (shape.strokeWidth ?? 0) > 0) {
+    ctx.strokeStyle = hexToRgba(shape.stroke);
+    ctx.lineWidth = Math.max(0.5, (shape.strokeWidth ?? 0) * scale);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function resolveShapeFillStyle(
+  fill: ShapeRun['fill'],
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+): string | CanvasGradient | null {
+  if (!fill) return null;
+  if (fill.fillType === 'solid') return hexToRgba(fill.color);
+  if (fill.fillType === 'gradient') {
+    if (fill.stops.length === 0) return null;
+    if (fill.stops.length === 1) return hexToRgba(fill.stops[0].color);
+    let gradient: CanvasGradient;
+    if (fill.gradType === 'radial') {
+      const cx = x + w / 2, cy = y + h / 2;
+      const r = Math.sqrt(w * w + h * h) / 2;
+      gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    } else {
+      const rad = (fill.angle * Math.PI) / 180;
+      const cx = x + w / 2, cy = y + h / 2;
+      const gradLen = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
+      gradient = ctx.createLinearGradient(
+        cx - Math.cos(rad) * gradLen, cy - Math.sin(rad) * gradLen,
+        cx + Math.cos(rad) * gradLen, cy + Math.sin(rad) * gradLen,
+      );
+    }
+    for (const s of fill.stops) {
+      gradient.addColorStop(Math.min(1, Math.max(0, s.position)), hexToRgba(s.color));
+    }
+    return gradient;
+  }
+  return null;
 }
 
 function isWrapFloat(mode?: string): boolean {

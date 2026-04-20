@@ -67,6 +67,9 @@ pub struct StyleMap {
     styles: HashMap<String, StyleDef>,
     defaults_para: ParaFmt,
     defaults_run: RunFmt,
+    /// styleId of the style with w:default="1" and w:type="paragraph".
+    /// Applied to paragraphs that have no explicit pStyle.
+    default_para_style_id: Option<String>,
 }
 
 impl StyleMap {
@@ -91,10 +94,17 @@ impl StyleMap {
         }
 
         // Parse each style
+        let mut default_para_style_id: Option<String> = None;
         for style_node in children_w(root, "style") {
             let Some(style_id) = attr_w(style_node, "styleId") else { continue };
             let style_type = attr_w(style_node, "type").unwrap_or_default();
             if style_type != "paragraph" && style_type != "character" { continue; }
+
+            if style_type == "paragraph"
+                && attr_w(style_node, "default").as_deref() == Some("1")
+            {
+                default_para_style_id = Some(style_id.clone());
+            }
 
             let based_on = child_w(style_node, "basedOn").and_then(|n| attr_w(n, "val"));
 
@@ -113,7 +123,7 @@ impl StyleMap {
             styles.insert(style_id, StyleDef { para, run, based_on });
         }
 
-        StyleMap { styles, defaults_para, defaults_run }
+        StyleMap { styles, defaults_para, defaults_run, default_para_style_id }
     }
 
     fn empty() -> Self {
@@ -121,6 +131,7 @@ impl StyleMap {
             styles: HashMap::new(),
             defaults_para: ParaFmt::default(),
             defaults_run: RunFmt::default(),
+            default_para_style_id: None,
         }
     }
 
@@ -134,7 +145,12 @@ impl StyleMap {
         apply_para(&mut merged_para, &self.defaults_para);
         apply_run(&mut merged_run, &self.defaults_run);
 
-        if let Some(id) = style_id {
+        // Use explicit pStyle if present, otherwise fall back to the
+        // paragraph style marked w:default="1" (typically "Normal").
+        let effective_id = style_id
+            .map(str::to_string)
+            .or_else(|| self.default_para_style_id.clone());
+        if let Some(id) = effective_id.as_deref() {
             self.apply_style_chain(id, &mut merged_para, &mut merged_run);
         }
 

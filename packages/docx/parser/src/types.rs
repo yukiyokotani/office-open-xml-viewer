@@ -163,6 +163,81 @@ pub enum DocRun {
     Image(ImageRun),
     Break { break_type: BreakType },
     Field(FieldRun),
+    Shape(ShapeRun),
+}
+
+/// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
+/// and rendered via core's buildCustomPath + paint primitives.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeRun {
+    /// pt
+    pub width_pt: f64,
+    /// pt
+    pub height_pt: f64,
+    /// anchor X (pt)
+    pub anchor_x_pt: f64,
+    /// anchor Y (pt)
+    pub anchor_y_pt: f64,
+    pub anchor_x_from_margin: bool,
+    pub anchor_y_from_para: bool,
+    /// If true, draw the shape behind text (wp:anchor behindDoc="1"). Renderer
+    /// should draw background shapes BEFORE body text.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub behind_doc: bool,
+    /// Document order within the wp:anchor (for correct z-ordering among shapes
+    /// sharing the same behindDoc value). Lower value = drawn first.
+    pub z_order: u32,
+    /// normalized [0,1] custom path commands (one or more sub-paths)
+    pub subpaths: Vec<Vec<PathCmd>>,
+    /// Fill (solid or gradient). None = no fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ShapeFill>,
+    /// stroke hex. None = no stroke.
+    pub stroke: Option<String>,
+    /// stroke width in pt.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub stroke_width: f64,
+    /// rotation in degrees (clockwise).
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    /// Wrap mode matching ImageRun.wrap_mode semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_mode: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "fillType", rename_all = "camelCase")]
+pub enum ShapeFill {
+    Solid { color: String },
+    Gradient {
+        stops: Vec<GradientStop>,
+        /// degrees: 0 = left→right, 90 = top→bottom
+        angle: f64,
+        /// "linear" | "radial"
+        grad_type: String,
+    },
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientStop {
+    /// 0.0–1.0
+    pub position: f64,
+    /// hex 6-char
+    pub color: String,
+}
+
+/// Custom geometry path command (shape rendering). Mirrors the pptx
+/// PathCmd type to keep JSON output compatible with core's buildCustomPath.
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "cmd", rename_all = "camelCase")]
+pub enum PathCmd {
+    MoveTo { x: f64, y: f64 },
+    LineTo { x: f64, y: f64 },
+    CubicBezTo { x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64 },
+    ArcTo { wr: f64, hr: f64, st_ang: f64, sw_ang: f64 },
+    Close,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
