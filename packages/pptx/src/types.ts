@@ -40,7 +40,23 @@ export interface Slide {
   elements: SlideElement[];
 }
 
-export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement;
+export type SlideElement = ShapeElement | PictureElement | TableElement | ChartElement | MediaElement;
+
+export interface MediaElement {
+  type: 'media';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** "audio" or "video" */
+  mediaKind: 'audio' | 'video';
+  /** Poster frame shown before playback (image data URL, may be empty). */
+  posterDataUrl: string;
+  /** Path inside the pptx zip (e.g. "ppt/media/media2.mp4"). Used by getMedia. */
+  mediaPath: string;
+  /** MIME type of the underlying media (e.g. "audio/mpeg", "video/mp4"). */
+  mimeType: string;
+}
 
 export interface ShapeElement {
   type: 'shape';

@@ -3,6 +3,7 @@ import type {
   SlideElement,
   ShapeElement,
   PictureElement,
+  MediaElement,
   TableElement,
   Fill,
   Stroke,
@@ -2556,6 +2557,52 @@ async function renderPicture(
   }
 }
 
+async function renderMedia(
+  ctx: CanvasRenderingContext2D,
+  el: MediaElement,
+  scale: number,
+) {
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+
+  if (el.posterDataUrl) {
+    try {
+      const resp = await fetch(el.posterDataUrl);
+      const blob = await resp.blob();
+      const bitmap = await createImageBitmap(blob);
+      ctx.drawImage(bitmap, x, y, w, h);
+      bitmap.close();
+    } catch {
+      // fall through to plain fill
+    }
+  }
+  if (!el.posterDataUrl) {
+    ctx.fillStyle = el.mediaKind === 'video' ? '#111' : '#f0f0f0';
+    ctx.fillRect(x, y, w, h);
+  }
+
+  // Play-badge overlay: centered filled circle with a triangle cue
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const r = Math.min(w, h) * 0.18;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  const tri = r * 0.55;
+  ctx.moveTo(cx - tri * 0.5, cy - tri);
+  ctx.lineTo(cx - tri * 0.5, cy + tri);
+  ctx.lineTo(cx + tri, cy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 // ===== Table renderer =====
 
 /** Draw an arrowhead at `tip` pointing in `angle` radians (0 = right). */
@@ -2777,6 +2824,8 @@ export async function renderSlide(
       await renderPicture(ctx, el, scale);
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
+    } else if (el.type === 'media') {
+      await renderMedia(ctx, el, scale);
     } else if (el.type === 'chart') {
       renderChart(
         ctx,
