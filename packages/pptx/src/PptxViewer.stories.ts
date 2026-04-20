@@ -57,6 +57,7 @@ export function buildViewerUI(
 
   const viewer = new PptxViewer(container, {
     width: args.width,
+    useGoogleFonts: true,
     onSlideChange: (idx, total) => {
       slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
       prevBtn.disabled = idx === 0;

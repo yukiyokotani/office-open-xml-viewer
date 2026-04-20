@@ -6,6 +6,11 @@ export interface PptxViewerOptions extends RenderOptions {
   onSlideChange?: (index: number, total: number) => void;
   /** Called on parse or render errors */
   onError?: (err: Error) => void;
+  /**
+   * Opt in to loading theme-declared webfonts from Google Fonts. Off by
+   * default — see {@link PptxPresentation.load} for privacy implications.
+   */
+  useGoogleFonts?: boolean;
 }
 
 /**
@@ -35,7 +40,9 @@ export class PptxViewer {
   /** Load a PPTX from URL or ArrayBuffer and render the first slide. */
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
-      this.engine = await PptxPresentation.load(source);
+      this.engine = await PptxPresentation.load(source, {
+        useGoogleFonts: this.opts.useGoogleFonts,
+      });
       this.currentSlide = 0;
       await this.renderCurrentSlide();
     } catch (err) {
