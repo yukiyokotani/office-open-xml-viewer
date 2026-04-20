@@ -562,6 +562,50 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
     map
 }
 
+/// Pair diagramData rels with diagramDrawing rels in a slide's rels XML by filename
+/// number (data1.xml ↔ drawing1.xml, data2.xml ↔ drawing2.xml, ...), then load each
+/// drawing XML from the zip. Returns dm_rid → drawing_xml_content.
+fn build_smartart_drawings(
+    rels_xml: &str,
+    zip: &mut PptxZip<'_>,
+) -> HashMap<String, String> {
+    let mut result: HashMap<String, String> = HashMap::new();
+    let doc = match roxmltree::Document::parse(rels_xml) {
+        Ok(d) => d,
+        Err(_) => return result,
+    };
+    let mut data_rels: Vec<(String, String)> = Vec::new();
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in doc.root_element().children().filter(|n| n.is_element()) {
+        let rel_type = attr(&rel, "Type").unwrap_or_default();
+        let (Some(rid), Some(target)) = (attr(&rel, "Id"), attr(&rel, "Target")) else {
+            continue;
+        };
+        if rel_type.ends_with("/diagramData") {
+            data_rels.push((rid, target));
+        } else if rel_type.ends_with("/diagramDrawing") {
+            drawing_targets.push(target);
+        }
+    }
+    fn trailing_num(target: &str) -> Option<u32> {
+        let file = target.rsplit('/').next().unwrap_or("");
+        let stem = file.split('.').next().unwrap_or("");
+        let digits: String = stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+        digits.chars().rev().collect::<String>().parse().ok()
+    }
+    for (rid, data_target) in data_rels {
+        let Some(num) = trailing_num(&data_target) else { continue };
+        let drawing_target = drawing_targets.iter().find(|t| trailing_num(t) == Some(num));
+        if let Some(dt) = drawing_target {
+            let drawing_path = resolve_path("ppt/slides", dt);
+            if let Ok(xml) = read_zip_str(zip, &drawing_path) {
+                result.insert(rid, xml);
+            }
+        }
+    }
+    result
+}
+
 /// Find the Target of the first relationship whose Type ends with `type_suffix`.
 fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
     let doc = roxmltree::Document::parse(rels_xml).ok()?;
@@ -3024,6 +3068,7 @@ fn parse_slide(
     master_color: &HashMap<String, String>,
     index: usize,
     rels: &HashMap<String, String>,
+    smartart_drawings: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
@@ -3077,7 +3122,7 @@ fn parse_slide(
                 let empty_lph = LayoutPlaceholders::default();
                 for node in lsp_tree.children().filter(|n| n.is_element()) {
                     parse_sp_tree_node(
-                        node, &empty_lph, layout_dir, layout_rels,
+                        node, &empty_lph, layout_dir, layout_rels, smartart_drawings,
                         zip, theme, &mut elements,
                         true, // skip placeholder shapes
                         None, // no inherited group fill at top level
@@ -3089,7 +3134,7 @@ fn parse_slide(
 
     // ── Slide shapes ─────────────────────────────────────────────────────
     for node in sp_tree.children().filter(|n| n.is_element()) {
-        parse_sp_tree_node(node, &lph, slide_dir, rels, zip, theme, &mut elements, false, None);
+        parse_sp_tree_node(node, &lph, slide_dir, rels, smartart_drawings, zip, theme, &mut elements, false, None);
     }
 
     Ok(Slide { index, slide_number: index + 1, background, elements })
@@ -3100,6 +3145,7 @@ fn parse_sp_tree_node(
     lph: &LayoutPlaceholders,
     slide_dir: &str,
     rels: &HashMap<String, String>,
+    smartart_drawings: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
     out: &mut Vec<SlideElement>,
@@ -3220,7 +3266,7 @@ fn parse_sp_tree_node(
                 .or_else(|| node.children().find(|n| n.is_element() && n.tag_name().name() == "Fallback"));
             if let Some(choice_node) = choice {
                 for child_node in choice_node.children().filter(|n| n.is_element()) {
-                    parse_sp_tree_node(child_node, lph, slide_dir, rels, zip, theme, out, skip_placeholders, group_fill);
+                    parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
                 }
             }
         }
@@ -3237,6 +3283,24 @@ fn parse_sp_tree_node(
                     out.push(SlideElement::Table(table));
                 }
                 return;
+            }
+
+            // SmartArt: render the PowerPoint-prebaked fallback drawing1.xml when present.
+            // Layout-engine reconstruction is not implemented; we rely on the cached dsp:spTree.
+            if let Some(gd) = node.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "graphicData")
+            {
+                let uri = attr(&gd, "uri").unwrap_or_default();
+                if uri == "http://schemas.openxmlformats.org/drawingml/2006/diagram" {
+                    if let Some(rel_ids) = child(gd, "relIds") {
+                        if let Some(dm_rid) = attr_r(&rel_ids, "dm") {
+                            if let Some(drawing_xml) = smartart_drawings.get(&dm_rid) {
+                                parse_smartart_drawing(drawing_xml, &t, theme, out);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
 
             // Chart
@@ -3307,7 +3371,7 @@ fn parse_sp_tree_node(
             let start = out.len();
             for child_node in node.children().filter(|n| n.is_element()) {
                 parse_sp_tree_node(
-                    child_node, lph, slide_dir, rels, zip, theme, out,
+                    child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out,
                     skip_placeholders, child_group_fill.as_ref(),
                 );
             }
@@ -3327,6 +3391,115 @@ fn parse_sp_tree_node(
             }
         }
         _ => {}
+    }
+}
+
+/// Render a SmartArt diagram's pre-baked fallback drawing (drawing1.xml).
+/// The drawing file stores a standard dsp:spTree whose shapes share the same
+/// element shape as a regular p:sp / p:cxnSp / p:grpSp (children use the `a:`
+/// namespace). Coordinates inside the drawing are local to the enclosing
+/// graphicFrame, so we translate every emitted element by the graphicFrame's xfrm.
+fn parse_smartart_drawing(
+    drawing_xml: &str,
+    gf_xfrm: &Transform,
+    theme: &HashMap<String, String>,
+    out: &mut Vec<SlideElement>,
+) {
+    let doc = match roxmltree::Document::parse(drawing_xml) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let root = doc.root_element();
+    let Some(sp_tree) = child(root, "spTree") else { return };
+
+    let empty_lph = LayoutPlaceholders::default();
+
+    let start = out.len();
+    for node in sp_tree.children().filter(|n| n.is_element()) {
+        // dsp:sp / dsp:cxnSp / dsp:grpSp share local names with their p:* counterparts.
+        // Shapes inside drawing1.xml don't reference external pictures via r:embed, so
+        // we can skip wiring up rels/zip for this pass — pass empty stubs.
+        let empty_rels: HashMap<String, String> = HashMap::new();
+        let empty_smartart: HashMap<String, String> = HashMap::new();
+        // SAFETY: parse_sp_tree_node would need a &mut zip only for embedded pictures;
+        // the dsp subtree never contains a:blip r:embed, so we can pass a dummy archive
+        // reference. To avoid juggling a zip reference here, dispatch the relevant
+        // branches (sp/cxnSp/grpSp) directly.
+        match node.tag_name().name() {
+            "sp" => {
+                if let Some(shape) = parse_shape(node, &empty_lph, theme, None) {
+                    out.push(SlideElement::Shape(shape));
+                }
+            }
+            "cxnSp" => {
+                if let Some(shape) = parse_connector(node, theme) {
+                    out.push(SlideElement::Shape(shape));
+                }
+            }
+            "grpSp" => {
+                // Recursively render a group by collecting its children into a temp buffer
+                // and applying the group's xfrm, mirroring the grpSp branch in parse_sp_tree_node.
+                let grp_sp_pr = child(node, "grpSpPr");
+                let gt: Option<GroupTransform> = grp_sp_pr
+                    .and_then(|pr| child(pr, "xfrm"))
+                    .map(|xfrm| {
+                        let off = child(xfrm, "off");
+                        let ext = child(xfrm, "ext");
+                        let ch_off = child(xfrm, "chOff");
+                        let ch_ext = child(xfrm, "chExt");
+                        GroupTransform {
+                            x:     off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                            y:     off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                            cx:    ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
+                            cy:    ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
+                            ch_x:  ch_off.and_then(|n| attr_i64(&n, "x")).unwrap_or(0),
+                            ch_y:  ch_off.and_then(|n| attr_i64(&n, "y")).unwrap_or(0),
+                            ch_cx: ch_ext.and_then(|n| attr_i64(&n, "cx")).unwrap_or(0),
+                            ch_cy: ch_ext.and_then(|n| attr_i64(&n, "cy")).unwrap_or(0),
+                            flip_h: attr(&xfrm, "flipH").map(|v| v == "1" || v == "true").unwrap_or(false),
+                            flip_v: attr(&xfrm, "flipV").map(|v| v == "1" || v == "true").unwrap_or(false),
+                            rot: attr_f64(&xfrm, "rot").unwrap_or(0.0) / 60000.0,
+                        }
+                    });
+                let group_start = out.len();
+                let _ = (&empty_rels, &empty_smartart); // silence unused warnings when no nested picture
+                for child_node in node.children().filter(|n| n.is_element()) {
+                    match child_node.tag_name().name() {
+                        "sp" => {
+                            if let Some(shape) = parse_shape(child_node, &empty_lph, theme, None) {
+                                out.push(SlideElement::Shape(shape));
+                            }
+                        }
+                        "cxnSp" => {
+                            if let Some(shape) = parse_connector(child_node, theme) {
+                                out.push(SlideElement::Shape(shape));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(gt) = gt {
+                    for el in &mut out[group_start..] {
+                        apply_group_transform_to_element(el, &gt);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Translate all emitted elements by the graphicFrame's position.
+    for el in &mut out[start..] {
+        offset_slide_element(el, gf_xfrm.x, gf_xfrm.y);
+    }
+}
+
+fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
+    match el {
+        SlideElement::Shape(s)   => { s.x += dx; s.y += dy; }
+        SlideElement::Picture(p) => { p.x += dx; p.y += dy; }
+        SlideElement::Table(t)   => { t.x += dx; t.y += dy; }
+        SlideElement::Chart(c)   => { c.x += dx; c.y += dy; }
     }
 }
 
@@ -3470,6 +3643,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         index: usize,
         slide_xml: String,
         slide_rels: HashMap<String, String>,
+        smartart_drawings: HashMap<String, String>,
         layout_xml: Option<String>,
         layout_rels: HashMap<String, String>,
         layout_dir: String,
@@ -3489,6 +3663,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         let slide_xml = read_zip_str(&mut zip, &slide_path)?;
         let slide_rels_xml = read_zip_str(&mut zip, &rels_path).unwrap_or_default();
         let slide_rels = parse_rels(&slide_rels_xml);
+        let smartart_drawings = build_smartart_drawings(&slide_rels_xml, &mut zip);
 
         // Layout XML
         let layout_path = find_rel_target_by_type(&slide_rels_xml, "/slideLayout")
@@ -3513,7 +3688,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             .unwrap_or_else(|| "ppt/slideLayouts".to_owned());
 
         raw_slides.push(SlideRaw {
-            index: idx, slide_xml, slide_rels,
+            index: idx, slide_xml, slide_rels, smartart_drawings,
             layout_xml, layout_rels, layout_dir,
         });
     }
@@ -3538,6 +3713,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_color,
             raw.index,
             &raw.slide_rels,
+            &raw.smartart_drawings,
             &mut zip,
             &theme,
         )?;
