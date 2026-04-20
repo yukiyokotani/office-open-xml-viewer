@@ -314,11 +314,11 @@ function estimateParagraphHeight(
   const segs = buildSegments(para.runs, state);
   let textH: number;
   if (segs.length === 0) {
-    textH = getDefaultFontSize(para) * lineSpacingMultiplier(para.lineSpacing);
+    const fs = getDefaultFontSize(para);
+    textH = fs * lineSpacingMultiplier(para.lineSpacing, fs);
   } else {
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops);
-    const mult = lineSpacingMultiplier(para.lineSpacing);
-    textH = lines.reduce((s, l) => s + l.height * mult, 0);
+    textH = lines.reduce((s, l) => s + l.height * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
 }
@@ -470,14 +470,14 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineSpacingMult: lineSpacingMultiplier(para.lineSpacing),
+    lineSpacingMult: (h: number) => lineSpacingMultiplier(para.lineSpacing, h),
     pageH: state.pageH,
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing), 0);
+    const totalTextH = lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
@@ -487,7 +487,7 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     // Honor wrap-computed line topY (may push past topAndBottom floats).
     if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
 
-    const lineH = line.height * scale * lineSpacingMultiplier(para.lineSpacing);
+    const lineH = line.height * scale * lineSpacingMultiplier(para.lineSpacing, line.height);
     const baseline = state.y + line.ascent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
@@ -653,7 +653,8 @@ interface WrapLayoutCtx {
   startPageY: number;   // absolute canvas Y where the first line should start
   paraX: number;        // absolute canvas X of the paragraph's content left edge
   floats: FloatRect[];  // floats active on the current page
-  lineSpacingMult: number;
+  /** Per-line-height multiplier so atLeast/exact rules can use their pt value. */
+  lineSpacingMult: (lineHeightPt: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -887,7 +888,7 @@ function layoutLines(
       topY: wrapCtx ? currentLineTopY : undefined,
     });
     if (wrapCtx) {
-      currentLineTopY += h * scale * wrapCtx.lineSpacingMult;
+      currentLineTopY += h * scale * wrapCtx.lineSpacingMult(h);
     }
     currentLine = [];
     currentWidth = 0;
@@ -1304,8 +1305,7 @@ function measureParaHeight(
   const segs = buildSegments(para.runs, state);
   if (segs.length === 0) return getDefaultFontSize(para) * scale;
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
-  const mult = lineSpacingMultiplier(para.lineSpacing);
-  return lines.reduce((s, l) => s + l.height * scale * mult, 0);
+  return lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
 }
 
 function measureCellContent(
@@ -1462,8 +1462,24 @@ function getDefaultFontSize(para: DocParagraph): number {
   return 10; // pt fallback
 }
 
-function lineSpacingMultiplier(ls: LineSpacing | null): number {
+/**
+ * Effective line-height multiplier for a paragraph's line spacing, given the
+ * line's tallest glyph (baseHeightPt, usually the run font size in pt).
+ *
+ * ECMA-376 §17.3.1.33:
+ *   auto    → value is a multiplier of "single-line spacing" (≈ 1.2× font).
+ *   exact   → value IS the line height in pt; ignore font.
+ *   atLeast → line height is the larger of single-line and value pt.
+ *
+ * Previously all non-auto rules collapsed to 1.2, so explicit pt-based line
+ * heights on headings were ignored and the paragraph rendered at 1.2× font
+ * even when the XML asked for a taller box. That made page flow too compact.
+ */
+function lineSpacingMultiplier(ls: LineSpacing | null, baseHeightPt: number = 1): number {
   if (!ls) return 1.2;
   if (ls.rule === 'auto') return ls.value * 1.2;
-  return 1.2; // for exact/atLeast, use line value directly in pt (handled separately if needed)
+  if (baseHeightPt <= 0) return 1.2;
+  if (ls.rule === 'exact')   return ls.value / baseHeightPt;
+  if (ls.rule === 'atLeast') return Math.max(1.2, ls.value / baseHeightPt);
+  return 1.2;
 }
