@@ -24,6 +24,8 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
 
+> **Bundle size note**: npm's *Unpacked Size* figure sums ES (`.mjs`) and CJS (`.cjs`) outputs for all three formats. The size that actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`) and your bundler picks a single module format, so tree-shaking drops the other two formats entirely.
+
 ---
 
 ## Quick Start
