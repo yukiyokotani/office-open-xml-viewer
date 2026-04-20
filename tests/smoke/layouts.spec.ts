@@ -7,12 +7,12 @@ const EXPECTED = {
 };
 
 type StoryId =
-  | 'pptxviewer-layouts--scroll-view'
-  | 'pptxviewer-layouts--thumbnail-grid'
-  | 'pptxviewer-layouts--master-detail'
-  | 'docxviewer-layouts--scroll-view'
-  | 'docxviewer-layouts--thumbnail-grid'
-  | 'docxviewer-layouts--master-detail';
+  | 'pptxviewer-examples--scroll-view'
+  | 'pptxviewer-examples--thumbnail-grid'
+  | 'pptxviewer-examples--master-detail'
+  | 'docxviewer-examples--scroll-view'
+  | 'docxviewer-examples--thumbnail-grid'
+  | 'docxviewer-examples--master-detail';
 
 async function canvasHasInk(page: import('@playwright/test').Page, index = 0): Promise<boolean> {
   return page.evaluate((i) => {
@@ -62,7 +62,7 @@ async function openStory(page: import('@playwright/test').Page, id: StoryId): Pr
 
 test.describe('Layouts smoke — pptx', () => {
   test('ScrollView renders every slide', async ({ page }) => {
-    await openStory(page, 'pptxviewer-layouts--scroll-view');
+    await openStory(page, 'pptxviewer-examples--scroll-view');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.pptx);
@@ -72,7 +72,7 @@ test.describe('Layouts smoke — pptx', () => {
   });
 
   test('ThumbnailGrid renders every slide', async ({ page }) => {
-    await openStory(page, 'pptxviewer-layouts--thumbnail-grid');
+    await openStory(page, 'pptxviewer-examples--thumbnail-grid');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.pptx);
@@ -81,7 +81,7 @@ test.describe('Layouts smoke — pptx', () => {
   });
 
   test('MasterDetail renders thumbs + large preview and switches on click', async ({ page }) => {
-    await openStory(page, 'pptxviewer-layouts--master-detail');
+    await openStory(page, 'pptxviewer-examples--master-detail');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
     const count = await page.locator('canvas').count();
     // thumbs + 1 detail
@@ -115,7 +115,7 @@ async function countInkedCanvases(page: import('@playwright/test').Page, total: 
 
 test.describe('Layouts smoke — docx', () => {
   test('ScrollView renders every page', async ({ page }) => {
-    await openStory(page, 'docxviewer-layouts--scroll-view');
+    await openStory(page, 'docxviewer-examples--scroll-view');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.docx);
@@ -125,7 +125,7 @@ test.describe('Layouts smoke — docx', () => {
   });
 
   test('ThumbnailGrid renders every page', async ({ page }) => {
-    await openStory(page, 'docxviewer-layouts--thumbnail-grid');
+    await openStory(page, 'docxviewer-examples--thumbnail-grid');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
     const count = await page.locator('canvas').count();
     expect(count).toBe(EXPECTED.docx);
@@ -134,7 +134,7 @@ test.describe('Layouts smoke — docx', () => {
   });
 
   test('MasterDetail renders thumbs + large preview', async ({ page }) => {
-    await openStory(page, 'docxviewer-layouts--master-detail');
+    await openStory(page, 'docxviewer-examples--master-detail');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.docx} pages`));
     const count = await page.locator('canvas').count();
     // N thumbs + 1 detail = N+1 canvases (but trailing page may be blank)
