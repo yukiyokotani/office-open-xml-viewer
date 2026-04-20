@@ -399,10 +399,20 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
-    // Font family
+    // Font family. ECMA-376 §17.3.2.26 rFonts supports both direct typeface
+    // attributes (ascii/hAnsi/eastAsia/cs) and theme references (asciiTheme,
+    // hAnsiTheme, eastAsiaTheme, cstheme). Theme refs are resolved post-parse
+    // in parse_document once a Theme is available; here we just record the
+    // reference string under the corresponding axis. Direct attributes take
+    // precedence over theme refs per spec.
     if let Some(rf) = child_w(rpr, "rFonts") {
-        fmt.font_family_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
-        fmt.font_family_east_asia = attr_w(rf, "eastAsia");
+        let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
+        let theme_ascii  = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
+        fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
+
+        let direct_ea = attr_w(rf, "eastAsia");
+        let theme_ea  = attr_w(rf, "eastAsiaTheme");
+        fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
     }
 
     // Background highlight
