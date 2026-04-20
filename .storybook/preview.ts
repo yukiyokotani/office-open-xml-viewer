@@ -14,6 +14,7 @@ const preview: Preview = {
     options: {
       storySort: {
         order: [
+          'Introduction',
           'PptxViewer', ['*', 'Examples', 'PrivateExamples'],
           'DocxViewer', ['*', 'Examples', 'PrivateExamples'],
           'XlsxViewer', ['*', 'Examples', 'PrivateExamples'],
