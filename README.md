@@ -6,6 +6,7 @@
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
+Each format also exposes a headless engine (`PptxPresentation` / `DocxDocument` / `XlsxWorkbook`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://yukiyokotani.github.io/office-open-xml-viewer/).
 
 ```bash
 npm install @silurus/ooxml
