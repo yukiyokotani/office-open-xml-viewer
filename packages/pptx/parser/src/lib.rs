@@ -1204,6 +1204,12 @@ struct LayoutPlaceholders {
     by_idx_blip_fill: HashMap<u32, InheritedBlipFill>,
     /// Inherited blipFill per placeholder type from layout spPr
     by_type_blip_fill: HashMap<String, InheritedBlipFill>,
+    /// Default text color per placeholder idx, from layout lstStyle defRPr solidFill
+    by_idx_color: HashMap<u32, String>,
+    /// Default text color per placeholder type, from layout lstStyle defRPr solidFill
+    by_type_color: HashMap<String, String>,
+    /// Default text color from master (txStyles + spTree lstStyle) — fallback when layout has none
+    by_type_master_color: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1289,6 +1295,16 @@ impl LayoutPlaceholders {
             .and_then(|i| self.by_idx_stroke.get(&i).cloned())
             .or_else(|| self.by_type_stroke.get(ph_type).cloned())
             .or_else(|| if ph_type == "body" { self.by_type_stroke.get("").cloned() } else { None })
+    }
+
+    /// Look up inherited default text color for this placeholder (layout then master fallback).
+    fn lookup_color(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
+        ph_idx
+            .and_then(|i| self.by_idx_color.get(&i).cloned())
+            .or_else(|| self.by_type_color.get(ph_type).cloned())
+            .or_else(|| if ph_type == "body" { self.by_type_color.get("").cloned() } else { None })
+            .or_else(|| self.by_type_master_color.get(ph_type).cloned())
+            .or_else(|| if ph_type == "body" { self.by_type_master_color.get("").cloned() } else { None })
     }
 
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
@@ -1448,6 +1464,64 @@ fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>,
     (bold_map, italic_map)
 }
 
+/// Parse default text color from master txStyles (titleStyle/bodyStyle/otherStyle)
+/// > lvl1pPr > defRPr > solidFill, and from per-placeholder shapes in the master spTree's
+/// txBody > lstStyle > lvl1pPr > defRPr > solidFill. Keyed by ph_type.
+/// Shape-level lstStyle takes priority over txStyles generic defaults.
+fn parse_master_txstyle_color(
+    master_xml: &str,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return map,
+    };
+    let root = doc.root_element();
+
+    // Scan master spTree placeholder shapes first — per-shape lstStyle is more specific.
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree.children().filter(|n| n.is_element() && n.tag_name().name() == "sp") {
+            let ph_node = sp.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph");
+            if let Some(ph) = ph_node {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(color) = child(sp, "txBody")
+                    .and_then(|tb| child(tb, "lstStyle"))
+                    .and_then(|ls| child(ls, "lvl1pPr"))
+                    .and_then(|lp| child(lp, "defRPr"))
+                    .and_then(|rp| child(rp, "solidFill"))
+                    .and_then(|sf| parse_color_node(sf, theme))
+                {
+                    map.entry(ph_type).or_insert(color);
+                }
+            }
+        }
+    }
+
+    // Fall back to p:txStyles > titleStyle/bodyStyle/otherStyle > lvl1pPr > defRPr > solidFill.
+    if let Some(tx_styles) = child(root, "txStyles") {
+        let style_ph_map: &[(&str, &[&str])] = &[
+            ("titleStyle",  &["title", "ctrTitle"]),
+            ("bodyStyle",   &["body", "subTitle", "obj", ""]),
+            ("otherStyle",  &["dt", "ftr", "sldNum"]),
+        ];
+        for (style_name, ph_types) in style_ph_map {
+            if let Some(color) = child(tx_styles, style_name)
+                .and_then(|sn| child(sn, "lvl1pPr"))
+                .and_then(|lp| child(lp, "defRPr"))
+                .and_then(|rp| child(rp, "solidFill"))
+                .and_then(|sf| parse_color_node(sf, theme))
+            {
+                for ph_type in *ph_types {
+                    map.entry(ph_type.to_string()).or_insert(color.clone());
+                }
+            }
+        }
+    }
+
+    map
+}
+
 /// Parse default paragraph spacing from master txStyles.
 /// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
 /// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
@@ -1558,6 +1632,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_font_size = layout_def_rpr.and_then(|rp| attr_f64(&rp, "sz")).map(|v| v / 100.0);
         let layout_bold   = layout_def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
         let layout_italic = layout_def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+        let layout_color: Option<String> = layout_def_rpr
+            .and_then(|rp| child(rp, "solidFill"))
+            .and_then(|sf| parse_color_node(sf, theme));
         let layout_alignment: Option<String> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "algn"))
             .map(|a| a.to_string());
@@ -1625,6 +1702,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 if let Some(ref bf) = layout_blip_fill {
                     lph.by_idx_blip_fill.entry(idx).or_insert(bf.clone());
                 }
+                if let Some(ref c) = layout_color {
+                    lph.by_idx_color.entry(idx).or_insert(c.clone());
+                }
             }
             let effective_fs = layout_font_size
                 .or_else(|| master_font_sizes.get(&ph_type).copied());
@@ -1660,6 +1740,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             }
             if let Some(bf) = layout_blip_fill {
                 lph.by_type_blip_fill.entry(ph_type.clone()).or_insert(bf);
+            }
+            if let Some(c) = layout_color {
+                lph.by_type_color.entry(ph_type.clone()).or_insert(c);
             }
             if let Some(t) = t_opt {
                 lph.by_type.entry(ph_type).or_insert(t);
@@ -2477,10 +2560,19 @@ fn parse_shape(
             }
         });
 
-    // fontRef → default text color for this shape
+    // fontRef → default text color for this shape.
+    // Fall back to layout/master placeholder inherited color (lstStyle > lvl1pPr > defRPr
+    // > solidFill) when the shape is a placeholder and has no explicit p:style > fontRef.
     let default_text_color: Option<String> = style_node
         .and_then(|s| child(s, "fontRef"))
-        .and_then(|fr| parse_color_node(fr, theme));
+        .and_then(|fr| parse_color_node(fr, theme))
+        .or_else(|| {
+            if ph_node.is_some() {
+                lph.lookup_color(&ph_type, ph_idx)
+            } else {
+                None
+            }
+        });
 
     // spPr fill: grpFill means inherit from parent group; explicit fill overrides style.
     // Note: Some(Fill::None) (noFill in spPr) must NOT be overridden by style.
@@ -2929,6 +3021,7 @@ fn parse_slide(
     master_line_spacing: &HashMap<String, f64>,
     master_bold: &HashMap<String, bool>,
     master_italic: &HashMap<String, bool>,
+    master_color: &HashMap<String, String>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
@@ -2946,6 +3039,9 @@ fn parse_slide(
     }
     for (t, i) in master_italic.iter() {
         lph.by_type_italic.entry(t.clone()).or_insert(*i);
+    }
+    for (t, c) in master_color.iter() {
+        lph.by_type_master_color.entry(t.clone()).or_insert(c.clone());
     }
 
     let doc = roxmltree::Document::parse(xml)?;
@@ -3364,6 +3460,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_txstyle_bold_italic(xml))
         .unwrap_or_default();
 
+    let master_color: HashMap<String, String> = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_txstyle_color(xml, &theme))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -3434,6 +3535,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_line_spacing,
             &master_bold,
             &master_italic,
+            &master_color,
             raw.index,
             &raw.slide_rels,
             &mut zip,
