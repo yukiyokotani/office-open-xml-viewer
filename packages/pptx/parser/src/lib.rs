@@ -182,6 +182,9 @@ struct PictureElement {
     /// source width/height. Only serialized when any edge is non-zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     src_rect: Option<SrcRect>,
+    /// a:blip > a:alphaModFix@amt (0.0–1.0). None = fully opaque.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alpha: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -203,6 +206,16 @@ struct SrcRect {
 }
 
 fn is_zero_f64(v: &f64) -> bool { v.abs() < 1e-9 }
+
+/// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node.
+/// Returns fraction (amt / 100000) when present and < 1.0; None otherwise.
+fn parse_blip_alpha(blip_fill: roxmltree::Node<'_, '_>) -> Option<f64> {
+    let blip = child(blip_fill, "blip")?;
+    let amf = child(blip, "alphaModFix")?;
+    let amt: f64 = attr(&amf, "amt")?.parse().ok()?;
+    let frac = amt / 100_000.0;
+    if frac >= 0.9999 { None } else { Some(frac.max(0.0)) }
+}
 
 /// Parse `<a:srcRect l t r b>` from a `<p:blipFill>` (or `<a:blipFill>`) node.
 /// Returns None if no srcRect or all edges are zero.
@@ -1187,6 +1200,17 @@ struct LayoutPlaceholders {
     by_type_master_alignment: HashMap<String, String>,
     /// Default line spacing from master txStyles (fallback when layout has none)
     by_type_master_line_spacing: HashMap<String, f64>,
+    /// Inherited blipFill (data URL + src rect) per placeholder idx from layout spPr
+    by_idx_blip_fill: HashMap<u32, InheritedBlipFill>,
+    /// Inherited blipFill per placeholder type from layout spPr
+    by_type_blip_fill: HashMap<String, InheritedBlipFill>,
+}
+
+#[derive(Debug, Clone)]
+struct InheritedBlipFill {
+    data_url: String,
+    src_rect: Option<SrcRect>,
+    alpha: Option<f64>,
 }
 
 impl LayoutPlaceholders {
@@ -1248,6 +1272,15 @@ impl LayoutPlaceholders {
             .or_else(|| if ph_type == "body" { self.by_type_space_after.get("").copied() } else { None })
             .or_else(|| self.by_type_master_space_after.get(ph_type).copied())
             .or_else(|| if ph_type == "body" { self.by_type_master_space_after.get("").copied() } else { None })
+    }
+
+    /// Look up inherited blipFill from the layout placeholder spPr. Used when a slide
+    /// references a picture placeholder (e.g. ph type="pic") without its own blipFill —
+    /// the image defined on the layout's matching placeholder should render through.
+    fn lookup_blip_fill(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<InheritedBlipFill> {
+        ph_idx
+            .and_then(|i| self.by_idx_blip_fill.get(&i).cloned())
+            .or_else(|| self.by_type_blip_fill.get(ph_type).cloned())
     }
 
     /// Look up inherited stroke from the layout placeholder spPr > ln.
@@ -1382,6 +1415,39 @@ fn parse_master_font_sizes(master_xml: &str) -> HashMap<String, f64> {
     map
 }
 
+/// Parse default bold/italic from master txStyles (titleStyle / bodyStyle / otherStyle)
+/// > lvl1pPr > defRPr @b and @i. Keyed by ph_type.
+/// Only populated when the attribute is explicitly present on the master.
+fn parse_master_txstyle_bold_italic(master_xml: &str) -> (HashMap<String, bool>, HashMap<String, bool>) {
+    let mut bold_map: HashMap<String, bool> = HashMap::new();
+    let mut italic_map: HashMap<String, bool> = HashMap::new();
+    let doc = match roxmltree::Document::parse(master_xml) {
+        Ok(d) => d,
+        Err(_) => return (bold_map, italic_map),
+    };
+    let root = doc.root_element();
+    let Some(tx_styles) = child(root, "txStyles") else { return (bold_map, italic_map); };
+    let style_ph_map: &[(&str, &[&str])] = &[
+        ("titleStyle",  &["title", "ctrTitle"]),
+        ("bodyStyle",   &["body", "subTitle", "obj", ""]),
+        ("otherStyle",  &["dt", "ftr", "sldNum"]),
+    ];
+    for (style_name, ph_types) in style_ph_map {
+        let def_rpr = child(tx_styles, style_name)
+            .and_then(|sn| child(sn, "lvl1pPr"))
+            .and_then(|lp| child(lp, "defRPr"));
+        let b = def_rpr.and_then(|rp| attr(&rp, "b")).map(|v| v == "1" || v == "true");
+        let i = def_rpr.and_then(|rp| attr(&rp, "i")).map(|v| v == "1" || v == "true");
+        if let Some(bv) = b {
+            for t in *ph_types { bold_map.entry(t.to_string()).or_insert(bv); }
+        }
+        if let Some(iv) = i {
+            for t in *ph_types { italic_map.entry(t.to_string()).or_insert(iv); }
+        }
+    }
+    (bold_map, italic_map)
+}
+
 /// Parse default paragraph spacing from master txStyles.
 /// Returns (space_before_map, space_after_map, line_spacing_map) keyed by ph_type string.
 /// space_before/after values are in hundredths of a point (same as Paragraph.space_before/after).
@@ -1448,7 +1514,7 @@ fn parse_master_transforms(master_xml: &str) -> HashMap<String, Transform> {
     map
 }
 
-fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>) -> LayoutPlaceholders {
+fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<String, f64>, master_anchors: &HashMap<String, String>, master_transforms: &HashMap<String, Transform>, master_alignments: &HashMap<String, String>, master_space_before: &HashMap<String, i64>, master_space_after: &HashMap<String, i64>, master_line_spacing: &HashMap<String, f64>, theme: &HashMap<String, String>, layout_dir: &str, layout_rels: &HashMap<String, String>, zip: &mut PptxZip<'_>) -> LayoutPlaceholders {
     let mut lph = LayoutPlaceholders::default();
     lph.master_by_type = master_transforms.clone();
     lph.by_type_master_alignment = master_alignments.clone();
@@ -1519,6 +1585,23 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
         let layout_stroke: Option<Stroke> = child(sp_pr, "ln")
             .and_then(|n| parse_stroke(n, theme));
 
+        // Layout spPr > blipFill → image that bleeds through when the slide's
+        // matching placeholder has no own blipFill (picture placeholder inheritance).
+        let layout_blip_fill: Option<InheritedBlipFill> = child(sp_pr, "blipFill")
+            .and_then(|bf| {
+                let rid = child(bf, "blip").and_then(|b| attr_r(&b, "embed"))?;
+                let rel_target = layout_rels.get(&rid)?;
+                let image_path = resolve_path(layout_dir, rel_target);
+                let bytes = read_zip_bytes(zip, &image_path)?;
+                let mime = mime_from_ext(&image_path);
+                let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
+                Some(InheritedBlipFill {
+                    data_url,
+                    src_rect: parse_src_rect(bf),
+                    alpha: parse_blip_alpha(bf),
+                })
+            });
+
         if let Some(ph) = ph_node {
             let ph_type = attr(&ph, "type").unwrap_or_default();
             let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
@@ -1538,6 +1621,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
                 }
                 if let Some(ls) = layout_line_spacing {
                     lph.by_idx_line_spacing.entry(idx).or_insert(ls);
+                }
+                if let Some(ref bf) = layout_blip_fill {
+                    lph.by_idx_blip_fill.entry(idx).or_insert(bf.clone());
                 }
             }
             let effective_fs = layout_font_size
@@ -1571,6 +1657,9 @@ fn parse_layout_placeholders(layout_xml: &str, master_font_sizes: &HashMap<Strin
             }
             if let Some(s) = layout_stroke {
                 lph.by_type_stroke.entry(ph_type.clone()).or_insert(s);
+            }
+            if let Some(bf) = layout_blip_fill {
+                lph.by_type_blip_fill.entry(ph_type.clone()).or_insert(bf);
             }
             if let Some(t) = t_opt {
                 lph.by_type.entry(ph_type).or_insert(t);
@@ -2477,6 +2566,7 @@ fn parse_picture(
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
         data_url, clip_adjust: None,
         src_rect: parse_src_rect(blip_fill),
+        alpha: parse_blip_alpha(blip_fill),
     })
 }
 
@@ -2837,14 +2927,26 @@ fn parse_slide(
     master_space_before: &HashMap<String, i64>,
     master_space_after: &HashMap<String, i64>,
     master_line_spacing: &HashMap<String, f64>,
+    master_bold: &HashMap<String, bool>,
+    master_italic: &HashMap<String, bool>,
     index: usize,
     rels: &HashMap<String, String>,
     zip: &mut PptxZip<'_>,
     theme: &HashMap<String, String>,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
-    let lph = layout_xml
-        .map(|x| parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme))
-        .unwrap_or_default();
+    let mut lph = match layout_xml {
+        Some(x) => parse_layout_placeholders(x, master_font_sizes, master_anchors, master_transforms, master_alignments, master_space_before, master_space_after, master_line_spacing, theme, layout_dir, layout_rels, zip),
+        None => LayoutPlaceholders::default(),
+    };
+    // Fall back to master txStyles defRPr @b/@i when the layout did not specify
+    // bold/italic for a placeholder type. Without this, e.g. the master titleStyle's
+    // b="1" is not applied to ctrTitle / title placeholders.
+    for (t, b) in master_bold.iter() {
+        lph.by_type_bold.entry(t.clone()).or_insert(*b);
+    }
+    for (t, i) in master_italic.iter() {
+        lph.by_type_italic.entry(t.clone()).or_insert(*i);
+    }
 
     let doc = roxmltree::Document::parse(xml)?;
     let root = doc.root_element(); // <p:sld>
@@ -2919,11 +3021,11 @@ fn parse_sp_tree_node(
             let blip_rid = blip_fill_node
                 .and_then(|bf| child(bf, "blip"))
                 .and_then(|b| attr_r(&b, "embed"));
-            if let Some(rid) = blip_rid {
+            if let Some(ref rid) = blip_rid {
                 if let Some(xfrm_node) = sp_pr_node.and_then(|p| child(p, "xfrm")) {
                     let t = parse_xfrm(xfrm_node);
                     if t.cx > 0 && t.cy > 0 {
-                        if let Some(target) = rels.get(&rid) {
+                        if let Some(target) = rels.get(rid) {
                             let image_path = resolve_path(slide_dir, target);
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
                                 let mime = mime_from_ext(&image_path);
@@ -2941,6 +3043,33 @@ fn parse_sp_tree_node(
                                     rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
                                     data_url, clip_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
+                                    alpha: blip_fill_node.and_then(parse_blip_alpha),
+                                }));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            // Picture-placeholder inheritance: slide sp has a ph but no own blipFill →
+            // look up an inherited blipFill from the layout placeholder. Transform
+            // comes from the slide's xfrm when present, otherwise from the layout.
+            if blip_rid.is_none() {
+                if let Some(ph) = node.descendants().find(|n| n.is_element() && n.tag_name().name() == "ph") {
+                    let ph_type = attr(&ph, "type").unwrap_or_else(|| "body".into());
+                    let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
+                    if let Some(bf) = lph.lookup_blip_fill(&ph_type, ph_idx) {
+                        let slide_xfrm = sp_pr_node.and_then(|p| child(p, "xfrm")).map(parse_xfrm);
+                        let t = slide_xfrm
+                            .or_else(|| lph.lookup(&ph_type, ph_idx).cloned());
+                        if let Some(t) = t {
+                            if t.cx > 0 && t.cy > 0 {
+                                out.push(SlideElement::Picture(PictureElement {
+                                    x: t.x, y: t.y, width: t.cx, height: t.cy,
+                                    rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
+                                    data_url: bf.data_url, clip_adjust: None,
+                                    src_rect: bf.src_rect,
+                                    alpha: bf.alpha,
                                 }));
                                 return;
                             }
@@ -2978,6 +3107,7 @@ fn parse_sp_tree_node(
                                         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
                                         data_url, clip_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
+                                        alpha: blip_fill.and_then(parse_blip_alpha),
                                     }));
                                 }
                             }
@@ -3229,6 +3359,11 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
         .map(|xml| parse_master_txstyle_spacing(xml))
         .unwrap_or_default();
 
+    let (master_bold, master_italic): (HashMap<String, bool>, HashMap<String, bool>) = master_xml_opt
+        .as_deref()
+        .map(|xml| parse_master_txstyle_bold_italic(xml))
+        .unwrap_or_default();
+
     // Pre-collect slide XMLs, their rels, the layout XML, and layout rels
     struct SlideRaw {
         index: usize,
@@ -3297,6 +3432,8 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
             &master_space_before,
             &master_space_after,
             &master_line_spacing,
+            &master_bold,
+            &master_italic,
             raw.index,
             &raw.slide_rels,
             &mut zip,

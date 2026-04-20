@@ -102,7 +102,48 @@ export type DocRun =
   | { type: 'text' } & TextRun
   | { type: 'image' } & ImageRun
   | { type: 'break'; breakType: 'line' | 'page' | 'column' }
-  | { type: 'field' } & FieldRun;
+  | { type: 'field' } & FieldRun
+  | { type: 'shape' } & ShapeRun;
+
+export type PathCmd =
+  | { cmd: 'moveTo'; x: number; y: number }
+  | { cmd: 'lineTo'; x: number; y: number }
+  | { cmd: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { cmd: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
+  | { cmd: 'close' };
+
+export interface ShapeRun {
+  widthPt: number;
+  heightPt: number;
+  /** X offset in pt */
+  anchorXPt: number;
+  /** Y offset in pt */
+  anchorYPt: number;
+  anchorXFromMargin: boolean;
+  anchorYFromPara: boolean;
+  /** Draw behind text when true (wp:anchor behindDoc="1"). */
+  behindDoc?: boolean;
+  /** Document-order index within a group; lower values render first. */
+  zOrder: number;
+  /** Normalized [0,1] custom-geometry sub-paths */
+  subpaths: PathCmd[][];
+  fill: ShapeFill | null;
+  stroke: string | null;
+  strokeWidth?: number;
+  rotation?: number;
+  wrapMode?: string | null;
+}
+
+export type ShapeFill =
+  | { fillType: 'solid'; color: string }
+  | { fillType: 'gradient'; stops: GradientStop[]; angle: number; gradType: string };
+
+export interface GradientStop {
+  /** 0.0–1.0 */
+  position: number;
+  /** hex 6-char */
+  color: string;
+}
 
 export interface FieldRun {
   /** "page" | "numPages" | "other" */

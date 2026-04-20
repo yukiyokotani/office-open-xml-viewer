@@ -156,6 +156,8 @@ export interface PictureElement {
    * width/height. Omitted when the image is not cropped.
    */
   srcRect?: { l?: number; t?: number; r?: number; b?: number };
+  /** a:blip > a:alphaModFix@amt as 0..1. Undefined = fully opaque. */
+  alpha?: number;
 }
 
 // ===== Worker message protocol =====

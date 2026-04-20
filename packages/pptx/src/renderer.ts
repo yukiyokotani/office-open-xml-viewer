@@ -14,7 +14,13 @@ import type {
   RenderOptions,
   TabStop,
 } from './types';
-import { renderChart } from '@silurus/ooxml-core';
+import {
+  renderChart,
+  buildCustomPath as buildCustomPathCore,
+  hexToRgba as hexToRgbaCore,
+  resolveFill as resolveFillCore,
+  applyStroke as applyStrokeCore,
+} from '@silurus/ooxml-core';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
@@ -33,14 +39,7 @@ function emuToPx(emu: number, scale: number): number {
   return emu * scale;
 }
 
-function hexToRgba(hex: string, alpha = 1): string {
-  const r = parseInt(hex.slice(0, 2), 16);
-  const g = parseInt(hex.slice(2, 4), 16);
-  const b = parseInt(hex.slice(4, 6), 16);
-  // 8-char hex (RRGGBBAA) encodes alpha in the last two chars
-  const a = hex.length >= 8 ? parseInt(hex.slice(6, 8), 16) / 255 : alpha;
-  return `rgba(${r},${g},${b},${a})`;
-}
+const hexToRgba = hexToRgbaCore;
 
 /** Simple fill resolver that returns a CSS color string.
  *  For gradient fills, returns the first stop's color (used by table cells etc.) */
@@ -57,40 +56,9 @@ function resolveFill(fill: Fill | null): string | null {
 function resolveShapeFill(
   fill: Fill | null,
   ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number
+  x: number, y: number, w: number, h: number,
 ): string | CanvasGradient | null {
-  if (!fill || fill.fillType === 'none') return null;
-  if (fill.fillType === 'solid') return hexToRgba(fill.color);
-  if (fill.fillType === 'gradient') {
-    const stops = fill.stops;
-    if (stops.length === 0) return null;
-    if (stops.length === 1) return hexToRgba(stops[0].color);
-
-    let gradient: CanvasGradient;
-    if (fill.gradType === 'radial') {
-      const cx = x + w / 2;
-      const cy = y + h / 2;
-      const r = Math.sqrt(w * w + h * h) / 2;
-      gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-    } else {
-      // Linear gradient — OOXML angle: 0 = left→right, 90 = top→bottom
-      const rad = (fill.angle * Math.PI) / 180;
-      const cx = x + w / 2;
-      const cy = y + h / 2;
-      // Compute extent so the gradient line covers the entire bounding box
-      const gradLen = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
-      gradient = ctx.createLinearGradient(
-        cx - Math.cos(rad) * gradLen, cy - Math.sin(rad) * gradLen,
-        cx + Math.cos(rad) * gradLen, cy + Math.sin(rad) * gradLen
-      );
-    }
-
-    for (const stop of stops) {
-      gradient.addColorStop(Math.min(1, Math.max(0, stop.position)), hexToRgba(stop.color));
-    }
-    return gradient;
-  }
-  return null;
+  return resolveFillCore(fill, ctx, x, y, w, h);
 }
 
 // ===== Text layout helpers =====
@@ -484,62 +452,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
  * the renderer maps them to canvas pixels.
  * Tracks pen position so arcTo can compute the ellipse centre correctly.
  */
-function buildCustomPath(
-  ctx: CanvasRenderingContext2D,
-  subpaths: PathCmd[][],
-  x: number,
-  y: number,
-  w: number,
-  h: number
-) {
-  for (const cmds of subpaths) {
-    // Pen position in normalised [0,1] space
-    let penX = 0, penY = 0;
-    for (const cmd of cmds) {
-      switch (cmd.cmd) {
-        case 'moveTo':
-          ctx.moveTo(x + cmd.x * w, y + cmd.y * h);
-          penX = cmd.x; penY = cmd.y;
-          break;
-        case 'lineTo':
-          ctx.lineTo(x + cmd.x * w, y + cmd.y * h);
-          penX = cmd.x; penY = cmd.y;
-          break;
-        case 'cubicBezTo':
-          ctx.bezierCurveTo(
-            x + cmd.x1 * w, y + cmd.y1 * h,
-            x + cmd.x2 * w, y + cmd.y2 * h,
-            x + cmd.x  * w, y + cmd.y  * h
-          );
-          penX = cmd.x; penY = cmd.y;
-          break;
-        case 'arcTo': {
-          // OOXML arcTo: the current pen is on the ellipse at angle stAng.
-          // Back-calculate the ellipse centre, then draw to stAng+swAng.
-          const rw = cmd.wr * w;
-          const rh = cmd.hr * h;
-          if (rw <= 0 || rh <= 0) break;
-          const stRad = (cmd.stAng * Math.PI) / 180;
-          const swRad = (cmd.swAng * Math.PI) / 180;
-          const penAbsX = x + penX * w;
-          const penAbsY = y + penY * h;
-          // Centre of the ellipse that passes through the current pen at stAng
-          const cx = penAbsX - rw * Math.cos(stRad);
-          const cy = penAbsY - rh * Math.sin(stRad);
-          const endRad = stRad + swRad;
-          ctx.ellipse(cx, cy, rw, rh, 0, stRad, endRad, swRad < 0);
-          // Update pen to the arc end point
-          penX = (cx + rw * Math.cos(endRad) - x) / w;
-          penY = (cy + rh * Math.sin(endRad) - y) / h;
-          break;
-        }
-        case 'close':
-          ctx.closePath();
-          break;
-      }
-    }
-  }
-}
+const buildCustomPath = buildCustomPathCore;
 
 // ── Star polygon helper ─────────────────────────────────────────────────────
 function drawStar(
@@ -2599,6 +2512,7 @@ async function renderPicture(
     const blob = await resp.blob();
     const bitmap = await createImageBitmap(blob);
     ctx.save();
+    if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);
     const y = emuToPx(el.y, scale);
     const w = emuToPx(el.width, scale);
@@ -2643,18 +2557,6 @@ async function renderPicture(
 }
 
 // ===== Table renderer =====
-
-const DASH_PATTERNS: Record<string, number[]> = {
-  dash:       [6, 3],
-  dot:        [1.5, 3],
-  dashDot:    [6, 3, 1.5, 3],
-  lgDash:     [10, 4],
-  lgDashDot:  [10, 4, 1.5, 4],
-  lgDashDotDot: [10, 4, 1.5, 4, 1.5, 4],
-  sysDash:    [4, 2],
-  sysDot:     [1, 2],
-  sysDashDot: [4, 2, 1, 2],
-};
 
 /** Draw an arrowhead at `tip` pointing in `angle` radians (0 = right). */
 function drawArrowHead(
@@ -2715,17 +2617,8 @@ function drawArrowHead(
 }
 
 function applyStroke(ctx: CanvasRenderingContext2D, stroke: Stroke | null, scale: number) {
-  if (!stroke) {
-    ctx.strokeStyle = 'transparent';
-    ctx.lineWidth = 0;
-    ctx.setLineDash([]);
-    return;
-  }
-  ctx.strokeStyle = hexToRgba(stroke.color);
-  const lw = Math.max(0.5, emuToPx(stroke.width, scale));
-  ctx.lineWidth = lw;
-  const pat = stroke.dashStyle ? DASH_PATTERNS[stroke.dashStyle] : null;
-  ctx.setLineDash(pat ? pat.map(v => v * lw) : []);
+  // `scale` is EMU → px factor (canvasWidthPx / slideWidthEMU).
+  applyStrokeCore(ctx, stroke, scale);
 }
 
 // ─── Chart rendering ────────────────────────────────────────────────────────
