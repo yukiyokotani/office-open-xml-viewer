@@ -14,6 +14,7 @@ const PPTX_FILES: { name: string; slideCount: number }[] = [
   { name: 'private/sample-3', slideCount: 9 },
   { name: 'private/sample-4', slideCount: 15 },
   { name: 'private/sample-5', slideCount: 3 },
+  { name: 'private/sample-6', slideCount: 3 },
   { name: 'demo/sample-1', slideCount: 9 },
 ];
 
