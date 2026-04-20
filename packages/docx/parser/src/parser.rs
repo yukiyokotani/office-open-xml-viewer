@@ -1484,9 +1484,15 @@ fn parse_border_spec(node: roxmltree::Node) -> BorderSpec {
 
 fn normalize_align(s: &str) -> &str {
     match s {
-        "both" | "distribute" => "justify",
+        // "both" = justified with last line left-aligned (default Word justify).
+        // "distribute" = justified including last line (CJK Distribute).
+        // Keep them distinct so the renderer can decide whether to stretch
+        // the last line. Legacy "justify" maps to the same behavior as "both".
+        "both" | "justify" => "justify",
+        "distribute" => "distribute",
         "right" | "end" => "right",
         "center" => "center",
+        "start" | "left" => "left",
         _ => "left",
     }
 }

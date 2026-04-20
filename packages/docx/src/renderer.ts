@@ -509,8 +509,28 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
 
-  let firstLine = true;
-  for (const line of lines) {
+  // ECMA-376 §17.18.44 ST_Jc: "both" and "distribute" fully justify the line
+  // by expanding inter-word spaces. The last line of a "both" paragraph is
+  // traditionally left-aligned (not stretched); "distribute" also stretches
+  // the last line. We count whitespace chars in trailing positions of each
+  // segment and divide the slack proportionally across them.
+  const isJustified =
+    para.alignment === 'justify' ||
+    para.alignment === 'both' ||
+    para.alignment === 'distribute';
+  const stretchLastLine = para.alignment === 'distribute';
+
+  const countTrailingSpaces = (s: string) => {
+    let c = 0;
+    for (let i = s.length - 1; i >= 0 && s[i] === ' '; i--) c++;
+    return c;
+  };
+
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const firstLine = li === 0;
+    const isLastLine = li === lines.length - 1;
+
     // Honor wrap-computed line topY (may push past topAndBottom floats).
     if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
 
@@ -531,12 +551,34 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
     let alignOffset = 0;
-    if (para.alignment === 'right') alignOffset = lineAvailW - (x - lineLeft) - lineWidth;
-    else if (para.alignment === 'center') alignOffset = (lineAvailW - (x - lineLeft) - lineWidth) / 2;
-
+    if (para.alignment === 'right' || para.alignment === 'end') {
+      alignOffset = lineAvailW - (x - lineLeft) - lineWidth;
+    } else if (para.alignment === 'center') {
+      alignOffset = (lineAvailW - (x - lineLeft) - lineWidth) / 2;
+    }
     x += alignOffset;
 
-    for (const seg of line.segments) {
+    // Justification slack per whitespace char on this line. Only populated
+    // for stretchable lines; on unstretched lines it stays 0 and we render
+    // with natural measured widths.
+    let extraPerSpace = 0;
+    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
+    if (applyJustify) {
+      let totalTrailingSpaces = 0;
+      for (let si = 0; si < line.segments.length; si++) {
+        const seg = line.segments[si];
+        if (si === line.segments.length - 1) break; // trailing spaces on final seg don't stretch
+        if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
+      }
+      const slack = lineAvailW - (x - lineLeft) - lineWidth;
+      if (totalTrailingSpaces > 0 && slack > 0) {
+        extraPerSpace = slack / totalTrailingSpaces;
+      }
+    }
+
+    for (let si = 0; si < line.segments.length; si++) {
+      const seg = line.segments[si];
+      const isLastSeg = si === line.segments.length - 1;
       if ('isTab' in seg) {
         // Tabs render as blank space; width was resolved during layout.
         x += seg.measuredWidth;
@@ -594,10 +636,16 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
       }
 
       x += s.measuredWidth;
+      // Inter-word justification slack (applied AFTER the segment so the next
+      // segment starts at a shifted baseline). Skip on the final segment —
+      // trailing spaces at line end don't participate in stretching.
+      if (extraPerSpace > 0 && !isLastSeg) {
+        const trailing = countTrailingSpaces(s.text);
+        if (trailing > 0) x += trailing * extraPerSpace;
+      }
     }
 
     state.y += lineH;
-    firstLine = false;
   }
 
   if (para.borders && !dryRun) {
