@@ -1520,12 +1520,19 @@ fn parse_table_cell(
         .and_then(|v| attr_w(v, "val"))
         .unwrap_or_else(|| "top".to_string());
 
+    // ECMA-376 §17.18.87 ST_TblWidth:
+    //   dxa  — twentieths of a point (1/20pt)
+    //   pct  — 50ths of a percent of the table width (e.g. w="2500" = 50%).
+    //         We don't know the table width here, so leave None and fall
+    //         back to grid allocation like the other non-dxa cases.
+    //   auto, nil — width is dictated by content/grid; treat as None.
     let width_pt = tc_pr.and_then(|p| child_w(p, "tcW"))
         .and_then(|w| {
-            let wtype = attr_w(w, "type").unwrap_or_default();
-            if wtype == "dxa" {
-                attr_w(w, "w").map(|v| twips_to_pt(&v))
-            } else { None }
+            let wtype = attr_w(w, "type").unwrap_or_else(|| "dxa".to_string());
+            match wtype.as_str() {
+                "dxa" => attr_w(w, "w").map(|v| twips_to_pt(&v)),
+                _ => None,
+            }
         });
 
     let mut content = vec![];
