@@ -759,6 +759,32 @@ fn parse_run_inner(
                     runs.push(r);
                 }
             }
+            "footnoteReference" | "endnoteReference" => {
+                // ECMA-376 §17.11.16: render the footnote number as superscript
+                // at the reference point. Full bottom-of-page footnote
+                // rendering isn't implemented; we at least place the marker.
+                let id_str = attr_w(child, "id").unwrap_or_else(|| "?".to_string());
+                runs.push(DocRun::Text(TextRun {
+                    text: id_str,
+                    bold,
+                    italic,
+                    underline,
+                    strikethrough,
+                    font_size,
+                    color: color.clone(),
+                    font_family: font_family.clone(),
+                    is_link,
+                    background: fmt.background.clone(),
+                    // Force superscript regardless of the run's original
+                    // vertAlign so reference markers appear above the line.
+                    vert_align: Some("superscript".to_string()),
+                    hyperlink: hyperlink.clone(),
+                    all_caps,
+                    small_caps,
+                    double_strikethrough,
+                    highlight: highlight.clone(),
+                }));
+            }
             "AlternateContent" => {
                 // mc:AlternateContent/mc:Choice may contain w:drawing
                 if let Some(choice) = child.children().find(|n| n.tag_name().name() == "Choice") {
