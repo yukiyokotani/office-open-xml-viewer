@@ -52,6 +52,7 @@ enum SlideElement {
     Picture(PictureElement),
     Table(TableElement),
     Chart(ChartElement),
+    Media(MediaElement),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -206,6 +207,28 @@ struct SrcRect {
 }
 
 fn is_zero_f64(v: &f64) -> bool { v.abs() < 1e-9 }
+
+/// ECMA-376 §19.3.1.17/18 a:audioFile / a:videoFile and the
+/// p14:media extension (embed attribute).
+/// Represents a p:pic that acts as an audio/video placeholder.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct MediaElement {
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    /// "audio" or "video"
+    media_kind: String,
+    /// Poster image shown before playback starts (data URL).
+    poster_data_url: String,
+    /// Path inside the pptx zip (e.g. "ppt/media/media2.mp4"). The renderer
+    /// uses this with a separate getMedia API to pull bytes lazily, avoiding
+    /// the cost of base64-encoding large videos into the parse result.
+    media_path: String,
+    /// Media MIME type (e.g. "audio/mpeg", "video/mp4")
+    mime_type: String,
+}
 
 /// Parse `<a:blip><a:alphaModFix amt="..."/></a:blip>` from a blipFill node.
 /// Returns fraction (amt / 100000) when present and < 1.0; None otherwise.
@@ -1197,6 +1220,11 @@ fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransform) 
             let t = Transform { x: ex, y: ey, cx: ecx, cy: ecy, rot: 0.0, flip_h: false, flip_v: false };
             let nt = gt.apply_to_transform(t);
             chart.x = nt.x; chart.y = nt.y; chart.width = nt.cx; chart.height = nt.cy;
+        }
+        SlideElement::Media(m) => {
+            let t = Transform { x: m.x, y: m.y, cx: m.width, cy: m.height, rot: 0.0, flip_h: false, flip_v: false };
+            let nt = gt.apply_to_transform(t);
+            m.x = nt.x; m.y = nt.y; m.width = nt.cx; m.height = nt.cy;
         }
     }
 }
@@ -2722,8 +2750,99 @@ fn mime_from_ext(path: &str) -> &'static str {
         "bmp"  => "image/bmp",
         "svg"  => "image/svg+xml",
         "webp" => "image/webp",
+        "mp3"  => "audio/mpeg",
+        "m4a"  => "audio/mp4",
+        "wav"  => "audio/wav",
+        "aac"  => "audio/aac",
+        "ogg" | "oga" => "audio/ogg",
+        "mp4"  => "video/mp4",
+        "mov"  => "video/quicktime",
+        "webm" => "video/webm",
+        "ogv"  => "video/ogg",
         _      => "application/octet-stream",
     }
+}
+
+/// If a `p:pic` declares an `a:audioFile` / `a:videoFile` in its `nvPr`
+/// (or the newer `p14:media` extension), emit a `MediaElement` with the
+/// poster image and the media bytes. Returns None for regular pictures.
+fn parse_media(
+    pic_node: roxmltree::Node<'_, '_>,
+    slide_dir: &str,
+    rels: &HashMap<String, String>,
+    zip: &mut PptxZip<'_>,
+) -> Option<MediaElement> {
+    let nv_pic_pr = child(pic_node, "nvPicPr")?;
+    let nv_pr = child(nv_pic_pr, "nvPr")?;
+
+    // Prefer a:videoFile/a:audioFile (r:link or r:embed), then fall back to
+    // the p14:media extension. All three resolve to the same media rel target.
+    let (media_kind, media_rid) = nv_pr
+        .children()
+        .find_map(|n| {
+            if !n.is_element() { return None; }
+            let name = n.tag_name().name();
+            if name == "videoFile" || name == "audioFile" {
+                let rid = attr_r(&n, "link").or_else(|| attr_r(&n, "embed"))?;
+                let kind = if name == "videoFile" { "video" } else { "audio" };
+                Some((kind, rid))
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // p14:media lives inside p:extLst > p:ext
+            let ext_lst = child(nv_pr, "extLst")?;
+            ext_lst.children().filter(|c| c.is_element()).find_map(|ext| {
+                ext.children().filter(|c| c.is_element()).find_map(|m| {
+                    if m.tag_name().name() != "media" { return None; }
+                    let rid = attr_r(&m, "link").or_else(|| attr_r(&m, "embed"))?;
+                    // ext has no way to say audio vs video by itself; decide from file ext
+                    Some(("", rid))
+                })
+            })
+        })?;
+
+    let rel_target = rels.get(&media_rid)?;
+    let media_path = resolve_path(slide_dir, rel_target);
+    let mime = mime_from_ext(&media_path);
+
+    // Finalize media_kind once MIME is known (p14:media-only path).
+    let media_kind = if !media_kind.is_empty() {
+        media_kind.to_string()
+    } else if mime.starts_with("video/") {
+        "video".to_string()
+    } else if mime.starts_with("audio/") {
+        "audio".to_string()
+    } else {
+        return None;
+    };
+
+    // Geometry
+    let sp_pr = child(pic_node, "spPr")?;
+    let xfrm_node = child(sp_pr, "xfrm")?;
+    let t = parse_xfrm(xfrm_node);
+    if t.cx == 0 || t.cy == 0 { return None; }
+
+    // Poster image (from blipFill). Optional — renders with a fallback icon when missing.
+    let poster_data_url = (|| -> Option<String> {
+        let blip_fill = child(pic_node, "blipFill")?;
+        let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
+        let rel_target = rels.get(&r_id)?;
+        let image_path = resolve_path(slide_dir, rel_target);
+        let image_bytes = read_zip_bytes(zip, &image_path)?;
+        let img_mime = mime_from_ext(&image_path);
+        Some(format!("data:{img_mime};base64,{}", B64.encode(&image_bytes)))
+    })()
+    .unwrap_or_default();
+
+    Some(MediaElement {
+        x: t.x, y: t.y, width: t.cx, height: t.cy,
+        media_kind,
+        poster_data_url,
+        media_path,
+        mime_type: mime.to_string(),
+    })
 }
 
 // ===========================
@@ -3232,7 +3351,9 @@ fn parse_sp_tree_node(
             }
         }
         "pic" => {
-            if let Some(pic) = parse_picture(node, slide_dir, rels, zip) {
+            if let Some(media) = parse_media(node, slide_dir, rels, zip) {
+                out.push(SlideElement::Media(media));
+            } else if let Some(pic) = parse_picture(node, slide_dir, rels, zip) {
                 out.push(SlideElement::Picture(pic));
             } else {
                 // Placeholder pic: no xfrm in spPr — position comes from layout by_idx
@@ -3508,6 +3629,7 @@ fn offset_slide_element(el: &mut SlideElement, dx: i64, dy: i64) {
         SlideElement::Picture(p) => { p.x += dx; p.y += dy; }
         SlideElement::Table(t)   => { t.x += dx; t.y += dy; }
         SlideElement::Chart(c)   => { c.x += dx; c.y += dy; }
+        SlideElement::Media(m)   => { m.x += dx; m.y += dy; }
     }
 }
 
@@ -3805,6 +3927,7 @@ mod tests {
                 SlideElement::Shape(s) => println!("  [{}] shape x={}", i, s.x),
                 SlideElement::Table(_) => println!("  [{}] table", i),
                 SlideElement::Picture(_) => println!("  [{}] picture", i),
+                SlideElement::Media(m) => println!("  [{}] media kind={}", i, m.media_kind),
             }
         }
     }

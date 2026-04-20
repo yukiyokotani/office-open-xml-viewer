@@ -6,7 +6,6 @@ type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
 
 const SAMPLE_URL = `${import.meta.env.BASE_URL}pptx/demo/sample-1.pptx`;
-const SAMPLE6_URL = `${import.meta.env.BASE_URL}pptx/private/sample-6.pptx`;
 
 const meta: Meta<DemoArgs> = {
   title: 'PptxViewer/Examples',
@@ -27,14 +26,6 @@ export const Demo: DemoStory = {
   name: 'Demo — single viewer (demo.pptx)',
   render(args) {
     const { root } = buildViewerUI(args, SAMPLE_URL);
-    return root;
-  },
-};
-
-export const Sample6: DemoStory = {
-  name: 'Sample-6 — single viewer (private/sample-6.pptx)',
-  render(args) {
-    const { root } = buildViewerUI(args, SAMPLE6_URL);
     return root;
   },
 };
