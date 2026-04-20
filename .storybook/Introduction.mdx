@@ -29,39 +29,6 @@ import xlsxImg from '../docs/images/xlsx.png';
     margin-bottom: 28px;
   }
   .sb-intro-badges img { display: block; }
-  .sb-intro-links {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin: 0 0 32px;
-  }
-  .sb-intro-links a {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    border-radius: 6px;
-    border: 1px solid #d1d5db;
-    background: #fff;
-    color: #111827;
-    font-weight: 600;
-    text-decoration: none;
-    font-size: 0.9rem;
-    transition: background 0.12s, border-color 0.12s;
-  }
-  .sb-intro-links a:hover {
-    background: #f9fafb;
-    border-color: #9ca3af;
-  }
-  .sb-intro-links a.primary {
-    background: #111827;
-    color: #fff;
-    border-color: #111827;
-  }
-  .sb-intro-links a.primary:hover {
-    background: #1f2937;
-    border-color: #1f2937;
-  }
   .sb-format-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -103,13 +70,6 @@ import xlsxImg from '../docs/images/xlsx.png';
     text-decoration: none;
   }
   .sb-format-card a:hover { text-decoration: underline; }
-  .sb-install pre {
-    background: #0f172a !important;
-    color: #e2e8f0 !important;
-    padding: 14px 16px !important;
-    border-radius: 8px !important;
-    font-size: 0.9rem !important;
-  }
 `}</style>
 
 <div className="sb-intro-hero">
@@ -128,20 +88,6 @@ import xlsxImg from '../docs/images/xlsx.png';
     </a>
     <a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/LICENSE" target="_blank" rel="noreferrer">
       <img src="https://img.shields.io/npm/l/@silurus/ooxml.svg" alt="license" />
-    </a>
-  </div>
-  <div className="sb-intro-links">
-    <a className="primary" href="https://github.com/yukiyokotani/office-open-xml-viewer" target="_blank" rel="noreferrer">
-      GitHub
-    </a>
-    <a href="https://www.npmjs.com/package/@silurus/ooxml" target="_blank" rel="noreferrer">
-      npm
-    </a>
-    <a href="https://github.com/yukiyokotani/office-open-xml-viewer#readme" target="_blank" rel="noreferrer">
-      README
-    </a>
-    <a href="https://github.com/yukiyokotani/office-open-xml-viewer/issues" target="_blank" rel="noreferrer">
-      Issues
     </a>
   </div>
 </div>
@@ -175,17 +121,11 @@ import xlsxImg from '../docs/images/xlsx.png';
   </div>
 </div>
 
-## Install
-
-<div className="sb-install">
+## Quick start
 
 ```bash
 npm install @silurus/ooxml
 ```
-
-</div>
-
-## Quick start
 
 ```typescript
 import { PptxViewer } from '@silurus/ooxml/pptx';
