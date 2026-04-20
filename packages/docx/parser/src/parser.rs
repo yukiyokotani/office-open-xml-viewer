@@ -399,7 +399,14 @@ fn parse_paragraph(
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
         borders: base_para.para_borders.clone(),
-        style_id: explicit_style_id.clone().or_else(|| Some("Normal".to_string())),
+        // Fall back to the document's default paragraph style (w:default="1")
+        // rather than the literal "Normal" — international templates often use
+        // locale-specific IDs ("a", "標準", etc.) for the default style, and
+        // contextualSpacing needs a stable ID to group adjacent paragraphs.
+        style_id: explicit_style_id
+            .clone()
+            .or_else(|| style_map.default_para_style_id().map(str::to_string))
+            .or_else(|| Some("Normal".to_string())),
         default_font_size: base_run.font_size,
     }
 }

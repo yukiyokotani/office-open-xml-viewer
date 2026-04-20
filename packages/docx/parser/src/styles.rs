@@ -79,6 +79,12 @@ pub struct StyleMap {
 }
 
 impl StyleMap {
+    /// Style ID of the paragraph style marked `w:default="1"` in styles.xml.
+    /// International templates may use non-English IDs (e.g. "a", "標準").
+    pub fn default_para_style_id(&self) -> Option<&str> {
+        self.default_para_style_id.as_deref()
+    }
+
     pub fn parse(xml: &str) -> Self {
         let doc = match XmlDoc::parse(xml) {
             Ok(d) => d,
