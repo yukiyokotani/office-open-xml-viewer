@@ -1,0 +1,212 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+import pptxImg from '../docs/images/pptx.png';
+import docxImg from '../docs/images/docx.png';
+import xlsxImg from '../docs/images/xlsx.png';
+
+<Meta title="Introduction" />
+
+<style>{`
+  .sb-intro-hero {
+    padding: 32px 0 8px;
+  }
+  .sb-intro-hero h1 {
+    margin: 0 0 8px;
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .sb-intro-hero p.lead {
+    margin: 0 0 20px;
+    font-size: 1.05rem;
+    color: #4b5563;
+    max-width: 720px;
+    line-height: 1.55;
+  }
+  .sb-intro-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 28px;
+  }
+  .sb-intro-badges img { display: block; }
+  .sb-intro-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0 0 32px;
+  }
+  .sb-intro-links a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    background: #fff;
+    color: #111827;
+    font-weight: 600;
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .sb-intro-links a:hover {
+    background: #f9fafb;
+    border-color: #9ca3af;
+  }
+  .sb-intro-links a.primary {
+    background: #111827;
+    color: #fff;
+    border-color: #111827;
+  }
+  .sb-intro-links a.primary:hover {
+    background: #1f2937;
+    border-color: #1f2937;
+  }
+  .sb-format-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 0 0 32px;
+  }
+  .sb-format-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+  }
+  .sb-format-card img {
+    width: 100%;
+    height: 160px;
+    object-fit: cover;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f3f4f6;
+  }
+  .sb-format-card .body {
+    padding: 14px 16px 16px;
+  }
+  .sb-format-card h3 {
+    margin: 0 0 4px;
+    font-size: 1.05rem;
+  }
+  .sb-format-card p {
+    margin: 0 0 10px;
+    font-size: 0.88rem;
+    color: #6b7280;
+    line-height: 1.45;
+  }
+  .sb-format-card a {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #2563eb;
+    text-decoration: none;
+  }
+  .sb-format-card a:hover { text-decoration: underline; }
+  .sb-install pre {
+    background: #0f172a !important;
+    color: #e2e8f0 !important;
+    padding: 14px 16px !important;
+    border-radius: 8px !important;
+    font-size: 0.9rem !important;
+  }
+`}</style>
+
+<div className="sb-intro-hero">
+  <h1>office-open-xml-viewer</h1>
+  <p className="lead">
+    A browser-based viewer for Office Open XML documents (<code>.pptx</code>, <code>.docx</code>, <code>.xlsx</code>)
+    that renders to an HTML Canvas. Parsers are written in Rust and compiled to WebAssembly;
+    the renderers use the Canvas 2D API.
+  </p>
+  <div className="sb-intro-badges">
+    <a href="https://www.npmjs.com/package/@silurus/ooxml" target="_blank" rel="noreferrer">
+      <img src="https://img.shields.io/npm/v/@silurus/ooxml.svg" alt="npm version" />
+    </a>
+    <a href="https://www.npmjs.com/package/@silurus/ooxml" target="_blank" rel="noreferrer">
+      <img src="https://img.shields.io/npm/dm/@silurus/ooxml.svg" alt="npm downloads" />
+    </a>
+    <a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/LICENSE" target="_blank" rel="noreferrer">
+      <img src="https://img.shields.io/npm/l/@silurus/ooxml.svg" alt="license" />
+    </a>
+  </div>
+  <div className="sb-intro-links">
+    <a className="primary" href="https://github.com/yukiyokotani/office-open-xml-viewer" target="_blank" rel="noreferrer">
+      GitHub
+    </a>
+    <a href="https://www.npmjs.com/package/@silurus/ooxml" target="_blank" rel="noreferrer">
+      npm
+    </a>
+    <a href="https://github.com/yukiyokotani/office-open-xml-viewer#readme" target="_blank" rel="noreferrer">
+      README
+    </a>
+    <a href="https://github.com/yukiyokotani/office-open-xml-viewer/issues" target="_blank" rel="noreferrer">
+      Issues
+    </a>
+  </div>
+</div>
+
+## Formats
+
+<div className="sb-format-grid">
+  <div className="sb-format-card">
+    <img src={pptxImg} alt="PPTX" />
+    <div className="body">
+      <h3>PowerPoint (.pptx)</h3>
+      <p>Slides with shapes, groups, tables, charts, theme inheritance, and text layout.</p>
+      <a href="?path=/story/pptxviewer--default">Open PptxViewer stories →</a>
+    </div>
+  </div>
+  <div className="sb-format-card">
+    <img src={docxImg} alt="DOCX" />
+    <div className="body">
+      <h3>Word (.docx)</h3>
+      <p>Paragraphs, runs, tables, headers/footers, inline and anchored images.</p>
+      <a href="?path=/story/docxviewer--default">Open DocxViewer stories →</a>
+    </div>
+  </div>
+  <div className="sb-format-card">
+    <img src={xlsxImg} alt="XLSX" />
+    <div className="body">
+      <h3>Excel (.xlsx)</h3>
+      <p>Cells, styles, merged/frozen panes, number formats, conditional formatting, charts.</p>
+      <a href="?path=/story/xlsxviewer--default">Open XlsxViewer stories →</a>
+    </div>
+  </div>
+</div>
+
+## Install
+
+<div className="sb-install">
+
+```bash
+npm install @silurus/ooxml
+```
+
+</div>
+
+## Quick start
+
+```typescript
+import { PptxViewer } from '@silurus/ooxml/pptx';
+
+const viewer = new PptxViewer(document.getElementById('container')!);
+const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
+await viewer.load(buf);
+viewer.nextSlide();
+```
+
+Each format also exposes a headless engine — `PptxPresentation` / `DocxDocument` / `XlsxWorkbook` —
+that renders into any caller-supplied canvas, so you can compose scroll views,
+thumbnail grids, or master-detail panes freely. See the **Layouts** stories under each viewer.
+
+## Highlights
+
+- **Canvas-only rendering.** No HTML/script from the source file is ever executed or injected into the DOM.
+- **Zip-bomb safe.** Each ZIP entry is capped at 512 MiB of uncompressed output.
+- **No network by default.** Google Fonts for PPTX themes is opt-in (`useGoogleFonts: true`).
+- **Tree-shakable.** Import a single format (e.g. `@silurus/ooxml/pptx`) and the other two are dropped entirely.
+
+## License
+
+MIT — see [LICENSE](https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/LICENSE).
