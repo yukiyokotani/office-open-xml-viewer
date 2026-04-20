@@ -254,12 +254,18 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         }
     }
 
-    // Indentation
+    // Indentation. ECMA-376 §17.3.1.12 allows both the older "left"/"right"
+    // attributes and the logical "start"/"end" aliases. In LTR docs these are
+    // identical; use either if present, with start/end taking precedence when
+    // both appear (logical wins for bidi correctness).
     if let Some(ind) = child_w(ppr, "ind") {
-        if let Some(v) = attr_w(ind, "left") { fmt.indent_left = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "left")  { fmt.indent_left  = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "start") { fmt.indent_left  = Some(twips_to_pt(&v)); }
         if let Some(v) = attr_w(ind, "right") { fmt.indent_right = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "end")   { fmt.indent_right = Some(twips_to_pt(&v)); }
         if let Some(v) = attr_w(ind, "firstLine") { fmt.indent_first = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "hanging") { fmt.indent_first = Some(-twips_to_pt(&v)); }
+        // hanging overrides firstLine per §17.3.1.12 when both are present.
+        if let Some(v) = attr_w(ind, "hanging")   { fmt.indent_first = Some(-twips_to_pt(&v)); }
     }
 
     // Numbering
