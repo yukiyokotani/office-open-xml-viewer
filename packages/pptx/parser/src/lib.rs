@@ -2525,12 +2525,6 @@ fn parse_shape(
             .and_then(|bp| attr(&bp, "anchor"))
             .map(|a| a == "b")
             .unwrap_or(false);
-    let cy = if t.cy == 0 {
-        if is_bottom_anchor { 0_i64 } else { 2_000_000_i64 }
-    } else {
-        t.cy
-    };
-
     // custGeom takes priority over prstGeom
     let cust_geom_node = sp_pr.and_then(|p| child(p, "custGeom"));
     let prst_geom_node = sp_pr.and_then(|p| child(p, "prstGeom"));
@@ -2540,6 +2534,20 @@ fn parse_shape(
         prst_geom_node
             .and_then(|n| attr(&n, "prst"))
             .unwrap_or_else(|| "rect".into())
+    };
+
+    // cy=0 means "auto-height" for body-text shapes, but connector-type
+    // geometries (line, *Connector*) legitimately use cy=0 to represent
+    // a perfectly horizontal segment — don't inflate their height.
+    let is_connector_geom = matches!(geometry.as_str(),
+        "line" | "straightConnector1"
+        | "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
+        | "curvedConnector2" | "curvedConnector3" | "curvedConnector4" | "curvedConnector5"
+    );
+    let cy = if t.cy == 0 && !is_connector_geom {
+        if is_bottom_anchor { 0_i64 } else { 2_000_000_i64 }
+    } else {
+        t.cy
     };
     let cust_geom = cust_geom_node.map(|n| parse_cust_geom(n));
 
