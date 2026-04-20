@@ -54,7 +54,7 @@ export const ScrollView: LayoutStory = {
       'max-height:720px;overflow-y:auto;border:1px solid #ccc;background:#f5f5f5;padding:12px;';
     root.appendChild(scroller);
 
-    PptxPresentation.load(SAMPLE_URL)
+    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} slides…`;
         const widthPx = 800;
@@ -93,7 +93,7 @@ export const ThumbnailGrid: LayoutStory = {
       'display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;';
     root.appendChild(grid);
 
-    PptxPresentation.load(SAMPLE_URL)
+    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} thumbnails…`;
         const thumbWidth = 240;
@@ -154,7 +154,7 @@ export const MasterDetail: LayoutStory = {
     detailCol.appendChild(detailCanvas);
     layout.append(thumbCol, detailCol);
 
-    PptxPresentation.load(SAMPLE_URL)
+    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} thumbnails…`;
         const thumbEntries: HTMLDivElement[] = [];

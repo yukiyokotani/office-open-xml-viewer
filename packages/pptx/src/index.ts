@@ -1,5 +1,5 @@
 export { PptxViewer, type PptxViewerOptions } from './viewer';
-export { PptxPresentation, type RenderSlideOptions } from './presentation';
+export { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
 export { renderSlide, type RenderOptions } from './renderer';
 export type {
   Presentation,

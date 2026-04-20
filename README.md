@@ -2,11 +2,19 @@
 
 # office-open-xml-viewer
 
+[![npm version](https://img.shields.io/npm/v/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
+[![npm downloads](https://img.shields.io/npm/dm/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
+[![license](https://img.shields.io/npm/l/@silurus/ooxml.svg)](./LICENSE)
+
 **[Demo (Storybook)](https://yukiyokotani.github.io/office-open-xml-viewer/)**
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 Each format also exposes a headless engine (`PptxPresentation` / `DocxDocument` / `XlsxWorkbook`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://yukiyokotani.github.io/office-open-xml-viewer/).
+
+| PPTX | DOCX | XLSX |
+|:---:|:---:|:---:|
+| ![pptx](docs/images/pptx.png) | ![docx](docs/images/docx.png) | ![xlsx](docs/images/xlsx.png) |
 
 ```bash
 npm install @silurus/ooxml
@@ -494,6 +502,13 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 cd packages/xlsx/parser && wasm-pack build --target web && cp pkg/xlsx_parser_bg.wasm  pkg/xlsx_parser.js  ../src/wasm/
 cd packages/docx/parser && wasm-pack build --target web && cp pkg/docx_parser_bg.wasm  pkg/docx_parser.js  ../src/wasm/
 ```
+
+## Security & Privacy
+
+- **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
+- **ZIP decompression cap.** Each entry in the source archive is limited to 512 MiB of uncompressed output to block zip-bomb DoS.
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, PPTX theme webfonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to `PptxPresentation.load()` / `new PptxViewer(...)`. Enabling that option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
+- **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 
 ## License
 

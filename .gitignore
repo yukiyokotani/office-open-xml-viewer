@@ -12,7 +12,7 @@
 !packages/docx/public/demo/
 !packages/docx/public/demo/*.docx
 # Office Open XML spec documents
-docs/spec/
+spec/
 node_modules/
 .claude/
 dist/

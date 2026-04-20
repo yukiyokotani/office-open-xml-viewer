@@ -57,6 +57,20 @@ async function preloadThemeFonts(majorFont: string | null, minorFont: string | n
   ]);
 }
 
+/** Options for {@link PptxPresentation.load}. */
+export interface LoadOptions {
+  /**
+   * Opt in to loading theme-declared webfonts from Google Fonts
+   * (`fonts.googleapis.com`). When enabled, end-user IP/User-Agent is sent to
+   * Google, which may have privacy/GDPR implications for your application.
+   *
+   * Default: `false` — the canvas falls back to locally available fonts. Host
+   * the required webfonts yourself and reference them via `@font-face` in your
+   * application CSS to match the document's theme fonts.
+   */
+  useGoogleFonts?: boolean;
+}
+
 /** Options for rendering a single slide onto a canvas. */
 export interface RenderSlideOptions {
   /** Display width in CSS pixels. Defaults to canvas.offsetWidth or 960. */
@@ -127,7 +141,10 @@ export class PptxPresentation {
   }
 
   /** Parse a PPTX from URL or ArrayBuffer. */
-  static async load(source: string | ArrayBuffer): Promise<PptxPresentation> {
+  static async load(
+    source: string | ArrayBuffer,
+    opts: LoadOptions = {},
+  ): Promise<PptxPresentation> {
     const pres = new PptxPresentation();
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
@@ -138,7 +155,9 @@ export class PptxPresentation {
       buffer = source;
     }
     await pres._parse(buffer);
-    await preloadThemeFonts(pres._presentation!.majorFont, pres._presentation!.minorFont);
+    if (opts.useGoogleFonts) {
+      await preloadThemeFonts(pres._presentation!.majorFont, pres._presentation!.minorFont);
+    }
     return pres;
   }
 

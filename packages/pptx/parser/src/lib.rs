@@ -435,19 +435,30 @@ struct TextRunData {
 
 type PptxZip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
 
+/// Refuse to decompress individual ZIP entries larger than 512 MiB.
+/// OOXML legitimately reaches tens of MB (embedded video, 4K images) but not
+/// hundreds, so this cap blocks zip-bomb DoS without rejecting real files.
+const MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
 fn read_zip_str(zip: &mut PptxZip<'_>, path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let mut file = zip
         .by_name(path)
         .map_err(|_| format!("missing ZIP entry: {path}"))?;
+    if file.size() > MAX_ZIP_ENTRY_BYTES {
+        return Err(format!("ZIP entry exceeds size limit: {path}").into());
+    }
     let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
+    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_string(&mut buf)?;
     Ok(buf)
 }
 
 fn read_zip_bytes(zip: &mut PptxZip<'_>, path: &str) -> Option<Vec<u8>> {
     let mut file = zip.by_name(path).ok()?;
+    if file.size() > MAX_ZIP_ENTRY_BYTES {
+        return None;
+    }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
+    file.by_ref().take(MAX_ZIP_ENTRY_BYTES).read_to_end(&mut buf).ok()?;
     Some(buf)
 }
 
