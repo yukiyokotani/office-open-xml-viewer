@@ -2561,27 +2561,33 @@ async function renderMedia(
   ctx: CanvasRenderingContext2D,
   el: MediaElement,
   scale: number,
+  fetchMedia?: (path: string) => Promise<Blob>,
+  skipControls?: boolean,
 ) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
   const h = emuToPx(el.height, scale);
 
-  if (el.posterDataUrl) {
+  let drewPoster = false;
+  if (el.posterPath && fetchMedia) {
     try {
-      const resp = await fetch(el.posterDataUrl);
-      const blob = await resp.blob();
-      const bitmap = await createImageBitmap(blob);
+      const blob = await fetchMedia(el.posterPath);
+      const typed = el.posterMimeType ? new Blob([blob], { type: el.posterMimeType }) : blob;
+      const bitmap = await createImageBitmap(typed);
       ctx.drawImage(bitmap, x, y, w, h);
       bitmap.close();
+      drewPoster = true;
     } catch {
       // fall through to plain fill
     }
   }
-  if (!el.posterDataUrl) {
+  if (!drewPoster) {
     ctx.fillStyle = el.mediaKind === 'video' ? '#111' : '#f0f0f0';
     ctx.fillRect(x, y, w, h);
   }
+
+  if (skipControls) return;
 
   // Play-badge overlay: centered filled circle with a triangle cue
   const cx = x + w / 2;
@@ -2825,7 +2831,7 @@ export async function renderSlide(
     } else if (el.type === 'table') {
       renderTable(ctx, el, scale, slideNumber, rc);
     } else if (el.type === 'media') {
-      await renderMedia(ctx, el, scale);
+      await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls);
     } else if (el.type === 'chart') {
       renderChart(
         ctx,

@@ -1,5 +1,6 @@
-import type { Presentation, WorkerRequest, WorkerResponse } from './types';
+import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide } from './renderer';
+import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
@@ -77,6 +78,12 @@ export interface RenderSlideOptions {
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio or 1. */
   dpr?: number;
+  /**
+   * Skip drawing the play badge overlay on media elements. Used internally by
+   * {@link PptxPresentation.presentSlide} so its interactive handle can draw
+   * its own play/pause chrome without duplication.
+   */
+  skipMediaControls?: boolean;
 }
 
 /**
@@ -101,6 +108,11 @@ export class PptxPresentation {
     number,
     { resolve: (p: Presentation) => void; reject: (e: Error) => void }
   >();
+  private _pendingMediaCallbacks = new Map<
+    number,
+    { resolve: (b: ArrayBuffer) => void; reject: (e: Error) => void }
+  >();
+  private _mediaCache = new Map<string, Promise<Blob>>();
   private _nextId = 1;
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
@@ -129,12 +141,27 @@ export class PptxPresentation {
         return;
       }
 
+      if (msg.kind === 'mediaExtracted') {
+        const cb = this._pendingMediaCallbacks.get(msg.id);
+        if (cb) {
+          this._pendingMediaCallbacks.delete(msg.id);
+          cb.resolve(msg.bytes);
+        }
+        return;
+      }
+
       if (msg.kind === 'error') {
-        const parseCb = this._pendingParseCallbacks.get(msg.id);
         const err = new Error(msg.message);
+        const parseCb = this._pendingParseCallbacks.get(msg.id);
         if (parseCb) {
           this._pendingParseCallbacks.delete(msg.id);
           parseCb.reject(err);
+          return;
+        }
+        const mediaCb = this._pendingMediaCallbacks.get(msg.id);
+        if (mediaCb) {
+          this._pendingMediaCallbacks.delete(msg.id);
+          mediaCb.reject(err);
         }
       }
     };
@@ -207,13 +234,75 @@ export class PptxPresentation {
         defaultTextColor: this._presentation.defaultTextColor,
         majorFont: this._presentation.majorFont,
         minorFont: this._presentation.minorFont,
+        fetchMedia: (path) => this.getMedia(path),
+        skipMediaControls: opts.skipMediaControls,
       },
     );
+  }
+
+  /**
+   * Extract raw media bytes for a zip path referenced by {@link MediaElement}.
+   * Results are cached by path for the lifetime of this instance.
+   */
+  async getMedia(mediaPath: string): Promise<Blob> {
+    const hit = this._mediaCache.get(mediaPath);
+    if (hit) return hit;
+    const mimeType = this._findMimeTypeForPath(mediaPath);
+    const p = (async () => {
+      await this._waitForWorker();
+      const id = this._nextId++;
+      const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+        this._pendingMediaCallbacks.set(id, { resolve, reject });
+        this._worker.postMessage({ kind: 'extractMedia', id, path: mediaPath } satisfies WorkerRequest);
+      });
+      return new Blob([bytes], { type: mimeType });
+    })();
+    this._mediaCache.set(mediaPath, p);
+    return p;
+  }
+
+  private _findMimeTypeForPath(mediaPath: string): string {
+    if (!this._presentation) return '';
+    for (const slide of this._presentation.slides) {
+      for (const el of slide.elements) {
+        if (el.type !== 'media') continue;
+        const m = el as MediaElement;
+        if (m.mediaPath === mediaPath) return m.mimeType;
+        if (m.posterPath === mediaPath) return m.posterMimeType;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Render a slide and attach canvas-native playback controls for any
+   * embedded audio/video. Returns a disposable handle that owns the RAF loop,
+   * media elements, and object URLs. Unlike {@link renderSlide}, this method
+   * is stateful — always call `handle.dispose()` when leaving the slide.
+   */
+  async presentSlide(
+    canvas: HTMLCanvasElement,
+    slideIndex: number,
+    opts: RenderSlideOptions = {},
+  ): Promise<PresentationHandle> {
+    if (!this._presentation) throw new Error('Presentation not loaded');
+    const slide = this._presentation.slides[slideIndex];
+    if (!slide) throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1);
+    const width = opts.width ?? (canvas.offsetWidth || 960);
+    return createPresentationHandle(canvas, slide, {
+      width,
+      dpr,
+      slideWidthEmu: this._presentation.slideWidth,
+      fetchMedia: (path) => this.getMedia(path),
+      drawBase: () => this.renderSlide(canvas, slideIndex, { width, dpr, skipMediaControls: true }),
+    });
   }
 
   /** Terminate the worker and release all resources. */
   destroy(): void {
     this._worker.terminate();
     this._presentation = null;
+    this._mediaCache.clear();
   }
 }

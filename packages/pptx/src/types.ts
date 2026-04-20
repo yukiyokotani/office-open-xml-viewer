@@ -50,8 +50,10 @@ export interface MediaElement {
   height: number;
   /** "audio" or "video" */
   mediaKind: 'audio' | 'video';
-  /** Poster frame shown before playback (image data URL, may be empty). */
-  posterDataUrl: string;
+  /** Poster image zip path (e.g. "ppt/media/image2.png"). Empty when no poster. */
+  posterPath: string;
+  /** Poster image MIME type (empty when no poster). */
+  posterMimeType: string;
   /** Path inside the pptx zip (e.g. "ppt/media/media2.mp4"). Used by getMedia. */
   mediaPath: string;
   /** MIME type of the underlying media (e.g. "audio/mpeg", "video/mp4"). */
@@ -180,9 +182,11 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer };
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer }
+  | { kind: 'extractMedia'; id: number; path: string };
 
 export type WorkerResponse =
   | { kind: 'ready' }
   | { kind: 'parsed'; id: number; presentation: Presentation }
+  | { kind: 'mediaExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'error'; id: number; message: string };
