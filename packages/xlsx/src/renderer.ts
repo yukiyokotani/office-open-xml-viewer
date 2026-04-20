@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink,
-  Run, ChartData,
+  Run, ChartData, GradientFillSpec,
 } from './types.js';
 import { renderChart, type ChartModel } from '@silurus/ooxml-core';
 
@@ -150,6 +150,43 @@ function hatchPattern(
   const pat = ctx.createPattern(off, 'repeat');
   PATTERN_CACHE.set(key, pat);
   return pat;
+}
+
+/**
+ * Build a Canvas gradient object for an xlsx `<gradientFill>`. Linear uses
+ * the degree attribute (0° = left→right, 90° = top→bottom). Path gradients
+ * radiate from a rectangular inner bounds defined by left/right/top/bottom
+ * as fractions of the cell.
+ */
+function buildGradientFill(
+  ctx: CanvasRenderingContext2D,
+  g: GradientFillSpec,
+  x: number, y: number, w: number, h: number,
+): CanvasGradient {
+  let grad: CanvasGradient;
+  if (g.gradientType === 'path') {
+    // Use the inner rectangle's center as the radial origin; radius spans to
+    // the farthest cell corner so stop=1 always reaches a cell edge.
+    const cxg = x + w * (g.left + (1 - g.right - g.left) / 2);
+    const cyg = y + h * (g.top + (1 - g.bottom - g.top) / 2);
+    const r = Math.hypot(Math.max(cxg - x, x + w - cxg), Math.max(cyg - y, y + h - cyg));
+    grad = ctx.createRadialGradient(cxg, cyg, 0, cxg, cyg, r);
+  } else {
+    // Linear: rotate around the cell's center and extend to the bounds.
+    const rad = (g.degree * Math.PI) / 180;
+    const cxg = x + w / 2;
+    const cyg = y + h / 2;
+    const ext = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
+    grad = ctx.createLinearGradient(
+      cxg - Math.cos(rad) * ext, cyg - Math.sin(rad) * ext,
+      cxg + Math.cos(rad) * ext, cyg + Math.sin(rad) * ext,
+    );
+  }
+  for (const stop of g.stops) {
+    const pos = Math.min(1, Math.max(0, stop.position));
+    grad.addColorStop(pos, hexToRgba(stop.color));
+  }
+  return grad;
 }
 
 /** Linear-interpolate two #RRGGBB values in RGB space at coverage fg weight. */
@@ -1027,7 +1064,10 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
-      if (effectiveFill.patternType && effectiveFill.patternType !== 'none' && effectiveFill.fgColor) {
+      if (effectiveFill.gradient && effectiveFill.gradient.stops.length > 0) {
+        ctx.fillStyle = buildGradientFill(ctx, effectiveFill.gradient, cx, cy, cellW, cellH);
+        ctx.fillRect(cx, cy, cellW, cellH);
+      } else if (effectiveFill.patternType && effectiveFill.patternType !== 'none' && effectiveFill.fgColor) {
         const pt = effectiveFill.patternType;
         const bg = effectiveFill.bgColor ?? 'FFFFFF';
         const hatch = hatchPattern(ctx, pt, effectiveFill.fgColor, bg);

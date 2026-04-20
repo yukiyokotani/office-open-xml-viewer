@@ -216,6 +216,21 @@ export interface Fill {
   patternType: string;
   fgColor: string | null;
   bgColor: string | null;
+  /** Set when the style's `<fill>` was a `<gradientFill>`; patternType stays "none". */
+  gradient?: GradientFillSpec | null;
+}
+
+export interface GradientFillSpec {
+  /** "linear" (default) or "path". */
+  gradientType: string;
+  /** Rotation in degrees for linear gradients (0 = left→right). */
+  degree: number;
+  /** Path-gradient bounding box (0..1) — unused for linear. */
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  stops: { position: number; color: string }[];
 }
 
 export interface Border {

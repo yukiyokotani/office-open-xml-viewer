@@ -296,6 +296,33 @@ pub struct Fill {
     pub pattern_type: String,
     pub fg_color: Option<String>,
     pub bg_color: Option<String>,
+    /// When the fill element is a <gradientFill>, this carries the gradient
+    /// stops + type + rotation. patternType stays "none" because xlsx does
+    /// not mix gradient + pattern in the same fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<GradientFillSpec>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientFillSpec {
+    /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
+    pub gradient_type: String,
+    /// Linear-gradient rotation in degrees (0 = left→right).
+    pub degree: f64,
+    /// Path-gradient bounding box (0..1 within the cell). Unused for linear.
+    pub left: f64,
+    pub right: f64,
+    pub top: f64,
+    pub bottom: f64,
+    pub stops: Vec<GradientStopSpec>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientStopSpec {
+    pub position: f64,
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -880,15 +907,47 @@ fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                 if fill_node.tag_name().name() != "fill" { continue; }
                 let mut f = Fill::default();
                 for pf in fill_node.children() {
-                    if pf.tag_name().name() == "patternFill" {
-                        f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
-                        for color_node in pf.children() {
-                            match color_node.tag_name().name() {
-                                "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
-                                "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
-                                _ => {}
+                    match pf.tag_name().name() {
+                        "patternFill" => {
+                            f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
+                            for color_node in pf.children() {
+                                match color_node.tag_name().name() {
+                                    "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
+                                    "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                    _ => {}
+                                }
                             }
                         }
+                        "gradientFill" => {
+                            // ECMA-376 §18.8.24 gradientFill — linear (default) uses
+                            // `degree`, path uses top/bottom/left/right as a relative
+                            // bounding box; children <stop position="n"><color/></stop>.
+                            let gtype = pf.attribute("type").unwrap_or("linear").to_string();
+                            let degree = pf.attribute("degree").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let left   = pf.attribute("left").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let right  = pf.attribute("right").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let top    = pf.attribute("top").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let bottom = pf.attribute("bottom").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let mut stops: Vec<GradientStopSpec> = pf.children()
+                                .filter(|n| n.is_element() && n.tag_name().name() == "stop")
+                                .filter_map(|stop| {
+                                    let position = stop.attribute("position").and_then(|s| s.parse::<f64>().ok())?;
+                                    let color_node = stop.children().find(|c| c.is_element() && c.tag_name().name() == "color")?;
+                                    let color = parse_color(&color_node, theme_colors)?;
+                                    Some(GradientStopSpec { position, color })
+                                })
+                                .collect();
+                            stops.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal));
+                            if !stops.is_empty() {
+                                f.gradient = Some(GradientFillSpec {
+                                    gradient_type: gtype,
+                                    degree,
+                                    left, right, top, bottom,
+                                    stops,
+                                });
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 fills.push(f);
