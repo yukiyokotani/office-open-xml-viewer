@@ -8,7 +8,7 @@ type Args = {
 
 const meta: Meta<Args> = {
   title: 'PptxViewer',
-  excludeStories: ['buildViewerUI'],
+  excludeStories: ['buildViewerUI', 'createCanvasSpinner'],
   argTypes: {
     width: {
       control: { type: 'range', min: 400, max: 1600, step: 40 },
@@ -52,8 +52,11 @@ export function buildViewerUI(
 
   const container = document.createElement('div');
   container.style.cssText =
-    `width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;min-height:120px;`;
+    `position:relative;width:${args.width}px;max-width:100%;border:1px solid #ccc;background:#f0f0f0;min-height:120px;`;
   root.appendChild(container);
+
+  const spinner = createCanvasSpinner();
+  container.appendChild(spinner);
 
   const viewer = new PptxViewer(container, {
     width: args.width,
@@ -70,6 +73,7 @@ export function buildViewerUI(
   nextBtn.addEventListener('click', () => viewer.nextSlide());
 
   if (autoLoadUrl) {
+    status.textContent = 'Loading…';
     fetch(autoLoadUrl)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status} from ${autoLoadUrl}`);
@@ -79,13 +83,49 @@ export function buildViewerUI(
         status.textContent = 'Parsing…';
         return viewer.load(buf);
       })
-      .then(() => { status.textContent = 'Loaded'; })
+      .then(() => {
+        status.textContent = 'Loaded';
+        spinner.remove();
+      })
       .catch((err) => {
         status.textContent = `Failed: ${err.message}`;
+        spinner.remove();
       });
+  } else {
+    spinner.remove();
   }
 
   return { root, viewer };
+}
+
+/**
+ * Returns an absolutely-positioned spinner overlay. The element is a simple
+ * CSS-keyframe ring centered in its parent — the parent must be positioned
+ * (set `position:relative`) so the overlay anchors correctly.
+ */
+export function createCanvasSpinner(): HTMLElement {
+  const el = document.createElement('div');
+  el.setAttribute('aria-label', 'Loading');
+  el.style.cssText = [
+    'position:absolute',
+    'top:50%', 'left:50%',
+    'width:40px', 'height:40px',
+    'margin:-20px 0 0 -20px',
+    'border:3px solid rgba(0,0,0,0.12)',
+    'border-top-color:rgba(0,0,0,0.55)',
+    'border-radius:50%',
+    'pointer-events:none',
+    'animation:pptxSpinnerRotate 0.9s linear infinite',
+  ].join(';');
+  // Inject keyframes once per document.
+  const keyframesId = '__pptx-spinner-keyframes';
+  if (!document.getElementById(keyframesId)) {
+    const style = document.createElement('style');
+    style.id = keyframesId;
+    style.textContent = '@keyframes pptxSpinnerRotate { to { transform: rotate(360deg); } }';
+    document.head.appendChild(style);
+  }
+  return el;
 }
 
 // ---------------------------------------------------------------------------

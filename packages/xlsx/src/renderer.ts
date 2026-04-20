@@ -1766,6 +1766,17 @@ function adaptChartData(chart: ChartData): ChartModel {
     catAxisHidden: false,
     valAxisHidden: false,
     plotAreaBg: null,
+    // Excel charts default to an opaque white chart area with a light border.
+    // Keep that appearance; pptx sets chartBg from the chartSpace spPr instead.
+    chartBg: 'FFFFFF',
+    showLegend: (chart.series?.length ?? 0) > 0,
+    catAxisCrossBetween: 'between',
+    valAxisMajorTickMark: 'cross',
+    catAxisMajorTickMark: 'cross',
+    titleFontSizeHpt: null,
+    catAxisFontSizeHpt: null,
+    valAxisFontSizeHpt: null,
+    dataLabelFontSizeHpt: null,
     subtotalIndices: [],
   };
 }
