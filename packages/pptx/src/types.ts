@@ -154,6 +154,24 @@ export interface ChartElement {
   catAxisHidden: boolean;
   valAxisHidden: boolean;
   plotAreaBg: string | null;
+  /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
+  chartBg: string | null;
+  /** True when <c:legend> is declared; false suppresses the legend entirely. */
+  showLegend: boolean;
+  /** catAx crossBetween: "between" (default, 0.5-step padding) or "midCat". */
+  catAxisCrossBetween: 'between' | 'midCat' | string;
+  /** `<c:valAx><c:majorTickMark>`. "cross" (default) | "out" | "in" | "none". */
+  valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+  /** `<c:catAx><c:majorTickMark>`. */
+  catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+  /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
+  titleFontSizeHpt: number | null;
+  /** `<c:catAx><c:txPr>` font size (hpt). null = proportional default. */
+  catAxisFontSizeHpt: number | null;
+  /** `<c:valAx><c:txPr>` font size (hpt). null = proportional default. */
+  valAxisFontSizeHpt: number | null;
+  /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
+  dataLabelFontSizeHpt: number | null;
 }
 
 export interface PictureElement {

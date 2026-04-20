@@ -103,6 +103,28 @@ struct ChartElement {
     val_axis_hidden: bool,
     /// Plot area background color from <c:plotArea><c:spPr><a:solidFill> (hex without #)
     plot_area_bg: Option<String>,
+    /// Outer chartSpace background (hex without #). None when chartSpace spPr is
+    /// noFill or absent — in which case the slide background shows through.
+    chart_bg: Option<String>,
+    /// True when <c:legend> is present; false means no legend should render.
+    show_legend: bool,
+    /// <c:catAx><c:crossBetween val="..."/>. "between" → inset category positions
+    /// by half a step so the first/last point aren't flush against the axes.
+    /// "midCat" → points sit exactly on the axes. Defaults to "between" when absent.
+    cat_axis_cross_between: String,
+    /// <c:valAx><c:majorTickMark val="..."/>: "out" | "cross" | "in" | "none".
+    val_axis_major_tick_mark: String,
+    /// <c:catAx><c:majorTickMark val="..."/>.
+    cat_axis_major_tick_mark: String,
+    /// Title rPr@sz in OOXML hundredths of a point (e.g. 1600 = 16pt). None
+    /// falls back to a proportional default.
+    title_font_size_hpt: Option<i32>,
+    /// <c:catAx><c:txPr>…defRPr@sz — category-axis label font size (hpt).
+    cat_axis_font_size_hpt: Option<i32>,
+    /// <c:valAx><c:txPr>…defRPr@sz — value-axis label font size (hpt).
+    val_axis_font_size_hpt: Option<i32>,
+    /// <c:dLbls><c:txPr>…defRPr@sz — data-label font size (hpt).
+    data_label_font_size_hpt: Option<i32>,
 }
 
 // ===== Table data model =====
@@ -2221,15 +2243,24 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     };
 
     // Title text
-    let title = root.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "title")
-        .and_then(|title_node| {
-            let texts: Vec<String> = title_node.descendants()
-                .filter(|n| n.is_element() && n.tag_name().name() == "t")
-                .filter_map(|n| n.text().map(|t| t.to_string()))
-                .collect();
-            if texts.is_empty() { None } else { Some(texts.join("")) }
-        });
+    let title_node_opt = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "title");
+    let title = title_node_opt.and_then(|title_node| {
+        let texts: Vec<String> = title_node.descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "t")
+            .filter_map(|n| n.text().map(|t| t.to_string()))
+            .collect();
+        if texts.is_empty() { None } else { Some(texts.join("")) }
+    });
+    // Title font size in hundredths of a point — taken from the first
+    // defRPr@sz or rPr@sz we find inside the title. ECMA-376 uses hpt for size.
+    let title_font_size_hpt = title_node_opt
+        .and_then(|t| t.descendants().find_map(|n| {
+            if !n.is_element() { return None; }
+            let tag = n.tag_name().name();
+            if tag != "defRPr" && tag != "rPr" { return None; }
+            attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
+        }));
 
     // val axis max / min
     let val_ax = root.descendants()
@@ -2376,6 +2407,67 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
                     && attr(&c, "val").as_deref() == Some("1"))
         });
 
+    // Outer chartSpace spPr: we want the child of chartSpace (not plotArea).
+    let chart_bg = root.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        .and_then(|sp| sp.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill"))
+        .and_then(|fill| parse_color_node(fill, theme));
+
+    let show_legend = root.descendants()
+        .any(|n| n.is_element() && n.tag_name().name() == "legend");
+
+    // ECMA-376 §21.2.2.35: `<c:crossBetween>` lives on the VALUE axis (not cat),
+    // and describes whether value gridlines land between or on category ticks.
+    // Default is "between" (categories inset by half a step each side).
+    let cat_axis_cross_between = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "valAx")
+        .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "crossBetween"))
+        .and_then(|n| attr(&n, "val"))
+        .unwrap_or_else(|| "between".to_string());
+
+    let read_major_tick_mark = |ax_name: &str| -> String {
+        root.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == ax_name)
+            .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "majorTickMark"))
+            .and_then(|n| attr(&n, "val"))
+            // ECMA-376 default for majorTickMark is "cross".
+            .unwrap_or_else(|| "cross".to_string())
+    };
+    let val_axis_major_tick_mark = read_major_tick_mark("valAx");
+    let cat_axis_major_tick_mark = read_major_tick_mark("catAx");
+
+    // <c:catAx>/<c:valAx><c:txPr> → defRPr/rPr@sz gives axis label font size
+    // in OOXML hundredths of a point. This drives both font rendering and
+    // the bottom/left padding so the plot area shrinks to leave room.
+    let read_axis_font_hpt = |ax_name: &str| -> Option<i32> {
+        root.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == ax_name)
+            .and_then(|ax| ax.children().find(|n| n.is_element() && n.tag_name().name() == "txPr"))
+            .and_then(|tx| tx.descendants().find_map(|n| {
+                if !n.is_element() { return None; }
+                let tag = n.tag_name().name();
+                if tag != "defRPr" && tag != "rPr" { return None; }
+                attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
+            }))
+    };
+    let cat_axis_font_size_hpt = read_axis_font_hpt("catAx");
+    let val_axis_font_size_hpt = read_axis_font_hpt("valAx");
+
+    // First <c:dLbls> we can find — per-series or plotArea-level. Drill down
+    // to the defRPr@sz the same way we do for axes.
+    let data_label_font_size_hpt = root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dl| {
+            dl.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "txPr")
+                .and_then(|tx| tx.descendants().find_map(|n| {
+                    if !n.is_element() { return None; }
+                    let tag = n.tag_name().name();
+                    if tag != "defRPr" && tag != "rPr" { return None; }
+                    attr(&n, "sz").and_then(|v| v.parse::<i32>().ok())
+                }))
+        });
+
     Some(ChartElement {
         x: 0, y: 0, width: 0, height: 0,
         chart_type,
@@ -2389,6 +2481,15 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
         cat_axis_hidden,
         val_axis_hidden,
         plot_area_bg,
+        chart_bg,
+        show_legend,
+        cat_axis_cross_between,
+        val_axis_major_tick_mark,
+        cat_axis_major_tick_mark,
+        title_font_size_hpt,
+        cat_axis_font_size_hpt,
+        val_axis_font_size_hpt,
+        data_label_font_size_hpt,
     })
 }
 
@@ -2477,6 +2578,15 @@ fn parse_chartex(xml: &str, theme: &HashMap<String, String>) -> Option<ChartElem
         cat_axis_hidden: false,
         val_axis_hidden: false,
         plot_area_bg: None,
+        chart_bg: None,
+        show_legend: false,
+        cat_axis_cross_between: "between".to_string(),
+        val_axis_major_tick_mark: "cross".to_string(),
+        cat_axis_major_tick_mark: "cross".to_string(),
+        title_font_size_hpt: None,
+        cat_axis_font_size_hpt: None,
+        val_axis_font_size_hpt: None,
+        data_label_font_size_hpt: None,
     })
 }
 

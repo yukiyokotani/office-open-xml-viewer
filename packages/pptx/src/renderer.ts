@@ -2248,15 +2248,30 @@ function renderTextBody(
     // Bullet resolution
     const hasBullet = para.bullet.type === 'char' || para.bullet.type === 'autoNum';
 
+    // Per ECMA-376 §21.1.2.4.13: when no buSz* is declared, the bullet takes
+    // the first run's font size. Using paraDefaultFontSizePx here (the layout
+    // lvl1pPr defRPr fallback, typically 18pt) oversizes the bullet so a
+    // hanging indent calibrated against the run (12pt) can't contain it —
+    // that's why the em-dash was overlapping the text.
+    const firstRunSizePt = (() => {
+      for (const r of para.runs) {
+        if (r.type === 'text' && r.fontSize != null) return r.fontSize;
+      }
+      return null;
+    })();
+    const bulletBaseSizePx = firstRunSizePt != null
+      ? firstRunSizePt * PT_TO_EMU * scale * fontScale
+      : paraDefaultFontSizePx;
+
     let bulletLabel  = '';
-    let bulletFont   = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif', rc);
+    let bulletFont   = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
     let bulletColor  = paraDefaultColor;
 
     if (para.bullet.type === 'char') {
       const b = para.bullet;
       const bSizePx = b.sizePct != null
-        ? paraDefaultFontSizePx * (b.sizePct / 100)
-        : paraDefaultFontSizePx;
+        ? bulletBaseSizePx * (b.sizePct / 100)
+        : bulletBaseSizePx;
       bulletLabel = applySymbolFont(b.char, b.fontFamily ?? '');
       // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
       // Otherwise use the specified font (e.g. Wingdings on systems that have it).
@@ -2274,7 +2289,7 @@ function renderTextBody(
         autoNumCounters.set(lvl, autoNumCounters.get(lvl)! + 1);
       }
       bulletLabel = formatAutoNum(autoNumCounters.get(lvl)!, b.numType);
-      bulletFont  = buildFont(false, false, paraDefaultFontSizePx, 'sans-serif', rc);
+      bulletFont  = buildFont(false, false, bulletBaseSizePx, 'sans-serif', rc);
       bulletColor = paraDefaultColor;
     } else {
       // Not a list paragraph — reset autoNum counters
@@ -2300,11 +2315,16 @@ function renderTextBody(
       const isFirst = i === 0;
       const isLast  = i === lines.length - 1;
 
-      // Line height: use max font size in the line
-      let maxSizePx = paraDefaultFontSizePx;
+      // Line height: use the max font size among rendered segments. The layout
+      // default (paraDefaultFontSizePx) is used only as a fallback for empty
+      // paragraphs — otherwise PowerPoint slide-layouts with placeholder
+      // defaults like `defRPr sz="30000"` (300pt prompt-text marker) would
+      // inflate lineHeight and push real 24pt runs far below the anchor.
+      let maxSizePx = 0;
       for (const seg of line.segments) {
         if (seg.sizePx > maxSizePx) maxSizePx = seg.sizePx;
       }
+      if (maxSizePx === 0) maxSizePx = paraDefaultFontSizePx;
       // Bullet font size also counts
       if (isFirst && bulletLabel) {
         ctx.font = bulletFont;
@@ -2833,6 +2853,9 @@ export async function renderSlide(
     } else if (el.type === 'media') {
       await renderMedia(ctx, el, scale, opts.fetchMedia, opts.skipMediaControls);
     } else if (el.type === 'chart') {
+      // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
+      // so 12700 * scale gives pixels-per-point at the current display size.
+      const chartPtToPx = 12700 * scale;
       renderChart(
         ctx,
         {
@@ -2848,6 +2871,15 @@ export async function renderSlide(
           catAxisHidden: el.catAxisHidden,
           valAxisHidden: el.valAxisHidden,
           plotAreaBg: el.plotAreaBg,
+          chartBg: el.chartBg,
+          showLegend: el.showLegend,
+          catAxisCrossBetween: el.catAxisCrossBetween,
+          valAxisMajorTickMark: el.valAxisMajorTickMark,
+          catAxisMajorTickMark: el.catAxisMajorTickMark,
+          titleFontSizeHpt: el.titleFontSizeHpt,
+          catAxisFontSizeHpt: el.catAxisFontSizeHpt,
+          valAxisFontSizeHpt: el.valAxisFontSizeHpt,
+          dataLabelFontSizeHpt: el.dataLabelFontSizeHpt,
           subtotalIndices: el.subtotalIndices,
         },
         {
@@ -2856,6 +2888,7 @@ export async function renderSlide(
           w: emuToPx(el.width, scale),
           h: emuToPx(el.height, scale),
         },
+        chartPtToPx,
       );
     }
   }

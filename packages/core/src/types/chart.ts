@@ -63,6 +63,25 @@ export interface ChartModel {
   valAxisHidden: boolean;
   /** Hex without '#'. From `<c:plotArea><c:spPr><a:solidFill>`. */
   plotAreaBg: string | null;
+  /** Outer chartSpace background (hex without '#'). null when noFill/absent. */
+  chartBg: string | null;
+  /** True when `<c:legend>` is declared in the chart XML. False = no legend. */
+  showLegend: boolean;
+  /** `<c:catAx><c:crossBetween val="..."/>`. "between" inserts 0.5-step padding
+   *  on each end of the category axis; "midCat" anchors endpoints to the axes. */
+  catAxisCrossBetween: 'between' | 'midCat' | string;
+  /** `<c:valAx><c:majorTickMark>`. ECMA-376 default is "cross". */
+  valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+  /** `<c:catAx><c:majorTickMark>`. */
+  catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+  /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
+  titleFontSizeHpt: number | null;
+  /** `<c:catAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
+  catAxisFontSizeHpt: number | null;
+  /** `<c:valAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
+  valAxisFontSizeHpt: number | null;
+  /** `<c:dLbls><c:txPr>` font size (hpt) for data-point value labels. */
+  dataLabelFontSizeHpt: number | null;
   /** Waterfall subtotal category indices. */
   subtotalIndices: number[];
 }

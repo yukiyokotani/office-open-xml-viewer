@@ -102,6 +102,55 @@ function drawLegend(
   void lw;
 }
 
+function drawAxisTick(
+  ctx: CanvasRenderingContext2D,
+  mode: string,
+  axis: 'val' | 'cat',
+  anchorXOrY: number,
+  perpendicular: number,
+): void {
+  if (mode === 'none' || !mode) return;
+  const len = 4;
+  const prev = ctx.strokeStyle;
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (axis === 'val') {
+    // val axis is vertical (x = anchor, y varies). Ticks extend horizontally.
+    const x0 = anchorXOrY;
+    const y = perpendicular;
+    const outer = mode === 'out' || mode === 'cross' ? -len : 0;
+    const inner = mode === 'in' || mode === 'cross' ? len : 0;
+    ctx.moveTo(x0 + outer, y);
+    ctx.lineTo(x0 + inner, y);
+  } else {
+    // cat axis is horizontal (y = anchor, x varies). Ticks extend vertically.
+    const y0 = anchorXOrY;
+    const xc = perpendicular;
+    const outer = mode === 'out' || mode === 'cross' ? len : 0;
+    const inner = mode === 'in' || mode === 'cross' ? -len : 0;
+    ctx.moveTo(xc, y0 + outer);
+    ctx.lineTo(xc, y0 + inner);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = prev;
+}
+
+function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
+  // Honor the XML-specified title font size (hundredths of a point) when
+  // present. ptToPx is the pixels-per-point at the current slide scale, so
+  // a 16pt title renders at the same proportional size as PowerPoint.
+  if (chart.titleFontSizeHpt) return (chart.titleFontSizeHpt / 100) * ptToPx;
+  return Math.max(10, h * 0.085);
+}
+
+/** Resolve an axis label font size (px) from <c:txPr> hpt or a proportional
+ *  fallback. ptToPx comes from the host renderer (EMU/px scale at display). */
+function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
+  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
+  return Math.max(8, h * 0.045);
+}
+
 function drawChartTitle(
   ctx: CanvasRenderingContext2D,
   title: string | null,
@@ -142,7 +191,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (n === 0) return;
 
   const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
@@ -321,19 +370,39 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 // Line chart
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderLineChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderLineChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  r: ChartRect,
+  ptToPx: number,
+): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
 
-  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
-  const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  // PowerPoint's auto-layout reserves a title band with air above and below
+  // the text; pinning the title to y+0 and the plot to y+titleFontPx+2 is too
+  // tight. Use proportional pads so scaling preserves the same feel.
+  const titleTopPad    = chart.title ? h * 0.045 : 0;
+  const titleBottomPad = chart.title ? h * 0.035 : 0;
+  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
+  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
+  const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
+  const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+  const axisFontSz = Math.max(catAxFontPx, valAxFontPx);
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14 + catTitleH, l: w * 0.12 + valTitleW };
+  // Pad based on actual label metrics rather than magic percents so an explicit
+  // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
+  const pad = {
+    t: titleH + valAxFontPx / 2 + 2,
+    r: legendW + w * 0.05,
+    b: catAxFontPx + 12 + catTitleH,
+    l: valAxFontPx * 2.2 + 10 + valTitleW,
+  };
 
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart.title, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -359,11 +428,16 @@ function renderLineChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const range = axMax - axMin; if (range === 0) return;
 
   const toY = (v: number) => py0 + ph - ((v - axMin) / range) * ph;
-  const toX = (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+  // crossBetween="between" (default) insets the first/last category by half a
+  // step so points aren't flush against the axes. "midCat" anchors them.
+  const between = chart.catAxisCrossBetween !== 'midCat';
+  const toX = between
+    ? (i: number) => px0 + ((i + 0.5) / n) * pw
+    : (i: number) => px0 + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
 
   if (!chart.valAxisHidden) {
     const steps = Math.round((axMax - axMin) / step);
-    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    ctx.font = `${valAxFontPx}px sans-serif`;
     ctx.textBaseline = 'middle';
     for (let si = 0; si <= steps; si++) {
       const v = axMin + si * step;
@@ -371,19 +445,31 @@ function renderLineChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.strokeStyle = v === 0 ? '#aaa' : '#e0e0e0';
       ctx.lineWidth = v === 0 ? 1 : 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       ctx.fillStyle = '#555'; ctx.textAlign = 'right';
-      ctx.fillText(formatChartVal(v), px0 - 4, gy);
+      ctx.fillText(formatChartVal(v), px0 - 6, gy);
     }
   }
 
+  // Axis lines: bottom (category) + left (value). Both default to visible
+  // unless hidden explicitly.
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  if (!chart.valAxisHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
 
-  const markerR = Math.max(3, ph * 0.015);
+  // Line width and marker size come from OOXML in points (<a:ln w=EMU> /
+  // <c:marker><c:size val=pt>). We don't parse per-series overrides yet so
+  // use the PowerPoint defaults (2.25pt line, 5pt marker diameter) scaled to
+  // the current slide pt-per-px so both shrink with the viewport.
+  const lineWidthPx = Math.max(1, 2.25 * ptToPx);
+  const markerR = Math.max(2, 2.5 * ptToPx);
+  const dataLabelPx = axisLabelPx(chart.dataLabelFontSizeHpt, h, ptToPx);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const color = chartColor(si, s);
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.strokeStyle = color; ctx.lineWidth = lineWidthPx; ctx.setLineDash([]);
     ctx.beginPath();
     let started = false;
     for (let ci = 0; ci < n; ci++) {
@@ -397,8 +483,7 @@ function renderLineChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       const v = s.values[ci]; if (v == null) continue;
       ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
       if (chart.showDataLabels) {
-        const lsz = Math.max(7, Math.round(markerR * 1.5));
-        ctx.font = `${lsz}px sans-serif`;
+        ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         ctx.fillText(formatChartVal(v), toX(ci), toY(v) - markerR - 1);
         ctx.fillStyle = color;
@@ -409,9 +494,12 @@ function renderLineChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   if (!chart.catAxisHidden) {
     const labelInterval = Math.max(1, Math.ceil(n / 8));
     ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = `${Math.max(8, Math.min(11, pw / n * 0.8))}px sans-serif`;
+    ctx.font = `${catAxFontPx}px sans-serif`;
     for (let ci = 0; ci < n; ci += labelInterval) {
-      ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), toX(ci), py0 + ph + 3);
+      const tx = toX(ci);
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', py0 + ph, tx);
+      ctx.fillStyle = '#555';
+      ctx.fillText((cats[ci] ?? '').toString().slice(0, 10), tx, py0 + ph + 5);
     }
   }
 
@@ -431,7 +519,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
 
   const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
@@ -540,7 +628,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const titleH = chart.title ? Math.max(14, h * 0.06) : 0;
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
-  const legendW = Math.max(80, w * 0.28);
+  const legendW = chart.showLegend ? Math.max(80, w * 0.28) : 0;
   const pw = w - legendW; const ph = h - titleH - h * 0.04;
   const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
   const outerR = Math.min(pw, ph) * 0.42;
@@ -602,7 +690,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const n = cats.length; if (n < 3) return;
 
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW = chart.series.length > 1 ? Math.max(70, w * 0.2) : 0;
+  const legendW = chart.showLegend ? Math.max(70, w * 0.2) : 0;
   drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
 
   const pw = w - legendW; const ph = h - titleH - h * 0.04;
@@ -678,7 +766,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
   const { x, y, w, h } = r;
   const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
-  const legendW  = chart.series.length >= 1 ? Math.max(80, w * 0.22) : 0;
+  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
@@ -895,15 +983,21 @@ export function renderChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartModel,
   rect: ChartRect,
+  /**
+   * Pixels per point at the caller's current display scale. For PPTX at
+   * 960px/12192000EMU the value is ~1.05; xlsx's sheet view renders at
+   * device-px where 1pt≈1.333. Used to size title/axis labels whose
+   * XML-specified sizes are in OOXML hundredths of a point.
+   */
+  ptToPx: number = 1.333,
 ): void {
   const { x, y, w, h } = rect;
-  // White background + light border (xlsx-style frame). PPTX charts are
-  // inside shape boxes with their own backgrounds so the frame is harmless.
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = '#d0d0d0';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  // Only fill the outer chartSpace when chartBg is set; a null means noFill
+  // (transparent) per OOXML, so the underlying slide/sheet shows through.
+  if (chart.chartBg) {
+    ctx.fillStyle = `#${chart.chartBg}`;
+    ctx.fillRect(x, y, w, h);
+  }
 
   if (chart.series.length === 0) {
     ctx.fillStyle = '#888';
@@ -925,7 +1019,7 @@ export function renderChart(
     case 'line':
     case 'stackedLine':
     case 'stackedLinePct':
-      renderLineChart(ctx, chart, rect); break;
+      renderLineChart(ctx, chart, rect, ptToPx); break;
     case 'area':
     case 'stackedArea':
     case 'stackedAreaPct':
