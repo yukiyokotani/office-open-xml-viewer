@@ -189,6 +189,44 @@ function buildGradientFill(
   return grad;
 }
 
+/**
+ * Parse an A1-style cell reference ("A1", "B12", "AA3") to 1-based row/col.
+ * Returns null when the input doesn't match the expected shape (parser-side
+ * data is trusted, but we still guard against malformed refs).
+ */
+function parseA1Ref(ref: string): { row: number; col: number } | null {
+  const m = /^([A-Z]+)(\d+)$/.exec(ref);
+  if (!m) return null;
+  const colLetters = m[1];
+  const row = parseInt(m[2], 10);
+  let col = 0;
+  for (let i = 0; i < colLetters.length; i++) {
+    col = col * 26 + (colLetters.charCodeAt(i) - 64);
+  }
+  return { row, col };
+}
+
+/**
+ * Draw Excel's comment marker — a small filled triangle in the top-right
+ * corner of the cell — coloured like Excel's default red indicator. Scales
+ * with cell size but is clamped so it stays legible at small zoom.
+ */
+function drawCommentMarker(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+): void {
+  const size = Math.max(4, Math.min(8, Math.min(w, h) * 0.18));
+  ctx.save();
+  ctx.fillStyle = '#D40000';
+  ctx.beginPath();
+  ctx.moveTo(x + w - size, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + size);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 /** Linear-interpolate two #RRGGBB values in RGB space at coverage fg weight. */
 function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
   const fh = fgHex.replace('#', '');
@@ -831,6 +869,9 @@ interface RenderContext {
   dpr: number;
   autoFilterCells: Set<string>;
   hyperlinkMap: Map<string, string>;
+  /** row:col keys for cells that carry a comment; renderer draws a small
+   *  red triangle in the top-right corner (ECMA-376 §18.7.3 commentList). */
+  commentCells: Set<string>;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1080,6 +1121,12 @@ function renderQuadrant(
             : blendHex(effectiveFill.fgColor, bg, coverage);
         }
         ctx.fillRect(cx, cy, cellW, cellH);
+      }
+
+      // Comment indicator triangle — drawn above fill but below borders so
+      // borders still read cleanly around the cell edge.
+      if (rc.commentCells.has(key)) {
+        drawCommentMarker(ctx, cx, cy, cellW, cellH);
       }
 
       // DataBar (drawn inside the cell, left-anchored)
@@ -1511,6 +1558,15 @@ export function renderViewport(
     if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
   }
 
+  // Build commented-cell lookup. worksheet.commentRefs are A1-style refs
+  // ("A1", "B12", "AA3") so we convert each to "row:col" and stash in a Set
+  // for O(1) membership checks in the cell loop.
+  const commentCells = new Set<string>();
+  for (const ref of worksheet.commentRefs ?? []) {
+    const parsed = parseA1Ref(ref);
+    if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
+  }
+
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
@@ -1522,6 +1578,7 @@ export function renderViewport(
     dpr,
     autoFilterCells,
     hyperlinkMap,
+    commentCells,
   };
 
   // Canvas areas for each quadrant

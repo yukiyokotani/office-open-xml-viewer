@@ -36,6 +36,9 @@ export interface Worksheet {
   autoFilter?: CellRange | null;
   /** Hyperlinks in this worksheet (ECMA-376 §18.3.1.47). */
   hyperlinks?: Hyperlink[];
+  /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
+   *  small red triangle in each cell's top-right corner. */
+  commentRefs?: string[];
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────

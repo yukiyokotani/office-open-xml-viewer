@@ -52,6 +52,9 @@ pub struct Worksheet {
     pub auto_filter: Option<CellRange>,
     /// Hyperlinks in this worksheet (ECMA-376 §18.3.1.47)
     pub hyperlinks: Vec<Hyperlink>,
+    /// Cell refs (A1-style) that have an associated <comment> in xl/commentsN.xml.
+    /// Excel shows a small red triangle in the top-right corner of each.
+    pub comment_refs: Vec<String>,
 }
 
 // ─── Chart types ────────────────────────────────────────────────────────────
@@ -434,6 +437,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.images = load_sheet_images(&mut archive, &sheet_path);
     ws.charts = load_sheet_charts(&mut archive, &sheet_path);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
+    ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1287,6 +1291,7 @@ fn parse_worksheet(
         tab_color,
         auto_filter,
         hyperlinks: Vec::new(),
+        comment_refs: Vec::new(),
     }, hyperlink_rids))
 }
 
@@ -1302,6 +1307,49 @@ fn parse_rels_map(xml: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Parse xl/comments{N}.xml referenced from the sheet's rels and collect the
+/// list of A1-style cell refs that have a `<comment>` associated. The
+/// renderer draws a small red triangle in each cell's top-right corner to
+/// indicate the presence of a comment (ECMA-376 §18.7.3 commentList).
+fn load_sheet_comment_refs(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+) -> Vec<String> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
+    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else { return Vec::new(); };
+
+    // Accept both plain ("/comments") and threaded ("/threadedComment") relTypes
+    // but prefer the classic comments file — threaded comments live in a
+    // separate namespace and are an extension.
+    let mut comments_target: Option<String> = None;
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        let rel_type = rel.attribute("Type").unwrap_or("");
+        if rel_type.ends_with("/comments") {
+            if let Some(t) = rel.attribute("Target") {
+                comments_target = Some(t.to_string());
+                break;
+            }
+        }
+    }
+    let Some(target) = comments_target else { return Vec::new(); };
+
+    let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+    let Ok(comments_xml) = read_zip_entry(archive, &comments_path) else { return Vec::new(); };
+    let Ok(comments_doc) = roxmltree::Document::parse(&comments_xml) else { return Vec::new(); };
+
+    let mut refs: Vec<String> = Vec::new();
+    for node in comments_doc.descendants() {
+        if node.tag_name().name() == "comment" && node.is_element() {
+            if let Some(r) = node.attribute("ref") {
+                refs.push(r.to_string());
+            }
+        }
+    }
+    refs
 }
 
 /// Resolve hyperlink rIds to URLs from the sheet rels file.
