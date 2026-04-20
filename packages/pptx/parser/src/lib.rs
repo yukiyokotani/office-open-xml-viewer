@@ -17,6 +17,24 @@ pub fn parse_pptx(data: &[u8]) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
+/// pptx zip archive. Used by the main thread to materialize media blobs for
+/// interactive playback without re-parsing the whole file.
+#[wasm_bindgen]
+pub fn extract_media(data: &[u8], path: &str) -> Result<Vec<u8>, JsValue> {
+    let cursor = Cursor::new(data);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .map_err(|e| JsValue::from_str(&format!("zip open error: {e}")))?;
+    let mut entry = zip
+        .by_name(path)
+        .map_err(|e| JsValue::from_str(&format!("entry not found: {path}: {e}")))?;
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut buf)
+        .map_err(|e| JsValue::from_str(&format!("read error: {e}")))?;
+    Ok(buf)
+}
+
 // ===========================
 //  Data types  (camelCase JSON → TypeScript)
 // ===========================
@@ -220,8 +238,13 @@ struct MediaElement {
     height: i64,
     /// "audio" or "video"
     media_kind: String,
-    /// Poster image shown before playback starts (data URL).
-    poster_data_url: String,
+    /// Zip path of the poster image (e.g. "ppt/media/image2.png"). Empty when
+    /// the media element has no blipFill poster. Fetched lazily through the
+    /// same getMedia API as `media_path` so large posters don't bloat the
+    /// parse output's JSON.
+    poster_path: String,
+    /// Poster image MIME type (derived from extension). Empty when no poster.
+    poster_mime_type: String,
     /// Path inside the pptx zip (e.g. "ppt/media/media2.mp4"). The renderer
     /// uses this with a separate getMedia API to pull bytes lazily, avoiding
     /// the cost of base64-encoding large videos into the parse result.
@@ -2770,7 +2793,6 @@ fn parse_media(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    zip: &mut PptxZip<'_>,
 ) -> Option<MediaElement> {
     let nv_pic_pr = child(pic_node, "nvPicPr")?;
     let nv_pr = child(nv_pic_pr, "nvPr")?;
@@ -2824,22 +2846,25 @@ fn parse_media(
     let t = parse_xfrm(xfrm_node);
     if t.cx == 0 || t.cy == 0 { return None; }
 
-    // Poster image (from blipFill). Optional — renders with a fallback icon when missing.
-    let poster_data_url = (|| -> Option<String> {
+    // Poster image (from blipFill). Optional — the renderer falls back to a
+    // solid fill when the poster is absent or still loading. We emit just the
+    // zip path so the main thread can lazily `getMedia` it; embedding large
+    // posters inline ballooned the parse output for video-heavy decks.
+    let (poster_path, poster_mime_type) = (|| -> Option<(String, String)> {
         let blip_fill = child(pic_node, "blipFill")?;
         let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
         let rel_target = rels.get(&r_id)?;
         let image_path = resolve_path(slide_dir, rel_target);
-        let image_bytes = read_zip_bytes(zip, &image_path)?;
-        let img_mime = mime_from_ext(&image_path);
-        Some(format!("data:{img_mime};base64,{}", B64.encode(&image_bytes)))
+        let img_mime = mime_from_ext(&image_path).to_string();
+        Some((image_path, img_mime))
     })()
     .unwrap_or_default();
 
     Some(MediaElement {
         x: t.x, y: t.y, width: t.cx, height: t.cy,
         media_kind,
-        poster_data_url,
+        poster_path,
+        poster_mime_type,
         media_path,
         mime_type: mime.to_string(),
     })
@@ -3351,7 +3376,7 @@ fn parse_sp_tree_node(
             }
         }
         "pic" => {
-            if let Some(media) = parse_media(node, slide_dir, rels, zip) {
+            if let Some(media) = parse_media(node, slide_dir, rels) {
                 out.push(SlideElement::Media(media));
             } else if let Some(pic) = parse_picture(node, slide_dir, rels, zip) {
                 out.push(SlideElement::Picture(pic));

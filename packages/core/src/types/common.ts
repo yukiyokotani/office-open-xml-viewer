@@ -160,4 +160,17 @@ export interface RenderOptions {
   dpr?: number;
   majorFont?: string | null;
   minorFont?: string | null;
+  /**
+   * Lazily resolve an archive-internal asset (by zip path) to a Blob. The
+   * renderer uses this to fetch posters and other large embedded assets on
+   * demand, keeping the parse output free of inlined base64.
+   */
+  fetchMedia?: (path: string) => Promise<Blob>;
+  /**
+   * When true, renderMedia draws only the poster frame — play/pause badges
+   * and progress bars are left to the caller. Set by the pptx presentSlide
+   * API so its interactive handle can own all control chrome without
+   * the static renderer drawing a duplicate play badge.
+   */
+  skipMediaControls?: boolean;
 }
