@@ -253,7 +253,30 @@ export function computePages(
     }
   };
 
-  for (const el of body) {
+  // ECMA-376 §17.3.1.15: keepNext means this paragraph must stay on the same
+  // page as the next paragraph. The simplest interpretation, and what Word
+  // appears to do in practice, is "treat the keepNext chain as a single unit
+  // for page-break purposes" — so here we look ahead and add the next
+  // paragraph's (or first line's) height to the break decision.
+  const estimateNextBlockHeight = (startIdx: number): number => {
+    const nxt = body[startIdx];
+    if (!nxt) return 0;
+    if (nxt.type === 'paragraph') {
+      // We only need enough room for the first line so that "keepNext" avoids
+      // orphaning the current paragraph at the bottom of a page while the
+      // next begins on a new page. Using the full paragraph is safer for a
+      // single-line next; for multi-line we rely on that paragraph's own
+      // break logic after placing.
+      return estimateParagraphHeight(measureState, nxt as unknown as DocParagraph, contentW, false);
+    }
+    if (nxt.type === 'table') {
+      return estimateTableHeight(measureState, nxt as unknown as DocTable, contentW);
+    }
+    return 0;
+  };
+
+  for (let i = 0; i < body.length; i++) {
+    const el = body[i];
     if (el.type === 'pageBreak') {
       pages.push([]);
       y = 0;
@@ -265,7 +288,11 @@ export function computePages(
       if (para.pageBreakBefore) newPage();
       const suppressBefore = contextualSuppressed(prevPara, para);
       const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore);
-      if (y + h > contentH) newPage();
+      // Break if this paragraph alone doesn't fit, OR if keepNext is set and
+      // placing it would leave no room for the next block on the same page.
+      const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
+      const needed = h + needNext;
+      if (y > 0 && y + needed > contentH) newPage();
       pages[pages.length - 1].push(el);
       y += h;
       prevPara = para;

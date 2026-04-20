@@ -52,6 +52,12 @@ export interface DocParagraph {
   pageBreakBefore?: boolean;
   /** Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing) */
   contextualSpacing?: boolean;
+  /** Keep paragraph on same page as the next paragraph (w:keepNext) */
+  keepNext?: boolean;
+  /** Keep all lines of this paragraph on the same page (w:keepLines) */
+  keepLines?: boolean;
+  /** Widow/orphan control (w:widowControl). ECMA-376 default is true. */
+  widowControl?: boolean;
   /** Paragraph borders (w:pBdr) */
   borders?: ParagraphBorders | null;
   /** Style ID of the applied paragraph style */

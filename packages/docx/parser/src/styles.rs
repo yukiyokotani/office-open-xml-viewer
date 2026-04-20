@@ -52,6 +52,12 @@ pub struct ParaFmt {
     pub page_break_before: Option<bool>,
     /// Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing)
     pub contextual_spacing: Option<bool>,
+    /// Keep paragraph on same page as the next paragraph (w:keepNext)
+    pub keep_next: Option<bool>,
+    /// Keep all lines of this paragraph on the same page (w:keepLines)
+    pub keep_lines: Option<bool>,
+    /// Widow/orphan control (w:widowControl). Default per spec: true.
+    pub widow_control: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
 }
@@ -185,6 +191,9 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.shading.is_some() { dst.shading = src.shading.clone(); }
     if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
     if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
+    if src.keep_next.is_some() { dst.keep_next = src.keep_next; }
+    if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
+    if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
     if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
 }
 
@@ -304,6 +313,16 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Contextual spacing
     fmt.contextual_spacing = bool_prop(ppr, "contextualSpacing");
+
+    // keepNext — keep this paragraph on the same page as the next one
+    fmt.keep_next = bool_prop(ppr, "keepNext");
+
+    // keepLines — do not split this paragraph's lines across pages
+    fmt.keep_lines = bool_prop(ppr, "keepLines");
+
+    // widowControl — avoid leaving a single line at page top/bottom
+    // (ECMA-376 default: true; explicit value=0 disables).
+    fmt.widow_control = bool_prop(ppr, "widowControl");
 
     // Paragraph borders (pBdr)
     if let Some(pbdr) = child_w(ppr, "pBdr") {

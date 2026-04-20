@@ -394,6 +394,10 @@ fn parse_paragraph(
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
         contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
+        keep_next: base_para.keep_next.unwrap_or(false),
+        keep_lines: base_para.keep_lines.unwrap_or(false),
+        // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
+        widow_control: base_para.widow_control.unwrap_or(true),
         borders: base_para.para_borders.clone(),
         style_id: explicit_style_id.clone().or_else(|| Some("Normal".to_string())),
         default_font_size: base_run.font_size,
