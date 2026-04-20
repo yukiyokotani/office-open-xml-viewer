@@ -44,3 +44,6 @@ packages/docx/src/*.privateDemo.stories.ts
 *.tsbuildinfo
 # npm lockfile (using pnpm)
 package-lock.json
+# Per-session scratch notes (keep local, do not commit)
+**/SESSION_LOG_*.md
+**/PLAN_*.md
