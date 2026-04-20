@@ -37,5 +37,8 @@
     "vite": "^6.3.5",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
+  },
+  "dependencies": {
+    "@silurus/ooxml-core": "workspace:*"
   }
 }

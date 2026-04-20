@@ -140,6 +140,27 @@ Each format also exposes a headless engine — `PptxPresentation` / `DocxDocumen
 that renders into any caller-supplied canvas, so you can compose scroll views,
 thumbnail grids, or master-detail panes freely. See the **Layouts** stories under each viewer.
 
+## Responsive rendering
+
+`autoResize` observes an element and re-runs the render callback on every size
+change, coalesced to one call per animation frame. It is framework-agnostic —
+call it from React `useEffect`, Vue `onMounted`, Svelte `onMount`, etc., and
+invoke the returned disposer in the matching teardown hook.
+
+```typescript
+import { PptxPresentation, autoResize } from '@silurus/ooxml/pptx';
+
+const pres = await PptxPresentation.load('/deck.pptx');
+const detach = autoResize(
+  (width) => pres.renderSlide(canvas, 0, { width }),
+  canvas.parentElement!, // observe the container so canvas can fill it
+);
+
+// teardown
+detach();
+pres.destroy();
+```
+
 ## Highlights
 
 - **Canvas-only rendering.** No HTML/script from the source file is ever executed or injected into the DOM.
