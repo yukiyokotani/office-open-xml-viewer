@@ -11,6 +11,15 @@ const preview: Preview = {
     a11y: {
       test: 'todo',
     },
+    options: {
+      storySort: {
+        order: [
+          'PptxViewer', ['*', 'Examples', 'PrivateExamples'],
+          'DocxViewer', ['*', 'Examples', 'PrivateExamples'],
+          'XlsxViewer', ['*', 'Examples', 'PrivateExamples'],
+        ],
+      },
+    },
   },
 };
 
