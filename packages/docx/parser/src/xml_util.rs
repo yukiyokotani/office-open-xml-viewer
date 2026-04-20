@@ -79,12 +79,15 @@ pub fn emu_to_pt(s: &str) -> f64 {
     s.parse::<f64>().unwrap_or(0.0) / 12700.0
 }
 
-/// Returns true if the given element exists and val != "0" / "false".
+/// Parse a ST_OnOff-style toggle child element. ECMA-376 §17.3.2.22 allows
+/// "true"/"false"/"1"/"0"/"on"/"off" (and absent val attribute = true).
+/// Returns None if the element itself is absent so the caller can distinguish
+/// "explicitly turned off" from "inherited from parent".
 pub fn bool_prop(node: Node, tag: &str) -> Option<bool> {
     let child = child_w(node, tag)?;
     let val = attr_w(child, "val");
     Some(match val.as_deref() {
-        Some("0") | Some("false") => false,
+        Some("0") | Some("false") | Some("off") => false,
         _ => true,
     })
 }

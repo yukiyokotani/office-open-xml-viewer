@@ -85,27 +85,54 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 #[derive(Debug, Default, Clone)]
 pub struct ThemeColors {
     map: HashMap<String, String>,
+    /// ECMA-376 §20.1.4.1.14 fontScheme: theme-referenced typefaces used via
+    /// rFonts @asciiTheme / @hAnsiTheme / @eastAsiaTheme / @cstheme.
+    /// Keys: "minor" + "major" crossed with "latin"/"ea"/"cs".
+    fonts: HashMap<String, String>,
 }
 
 impl ThemeColors {
     fn parse(xml: &str) -> Self {
         let mut map: HashMap<String, String> = HashMap::new();
-        let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return Self { map } };
-        let Some(scheme) = doc.descendants().find(|n| n.is_element() && n.tag_name().name() == "clrScheme") else {
-            return Self { map };
-        };
-        for child in scheme.children().filter(|n| n.is_element()) {
-            let name = child.tag_name().name().to_string();
-            let hex = child.children().filter(|n| n.is_element()).find_map(|n| {
-                match n.tag_name().name() {
-                    "srgbClr" => n.attribute("val").map(|v| v.to_uppercase()),
-                    "sysClr" => n.attribute("lastClr").map(|v| v.to_uppercase()),
-                    _ => None,
-                }
-            });
-            if let Some(h) = hex { map.insert(name, h); }
+        let mut fonts: HashMap<String, String> = HashMap::new();
+        let doc = match XmlDoc::parse(xml) { Ok(d) => d, Err(_) => return Self { map, fonts } };
+        let root = doc.root_element();
+        if let Some(scheme) = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "clrScheme") {
+            for child in scheme.children().filter(|n| n.is_element()) {
+                let name = child.tag_name().name().to_string();
+                let hex = child.children().filter(|n| n.is_element()).find_map(|n| {
+                    match n.tag_name().name() {
+                        "srgbClr" => n.attribute("val").map(|v| v.to_uppercase()),
+                        "sysClr" => n.attribute("lastClr").map(|v| v.to_uppercase()),
+                        _ => None,
+                    }
+                });
+                if let Some(h) = hex { map.insert(name, h); }
+            }
         }
-        Self { map }
+        if let Some(font_scheme) = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "fontScheme") {
+            for group_name in &["majorFont", "minorFont"] {
+                let prefix = if *group_name == "majorFont" { "major" } else { "minor" };
+                if let Some(group) = font_scheme.children().find(|n| n.is_element() && n.tag_name().name() == *group_name) {
+                    for child in group.children().filter(|n| n.is_element()) {
+                        let typ = match child.tag_name().name() {
+                            "latin" => Some("latin"),
+                            "ea"    => Some("ea"),
+                            "cs"    => Some("cs"),
+                            _       => None,
+                        };
+                        if let Some(t) = typ {
+                            if let Some(face) = child.attribute("typeface") {
+                                if !face.is_empty() {
+                                    fonts.insert(format!("{prefix}/{t}"), face.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self { map, fonts }
     }
 
     fn resolve(&self, scheme_name: &str) -> Option<String> {
@@ -118,6 +145,34 @@ impl ThemeColors {
             other => other,
         };
         self.map.get(key).cloned()
+    }
+
+    /// Resolve a string that may be either a literal typeface (e.g. "Georgia")
+    /// or an internal "@theme:<ref>" marker produced at rFonts-parse time.
+    /// Theme refs that fail to resolve fall back to None so the renderer can
+    /// use its own default; literal typefaces pass through unchanged.
+    pub fn resolve_font_ref(&self, v: Option<String>) -> Option<String> {
+        let s = v?;
+        if let Some(r) = s.strip_prefix("@theme:") {
+            return self.resolve_font(r);
+        }
+        Some(s)
+    }
+
+    /// Resolve an rFonts theme reference (e.g. "minorHAnsi" → minor.latin,
+    /// "minorEastAsia" → minor.ea, "majorHAnsi" → major.latin). Returns None
+    /// when the reference is unknown or the theme has no matching typeface.
+    pub fn resolve_font(&self, theme_ref: &str) -> Option<String> {
+        let (group, axis) = match theme_ref {
+            "minorHAnsi" | "minorAscii" => ("minor", "latin"),
+            "minorBidi"                 => ("minor", "cs"),
+            "minorEastAsia"             => ("minor", "ea"),
+            "majorHAnsi" | "majorAscii" => ("major", "latin"),
+            "majorBidi"                 => ("major", "cs"),
+            "majorEastAsia"             => ("major", "ea"),
+            _ => return None,
+        };
+        self.fonts.get(&format!("{group}/{axis}")).cloned()
     }
 }
 
@@ -394,8 +449,19 @@ fn parse_paragraph(
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
         contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
+        keep_next: base_para.keep_next.unwrap_or(false),
+        keep_lines: base_para.keep_lines.unwrap_or(false),
+        // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
+        widow_control: base_para.widow_control.unwrap_or(true),
         borders: base_para.para_borders.clone(),
-        style_id: explicit_style_id.clone().or_else(|| Some("Normal".to_string())),
+        // Fall back to the document's default paragraph style (w:default="1")
+        // rather than the literal "Normal" — international templates often use
+        // locale-specific IDs ("a", "標準", etc.) for the default style, and
+        // contextualSpacing needs a stable ID to group adjacent paragraphs.
+        style_id: explicit_style_id
+            .clone()
+            .or_else(|| style_map.default_para_style_id().map(str::to_string))
+            .or_else(|| Some("Normal".to_string())),
         default_font_size: base_run.font_size,
     }
 }
@@ -452,7 +518,7 @@ fn parse_para_content(
                     }
                 }
                 let fallback = extract_text_from_runs(child);
-                runs.push(make_field_run(&instr, &fmt, &fallback));
+                runs.push(make_field_run(&instr, &fmt, &fallback, theme));
             }
             _ => {}
         }
@@ -504,7 +570,7 @@ fn handle_run_in_para(
             "end" => {
                 if field.active {
                     let fmt = field.fmt.clone().unwrap_or_else(|| base_run.clone());
-                    runs.push(make_field_run(&field.instruction, &fmt, &field.fallback));
+                    runs.push(make_field_run(&field.instruction, &fmt, &field.fallback, theme));
                 }
                 *field = FieldState::default();
             }
@@ -553,7 +619,7 @@ fn extract_text_from_runs(node: roxmltree::Node) -> String {
     out
 }
 
-fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str) -> DocRun {
+fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str, theme: &ThemeColors) -> DocRun {
     let field_type = classify_field(instr);
     DocRun::Field(FieldRun {
         field_type,
@@ -565,7 +631,9 @@ fn make_field_run(instr: &str, fmt: &RunFmt, fallback: &str) -> DocRun {
         strikethrough: fmt.strikethrough.unwrap_or(false),
         font_size: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
         color: fmt.color.clone(),
-        font_family: fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone()),
+        font_family: theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone())),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -623,7 +691,9 @@ fn parse_run_inner(
     } else {
         fmt.color.clone()
     };
-    let font_family = fmt.font_family_ascii.clone().or(fmt.font_family_east_asia.clone());
+    let font_family = theme
+        .resolve_font_ref(fmt.font_family_ascii.clone())
+        .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()));
     let vert_align = fmt.vert_align.clone();
     let all_caps = fmt.all_caps.unwrap_or(false);
     let small_caps = fmt.small_caps.unwrap_or(false);
@@ -688,6 +758,32 @@ fn parse_run_inner(
                 for r in parse_inline_drawing(child, media_map, theme) {
                     runs.push(r);
                 }
+            }
+            "footnoteReference" | "endnoteReference" => {
+                // ECMA-376 §17.11.16: render the footnote number as superscript
+                // at the reference point. Full bottom-of-page footnote
+                // rendering isn't implemented; we at least place the marker.
+                let id_str = attr_w(child, "id").unwrap_or_else(|| "?".to_string());
+                runs.push(DocRun::Text(TextRun {
+                    text: id_str,
+                    bold,
+                    italic,
+                    underline,
+                    strikethrough,
+                    font_size,
+                    color: color.clone(),
+                    font_family: font_family.clone(),
+                    is_link,
+                    background: fmt.background.clone(),
+                    // Force superscript regardless of the run's original
+                    // vertAlign so reference markers appear above the line.
+                    vert_align: Some("superscript".to_string()),
+                    hyperlink: hyperlink.clone(),
+                    all_caps,
+                    small_caps,
+                    double_strikethrough,
+                    highlight: highlight.clone(),
+                }));
             }
             "AlternateContent" => {
                 // mc:AlternateContent/mc:Choice may contain w:drawing
@@ -1424,12 +1520,19 @@ fn parse_table_cell(
         .and_then(|v| attr_w(v, "val"))
         .unwrap_or_else(|| "top".to_string());
 
+    // ECMA-376 §17.18.87 ST_TblWidth:
+    //   dxa  — twentieths of a point (1/20pt)
+    //   pct  — 50ths of a percent of the table width (e.g. w="2500" = 50%).
+    //         We don't know the table width here, so leave None and fall
+    //         back to grid allocation like the other non-dxa cases.
+    //   auto, nil — width is dictated by content/grid; treat as None.
     let width_pt = tc_pr.and_then(|p| child_w(p, "tcW"))
         .and_then(|w| {
-            let wtype = attr_w(w, "type").unwrap_or_default();
-            if wtype == "dxa" {
-                attr_w(w, "w").map(|v| twips_to_pt(&v))
-            } else { None }
+            let wtype = attr_w(w, "type").unwrap_or_else(|| "dxa".to_string());
+            match wtype.as_str() {
+                "dxa" => attr_w(w, "w").map(|v| twips_to_pt(&v)),
+                _ => None,
+            }
         });
 
     let mut content = vec![];
@@ -1473,9 +1576,15 @@ fn parse_border_spec(node: roxmltree::Node) -> BorderSpec {
 
 fn normalize_align(s: &str) -> &str {
     match s {
-        "both" | "distribute" => "justify",
+        // "both" = justified with last line left-aligned (default Word justify).
+        // "distribute" = justified including last line (CJK Distribute).
+        // Keep them distinct so the renderer can decide whether to stretch
+        // the last line. Legacy "justify" maps to the same behavior as "both".
+        "both" | "justify" => "justify",
+        "distribute" => "distribute",
         "right" | "end" => "right",
         "center" => "center",
+        "start" | "left" => "left",
         _ => "left",
     }
 }

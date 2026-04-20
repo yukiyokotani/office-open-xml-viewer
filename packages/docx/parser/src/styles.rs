@@ -52,6 +52,12 @@ pub struct ParaFmt {
     pub page_break_before: Option<bool>,
     /// Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing)
     pub contextual_spacing: Option<bool>,
+    /// Keep paragraph on same page as the next paragraph (w:keepNext)
+    pub keep_next: Option<bool>,
+    /// Keep all lines of this paragraph on the same page (w:keepLines)
+    pub keep_lines: Option<bool>,
+    /// Widow/orphan control (w:widowControl). Default per spec: true.
+    pub widow_control: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
 }
@@ -73,6 +79,12 @@ pub struct StyleMap {
 }
 
 impl StyleMap {
+    /// Style ID of the paragraph style marked `w:default="1"` in styles.xml.
+    /// International templates may use non-English IDs (e.g. "a", "標準").
+    pub fn default_para_style_id(&self) -> Option<&str> {
+        self.default_para_style_id.as_deref()
+    }
+
     pub fn parse(xml: &str) -> Self {
         let doc = match XmlDoc::parse(xml) {
             Ok(d) => d,
@@ -185,6 +197,9 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.shading.is_some() { dst.shading = src.shading.clone(); }
     if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
     if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
+    if src.keep_next.is_some() { dst.keep_next = src.keep_next; }
+    if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
+    if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
     if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
 }
 
@@ -245,12 +260,18 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
         }
     }
 
-    // Indentation
+    // Indentation. ECMA-376 §17.3.1.12 allows both the older "left"/"right"
+    // attributes and the logical "start"/"end" aliases. In LTR docs these are
+    // identical; use either if present, with start/end taking precedence when
+    // both appear (logical wins for bidi correctness).
     if let Some(ind) = child_w(ppr, "ind") {
-        if let Some(v) = attr_w(ind, "left") { fmt.indent_left = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "left")  { fmt.indent_left  = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "start") { fmt.indent_left  = Some(twips_to_pt(&v)); }
         if let Some(v) = attr_w(ind, "right") { fmt.indent_right = Some(twips_to_pt(&v)); }
+        if let Some(v) = attr_w(ind, "end")   { fmt.indent_right = Some(twips_to_pt(&v)); }
         if let Some(v) = attr_w(ind, "firstLine") { fmt.indent_first = Some(twips_to_pt(&v)); }
-        if let Some(v) = attr_w(ind, "hanging") { fmt.indent_first = Some(-twips_to_pt(&v)); }
+        // hanging overrides firstLine per §17.3.1.12 when both are present.
+        if let Some(v) = attr_w(ind, "hanging")   { fmt.indent_first = Some(-twips_to_pt(&v)); }
     }
 
     // Numbering
@@ -304,6 +325,16 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // Contextual spacing
     fmt.contextual_spacing = bool_prop(ppr, "contextualSpacing");
+
+    // keepNext — keep this paragraph on the same page as the next one
+    fmt.keep_next = bool_prop(ppr, "keepNext");
+
+    // keepLines — do not split this paragraph's lines across pages
+    fmt.keep_lines = bool_prop(ppr, "keepLines");
+
+    // widowControl — avoid leaving a single line at page top/bottom
+    // (ECMA-376 default: true; explicit value=0 disables).
+    fmt.widow_control = bool_prop(ppr, "widowControl");
 
     // Paragraph borders (pBdr)
     if let Some(pbdr) = child_w(ppr, "pBdr") {
@@ -368,10 +399,20 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         }
     }
 
-    // Font family
+    // Font family. ECMA-376 §17.3.2.26 rFonts supports both direct typeface
+    // attributes (ascii/hAnsi/eastAsia/cs) and theme references (asciiTheme,
+    // hAnsiTheme, eastAsiaTheme, cstheme). Theme refs are resolved post-parse
+    // in parse_document once a Theme is available; here we just record the
+    // reference string under the corresponding axis. Direct attributes take
+    // precedence over theme refs per spec.
     if let Some(rf) = child_w(rpr, "rFonts") {
-        fmt.font_family_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
-        fmt.font_family_east_asia = attr_w(rf, "eastAsia");
+        let direct_ascii = attr_w(rf, "ascii").or_else(|| attr_w(rf, "hAnsi"));
+        let theme_ascii  = attr_w(rf, "asciiTheme").or_else(|| attr_w(rf, "hAnsiTheme"));
+        fmt.font_family_ascii = direct_ascii.or_else(|| theme_ascii.map(|t| format!("@theme:{t}")));
+
+        let direct_ea = attr_w(rf, "eastAsia");
+        let theme_ea  = attr_w(rf, "eastAsiaTheme");
+        fmt.font_family_east_asia = direct_ea.or_else(|| theme_ea.map(|t| format!("@theme:{t}")));
     }
 
     // Background highlight

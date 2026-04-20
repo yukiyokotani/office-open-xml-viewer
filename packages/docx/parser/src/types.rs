@@ -82,6 +82,14 @@ pub struct DocParagraph {
     /// Suppress spacing between adjacent same-style paragraphs (w:contextualSpacing)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub contextual_spacing: bool,
+    /// Keep paragraph on the same page as the next paragraph (w:keepNext)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub keep_next: bool,
+    /// Keep all lines of this paragraph on the same page (w:keepLines)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub keep_lines: bool,
+    /// Widow/orphan control (w:widowControl). Default per spec: true.
+    pub widow_control: bool,
     /// Paragraph borders (w:pBdr)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<ParagraphBorders>,
