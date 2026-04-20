@@ -2413,13 +2413,14 @@ function renderTextBody(
   // must be normalized before fillText() or alignment/anchor math will drift.
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  // Zero-width shapes (e.g., vertical line annotations with bw=0) must not use a
-  // zero-area clip rect — it would make all text invisible. Only clip when bw > 0.
-  if (bw > 0) {
-    ctx.beginPath();
-    ctx.rect(bx, effectiveBy, bw, effectiveBh);
-    ctx.clip();
-  }
+  // ECMA-376 §20.1.2.3.6 (a:bodyPr): PowerPoint does NOT clip text that
+  // overflows its shape — the text simply renders past the shape bounds and
+  // can overlap with adjacent elements. Our previous behavior clipped, which
+  // cropped long text in fixed-height boxes. Only clip when the caller has
+  // opted into wrap=none AND a finite x-axis rectangle (rare), which we
+  // approximate here by skipping clipping entirely for the default bodyPr.
+  // `body.wrap === "none"` means horizontal non-wrap; it doesn't affect
+  // clipping per spec either, so we just don't clip.
 
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
