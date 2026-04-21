@@ -30,6 +30,10 @@ export interface Worksheet {
   charts: ChartAnchor[];
   /** Whether to display zero values (ECMA-376 §18.3.1.94). Defaults to true. */
   showZeros?: boolean;
+  /** Whether to draw default grid lines (ECMA-376 §18.3.1.83
+   *  `<sheetView showGridLines>`). Mirrors the Excel "View → Gridlines"
+   *  checkbox. Defaults to true. */
+  showGridlines?: boolean;
   /** Sheet tab color (ECMA-376 §18.3.1.79). */
   tabColor?: string | null;
   /** AutoFilter header range (ECMA-376 §18.3.1.2). */
@@ -39,6 +43,15 @@ export interface Worksheet {
   /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
    *  small red triangle in each cell's top-right corner. */
   commentRefs?: string[];
+  /** Defined names in scope for this sheet (ECMA-376 §18.2.5). Used by
+   *  conditional-formatting `expression` rules that call named ranges
+   *  (e.g. `task_start`, `today`). */
+  definedNames?: DefinedName[];
+}
+
+export interface DefinedName {
+  name: string;
+  formula: string;
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────
@@ -142,9 +155,9 @@ export interface ConditionalFormat {
 
 export type CfRule =
   | { type: 'cellIs'; operator: string; formulas: string[]; dxfId: number | null; priority: number }
-  | { type: 'expression'; formula: string; dxfId: number | null; priority: number }
+  | { type: 'expression'; formula: string; dxfId: number | null; priority: number; stopIfTrue: boolean }
   | { type: 'colorScale'; stops: CfStop[]; priority: number }
-  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number }
+  | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean }
   | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number }
   | { type: 'aboveAverage'; aboveAverage: boolean; dxfId: number | null; priority: number }
   | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number }
