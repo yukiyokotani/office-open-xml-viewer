@@ -3802,19 +3802,58 @@ fn parse_connector(
 
     let cy = if t.cy == 0 { 1 } else { t.cy };
 
+    // Preserve the actual preset geometry (bentConnector3, curvedConnector4, …)
+    // rather than collapsing every p:cxnSp to "line" — otherwise the renderer
+    // can't distinguish bent/curved paths from a straight segment.
+    let prst_geom_node = child(sp_pr, "prstGeom");
+    let geometry = prst_geom_node
+        .and_then(|n| attr(&n, "prst"))
+        .unwrap_or_else(|| "line".to_owned());
+
+    // Pull connector adjust values from avLst (e.g. bentConnector3 adj1 = bend %).
+    let parse_gd_val = |gd: roxmltree::Node<'_, '_>| -> Option<f64> {
+        attr(&gd, "fmla")
+            .and_then(|f| f.strip_prefix("val ").map(|s| s.to_owned()))
+            .and_then(|s| s.parse::<f64>().ok())
+    };
+    let av_node = prst_geom_node.and_then(|n| child(n, "avLst"));
+    let gd_nodes: Vec<_> = av_node
+        .map(|av| av.children().filter(|n| n.is_element() && n.tag_name().name() == "gd").collect())
+        .unwrap_or_default();
+    let adj: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| matches!(attr(n, "name").as_deref(), Some("adj") | Some("adj1")))
+        .or_else(|| gd_nodes.first())
+        .and_then(|n| parse_gd_val(*n));
+    let adj2: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj2"))
+        .or_else(|| gd_nodes.get(1))
+        .and_then(|n| parse_gd_val(*n));
+    let adj3: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj3"))
+        .or_else(|| gd_nodes.get(2))
+        .and_then(|n| parse_gd_val(*n));
+    let adj4: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj4"))
+        .or_else(|| gd_nodes.get(3))
+        .and_then(|n| parse_gd_val(*n));
+
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        geometry: "line".to_owned(),
+        geometry,
         fill: None,
         stroke,
         text_body: None,
         default_text_color: None,
         cust_geom: None,
-        adj: None,
-        adj2: None,
-        adj3: None,
-        adj4: None,
+        adj,
+        adj2,
+        adj3,
+        adj4,
         shadow,
     })
 }
