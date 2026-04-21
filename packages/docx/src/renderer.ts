@@ -248,6 +248,11 @@ export function computePages(
   const pages: BodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
+  // Word collapses the gap between two paragraphs to max(prev.spaceAfter,
+  // this.spaceBefore) — i.e. it does NOT sum them. CSS-style "margin
+  // collapsing." Matches Word's observed layout on demo/sample-1 (gap
+  // between para 18 after=360 and para 19 before=240 is 18pt, not 30pt).
+  let prevSpaceAfter = 0;
   // Keep measureState.y in sync with the current page's content Y so that
   // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
   // are on the page. Anchor floats are registered on the measureState as
@@ -260,6 +265,7 @@ export function computePages(
       pages.push([]);
       y = 0;
       prevPara = null;
+      prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
     }
@@ -300,25 +306,41 @@ export function computePages(
       if (para.pageBreakBefore) newPage();
       const suppressBefore = contextualSuppressed(prevPara, para);
 
+      // Collapse with the previous paragraph's spaceAfter — Word takes
+      // max(prev.after, this.before) between paragraphs, not the sum.
+      const effectiveBefore = suppressBefore ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effectiveBefore);
+      y -= overlap;
+      measureState.y -= overlap;
+
       // Register this paragraph's anchor-image floats on the measureState so
       // subsequent paragraphs estimate around them (text-wrap around images
       // adds lines that the float-unaware estimate would otherwise miss,
       // which caused page 2 of demo/sample-1 to spill past the bottom
       // margin). The renderer runs the same registerAnchorFloats call; by
       // mirroring it here the paginator sees the same layout.
-      const paragraphAnchorY = measureState.y + (suppressBefore ? 0 : para.spaceBefore);
+      const paragraphAnchorY = measureState.y + effectiveBefore;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
       const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
       // Break if this paragraph alone doesn't fit, OR if keepNext is set and
       // placing it would leave no room for the next block on the same page.
+      // Per Word's layout behavior: `spaceAfter` is trailing whitespace that
+      // can legally overflow the bottom of the page — only content + spaceBefore
+      // must fit. This is what lets a closing paragraph with a large
+      // `w:spacing/@w:after` land flush against the bottom margin.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
-      const needed = h + needNext;
-      if (y > 0 && y + needed > contentH) newPage();
+      const fitHeight = h - para.spaceAfter;
+      const needed = fitHeight + needNext;
+      if (y > 0 && y + needed > contentH) {
+        newPage();
+        // After newPage, overlap is irrelevant (first paragraph on new page).
+      }
       pages[pages.length - 1].push(el);
       y += h;
       measureState.y += h;
       prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
       const h = estimateTableHeight(measureState, tbl, contentW);
@@ -454,23 +476,37 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
 
 function renderBodyElements(elements: BodyElement[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
   for (const el of elements) {
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
-      renderParagraph(para, state, contextualSuppressed(prevPara, para));
+      const suppress = contextualSuppressed(prevPara, para);
+      // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effBefore);
+      state.y -= overlap * state.scale;
+      renderParagraph(para, state, suppress);
       prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       renderTable(el as unknown as DocTable, state);
       prevPara = null;
+      prevSpaceAfter = 0;
     }
   }
 }
 
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
   for (const para of paras) {
-    renderParagraph(para, state, contextualSuppressed(prevPara, para));
+    const suppress = contextualSuppressed(prevPara, para);
+    const effBefore = suppress ? 0 : para.spaceBefore;
+    const overlap = Math.min(prevSpaceAfter, effBefore);
+    state.y -= overlap * state.scale;
+    renderParagraph(para, state, suppress);
     prevPara = para;
+    prevSpaceAfter = para.spaceAfter;
   }
 }
 
@@ -1670,12 +1706,22 @@ function lineBoxHeight(
 ): number {
   const natural = ascentPx + descentPx;
   const hasGrid = isGridLineRule(grid);
+  const pitchPx = hasGrid ? grid!.linePitchPt! * scale : 0;
+  // Per ECMA-376 §17.6.5, a paragraph whose `line` attribute is NOT
+  // explicitly set — it only inherits from docDefault — snaps to one grid
+  // pitch per text line in docGrid sections, regardless of the inherited
+  // multiplier. Paragraphs that do set `line` on their pPr or a named style
+  // multiply against the pitch as usual. This is what makes Word render
+  // ESSAY (9 pt, no explicit line) at ~1 pitch (~18 pt) while a 1.33×
+  // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
+  const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
-    return hasGrid ? Math.max(natural, grid!.linePitchPt! * scale) : natural;
+    return hasGrid ? Math.max(natural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      return Math.max(natural, grid!.linePitchPt! * ls.value * scale);
+      if (inheritedOnly) return Math.max(natural, pitchPx);
+      return Math.max(natural, pitchPx * ls.value);
     }
     return natural * ls.value;
   }

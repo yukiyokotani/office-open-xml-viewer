@@ -423,6 +423,7 @@ fn parse_paragraph(
     let line_spacing = base_para.line_spacing_val.map(|v| LineSpacing {
         value: v,
         rule: base_para.line_spacing_rule.clone().unwrap_or_else(|| "auto".to_string()),
+        explicit: base_para.line_spacing_explicit.unwrap_or(false),
     });
 
     // Numbering — extract level data before advancing counter (avoids borrow conflict)
@@ -1617,6 +1618,7 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     if direct.space_after.is_some() { base.space_after = direct.space_after; }
     if direct.line_spacing_val.is_some() { base.line_spacing_val = direct.line_spacing_val; }
     if direct.line_spacing_rule.is_some() { base.line_spacing_rule = direct.line_spacing_rule.clone(); }
+    if direct.line_spacing_explicit.is_some() { base.line_spacing_explicit = direct.line_spacing_explicit; }
     if direct.num_id.is_some() { base.num_id = direct.num_id; }
     if direct.num_level.is_some() { base.num_level = direct.num_level; }
     if direct.tab_stops.is_some() { base.tab_stops = direct.tab_stops.clone(); }
