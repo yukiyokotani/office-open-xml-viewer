@@ -67,6 +67,11 @@ pub struct ParaFmt {
     pub widow_control: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
+    /// Heading outline level (w:outlineLvl, 0–8) when set. Word's built-in
+    /// heading styles (Heading 1–9) are rendered with an implicit
+    /// `w:keepNext` even when not spelled out in styles.xml; downstream
+    /// code uses this to infer that behavior.
+    pub outline_level: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -213,6 +218,7 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
     if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
     if src.keep_next.is_some() { dst.keep_next = src.keep_next; }
+    if src.outline_level.is_some() { dst.outline_level = src.outline_level; }
     if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
     if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
     if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
@@ -347,6 +353,19 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // widowControl — avoid leaving a single line at page top/bottom
     // (ECMA-376 default: true; explicit value=0 disables).
     fmt.widow_control = bool_prop(ppr, "widowControl");
+
+    // outlineLvl — 0..8 marks this paragraph (or its style) as a heading.
+    // ECMA-376 §17.3.1.20 lists only 0–8 and "no level" (absent). Word
+    // attaches an implicit keepNext to heading paragraphs (Heading 1–9
+    // styles) even when the style XML omits it, which we replicate at
+    // the final paragraph build step.
+    if let Some(lvl) = child_w(ppr, "outlineLvl") {
+        if let Some(v) = attr_w(lvl, "val") {
+            if let Ok(n) = v.parse::<u32>() {
+                if n <= 8 { fmt.outline_level = Some(n); }
+            }
+        }
+    }
 
     // Paragraph borders (pBdr)
     if let Some(pbdr) = child_w(ppr, "pBdr") {
