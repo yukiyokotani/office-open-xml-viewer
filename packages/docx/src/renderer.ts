@@ -245,11 +245,20 @@ export function computePages(
   const pages: BodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
+  // Keep measureState.y in sync with the current page's content Y so that
+  // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
+  // are on the page. Anchor floats are registered on the measureState as
+  // paragraphs are processed and cleared when we flip to a new page, exactly
+  // like the real renderer does.
+  measureState.y = section.marginTop;
+  measureState.floats = [];
   const newPage = () => {
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
       y = 0;
       prevPara = null;
+      measureState.y = section.marginTop;
+      measureState.floats = [];
     }
   };
 
@@ -287,7 +296,17 @@ export function computePages(
       const para = el as unknown as DocParagraph;
       if (para.pageBreakBefore) newPage();
       const suppressBefore = contextualSuppressed(prevPara, para);
-      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore);
+
+      // Register this paragraph's anchor-image floats on the measureState so
+      // subsequent paragraphs estimate around them (text-wrap around images
+      // adds lines that the float-unaware estimate would otherwise miss,
+      // which caused page 2 of demo/sample-1 to spill past the bottom
+      // margin). The renderer runs the same registerAnchorFloats call; by
+      // mirroring it here the paginator sees the same layout.
+      const paragraphAnchorY = measureState.y + (suppressBefore ? 0 : para.spaceBefore);
+      registerAnchorFloats(para, measureState, paragraphAnchorY);
+
+      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
       // Break if this paragraph alone doesn't fit, OR if keepNext is set and
       // placing it would leave no room for the next block on the same page.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
@@ -295,6 +314,7 @@ export function computePages(
       if (y > 0 && y + needed > contentH) newPage();
       pages[pages.length - 1].push(el);
       y += h;
+      measureState.y += h;
       prevPara = para;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
@@ -302,6 +322,7 @@ export function computePages(
       if (y + h > contentH) newPage();
       pages[pages.length - 1].push(el);
       y += h;
+      measureState.y += h;
       prevPara = null;
     }
   }
@@ -334,6 +355,7 @@ function estimateParagraphHeight(
   para: DocParagraph,
   contentWPt: number,
   suppressSpaceBefore = false,
+  paraXPt = 0,
 ): number {
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
@@ -342,10 +364,21 @@ function estimateParagraphHeight(
   let textH: number;
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
-    textH = fs * lineSpacingMultiplier(para.lineSpacing, fs);
+    const { asc, desc } = emptyLineNaturalPx(fs, 1);
+    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1);
   } else {
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops);
-    textH = lines.reduce((s, l) => s + l.height * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
+    // When anchor-image floats are active on the current page the paragraph
+    // wraps around them, adding lines compared to a full-width layout. Use
+    // the same WrapLayoutCtx the renderer uses so estimate and render agree.
+    const wrapCtx: WrapLayoutCtx | undefined = state.floats.length > 0 ? {
+      startPageY: state.y,
+      paraX: paraXPt,
+      floats: state.floats,
+      lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1),
+      pageH: state.pageH,
+    } : undefined;
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
+    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1), 0);
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
 }
@@ -478,8 +511,9 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
   const segments = buildSegments(para.runs, state);
 
   if (segments.length === 0) {
-    const fontSize = getDefaultFontSize(para) * scale;
-    const emptyH = fontSize * lineSpacingMultiplier(para.lineSpacing);
+    const fontSizePt = getDefaultFontSize(para);
+    const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
+    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -497,14 +531,14 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineSpacingMult: (h: number) => lineSpacingMultiplier(para.lineSpacing, h),
+    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, scale),
     pageH: state.pageH,
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
+    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale), 0);
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
@@ -534,8 +568,12 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     // Honor wrap-computed line topY (may push past topAndBottom floats).
     if (line.topY !== undefined && line.topY > state.y) state.y = line.topY;
 
-    const lineH = line.height * scale * lineSpacingMultiplier(para.lineSpacing, line.height);
-    const baseline = state.y + line.ascent;
+    // Word centers the font's natural line (ascent+descent) within the expanded
+    // line box — extra space from auto/exact/atLeast goes half above and half
+    // below the glyphs. Baseline = top + halfExtra + ascent.
+    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale);
+    const naturalLineH = line.ascent + line.descent;
+    const baseline = state.y + (lineH - naturalLineH) / 2 + line.ascent;
 
     // Per-line X range (may be narrower than paraW when wrapping around floats).
     const lineLeft = paraX + line.xOffset;
@@ -713,8 +751,9 @@ type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutLineBreak | LayoutTabSeg
 
 interface LayoutLine {
   segments: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[];
-  height: number;  // pt
-  ascent: number;  // px
+  height: number;  // pt — max fontSize on line (for empty-line sizing fallback)
+  ascent: number;  // px — fontBoundingBoxAscent (font-metric, stable per font+size)
+  descent: number; // px — fontBoundingBoxDescent
   /** Additional horizontal offset (px) from paraX, caused by wrap-around floats. */
   xOffset: number;
   /** Effective available width (px) for this line after float exclusion. */
@@ -728,8 +767,8 @@ interface WrapLayoutCtx {
   startPageY: number;   // absolute canvas Y where the first line should start
   paraX: number;        // absolute canvas X of the paragraph's content left edge
   floats: FloatRect[];  // floats active on the current page
-  /** Per-line-height multiplier so atLeast/exact rules can use their pt value. */
-  lineSpacingMult: (lineHeightPt: number) => number;
+  /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
+  lineBoxH: (ascentPx: number, descentPx: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -888,6 +927,7 @@ function layoutLines(
   let currentWidth = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
+  let lineDescent = 0;  // px
   let isFirst = true;
   // Effective width/offset for the current line after float exclusion.
   let lineMaxWidth = maxWidth;
@@ -954,30 +994,45 @@ function layoutLines(
 
   const flush = (forceHeight?: number) => {
     const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
+    // If the line has no measured content (empty/line-break line), synthesize
+    // stable ascent/descent from the effective font size so wrap/baseline math
+    // stays consistent with non-empty lines.
+    const hasContent = lineAscent > 0 || lineDescent > 0;
+    const asc = hasContent ? lineAscent : h * scale * 0.8;
+    const desc = hasContent ? lineDescent : h * scale * 0.2;
     lines.push({
       segments: currentLine,
       height: h,
-      ascent: lineAscent,
+      ascent: asc,
+      descent: desc,
       xOffset: lineXOffset,
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
     });
     if (wrapCtx) {
-      currentLineTopY += h * scale * wrapCtx.lineSpacingMult(h);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc);
     }
     currentLine = [];
     currentWidth = 0;
     lineHeight = 0;
     lineAscent = 0;
+    lineDescent = 0;
     isFirst = false;
     startLine();
   };
 
-  const addToLine = (s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg, w: number, h: number, asc: number) => {
+  const addToLine = (
+    s: LayoutTextSeg | LayoutImageSeg | LayoutTabSeg,
+    w: number,
+    h: number,
+    asc: number,
+    desc: number,
+  ) => {
     currentLine.push(s);
     currentWidth += w;
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
+    if (desc > lineDescent) lineDescent = desc;
   };
 
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
@@ -1025,7 +1080,7 @@ function layoutLines(
         continue;
       }
       seg.measuredWidth = tabWidth;
-      addToLine(seg, tabWidth, seg.fontSize, seg.fontSize * scale * 0.75);
+      addToLine(seg, tabWidth, seg.fontSize, seg.fontSize * scale * 0.8, seg.fontSize * scale * 0.2);
       continue;
     }
 
@@ -1037,7 +1092,7 @@ function layoutLines(
       const asc = seg.heightPt * scale;
       seg.measuredWidth = w;
       if (currentLine.length > 0 && currentWidth + w > availW()) flush();
-      addToLine(seg, w, h, asc);
+      addToLine(seg, w, h, asc, 0);
       continue;
     }
 
@@ -1045,14 +1100,17 @@ function layoutLines(
     const s = seg as LayoutTextSeg;
     const m = measureText(s);
     const w = m.width;
-    // Line-height should track the un-scaled font so super/sub don't shrink the line
+    // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
-    const asc = m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.75;
+    // Prefer font-metric ascent/descent (stable per font+size) so baselines and
+    // line boxes do not jitter based on the specific characters on each line.
+    const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
+    const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
 
     if (currentWidth + w <= availW()) {
       // Fits on current line as-is
       s.measuredWidth = w;
-      addToLine(s, w, h, asc);
+      addToLine(s, w, h, asc, desc);
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
@@ -1061,7 +1119,7 @@ function layoutLines(
       if (prefix.length > 0) {
         const pm = ctx.measureText(prefix);
         const headSeg: LayoutTextSeg = { ...s, text: prefix, measuredWidth: pm.width };
-        addToLine(headSeg, pm.width, h, pm.actualBoundingBoxAscent ?? asc);
+        addToLine(headSeg, pm.width, h, asc, desc);
         const tail = s.text.slice(prefix.length);
         if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
       } else if (currentLine.length > 0) {
@@ -1074,7 +1132,7 @@ function layoutLines(
         if (firstChar) {
           const fm = ctx.measureText(firstChar);
           const headSeg: LayoutTextSeg = { ...s, text: firstChar, measuredWidth: fm.width };
-          addToLine(headSeg, fm.width, h, fm.actualBoundingBoxAscent ?? asc);
+          addToLine(headSeg, fm.width, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
           if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
         }
@@ -1082,12 +1140,12 @@ function layoutLines(
     } else if (currentLine.length === 0) {
       // Nothing on the line yet and no CJK break — force-fit (word wider than column)
       s.measuredWidth = w;
-      addToLine(s, w, h, asc);
+      addToLine(s, w, h, asc, desc);
     } else {
       // Latin word wrap: flush and put this word on the next line
       flush();
       s.measuredWidth = w;
-      addToLine(s, w, h, asc);
+      addToLine(s, w, h, asc, desc);
     }
   }
 
@@ -1378,9 +1436,13 @@ function measureParaHeight(
   scale: number,
 ): number {
   const segs = buildSegments(para.runs, state);
-  if (segs.length === 0) return getDefaultFontSize(para) * scale;
+  if (segs.length === 0) {
+    const fs = getDefaultFontSize(para);
+    const { asc, desc } = emptyLineNaturalPx(fs, scale);
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale);
+  }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
-  return lines.reduce((s, l) => s + l.height * scale * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale), 0);
 }
 
 function measureCellContent(
@@ -1538,23 +1600,33 @@ function getDefaultFontSize(para: DocParagraph): number {
 }
 
 /**
- * Effective line-height multiplier for a paragraph's line spacing, given the
- * line's tallest glyph (baseHeightPt, usually the run font size in pt).
+ * Compute the total line-box height in px from a line's natural font metrics
+ * (fontBoundingBoxAscent + fontBoundingBoxDescent) per ECMA-376 §17.3.1.33.
  *
- * ECMA-376 §17.3.1.33:
- *   auto    → value is a multiplier of "single-line spacing" (≈ 1.2× font).
- *   exact   → value IS the line height in pt; ignore font.
- *   atLeast → line height is the larger of single-line and value pt.
+ *   auto    → natural × value ("single" = 1 natural line, "double" = 2)
+ *   exact   → value in pt, converted to px (ignores font)
+ *   atLeast → max(natural, value in pt × scale)
+ *   null    → natural
  *
- * Previously all non-auto rules collapsed to 1.2, so explicit pt-based line
- * heights on headings were ignored and the paragraph rendered at 1.2× font
- * even when the XML asked for a taller box. That made page flow too compact.
+ * Word's "1×" spacing is defined by font design metrics, not the em-box, so a
+ * 28-pt heading with value=2.67 yields roughly (ascent+descent) × 2.67 ≈ 88pt
+ * between baselines — matching Word rather than 28 × 2.67 = 74.76pt (em-box).
  */
-function lineSpacingMultiplier(ls: LineSpacing | null, baseHeightPt: number = 1): number {
-  if (!ls) return 1.2;
-  if (ls.rule === 'auto') return ls.value * 1.2;
-  if (baseHeightPt <= 0) return 1.2;
-  if (ls.rule === 'exact')   return ls.value / baseHeightPt;
-  if (ls.rule === 'atLeast') return Math.max(1.2, ls.value / baseHeightPt);
-  return 1.2;
+function lineBoxHeight(
+  ls: LineSpacing | null,
+  ascentPx: number,
+  descentPx: number,
+  scale: number,
+): number {
+  const natural = ascentPx + descentPx;
+  if (!ls) return natural;
+  if (ls.rule === 'auto') return natural * ls.value;
+  if (ls.rule === 'exact') return ls.value * scale;
+  if (ls.rule === 'atLeast') return Math.max(natural, ls.value * scale);
+  return natural;
+}
+
+/** Natural single-line height in px for an empty paragraph (no rendered text). */
+function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: number; desc: number } {
+  return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
 }
