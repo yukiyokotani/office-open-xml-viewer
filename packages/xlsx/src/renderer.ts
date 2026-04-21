@@ -34,6 +34,26 @@ function hexToRgba(hex: string, alpha = 1): string {
 }
 
 /**
+ * Fill a data-bar rectangle with the Excel 2010+ horizontal gradient
+ * (x14:dataBar@gradient default = "1"): solid color on the left, fading
+ * to an ~85%-tinted-to-white version on the right. We render with alpha
+ * stops rather than literally mixing toward white so underlying cell
+ * background (including zebra-striping or fills) shows through.
+ */
+function fillDataBarGradient(
+  ctx: CanvasRenderingContext2D,
+  color: string,
+  x: number, y: number, w: number, h: number,
+): void {
+  if (w <= 0 || h <= 0) return;
+  const grad = ctx.createLinearGradient(x, y, x + w, y);
+  grad.addColorStop(0, hexToRgba(color, 0.85));
+  grad.addColorStop(1, hexToRgba(color, 0.15));
+  ctx.fillStyle = grad;
+  ctx.fillRect(x, y, w, h);
+}
+
+/**
  * Fractional fg coverage for an ECMA-376 ST_PatternType (§18.8.22). Values are
  * derived from the spec's verbal descriptions — gray125 = 12.5% fg on bg,
  * gray0625 = 6.25%, mediumGray ≈ 50%, darkGray ≈ 75%, lightGray ≈ 25%. Hatch
@@ -1024,10 +1044,7 @@ function renderQuadrant(
     if (cf.dataBar && cf.dataBar.ratio > 0) {
       const bInset = 2;
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
-      if (bW > 0) {
-        ctx.fillStyle = hexToRgba(cf.dataBar.color, 0.6);
-        ctx.fillRect(aCx + bInset, aCy + bInset, bW, cH - bInset * 2);
-      }
+      fillDataBarGradient(ctx, cf.dataBar.color, aCx + bInset, aCy + bInset, bW, cH - bInset * 2);
     }
     renderBorder(ctx, border, aCx, aCy, cW, cH);
 
@@ -1129,14 +1146,12 @@ function renderQuadrant(
         drawCommentMarker(ctx, cx, cy, cellW, cellH);
       }
 
-      // DataBar (drawn inside the cell, left-anchored)
+      // DataBar (drawn inside the cell, left-anchored). Excel 2010+ renders
+      // these with a horizontal gradient by default.
       if (cf.dataBar && cf.dataBar.ratio > 0) {
         const barInset = 2;
         const barW = Math.max(0, (cellW - barInset * 2) * cf.dataBar.ratio);
-        if (barW > 0) {
-          ctx.fillStyle = hexToRgba(cf.dataBar.color, 0.6);
-          ctx.fillRect(cx + barInset, cy + barInset, barW, cellH - barInset * 2);
-        }
+        fillDataBarGradient(ctx, cf.dataBar.color, cx + barInset, cy + barInset, barW, cellH - barInset * 2);
       }
 
       // Grid lines – draw only right + bottom edges once per cell (avoids double-drawing at
