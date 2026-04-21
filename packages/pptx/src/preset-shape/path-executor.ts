@@ -88,10 +88,20 @@ export function applyPresetPath(
         const stDeg = evaluator.resolve(cmd[3]) * DEG60K_TO_RAD;
         const swDeg = evaluator.resolve(cmd[4]) * DEG60K_TO_RAD;
         // OOXML arc uses visual angles; Canvas's ellipse() takes parametric.
+        // atan2 collapses every full revolution, so split the sweep into
+        // whole turns + remainder and compute a monotonic parametric sweep
+        // whose sign matches swDeg. Without this, sun/etc. with swDeg=360°
+        // produce start==end and nothing is drawn.
+        const TWO_PI = Math.PI * 2;
         const visualToParam = (v: number) =>
           Math.atan2(wR * Math.sin(v), hR * Math.cos(v));
-        const stP  = visualToParam(stDeg);
-        const endP = visualToParam(stDeg + swDeg);
+        const stP = visualToParam(stDeg);
+        const fullRevs = Math.trunc(swDeg / TWO_PI);
+        const remainder = swDeg - fullRevs * TWO_PI;
+        let delta = visualToParam(stDeg + remainder) - stP;
+        if (remainder > 0 && delta < 0) delta += TWO_PI;
+        else if (remainder < 0 && delta > 0) delta -= TWO_PI;
+        const endP = stP + delta + fullRevs * TWO_PI;
         // Back-solve center from pen & start angle.
         const cx = penX - wR * Math.cos(stP);
         const cy = penY - hR * Math.sin(stP);
