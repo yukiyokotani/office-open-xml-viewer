@@ -186,6 +186,11 @@ export interface Cell {
   colRef: string;
   value: CellValue;
   styleIndex: number;
+  /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The renderer
+   *  uses this to recompute volatile functions (TODAY, NOW) at display time
+   *  so the cached `<v>` — frozen when the file was last saved — doesn't
+   *  show a stale date. */
+  formula?: string;
 }
 
 export type CellValue =
