@@ -27,6 +27,14 @@ export interface ChartSeries {
    * `ChartModel.categories` as X.
    */
   categories?: string[] | null;
+  /**
+   * Resolved marker visibility for line/scatter series. ECMA-376 §21.2.2.32
+   * `<c:marker><c:symbol>` defaults to "none" for line charts unless the
+   * chart-level `<c:marker val="1"/>` or a per-series symbol opts in. When
+   * undefined/null the renderer uses its own default (visible) so callers
+   * that don't parse markers (e.g. pptx today) keep their existing behavior.
+   */
+  showMarker?: boolean | null;
 }
 
 /**
@@ -67,6 +75,8 @@ export interface ChartModel {
   chartBg: string | null;
   /** True when `<c:legend>` is declared in the chart XML. False = no legend. */
   showLegend: boolean;
+  /** `<c:legend><c:legendPos val>` — "r"|"l"|"t"|"b"|"tr". null = default (r). */
+  legendPos: 'r' | 'l' | 't' | 'b' | 'tr' | null;
   /** `<c:catAx><c:crossBetween val="..."/>`. "between" inserts 0.5-step padding
    *  on each end of the category axis; "midCat" anchors endpoints to the axes. */
   catAxisCrossBetween: 'between' | 'midCat' | string;

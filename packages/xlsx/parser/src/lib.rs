@@ -75,6 +75,11 @@ pub struct ChartSeries {
     /// Explicit fill color hex (from c:spPr/a:solidFill/a:srgbClr). None = use palette.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Whether to draw data-point markers on line/scatter series. Resolved at
+    /// parse time from `<c:ser><c:marker><c:symbol val>` (ECMA-376 §21.2.2.32)
+    /// falling back to the chart-type-level `<c:lineChart><c:marker val>`
+    /// (§21.2.2.33). Absent markers default to hidden for line charts.
+    pub show_marker: bool,
 }
 
 /// Parsed chart data extracted from `xl/charts/chartN.xml`.
@@ -104,6 +109,10 @@ pub struct ChartData {
     pub val_axis_title: Option<String>,
     /// True when `<c:legend>` is present in the chart; false means no legend.
     pub show_legend: bool,
+    /// `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr".
+    /// None = default ("r").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_pos: Option<String>,
     /// Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt).
     /// Taken from the first `defRPr@sz` or `rPr@sz` inside `c:title`. None =
     /// not specified; renderer falls back to a proportional default.
@@ -117,6 +126,13 @@ pub struct ChartData {
     /// Taken from the first `a:latin` element inside `c:title`. None = default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_font_face: Option<String>,
+    /// Category axis tick-label font size in hundredths of a point
+    /// (ECMA-376 §21.2.2.17 `c:txPr/a:defRPr@sz`). None = not specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_size_hpt: Option<i32>,
+    /// Value axis tick-label font size in hundredths of a point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_size_hpt: Option<i32>,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -1690,9 +1706,16 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
-    // explicit legend element).
-    let show_legend = chart_root.children()
-        .any(|n| n.tag_name().name() == "legend" && n.tag_name().namespace() == Some(c_ns));
+    // explicit legend element). When present, `<c:legendPos val>` picks a side
+    // ("r"|"l"|"t"|"b"|"tr") — default "r" per ECMA-376 §21.2.2.10.
+    let legend_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "legend" && n.tag_name().namespace() == Some(c_ns));
+    let show_legend = legend_node.is_some();
+    let legend_pos = legend_node.and_then(|ln| {
+        ln.children()
+            .find(|n| n.tag_name().name() == "legendPos" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|p| p.attribute("val").map(|s| s.to_string()))
+    });
 
     // Find c:plotArea
     let plot_area = chart_root.children()
@@ -1706,6 +1729,8 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     let mut show_data_labels = false;
     let mut cat_axis_title: Option<String> = None;
     let mut val_axis_title: Option<String> = None;
+    let mut cat_axis_font_size_hpt: Option<i32> = None;
+    let mut val_axis_font_size_hpt: Option<i32> = None;
 
     // Recognised chart-type element names → our internal type strings
     let type_map: &[(&str, &str)] = &[
@@ -1724,17 +1749,24 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         if child.tag_name().namespace() != Some(c_ns) { continue; }
         let elem_name = child.tag_name().name();
 
-        // Axis title extraction
+        // Axis title + tick label font size extraction (ECMA-376 §21.2.2.17
+        // c:txPr/a:defRPr@sz gives tick labels their hpt size; absent = default).
         match elem_name {
             "catAx" => {
                 if cat_axis_title.is_none() {
                     cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                }
+                if cat_axis_font_size_hpt.is_none() {
+                    cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                 }
                 continue;
             }
             "valAx" => {
                 if val_axis_title.is_none() {
                     val_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                }
+                if val_axis_font_size_hpt.is_none() {
+                    val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                 }
                 continue;
             }
@@ -1750,11 +1782,17 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
             primary_type = ser_type.to_string();
         }
 
-        // barDir / grouping / dLbls (only meaningful for bar/line/area)
+        // barDir / grouping / dLbls / marker (only meaningful for bar/line/area).
+        // <c:marker val> at the chart-type element is the default for all line
+        // series in that element (ECMA-376 §21.2.2.33). "1" = markers visible.
+        let mut chart_marker_default = false;
         for attr_node in child.children().filter(|n| n.is_element()) {
             match attr_node.tag_name().name() {
                 "barDir"   => { bar_dir  = attr_node.attribute("val").unwrap_or("col").to_string(); }
                 "grouping" => { grouping = attr_node.attribute("val").unwrap_or("clustered").to_string(); }
+                "marker"   => {
+                    chart_marker_default = attr_node.attribute("val").unwrap_or("0") != "0";
+                }
                 "dLbls"    => {
                     for d in attr_node.children().filter(|n| n.is_element()) {
                         match d.tag_name().name() {
@@ -1775,7 +1813,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         for ser_node in child.children()
             .filter(|n| n.is_element() && n.tag_name().name() == "ser" && n.tag_name().namespace() == Some(c_ns))
         {
-            let s = parse_chart_series(&ser_node, c_ns, ser_type);
+            let s = parse_chart_series(&ser_node, c_ns, ser_type, chart_marker_default);
             if shared_categories.is_empty() && !s.categories.is_empty() {
                 shared_categories = s.categories.clone();
             }
@@ -1803,9 +1841,27 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         cat_axis_title,
         val_axis_title,
         show_legend,
+        legend_pos,
         title_font_size_hpt,
         title_font_color,
         title_font_face,
+        cat_axis_font_size_hpt,
+        val_axis_font_size_hpt,
+    })
+}
+
+/// Extract a category/value axis tick-label font size (hundredths of a point)
+/// from the first `a:defRPr@sz` (or `a:rPr@sz`) inside the axis' `c:txPr`.
+/// ECMA-376 §21.2.2.17 — `<c:txPr>` controls tick label text properties.
+fn extract_axis_tick_label_size(axis_node: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<i32> {
+    let txpr = axis_node.children()
+        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))?;
+    txpr.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        if n.tag_name().namespace() != Some(a_ns) { return None; }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" { return None; }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
     })
 }
 
@@ -1874,7 +1930,12 @@ fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> 
 }
 
 /// Parse one `<c:ser>` element.
-fn parse_chart_series(node: &roxmltree::Node, c_ns: &str, ser_type: &str) -> ChartSeries {
+fn parse_chart_series(
+    node: &roxmltree::Node,
+    c_ns: &str,
+    ser_type: &str,
+    chart_marker_default: bool,
+) -> ChartSeries {
     let name = extract_series_name(node, c_ns);
 
     // For scatter: xVal → categories (as strings), yVal → values
@@ -1889,12 +1950,30 @@ fn parse_chart_series(node: &roxmltree::Node, c_ns: &str, ser_type: &str) -> Cha
         .find(|n| n.tag_name().name() == "srgbClr")
         .and_then(|n| n.attribute("val").map(|v| v.to_lowercase()));
 
+    // Marker visibility (ECMA-376 §21.2.2.32 — c:marker/c:symbol default is
+    // "none"). A per-series <c:marker><c:symbol> overrides; otherwise fall
+    // back to the chart-type-level <c:lineChart><c:marker val> flag. Scatter
+    // charts default to visible markers even without an explicit flag.
+    let show_marker = if let Some(mk) = node.children()
+        .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns))
+    {
+        match mk.children().find(|n| n.tag_name().name() == "symbol" && n.tag_name().namespace() == Some(c_ns)) {
+            Some(sym) => sym.attribute("val").map(|v| v != "none").unwrap_or(true),
+            None => true,
+        }
+    } else if ser_type == "scatter" {
+        true
+    } else {
+        chart_marker_default
+    };
+
     ChartSeries {
         name,
         series_type: ser_type.to_string(),
         categories,
         values,
         color,
+        show_marker,
     }
 }
 

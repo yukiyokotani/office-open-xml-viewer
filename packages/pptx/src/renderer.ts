@@ -2858,6 +2858,7 @@ export async function renderSlide(
           plotAreaBg: el.plotAreaBg,
           chartBg: el.chartBg,
           showLegend: el.showLegend,
+          legendPos: null,
           catAxisCrossBetween: el.catAxisCrossBetween,
           valAxisMajorTickMark: el.valAxisMajorTickMark,
           catAxisMajorTickMark: el.catAxisMajorTickMark,

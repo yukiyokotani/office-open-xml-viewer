@@ -2004,6 +2004,7 @@ function adaptChartData(chart: ChartData): ChartModel {
       values: s.values,
       seriesType: s.seriesType ?? null,
       categories: s.categories.length > 0 ? s.categories : null,
+      showMarker: s.showMarker ?? null,
     })),
     showDataLabels: chart.showDataLabels ?? false,
     valMin: null,
@@ -2020,14 +2021,15 @@ function adaptChartData(chart: ChartData): ChartModel {
     // A single-series bar chart in Excel typically omits <c:legend>, so we
     // must honor that rather than deriving from series count.
     showLegend: chart.showLegend ?? false,
+    legendPos: chart.legendPos ?? null,
     catAxisCrossBetween: 'between',
     valAxisMajorTickMark: 'cross',
     catAxisMajorTickMark: 'cross',
     titleFontSizeHpt: chart.titleFontSizeHpt ?? null,
     titleFontColor: chart.titleFontColor ?? null,
     titleFontFace: chart.titleFontFace ?? null,
-    catAxisFontSizeHpt: null,
-    valAxisFontSizeHpt: null,
+    catAxisFontSizeHpt: chart.catAxisFontSizeHpt ?? null,
+    valAxisFontSizeHpt: chart.valAxisFontSizeHpt ?? null,
     dataLabelFontSizeHpt: null,
     subtotalIndices: [],
   };
