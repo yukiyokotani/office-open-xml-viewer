@@ -4,6 +4,13 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.8.1 — 2026-04-21
+
+### Infrastructure
+
+- **Demo URL changed to `https://ooxml.silurus.dev`** — custom domain updated
+  from `demo.silurus.dev` to `ooxml.silurus.dev` for scalability across future libraries.
+
 ## 0.8.0 — 2026-04-21
 
 ### Infrastructure
