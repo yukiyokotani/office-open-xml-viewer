@@ -600,9 +600,13 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     }
     x += alignOffset;
 
-    // Justification slack per whitespace char on this line. Only populated
-    // for stretchable lines; on unstretched lines it stays 0 and we render
-    // with natural measured widths.
+    // Inter-word adjustment per whitespace char on this line. Positive slack
+    // (lineWidth < availW) expands spaces to fill; negative slack (lineWidth >
+    // availW, typically from canvas measuring ~1 px wider than Word) compresses
+    // spaces so the final glyph lands on the right margin instead of overflowing.
+    // Compression is capped so we never eat more than the natural width of a
+    // space, and is only applied when the line is a candidate for justification
+    // (jc=both/distribute, not the last line unless distribute).
     let extraPerSpace = 0;
     const applyJustify = isJustified && (!isLastLine || stretchLastLine);
     if (applyJustify) {
@@ -613,8 +617,12 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
         if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
       }
       const slack = lineAvailW - (x - lineLeft) - lineWidth;
-      if (totalTrailingSpaces > 0 && slack > 0) {
+      if (totalTrailingSpaces > 0) {
         extraPerSpace = slack / totalTrailingSpaces;
+        // Don't compress past zero-width spaces — limit compression to at most
+        // half the widest space on the line. Estimated from default font size.
+        const minExtra = -line.ascent * 0.25;
+        if (extraPerSpace < minExtra) extraPerSpace = minExtra;
       }
     }
 
