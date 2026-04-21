@@ -45,6 +45,9 @@ jobs:
       - name: Build Storybook
         run: pnpm build-storybook
 
+      - name: Write CNAME for custom domain
+        run: echo "demo.silurus.dev" > storybook-static/CNAME
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

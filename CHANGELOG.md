@@ -4,6 +4,15 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.8.0 — 2026-04-21
+
+### Infrastructure
+
+- **Demo URL changed to `https://demo.silurus.dev`** — GitHub Pages now served
+  from a custom domain. README and npm `homepage` field updated accordingly.
+- Storybook build base path simplified to `/` (was `/office-open-xml-viewer/`
+  on CI); `CNAME` file is now written into the artifact on every deploy.
+
 ## 0.7.0 — 2026-04-21
 
 Quality pass across pptx shape rendering and chart legends — no new
