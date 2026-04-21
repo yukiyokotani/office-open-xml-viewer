@@ -153,15 +153,15 @@ function axisLabelPx(sizeHpt: number | null | undefined, h: number, ptToPx: numb
 
 function drawChartTitle(
   ctx: CanvasRenderingContext2D,
-  title: string | null,
+  chart: ChartModel,
   x: number, y: number, w: number, fontSize: number,
 ): void {
-  if (!title) return;
+  if (!chart.title) return;
   ctx.font = `bold ${fontSize}px sans-serif`;
-  ctx.fillStyle = '#333';
+  ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText(title, x + w / 2, y);
+  ctx.fillText(chart.title, x + w / 2, y);
 }
 
 // ─── Category helper ────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   };
   if (isH) { pad.l = w * 0.22 + valTitleW; pad.b = h * 0.08 + catTitleH; }
 
-  drawChartTitle(ctx, chart.title, x, y + titleTopPad, w, titleFontPx);
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw  = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -408,7 +408,7 @@ function renderLineChart(
     l: valAxFontPx * 2.2 + 10 + valTitleW,
   };
 
-  drawChartTitle(ctx, chart.title, x, y + titleTopPad, w, titleFontPx);
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -531,7 +531,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
   const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14 + catTitleH, l: w * 0.12 + valTitleW };
 
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -632,7 +632,7 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (total === 0) return;
 
   const titleH = chart.title ? Math.max(14, h * 0.06) : 0;
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
 
   const legendW = chart.showLegend ? Math.max(80, w * 0.28) : 0;
   const pw = w - legendW; const ph = h - titleH - h * 0.04;
@@ -697,7 +697,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 
   const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
   const legendW = chart.showLegend ? Math.max(70, w * 0.2) : 0;
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
 
   const pw = w - legendW; const ph = h - titleH - h * 0.04;
   const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
@@ -778,7 +778,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
   const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12 + catTitleH, l: w * 0.12 + valTitleW };
 
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;

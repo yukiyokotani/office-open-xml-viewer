@@ -109,6 +109,10 @@ pub struct ChartData {
     /// not specified; renderer falls back to a proportional default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_font_size_hpt: Option<i32>,
+    /// Chart title font color as a hex string without '#'. Taken from the
+    /// first `a:solidFill/a:srgbClr@val` inside `c:title`. None = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_font_color: Option<String>,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -1677,6 +1681,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     // Parse optional title
     let title = extract_chart_title(&chart_root, c_ns, a_ns);
     let title_font_size_hpt = extract_chart_title_size(&chart_root, c_ns, a_ns);
+    let title_font_color = extract_chart_title_color(&chart_root, c_ns, a_ns);
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
@@ -1794,6 +1799,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         val_axis_title,
         show_legend,
         title_font_size_hpt,
+        title_font_color,
     })
 }
 
@@ -1808,6 +1814,26 @@ fn extract_chart_title_size(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str
         let tag = n.tag_name().name();
         if tag != "defRPr" && tag != "rPr" { return None; }
         n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
+/// Extract the chart title's font color (hex without '#') from the first
+/// `a:solidFill/a:srgbClr@val` inside `c:title`. Only srgb is resolved here —
+/// scheme colors would require the workbook theme, which isn't wired through
+/// to chart parsing yet.
+fn extract_chart_title_color(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<String> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    title_node.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        if n.tag_name().namespace() != Some(a_ns) { return None; }
+        if n.tag_name().name() != "srgbClr" { return None; }
+        // Skip srgbClr nodes that aren't inside a solidFill (e.g. a gradient stop).
+        let parent_is_solid = n.parent()
+            .map(|p| p.tag_name().name() == "solidFill" && p.tag_name().namespace() == Some(a_ns))
+            .unwrap_or(false);
+        if !parent_is_solid { return None; }
+        n.attribute("val").map(|s| s.to_string())
     })
 }
 

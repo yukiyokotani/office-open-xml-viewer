@@ -76,6 +76,8 @@ export interface ChartModel {
   catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
   /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
   titleFontSizeHpt: number | null;
+  /** Title font color as a hex string without '#' (e.g. "1B4332"). null = default. */
+  titleFontColor: string | null;
   /** `<c:catAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
   catAxisFontSizeHpt: number | null;
   /** `<c:valAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
