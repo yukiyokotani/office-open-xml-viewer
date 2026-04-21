@@ -52,6 +52,9 @@ pub struct Worksheet {
     pub auto_filter: Option<CellRange>,
     /// Hyperlinks in this worksheet (ECMA-376 §18.3.1.47)
     pub hyperlinks: Vec<Hyperlink>,
+    /// Cell refs (A1-style) that have an associated <comment> in xl/commentsN.xml.
+    /// Excel shows a small red triangle in the top-right corner of each.
+    pub comment_refs: Vec<String>,
 }
 
 // ─── Chart types ────────────────────────────────────────────────────────────
@@ -296,6 +299,33 @@ pub struct Fill {
     pub pattern_type: String,
     pub fg_color: Option<String>,
     pub bg_color: Option<String>,
+    /// When the fill element is a <gradientFill>, this carries the gradient
+    /// stops + type + rotation. patternType stays "none" because xlsx does
+    /// not mix gradient + pattern in the same fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<GradientFillSpec>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientFillSpec {
+    /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
+    pub gradient_type: String,
+    /// Linear-gradient rotation in degrees (0 = left→right).
+    pub degree: f64,
+    /// Path-gradient bounding box (0..1 within the cell). Unused for linear.
+    pub left: f64,
+    pub right: f64,
+    pub top: f64,
+    pub bottom: f64,
+    pub stops: Vec<GradientStopSpec>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientStopSpec {
+    pub position: f64,
+    pub color: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -407,6 +437,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.images = load_sheet_images(&mut archive, &sheet_path);
     ws.charts = load_sheet_charts(&mut archive, &sheet_path);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
+    ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -880,15 +911,47 @@ fn parse_fills(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> 
                 if fill_node.tag_name().name() != "fill" { continue; }
                 let mut f = Fill::default();
                 for pf in fill_node.children() {
-                    if pf.tag_name().name() == "patternFill" {
-                        f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
-                        for color_node in pf.children() {
-                            match color_node.tag_name().name() {
-                                "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
-                                "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
-                                _ => {}
+                    match pf.tag_name().name() {
+                        "patternFill" => {
+                            f.pattern_type = pf.attribute("patternType").unwrap_or("none").to_string();
+                            for color_node in pf.children() {
+                                match color_node.tag_name().name() {
+                                    "fgColor" => f.fg_color = parse_color(&color_node, theme_colors),
+                                    "bgColor" => f.bg_color = parse_color(&color_node, theme_colors),
+                                    _ => {}
+                                }
                             }
                         }
+                        "gradientFill" => {
+                            // ECMA-376 §18.8.24 gradientFill — linear (default) uses
+                            // `degree`, path uses top/bottom/left/right as a relative
+                            // bounding box; children <stop position="n"><color/></stop>.
+                            let gtype = pf.attribute("type").unwrap_or("linear").to_string();
+                            let degree = pf.attribute("degree").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let left   = pf.attribute("left").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let right  = pf.attribute("right").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let top    = pf.attribute("top").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let bottom = pf.attribute("bottom").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let mut stops: Vec<GradientStopSpec> = pf.children()
+                                .filter(|n| n.is_element() && n.tag_name().name() == "stop")
+                                .filter_map(|stop| {
+                                    let position = stop.attribute("position").and_then(|s| s.parse::<f64>().ok())?;
+                                    let color_node = stop.children().find(|c| c.is_element() && c.tag_name().name() == "color")?;
+                                    let color = parse_color(&color_node, theme_colors)?;
+                                    Some(GradientStopSpec { position, color })
+                                })
+                                .collect();
+                            stops.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap_or(std::cmp::Ordering::Equal));
+                            if !stops.is_empty() {
+                                f.gradient = Some(GradientFillSpec {
+                                    gradient_type: gtype,
+                                    degree,
+                                    left, right, top, bottom,
+                                    stops,
+                                });
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 fills.push(f);
@@ -1228,6 +1291,7 @@ fn parse_worksheet(
         tab_color,
         auto_filter,
         hyperlinks: Vec::new(),
+        comment_refs: Vec::new(),
     }, hyperlink_rids))
 }
 
@@ -1243,6 +1307,49 @@ fn parse_rels_map(xml: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Parse xl/comments{N}.xml referenced from the sheet's rels and collect the
+/// list of A1-style cell refs that have a `<comment>` associated. The
+/// renderer draws a small red triangle in each cell's top-right corner to
+/// indicate the presence of a comment (ECMA-376 §18.7.3 commentList).
+fn load_sheet_comment_refs(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+) -> Vec<String> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
+    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else { return Vec::new(); };
+
+    // Accept both plain ("/comments") and threaded ("/threadedComment") relTypes
+    // but prefer the classic comments file — threaded comments live in a
+    // separate namespace and are an extension.
+    let mut comments_target: Option<String> = None;
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        let rel_type = rel.attribute("Type").unwrap_or("");
+        if rel_type.ends_with("/comments") {
+            if let Some(t) = rel.attribute("Target") {
+                comments_target = Some(t.to_string());
+                break;
+            }
+        }
+    }
+    let Some(target) = comments_target else { return Vec::new(); };
+
+    let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+    let Ok(comments_xml) = read_zip_entry(archive, &comments_path) else { return Vec::new(); };
+    let Ok(comments_doc) = roxmltree::Document::parse(&comments_xml) else { return Vec::new(); };
+
+    let mut refs: Vec<String> = Vec::new();
+    for node in comments_doc.descendants() {
+        if node.tag_name().name() == "comment" && node.is_element() {
+            if let Some(r) = node.attribute("ref") {
+                refs.push(r.to_string());
+            }
+        }
+    }
+    refs
 }
 
 /// Resolve hyperlink rIds to URLs from the sheet rels file.

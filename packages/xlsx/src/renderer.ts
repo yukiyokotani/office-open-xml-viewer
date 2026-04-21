@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink,
-  Run, ChartData,
+  Run, ChartData, GradientFillSpec,
 } from './types.js';
 import { renderChart, type ChartModel } from '@silurus/ooxml-core';
 
@@ -31,6 +31,217 @@ function hexToRgba(hex: string, alpha = 1): string {
   const g = parseInt(h.slice(2, 4), 16);
   const b = parseInt(h.slice(4, 6), 16);
   return alpha === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
+}
+
+/**
+ * Fractional fg coverage for an ECMA-376 ST_PatternType (§18.8.22). Values are
+ * derived from the spec's verbal descriptions — gray125 = 12.5% fg on bg,
+ * gray0625 = 6.25%, mediumGray ≈ 50%, darkGray ≈ 75%, lightGray ≈ 25%. Hatch
+ * variants (darkHorizontal etc.) approximate their average ink density.
+ * Unknown values default to 1 so they render as solid fg.
+ */
+function patternCoverage(pt: string): number {
+  switch (pt) {
+    case 'solid':         return 1;
+    case 'darkGray':      return 0.75;
+    case 'mediumGray':    return 0.50;
+    case 'lightGray':     return 0.25;
+    case 'gray125':       return 0.125;
+    case 'gray0625':      return 0.0625;
+    // Directional hatches: visual ink ratio is roughly 50/50 at default cell
+    // sizes; without a true hatch tile we blend at 50% so the cell reads as a
+    // middle-tone fill rather than a solid fg block.
+    case 'darkHorizontal':
+    case 'darkVertical':
+    case 'darkDown':
+    case 'darkUp':
+    case 'darkGrid':
+    case 'darkTrellis':   return 0.5;
+    case 'lightHorizontal':
+    case 'lightVertical':
+    case 'lightDown':
+    case 'lightUp':
+    case 'lightGrid':
+    case 'lightTrellis':  return 0.25;
+    default:              return 1;
+  }
+}
+
+/**
+ * Cache of (pattern, fg, bg) → CanvasPattern. Keyed by a compound string so
+ * that the same pattern across thousands of cells only builds the tile once.
+ */
+const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
+
+/**
+ * Build a small repeating tile for ECMA-376 directional hatch patterns. Uses
+ * an offscreen canvas painted with bgColor + fgColor lines and returns a
+ * CanvasPattern for `ctx.fillStyle`. Non-hatch patterns return null so the
+ * caller falls back to the fg/bg blend.
+ */
+function hatchPattern(
+  ctx: CanvasRenderingContext2D,
+  pt: string,
+  fgHex: string,
+  bgHex: string,
+): CanvasPattern | null {
+  const key = `${pt}|${fgHex}|${bgHex}`;
+  if (PATTERN_CACHE.has(key)) return PATTERN_CACHE.get(key)!;
+
+  const size = 8;
+  const isDark = pt.startsWith('dark');
+  const isLight = pt.startsWith('light');
+  if (!isDark && !isLight) {
+    PATTERN_CACHE.set(key, null);
+    return null;
+  }
+  const off = document.createElement('canvas');
+  off.width = size;
+  off.height = size;
+  const octx = off.getContext('2d');
+  if (!octx) { PATTERN_CACHE.set(key, null); return null; }
+
+  octx.fillStyle = hexToRgba(bgHex);
+  octx.fillRect(0, 0, size, size);
+  octx.strokeStyle = hexToRgba(fgHex);
+  octx.lineWidth = isDark ? 2 : 1;
+  octx.beginPath();
+  switch (pt) {
+    case 'darkHorizontal':
+    case 'lightHorizontal':
+      octx.moveTo(0, size / 2);
+      octx.lineTo(size, size / 2);
+      break;
+    case 'darkVertical':
+    case 'lightVertical':
+      octx.moveTo(size / 2, 0);
+      octx.lineTo(size / 2, size);
+      break;
+    case 'darkDown':
+    case 'lightDown':
+      // Diagonal from top-left to bottom-right; draw a second line shifted to
+      // avoid seams where the tile wraps.
+      octx.moveTo(0, 0); octx.lineTo(size, size);
+      octx.moveTo(-size, 0); octx.lineTo(0, size);
+      octx.moveTo(0, -size); octx.lineTo(size, 0);
+      break;
+    case 'darkUp':
+    case 'lightUp':
+      octx.moveTo(0, size); octx.lineTo(size, 0);
+      octx.moveTo(-size, size); octx.lineTo(0, 0);
+      octx.moveTo(0, 2 * size); octx.lineTo(size, size);
+      break;
+    case 'darkGrid':
+    case 'lightGrid':
+      octx.moveTo(0, size / 2); octx.lineTo(size, size / 2);
+      octx.moveTo(size / 2, 0); octx.lineTo(size / 2, size);
+      break;
+    case 'darkTrellis':
+    case 'lightTrellis':
+      octx.moveTo(0, 0); octx.lineTo(size, size);
+      octx.moveTo(0, size); octx.lineTo(size, 0);
+      break;
+    default:
+      PATTERN_CACHE.set(key, null);
+      return null;
+  }
+  octx.stroke();
+
+  const pat = ctx.createPattern(off, 'repeat');
+  PATTERN_CACHE.set(key, pat);
+  return pat;
+}
+
+/**
+ * Build a Canvas gradient object for an xlsx `<gradientFill>`. Linear uses
+ * the degree attribute (0° = left→right, 90° = top→bottom). Path gradients
+ * radiate from a rectangular inner bounds defined by left/right/top/bottom
+ * as fractions of the cell.
+ */
+function buildGradientFill(
+  ctx: CanvasRenderingContext2D,
+  g: GradientFillSpec,
+  x: number, y: number, w: number, h: number,
+): CanvasGradient {
+  let grad: CanvasGradient;
+  if (g.gradientType === 'path') {
+    // Use the inner rectangle's center as the radial origin; radius spans to
+    // the farthest cell corner so stop=1 always reaches a cell edge.
+    const cxg = x + w * (g.left + (1 - g.right - g.left) / 2);
+    const cyg = y + h * (g.top + (1 - g.bottom - g.top) / 2);
+    const r = Math.hypot(Math.max(cxg - x, x + w - cxg), Math.max(cyg - y, y + h - cyg));
+    grad = ctx.createRadialGradient(cxg, cyg, 0, cxg, cyg, r);
+  } else {
+    // Linear: rotate around the cell's center and extend to the bounds.
+    const rad = (g.degree * Math.PI) / 180;
+    const cxg = x + w / 2;
+    const cyg = y + h / 2;
+    const ext = (Math.abs(Math.cos(rad)) * w + Math.abs(Math.sin(rad)) * h) / 2;
+    grad = ctx.createLinearGradient(
+      cxg - Math.cos(rad) * ext, cyg - Math.sin(rad) * ext,
+      cxg + Math.cos(rad) * ext, cyg + Math.sin(rad) * ext,
+    );
+  }
+  for (const stop of g.stops) {
+    const pos = Math.min(1, Math.max(0, stop.position));
+    grad.addColorStop(pos, hexToRgba(stop.color));
+  }
+  return grad;
+}
+
+/**
+ * Parse an A1-style cell reference ("A1", "B12", "AA3") to 1-based row/col.
+ * Returns null when the input doesn't match the expected shape (parser-side
+ * data is trusted, but we still guard against malformed refs).
+ */
+function parseA1Ref(ref: string): { row: number; col: number } | null {
+  const m = /^([A-Z]+)(\d+)$/.exec(ref);
+  if (!m) return null;
+  const colLetters = m[1];
+  const row = parseInt(m[2], 10);
+  let col = 0;
+  for (let i = 0; i < colLetters.length; i++) {
+    col = col * 26 + (colLetters.charCodeAt(i) - 64);
+  }
+  return { row, col };
+}
+
+/**
+ * Draw Excel's comment marker — a small filled triangle in the top-right
+ * corner of the cell — coloured like Excel's default red indicator. Scales
+ * with cell size but is clamped so it stays legible at small zoom.
+ */
+function drawCommentMarker(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+): void {
+  const size = Math.max(4, Math.min(8, Math.min(w, h) * 0.18));
+  ctx.save();
+  ctx.fillStyle = '#D40000';
+  ctx.beginPath();
+  ctx.moveTo(x + w - size, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + size);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Linear-interpolate two #RRGGBB values in RGB space at coverage fg weight. */
+function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
+  const fh = fgHex.replace('#', '');
+  const bh = bgHex.replace('#', '');
+  const fr = parseInt(fh.slice(0, 2), 16);
+  const fg = parseInt(fh.slice(2, 4), 16);
+  const fb = parseInt(fh.slice(4, 6), 16);
+  const br = parseInt(bh.slice(0, 2), 16);
+  const bg = parseInt(bh.slice(2, 4), 16);
+  const bb = parseInt(bh.slice(4, 6), 16);
+  const c = Math.min(1, Math.max(0, fgCoverage));
+  const r = Math.round(fr * c + br * (1 - c));
+  const g = Math.round(fg * c + bg * (1 - c));
+  const b = Math.round(fb * c + bb * (1 - c));
+  return `rgb(${r},${g},${b})`;
 }
 
 function buildFont(font: Font, cs = 1): string {
@@ -658,6 +869,9 @@ interface RenderContext {
   dpr: number;
   autoFilterCells: Set<string>;
   hyperlinkMap: Map<string, string>;
+  /** row:col keys for cells that carry a comment; renderer draws a small
+   *  red triangle in the top-right corner (ECMA-376 §18.7.3 commentList). */
+  commentCells: Set<string>;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -886,10 +1100,33 @@ function renderQuadrant(
       const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
       const effectiveFill = cf.fill ?? fill;
 
-      // Background fill (base or CF override)
-      if (effectiveFill.patternType !== 'none' && effectiveFill.patternType !== '' && effectiveFill.fgColor) {
-        ctx.fillStyle = hexToRgba(effectiveFill.fgColor);
+      // Background fill (base or CF override). ECMA-376 §18.8.22 ST_PatternType.
+      // - solid/gray*: blend fgColor with bgColor at the pattern's fg coverage.
+      // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
+      //   Trellis): render via a small repeating tile using createPattern so
+      //   the hatch actually shows, rather than approximating as a blend.
+      if (effectiveFill.gradient && effectiveFill.gradient.stops.length > 0) {
+        ctx.fillStyle = buildGradientFill(ctx, effectiveFill.gradient, cx, cy, cellW, cellH);
         ctx.fillRect(cx, cy, cellW, cellH);
+      } else if (effectiveFill.patternType && effectiveFill.patternType !== 'none' && effectiveFill.fgColor) {
+        const pt = effectiveFill.patternType;
+        const bg = effectiveFill.bgColor ?? 'FFFFFF';
+        const hatch = hatchPattern(ctx, pt, effectiveFill.fgColor, bg);
+        if (hatch) {
+          ctx.fillStyle = hatch;
+        } else {
+          const coverage = patternCoverage(pt);
+          ctx.fillStyle = coverage >= 1
+            ? hexToRgba(effectiveFill.fgColor)
+            : blendHex(effectiveFill.fgColor, bg, coverage);
+        }
+        ctx.fillRect(cx, cy, cellW, cellH);
+      }
+
+      // Comment indicator triangle — drawn above fill but below borders so
+      // borders still read cleanly around the cell edge.
+      if (rc.commentCells.has(key)) {
+        drawCommentMarker(ctx, cx, cy, cellW, cellH);
       }
 
       // DataBar (drawn inside the cell, left-anchored)
@@ -1321,6 +1558,15 @@ export function renderViewport(
     if (hl.url) hyperlinkMap.set(`${hl.row}:${hl.col}`, hl.url);
   }
 
+  // Build commented-cell lookup. worksheet.commentRefs are A1-style refs
+  // ("A1", "B12", "AA3") so we convert each to "row:col" and stash in a Set
+  // for O(1) membership checks in the cell loop.
+  const commentCells = new Set<string>();
+  for (const ref of worksheet.commentRefs ?? []) {
+    const parsed = parseA1Ref(ref);
+    if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
+  }
+
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
@@ -1332,6 +1578,7 @@ export function renderViewport(
     dpr,
     autoFilterCells,
     hyperlinkMap,
+    commentCells,
   };
 
   // Canvas areas for each quadrant

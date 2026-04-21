@@ -36,6 +36,9 @@ export interface Worksheet {
   autoFilter?: CellRange | null;
   /** Hyperlinks in this worksheet (ECMA-376 §18.3.1.47). */
   hyperlinks?: Hyperlink[];
+  /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
+   *  small red triangle in each cell's top-right corner. */
+  commentRefs?: string[];
 }
 
 // ─── Chart types ─────────────────────────────────────────────────────────────
@@ -216,6 +219,21 @@ export interface Fill {
   patternType: string;
   fgColor: string | null;
   bgColor: string | null;
+  /** Set when the style's `<fill>` was a `<gradientFill>`; patternType stays "none". */
+  gradient?: GradientFillSpec | null;
+}
+
+export interface GradientFillSpec {
+  /** "linear" (default) or "path". */
+  gradientType: string;
+  /** Rotation in degrees for linear gradients (0 = left→right). */
+  degree: number;
+  /** Path-gradient bounding box (0..1) — unused for linear. */
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  stops: { position: number; color: string }[];
 }
 
 export interface Border {
