@@ -2025,6 +2025,7 @@ function adaptChartData(chart: ChartData): ChartModel {
     catAxisMajorTickMark: 'cross',
     titleFontSizeHpt: chart.titleFontSizeHpt ?? null,
     titleFontColor: chart.titleFontColor ?? null,
+    titleFontFace: chart.titleFontFace ?? null,
     catAxisFontSizeHpt: null,
     valAxisFontSizeHpt: null,
     dataLabelFontSizeHpt: null,

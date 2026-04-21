@@ -168,6 +168,8 @@ export interface ChartElement {
   titleFontSizeHpt: number | null;
   /** Title font color as a hex string without '#'. null = default/theme. */
   titleFontColor?: string | null;
+  /** Title font family (`<a:latin typeface>`). null = default/theme. */
+  titleFontFace?: string | null;
   /** `<c:catAx><c:txPr>` font size (hpt). null = proportional default. */
   catAxisFontSizeHpt: number | null;
   /** `<c:valAx><c:txPr>` font size (hpt). null = proportional default. */
