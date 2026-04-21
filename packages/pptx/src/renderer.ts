@@ -23,6 +23,7 @@ import {
   applyStroke as applyStrokeCore,
 } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
+import { renderPresetShape, hasPreset } from './preset-shape';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
@@ -377,43 +378,61 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Apply shadow before fill/stroke drawing; ctx.restore() will clear it
   applyShadow(ctx, el.shadow ?? null, scale);
 
-  ctx.beginPath();
-  if (el.custGeom && el.custGeom.length > 0) {
-    buildCustomPath(ctx, el.custGeom, x, y, w, h);
+  const CONNECTOR_GEOMS = new Set([
+    'line', 'straightconnector1',
+    'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
+    'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
+  ]);
+
+  const applyAndStroke = el.stroke
+    ? () => {
+        applyStroke(ctx, el.stroke!, scale);
+        ctx.stroke();
+      }
+    : null;
+  const clearShadowOnce = () => clearShadow(ctx);
+
+  // ── Dispatch to preset engine when possible ────────────────────────────
+  // Preference order: custGeom → generic preset engine → legacy switch.
+  // `arc` keeps its bespoke case because its fill semantics (pie-wedge vs
+  // open arc) depend on stroke state in ways the engine doesn't express.
+  const usePresetEngine =
+    !el.custGeom && geom !== 'arc' && !CONNECTOR_GEOMS.has(geom) && hasPreset(geom);
+
+  if (usePresetEngine) {
+    renderPresetShape(
+      ctx, geom, x, y, w, h,
+      [el.adj, el.adj2, el.adj3, el.adj4],
+      fillStyle, applyAndStroke, clearShadowOnce,
+    );
   } else {
-    buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
-  }
-
-  if (fillStyle && geom !== 'arc') {
-    ctx.fillStyle = fillStyle;
-    // evenodd winding for shapes that use holes (inner path subtracts from outer)
-    if (geom === 'donut' || geom === 'smileyface' || geom === 'frame') {
-      ctx.fill('evenodd');
+    ctx.beginPath();
+    if (el.custGeom && el.custGeom.length > 0) {
+      buildCustomPath(ctx, el.custGeom, x, y, w, h);
     } else {
-      ctx.fill();
+      buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
     }
-    // Clear shadow after fill so stroke/text don't double-shadow
-    clearShadow(ctx);
+    if (fillStyle && geom !== 'arc') {
+      ctx.fillStyle = fillStyle;
+      if (geom === 'donut' || geom === 'smileyface' || geom === 'frame') {
+        ctx.fill('evenodd');
+      } else {
+        ctx.fill();
+      }
+      clearShadow(ctx);
+    }
+    if (applyAndStroke) {
+      applyAndStroke();
+    }
   }
-  if (el.stroke) {
-    applyStroke(ctx, el.stroke, scale);
-    ctx.stroke();
 
-    // Arrow heads on connector / line shapes
-    const CONNECTOR_GEOMS = new Set([
-      'line', 'straightconnector1',
-      'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
-      'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
-    ]);
-    if (CONNECTOR_GEOMS.has(geom)) {
-      // The shape runs from (x,y) to (x+w, y+h) in local (already-rotated) coords.
-      const angle = Math.atan2(h, w);
-      if (el.stroke.tailEnd) {
-        drawArrowHead(ctx, x + w, y + h, angle, el.stroke.tailEnd, el.stroke, scale);
-      }
-      if (el.stroke.headEnd) {
-        drawArrowHead(ctx, x, y, angle + Math.PI, el.stroke.headEnd, el.stroke, scale);
-      }
+  if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
+    const angle = Math.atan2(h, w);
+    if (el.stroke.tailEnd) {
+      drawArrowHead(ctx, x + w, y + h, angle, el.stroke.tailEnd, el.stroke, scale);
+    }
+    if (el.stroke.headEnd) {
+      drawArrowHead(ctx, x, y, angle + Math.PI, el.stroke.headEnd, el.stroke, scale);
     }
   }
 
