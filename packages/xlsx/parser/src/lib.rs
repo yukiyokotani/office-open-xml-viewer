@@ -44,6 +44,10 @@ pub struct Worksheet {
     pub charts: Vec<ChartAnchor>,
     /// Whether to display zero values in cells (ECMA-376 §18.3.1.94)
     pub show_zeros: bool,
+    /// Whether to draw default grid lines on this sheet. Mirrors the "View →
+    /// Gridlines" checkbox in Excel; parsed from `<sheetView showGridLines>`
+    /// (ECMA-376 §18.3.1.83). Defaults to true.
+    pub show_gridlines: bool,
     /// Tab color for the sheet tab (ECMA-376 §18.3.1.79)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
@@ -55,6 +59,22 @@ pub struct Worksheet {
     /// Cell refs (A1-style) that have an associated <comment> in xl/commentsN.xml.
     /// Excel shows a small red triangle in the top-right corner of each.
     pub comment_refs: Vec<String>,
+    /// Defined names in scope for this sheet. Includes workbook-global names and
+    /// any names whose `localSheetId` matches this sheet's position in the
+    /// workbook. Used by conditional-formatting `expression` rules that call
+    /// named ranges like `task_start`, `today`, etc. (ECMA-376 §18.2.5).
+    pub defined_names: Vec<DefinedName>,
+}
+
+/// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
+/// `formula` is the raw formula text (typically a cell/range reference, e.g.
+/// `ProjectSchedule!$E1`). Relative references inside are shifted relative to
+/// A1 when substituted into a formula.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DefinedName {
+    pub name: String,
+    pub formula: String,
 }
 
 // ─── Chart types ────────────────────────────────────────────────────────────
@@ -191,11 +211,11 @@ pub enum CfRule {
     #[serde(rename_all = "camelCase")]
     CellIs { operator: String, formulas: Vec<String>, dxf_id: Option<u32>, priority: i32 },
     #[serde(rename_all = "camelCase")]
-    Expression { formula: String, dxf_id: Option<u32>, priority: i32 },
+    Expression { formula: String, dxf_id: Option<u32>, priority: i32, stop_if_true: bool },
     #[serde(rename_all = "camelCase")]
     ColorScale { stops: Vec<CfStop>, priority: i32 },
     #[serde(rename_all = "camelCase")]
-    DataBar { color: String, min: CfValue, max: CfValue, priority: i32 },
+    DataBar { color: String, min: CfValue, max: CfValue, priority: i32, gradient: bool },
     #[serde(rename_all = "camelCase")]
     Top10 { top: bool, percent: bool, rank: u32, dxf_id: Option<u32>, priority: i32 },
     #[serde(rename_all = "camelCase")]
@@ -469,6 +489,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.charts = load_sheet_charts(&mut archive, &sheet_path);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
     ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
+    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -684,6 +705,25 @@ fn parse_workbook_sheets(doc: &roxmltree::Document) -> Vec<SheetMeta> {
         }
     }
     sheets
+}
+
+/// Collect `<definedName>` entries from `workbook.xml`. `sheet_index` selects
+/// which names are in scope: workbook-global (no `localSheetId`) plus any
+/// whose `localSheetId` matches the given sheet position.
+fn parse_defined_names_for_sheet(doc: &roxmltree::Document, sheet_index: u32) -> Vec<DefinedName> {
+    let mut names = Vec::new();
+    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    for node in doc.descendants() {
+        if node.tag_name().name() != "definedName" || node.tag_name().namespace() != Some(ns) {
+            continue;
+        }
+        let local: Option<u32> = node.attribute("localSheetId").and_then(|s| s.parse().ok());
+        if let Some(l) = local { if l != sheet_index { continue; } }
+        let name = match node.attribute("name") { Some(n) => n.to_string(), None => continue };
+        let formula = node.text().unwrap_or("").to_string();
+        names.push(DefinedName { name, formula });
+    }
+    names
 }
 
 fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
@@ -1079,9 +1119,27 @@ fn parse_worksheet(
     let mut default_row_height = 15.0;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
+    let mut show_gridlines = true;
     let mut tab_color: Option<String> = None;
     let mut auto_filter: Option<CellRange> = None;
     let mut hyperlink_rids: Vec<(u32, u32, String)> = Vec::new();
+
+    // Pre-scan worksheet-level extLst for x14:dataBar extension attributes.
+    // Excel 2010+ stores the `gradient` flag on `<x14:dataBar>` inside
+    // `<extLst>/<ext>/<x14:conditionalFormattings>/<x14:conditionalFormatting>
+    // /<x14:cfRule id="{GUID}">`, linked to the SpreadsheetML cfRule via a
+    // matching `<x14:id>{GUID}</x14:id>` inside the cfRule's own extLst
+    // (§2.6.3). Build a GUID → gradient map so cfRule parsing can look up
+    // the override.
+    let mut x14_databar_gradient: HashMap<String, bool> = HashMap::new();
+    for x14_rule in doc.descendants().filter(|n| n.tag_name().name() == "cfRule" && n.attribute("type") == Some("dataBar")) {
+        let Some(id) = x14_rule.attribute("id") else { continue };
+        for bar in x14_rule.children().filter(|n| n.tag_name().name() == "dataBar") {
+            if let Some(g) = bar.attribute("gradient") {
+                x14_databar_gradient.insert(id.to_string(), !(g == "0" || g == "false"));
+            }
+        }
+    }
 
     for node in doc.descendants() {
         match node.tag_name().name() {
@@ -1113,6 +1171,7 @@ fn parse_worksheet(
             }
             "sheetView" if node.tag_name().namespace() == Some(ns) => {
                 show_zeros = node.attribute("showZeros").map(|v| v != "0").unwrap_or(true);
+                show_gridlines = node.attribute("showGridLines").map(|v| v != "0").unwrap_or(true);
             }
             "tabColor" if node.tag_name().namespace() == Some(ns) => {
                 tab_color = parse_color(&node, theme_colors);
@@ -1207,7 +1266,10 @@ fn parse_worksheet(
                                 .and_then(|n| n.text())
                                 .unwrap_or("")
                                 .to_string();
-                            rules.push(CfRule::Expression { formula, dxf_id, priority });
+                            let stop_if_true = cf.attribute("stopIfTrue")
+                                .map(|v| v == "1" || v == "true")
+                                .unwrap_or(false);
+                            rules.push(CfRule::Expression { formula, dxf_id, priority, stop_if_true });
                         }
                         "colorScale" => {
                             let scale = cf.children().find(|n| n.tag_name().name() == "colorScale");
@@ -1223,7 +1285,7 @@ fn parse_worksheet(
                                             ));
                                         }
                                         "color" => {
-                                            stop_colors.push(parse_color(&child, &[]).unwrap_or_else(|| "#FFFFFF".to_string()));
+                                            stop_colors.push(parse_color(&child, theme_colors).unwrap_or_else(|| "#FFFFFF".to_string()));
                                         }
                                         _ => {}
                                     }
@@ -1250,9 +1312,36 @@ fn parse_worksheet(
                                             ));
                                         }
                                         "color" => {
-                                            if let Some(c) = parse_color(&child, &[]) { color = c; }
+                                            if let Some(c) = parse_color(&child, theme_colors) { color = c; }
                                         }
                                         _ => {}
+                                    }
+                                }
+                            }
+                            // Excel 2010+ x14:dataBar extension may override the
+                            // gradient flag (§2.6.3, default="1"). "0" → solid
+                            // fill. The override lives in a separate
+                            // worksheet-level extLst and is linked via the
+                            // `<x14:id>{GUID}</x14:id>` contained in this
+                            // cfRule's own extLst.
+                            let mut gradient = true;
+                            'gradient_lookup: for ext_list in cf.children().filter(|n| n.tag_name().name() == "extLst") {
+                                for ext in ext_list.children().filter(|n| n.tag_name().name() == "ext") {
+                                    for id_node in ext.descendants().filter(|n| n.tag_name().name() == "id") {
+                                        if let Some(guid) = id_node.text() {
+                                            if let Some(&g) = x14_databar_gradient.get(guid) {
+                                                gradient = g;
+                                                break 'gradient_lookup;
+                                            }
+                                        }
+                                    }
+                                    // Fallback: some files embed <x14:dataBar>
+                                    // directly in the cfRule's extLst.
+                                    for x14_bar in ext.descendants().filter(|n| n.tag_name().name() == "dataBar") {
+                                        if let Some(g) = x14_bar.attribute("gradient") {
+                                            gradient = !(g == "0" || g == "false");
+                                            break 'gradient_lookup;
+                                        }
                                     }
                                 }
                             }
@@ -1260,7 +1349,7 @@ fn parse_worksheet(
                                 .unwrap_or(CfValue { kind: "min".into(), value: None });
                             let max = cfvos.get(1).map(|(k, v)| CfValue { kind: k.clone(), value: v.clone() })
                                 .unwrap_or(CfValue { kind: "max".into(), value: None });
-                            rules.push(CfRule::DataBar { color, min, max, priority });
+                            rules.push(CfRule::DataBar { color, min, max, priority, gradient });
                         }
                         "top10" => {
                             let top = !cf.attribute("bottom").map(|v| v == "1" || v == "true").unwrap_or(false);
@@ -1319,10 +1408,12 @@ fn parse_worksheet(
         images: Vec::new(),
         charts: Vec::new(),
         show_zeros,
+        show_gridlines,
         tab_color,
         auto_filter,
         hyperlinks: Vec::new(),
         comment_refs: Vec::new(),
+        defined_names: Vec::new(),
     }, hyperlink_rids))
 }
 
