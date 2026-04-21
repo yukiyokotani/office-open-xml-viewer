@@ -245,11 +245,20 @@ export function computePages(
   const pages: BodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
+  // Keep measureState.y in sync with the current page's content Y so that
+  // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
+  // are on the page. Anchor floats are registered on the measureState as
+  // paragraphs are processed and cleared when we flip to a new page, exactly
+  // like the real renderer does.
+  measureState.y = section.marginTop;
+  measureState.floats = [];
   const newPage = () => {
     if (pages[pages.length - 1].length > 0) {
       pages.push([]);
       y = 0;
       prevPara = null;
+      measureState.y = section.marginTop;
+      measureState.floats = [];
     }
   };
 
@@ -287,7 +296,17 @@ export function computePages(
       const para = el as unknown as DocParagraph;
       if (para.pageBreakBefore) newPage();
       const suppressBefore = contextualSuppressed(prevPara, para);
-      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore);
+
+      // Register this paragraph's anchor-image floats on the measureState so
+      // subsequent paragraphs estimate around them (text-wrap around images
+      // adds lines that the float-unaware estimate would otherwise miss,
+      // which caused page 2 of demo/sample-1 to spill past the bottom
+      // margin). The renderer runs the same registerAnchorFloats call; by
+      // mirroring it here the paginator sees the same layout.
+      const paragraphAnchorY = measureState.y + (suppressBefore ? 0 : para.spaceBefore);
+      registerAnchorFloats(para, measureState, paragraphAnchorY);
+
+      const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
       // Break if this paragraph alone doesn't fit, OR if keepNext is set and
       // placing it would leave no room for the next block on the same page.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
@@ -295,6 +314,7 @@ export function computePages(
       if (y > 0 && y + needed > contentH) newPage();
       pages[pages.length - 1].push(el);
       y += h;
+      measureState.y += h;
       prevPara = para;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
@@ -302,6 +322,7 @@ export function computePages(
       if (y + h > contentH) newPage();
       pages[pages.length - 1].push(el);
       y += h;
+      measureState.y += h;
       prevPara = null;
     }
   }
@@ -334,6 +355,7 @@ function estimateParagraphHeight(
   para: DocParagraph,
   contentWPt: number,
   suppressSpaceBefore = false,
+  paraXPt = 0,
 ): number {
   const indLeft = para.indentLeft;
   const indRight = para.indentRight;
@@ -344,7 +366,17 @@ function estimateParagraphHeight(
     const fs = getDefaultFontSize(para);
     textH = fs * lineSpacingMultiplier(para.lineSpacing, fs);
   } else {
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops);
+    // When anchor-image floats are active on the current page the paragraph
+    // wraps around them, adding lines compared to a full-width layout. Use
+    // the same WrapLayoutCtx the renderer uses so estimate and render agree.
+    const wrapCtx: WrapLayoutCtx | undefined = state.floats.length > 0 ? {
+      startPageY: state.y,
+      paraX: paraXPt,
+      floats: state.floats,
+      lineSpacingMult: (h: number) => lineSpacingMultiplier(para.lineSpacing, h),
+      pageH: state.pageH,
+    } : undefined;
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
     textH = lines.reduce((s, l) => s + l.height * lineSpacingMultiplier(para.lineSpacing, l.height), 0);
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
