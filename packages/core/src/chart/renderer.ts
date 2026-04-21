@@ -53,9 +53,12 @@ function niceAxisMin(dataMin: number, step: number): number {
 }
 
 function formatChartVal(v: number): string {
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
-  return Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/\.?0+$/, '');
+  // Matches Excel's default `<c:valAx><c:numFmt formatCode="General">` which
+  // shows raw numbers — no "k"/"M" abbreviation. An upcoming change will honor
+  // the parsed formatCode per ECMA-376 §21.2.2.33 for non-General codes.
+  if (Number.isInteger(v)) return String(v);
+  // Trim trailing zeros on decimals (so 0.50 → "0.5") but cap at 6 digits.
+  return v.toFixed(6).replace(/\.?0+$/, '');
 }
 
 function drawAxisTitle(
@@ -84,11 +87,32 @@ function drawLegend(
   ctx: CanvasRenderingContext2D,
   series: ChartSeries[],
   lx: number, ly: number, lw: number, lh: number,
+  orient: 'vertical' | 'horizontal' = 'vertical',
 ): void {
+  const sw = 10; const gap = 4;
+  if (orient === 'horizontal') {
+    // Excel lays a bottom/top legend as a single horizontal row, centered.
+    const fontSize = Math.max(9, Math.min(12, lh * 0.7));
+    ctx.font = `${fontSize}px sans-serif`;
+    ctx.textBaseline = 'middle';
+    const itemGap = 12;
+    const labels = series.map((s, i) => s.name || `Series ${i + 1}`);
+    const itemWidths = labels.map((l) => sw + gap + ctx.measureText(l.slice(0, 30)).width);
+    const total = itemWidths.reduce((a, b) => a + b, 0) + itemGap * Math.max(0, series.length - 1);
+    let rx = lx + (lw - total) / 2;
+    const ry = ly + lh / 2;
+    for (let i = 0; i < series.length; i++) {
+      ctx.fillStyle = chartColor(i, series[i]);
+      ctx.fillRect(rx, ry - fontSize / 2, sw, fontSize);
+      ctx.fillStyle = '#333'; ctx.textAlign = 'left';
+      ctx.fillText(labels[i].slice(0, 30), rx + sw + gap, ry);
+      rx += itemWidths[i] + itemGap;
+    }
+    return;
+  }
   const fontSize = Math.max(9, Math.min(12, lh / (series.length + 1)));
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textBaseline = 'middle';
-  const sw = 10; const gap = 4;
   const rowH = fontSize + 4;
   let ry = ly + (lh - rowH * series.length) / 2;
   for (let i = 0; i < series.length; i++) {
@@ -100,6 +124,53 @@ function drawLegend(
     ry += rowH;
   }
   void lw;
+}
+
+type LegendSide = 'r' | 'l' | 't' | 'b';
+interface LegendLayout {
+  side: LegendSide;
+  /** Reserved plot-area width (>0 when side = l or r). */
+  reserveW: number;
+  /** Reserved plot-area height (>0 when side = t or b). */
+  reserveH: number;
+}
+
+/** Resolve legend placement from `<c:legendPos>`. Returns null when hidden. */
+function legendLayout(chart: ChartModel, w: number, h: number): LegendLayout | null {
+  if (!chart.showLegend) return null;
+  const pos = chart.legendPos ?? 'r';
+  const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
+  if (side === 'r' || side === 'l') {
+    return { side, reserveW: Math.max(80, w * 0.22), reserveH: 0 };
+  }
+  // Excel's top/bottom legend is a single-row strip; reserve ~8% of height.
+  return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
+}
+
+/** Draw a legend in the band reserved by {@link legendLayout}. */
+function drawLegendForLayout(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  leg: LegendLayout | null,
+  x: number, y: number, w: number, h: number,
+  px0: number, py0: number, pw: number, ph: number,
+  topBand: number,
+): void {
+  if (!leg) return;
+  switch (leg.side) {
+    case 'r':
+      drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph);
+      break;
+    case 'l':
+      drawLegend(ctx, chart.series, x + 4, py0, leg.reserveW - 8, ph);
+      break;
+    case 't':
+      drawLegend(ctx, chart.series, px0, y + topBand, pw, leg.reserveH, 'horizontal');
+      break;
+    case 'b':
+      drawLegend(ctx, chart.series, px0, y + h - leg.reserveH, pw, leg.reserveH, 'horizontal');
+      break;
+  }
 }
 
 function drawAxisTick(
@@ -170,7 +241,13 @@ function drawChartTitle(
 function chartCategories(chart: ChartModel): string[] {
   if (chart.categories.length > 0) return chart.categories;
   const first = chart.series[0];
-  return first?.categories ?? [];
+  if (first?.categories && first.categories.length > 0) return first.categories;
+  // ECMA-376 §21.2.2.24 — when <c:cat> is absent the category axis uses
+  // integer values starting at 1. Fall back to the longest series so the
+  // chart still renders instead of bailing out at n === 0.
+  let n = 0;
+  for (const s of chart.series) if (s.values.length > n) n = s.values.length;
+  return n > 0 ? Array.from({ length: n }, (_, i) => String(i + 1)) : [];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -198,17 +275,24 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const titleTopPad    = chart.title ? h * 0.02 : 0;
   const titleBottomPad = chart.title ? h * 0.025 : 0;
   const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
+  const leg = legendLayout(chart, w, h);
+  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
+  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
+  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
+  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
   const pad = {
-    t: titleH + h * 0.02,
-    r: legendW + w * 0.03,
-    b: h * 0.14 + catTitleH,
-    l: w * 0.12 + valTitleW,
+    t: titleH + legTopH + h * 0.02,
+    r: legRightW + w * 0.03,
+    b: h * 0.14 + catTitleH + legBottomH,
+    l: w * 0.12 + valTitleW + legLeftW,
   };
-  if (isH) { pad.l = w * 0.22 + valTitleW; pad.b = h * 0.08 + catTitleH; }
+  if (isH) {
+    pad.l = w * 0.22 + valTitleW + legLeftW;
+    pad.b = h * 0.08 + catTitleH + legBottomH;
+  }
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
@@ -247,7 +331,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (!chart.valAxisHidden) {
     for (let si = 0; si <= steps; si++) {
       const val = si * step;
-      const label = pct ? `${Math.round(val)}%` : val >= 1000 ? `${(val / 1000).toFixed(1)}k` : String(val);
+      const label = pct ? `${Math.round(val)}%` : formatChartVal(val);
       if (!isH) {
         const gy = py0 + ph - (val / axMax) * ph;
         ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
@@ -357,18 +441,20 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
       }
       ctx.stroke();
-      for (let ci = 0; ci < n; ci++) {
-        const v = s.values[ci];
-        if (v == null) continue;
-        const lx = px0 + ci * catGap + catGap / 2;
-        const ly = py0 + ph - (v / axMax) * ph;
-        ctx.fillStyle = color;
-        ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+      if (s.showMarker !== false) {
+        for (let ci = 0; ci < n; ci++) {
+          const v = s.values[ci];
+          if (v == null) continue;
+          const lx = px0 + ci * catGap + catGap / 2;
+          const ly = py0 + ph - (v / axMax) * ph;
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+        }
       }
     }
   }
 
-  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }
@@ -394,7 +480,11 @@ function renderLineChart(
   const titleTopPad    = chart.title ? h * 0.045 : 0;
   const titleBottomPad = chart.title ? h * 0.035 : 0;
   const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
+  const leg = legendLayout(chart, w, h);
+  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
+  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
+  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
+  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
   const axisFontSz = Math.max(catAxFontPx, valAxFontPx);
@@ -403,10 +493,10 @@ function renderLineChart(
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
-    t: titleH + valAxFontPx / 2 + 2,
-    r: legendW + w * 0.05,
-    b: catAxFontPx + 12 + catTitleH,
-    l: valAxFontPx * 2.2 + 10 + valTitleW,
+    t: titleH + legTopH + valAxFontPx / 2 + 2,
+    r: legRightW + w * 0.05,
+    b: catAxFontPx + 12 + catTitleH + legBottomH,
+    l: valAxFontPx * 2.2 + 10 + valTitleW + legLeftW,
   };
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
@@ -486,13 +576,20 @@ function renderLineChart(
     }
     ctx.stroke();
     ctx.fillStyle = color;
+    // ECMA-376 §21.2.2.32 — when the series resolves to no marker, skip the
+    // data-point dots but keep data labels (which pin to each raw value, not
+    // to the marker).
+    const drawMarkers = s.showMarker !== false;
     for (let ci = 0; ci < n; ci++) {
       const v = s.values[ci]; if (v == null) continue;
-      ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
+      if (drawMarkers) {
+        ctx.beginPath(); ctx.arc(toX(ci), toY(v), markerR, 0, Math.PI * 2); ctx.fill();
+      }
       if (chart.showDataLabels) {
         ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-        ctx.fillText(formatChartVal(v), toX(ci), toY(v) - markerR - 1);
+        const labelOffset = drawMarkers ? markerR + 1 : 2;
+        ctx.fillText(formatChartVal(v), toX(ci), toY(v) - labelOffset);
         ctx.fillStyle = color;
       }
     }
@@ -510,7 +607,7 @@ function renderLineChart(
     }
   }
 
-  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }
@@ -529,11 +626,20 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const titleTopPad    = chart.title ? h * 0.035 : 0;
   const titleBottomPad = chart.title ? h * 0.035 : 0;
   const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
+  const leg = legendLayout(chart, w, h);
+  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
+  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
+  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
+  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = { t: titleH + h * 0.02, r: legendW + w * 0.05, b: h * 0.14 + catTitleH, l: w * 0.12 + valTitleW };
+  const pad = {
+    t: titleH + legTopH + h * 0.02,
+    r: legRightW + w * 0.05,
+    b: h * 0.14 + catTitleH + legBottomH,
+    l: w * 0.12 + valTitleW + legLeftW,
+  };
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
@@ -618,7 +724,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     }
   }
 
-  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }
@@ -641,9 +747,27 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const titleH = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const legendW = chart.showLegend ? Math.max(80, w * 0.28) : 0;
-  const pw = w - legendW; const ph = h - titleH - h * 0.02;
-  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.02 + ph / 2;
+  // Pie legend labels categories (one row per slice) so reserve a bit more
+  // than the default 22% when placed on the side.
+  const pieLeg: LegendLayout | null = chart.showLegend
+    ? (() => {
+        const pos = chart.legendPos ?? 'r';
+        const side: LegendSide = pos === 'l' ? 'l' : pos === 't' ? 't' : pos === 'b' ? 'b' : 'r';
+        if (side === 'r' || side === 'l') {
+          return { side, reserveW: Math.max(80, w * 0.28), reserveH: 0 };
+        }
+        return { side, reserveW: 0, reserveH: Math.max(18, h * 0.08) };
+      })()
+    : null;
+  const legRightW  = pieLeg?.side === 'r' ? pieLeg.reserveW : 0;
+  const legLeftW   = pieLeg?.side === 'l' ? pieLeg.reserveW : 0;
+  const legTopH    = pieLeg?.side === 't' ? pieLeg.reserveH : 0;
+  const legBottomH = pieLeg?.side === 'b' ? pieLeg.reserveH : 0;
+
+  const pw = w - legRightW - legLeftW;
+  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
+  const cx2 = x + legLeftW + pw / 2;
+  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
   const outerR = Math.min(pw, ph) * 0.42;
   const innerR = isDoughnut ? outerR * 0.5 : 0;
 
@@ -678,18 +802,19 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     ctx.fillStyle = '#fff'; ctx.fill();
   }
 
-  const lx = x + pw + 4;
-  const fontSize = Math.max(9, Math.min(12, h / (vals.length + 2)));
-  ctx.font = `${fontSize}px sans-serif`;
-  ctx.textBaseline = 'middle';
-  const rowH = fontSize + 4;
-  let ry = y + (h - rowH * vals.length) / 2;
-  for (let i = 0; i < vals.length; i++) {
-    ctx.fillStyle = pieSliceColor(i, s);
-    ctx.fillRect(lx, ry, 10, fontSize);
-    ctx.fillStyle = '#333'; ctx.textAlign = 'left';
-    ctx.fillText((cats[i] ?? `Item ${i + 1}`).toString().slice(0, 18), lx + 14, ry + fontSize / 2);
-    ry += rowH;
+  if (pieLeg) {
+    // Pie legend is category-driven; build a pseudo-series array whose per-
+    // index palette matches the pie's slice colors so the swatches line up.
+    const legendSeries: ChartSeries[] = vals.map((_, i) => ({
+      name: (cats[i] ?? `Item ${i + 1}`).toString(),
+      color: s.dataPointColors?.[i] ?? s.color ?? CHART_PALETTE[i % CHART_PALETTE.length],
+      values: [],
+    }));
+    const plotLeft = cx2 - pw / 2;
+    drawLegendForLayout(
+      ctx, { ...chart, series: legendSeries } as ChartModel, pieLeg,
+      x, y, w, h, plotLeft, cy2 - ph / 2, pw, ph, titleH + 2,
+    );
   }
 }
 
@@ -706,11 +831,17 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const titleTopPad    = chart.title ? h * 0.035 : 0;
   const titleBottomPad = chart.title ? h * 0.035 : 0;
   const titleH  = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const legendW = chart.showLegend ? Math.max(70, w * 0.2) : 0;
+  const leg = legendLayout(chart, w, h);
+  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
+  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
+  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
+  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const pw = w - legendW; const ph = h - titleH - h * 0.02;
-  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.02 + ph / 2;
+  const pw = w - legRightW - legLeftW;
+  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
+  const cx2 = x + legLeftW + pw / 2;
+  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
   const rd  = Math.min(pw, ph) * 0.38;
 
   let dataMax = 0;
@@ -743,6 +874,23 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.lineTo(cx2 + Math.cos(a) * rd, cy2 + Math.sin(a) * rd); ctx.stroke();
   }
 
+  // Radial tick labels on the top (12 o'clock) spoke — Excel places the value
+  // axis there for radar charts. Respect <c:valAx><c:delete val="1"/> when the
+  // caller hides the axis, and skip the 0-label at the center to avoid
+  // overlapping the origin point.
+  if (!chart.valAxisHidden) {
+    const valAxPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
+    ctx.font = `${valAxPx}px sans-serif`;
+    ctx.fillStyle = '#555';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let ri = 1; ri <= rings; ri++) {
+      const v = (ri / rings) * axMax;
+      const rr = (ri / rings) * rd;
+      ctx.fillText(formatChartVal(v), cx2 - 3, cy2 - rr);
+    }
+  }
+
   ctx.font = `${Math.max(8, Math.min(11, rd * 0.2))}px sans-serif`;
   ctx.fillStyle = '#444'; ctx.textBaseline = 'middle';
   for (let i = 0; i < n; i++) {
@@ -770,9 +918,11 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
   }
 
-  if (legendW > 0) {
-    drawLegend(ctx, chart.series, x + w - legendW + 4, y + titleH + h * 0.04, legendW - 8, ph);
-  }
+  drawLegendForLayout(
+    ctx, chart, leg,
+    x, y, w, h,
+    cx2 - pw / 2, cy2 - ph / 2, pw, ph, titleH + 2,
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -785,11 +935,20 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const titleTopPad    = chart.title ? h * 0.035 : 0;
   const titleBottomPad = chart.title ? h * 0.035 : 0;
   const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
+  const leg = legendLayout(chart, w, h);
+  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
+  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
+  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
+  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = { t: titleH + h * 0.02, r: legendW + w * 0.05, b: h * 0.12 + catTitleH, l: w * 0.12 + valTitleW };
+  const pad = {
+    t: titleH + legTopH + h * 0.02,
+    r: legRightW + w * 0.05,
+    b: h * 0.12 + catTitleH + legBottomH,
+    l: w * 0.12 + valTitleW + legLeftW,
+  };
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
@@ -845,6 +1004,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const markerR = Math.max(3, ph * 0.015);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
+    if (s.showMarker === false) continue;
     const color = chartColor(si, s);
     ctx.fillStyle = color;
     const cats = s.categories ?? [];
@@ -856,7 +1016,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
-  if (legendW > 0) drawLegend(ctx, chart.series, x + w - legendW + 4, py0, legendW - 8, ph);
+  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }

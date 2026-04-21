@@ -55,6 +55,9 @@ export interface XlsxChartSeries {
   values: (number | null)[];
   /** Explicit fill color hex (from c:spPr). Undefined = use palette. */
   color?: string | null;
+  /** Marker visibility resolved from `<c:marker>`/chart-level default
+   *  (ECMA-376 §21.2.2.32). */
+  showMarker?: boolean;
 }
 
 /**
@@ -80,12 +83,18 @@ export interface ChartData {
   valAxisTitle?: string | null;
   /** True when <c:legend> is present. Absence means the legend is hidden. */
   showLegend?: boolean;
+  /** `<c:legendPos val>` — "r"|"l"|"t"|"b"|"tr". null/undefined = default ("r"). */
+  legendPos?: 'r' | 'l' | 't' | 'b' | 'tr' | null;
   /** Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt). */
   titleFontSizeHpt?: number | null;
   /** Chart title font color as a hex string without '#' (srgbClr only). */
   titleFontColor?: string | null;
   /** Chart title font family from `<a:latin typeface>` (ECMA-376 §20.1.4.2.24). */
   titleFontFace?: string | null;
+  /** Category axis tick-label font size in hpt (ECMA-376 §21.2.2.17 c:txPr). */
+  catAxisFontSizeHpt?: number | null;
+  /** Value axis tick-label font size in hpt. */
+  valAxisFontSizeHpt?: number | null;
 }
 
 export interface ChartAnchor {
