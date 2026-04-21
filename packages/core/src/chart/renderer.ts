@@ -177,7 +177,7 @@ function chartCategories(chart: ChartModel): string[] {
 // percentStacked. Also handles mixed bar+line series (seriesType per series).
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   const isH = chart.chartType === 'clusteredBarH' || chart.chartType === 'stackedBarH' || chart.chartType === 'stackedBarHPct';
   const stacked = chart.chartType.startsWith('stacked');
@@ -190,20 +190,26 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const n = cats.length;
   if (n === 0) return;
 
-  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  // Honor the XML-specified title font size when present; otherwise fall back
+  // to the proportional heuristic. Reserve the title band based on the actual
+  // drawn height so the plot shrinks to avoid overlap.
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  const titleTopPad    = chart.title ? h * 0.02 : 0;
+  const titleBottomPad = chart.title ? h * 0.025 : 0;
+  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
   const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
   const pad = {
-    t: titleH + h * 0.04,
+    t: titleH + h * 0.02,
     r: legendW + w * 0.03,
     b: h * 0.14 + catTitleH,
     l: w * 0.12 + valTitleW,
   };
   if (isH) { pad.l = w * 0.22 + valTitleW; pad.b = h * 0.08 + catTitleH; }
 
-  drawChartTitle(ctx, chart.title, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart.title, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw  = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -1015,7 +1021,7 @@ export function renderChart(
     case 'stackedBarH':
     case 'stackedBarPct':
     case 'stackedBarHPct':
-      renderBarChart(ctx, chart, rect); break;
+      renderBarChart(ctx, chart, rect, ptToPx); break;
     case 'line':
     case 'stackedLine':
     case 'stackedLinePct':

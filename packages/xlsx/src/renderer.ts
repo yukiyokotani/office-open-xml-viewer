@@ -2016,11 +2016,14 @@ function adaptChartData(chart: ChartData): ChartModel {
     // Excel charts default to an opaque white chart area with a light border.
     // Keep that appearance; pptx sets chartBg from the chartSpace spPr instead.
     chartBg: 'FFFFFF',
-    showLegend: (chart.series?.length ?? 0) > 0,
+    // <c:legend> is the authoritative signal: present → show, absent → hide.
+    // A single-series bar chart in Excel typically omits <c:legend>, so we
+    // must honor that rather than deriving from series count.
+    showLegend: chart.showLegend ?? false,
     catAxisCrossBetween: 'between',
     valAxisMajorTickMark: 'cross',
     catAxisMajorTickMark: 'cross',
-    titleFontSizeHpt: null,
+    titleFontSizeHpt: chart.titleFontSizeHpt ?? null,
     catAxisFontSizeHpt: null,
     valAxisFontSizeHpt: null,
     dataLabelFontSizeHpt: null,
@@ -2074,7 +2077,10 @@ function renderCharts(
     ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
-    renderChart(ctx, adaptChartData(anchor.chart), { x: cx, y: cy, w: cw, h: ch });
+    // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
+    // that by `cs` so OOXML-specified font sizes (title/axes) scale with zoom.
+    const ptToPx = (4 / 3) * cs;
+    renderChart(ctx, adaptChartData(anchor.chart), { x: cx, y: cy, w: cw, h: ch }, ptToPx);
     ctx.restore();
   }
 }
