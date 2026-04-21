@@ -2828,13 +2828,22 @@ fn parse_shape(
             }
         });
 
-    // lnRef idx=0 → no line; idx>0 → use referenced color
+    // lnRef idx=0 → no line; idx>0 → resolve width from theme's fmtScheme >
+    // lnStyleLst (stored as "+lnRef-N") and color from the ref's own solidFill.
+    // Falling back to 9525 under-weights idx>=2 strokes (Office default theme
+    // idx=2 is 19050 EMU = 1.5pt, idx=3 is 25400 EMU = 2pt).
     let style_stroke: Option<Stroke> = style_node
         .and_then(|s| child(s, "lnRef"))
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None, head_end: None, tail_end: None })
+                parse_color_node(lr, theme).map(|c| {
+                    let width = theme
+                        .get(&format!("+lnRef-{}", idx))
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(9525);
+                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None }
+                })
             }
         });
 
