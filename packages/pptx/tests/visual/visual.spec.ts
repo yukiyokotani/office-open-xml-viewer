@@ -11,7 +11,7 @@ import pixelmatch from 'pixelmatch';
 const PPTX_FILES: { name: string; slideCount: number }[] = [
   { name: 'private/sample-1', slideCount: 5 },
   { name: 'private/sample-2', slideCount: 17 },
-  { name: 'private/sample-3', slideCount: 16 },
+  { name: 'private/sample-3', slideCount: 17 },
   { name: 'private/sample-4', slideCount: 15 },
   { name: 'private/sample-5', slideCount: 3 },
   { name: 'private/sample-6', slideCount: 3 },

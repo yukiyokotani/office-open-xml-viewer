@@ -745,6 +745,21 @@ fn parse_theme_colors(xml: &str) -> HashMap<String, String> {
         }
     }
 
+    // Parse fmtScheme > lnStyleLst so lnRef idx="N" can resolve to the theme's
+    // canonical stroke width (9525 is wrong; theme defines 12700 / 19050 / 25400).
+    // Stored under "+lnRef-1", "+lnRef-2", "+lnRef-3".
+    if let Some(fmt_scheme) = root.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "fmtScheme")
+    {
+        if let Some(ln_style_lst) = child(fmt_scheme, "lnStyleLst") {
+            for (i, ln) in ln_style_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "ln").enumerate() {
+                if let Some(w) = attr(&ln, "w") {
+                    map.insert(format!("+lnRef-{}", i + 1), w);
+                }
+            }
+        }
+    }
+
     // Parse font scheme: majorFont (+mj-lt, +mj-ea, +mj-cs) and minorFont (+mn-lt, +mn-ea, +mn-cs)
     // Store as special keys in the theme map so the renderer can resolve +mj-lt → actual typeface.
     if let Some(font_scheme) = root.descendants()
@@ -860,11 +875,23 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
                 rf *= val; gf *= val; bf *= val;
             }
             "tint" => {
-                // tint=100000 → no change; tint=0 → white
-                let val = attr_f64(&t, "val").unwrap_or(100_000.0) / 100_000.0;
-                rf = rf * val + (1.0 - val);
-                gf = gf * val + (1.0 - val);
-                bf = bf * val + (1.0 - val);
+                // PowerPoint renders tint as a lerp toward white in LINEAR sRGB
+                // space (val = fraction of shift toward white). Sampling PDF
+                // exports of SmartArt confirms this: accent1 #156082 with
+                // tint=60000 produces ~#D1D6DB, which matches only the
+                // linear-RGB formulation. HSL-space luminance shift keeps the
+                // color too saturated (#83C3EB-ish); straight sRGB lerp yields
+                // a different midpoint. Linear RGB matches pixel-for-pixel.
+                let val = attr_f64(&t, "val").unwrap_or(0.0) / 100_000.0;
+                let lr = srgb_to_linear(rf);
+                let lg = srgb_to_linear(gf);
+                let lb = srgb_to_linear(bf);
+                let nr_l = lr + (1.0 - lr) * val;
+                let ng_l = lg + (1.0 - lg) * val;
+                let nb_l = lb + (1.0 - lb) * val;
+                rf = linear_to_srgb(nr_l.clamp(0.0, 1.0));
+                gf = linear_to_srgb(ng_l.clamp(0.0, 1.0));
+                bf = linear_to_srgb(nb_l.clamp(0.0, 1.0));
             }
             "alpha" => {
                 // alpha=100000 → fully opaque, alpha=0 → fully transparent
@@ -883,6 +910,16 @@ fn apply_color_transforms(hex: &str, node: roxmltree::Node<'_, '_>) -> String {
         let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!("{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
     }
+}
+
+/// sRGB → linear light. IEC 61966-2-1 transfer function.
+fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Linear light → sRGB.
+fn linear_to_srgb(c: f64) -> f64 {
+    if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 fn rgb_to_hls(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
@@ -3809,21 +3846,62 @@ fn parse_connector(
         return None;
     }
 
-    // Style-based stroke fallback
+    // Style-based stroke fallback. `p:style > a:lnRef idx="N"` references the
+    // theme fmtScheme lnStyleLst entry N (1-based). We look up the canonical
+    // width from the theme map ("+lnRef-N") rather than hardcoding 9525.
     let style_node = child(node, "style");
     let style_stroke: Option<Stroke> = style_node
         .and_then(|s| child(s, "lnRef"))
         .and_then(|lr| {
             let idx: u32 = attr(&lr, "idx").and_then(|v| v.parse().ok()).unwrap_or(1);
             if idx == 0 { None } else {
-                parse_color_node(lr, theme).map(|c| Stroke { color: c, width: 9525, dash_style: None, head_end: None, tail_end: None })
+                parse_color_node(lr, theme).map(|c| {
+                    let width = theme
+                        .get(&format!("+lnRef-{}", idx))
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(9525);
+                    Stroke { color: c, width, dash_style: None, head_end: None, tail_end: None }
+                })
             }
         });
 
-    let stroke = if child(sp_pr, "ln").is_some() {
-        child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme))
-    } else {
-        style_stroke
+    // Merge <a:ln> attributes onto style_stroke: <a:ln> commonly contains only
+    // arrow ends (headEnd/tailEnd) while the color/width come from lnRef.
+    // parse_stroke() alone drops the whole stroke when solidFill is absent,
+    // which leaves connectors invisible on slides that rely on style_ref.
+    let ln_node = child(sp_pr, "ln");
+    let stroke: Option<Stroke> = match ln_node {
+        None => style_stroke,
+        Some(ln) => {
+            if child(ln, "noFill").is_some() {
+                None
+            } else {
+                let ln_width = attr_i64(&ln, "w");
+                let ln_color = child(ln, "solidFill").and_then(|n| parse_color_node(n, theme));
+                let ln_dash = child(ln, "prstDash")
+                    .and_then(|n| attr(&n, "val"))
+                    .filter(|v| v != "solid");
+                let ln_head = child(ln, "headEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
+                let ln_tail = child(ln, "tailEnd").map(parse_arrow_end).filter(|a| a.kind != "none");
+                match (ln_color, style_stroke) {
+                    (Some(c), base) => Some(Stroke {
+                        color: c,
+                        width: ln_width.unwrap_or_else(|| base.as_ref().map(|s| s.width).unwrap_or(9525)),
+                        dash_style: ln_dash.or_else(|| base.as_ref().and_then(|s| s.dash_style.clone())),
+                        head_end: ln_head.or_else(|| base.as_ref().and_then(|s| s.head_end.clone())),
+                        tail_end: ln_tail.or_else(|| base.as_ref().and_then(|s| s.tail_end.clone())),
+                    }),
+                    (None, Some(base)) => Some(Stroke {
+                        color: base.color,
+                        width: ln_width.unwrap_or(base.width),
+                        dash_style: ln_dash.or(base.dash_style),
+                        head_end: ln_head.or(base.head_end),
+                        tail_end: ln_tail.or(base.tail_end),
+                    }),
+                    (None, None) => None,
+                }
+            }
+        }
     };
 
     let shadow = child(sp_pr, "effectLst")
