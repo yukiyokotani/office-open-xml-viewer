@@ -78,6 +78,10 @@ export interface ChartData {
   catAxisTitle?: string | null;
   /** Value axis title (c:valAx/c:title). */
   valAxisTitle?: string | null;
+  /** True when <c:legend> is present. Absence means the legend is hidden. */
+  showLegend?: boolean;
+  /** Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt). */
+  titleFontSizeHpt?: number | null;
 }
 
 export interface ChartAnchor {

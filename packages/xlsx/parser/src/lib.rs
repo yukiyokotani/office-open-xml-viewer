@@ -102,6 +102,13 @@ pub struct ChartData {
     /// Value axis title (c:valAx/c:title).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_title: Option<String>,
+    /// True when `<c:legend>` is present in the chart; false means no legend.
+    pub show_legend: bool,
+    /// Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt).
+    /// Taken from the first `defRPr@sz` or `rPr@sz` inside `c:title`. None =
+    /// not specified; renderer falls back to a proportional default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_font_size_hpt: Option<i32>,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -1669,6 +1676,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
 
     // Parse optional title
     let title = extract_chart_title(&chart_root, c_ns, a_ns);
+    let title_font_size_hpt = extract_chart_title_size(&chart_root, c_ns, a_ns);
+
+    // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
+    // means Excel hides the legend (default for a single-series chart with no
+    // explicit legend element).
+    let show_legend = chart_root.children()
+        .any(|n| n.tag_name().name() == "legend" && n.tag_name().namespace() == Some(c_ns));
 
     // Find c:plotArea
     let plot_area = chart_root.children()
@@ -1778,6 +1792,22 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         show_data_labels,
         cat_axis_title,
         val_axis_title,
+        show_legend,
+        title_font_size_hpt,
+    })
+}
+
+/// Extract the chart title's font size (hundredths of a point) from the first
+/// `a:defRPr@sz` or `a:rPr@sz` found under `c:title`. Returns None when absent.
+fn extract_chart_title_size(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<i32> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    title_node.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        if n.tag_name().namespace() != Some(a_ns) { return None; }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" { return None; }
+        n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
     })
 }
 
