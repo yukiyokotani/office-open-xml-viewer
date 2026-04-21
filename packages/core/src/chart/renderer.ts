@@ -157,7 +157,8 @@ function drawChartTitle(
   x: number, y: number, w: number, fontSize: number,
 ): void {
   if (!chart.title) return;
-  ctx.font = `bold ${fontSize}px sans-serif`;
+  const face = chart.titleFontFace ? `"${chart.titleFontFace}", Calibri, Arial, sans-serif` : 'Calibri, Arial, sans-serif';
+  ctx.font = `bold ${fontSize}px ${face}`;
   ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';

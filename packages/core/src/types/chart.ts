@@ -78,6 +78,8 @@ export interface ChartModel {
   titleFontSizeHpt: number | null;
   /** Title font color as a hex string without '#' (e.g. "1B4332"). null = default. */
   titleFontColor: string | null;
+  /** Title font family from `<a:latin typeface>` (ECMA-376 §20.1.4.2.24). null = default. */
+  titleFontFace: string | null;
   /** `<c:catAx><c:txPr>` font size (hpt). null = fall back to proportional default. */
   catAxisFontSizeHpt: number | null;
   /** `<c:valAx><c:txPr>` font size (hpt). null = fall back to proportional default. */

@@ -113,6 +113,10 @@ pub struct ChartData {
     /// first `a:solidFill/a:srgbClr@val` inside `c:title`. None = default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title_font_color: Option<String>,
+    /// Chart title font family (ECMA-376 DrawingML §20.1.4.2.24 `a:latin@typeface`).
+    /// Taken from the first `a:latin` element inside `c:title`. None = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_font_face: Option<String>,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -1682,6 +1686,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     let title = extract_chart_title(&chart_root, c_ns, a_ns);
     let title_font_size_hpt = extract_chart_title_size(&chart_root, c_ns, a_ns);
     let title_font_color = extract_chart_title_color(&chart_root, c_ns, a_ns);
+    let title_font_face = extract_chart_title_face(&chart_root, c_ns, a_ns);
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
@@ -1800,6 +1805,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         show_legend,
         title_font_size_hpt,
         title_font_color,
+        title_font_face,
     })
 }
 
@@ -1834,6 +1840,19 @@ fn extract_chart_title_color(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &st
             .unwrap_or(false);
         if !parent_is_solid { return None; }
         n.attribute("val").map(|s| s.to_string())
+    })
+}
+
+/// Extract the chart title's font family from the first `a:latin@typeface`
+/// descendant of `c:title` (ECMA-376 DrawingML §20.1.4.2.24).
+fn extract_chart_title_face(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<String> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    title_node.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        if n.tag_name().namespace() != Some(a_ns) { return None; }
+        if n.tag_name().name() != "latin" { return None; }
+        n.attribute("typeface").map(|s| s.to_string())
     })
 }
 

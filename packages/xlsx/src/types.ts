@@ -84,6 +84,8 @@ export interface ChartData {
   titleFontSizeHpt?: number | null;
   /** Chart title font color as a hex string without '#' (srgbClr only). */
   titleFontColor?: string | null;
+  /** Chart title font family from `<a:latin typeface>` (ECMA-376 §20.1.4.2.24). */
+  titleFontFace?: string | null;
 }
 
 export interface ChartAnchor {
