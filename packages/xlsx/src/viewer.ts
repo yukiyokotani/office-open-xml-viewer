@@ -119,7 +119,7 @@ export class XlsxViewer {
     // eye. Tabs align to flex-end, so shorter inactive tabs sit lower and the
     // active tab sticks up. Font size also bumps a hair on active.
     const activeH = TAB_BAR_H - 2;
-    const inactiveH = TAB_BAR_H - 8;
+    const inactiveH = TAB_BAR_H - 5;
     const base =
       `display:inline-block;padding:0 14px;` +
       `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
