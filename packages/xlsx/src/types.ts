@@ -82,6 +82,8 @@ export interface ChartData {
   showLegend?: boolean;
   /** Chart title font size in OOXML hundredths of a point (e.g. 1400 = 14pt). */
   titleFontSizeHpt?: number | null;
+  /** Chart title font color as a hex string without '#' (srgbClr only). */
+  titleFontColor?: string | null;
 }
 
 export interface ChartAnchor {

@@ -2878,6 +2878,7 @@ export async function renderSlide(
           valAxisMajorTickMark: el.valAxisMajorTickMark,
           catAxisMajorTickMark: el.catAxisMajorTickMark,
           titleFontSizeHpt: el.titleFontSizeHpt,
+          titleFontColor: el.titleFontColor ?? null,
           catAxisFontSizeHpt: el.catAxisFontSizeHpt,
           valAxisFontSizeHpt: el.valAxisFontSizeHpt,
           dataLabelFontSizeHpt: el.dataLabelFontSizeHpt,
