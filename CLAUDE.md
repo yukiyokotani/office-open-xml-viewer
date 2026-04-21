@@ -37,6 +37,15 @@ Rust/WASM parser + TypeScript Canvas renderer 構成。
 - 参照画像（`packages/*/tests/visual/references/`）はユーザー指示のみ更新。絶対に自動更新しない。
 - pptx/xlsx/docx ファイルは git にコミットしない。
 
+## 実装方針: ヒューリスティックより仕様忠実を優先
+
+- VRT を一時的に良くするためだけのヒューリスティック（「M > 2 なら grid snap」「auto > 720 は atLeast と見なす」「body は natural × M で heading は max(natural, pitch × M)」等）を**入れない**。
+  短期的に数字が上がっても別サンプルで後退し、理由を書けない挙動が積み重なる。
+- まず ECMA-376 / ISO-29500 の該当節を読み、Word が実際にどう解釈しているか（docGrid の snap ルール、line rule の各意味、paragraph mark sz の扱い、spacing 継承の各属性、compat フラグなど）を突き止める。
+- 仕様との差の原因が分からないときは、parser 側で情報を捨てていないか（inherit / merge で潰れていないか）を先に疑う。情報が足りなければ parser を拡張するのが正道。
+- 工数が増えても spec に忠実な実装を選ぶ。empirical な定数（1.15、0.25、ceiling 付きの条件分岐など）を入れそうになったら、いったん手を止めて「どの §x.x.x の挙動なのか」を書き出す。書き出せないなら実装しない。
+- 既存コードに上の原則に反するコードが残っている場合は、触る機会があったら正道に寄せる。
+
 ## WASM ビルド手順
 
 ```bash
