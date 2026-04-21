@@ -26,8 +26,9 @@ Rust/WASM parser + TypeScript Canvas renderer 構成。
 **複数セッションが並列で作業するため、main への直接 push は禁止。**
 
 - 作業は必ず feature branch で行う（例: `feature/xlsx-xxx`、`feature/pptx-xxx`）
-- `git push origin <branch>` して PR を作成し、main へマージする
-- `git push origin main` は絶対に行わない
+- `git push origin <branch>` して GitHub で PR を作成し、PR 経由で main へマージする
+- `git push origin main` は絶対に行わない（直接 push 禁止）
+- **squash merge は使わない。** merge commit（`--no-ff`）または rebase merge を使うこと。squash すると feature branch の commit 粒度が失われ、bisect / revert の単位が粗くなる
 - `git push` 前に `git config http.postBuffer 524288000` を設定すること
 
 ## 自律作業の原則
