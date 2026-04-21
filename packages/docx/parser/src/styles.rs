@@ -124,12 +124,19 @@ impl StyleMap {
             }
         }
 
-        // Parse each style
+        // Parse each style (paragraph, character, or table).
+        // ECMA-376 §17.7.6 ST_StyleType: table styles may carry pPr that
+        // applies to cell paragraphs (e.g. "Table Grid" sets
+        // `w:spacing w:line="240" w:lineRule="auto" w:after="0"`). We
+        // index them in the same StyleMap so cell resolution can look
+        // them up by ID.
         let mut default_para_style_id: Option<String> = None;
         for style_node in children_w(root, "style") {
             let Some(style_id) = attr_w(style_node, "styleId") else { continue };
             let style_type = attr_w(style_node, "type").unwrap_or_default();
-            if style_type != "paragraph" && style_type != "character" { continue; }
+            if style_type != "paragraph"
+                && style_type != "character"
+                && style_type != "table" { continue; }
 
             if style_type == "paragraph"
                 && attr_w(style_node, "default").as_deref() == Some("1")
@@ -167,14 +174,27 @@ impl StyleMap {
     }
 
     /// Resolve all formatting for a paragraph style ID, merging inherited chain.
-    /// Priority (lowest to highest): docDefaults → basedOn chain → style itself.
+    /// Priority (lowest to highest): docDefaults → table style pPr (if inside a
+    /// table) → basedOn chain of the paragraph style → paragraph style itself.
     /// Within each level: style rPr then pPr/rPr (both are paragraph-level run defaults).
-    pub fn resolve_para(&self, style_id: Option<&str>) -> (ParaFmt, RunFmt) {
+    pub fn resolve_para(
+        &self,
+        style_id: Option<&str>,
+        table_style_id: Option<&str>,
+    ) -> (ParaFmt, RunFmt) {
         let mut merged_para = ParaFmt::default();
         let mut merged_run = RunFmt::default();
 
         apply_para(&mut merged_para, &self.defaults_para);
         apply_run(&mut merged_run, &self.defaults_run);
+
+        // Table style pPr applies to every paragraph inside the table, below
+        // the paragraph style (§17.7.6). "Table Grid" sets line=240 after=0;
+        // without this, cell paragraphs inherit docDefault's M=1.15 spacing
+        // and render ~3pt taller per line than Word.
+        if let Some(tid) = table_style_id {
+            self.apply_style_chain(tid, &mut merged_para, &mut merged_run);
+        }
 
         // Use explicit pStyle if present, otherwise fall back to the
         // paragraph style marked w:default="1" (typically "Normal").

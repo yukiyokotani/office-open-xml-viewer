@@ -332,10 +332,6 @@ export function computePages(
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
       const fitHeight = h - para.spaceAfter;
       const needed = fitHeight + needNext;
-      {
-        const firstText = (para.runs.find((r) => r.type === 'text' || r.type === 'field') as { text?: string } | undefined)?.text ?? '(empty)';
-        console.log(`PAG[${i}] y=${y.toFixed(1)} h=${h.toFixed(1)} fit=${fitHeight.toFixed(1)} olap=${overlap.toFixed(1)} next=${needNext.toFixed(1)} contentH=${contentH.toFixed(1)} ${firstText.slice(0, 30)}`);
-      }
       if (y > 0 && y + needed > contentH) {
         newPage();
       }
@@ -416,8 +412,6 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
   const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
   const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
   const colWidths = table.colWidths.map((w) => w * colScale);
-  // Table cells don't snap to the section docGrid — see comment in renderCell.
-  const cellState: RenderState = { ...state, docGrid: { type: null, linePitchPt: null } };
   let h = 0;
   for (const row of table.rows) {
     if (row.rowHeight != null) {
@@ -432,7 +426,7 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
       const innerW = Math.max(1, cellW - table.cellMarginLeft - table.cellMarginRight);
       let ch = table.cellMarginTop + table.cellMarginBottom;
       for (const para of cell.content) {
-        ch += estimateParagraphHeight(cellState, para, innerW);
+        ch += estimateParagraphHeight(state, para, innerW);
       }
       if (ch > rowH) rowH = ch;
       ci += span;
@@ -1507,12 +1501,9 @@ function calculateRowHeight(
     const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
     const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
 
-    // Cell paragraphs don't snap to the section's line grid (see comment in
-    // renderCell); use a grid-less measurement state for row-height estimate.
-    const cellMeasureState: RenderState = { ...state, docGrid: { type: null, linePitchPt: null } };
     let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
     for (const para of cell.content) {
-      h += measureParaHeight(cellMeasureState, para, contentW, scale);
+      h += measureParaHeight(state, para, contentW, scale);
       h += (para.spaceBefore + para.spaceAfter) * scale;
     }
     if (h > maxH) maxH = h;
@@ -1576,18 +1567,17 @@ function renderCell(
   const mr = table.cellMarginRight * scale;
 
   // ECMA-376 §17.6.5 defines w:docGrid as a section-level constraint on
-  // body-text lines. Word's observed behavior is that line-grid snapping
-  // does NOT carry into table cells — a cell's own paragraphs render at
-  // their natural font line height regardless of the enclosing section's
-  // grid pitch. Disable the grid on the cell state so cell paragraphs use
-  // `natural × M` line boxes (or `natural` for inherited line spacing),
-  // matching Word's layout on tables like demo/sample-1 page 3.
+  // Cell paragraphs inherit the section's docGrid, but their line-spacing
+  // rule comes from the table style's pPr (see parse_table + StyleMap's
+  // `resolve_para` with a `table_style_id`). "Table Grid" sets line=240
+  // (M=1.0), so with docGrid a cell line box is `max(natural, pitch × 1.0)`
+  // = pitch (~18pt), matching Word's observed in-cell baseline advance
+  // on demo/sample-1 page 3.
   const cellState: RenderState = {
     ...state,
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
-    docGrid: { type: null, linePitchPt: null },
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
