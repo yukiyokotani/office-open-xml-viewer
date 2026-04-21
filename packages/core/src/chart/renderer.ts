@@ -519,20 +519,23 @@ function renderLineChart(
 // Area chart
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
 
-  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  const titleTopPad    = chart.title ? h * 0.035 : 0;
+  const titleBottomPad = chart.title ? h * 0.035 : 0;
+  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
   const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = { t: titleH + h * 0.04, r: legendW + w * 0.05, b: h * 0.14 + catTitleH, l: w * 0.12 + valTitleW };
+  const pad = { t: titleH + h * 0.02, r: legendW + w * 0.05, b: h * 0.14 + catTitleH, l: w * 0.12 + valTitleW };
 
-  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -624,7 +627,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
 // Pie / Doughnut — supports dataPointColors (per slice).
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, isDoughnut: boolean): void {
+function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, isDoughnut: boolean, ptToPx: number): void {
   const { x, y, w, h } = r;
   const s = chart.series[0]; if (!s) return;
   const cats = (s.categories && s.categories.length > 0) ? s.categories : chart.categories;
@@ -632,12 +635,15 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
 
-  const titleH = chart.title ? Math.max(14, h * 0.06) : 0;
-  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  const titleTopPad    = chart.title ? h * 0.035 : 0;
+  const titleBottomPad = chart.title ? h * 0.035 : 0;
+  const titleH = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const legendW = chart.showLegend ? Math.max(80, w * 0.28) : 0;
-  const pw = w - legendW; const ph = h - titleH - h * 0.04;
-  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
+  const pw = w - legendW; const ph = h - titleH - h * 0.02;
+  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.02 + ph / 2;
   const outerR = Math.min(pw, ph) * 0.42;
   const innerR = isDoughnut ? outerR * 0.5 : 0;
 
@@ -691,17 +697,20 @@ function renderPieChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 // Radar / Spider chart
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
   const cats = chartCategories(chart);
   const n = cats.length; if (n < 3) return;
 
-  const titleH  = chart.title ? Math.max(14, h * 0.06) : 0;
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  const titleTopPad    = chart.title ? h * 0.035 : 0;
+  const titleBottomPad = chart.title ? h * 0.035 : 0;
+  const titleH  = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
   const legendW = chart.showLegend ? Math.max(70, w * 0.2) : 0;
-  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
-  const pw = w - legendW; const ph = h - titleH - h * 0.04;
-  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.04 + ph / 2;
+  const pw = w - legendW; const ph = h - titleH - h * 0.02;
+  const cx2 = x + pw / 2; const cy2 = y + titleH + h * 0.02 + ph / 2;
   const rd  = Math.min(pw, ph) * 0.38;
 
   let dataMax = 0;
@@ -770,16 +779,19 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
 // Scatter chart — X values from series.categories, Y from series.values.
 // ═══════════════════════════════════════════════════════════════════════════
 
-function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect): void {
+function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: ChartRect, ptToPx: number): void {
   const { x, y, w, h } = r;
-  const titleH   = chart.title ? Math.max(14, h * 0.06) : 0;
+  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
+  const titleTopPad    = chart.title ? h * 0.035 : 0;
+  const titleBottomPad = chart.title ? h * 0.035 : 0;
+  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
   const legendW  = chart.showLegend ? Math.max(80, w * 0.22) : 0;
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = { t: titleH + h * 0.06, r: legendW + w * 0.05, b: h * 0.12 + catTitleH, l: w * 0.12 + valTitleW };
+  const pad = { t: titleH + h * 0.02, r: legendW + w * 0.05, b: h * 0.12 + catTitleH, l: w * 0.12 + valTitleW };
 
-  drawChartTitle(ctx, chart, x, y + 2, w, Math.max(11, titleH * 0.7));
+  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
 
   const px0 = x + pad.l; const py0 = y + pad.t;
   const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
@@ -1030,16 +1042,16 @@ export function renderChart(
     case 'area':
     case 'stackedArea':
     case 'stackedAreaPct':
-      renderAreaChart(ctx, chart, rect); break;
+      renderAreaChart(ctx, chart, rect, ptToPx); break;
     case 'pie':
-      renderPieChart(ctx, chart, rect, false); break;
+      renderPieChart(ctx, chart, rect, false, ptToPx); break;
     case 'doughnut':
-      renderPieChart(ctx, chart, rect, true); break;
+      renderPieChart(ctx, chart, rect, true, ptToPx); break;
     case 'radar':
-      renderRadarChart(ctx, chart, rect); break;
+      renderRadarChart(ctx, chart, rect, ptToPx); break;
     case 'scatter':
     case 'bubble':
-      renderScatterChart(ctx, chart, rect); break;
+      renderScatterChart(ctx, chart, rect, ptToPx); break;
     case 'waterfall':
       renderWaterfallChart(ctx, chart, rect); break;
     default:
