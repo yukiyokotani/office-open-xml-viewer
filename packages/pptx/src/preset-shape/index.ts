@@ -86,6 +86,78 @@ export function renderPresetShape(
   return true;
 }
 
+/**
+ * For connector presets (straight / bent / curved), return the canvas-space
+ * tip points and outgoing tangent angles at the start and end of the path.
+ * Used by the renderer to place arrow heads with the correct orientation.
+ *
+ * `start.angle` is the direction **from** the path **toward** the start tip
+ * (so arrow heads "headEnd" point outward); `end.angle` is the direction
+ * the pen was moving as it reached the end tip.
+ */
+export function getConnectorAnchors(
+  geom: string,
+  x: number, y: number, w: number, h: number,
+  adj: (number | null | undefined)[],
+): {
+  start: { x: number; y: number; angle: number };
+  end:   { x: number; y: number; angle: number };
+} | null {
+  const def = PRESETS[geom.toLowerCase()];
+  if (!def || def.paths.length === 0) return null;
+  const path = def.paths[0];
+  const evaluator = createEvaluator({ w, h, adj }, def.adj, def.gd);
+  const sx = path.w != null ? w / path.w : 1;
+  const sy = path.h != null ? h / path.h : 1;
+  const toAbsX = (v: number) => x + v * sx;
+  const toAbsY = (v: number) => y + v * sy;
+
+  let startX = 0, startY = 0;
+  let penX = 0, penY = 0;
+  let startTanX = 0, startTanY = 0;
+  let startTanSet = false;
+  let endTanX = 0, endTanY = 0;
+
+  for (const cmd of path.cmds) {
+    switch (cmd[0]) {
+      case 'm': {
+        penX = toAbsX(evaluator.resolve(cmd[1]));
+        penY = toAbsY(evaluator.resolve(cmd[2]));
+        startX = penX; startY = penY;
+        break;
+      }
+      case 'l': {
+        const nx = toAbsX(evaluator.resolve(cmd[1]));
+        const ny = toAbsY(evaluator.resolve(cmd[2]));
+        if (!startTanSet) { startTanX = nx - penX; startTanY = ny - penY; startTanSet = true; }
+        endTanX = nx - penX; endTanY = ny - penY;
+        penX = nx; penY = ny;
+        break;
+      }
+      case 'C': {
+        const c1x = toAbsX(evaluator.resolve(cmd[1]));
+        const c1y = toAbsY(evaluator.resolve(cmd[2]));
+        const c2x = toAbsX(evaluator.resolve(cmd[3]));
+        const c2y = toAbsY(evaluator.resolve(cmd[4]));
+        const nx  = toAbsX(evaluator.resolve(cmd[5]));
+        const ny  = toAbsY(evaluator.resolve(cmd[6]));
+        if (!startTanSet) { startTanX = c1x - penX; startTanY = c1y - penY; startTanSet = true; }
+        endTanX = nx - c2x; endTanY = ny - c2y;
+        penX = nx; penY = ny;
+        break;
+      }
+    }
+  }
+
+  // Start arrow points opposite the outgoing tangent (away from the path).
+  const startAngle = Math.atan2(startTanY, startTanX) + Math.PI;
+  const endAngle   = Math.atan2(endTanY,   endTanX);
+  return {
+    start: { x: startX, y: startY, angle: startAngle },
+    end:   { x: penX,   y: penY,   angle: endAngle   },
+  };
+}
+
 function tintOverlay(mode: string | null): string | null {
   switch (mode) {
     case 'lighten':     return 'rgba(255,255,255,0.30)';

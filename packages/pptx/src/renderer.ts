@@ -23,7 +23,7 @@ import {
   applyStroke as applyStrokeCore,
 } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
-import { renderPresetShape, hasPreset } from './preset-shape';
+import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
@@ -397,7 +397,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // `arc` keeps its bespoke case because its fill semantics (pie-wedge vs
   // open arc) depend on stroke state in ways the engine doesn't express.
   const usePresetEngine =
-    !el.custGeom && geom !== 'arc' && !CONNECTOR_GEOMS.has(geom) && hasPreset(geom);
+    !el.custGeom && geom !== 'arc' && hasPreset(geom);
 
   if (usePresetEngine) {
     renderPresetShape(
@@ -427,12 +427,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   }
 
   if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
-    const angle = Math.atan2(h, w);
-    if (el.stroke.tailEnd) {
-      drawArrowHead(ctx, x + w, y + h, angle, el.stroke.tailEnd, el.stroke, scale);
-    }
-    if (el.stroke.headEnd) {
-      drawArrowHead(ctx, x, y, angle + Math.PI, el.stroke.headEnd, el.stroke, scale);
+    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4]);
+    if (anchors) {
+      if (el.stroke.tailEnd) {
+        drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);
+      }
+      if (el.stroke.headEnd) {
+        drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
+      }
     }
   }
 
