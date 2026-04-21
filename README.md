@@ -432,16 +432,21 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Bold, italic, underline, strikethrough | ✅ |
 | | Font family, size, color | ✅ |
 | | Hyperlinks | ✅ |
-| | Superscript / subscript | ❌ |
-| **Formatting** | Paragraph alignment | ✅ |
-| | Line spacing | ✅ |
+| | Superscript / subscript (`w:vertAlign`) | ✅ |
+| **Formatting** | Paragraph alignment (left/center/right/justify) | ✅ |
+| | Line spacing (auto / atLeast / exact) | ✅ |
+| | Line grid (`w:docGrid`, §17.6.5) | ✅ |
+| | Margin collapsing between paragraphs | ✅ |
 | | Indents and tab stops | ✅ |
 | | Lists (bullet and numbered) | ✅ |
-| | Paragraph styles (Heading 1–6, Normal) | 🔜 Planned |
+| | Paragraph styles (Heading 1–9, Normal, custom) | ✅ |
+| | Table style `w:pPr` cascade (§17.7.6) | ✅ |
+| | keepNext / keepLines / widowControl | ✅ |
 | **Elements** | Tables (with borders, fills, merges) | ✅ |
-| | Images (inline and anchored) | ✅ |
-| | Text boxes / drawing shapes | ❌ |
-| **Advanced** | Track changes / comments / footnotes | ❌ |
+| | Images (inline and anchored, with text wrap) | ✅ |
+| | Text boxes / drawing shapes | ✅ |
+| **Advanced** | Footnote / endnote reference markers | ✅ |
+| | Track changes / comments | ❌ |
 | | Mail merge fields | ❌ Not planned |
 
 ---
