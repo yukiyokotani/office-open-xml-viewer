@@ -90,6 +90,11 @@ export interface ShapeElement {
   adj3: number | null;
   /** Fourth adjustment value from prstGeom avLst (e.g. callout tip y). Range 0–100000. */
   adj4: number | null;
+  /** adj5-adj8: extra polyline vertices for callouts like accentBorderCallout3. */
+  adj5: number | null;
+  adj6: number | null;
+  adj7: number | null;
+  adj8: number | null;
   /** Drop shadow from effectLst > outerShdw (null if not present). */
   shadow: Shadow | null;
 }

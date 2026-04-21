@@ -3,6 +3,7 @@
   "compilerOptions": {
     "declarationDir": "./dist/types",
     "emitDeclarationOnly": true,
+    "resolveJsonModule": true,
     "rootDir": "./src",
     "outDir": "./dist",
     "paths": {
@@ -10,6 +11,6 @@
       "@silurus/ooxml-core/*": ["../core/src/*"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "src/**/*.json"],
   "references": [{ "path": "../core" }]
 }

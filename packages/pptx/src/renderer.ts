@@ -23,6 +23,7 @@ import {
   applyStroke as applyStrokeCore,
 } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
+import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
@@ -377,42 +378,62 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Apply shadow before fill/stroke drawing; ctx.restore() will clear it
   applyShadow(ctx, el.shadow ?? null, scale);
 
-  ctx.beginPath();
-  if (el.custGeom && el.custGeom.length > 0) {
-    buildCustomPath(ctx, el.custGeom, x, y, w, h);
+  const CONNECTOR_GEOMS = new Set([
+    'line', 'straightconnector1',
+    'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
+    'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
+  ]);
+
+  const applyAndStroke = el.stroke
+    ? () => {
+        applyStroke(ctx, el.stroke!, scale);
+        ctx.stroke();
+      }
+    : null;
+  const clearShadowOnce = () => clearShadow(ctx);
+
+  // ── Dispatch to preset engine when possible ────────────────────────────
+  // Preference order: custGeom → generic preset engine → legacy switch.
+  // `arc` keeps its bespoke case because its fill semantics (pie-wedge vs
+  // open arc) depend on stroke state in ways the engine doesn't express.
+  const usePresetEngine =
+    !el.custGeom && geom !== 'arc' && hasPreset(geom);
+
+  if (usePresetEngine) {
+    renderPresetShape(
+      ctx, geom, x, y, w, h,
+      [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
+      fillStyle, applyAndStroke, clearShadowOnce,
+    );
   } else {
-    buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
-  }
-
-  if (fillStyle && geom !== 'arc') {
-    ctx.fillStyle = fillStyle;
-    // evenodd winding for shapes that use holes (inner path subtracts from outer)
-    if (geom === 'donut' || geom === 'smileyface') {
-      ctx.fill('evenodd');
+    ctx.beginPath();
+    if (el.custGeom && el.custGeom.length > 0) {
+      buildCustomPath(ctx, el.custGeom, x, y, w, h);
     } else {
-      ctx.fill();
+      buildShapePath(ctx, geom, x, y, w, h, el.adj, el.adj2, el.adj3, el.adj4);
     }
-    // Clear shadow after fill so stroke/text don't double-shadow
-    clearShadow(ctx);
+    if (fillStyle && geom !== 'arc') {
+      ctx.fillStyle = fillStyle;
+      if (geom === 'donut' || geom === 'smileyface' || geom === 'frame') {
+        ctx.fill('evenodd');
+      } else {
+        ctx.fill();
+      }
+      clearShadow(ctx);
+    }
+    if (applyAndStroke) {
+      applyAndStroke();
+    }
   }
-  if (el.stroke) {
-    applyStroke(ctx, el.stroke, scale);
-    ctx.stroke();
 
-    // Arrow heads on connector / line shapes
-    const CONNECTOR_GEOMS = new Set([
-      'line', 'straightconnector1',
-      'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
-      'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
-    ]);
-    if (CONNECTOR_GEOMS.has(geom)) {
-      // The shape runs from (x,y) to (x+w, y+h) in local (already-rotated) coords.
-      const angle = Math.atan2(h, w);
+  if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
+    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
+    if (anchors) {
       if (el.stroke.tailEnd) {
-        drawArrowHead(ctx, x + w, y + h, angle, el.stroke.tailEnd, el.stroke, scale);
+        drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);
       }
       if (el.stroke.headEnd) {
-        drawArrowHead(ctx, x, y, angle + Math.PI, el.stroke.headEnd, el.stroke, scale);
+        drawArrowHead(ctx, anchors.start.x, anchors.start.y, anchors.start.angle, el.stroke.headEnd, el.stroke, scale);
       }
     }
   }
@@ -493,6 +514,41 @@ function drawPolygon(
     else ctx.lineTo(px, py);
   }
   ctx.closePath();
+}
+
+/**
+ * Emulate OOXML `<arcTo>` on a Canvas path.
+ *
+ * OOXML arc semantics (DrawingML §20.1.9.4): `stAng`/`swAng` are *visual*
+ * angles — the angle of the radius ray from the ellipse center, not the
+ * parametric ellipse angle. That is why the canonical preset-shape `gdLst`
+ * formulas compute angles with plain `at2` on raw dimensions and still land
+ * on the correct point on an elongated ellipse.
+ *
+ * Canvas's `ellipse()` takes parametric angles, so we convert:
+ *   θ_parametric = atan2(wR * sin θ_visual, hR * cos θ_visual)
+ *
+ * The center is placed so the pen sits on the ellipse at the parametric
+ * equivalent of `stAng` (guaranteed non-degenerate when `wR, hR > 0`).
+ *
+ * Returns the arc's geometric end point, so the caller can chain.
+ */
+function ooxmlArcTo(
+  ctx: CanvasRenderingContext2D,
+  curX: number, curY: number,
+  wR: number, hR: number,
+  stAng: number, swAng: number,
+): { x: number; y: number } {
+  const visualToParam = (v: number) => Math.atan2(wR * Math.sin(v), hR * Math.cos(v));
+  const stP  = visualToParam(stAng);
+  const endP = visualToParam(stAng + swAng);
+  const cx   = curX - wR * Math.cos(stP);
+  const cy   = curY - hR * Math.sin(stP);
+  // Canvas draws from stP to endP in the direction set by `counterclockwise`.
+  // OOXML positive swAng = clockwise in screen coords = parametric angle
+  // increasing, so pass `counterclockwise = swAng < 0`.
+  ctx.ellipse(cx, cy, Math.abs(wR), Math.abs(hR), 0, stP, endP, swAng < 0);
+  return { x: cx + wR * Math.cos(endP), y: cy + hR * Math.sin(endP) };
 }
 
 /** Build the canvas path for a given OOXML preset geometry.
@@ -1225,18 +1281,14 @@ function buildShapePath(
     case 'irregularSeal1':
     case 'irregularseal1': {
       // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発1: 40-point irregular explosion / jagged starburst.
+      // 爆発1: 24-point irregular explosion / jagged starburst.
       const s1: [number, number][] = [
-        [10964, 2358], [12095,    0], [12095, 3192], [14000, 4500],
-        [15648, 2832], [16349, 5225], [19500, 4650], [19350, 7200],
-        [21600, 7650], [19850, 9950], [21150,12400], [18300,13800],
-        [20350,16700], [17150,16700], [19150,20000], [15900,19050],
-        [16300,21600], [13000,19700], [12700,21600], [11150,19800],
-        [ 9100,21150], [ 9100,19200], [ 6550,21400], [ 6550,19150],
-        [ 3900,21250], [ 4350,18800], [ 2100,19850], [ 3300,17200],
-        [ 1250,17100], [ 2100,14650], [    0,13450], [ 1800,12050],
-        [    0, 9550], [ 2950, 9600], [ 1350, 7300], [ 4200, 7650],
-        [ 4100, 5200], [ 6750, 5600], [ 7050, 3450], [ 9800, 4800],
+        [10800,  5800], [14522,     0], [14155,  5325], [18380,  4457],
+        [16702,  7315], [21097,  8137], [17607, 10475], [21600, 13290],
+        [16837, 12942], [18145, 18095], [14020, 14457], [13247, 19737],
+        [10532, 14935], [ 8485, 21600], [ 7715, 15627], [ 4762, 17617],
+        [ 5667, 13937], [  135, 14587], [ 3722, 11775], [    0,  8615],
+        [ 4627,  7617], [  370,  2295], [ 7312,  6320], [ 8352,  2295],
       ];
       s1.forEach(([px, py], i) => {
         const sx = x + w * px / 21600;
@@ -1249,16 +1301,15 @@ function buildShapePath(
     case 'irregularSeal2':
     case 'irregularseal2': {
       // ECMA-376 preset geometry – exact polygon vertices in 21600×21600 space.
-      // 爆発2: 29-point irregular explosion / jagged starburst (more spikes than seal1).
+      // 爆発2: 28-point irregular explosion / jagged starburst (more spikes than seal1).
       const s2: [number, number][] = [
-        [11462, 4342], [14790,    0], [14790, 5155], [18010, 3625],
-        [16380, 6810], [21600, 6810], [18350, 9215], [21600,11355],
-        [18990,11040], [21600,14910], [17800,14070], [18350,17270],
-        [15030,15010], [13810,18520], [12220,15210], [11260,21600],
-        [ 9870,15980], [ 7030,21600], [ 7490,15640], [ 3900,18200],
-        [ 4870,14160], [    0,14340], [ 3460,11610], [    0, 8590],
-        [ 3890, 8020], [ 1290, 4870], [ 5020, 6460], [ 6840, 3250],
-        [ 8820, 6100],
+        [11462,  4342], [14790,     0], [14525,  5777], [18007,  3172],
+        [16380,  6532], [21600,  6645], [16985,  9402], [18270, 11290],
+        [16380, 12310], [18877, 15632], [14640, 14350], [14942, 17370],
+        [12180, 15935], [11612, 18842], [ 9872, 17370], [ 8700, 19712],
+        [ 7527, 18125], [ 4917, 21600], [ 4805, 18240], [ 1285, 17825],
+        [ 3330, 15370], [    0, 12877], [ 3935, 11592], [ 1172,  8270],
+        [ 5372,  7817], [ 4502,  3625], [ 8550,  6382], [ 9722,  1887],
       ];
       s2.forEach(([px, py], i) => {
         const sx = x + w * px / 21600;
@@ -1345,48 +1396,105 @@ function buildShapePath(
       break;
     }
 
-    // ── Math operator shapes ───────────────────────────────────────────────────
+    // ── Math operator shapes (ECMA-376 presets) ───────────────────────────────
     case 'mathequal': {
-      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
-      const gap  = 17490 / 100000 * h;
-      ctx.rect(x, cy - gap / 2 - barH, w, barH);
-      ctx.rect(x, cy + gap / 2,        w, barH);
+      const a1 = Math.min(36745, Math.max(0, adj ?? 23520));
+      const mAdj2 = 100000 - 2 * a1;
+      const a2 = Math.min(mAdj2, Math.max(0, adj2 ?? 11760));
+      const dy1 = h * a1 / 100000;
+      const dy2 = h * a2 / 200000;
+      const dx1 = w * 73490 / 200000;
+      const x1 = cx - dx1, x2 = cx + dx1;
+      const y2 = cy - dy2, y3 = cy + dy2;
+      const y1 = y2 - dy1, y4 = y3 + dy1;
+      ctx.rect(x1, y1, x2 - x1, y2 - y1);
+      ctx.rect(x1, y3, x2 - x1, y4 - y3);
       break;
     }
 
     case 'mathmultiply': {
-      // "×": a "+" shape rotated 45°
-      const t  = (adj ?? 23520) / 100000 * Math.min(w, h) * 0.5;
-      const hl = Math.max(w, h) * 0.72;
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate(Math.PI / 4);
-      ctx.rect(-t, -hl, 2 * t, 2 * hl);
-      ctx.rect(-hl, -t, 2 * hl, 2 * t);
-      ctx.restore();
+      // ECMA-376 preset: "×" aligned to bbox diagonals, thickness = ss * a1 / 100000
+      const a1 = Math.min(51965, Math.max(0, adj ?? 23520));
+      const th = Math.min(w, h) * a1 / 100000;
+      const ang = Math.atan2(h, w);
+      const sa = Math.sin(ang), ca = Math.cos(ang);
+      const halfTX = th / 2 * sa;
+      const halfTY = th / 2 * ca;
+      // Bar 1: corner (x,y) → (x+w, y+h)
+      ctx.moveTo(x + halfTX,     y - halfTY);
+      ctx.lineTo(x - halfTX,     y + halfTY);
+      ctx.lineTo(x + w - halfTX, y + h + halfTY);
+      ctx.lineTo(x + w + halfTX, y + h - halfTY);
+      ctx.closePath();
+      // Bar 2: corner (x+w, y) → (x, y+h)
+      ctx.moveTo(x + w - halfTX, y - halfTY);
+      ctx.lineTo(x + w + halfTX, y + halfTY);
+      ctx.lineTo(x + halfTX,     y + h + halfTY);
+      ctx.lineTo(x - halfTX,     y + h - halfTY);
+      ctx.closePath();
       break;
     }
 
     case 'mathplus': {
-      const t = (adj ?? 23520) / 100000 * Math.min(w, h) * 0.5;
-      ctx.rect(cx - t, y, 2 * t, h);
-      ctx.rect(x, cy - t, w, 2 * t);
+      const a1 = Math.min(73490, Math.max(0, adj ?? 23520));
+      const dx1 = w * 73490 / 200000;
+      const dy1 = h * 73490 / 200000;
+      const dx2 = Math.min(w, h) * a1 / 200000;
+      const x1 = cx - dx1, x4 = cx + dx1;
+      const y1 = cy - dy1, y4 = cy + dy1;
+      const x2 = cx - dx2, x3 = cx + dx2;
+      const y2 = cy - dx2, y3 = cy + dx2;
+      ctx.moveTo(x1, y2);
+      ctx.lineTo(x2, y2);
+      ctx.lineTo(x2, y1);
+      ctx.lineTo(x3, y1);
+      ctx.lineTo(x3, y2);
+      ctx.lineTo(x4, y2);
+      ctx.lineTo(x4, y3);
+      ctx.lineTo(x3, y3);
+      ctx.lineTo(x3, y4);
+      ctx.lineTo(x2, y4);
+      ctx.lineTo(x2, y3);
+      ctx.lineTo(x1, y3);
+      ctx.closePath();
       break;
     }
 
     case 'mathminus': {
-      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
-      ctx.rect(x, cy - barH / 2, w, barH);
+      const a1 = Math.min(100000, Math.max(0, adj ?? 23520));
+      const dx1 = w * 73490 / 200000;
+      const dy1 = h * a1 / 200000;
+      const x1 = cx - dx1, x2 = cx + dx1;
+      const y1 = cy - dy1, y2 = cy + dy1;
+      ctx.rect(x1, y1, x2 - x1, y2 - y1);
       break;
     }
 
     case 'mathdivide': {
-      const barH  = Math.max(1, (adj ?? 23520) / 100000 * h);
-      const dotR  = barH * 1.1;
-      const dotGap = h * 0.22;
-      ctx.rect(x, cy - barH / 2, w, barH);
-      ctx.arc(cx, cy - dotGap, dotR, 0, Math.PI * 2);
-      ctx.arc(cx, cy + dotGap, dotR, 0, Math.PI * 2);
+      const a1 = Math.min(36745, Math.max(1000, adj ?? 23520));
+      const ma1 = -a1;
+      const ma3h = (73490 + ma1) / 4;
+      const ma3w = 36745 * w / h;
+      const maxAdj3 = Math.min(ma3h, ma3w);
+      const a3 = Math.min(maxAdj3, Math.max(1000, adj3 ?? 11760));
+      const maxAdj2 = 73490 + (4 * a3) - a1;
+      const a2 = Math.min(maxAdj2, Math.max(0, adj2 ?? 5880));
+      const dy1 = h * a1 / 200000;
+      const yg  = h * a2 / 100000;
+      const rad = h * a3 / 100000;
+      const dx1 = w * 73490 / 200000;
+      const y3 = cy - dy1;
+      const y4 = cy + dy1;
+      const y2 = y3 - (yg + rad);
+      const y1 = y2 - rad;
+      const y5 = (y + h) - y1;
+      const x1 = cx - dx1;
+      const x2 = cx + dx1;
+      ctx.rect(x1, y3, x2 - x1, y4 - y3);
+      ctx.moveTo(cx + rad, y1 + rad);
+      ctx.arc(cx, y1 + rad, rad, 0, Math.PI * 2);
+      ctx.moveTo(cx + rad, y5 - rad);
+      ctx.arc(cx, y5 - rad, rad, 0, Math.PI * 2);
       break;
     }
 
@@ -1423,13 +1531,66 @@ function buildShapePath(
     }
 
     // ── Quad-arrow callout ────────────────────────────────────────────────────
+    // ECMA-376 prstGeom quadArrowCallout:
+    //   adj1 = shaft half-thickness (default 18515)
+    //   adj2 = arrowhead half-width (default 18515)
+    //   adj3 = arrowhead length (default 18515)
+    //   adj4 = inner square size (default 48123)
     case 'quadarrowcallout': {
-      const t = Math.min(w, h) * 0.25;
-      ctx.rect(x + t, y + t, w - 2 * t, h - 2 * t);
-      ctx.moveTo(cx, y); ctx.lineTo(x + t, y + t); ctx.lineTo(x + w - t, y + t); ctx.closePath();
-      ctx.moveTo(cx, y + h); ctx.lineTo(x + t, y + h - t); ctx.lineTo(x + w - t, y + h - t); ctx.closePath();
-      ctx.moveTo(x, cy); ctx.lineTo(x + t, y + t); ctx.lineTo(x + t, y + h - t); ctx.closePath();
-      ctx.moveTo(x + w, cy); ctx.lineTo(x + w - t, y + t); ctx.lineTo(x + w - t, y + h - t); ctx.closePath();
+      const ss = Math.min(w, h);
+      const a2 = Math.min(50000, Math.max(0, adj2 ?? 18515));
+      const maxAdj1 = a2 * 2;
+      const a1 = Math.min(maxAdj1, Math.max(0, adj  ?? 18515));
+      const maxAdj3 = 50000 - a2;
+      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 18515));
+      const maxAdj4 = 100000 - 2 * a3;
+      const a4 = Math.min(maxAdj4, Math.max(a1, adj4 ?? 48123));
+      const dx2 = ss * a2 / 100000;
+      const dx3 = ss * a1 / 200000;
+      const ah  = ss * a3 / 100000;
+      const dx1 = w * a4 / 200000;
+      const dy1 = h * a4 / 200000;
+      const x2a = cx - dx1, x7a = cx + dx1;
+      const x3a = cx - dx2, x6a = cx + dx2;
+      const x4a = cx - dx3, x5a = cx + dx3;
+      const x8a = x + w - ah;
+      const y2a = cy - dy1, y7a = cy + dy1;
+      const y3a = cy - dx2, y6a = cy + dx2;
+      const y4a = cy - dx3, y5a = cy + dx3;
+      const y8a = y + h - ah;
+      ctx.moveTo(x,          cy);
+      ctx.lineTo(x + ah,     y3a);
+      ctx.lineTo(x + ah,     y4a);
+      ctx.lineTo(x2a,        y4a);
+      ctx.lineTo(x2a,        y2a);
+      ctx.lineTo(x4a,        y2a);
+      ctx.lineTo(x4a,        y + ah);
+      ctx.lineTo(x3a,        y + ah);
+      ctx.lineTo(cx,         y);
+      ctx.lineTo(x6a,        y + ah);
+      ctx.lineTo(x5a,        y + ah);
+      ctx.lineTo(x5a,        y2a);
+      ctx.lineTo(x7a,        y2a);
+      ctx.lineTo(x7a,        y4a);
+      ctx.lineTo(x8a,        y4a);
+      ctx.lineTo(x8a,        y3a);
+      ctx.lineTo(x + w,      cy);
+      ctx.lineTo(x8a,        y6a);
+      ctx.lineTo(x8a,        y5a);
+      ctx.lineTo(x7a,        y5a);
+      ctx.lineTo(x7a,        y7a);
+      ctx.lineTo(x5a,        y7a);
+      ctx.lineTo(x5a,        y8a);
+      ctx.lineTo(x6a,        y8a);
+      ctx.lineTo(cx,         y + h);
+      ctx.lineTo(x3a,        y8a);
+      ctx.lineTo(x4a,        y8a);
+      ctx.lineTo(x4a,        y7a);
+      ctx.lineTo(x2a,        y7a);
+      ctx.lineTo(x2a,        y5a);
+      ctx.lineTo(x + ah,     y5a);
+      ctx.lineTo(x + ah,     y6a);
+      ctx.closePath();
       break;
     }
 
@@ -1472,21 +1633,21 @@ function buildShapePath(
       break;
     }
 
-    // ── Sun ───────────────────────────────────────────────────────────────────
+    // ── Sun (8 triangular rays + central disc) ────────────────────────────────
     case 'sun': {
       const outerR = Math.min(w, h) / 2;
-      const innerR = outerR * 0.55;
-      const rayLen = outerR * 0.35;
-      const rayW   = outerR * 0.1;
-      ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+      const innerR = outerR * ((adj ?? 25000) / 100000 + 0.5);
+      const clampedInner = Math.min(innerR, outerR * 0.9);
+      const halfRayAng = Math.PI / 16;
       for (let i = 0; i < 8; i++) {
-        const angle = (i / 8) * Math.PI * 2;
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(angle);
-        ctx.rect(innerR + 2, -rayW / 2, rayLen, rayW);
-        ctx.restore();
+        const a = (i / 8) * Math.PI * 2;
+        ctx.moveTo(cx + clampedInner * Math.cos(a - halfRayAng), cy + clampedInner * Math.sin(a - halfRayAng));
+        ctx.lineTo(cx + outerR       * Math.cos(a),             cy + outerR       * Math.sin(a));
+        ctx.lineTo(cx + clampedInner * Math.cos(a + halfRayAng), cy + clampedInner * Math.sin(a + halfRayAng));
+        ctx.closePath();
       }
+      ctx.moveTo(cx + clampedInner, cy);
+      ctx.arc(cx, cy, clampedInner, 0, Math.PI * 2);
       break;
     }
 
@@ -1656,19 +1817,42 @@ function buildShapePath(
     }
 
     // ── Left-up arrow ─────────────────────────────────────────────────────────
+    // ECMA-376 leftUpArrow preset: L-shape with arrowheads on the up (vertical)
+    // and left (horizontal) arms, meeting at the bottom-right outer corner.
+    //   adj1 (default 25000): arrow-head overhang (shaft width control; dx3 = ss*a1/200000)
+    //   adj2 (default 25000): shaft offset from bbox edge (= head half-width; dx4 = ss*a2/100000)
+    //   adj3 (default 25000): arrow-head length along arm (x1 = ss*a3/100000)
     case 'leftuparrow': {
-      const ahLen = Math.min(w, h) * (adj ?? 30000) / 100000;
-      const sw    = Math.min(w, h) * (adj2 ?? 25000) / 100000;
-      ctx.moveTo(x, cy);
-      ctx.lineTo(x + ahLen, y);
-      ctx.lineTo(x + ahLen, y + h - ahLen - sw);
-      ctx.lineTo(cx + sw / 2, y + h - ahLen - sw);
-      ctx.lineTo(cx + sw / 2, y + h);
-      ctx.lineTo(x + w, y + h - ahLen);
-      ctx.lineTo(cx + sw / 2 + sw, y + h - ahLen);
-      ctx.lineTo(cx + sw / 2 + sw, y + ahLen);
-      ctx.lineTo(x + ahLen, y + ahLen);
-      ctx.lineTo(x + ahLen, cy + sw / 2);
+      const ss = Math.min(w, h);
+      const a2 = Math.min(50000, Math.max(0, adj2 ?? 25000));
+      const maxAdj1 = a2 * 2;
+      const a1 = Math.min(maxAdj1, Math.max(0, adj ?? 25000));
+      const maxAdj3 = 100000 - maxAdj1;
+      const a3 = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
+      const x1  = ss * a3 / 100000;
+      const dx2 = ss * a2 / 50000;
+      const x2  = w - dx2;
+      const y2  = h - dx2;
+      const dx4 = ss * a2 / 100000;
+      const x4  = w - dx4;
+      const y4  = h - dx4;
+      const dx3 = ss * a1 / 200000;
+      const x3  = x4 - dx3;
+      const x5  = x4 + dx3;
+      const y3  = y4 - dx3;
+      const y5  = y4 + dx3;
+      ctx.moveTo(x,      y + y4);
+      ctx.lineTo(x + x1, y + y2);
+      ctx.lineTo(x + x1, y + y3);
+      ctx.lineTo(x + x3, y + y3);
+      ctx.lineTo(x + x3, y + x1);
+      ctx.lineTo(x + x2, y + x1);
+      ctx.lineTo(x + x4, y);
+      ctx.lineTo(x + w,  y + x1);
+      ctx.lineTo(x + x5, y + x1);
+      ctx.lineTo(x + x5, y + y5);
+      ctx.lineTo(x + x1, y + y5);
+      ctx.lineTo(x + x1, y + h);
       ctx.closePath();
       break;
     }
@@ -1724,13 +1908,32 @@ function buildShapePath(
     }
 
     // ── Math not-equal ────────────────────────────────────────────────────────
+    // ECMA-376 prstGeom mathNotEqual:
+    //   adj1 = bar thickness (default 23520, pin 0..50000)
+    //   adj2 = cross angle in 60000ths of degrees (default 6600000 = 110°, pin 4200000..6600000)
+    //   adj3 = gap between bars (default 11760, pin 0..100000-2*adj1)
     case 'mathnotequal': {
-      const barH = Math.max(1, (adj ?? 23520) / 100000 * h);
-      const gap  = 17490 / 100000 * h;
-      ctx.rect(x, cy - gap / 2 - barH, w, barH);
-      ctx.rect(x, cy + gap / 2,        w, barH);
-      ctx.moveTo(cx - w * 0.15, y + h * 0.1);
-      ctx.lineTo(cx + w * 0.15, y + h * 0.9);
+      const a1 = Math.min(50000, Math.max(0, adj  ?? 23520));
+      const crAngRaw = Math.min(6600000, Math.max(4200000, adj2 ?? 6600000));
+      const a3 = Math.min(100000 - 2 * a1, Math.max(0, adj3 ?? 11760));
+      const dy1 = h * a1 / 100000;
+      const dy2 = h * a3 / 200000;
+      const dx1 = w * 73490 / 200000;
+      const hd2 = h / 2;
+      const cadj2 = (crAngRaw / 60000 - 90) * Math.PI / 180;
+      const xadj2 = hd2 * Math.tan(cadj2);
+      const len = Math.hypot(xadj2, hd2);
+      const bhw = len * dy1 / hd2;
+      // Bars centered on cx with width 2*dx1 ≈ 0.7349w
+      ctx.rect(cx - dx1, cy - dy2 - dy1, 2 * dx1, dy1);
+      ctx.rect(cx - dx1, cy + dy2,       2 * dx1, dy1);
+      // Diagonal slash as a parallelogram: top at (cx+xadj2), bottom at (cx-xadj2).
+      // bhw is horizontal thickness (so perpendicular thickness matches dy1).
+      ctx.moveTo(cx + xadj2 - bhw / 2, y);
+      ctx.lineTo(cx + xadj2 + bhw / 2, y);
+      ctx.lineTo(cx - xadj2 + bhw / 2, y + h);
+      ctx.lineTo(cx - xadj2 - bhw / 2, y + h);
+      ctx.closePath();
       break;
     }
 
@@ -1832,68 +2035,195 @@ function buildShapePath(
       break;
     }
 
-    // ── Ribbon (V-notch at bottom center) ────────────────────────────────────
-    // OOXML: x1=w/8, x2=7w/8, y1=h*adj/100000, y2=h-y1; adj default 16667
+    // ── Ribbon ───────────────────────────────────────────────────────────────
+    // ECMA-376 prstGeom ribbon: tails at top, main body extends downward with
+    // two side fold tabs. adj1 = tail depth (default 16667, pin 0..33333),
+    // adj2 = body width percent (default 50000, pin 25000..75000).
     case 'ribbon': {
-      const x1r = w / 8, x2r = w * 7 / 8;
-      const y1r = h * (adj ?? 16667) / 100000;
-      const y2r = h - y1r;
-      ctx.moveTo(x + x1r, y);           // top-left body
-      ctx.lineTo(x + x2r, y);           // top-right body
-      ctx.lineTo(x + w,   y + y1r);     // right upper fold
-      ctx.lineTo(x + x2r, y + y2r);     // right lower fold
-      ctx.lineTo(cx,      y + h);        // center bottom V-notch
-      ctx.lineTo(x + x1r, y + y2r);     // left lower fold
-      ctx.lineTo(x,       y + y1r);     // left upper fold
+      const a1 = Math.min(33333, Math.max(0, adj  ?? 16667));
+      const a2 = Math.min(75000, Math.max(25000, adj2 ?? 50000));
+      const dx2 = w * a2 / 200000;
+      const wd8 = w / 8, wd32 = w / 32;
+      const x2r = w / 2 - dx2, x9r = w / 2 + dx2;
+      const x3r = x2r + wd32, x8r = x9r - wd32;
+      const x5r = x2r + wd8,  x6r = x9r - wd8;
+      const x4r = x5r - wd32, x7r = x6r + wd32;
+      const x10r = w - wd8;
+      const y1r = h * a1 / 200000;
+      const y2r = h * a1 / 100000;
+      const y4r = h - y2r;
+      const y3r = y4r / 2;
+      // Outer outline (straight-line approximation of wd32 arcs)
+      ctx.moveTo(x,          y);
+      ctx.lineTo(x + x4r,    y);
+      ctx.lineTo(x + x3r,    y + y1r);
+      ctx.lineTo(x + x8r,    y + y2r);
+      ctx.lineTo(x + x7r,    y + y1r);
+      ctx.lineTo(x + w,      y);
+      ctx.lineTo(x + x10r,   y + y3r);
+      ctx.lineTo(x + w,      y + y4r);
+      ctx.lineTo(x + x9r,    y + y4r);
+      ctx.lineTo(x + x9r,    y + h);
+      ctx.lineTo(x + x3r,    y + h);
+      ctx.lineTo(x + x2r,    y + y4r);
+      ctx.lineTo(x,          y + y4r);
+      ctx.lineTo(x + wd8,    y + y3r);
       ctx.closePath();
       break;
     }
 
-    // ── Ribbon2 (V-notch at top center) ──────────────────────────────────────
+    // ── Ribbon2 (mirrored vertically: tails at bottom, body above) ───────────
     case 'ribbon2': {
-      const x1r = w / 8, x2r = w * 7 / 8;
-      const y1r = h * (adj ?? 16667) / 100000;
-      const y2r = h - y1r;
-      ctx.moveTo(x + x1r, y + h);       // bottom-left body
-      ctx.lineTo(x + x2r, y + h);       // bottom-right body
-      ctx.lineTo(x + w,   y + y2r);     // right lower fold
-      ctx.lineTo(x + x2r, y + y1r);     // right upper fold
-      ctx.lineTo(cx,      y);            // center top V-notch
-      ctx.lineTo(x + x1r, y + y1r);     // left upper fold
-      ctx.lineTo(x,       y + y2r);     // left lower fold
+      const a1 = Math.min(33333, Math.max(0, adj  ?? 16667));
+      const a2 = Math.min(75000, Math.max(25000, adj2 ?? 50000));
+      const dx2 = w * a2 / 200000;
+      const wd8 = w / 8, wd32 = w / 32;
+      const x2r = w / 2 - dx2, x9r = w / 2 + dx2;
+      const x3r = x2r + wd32, x8r = x9r - wd32;
+      const x5r = x2r + wd8,  x6r = x9r - wd8;
+      const x4r = x5r - wd32, x7r = x6r + wd32;
+      const x10r = w - wd8;
+      const dy1 = h * a1 / 200000;
+      const dy2 = h * a1 / 100000;
+      const y1r = h - dy1;          // tail upper ridge
+      const y2r = h - dy2;          // tail bottom ridge
+      const y4r = dy2;              // top of body bottom
+      const y3r = (y4r + h) / 2;    // bottom indent of tails
+      // Mirror of ribbon around horizontal center
+      ctx.moveTo(x,          y + h);
+      ctx.lineTo(x + x4r,    y + h);
+      ctx.lineTo(x + x3r,    y + y1r);
+      ctx.lineTo(x + x8r,    y + y2r);
+      ctx.lineTo(x + x7r,    y + y1r);
+      ctx.lineTo(x + w,      y + h);
+      ctx.lineTo(x + x10r,   y + y3r);
+      ctx.lineTo(x + w,      y + y4r);
+      ctx.lineTo(x + x9r,    y + y4r);
+      ctx.lineTo(x + x9r,    y);
+      ctx.lineTo(x + x3r,    y);
+      ctx.lineTo(x + x2r,    y + y4r);
+      ctx.lineTo(x,          y + y4r);
+      ctx.lineTo(x + wd8,    y + y3r);
       ctx.closePath();
       break;
     }
 
-    // ── Ellipse ribbon (angled ends + elliptical arch at bottom) ─────────────
-    // OOXML: x1=w/8, x2=7w/8, y1=h*adj/100000, y2=h-y1; adj default 25000
+    // ── Ellipse ribbon (ECMA-376 prstGeom ellipseRibbon) ─────────────────────
+    // Arched ribbon: top edge is a downward parabola, bottom has center fold.
+    // adj1 = overall band depth (default 25000, pin 0..100000)
+    // adj2 = body width % (default 50000, pin 25000..75000)
+    // adj3 = arch depth (default 12500, pin minAdj3..adj1)
     case 'ellipseribbon': {
-      const x1e = w / 8, x2e = w * 7 / 8;
-      const y1e = h * (adj ?? 25000) / 100000;
-      const y2e = h - y1e;
-      ctx.moveTo(x + x1e, y);           // top-left fold crease
-      ctx.lineTo(x + x2e, y);           // top-right fold crease
-      ctx.lineTo(x + w,   y + y1e);     // right upper fold angle
-      ctx.lineTo(x + w,   y + y2e);     // right side down
-      // bottom arch (center=(cx,y+y2e), rx=w/2, ry=y1e, CW from right to left)
-      ctx.ellipse(cx, y + y2e, w / 2, y1e, 0, 0, Math.PI, false);
-      ctx.lineTo(x,       y + y1e);     // left side up to fold crease
+      const a1 = Math.min(100000, Math.max(0, adj  ?? 25000));
+      const a2 = Math.min(75000,  Math.max(25000, adj2 ?? 50000));
+      const minAdj3 = Math.max(0, a1 - (100000 - a1) / 2);
+      const a3 = Math.min(a1, Math.max(minAdj3, adj3 ?? 12500));
+      const wd8 = w / 8;
+      const dx2 = w * a2 / 200000;
+      const x2e = w / 2 - dx2;
+      const x3e = x2e + wd8;
+      const x4e = w - x3e;
+      const x5e = w - x2e;
+      const x6e = w - wd8;
+      const dy1 = h * a3 / 100000;
+      const f1 = 4 * dy1 / w;
+      // top outer arch
+      const q2a = x3e - x3e * x3e / w;
+      const y1e = f1 * q2a;
+      const cx1 = x3e / 2, cy1 = f1 * cx1;
+      const cx2 = w - cx1;
+      // top inner fold
+      const q1b = h * a1 / 100000;
+      const dy3 = q1b - dy1;
+      const q4b = x2e - x2e * x2e / w;
+      const q5  = f1 * q4b;
+      const y3e = q5 + dy3;
+      const q7  = (dy1 + dy3 - y3e) + dy1;
+      const cy3 = q7 + dy3;
+      const rh  = h - q1b;
+      const y2e = (dy1 * 14 / 16 + rh) / 2;
+      const y5e = q5 + rh;
+      const y6e = y3e + rh;
+      const cx4 = x2e / 2, cy4 = f1 * cx4 + rh;
+      const cx5 = w - cx4;
+      const cy6 = cy3 + rh;
+      ctx.moveTo(x,            y);
+      ctx.quadraticCurveTo(x + cx1, y + cy1, x + x3e, y + y1e);
+      ctx.lineTo(x + x2e,       y + y3e);
+      ctx.quadraticCurveTo(x + w / 2, y + cy3, x + x5e, y + y3e);
+      ctx.lineTo(x + x4e,       y + y1e);
+      ctx.quadraticCurveTo(x + cx2, y + cy1, x + w, y);
+      ctx.lineTo(x + x6e,       y + y2e);
+      ctx.lineTo(x + w,         y + rh);
+      ctx.quadraticCurveTo(x + cx5, y + cy4, x + x5e, y + y5e);
+      ctx.lineTo(x + x5e,       y + y6e);
+      ctx.quadraticCurveTo(x + w / 2, y + cy6, x + x2e, y + y6e);
+      ctx.lineTo(x + x2e,       y + y5e);
+      ctx.quadraticCurveTo(x + cx4, y + cy4, x, y + rh);
+      ctx.lineTo(x + wd8,       y + y2e);
       ctx.closePath();
       break;
     }
 
-    // ── Ellipse ribbon 2 (angled ends + elliptical arch at top) ──────────────
+    // ── Ellipse ribbon 2 (ECMA-376 prstGeom ellipseRibbon2: mirrored) ────────
     case 'ellipseribbon2': {
-      const x1e = w / 8, x2e = w * 7 / 8;
-      const y1e = h * (adj ?? 25000) / 100000;
-      const y2e = h - y1e;
-      ctx.moveTo(x + x1e, y + h);       // bottom-left fold crease
-      ctx.lineTo(x + x2e, y + h);       // bottom-right fold crease
-      ctx.lineTo(x + w,   y + y2e);     // right lower fold angle
-      ctx.lineTo(x + w,   y + y1e);     // right side up
-      // top arch (center=(cx,y+y1e), rx=w/2, ry=y1e, CCW from right to left = upward)
-      ctx.ellipse(cx, y + y1e, w / 2, y1e, 0, 0, Math.PI, true);
-      ctx.lineTo(x,       y + y2e);     // left side down to fold crease
+      const a1 = Math.min(100000, Math.max(0, adj  ?? 25000));
+      const a2 = Math.min(75000,  Math.max(25000, adj2 ?? 50000));
+      const minAdj3 = Math.max(0, a1 - (100000 - a1) / 2);
+      const a3 = Math.min(a1, Math.max(minAdj3, adj3 ?? 12500));
+      const wd8 = w / 8;
+      const dx2 = w * a2 / 200000;
+      const x2e = w / 2 - dx2;
+      const x3e = x2e + wd8;
+      const x4e = w - x3e;
+      const x5e = w - x2e;
+      const x6e = w - wd8;
+      const dy1 = h * a3 / 100000;
+      const f1 = 4 * dy1 / w;
+      const q2a = x3e - x3e * x3e / w;
+      const u1  = f1 * q2a;
+      const y1e = h - u1;
+      const cx1 = x3e / 2;
+      const cu1 = f1 * cx1;
+      const cy1 = h - cu1;
+      const cx2 = w - cx1;
+      const q1b = h * a1 / 100000;
+      const dy3 = q1b - dy1;
+      const q4b = x2e - x2e * x2e / w;
+      const q5  = f1 * q4b;
+      const u3  = q5 + dy3;
+      const y3e = h - u3;
+      const q7  = (dy1 + dy3 - u3) + dy1;
+      const cu3 = q7 + dy3;
+      const cy3 = h - cu3;
+      const rh  = h - q1b;
+      const u2  = (dy1 * 14 / 16 + rh) / 2;
+      const y2e = h - u2;
+      const u5  = q5 + rh;
+      const y5e = h - u5;
+      const u6  = u3 + rh;
+      const y6e = h - u6;
+      const cx4 = x2e / 2;
+      const q9  = f1 * cx4;
+      const cu4 = q9 + rh;
+      const cy4 = h - cu4;
+      const cx5 = w - cx4;
+      const cu6 = cu3 + rh;
+      const cy6 = h - cu6;
+      ctx.moveTo(x,            y + h);
+      ctx.quadraticCurveTo(x + cx1, y + cy1, x + x3e, y + y1e);
+      ctx.lineTo(x + x2e,       y + y3e);
+      ctx.quadraticCurveTo(x + w / 2, y + cy3, x + x5e, y + y3e);
+      ctx.lineTo(x + x4e,       y + y1e);
+      ctx.quadraticCurveTo(x + cx2, y + cy1, x + w, y + h);
+      ctx.lineTo(x + x6e,       y + y2e);
+      ctx.lineTo(x + w,         y + q1b);
+      ctx.quadraticCurveTo(x + cx5, y + cy4, x + x5e, y + y5e);
+      ctx.lineTo(x + x5e,       y + y6e);
+      ctx.quadraticCurveTo(x + w / 2, y + cy6, x + x2e, y + y6e);
+      ctx.lineTo(x + x2e,       y + y5e);
+      ctx.quadraticCurveTo(x + cx4, y + cy4, x, y + q1b);
+      ctx.lineTo(x + wd8,       y + y2e);
       ctx.closePath();
       break;
     }
@@ -1929,44 +2259,167 @@ function buildShapePath(
       break;
     }
 
-    // ── Curved directional arrows (simplified) ────────────────────────────────
-    case 'curveduparrow': {
-      ctx.moveTo(cx, y);
-      ctx.lineTo(x + w, y + h * 0.45);
-      ctx.lineTo(x + w * 0.65, y + h * 0.45);
-      ctx.quadraticCurveTo(x + w * 0.65, y + h, cx, y + h);
-      ctx.quadraticCurveTo(x + w * 0.35, y + h, x + w * 0.35, y + h * 0.45);
-      ctx.lineTo(x, y + h * 0.45);
-      ctx.closePath();
-      break;
-    }
-    case 'curveddownarrow': {
-      ctx.moveTo(cx, y + h);
-      ctx.lineTo(x + w, y + h * 0.55);
-      ctx.lineTo(x + w * 0.65, y + h * 0.55);
-      ctx.quadraticCurveTo(x + w * 0.65, y, cx, y);
-      ctx.quadraticCurveTo(x + w * 0.35, y, x + w * 0.35, y + h * 0.55);
-      ctx.lineTo(x, y + h * 0.55);
+    // ── Curved directional arrows (ECMA-376 §20.1.9.11–14) ────────────────────
+    // adj1 = shaft thickness (pin 0..a2), adj2 = arrowhead half-width (pin 0..maxAdj2),
+    // adj3 = arrowhead length along main axis (pin 0..maxAdj3).
+    case 'curvedrightarrow': {
+      const ss  = Math.min(w, h);
+      const hd2 = h / 2;
+      const maxAdj2 = 50000 * h / ss;
+      const a2  = Math.min(maxAdj2, Math.max(0, adj2 ?? 50000));
+      const a1  = Math.min(a2,      Math.max(0, adj  ?? 25000));
+      const th  = ss * a1 / 100000;
+      const aw  = ss * a2 / 100000;
+      const hR  = hd2 - (th + aw) / 4;
+      const q10 = (2 * hR) ** 2 - th ** 2;
+      const idx = Math.sqrt(Math.max(0, q10)) * w / (2 * hR);
+      const maxAdj3 = 100000 * idx / ss;
+      const a3  = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
+      const ah  = ss * a3 / 100000;
+      const dy  = Math.sqrt(Math.max(0, w * w - ah * ah)) * hR / w;
+      const y3  = hR + th;
+      const y5  = hR + dy;    // +- hR dy 0 = hR + dy - 0
+      const y7  = y3 + dy;
+      const dh  = (aw - th) / 2;
+      const y4  = y5 - dh;
+      const y8  = y7 + dh;
+      const y6  = h - aw / 2;
+      const x1  = w - ah;
+      const swAng  = Math.atan2(ah, dy);    // at2 returns angle of (dy, ah): but OOXML at2 a b = atan2(b, a), i.e. atan2(dy, ah)? Check spec — at2 x y returns the angle whose tan = y/x, so at2 ah dy = atan2(dy, ah).
+      const mswAng = -swAng;
+      const stAng  = Math.PI - swAng;       // cd2 - swAng
+      // Outer path: start at (l, hR), outer upper arc, arrowhead, inner lower arc, close
+      ctx.moveTo(x, y + hR);
+      ooxmlArcTo(ctx, x, y + hR, w, hR, Math.PI, mswAng);
+      ctx.lineTo(x + x1, y + y4);
+      ctx.lineTo(x + w,  y + y6);
+      ctx.lineTo(x + x1, y + y8);
+      ctx.lineTo(x + x1, y + y7);
+      ooxmlArcTo(ctx, x + x1, y + y7, w, hR, stAng, swAng);
       ctx.closePath();
       break;
     }
     case 'curvedleftarrow': {
-      ctx.moveTo(x, cy);
-      ctx.lineTo(x + w * 0.45, y);
-      ctx.lineTo(x + w * 0.45, y + h * 0.35);
-      ctx.quadraticCurveTo(x + w, y + h * 0.35, x + w, cy);
-      ctx.quadraticCurveTo(x + w, y + h * 0.65, x + w * 0.45, y + h * 0.65);
-      ctx.lineTo(x + w * 0.45, y + h);
+      const ss  = Math.min(w, h);
+      const hd2 = h / 2;
+      const maxAdj2 = 50000 * h / ss;
+      const a2  = Math.min(maxAdj2, Math.max(0, adj2 ?? 50000));
+      const a1  = Math.min(a2,      Math.max(0, adj  ?? 25000));
+      const th  = ss * a1 / 100000;
+      const aw  = ss * a2 / 100000;
+      const hR  = hd2 - (th + aw) / 4;
+      const q10 = (2 * hR) ** 2 - th ** 2;
+      const idx = Math.sqrt(Math.max(0, q10)) * w / (2 * hR);
+      const maxAdj3 = 100000 * idx / ss;
+      const a3  = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
+      const ah  = ss * a3 / 100000;
+      const dy  = Math.sqrt(Math.max(0, w * w - ah * ah)) * hR / w;
+      const y3  = hR + th;
+      const y5  = hR + dy;
+      const y7  = y3 + dy;
+      const dh  = (aw - th) / 2;
+      const y4  = y5 - dh;
+      const y8  = y7 + dh;
+      const y6  = h - aw / 2;
+      const x1  = ah;
+      const swAng  = Math.atan2(ah, dy);
+      const q12    = th / 2;
+      const dang2  = Math.atan2(q12, idx);
+      const swAng2 = dang2 - swAng;
+      const swAng3 = swAng - dang2;
+      const stAng3 = -dang2;
+      // moveTo (l, y6); lnTo (x1, y4); lnTo (x1, y5); arcTo wR=w hR=hR stAng=swAng swAng=swAng2;
+      //   arcTo wR=w hR=hR stAng=stAng3 swAng=swAng3; lnTo (x1, y8); close
+      ctx.moveTo(x,      y + y6);
+      ctx.lineTo(x + x1, y + y4);
+      ctx.lineTo(x + x1, y + y5);
+      const p1 = ooxmlArcTo(ctx, x + x1, y + y5, w, hR, swAng, swAng2);
+      ooxmlArcTo(ctx, p1.x, p1.y, w, hR, stAng3, swAng3);
+      ctx.lineTo(x + x1, y + y8);
       ctx.closePath();
       break;
     }
-    case 'curvedrightarrow': {
-      ctx.moveTo(x + w, cy);
-      ctx.lineTo(x + w * 0.55, y);
-      ctx.lineTo(x + w * 0.55, y + h * 0.35);
-      ctx.quadraticCurveTo(x, y + h * 0.35, x, cy);
-      ctx.quadraticCurveTo(x, y + h * 0.65, x + w * 0.55, y + h * 0.65);
-      ctx.lineTo(x + w * 0.55, y + h);
+    case 'curveduparrow': {
+      const ss  = Math.min(w, h);
+      const wd2 = w / 2;
+      const maxAdj2 = 50000 * w / ss;
+      const a2  = Math.min(maxAdj2, Math.max(0, adj2 ?? 50000));
+      const a1  = Math.min(100000,  Math.max(0, adj  ?? 25000));
+      const th  = ss * a1 / 100000;
+      const aw  = ss * a2 / 100000;
+      const wR  = wd2 - (th + aw) / 4;
+      const q10 = (2 * wR) ** 2 - th ** 2;
+      const idy = Math.sqrt(Math.max(0, q10)) * h / (2 * wR);
+      const maxAdj3 = 100000 * idy / ss;
+      const a3  = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
+      const ah  = ss * a3 / 100000;
+      const dx  = Math.sqrt(Math.max(0, h * h - ah * ah)) * wR / h;
+      const x3  = wR + th;
+      const x5  = wR + dx;
+      const x7  = x3 + dx;
+      const dh  = (aw - th) / 2;
+      const x4  = x5 - dh;
+      const x8  = x7 + dh;
+      const x6  = w - aw / 2;
+      const y1  = ah;
+      const swAng   = Math.atan2(ah, dx);
+      const q12     = th / 2;
+      const dang2   = Math.atan2(q12, idy);
+      const swAng2  = dang2 - swAng;
+      const swAng3  = swAng - dang2;   // +- swAng dang2 0 = swAng - dang2
+      const stAng3  = Math.PI / 2 - swAng;  // cd4 - swAng
+      const stAng2  = Math.PI / 2 - dang2;  // cd4 - dang2
+      // moveTo (x6, t); lnTo (x8, y1); lnTo (x7, y1); arcTo wR=wR hR=h stAng=stAng3 swAng=swAng3;
+      //   arcTo wR=wR hR=h stAng=stAng2 swAng=swAng2; lnTo (x4, y1); close
+      ctx.moveTo(x + x6, y);
+      ctx.lineTo(x + x8, y + y1);
+      ctx.lineTo(x + x7, y + y1);
+      const p1 = ooxmlArcTo(ctx, x + x7, y + y1, wR, h, stAng3, swAng3);
+      ooxmlArcTo(ctx, p1.x, p1.y, wR, h, stAng2, swAng2);
+      ctx.lineTo(x + x4, y + y1);
+      ctx.closePath();
+      break;
+    }
+    case 'curveddownarrow': {
+      const ss  = Math.min(w, h);
+      const wd2 = w / 2;
+      const maxAdj2 = 50000 * w / ss;
+      const a2  = Math.min(maxAdj2, Math.max(0, adj2 ?? 50000));
+      const a1  = Math.min(100000,  Math.max(0, adj  ?? 25000));
+      const th  = ss * a1 / 100000;
+      const aw  = ss * a2 / 100000;
+      const wR  = wd2 - (th + aw) / 4;
+      const q10 = (2 * wR) ** 2 - th ** 2;
+      const idy = Math.sqrt(Math.max(0, q10)) * h / (2 * wR);
+      const maxAdj3 = 100000 * idy / ss;
+      const a3  = Math.min(maxAdj3, Math.max(0, adj3 ?? 25000));
+      const ah  = ss * a3 / 100000;
+      const dx  = Math.sqrt(Math.max(0, h * h - ah * ah)) * wR / h;
+      const x3  = wR + th;
+      const x5  = wR + dx;
+      const x7  = x3 + dx;
+      const dh  = (aw - th) / 2;
+      const x4  = x5 - dh;
+      const x8  = x7 + dh;
+      const x6  = w - aw / 2;
+      const y1  = h - ah;
+      const swAng   = Math.atan2(ah, dx);
+      const q12     = th / 2;
+      const dang2   = Math.atan2(q12, idy);
+      const stAng   = 3 * Math.PI / 2 + swAng;   // 3cd4 + swAng
+      const stAng2  = 3 * Math.PI / 2 - dang2;   // 3cd4 - dang2
+      const swAng2  = dang2 - Math.PI / 2;       // dang2 - cd4
+      const swAng3  = Math.PI / 2 - dang2;       // cd4 - dang2
+      // ECMA: moveTo (x6, b); lnTo (x4, y1); lnTo (x5, y1); arcTo stAng=stAng swAng=mswAng;
+      //   lnTo (x3, t); arcTo stAng=3cd4 swAng=swAng; lnTo (x8, y1); close
+      ctx.moveTo(x + x6, y + h);
+      ctx.lineTo(x + x4, y + y1);
+      ctx.lineTo(x + x5, y + y1);
+      ooxmlArcTo(ctx, x + x5, y + y1, wR, h, stAng, -swAng);
+      ctx.lineTo(x + x3, y);
+      ooxmlArcTo(ctx, x + x3, y, wR, h, 3 * Math.PI / 2, swAng);
+      ctx.lineTo(x + x8, y + y1);
+      void stAng2; void swAng2; void swAng3; void x7;
       ctx.closePath();
       break;
     }
@@ -2128,6 +2581,15 @@ function buildShapePath(
       ctx.lineTo(x + w, y);
       ctx.lineTo(x + w, y + h - waveH);
       ctx.bezierCurveTo(x + w * 0.75, y + h, x + w * 0.25, y + h - waveH * 2, x, y + h - waveH);
+      ctx.closePath();
+      break;
+    }
+
+    case 'rttriangle': {
+      // Right triangle — right angle at bottom-left corner
+      ctx.moveTo(x, y);
+      ctx.lineTo(x, y + h);
+      ctx.lineTo(x + w, y + h);
       ctx.closePath();
       break;
     }
