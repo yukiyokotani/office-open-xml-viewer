@@ -402,7 +402,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   if (usePresetEngine) {
     renderPresetShape(
       ctx, geom, x, y, w, h,
-      [el.adj, el.adj2, el.adj3, el.adj4],
+      [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
       fillStyle, applyAndStroke, clearShadowOnce,
     );
   } else {
@@ -427,7 +427,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   }
 
   if (el.stroke && CONNECTOR_GEOMS.has(geom)) {
-    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4]);
+    const anchors = getConnectorAnchors(geom, x, y, w, h, [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8]);
     if (anchors) {
       if (el.stroke.tailEnd) {
         drawArrowHead(ctx, anchors.end.x, anchors.end.y, anchors.end.angle, el.stroke.tailEnd, el.stroke, scale);

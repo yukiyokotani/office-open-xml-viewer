@@ -201,6 +201,12 @@ struct ShapeElement {
     adj3: Option<f64>,
     /// Fourth adjustment value from prstGeom avLst (e.g. callout tip y).
     adj4: Option<f64>,
+    /// Fifth-through-eighth adjustment values (needed by callouts like
+    /// accentBorderCallout3 whose polyline uses up to 8 adj values).
+    adj5: Option<f64>,
+    adj6: Option<f64>,
+    adj7: Option<f64>,
+    adj8: Option<f64>,
     /// Drop shadow from spPr > effectLst > outerShdw (None if not present).
     shadow: Option<Shadow>,
 }
@@ -2747,6 +2753,28 @@ fn parse_shape(
         .find(|n| attr(n, "name").as_deref() == Some("adj4"))
         .or_else(|| gd_nodes.get(3))
         .and_then(|n| parse_gd_val(*n));
+    // adj5-adj8 for callouts that specify extra polyline vertices
+    // (accentBorderCallout3 etc.).
+    let adj5: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj5"))
+        .or_else(|| gd_nodes.get(4))
+        .and_then(|n| parse_gd_val(*n));
+    let adj6: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj6"))
+        .or_else(|| gd_nodes.get(5))
+        .and_then(|n| parse_gd_val(*n));
+    let adj7: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj7"))
+        .or_else(|| gd_nodes.get(6))
+        .and_then(|n| parse_gd_val(*n));
+    let adj8: Option<f64> = gd_nodes
+        .iter()
+        .find(|n| attr(n, "name").as_deref() == Some("adj8"))
+        .or_else(|| gd_nodes.get(7))
+        .and_then(|n| parse_gd_val(*n));
 
     // --- Shape style (p:style) provides fill/stroke/text-color fallbacks ---
     let style_node = child(sp_node, "style");
@@ -2834,7 +2862,8 @@ fn parse_shape(
     Some(ShapeElement {
         x: t.x, y: t.y, width: t.cx, height: cy,
         rotation: t.rot, flip_h: t.flip_h, flip_v: t.flip_v,
-        geometry, fill, stroke, text_body, default_text_color, cust_geom, adj, adj2, adj3, adj4, shadow,
+        geometry, fill, stroke, text_body, default_text_color, cust_geom,
+        adj, adj2, adj3, adj4, adj5, adj6, adj7, adj8, shadow,
     })
 }
 
@@ -3854,6 +3883,10 @@ fn parse_connector(
         adj2,
         adj3,
         adj4,
+        adj5: None,
+        adj6: None,
+        adj7: None,
+        adj8: None,
         shadow,
     })
 }
