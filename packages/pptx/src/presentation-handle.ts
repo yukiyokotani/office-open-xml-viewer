@@ -1,4 +1,5 @@
 import type { MediaElement, Slide } from './types';
+import { drawPlayBadge } from './media-chrome';
 
 const EMU_PER_PX = 9525;
 const emuToPx = (v: number, scale: number) => (v / EMU_PER_PX) * scale;
@@ -282,50 +283,21 @@ function drawControls(
   const duration = Number.isFinite(media.duration) ? media.duration : 0;
   const progress = duration > 0 ? Math.min(1, media.currentTime / duration) : 0;
 
-  drawPlayBadge(ctx, state, media);
+  const poster = state.posterRect;
+  drawPlayBadge(
+    ctx,
+    poster.x + poster.w / 2,
+    poster.y + poster.h / 2,
+    poster.w,
+    poster.h,
+    media.paused ? 'paused' : 'playing',
+  );
 
   if (state.el.mediaKind === 'audio') {
     drawAudioPill(ctx, state, media, duration, progress);
   } else {
     drawVideoChrome(ctx, state, media, duration, progress);
   }
-}
-
-function drawPlayBadge(
-  ctx: CanvasRenderingContext2D,
-  state: MediaState,
-  media: HTMLVideoElement | HTMLAudioElement,
-): void {
-  const poster = state.posterRect;
-  const badgeR = Math.max(18, Math.min(32, Math.min(poster.w, poster.h) * 0.25));
-  const cx = poster.x + poster.w / 2;
-  const cy = poster.y + poster.h / 2;
-  ctx.save();
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
-  ctx.shadowBlur = badgeR * 0.35;
-  ctx.fillStyle = 'rgba(20, 20, 20, 0.7)';
-  ctx.beginPath();
-  ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#fff';
-  if (media.paused) {
-    ctx.beginPath();
-    const tri = badgeR * 0.48;
-    ctx.moveTo(cx - tri * 0.4, cy - tri);
-    ctx.lineTo(cx - tri * 0.4, cy + tri);
-    ctx.lineTo(cx + tri * 0.75, cy);
-    ctx.closePath();
-    ctx.fill();
-  } else {
-    const bw = badgeR * 0.2;
-    const bh = badgeR * 0.8;
-    const gap = badgeR * 0.15;
-    ctx.fillRect(cx - gap - bw, cy - bh / 2, bw, bh);
-    ctx.fillRect(cx + gap, cy - bh / 2, bw, bh);
-  }
-  ctx.restore();
 }
 
 function drawVideoChrome(

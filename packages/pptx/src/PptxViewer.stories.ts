@@ -235,6 +235,7 @@ export const FileUpload: Story = {
       container.innerHTML = '';
       viewer = new PptxViewer(container, {
         width: args.width,
+        enableMediaPlayback: true,
         onSlideChange: (idx, total) => {
           slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
           prevBtn.disabled = idx === 0;

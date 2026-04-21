@@ -1,5 +1,6 @@
 import type { RenderOptions } from './renderer';
 import { PptxPresentation } from './presentation';
+import type { PresentationHandle } from './presentation-handle';
 
 export interface PptxViewerOptions extends RenderOptions {
   /** Called when a slide finishes rendering */
@@ -11,6 +12,14 @@ export interface PptxViewerOptions extends RenderOptions {
    * default — see {@link PptxPresentation.load} for privacy implications.
    */
   useGoogleFonts?: boolean;
+  /**
+   * Enable interactive audio/video playback. When true, slides are rendered
+   * via {@link PptxPresentation.presentSlide} so media elements become
+   * clickable and the viewer draws its own play/pause chrome. When false
+   * (default) the viewer renders a static slide with a non-interactive play
+   * badge over media posters.
+   */
+  enableMediaPlayback?: boolean;
 }
 
 /**
@@ -26,6 +35,7 @@ export class PptxViewer {
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
+  private handle: PresentationHandle | null = null;
 
   constructor(container: HTMLElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
@@ -83,8 +93,18 @@ export class PptxViewer {
     this.canvas.style.width = `${targetWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
+    this.handle?.dispose();
+    this.handle = null;
+
     try {
-      await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr });
+      if (this.opts.enableMediaPlayback) {
+        this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
+          width: targetWidth,
+          dpr,
+        });
+      } else {
+        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr });
+      }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
@@ -93,6 +113,8 @@ export class PptxViewer {
 
   /** Clean up the viewer and terminate the background worker. */
   destroy(): void {
+    this.handle?.dispose();
+    this.handle = null;
     this.engine?.destroy();
     this.canvas.remove();
   }
