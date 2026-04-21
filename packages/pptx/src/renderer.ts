@@ -22,6 +22,7 @@ import {
   resolveFill as resolveFillCore,
   applyStroke as applyStrokeCore,
 } from '@silurus/ooxml-core';
+import { drawPlayBadge } from './media-chrome';
 
 /** EMU per point (OOXML: 1 pt = 12700 EMU). Used to scale font sizes with the canvas. */
 const PT_TO_EMU = 12700;
@@ -2610,24 +2611,7 @@ async function renderMedia(
 
   if (skipControls) return;
 
-  // Play-badge overlay: centered filled circle with a triangle cue
-  const cx = x + w / 2;
-  const cy = y + h / 2;
-  const r = Math.min(w, h) * 0.18;
-  ctx.save();
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  const tri = r * 0.55;
-  ctx.moveTo(cx - tri * 0.5, cy - tri);
-  ctx.lineTo(cx - tri * 0.5, cy + tri);
-  ctx.lineTo(cx + tri, cy);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
+  drawPlayBadge(ctx, x + w / 2, y + h / 2, w, h, 'paused');
 }
 
 // ===== Table renderer =====
