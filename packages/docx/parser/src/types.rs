@@ -42,6 +42,16 @@ pub struct SectionProps {
     pub title_page: bool,
     /// whether even pages have distinct header/footer
     pub even_and_odd_headers: bool,
+    /// ECMA-376 §17.6.5 w:docGrid/@w:type ("default" | "lines" |
+    /// "linesAndChars" | "snapToChars"). None = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_type: Option<String>,
+    /// ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt (converted from twentieths
+    /// of a point). When docGridType is "lines" or "linesAndChars", this is
+    /// the vertical pitch per grid line — auto line spacing multiplies against
+    /// this instead of the font's natural line height.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_line_pitch: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone)]

@@ -327,6 +327,8 @@ fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, Str
         footer_distance: 36.0,
         title_page: false,
         even_and_odd_headers: false,
+        doc_grid_type: None,
+        doc_grid_line_pitch: None,
     };
 
     let Some(sp) = sect_pr else { return (default, SectionRefs::default()) };
@@ -345,6 +347,23 @@ fn parse_section(sect_pr: Option<roxmltree::Node>, rel_map: &HashMap<String, Str
         if let Some(v) = attr_w(pg_mar, "footer") { props.footer_distance = twips_to_pt(&v); }
     }
     props.title_page = child_w(sp, "titlePg").is_some();
+
+    // ECMA-376 §17.6.5 w:docGrid. When @type=lines|linesAndChars with a
+    // linePitch, Word renders each line of text at intervals of linePitch
+    // rather than at the font's natural line height. For auto line rule the
+    // multiplier applies against linePitch, not the font — which is what
+    // makes a 56pt heading with lineRule=auto value=1040 (4.33×) render at
+    // ~18pt × 4.33 = 78pt rather than 56pt × 1.25 × 4.33 = 303pt.
+    if let Some(dg) = child_w(sp, "docGrid") {
+        if let Some(t) = attr_w(dg, "type") {
+            props.doc_grid_type = Some(t);
+        }
+        if let Some(lp) = attr_w(dg, "linePitch") {
+            // linePitch is in twentieths of a point (twips), same as other
+            // w: unit attributes. twips_to_pt divides by 20.
+            props.doc_grid_line_pitch = Some(twips_to_pt(&lp));
+        }
+    }
 
     // Collect header/footer references
     let mut refs = SectionRefs::default();
