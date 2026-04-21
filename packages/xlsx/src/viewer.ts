@@ -115,11 +115,11 @@ export class XlsxViewer {
   }
 
   private tabStyle(active: boolean): string {
-    // Active tab renders taller than inactive so the selected sheet draws the
-    // eye. Tabs align to flex-end, so shorter inactive tabs sit lower and the
-    // active tab sticks up. Font size also bumps a hair on active.
-    const activeH = TAB_BAR_H - 2;
-    const inactiveH = TAB_BAR_H - 8;
+    // Active (white) gets the smaller box, inactive (gray) the larger — the
+    // inverse of the intuitive "selected is bigger" rule, per explicit design
+    // request.
+    const smallH = TAB_BAR_H - 8;
+    const largeH = TAB_BAR_H - 2;
     const base =
       `display:inline-block;padding:0 14px;` +
       `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
@@ -127,10 +127,10 @@ export class XlsxViewer {
       `outline:none;box-sizing:border-box;`;
     return active
       ? base +
-        `height:${activeH}px;font-size:13px;` +
+        `height:${smallH}px;font-size:11px;` +
         `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;position:relative;top:1px;`
       : base +
-        `height:${inactiveH}px;font-size:11px;` +
+        `height:${largeH}px;font-size:13px;` +
         `background:#e0e0e0;color:#555;`;
   }
 
