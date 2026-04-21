@@ -265,6 +265,12 @@ pub struct Cell {
     pub col_ref: String,
     pub value: CellValue,
     pub style_index: u32,
+    /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
+    /// renderer uses this to recompute volatile functions like TODAY() /
+    /// NOW() at display time so the cached `<v>` (frozen when the file was
+    /// last saved) doesn't show a stale date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -2219,6 +2225,15 @@ fn parse_row_cells(
         // Inline string: <c t="inlineStr"><is>...</is></c>
         let is_node = c_node.children().find(|n| n.tag_name().name() == "is");
 
+        // Formula text, if any (<f>…</f>). Kept so the renderer can
+        // recompute volatile builtins (TODAY, NOW) at display time.
+        let formula: Option<String> = c_node
+            .children()
+            .find(|n| n.tag_name().name() == "f")
+            .and_then(|n| n.text())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let v_text = c_node
             .children()
             .find(|n| n.tag_name().name() == "v")
@@ -2259,7 +2274,7 @@ fn parse_row_cells(
             }
         };
 
-        cells.push(Cell { col, row, col_ref: cell_ref, value, style_index });
+        cells.push(Cell { col, row, col_ref: cell_ref, value, style_index, formula });
     }
     cells
 }
