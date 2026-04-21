@@ -4,6 +4,60 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.7.0 — 2026-04-21
+
+Quality pass across pptx shape rendering and chart legends — no new
+feature categories, but several existing ✅ features now match the
+Office output more faithfully.
+
+### pptx
+
+- **`cxnSp` connectors honor `<p:style><a:lnRef idx="N">`** as a stroke
+  fallback (#74). Previously a connector that only declared
+  `headEnd` / `tailEnd` on `<a:ln>` (no `solidFill`) rendered invisible;
+  the style-level stroke now fills in color and width.
+- **`<p:style><a:lnRef>` stroke width resolves from the theme's
+  `fmtScheme > lnStyleLst`** for both `<p:cxnSp>` (#74) and `<p:sp>`
+  (#76). The previous hard-coded 9525 EMU (0.75 pt) under-weighted
+  every idx ≥ 2 stroke — idx=2 is 19050 EMU (1.5 pt) and idx=3 is
+  25400 EMU (2 pt) in the Office default theme. Brackets, braces, and
+  arcs that inherited the style line now render at the thickness
+  PowerPoint shows.
+- **`<a:tint>` mixes in linear sRGB** (IEC 61966-2-1) rather than
+  straight sRGB (#74). Sampling the PDF export of the reference
+  SmartArt arrow (#156082 + tint=60000) yields ~#D1D6DB, which the
+  linear-sRGB lerp now reproduces pixel-for-pixel.
+- **`bentConnector{2-5}` / `curvedConnector{2-5}` routed through the
+  ECMA-376 preset path evaluator** (#74), and `getConnectorAnchors()`
+  walks the preset cmd list so arrow heads sit on the true tangent
+  angle instead of the bounding-box diagonal.
+- **`rtTriangle` prstGeom** (right-angle at bottom-left) gained a
+  proper path (#74); previously fell back to `rect`.
+- **`adj5`–`adj8` threaded through parser → renderer → preset
+  evaluator** (#74) for callouts whose gdLst references them
+  (e.g. `accentBorderCallout3`).
+
+### charts
+
+- **`c:legendPos` and marker visibility** now drive legend placement
+  and series point rendering across the chart families (#72); radar
+  charts also honor the value-axis scale instead of defaulting to
+  `0–max`.
+
+### xlsx
+
+- **Data bar conditional formatting** renders with the Excel 2010+
+  gradient fill instead of the flat solid color (#73), matching the
+  in-cell gradient Excel draws.
+
+### Docs
+
+- README screenshots refreshed for the release.
+- CLAUDE.md codifies two workflow rules: squash merges to `main` are
+  forbidden (use `--merge` or `--rebase`), and the release process
+  (README screenshots + support table + CHANGELOG + version bump)
+  is documented as a single PR procedure.
+
 ## 0.6.0 — 2026-04-21
 
 ### docx
