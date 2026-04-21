@@ -240,20 +240,16 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             //   auto      → raw / 240   = multiplier (1.0 = single, 1.5 = 1½, 2.0 = double)
             //   atLeast   → raw / 20    = pt (minimum line height)
             //   exact     → raw / 20    = pt (exact line height)
-            // Word tolerates "auto" with very large raw values and treats them as
-            // atLeast-twips in practice (seen in the wild for decorative titles).
-            // Reinterpret raw > 720 (3x single) in the auto rule as atLeast pt so
-            // large fonts render near their natural height instead of 3×+.
+            // Previously we reinterpreted auto > 720 (3× single) as atLeast-pt
+            // to tame decorative-title overruns, but that was an empirical
+            // work-around. ECMA-376 §17.6.5 w:docGrid (handled at render time)
+            // already constrains large auto multipliers to a grid pitch when
+            // the section enables a line grid, which is where those oversized
+            // values are actually authored.
             let (val, effective_rule) = match rule.as_str() {
-                "exact" => (raw / 20.0, "exact".to_string()),
+                "exact"   => (raw / 20.0, "exact".to_string()),
                 "atLeast" => (raw / 20.0, "atLeast".to_string()),
-                _ => {
-                    if raw > 720.0 {
-                        (raw / 20.0, "atLeast".to_string())
-                    } else {
-                        (raw / 240.0, "auto".to_string())
-                    }
-                }
+                _         => (raw / 240.0, "auto".to_string()),
             };
             fmt.line_spacing_val = Some(val);
             fmt.line_spacing_rule = Some(effective_rule);

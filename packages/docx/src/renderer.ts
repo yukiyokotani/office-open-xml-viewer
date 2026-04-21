@@ -929,6 +929,10 @@ function layoutLines(
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
+  // Width of trailing spaces on the last added text token. Those spaces
+  // collapse if the next word wraps and the current word becomes the last on
+  // the line — so we subtract them during fit checks to avoid premature wraps.
+  let lastTokenTrailingSpaceW = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
@@ -1018,6 +1022,7 @@ function layoutLines(
     }
     currentLine = [];
     currentWidth = 0;
+    lastTokenTrailingSpaceW = 0;
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
@@ -1031,9 +1036,11 @@ function layoutLines(
     h: number,
     asc: number,
     desc: number,
+    trailingSpaceW: number = 0,
   ) => {
     currentLine.push(s);
     currentWidth += w;
+    lastTokenTrailingSpaceW = trailingSpaceW;
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
@@ -1110,11 +1117,23 @@ function layoutLines(
     // line boxes do not jitter based on the specific characters on each line.
     const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    // Trailing spaces collapse at line breaks in Word, so a wrap-fit check
+    // should treat both (a) the candidate word's own trailing space AND
+    // (b) the current line's last token trailing space as collapsible. That
+    // keeps wrap decisions spec-accurate and prevents premature wraps that
+    // would otherwise bloat justify slack (e.g. dropping "narrows" to line 2
+    // when it still fits after "trail "'s trailing space collapses).
+    const trimmed = s.text.replace(/ +$/, '');
+    const trailingSpaceW = s.text.endsWith(' ')
+      ? w - ctx.measureText(trimmed).width
+      : 0;
+    const wForFit = w - trailingSpaceW;
+    const currentWidthNoTail = currentWidth - lastTokenTrailingSpaceW;
 
-    if (currentWidth + w <= availW()) {
+    if (currentWidthNoTail + wForFit <= availW()) {
       // Fits on current line as-is
       s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      addToLine(s, w, h, asc, desc, trailingSpaceW);
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
