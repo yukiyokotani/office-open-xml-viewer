@@ -1574,19 +1574,25 @@ function getDefaultFontSize(para: DocParagraph): number {
  * line's tallest glyph (baseHeightPt, usually the run font size in pt).
  *
  * ECMA-376 §17.3.1.33:
- *   auto    → value is a multiplier of "single-line spacing" (≈ 1.2× font).
+ *   auto    → the value is a multiplier that expresses the TOTAL baseline-
+ *             to-baseline distance as a fraction of the font em. 240 ("single")
+ *             means one em of baseline advance, 480 ("double") means two. The
+ *             multiplier is NOT an extra leading added on top of the em-box;
+ *             it IS the line height. A prior version here multiplied by 1.2
+ *             on top, which double-counted the em-box and pushed baselines
+ *             ~20% farther apart than Word renders (28 pt × 2.67 should give
+ *             ~74.76 pt per line, not ~89.6 pt).
  *   exact   → value IS the line height in pt; ignore font.
- *   atLeast → line height is the larger of single-line and value pt.
+ *   atLeast → line height is the larger of the font em and the value in pt.
  *
- * Previously all non-auto rules collapsed to 1.2, so explicit pt-based line
- * heights on headings were ignored and the paragraph rendered at 1.2× font
- * even when the XML asked for a taller box. That made page flow too compact.
+ * When no lineSpacing is declared we fall back to 1.0 (one em) which is Word's
+ * default "single" behavior for absent w:spacing children.
  */
 function lineSpacingMultiplier(ls: LineSpacing | null, baseHeightPt: number = 1): number {
-  if (!ls) return 1.2;
-  if (ls.rule === 'auto') return ls.value * 1.2;
-  if (baseHeightPt <= 0) return 1.2;
+  if (!ls) return 1.0;
+  if (ls.rule === 'auto') return ls.value;
+  if (baseHeightPt <= 0) return 1.0;
   if (ls.rule === 'exact')   return ls.value / baseHeightPt;
-  if (ls.rule === 'atLeast') return Math.max(1.2, ls.value / baseHeightPt);
-  return 1.2;
+  if (ls.rule === 'atLeast') return Math.max(1.0, ls.value / baseHeightPt);
+  return 1.0;
 }
