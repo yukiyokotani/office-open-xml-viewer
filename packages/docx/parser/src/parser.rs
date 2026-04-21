@@ -211,7 +211,7 @@ fn parse_body_elements(
     for child in body_children {
         match child.tag_name().name() {
             "p" => {
-                let result = parse_paragraph(child, style_map, num_map, media_map, rel_map, theme);
+                let result = parse_paragraph(child, style_map, num_map, media_map, rel_map, theme, None);
                 let is_page_break_only = result.runs.len() == 1 && matches!(
                     result.runs[0],
                     DocRun::Break { break_type: BreakType::Page }
@@ -394,6 +394,7 @@ fn parse_paragraph(
     media_map: &HashMap<String, String>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    table_style_id: Option<&str>,
 ) -> DocParagraph {
     // Get style ID from pPr/pStyle. When absent, resolve_para falls back to the
     // paragraph style marked w:default="1" via StyleMap::default_para_style_id.
@@ -403,7 +404,7 @@ fn parse_paragraph(
         .and_then(|s| attr_w(s, "val"));
 
     // Resolve base formatting from style
-    let (mut base_para, mut base_run) = style_map.resolve_para(explicit_style_id.as_deref());
+    let (mut base_para, mut base_run) = style_map.resolve_para(explicit_style_id.as_deref(), table_style_id);
 
     // Apply direct paragraph formatting overrides
     if let Some(ppr) = ppr_node {
@@ -692,7 +693,7 @@ fn parse_run_inner(
     // Apply rStyle
     if let Some(rpr) = rpr_node {
         if let Some(rs) = child_w(rpr, "rStyle").and_then(|n| attr_w(n, "val")) {
-            let (_, style_run) = style_map.resolve_para(Some(&rs));
+            let (_, style_run) = style_map.resolve_para(Some(&rs), None);
             apply_direct_run(&mut fmt, &style_run);
         }
         let direct = parse_run_fmt(rpr);
@@ -1446,6 +1447,14 @@ fn parse_table(
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
 
+    // Resolve the table style ID (§17.4.63 w:tblStyle). Cell paragraphs
+    // inherit this style's pPr — e.g. "Table Grid" (style `af3` in this
+    // sample) sets line="240" after="0", which tightens cell line spacing
+    // below the body-text default inherited from docDefault.
+    let table_style_id = tbl_pr
+        .and_then(|p| child_w(p, "tblStyle"))
+        .and_then(|s| attr_w(s, "val"));
+
     // Column widths from tblGrid
     let col_widths: Vec<f64> = tbl_grid.map(|g| {
         children_w(g, "gridCol")
@@ -1472,7 +1481,7 @@ fn parse_table(
 
     let mut rows = vec![];
     for tr_node in children_w_flat(node, "tr") {
-        let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme);
+        let row = parse_table_row(tr_node, style_map, num_map, media_map, rel_map, theme, table_style_id.as_deref());
         rows.push(row);
     }
 
@@ -1494,6 +1503,7 @@ fn parse_table_row(
     media_map: &HashMap<String, String>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    table_style_id: Option<&str>,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let row_height = tr_pr
@@ -1504,7 +1514,7 @@ fn parse_table_row(
 
     let mut cells = vec![];
     for tc_node in children_w_flat(node, "tc") {
-        let cell = parse_table_cell(tc_node, style_map, num_map, media_map, rel_map, theme);
+        let cell = parse_table_cell(tc_node, style_map, num_map, media_map, rel_map, theme, table_style_id);
         cells.push(cell);
     }
 
@@ -1518,6 +1528,7 @@ fn parse_table_cell(
     media_map: &HashMap<String, String>,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    table_style_id: Option<&str>,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -1561,7 +1572,7 @@ fn parse_table_cell(
 
     let mut content = vec![];
     for p_node in children_w_flat(node, "p") {
-        content.push(parse_paragraph(p_node, style_map, num_map, media_map, rel_map, theme));
+        content.push(parse_paragraph(p_node, style_map, num_map, media_map, rel_map, theme, table_style_id));
     }
 
     DocTableCell { content, col_span, v_merge, borders, background, v_align, width_pt }
