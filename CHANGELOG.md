@@ -4,6 +4,43 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.9.0 — 2026-04-22
+
+Focused xlsx release: conditional formatting now evaluates formula-based
+rules, resolves defined names, overlays `<dxf>` borders per edge, and
+honors Excel's `x14:dataBar@gradient="0"` for solid bars. The CF formula
+evaluator is broadened to cover the functions most commonly used in
+`expression` rules.
+
+### xlsx
+
+- **Conditional formatting — `expression` rules** (§18.3.1.10): the
+  formula is tokenized, references are shifted by the sqref anchor, and
+  the AST is walked to a boolean. `stopIfTrue` and rule priority are
+  honored so later rules can't mask earlier hits.
+- **Defined-name resolution** (§18.2.5): sheet-scoped names used inside
+  CF expressions (e.g. `task_start`, `today`) are resolved by inlining
+  the formula and shifting embedded relative refs from A1.
+- **CF `<dxf>` borders** (§18.8.17): per-edge overlay — a CF rule can
+  draw a red left/right stripe without erasing the cell's existing
+  top/bottom border.
+- **Data-bar gradient flag**: `x14:dataBar@gradient="0"` (living in a
+  separate worksheet-level `<extLst>` linked by GUID) now produces a
+  solid fill. Previously bars always rendered with a gradient.
+- **Data-bar / color-scale theme colors**: `<color theme="…" tint="…">`
+  inside `<dataBar>`/`<colorScale>` is now resolved through the workbook
+  theme (was srgb/indexed only).
+- **`sheetView showGridLines`** (§18.3.1.83): when unchecked in Excel's
+  View tab, the default `#d0d0d0` grid lines are no longer drawn.
+- **Formula evaluator broadening** (for CF `expression` rules): `A1:B5`
+  ranges; `&` concatenation; IFERROR/IFS; type checks (ISTEXT, ISERROR,
+  ISNA, …); math (TRUNC, CEILING, FLOOR, MOD, POWER, SQRT, SIGN, EXP,
+  LN, LOG10); aggregates (AVERAGE, COUNT/COUNTA/COUNTBLANK, COUNTIF,
+  SUMIF, AVERAGEIF with operator-prefixed criteria); text (LEN, LEFT,
+  RIGHT, MID, UPPER, LOWER, TRIM, EXACT, FIND, SEARCH, CONCATENATE, T,
+  N, VALUE); ROW/COLUMN; date (TODAY, NOW, DATE, YEAR, MONTH, DAY,
+  WEEKDAY, with the 1900 leap-year serial compensation).
+
 ## 0.8.1 — 2026-04-21
 
 ### Infrastructure
