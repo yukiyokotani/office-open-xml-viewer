@@ -4,6 +4,74 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.6.0 — 2026-04-21
+
+### docx
+
+Layout improvements driven by cross-referencing Word's PDF export of
+demo/sample-1 with our paginator / line-layout output. Unless noted, the
+work lands as strict ECMA-376 reading of the relevant sections — empirical
+tolerance knobs were deliberately avoided per the project's spec-first
+rule.
+
+- **Line spacing, explicit vs inherited (ECMA-376 §17.6.5 + §17.3.1.33).**
+  `line_spacing_explicit` now flows through the style cascade. A paragraph
+  whose `w:spacing/@w:line` is inherited only from docDefault snaps to one
+  grid pitch per line in a `w:docGrid`-enabled section; a paragraph that
+  sets `w:line` on its own pPr or a named style multiplies against the
+  pitch. Fixes body labels like ESSAY / BY THE EDITORS advancing at
+  `pitch × 1.15` instead of the `pitch` Word uses.
+- **Paragraph margin collapsing.** The gap between two paragraphs is now
+  `max(prev.spaceAfter, this.spaceBefore)` rather than the sum (CSS-style
+  collapsing margins). Matches Word's observed 18 pt gap between
+  `after=360` → `before=240` paragraphs.
+- **spaceAfter may overflow the bottom margin.** A paragraph fits when
+  `y + (h − spaceAfter) ≤ contentH`; the trailing whitespace is suppressed
+  at page boundaries. Lets a closing paragraph with a large `after` land
+  flush against the bottom margin.
+- **Knuth-Plass-style shrink tolerance on wrap-fit.** ECMA-376 doesn't
+  prescribe a line-breaking algorithm; we adopt the standard typographic
+  policy used by TeX / InDesign / Word — each inter-word space may
+  compress by up to 25 % of its natural width when testing fit. Absorbs
+  the ~0.1–0.3 px/glyph advance difference between Chromium's canvas
+  and Word's internal text layout, so long paragraphs wrap like Word's.
+- **Implicit `w:keepNext` on heading paragraphs (w:outlineLvl 0–8).** Word's
+  built-in Heading 1–9 styles carry an implicit keepNext even when
+  styles.xml omits it; parser now sets `keep_next=true` when a paragraph's
+  effective style declares `w:outlineLvl`.
+- **Table style `w:pPr` cascade (§17.7.6).** A table's `w:tblStyle` now
+  contributes its paragraph formatting to every cell paragraph, resolved
+  between docDefault and the paragraph's own style. For the default
+  "Table Grid" style (`line=240 auto`, `after=0`), this tightens cell
+  line spacing from ~28 pt to ~18 pt per line, matching Word.
+- **docGrid per-grid-line computation (§17.6.5).** Parsing
+  `w:docGrid/@w:type` and `@w:linePitch` on the section now feeds into
+  the line-box formula. Headings authored with oversized `lineRule="auto"`
+  values (e.g. `line="1040"` on a 56 pt title) no longer blow up into
+  ~300 pt tall lines — they snap to the section's grid pitch times the
+  multiplier.
+- **Inter-word compression on justified lines.** When canvas measurement
+  forces a line slightly over `availW`, the final render compresses
+  inter-word spaces (capped at ~¼ of the line's ascent) instead of
+  overflowing the right margin.
+
+### Stories / samples
+
+- xlsx viewer: active sheet tab is now visually smaller than inactive
+  tabs, which matches the project's layout preference.
+- pptx interactive playback: media play / pause badge style unified; the
+  story now explicitly opts into `presentSlide` so static rendering and
+  playback paths share identical chrome.
+
+### Known limitation
+
+- Word chains `w:keepNext` transitively through "heading cluster"
+  paragraphs (kicker label → title) that are not themselves marked with
+  `w:keepNext` or `w:outlineLvl`. ECMA-376 §17.3.1.15 defines keepNext as
+  1-hop only, so we follow the spec and accept that a kicker paragraph
+  can land at the bottom of page N while the matching title heads page
+  N+1 in layouts like demo/sample-1 page 3's "FIELD NOTES · CHAPTER THREE".
+
 ## 0.5.0 — 2026-04-21
 
 ### xlsx
