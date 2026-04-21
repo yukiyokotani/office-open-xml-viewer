@@ -115,14 +115,23 @@ export class XlsxViewer {
   }
 
   private tabStyle(active: boolean): string {
+    // Active tab renders taller than inactive so the selected sheet draws the
+    // eye. Tabs align to flex-end, so shorter inactive tabs sit lower and the
+    // active tab sticks up. Font size also bumps a hair on active.
+    const activeH = TAB_BAR_H - 2;
+    const inactiveH = TAB_BAR_H - 5;
     const base =
-      `display:inline-block;padding:0 14px;height:${TAB_BAR_H - 2}px;` +
+      `display:inline-block;padding:0 14px;` +
       `border:1px solid #c8ccd0;border-bottom:none;border-radius:3px 3px 0 0;` +
-      `font-size:12px;cursor:pointer;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;` +
-      `outline:none;`;
+      `cursor:pointer;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;` +
+      `outline:none;box-sizing:border-box;`;
     return active
-      ? base + `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;position:relative;top:1px;`
-      : base + `background:#e0e0e0;color:#555;`;
+      ? base +
+        `height:${activeH}px;font-size:13px;` +
+        `background:#fff;color:#000;border-bottom:1px solid #fff;font-weight:600;position:relative;top:1px;`
+      : base +
+        `height:${inactiveH}px;font-size:11px;` +
+        `background:#e0e0e0;color:#555;`;
   }
 
   private updateSpacerSize(ws: Worksheet): void {
