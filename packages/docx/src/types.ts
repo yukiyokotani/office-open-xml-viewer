@@ -28,6 +28,12 @@ export interface SectionProps {
   footerDistance: number;   // pt — bottom of page to footer
   titlePage: boolean;
   evenAndOddHeaders: boolean;
+  /** ECMA-376 §17.6.5 w:docGrid/@w:type — "default" | "lines" | "linesAndChars" | "snapToChars". */
+  docGridType?: string | null;
+  /** ECMA-376 §17.6.5 w:docGrid/@w:linePitch in pt. When docGridType is "lines" or
+   *  "linesAndChars", auto line spacing multiplies against this pitch instead of
+   *  the font's natural line height. */
+  docGridLinePitch?: number | null;
 }
 
 export type BodyElement =

@@ -57,6 +57,8 @@ interface RenderState {
   marginLeft: number;
   /** Active anchor-image floats that constrain text layout on the current page. */
   floats: FloatRect[];
+  /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
+  docGrid: DocGridCtx;
 }
 
 export interface RenderDocumentOptions {
@@ -208,6 +210,7 @@ export async function renderDocumentToCanvas(
     dryRun: false,
     marginLeft: sec.marginLeft,
     floats: [],
+    docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
   };
 
   // Header: top of page, starting at headerDistance
@@ -347,6 +350,7 @@ function buildMeasureState(
     dryRun: true,
     marginLeft: section.marginLeft,
     floats: [],
+    docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
   };
 }
 
@@ -365,7 +369,7 @@ function estimateParagraphHeight(
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, 1);
-    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1);
+    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid);
   } else {
     // When anchor-image floats are active on the current page the paragraph
     // wraps around them, adding lines compared to a full-width layout. Use
@@ -374,11 +378,11 @@ function estimateParagraphHeight(
       startPageY: state.y,
       paraX: paraXPt,
       floats: state.floats,
-      lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1),
+      lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
-    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1), 0);
+    textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid), 0);
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
 }
@@ -513,7 +517,7 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
   if (segments.length === 0) {
     const fontSizePt = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
-    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale);
+    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -531,14 +535,14 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, scale),
+    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid),
     pageH: state.pageH,
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
 
   if (para.shading && !dryRun) {
-    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale), 0);
+    const totalTextH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid), 0);
     ctx.fillStyle = `#${para.shading}`;
     ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, totalTextH);
   }
@@ -571,7 +575,7 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
     // Word centers the font's natural line (ascent+descent) within the expanded
     // line box — extra space from auto/exact/atLeast goes half above and half
     // below the glyphs. Baseline = top + halfExtra + ascent.
-    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale);
+    const lineH = lineBoxHeight(para.lineSpacing, line.ascent, line.descent, scale, state.docGrid);
     const naturalLineH = line.ascent + line.descent;
     const baseline = state.y + (lineH - naturalLineH) / 2 + line.ascent;
 
@@ -925,6 +929,10 @@ function layoutLines(
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
+  // Width of trailing spaces on the last added text token. Those spaces
+  // collapse if the next word wraps and the current word becomes the last on
+  // the line — so we subtract them during fit checks to avoid premature wraps.
+  let lastTokenTrailingSpaceW = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
@@ -1014,6 +1022,7 @@ function layoutLines(
     }
     currentLine = [];
     currentWidth = 0;
+    lastTokenTrailingSpaceW = 0;
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
@@ -1027,9 +1036,11 @@ function layoutLines(
     h: number,
     asc: number,
     desc: number,
+    trailingSpaceW: number = 0,
   ) => {
     currentLine.push(s);
     currentWidth += w;
+    lastTokenTrailingSpaceW = trailingSpaceW;
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
@@ -1106,11 +1117,23 @@ function layoutLines(
     // line boxes do not jitter based on the specific characters on each line.
     const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    // Trailing spaces collapse at line breaks in Word, so a wrap-fit check
+    // should treat both (a) the candidate word's own trailing space AND
+    // (b) the current line's last token trailing space as collapsible. That
+    // keeps wrap decisions spec-accurate and prevents premature wraps that
+    // would otherwise bloat justify slack (e.g. dropping "narrows" to line 2
+    // when it still fits after "trail "'s trailing space collapses).
+    const trimmed = s.text.replace(/ +$/, '');
+    const trailingSpaceW = s.text.endsWith(' ')
+      ? w - ctx.measureText(trimmed).width
+      : 0;
+    const wForFit = w - trailingSpaceW;
+    const currentWidthNoTail = currentWidth - lastTokenTrailingSpaceW;
 
-    if (currentWidth + w <= availW()) {
+    if (currentWidthNoTail + wForFit <= availW()) {
       // Fits on current line as-is
       s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
+      addToLine(s, w, h, asc, desc, trailingSpaceW);
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
@@ -1439,10 +1462,10 @@ function measureParaHeight(
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale);
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid);
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid), 0);
 }
 
 function measureCellContent(
@@ -1599,28 +1622,55 @@ function getDefaultFontSize(para: DocParagraph): number {
   return 10; // pt fallback
 }
 
+/** Document-grid context passed to line-box computation.  When the section's
+ *  `w:docGrid` is "lines"/"linesAndChars" with a positive pitch (ECMA-376
+ *  §17.6.5), auto line spacing multiplies against the grid pitch instead of
+ *  the font's natural line height. Without this, a 56-pt heading with
+ *  lineRule="auto" value=4.33 would claim 56×1.25×4.33 ≈ 303pt of vertical
+ *  space; with this, it claims max(natural, 18pt × 4.33) ≈ 78pt — matching
+ *  Word's rendering on grids typical of Japanese/Chinese templates. */
+interface DocGridCtx {
+  /** "default" | "lines" | "linesAndChars" | "snapToChars" */
+  type: string | null | undefined;
+  /** Grid pitch in pt (already converted from twips in the parser). */
+  linePitchPt: number | null | undefined;
+}
+
+function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
+  if (!ctx || !ctx.linePitchPt || ctx.linePitchPt <= 0) return false;
+  return ctx.type === 'lines' || ctx.type === 'linesAndChars';
+}
+
 /**
  * Compute the total line-box height in px from a line's natural font metrics
  * (fontBoundingBoxAscent + fontBoundingBoxDescent) per ECMA-376 §17.3.1.33.
  *
- *   auto    → natural × value ("single" = 1 natural line, "double" = 2)
- *   exact   → value in pt, converted to px (ignores font)
- *   atLeast → max(natural, value in pt × scale)
- *   null    → natural
- *
- * Word's "1×" spacing is defined by font design metrics, not the em-box, so a
- * 28-pt heading with value=2.67 yields roughly (ascent+descent) × 2.67 ≈ 88pt
- * between baselines — matching Word rather than 28 × 2.67 = 74.76pt (em-box).
+ *   auto    → natural × value ("single" = 1 natural line, "double" = 2).
+ *             When docGrid type=lines|linesAndChars is active, the
+ *             multiplier applies against the grid pitch instead, with a
+ *             floor of the natural line height.
+ *   exact   → value in pt, converted to px (ignores font and grid).
+ *   atLeast → max(natural, value in pt × scale).
+ *   null    → natural, or grid pitch if the section defines one.
  */
 function lineBoxHeight(
   ls: LineSpacing | null,
   ascentPx: number,
   descentPx: number,
   scale: number,
+  grid?: DocGridCtx,
 ): number {
   const natural = ascentPx + descentPx;
-  if (!ls) return natural;
-  if (ls.rule === 'auto') return natural * ls.value;
+  const hasGrid = isGridLineRule(grid);
+  if (!ls) {
+    return hasGrid ? Math.max(natural, grid!.linePitchPt! * scale) : natural;
+  }
+  if (ls.rule === 'auto') {
+    if (hasGrid) {
+      return Math.max(natural, grid!.linePitchPt! * ls.value * scale);
+    }
+    return natural * ls.value;
+  }
   if (ls.rule === 'exact') return ls.value * scale;
   if (ls.rule === 'atLeast') return Math.max(natural, ls.value * scale);
   return natural;
