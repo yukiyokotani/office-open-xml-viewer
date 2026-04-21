@@ -4,6 +4,39 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.5.0 — 2026-04-21
+
+### xlsx
+
+- **Pattern fills (ECMA-376 §18.8.20).** `gray125` and hatch patterns
+  (`darkGrid`, `lightGrid`, `darkHorizontal`, `lightHorizontal`, etc.) now
+  render as a blend of the cell's `fgColor` and `bgColor`, and the hatch
+  varieties draw a repeating `CanvasPattern` tile instead of a flat blended
+  color.
+- **Gradient fills (§18.8.24).** Parse `<gradientFill>` (linear `degree` +
+  path-style bounding box) and render via `createLinearGradient` /
+  `createRadialGradient` with multi-stop color interpolation.
+- **Comment indicators (§18.7.3).** Commented cells get a small red triangle
+  in the top-right corner to mirror Excel's visual cue. Parsed from
+  `xl/comments*.xml` and exposed as `Worksheet.commentRefs`.
+
+### docx
+
+- **Page margins respected in pagination.** The paginator's per-paragraph
+  height estimator now builds the same `WrapLayoutCtx` as the renderer when
+  anchor-image floats are active, so float-aware line wrapping and
+  estimation agree. Pages whose content wraps around floats no longer
+  overshoot or undershoot the bottom margin.
+- **Line-box metrics and vertical centering (§17.3.1.33).** Replace
+  per-character `actualBoundingBoxAscent` with font-metric
+  `fontBoundingBoxAscent` / `fontBoundingBoxDescent`, so every line in a
+  paragraph — and every paragraph that shares a font/size — sits on a
+  consistent baseline. `lineBoxHeight` now reads: `auto` = natural × value,
+  `exact` = pt × scale, `atLeast` = max(natural, pt × scale). Glyphs are
+  centered within the line box (extra spacing split above and below),
+  fixing text that previously rendered top-aligned inside wide auto-spaced
+  paragraphs.
+
 ## 0.4.0 — 2026-04-21
 
 ### pptx
