@@ -423,6 +423,7 @@ fn parse_paragraph(
     let line_spacing = base_para.line_spacing_val.map(|v| LineSpacing {
         value: v,
         rule: base_para.line_spacing_rule.clone().unwrap_or_else(|| "auto".to_string()),
+        explicit: base_para.line_spacing_explicit.unwrap_or(false),
     });
 
     // Numbering — extract level data before advancing counter (avoids borrow conflict)
@@ -468,7 +469,11 @@ fn parse_paragraph(
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
         contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
-        keep_next: base_para.keep_next.unwrap_or(false),
+        // Word's built-in "Heading 1–9" styles carry an implicit keepNext even
+        // when styles.xml doesn't spell it out — demoted heading paragraphs
+        // (outlineLvl 0..8) are pinned to the next paragraph so the heading
+        // never orphans at page bottom. Honor an explicit false to opt out.
+        keep_next: base_para.keep_next.unwrap_or_else(|| base_para.outline_level.is_some()),
         keep_lines: base_para.keep_lines.unwrap_or(false),
         // ECMA-376 §17.3.1.44: widowControl defaults to true when absent.
         widow_control: base_para.widow_control.unwrap_or(true),
@@ -1617,6 +1622,8 @@ fn apply_direct_para(base: &mut ParaFmt, direct: &ParaFmt) {
     if direct.space_after.is_some() { base.space_after = direct.space_after; }
     if direct.line_spacing_val.is_some() { base.line_spacing_val = direct.line_spacing_val; }
     if direct.line_spacing_rule.is_some() { base.line_spacing_rule = direct.line_spacing_rule.clone(); }
+    if direct.line_spacing_explicit.is_some() { base.line_spacing_explicit = direct.line_spacing_explicit; }
+    if direct.outline_level.is_some() { base.outline_level = direct.outline_level; }
     if direct.num_id.is_some() { base.num_id = direct.num_id; }
     if direct.num_level.is_some() { base.num_level = direct.num_level; }
     if direct.tab_stops.is_some() { base.tab_stops = direct.tab_stops.clone(); }

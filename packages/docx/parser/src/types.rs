@@ -157,6 +157,12 @@ pub struct LineSpacing {
     pub value: f64,
     /// "auto" | "exact" | "atLeast"
     pub rule: String,
+    /// True when `w:spacing/@w:line` is set on the paragraph's own pPr or on
+    /// a named style; false when only docDefault provides it. Controls the
+    /// docGrid interaction per ECMA-376 §17.6.5 — inherited-only paragraphs
+    /// snap to one grid pitch per line regardless of the multiplier.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub explicit: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]

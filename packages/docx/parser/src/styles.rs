@@ -39,6 +39,13 @@ pub struct ParaFmt {
     pub space_after: Option<f64>,     // pt
     pub line_spacing_val: Option<f64>,
     pub line_spacing_rule: Option<String>,
+    /// True when `w:spacing/@w:line` was declared on the paragraph's own pPr
+    /// or on one of its named styles (i.e. NOT inherited from docDefaults).
+    /// Per ECMA-376 §17.6.5, when docGrid is active a paragraph that only
+    /// inherits line from docDefault uses the grid pitch (1 grid line per
+    /// text line, ignoring the multiplier), while an explicitly-set line
+    /// multiplies against the pitch as usual.
+    pub line_spacing_explicit: Option<bool>,
     pub num_id: Option<u32>,
     pub num_level: Option<u32>,
     /// Explicit tab stops (pos_pt, alignment, leader). None = inherit from parent style chain.
@@ -60,6 +67,11 @@ pub struct ParaFmt {
     pub widow_control: Option<bool>,
     /// Paragraph border edges (w:pBdr)
     pub para_borders: Option<crate::types::ParagraphBorders>,
+    /// Heading outline level (w:outlineLvl, 0–8) when set. Word's built-in
+    /// heading styles (Heading 1–9) are rendered with an implicit
+    /// `w:keepNext` even when not spelled out in styles.xml; downstream
+    /// code uses this to infer that behavior.
+    pub outline_level: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +114,13 @@ impl StyleMap {
             }
             if let Some(ppr_def) = child_w(dd, "pPrDefault").and_then(|n| child_w(n, "pPr")) {
                 defaults_para = parse_para_fmt(ppr_def);
+                // docDefaults is the implicit fallback; ECMA-376 §17.6.5 +
+                // §17.3.1.33 imply that a paragraph whose line spacing is
+                // only satisfied by docDefault (not declared on pPr or a
+                // named style) should be treated as "no explicit line" —
+                // in a docGrid section that yields 1 grid line per text
+                // line rather than pitch × M.
+                defaults_para.line_spacing_explicit = None;
             }
         }
 
@@ -191,6 +210,7 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.space_after.is_some() { dst.space_after = src.space_after; }
     if src.line_spacing_val.is_some() { dst.line_spacing_val = src.line_spacing_val; }
     if src.line_spacing_rule.is_some() { dst.line_spacing_rule = src.line_spacing_rule.clone(); }
+    if src.line_spacing_explicit.is_some() { dst.line_spacing_explicit = src.line_spacing_explicit; }
     if src.num_id.is_some() { dst.num_id = src.num_id; }
     if src.num_level.is_some() { dst.num_level = src.num_level; }
     if src.tab_stops.is_some() { dst.tab_stops = src.tab_stops.clone(); }
@@ -198,6 +218,7 @@ fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.page_break_before.is_some() { dst.page_break_before = src.page_break_before; }
     if src.contextual_spacing.is_some() { dst.contextual_spacing = src.contextual_spacing; }
     if src.keep_next.is_some() { dst.keep_next = src.keep_next; }
+    if src.outline_level.is_some() { dst.outline_level = src.outline_level; }
     if src.keep_lines.is_some() { dst.keep_lines = src.keep_lines; }
     if src.widow_control.is_some() { dst.widow_control = src.widow_control; }
     if src.para_borders.is_some() { dst.para_borders = src.para_borders.clone(); }
@@ -253,6 +274,7 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
             };
             fmt.line_spacing_val = Some(val);
             fmt.line_spacing_rule = Some(effective_rule);
+            fmt.line_spacing_explicit = Some(true);
         }
     }
 
@@ -331,6 +353,19 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // widowControl — avoid leaving a single line at page top/bottom
     // (ECMA-376 default: true; explicit value=0 disables).
     fmt.widow_control = bool_prop(ppr, "widowControl");
+
+    // outlineLvl — 0..8 marks this paragraph (or its style) as a heading.
+    // ECMA-376 §17.3.1.20 lists only 0–8 and "no level" (absent). Word
+    // attaches an implicit keepNext to heading paragraphs (Heading 1–9
+    // styles) even when the style XML omits it, which we replicate at
+    // the final paragraph build step.
+    if let Some(lvl) = child_w(ppr, "outlineLvl") {
+        if let Some(v) = attr_w(lvl, "val") {
+            if let Ok(n) = v.parse::<u32>() {
+                if n <= 8 { fmt.outline_level = Some(n); }
+            }
+        }
+    }
 
     // Paragraph borders (pBdr)
     if let Some(pbdr) = child_w(ppr, "pBdr") {

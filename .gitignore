@@ -4,6 +4,8 @@
 *.pptx
 *.xlsx
 *.docx
+# Reference PDFs (Word-exported, kept locally for layout diffing)
+*.pdf
 # Committable demo samples (free-license files provided by maintainer)
 !packages/pptx/public/demo/
 !packages/pptx/public/demo/*.pptx

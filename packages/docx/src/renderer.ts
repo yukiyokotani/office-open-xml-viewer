@@ -248,6 +248,11 @@ export function computePages(
   const pages: BodyElement[][] = [[]];
   let y = 0;
   let prevPara: DocParagraph | null = null;
+  // Word collapses the gap between two paragraphs to max(prev.spaceAfter,
+  // this.spaceBefore) — i.e. it does NOT sum them. CSS-style "margin
+  // collapsing." Matches Word's observed layout on demo/sample-1 (gap
+  // between para 18 after=360 and para 19 before=240 is 18pt, not 30pt).
+  let prevSpaceAfter = 0;
   // Keep measureState.y in sync with the current page's content Y so that
   // registerAnchorFloats/WrapLayoutCtx anchor relative to where we actually
   // are on the page. Anchor floats are registered on the measureState as
@@ -260,6 +265,7 @@ export function computePages(
       pages.push([]);
       y = 0;
       prevPara = null;
+      prevSpaceAfter = 0;
       measureState.y = section.marginTop;
       measureState.floats = [];
     }
@@ -300,25 +306,44 @@ export function computePages(
       if (para.pageBreakBefore) newPage();
       const suppressBefore = contextualSuppressed(prevPara, para);
 
+      // Collapse with the previous paragraph's spaceAfter — Word takes
+      // max(prev.after, this.before) between paragraphs, not the sum.
+      const effectiveBefore = suppressBefore ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effectiveBefore);
+      y -= overlap;
+      measureState.y -= overlap;
+
       // Register this paragraph's anchor-image floats on the measureState so
       // subsequent paragraphs estimate around them (text-wrap around images
       // adds lines that the float-unaware estimate would otherwise miss,
       // which caused page 2 of demo/sample-1 to spill past the bottom
       // margin). The renderer runs the same registerAnchorFloats call; by
       // mirroring it here the paginator sees the same layout.
-      const paragraphAnchorY = measureState.y + (suppressBefore ? 0 : para.spaceBefore);
+      const paragraphAnchorY = measureState.y + effectiveBefore;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
       const h = estimateParagraphHeight(measureState, para, contentW, suppressBefore, section.marginLeft);
       // Break if this paragraph alone doesn't fit, OR if keepNext is set and
       // placing it would leave no room for the next block on the same page.
+      // Per Word's layout behavior: `spaceAfter` is trailing whitespace that
+      // can legally overflow the bottom of the page — only content + spaceBefore
+      // must fit. This is what lets a closing paragraph with a large
+      // `w:spacing/@w:after` land flush against the bottom margin.
       const needNext = para.keepNext ? estimateNextBlockHeight(i + 1) : 0;
-      const needed = h + needNext;
-      if (y > 0 && y + needed > contentH) newPage();
+      const fitHeight = h - para.spaceAfter;
+      const needed = fitHeight + needNext;
+      {
+        const firstText = (para.runs.find((r) => r.type === 'text' || r.type === 'field') as { text?: string } | undefined)?.text ?? '(empty)';
+        console.log(`PAG[${i}] y=${y.toFixed(1)} h=${h.toFixed(1)} fit=${fitHeight.toFixed(1)} olap=${overlap.toFixed(1)} next=${needNext.toFixed(1)} contentH=${contentH.toFixed(1)} ${firstText.slice(0, 30)}`);
+      }
+      if (y > 0 && y + needed > contentH) {
+        newPage();
+      }
       pages[pages.length - 1].push(el);
       y += h;
       measureState.y += h;
       prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
       const h = estimateTableHeight(measureState, tbl, contentW);
@@ -391,6 +416,8 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
   const totalColW = table.colWidths.reduce((s, w) => s + w, 0);
   const colScale = totalColW > contentWPt ? contentWPt / totalColW : 1;
   const colWidths = table.colWidths.map((w) => w * colScale);
+  // Table cells don't snap to the section docGrid — see comment in renderCell.
+  const cellState: RenderState = { ...state, docGrid: { type: null, linePitchPt: null } };
   let h = 0;
   for (const row of table.rows) {
     if (row.rowHeight != null) {
@@ -405,7 +432,7 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
       const innerW = Math.max(1, cellW - table.cellMarginLeft - table.cellMarginRight);
       let ch = table.cellMarginTop + table.cellMarginBottom;
       for (const para of cell.content) {
-        ch += estimateParagraphHeight(state, para, innerW);
+        ch += estimateParagraphHeight(cellState, para, innerW);
       }
       if (ch > rowH) rowH = ch;
       ci += span;
@@ -454,23 +481,37 @@ function contextualSuppressed(prev: DocParagraph | null, curr: DocParagraph): bo
 
 function renderBodyElements(elements: BodyElement[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
   for (const el of elements) {
     if (el.type === 'paragraph') {
       const para = el as unknown as DocParagraph;
-      renderParagraph(para, state, contextualSuppressed(prevPara, para));
+      const suppress = contextualSuppressed(prevPara, para);
+      // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
+      const effBefore = suppress ? 0 : para.spaceBefore;
+      const overlap = Math.min(prevSpaceAfter, effBefore);
+      state.y -= overlap * state.scale;
+      renderParagraph(para, state, suppress);
       prevPara = para;
+      prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       renderTable(el as unknown as DocTable, state);
       prevPara = null;
+      prevSpaceAfter = 0;
     }
   }
 }
 
 function renderParaList(paras: DocParagraph[], state: RenderState): void {
   let prevPara: DocParagraph | null = null;
+  let prevSpaceAfter = 0;
   for (const para of paras) {
-    renderParagraph(para, state, contextualSuppressed(prevPara, para));
+    const suppress = contextualSuppressed(prevPara, para);
+    const effBefore = suppress ? 0 : para.spaceBefore;
+    const overlap = Math.min(prevSpaceAfter, effBefore);
+    state.y -= overlap * state.scale;
+    renderParagraph(para, state, suppress);
     prevPara = para;
+    prevSpaceAfter = para.spaceAfter;
   }
 }
 
@@ -937,10 +978,20 @@ function layoutLines(
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
   let currentWidth = 0;
-  // Width of trailing spaces on the last added text token. Those spaces
-  // collapse if the next word wraps and the current word becomes the last on
-  // the line — so we subtract them during fit checks to avoid premature wraps.
-  let lastTokenTrailingSpaceW = 0;
+  // Sum of trailing-space widths of every text token on the current line.
+  // Used for two things:
+  //   1. Knuth-Plass-style shrink tolerance: a justified line may compress
+  //      inter-word spaces by up to SPACE_SHRINK_RATIO, so a candidate word
+  //      whose "natural" width would overflow by less than that total shrink
+  //      budget is allowed to fit. This is the standard typographic approach
+  //      to line-breaking and lets us absorb the ~0.1–0.3 px/glyph advance
+  //      bias between Chromium canvas and Word's internal text layout,
+  //      matching Word's wrap on long paragraphs.
+  //   2. Trailing-space collapse at line end — the last token's trailing
+  //      space disappears when no further word is added, so when deciding
+  //      whether a candidate word fits we treat it as if it would become the
+  //      final word (its own trailing spaces collapsible).
+  let lineTotalTrailingW = 0;
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
@@ -1030,7 +1081,7 @@ function layoutLines(
     }
     currentLine = [];
     currentWidth = 0;
-    lastTokenTrailingSpaceW = 0;
+    lineTotalTrailingW = 0;
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
@@ -1048,7 +1099,7 @@ function layoutLines(
   ) => {
     currentLine.push(s);
     currentWidth += w;
-    lastTokenTrailingSpaceW = trailingSpaceW;
+    lineTotalTrailingW += trailingSpaceW;
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
@@ -1125,20 +1176,27 @@ function layoutLines(
     // line boxes do not jitter based on the specific characters on each line.
     const asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
     const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
-    // Trailing spaces collapse at line breaks in Word, so a wrap-fit check
-    // should treat both (a) the candidate word's own trailing space AND
-    // (b) the current line's last token trailing space as collapsible. That
-    // keeps wrap decisions spec-accurate and prevents premature wraps that
-    // would otherwise bloat justify slack (e.g. dropping "narrows" to line 2
-    // when it still fits after "trail "'s trailing space collapses).
+    // Wrap-fit check uses two standard typographic allowances:
+    //   1. Trailing-space collapse: if this word becomes the last on the
+    //      line, its trailing space (if any) collapses. We subtract it from
+    //      the width used to test fit.
+    //   2. Knuth-Plass shrink tolerance: a justified line may compress
+    //      each inter-word space by up to SPACE_SHRINK_RATIO (25%) of its
+    //      natural width without harming readability. This lets us absorb
+    //      the canvas measureText vs Word advance-width discrepancy
+    //      (~0.1–0.3 px/glyph) that would otherwise push a trailing word
+    //      onto the next line. ECMA-376 doesn't prescribe a line-breaking
+    //      algorithm — tolerance-based fit is standard typography (TeX,
+    //      InDesign, Word) and keeps layout close to Word's output.
+    const SPACE_SHRINK_RATIO = 0.25;
     const trimmed = s.text.replace(/ +$/, '');
     const trailingSpaceW = s.text.endsWith(' ')
       ? w - ctx.measureText(trimmed).width
       : 0;
     const wForFit = w - trailingSpaceW;
-    const currentWidthNoTail = currentWidth - lastTokenTrailingSpaceW;
+    const shrinkBudget = lineTotalTrailingW * SPACE_SHRINK_RATIO;
 
-    if (currentWidthNoTail + wForFit <= availW()) {
+    if (currentWidth + wForFit <= availW() + shrinkBudget) {
       // Fits on current line as-is
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
@@ -1449,9 +1507,12 @@ function calculateRowHeight(
     const cellW = colWidths.slice(ci, ci + span).reduce((s, w) => s + w, 0);
     const contentW = cellW - (table.cellMarginLeft + table.cellMarginRight) * scale;
 
+    // Cell paragraphs don't snap to the section's line grid (see comment in
+    // renderCell); use a grid-less measurement state for row-height estimate.
+    const cellMeasureState: RenderState = { ...state, docGrid: { type: null, linePitchPt: null } };
     let h = (table.cellMarginTop + table.cellMarginBottom) * scale;
     for (const para of cell.content) {
-      h += measureParaHeight(state, para, contentW, scale);
+      h += measureParaHeight(cellMeasureState, para, contentW, scale);
       h += (para.spaceBefore + para.spaceAfter) * scale;
     }
     if (h > maxH) maxH = h;
@@ -1514,16 +1575,24 @@ function renderCell(
   const ml = table.cellMarginLeft * scale;
   const mr = table.cellMarginRight * scale;
 
+  // ECMA-376 §17.6.5 defines w:docGrid as a section-level constraint on
+  // body-text lines. Word's observed behavior is that line-grid snapping
+  // does NOT carry into table cells — a cell's own paragraphs render at
+  // their natural font line height regardless of the enclosing section's
+  // grid pitch. Disable the grid on the cell state so cell paragraphs use
+  // `natural × M` line boxes (or `natural` for inherited line spacing),
+  // matching Word's layout on tables like demo/sample-1 page 3.
   const cellState: RenderState = {
     ...state,
     contentX: x + ml,
     contentW: w - ml - mr,
     y: y + mt,
+    docGrid: { type: null, linePitchPt: null },
   };
 
   if (cell.vAlign === 'center' || cell.vAlign === 'bottom') {
     const contentH = cell.content.reduce((s, p) =>
-      s + measureParaHeight(state, p, w - ml - mr, scale) + (p.spaceBefore + p.spaceAfter) * scale, 0);
+      s + measureParaHeight(cellState, p, w - ml - mr, scale) + (p.spaceBefore + p.spaceAfter) * scale, 0);
     if (cell.vAlign === 'center') cellState.y = y + (h - contentH) / 2;
     else cellState.y = y + h - contentH - mb;
   }
@@ -1670,12 +1739,22 @@ function lineBoxHeight(
 ): number {
   const natural = ascentPx + descentPx;
   const hasGrid = isGridLineRule(grid);
+  const pitchPx = hasGrid ? grid!.linePitchPt! * scale : 0;
+  // Per ECMA-376 §17.6.5, a paragraph whose `line` attribute is NOT
+  // explicitly set — it only inherits from docDefault — snaps to one grid
+  // pitch per text line in docGrid sections, regardless of the inherited
+  // multiplier. Paragraphs that do set `line` on their pPr or a named style
+  // multiply against the pitch as usual. This is what makes Word render
+  // ESSAY (9 pt, no explicit line) at ~1 pitch (~18 pt) while a 1.33×
+  // body paragraph with line="320" renders at pitch × 1.33 = ~24 pt.
+  const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
-    return hasGrid ? Math.max(natural, grid!.linePitchPt! * scale) : natural;
+    return hasGrid ? Math.max(natural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      return Math.max(natural, grid!.linePitchPt! * ls.value * scale);
+      if (inheritedOnly) return Math.max(natural, pitchPx);
+      return Math.max(natural, pitchPx * ls.value);
     }
     return natural * ls.value;
   }
