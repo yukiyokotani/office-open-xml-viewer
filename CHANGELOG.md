@@ -4,6 +4,37 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.10.0 — 2026-04-22
+
+xlsx number-format and volatile-function release. Cells with `TODAY()` /
+`NOW()` formulas now show today's date at render time instead of the
+cached `<v>` from when the file was last saved, and the format-code
+renderer gains Japanese weekday / imperial era support plus several
+internationally important codes (elapsed time, literal preservation,
+scientific notation).
+
+### xlsx
+
+- **Volatile formula recompute** (§18.3.1.40): the parser now carries
+  each cell's `<f>` text, and the renderer detects `TODAY()` / `NOW()`
+  and substitutes the live serial before formatting. Dates no longer
+  appear frozen to the file's last-save date.
+- **Japanese weekday format codes** (§18.8.30): `aaa` → 水, `aaaa` →
+  水曜日. Detected as date formats even without a `y`/`d` specifier.
+- **Japanese imperial era format codes** (§18.8.30): `g` / `gg` / `ggg`
+  render the era name (R / 令 / 令和) and `e` / `ee` / `r` / `rr` render
+  the era year. Era table covers Meiji through Reiwa; no runtime
+  dependency added.
+- **Elapsed-time brackets** `[h]` / `[m]` / `[s]` (§18.8.30): render the
+  full duration instead of wrapping at 24h / 60m / 60s, so a 54-hour
+  value formatted `[h]:mm` reads `54:00`.
+- **Literal text preservation in number formats**: quoted strings
+  (`"$"#,##0.00`) and backslash-escaped characters (`\$#,##0`), as well
+  as non-placeholder currency glyphs like `¥` / `€`, are now kept around
+  the formatted number instead of being stripped.
+- **Scientific notation** `0.00E+00` / `0.00E-00`: honors the exponent
+  sign placeholder and pads the exponent to at least two digits.
+
 ## 0.9.0 — 2026-04-22
 
 Focused xlsx release: conditional formatting now evaluates formula-based
