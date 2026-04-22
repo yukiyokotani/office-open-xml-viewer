@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec,
+  Run, ChartData, GradientFillSpec, ShapeInfo,
 } from './types.js';
 import { renderChart, type ChartModel } from '@silurus/ooxml-core';
 
@@ -2777,6 +2777,17 @@ export function renderViewport(
     );
   }
 
+  // ── Anchored shape groups (custom geometry) ────────────────────
+  if (worksheet.shapeGroups && worksheet.shapeGroups.length > 0) {
+    renderShapeGroups(
+      ctx, worksheet, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+    );
+  }
+
   // ── Anchored charts (clipped to scrollable area) ──────────────
   if (worksheet.charts && worksheet.charts.length > 0) {
     renderCharts(
@@ -3044,6 +3055,170 @@ function renderImages(
   }
 
   ctx.restore();
+}
+
+function renderShapeGroups(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+  const anchors = ws.shapeGroups;
+  if (!anchors || anchors.length === 0) return;
+
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  ctx.clip();
+
+  for (const anchor of anchors) {
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    const x1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const y1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const x2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const y2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    if (w <= 0 || h <= 0) continue;
+
+    const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasY = scrollAreaY + (y1 - scrollOriginSheetY) - scrollOffsetY;
+
+    if (canvasX + w < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasY + h < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
+
+    for (const shape of anchor.shapes) {
+      const sx = canvasX + shape.x * w;
+      const sy = canvasY + shape.y * h;
+      const sw = shape.w * w;
+      const sh = shape.h * h;
+      if (sw <= 0 || sh <= 0) continue;
+      drawShape(ctx, shape, sx, sy, sw, sh);
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  sx: number, sy: number, sw: number, sh: number,
+): void {
+  ctx.save();
+  if (shape.rot !== 0) {
+    ctx.translate(sx + sw / 2, sy + sh / 2);
+    ctx.rotate((shape.rot * Math.PI) / 180);
+    ctx.translate(-sw / 2, -sh / 2);
+  } else {
+    ctx.translate(sx, sy);
+  }
+
+  if (shape.geom.type === 'custom') {
+    for (const path of shape.geom.paths) {
+      if (path.w <= 0 || path.h <= 0) continue;
+      const kx = sw / path.w;
+      const ky = sh / path.h;
+      ctx.beginPath();
+      // Track pen position for arcTo center computation.
+      let penX = 0, penY = 0;
+      // Track subpath start for close lineTo.
+      let subX = 0, subY = 0;
+      for (const cmd of path.commands) {
+        switch (cmd.op) {
+          case 'moveTo': {
+            const px = cmd.x * kx, py = cmd.y * ky;
+            ctx.moveTo(px, py);
+            penX = subX = px; penY = subY = py;
+            break;
+          }
+          case 'lineTo': {
+            const px = cmd.x * kx, py = cmd.y * ky;
+            ctx.lineTo(px, py);
+            penX = px; penY = py;
+            break;
+          }
+          case 'cubicBezTo': {
+            const ex = cmd.x3 * kx, ey = cmd.y3 * ky;
+            ctx.bezierCurveTo(
+              cmd.x1 * kx, cmd.y1 * ky,
+              cmd.x2 * kx, cmd.y2 * ky,
+              ex, ey,
+            );
+            penX = ex; penY = ey;
+            break;
+          }
+          case 'quadBezTo': {
+            const ex = cmd.x2 * kx, ey = cmd.y2 * ky;
+            ctx.quadraticCurveTo(cmd.x1 * kx, cmd.y1 * ky, ex, ey);
+            penX = ex; penY = ey;
+            break;
+          }
+          case 'arcTo': {
+            // ECMA-376 §20.1.9.3: pen lies on ellipse at stAng;
+            // derive center from pen + stAng, then sweep swAng.
+            const rx = cmd.wr * kx, ry = cmd.hr * ky;
+            if (rx <= 0 || ry <= 0) break;
+            const stRad = (cmd.stAng / 60000) * (Math.PI / 180);
+            const swRad = (cmd.swAng / 60000) * (Math.PI / 180);
+            const cx = penX - Math.cos(stRad) * rx;
+            const cy = penY - Math.sin(stRad) * ry;
+            const endRad = stRad + swRad;
+            ctx.ellipse(cx, cy, rx, ry, 0, stRad, endRad, swRad < 0);
+            penX = cx + Math.cos(endRad) * rx;
+            penY = cy + Math.sin(endRad) * ry;
+            break;
+          }
+          case 'close':
+            ctx.closePath();
+            penX = subX; penY = subY;
+            break;
+        }
+      }
+      fillAndStroke(ctx, shape);
+    }
+  } else if (shape.geom.type === 'preset') {
+    ctx.beginPath();
+    switch (shape.geom.name) {
+      case 'ellipse':
+      case 'roundRect': {
+        const rx = sw / 2, ry = sh / 2;
+        ctx.ellipse(rx, ry, rx, ry, 0, 0, Math.PI * 2);
+        break;
+      }
+      default:
+        ctx.rect(0, 0, sw, sh);
+    }
+    fillAndStroke(ctx, shape);
+  }
+  ctx.restore();
+}
+
+function fillAndStroke(ctx: CanvasRenderingContext2D, shape: ShapeInfo): void {
+  if (shape.fillColor) {
+    ctx.fillStyle = shape.fillColor;
+    ctx.fill();
+  }
+  if (shape.strokeColor && shape.strokeWidth > 0) {
+    ctx.strokeStyle = shape.strokeColor;
+    ctx.lineWidth = Math.max(0.5, shape.strokeWidth / EMU_PER_PX);
+    ctx.stroke();
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
