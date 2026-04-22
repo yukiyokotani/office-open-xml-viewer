@@ -64,6 +64,33 @@ pub struct Worksheet {
     /// workbook. Used by conditional-formatting `expression` rules that call
     /// named ranges like `task_start`, `today`, etc. (ECMA-376 §18.2.5).
     pub defined_names: Vec<DefinedName>,
+    /// Excel Tables defined for this sheet (ECMA-376 §18.5). Rendered with a
+    /// built-in table style (bold header, banded rows, etc.) on top of the
+    /// cells' own styles.
+    pub tables: Vec<TableInfo>,
+}
+
+/// Excel Table metadata (ECMA-376 §18.5 `<table>`). The renderer overlays a
+/// built-in style on top of the cell styles inside `range`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableInfo {
+    /// Inclusive table area including the header row.
+    pub range: CellRange,
+    /// Built-in style name like "TableStyleLight18" (ECMA-376 §18.5.1.4).
+    pub style_name: String,
+    /// Number of header rows (default 1).
+    pub header_row_count: u32,
+    /// Number of totals rows at the bottom (default 0).
+    pub totals_row_count: u32,
+    /// `<tableStyleInfo showRowStripes>` — banded rows in the data region.
+    pub show_row_stripes: bool,
+    /// `<tableStyleInfo showColumnStripes>`.
+    pub show_column_stripes: bool,
+    /// `<tableStyleInfo showFirstColumn>`.
+    pub show_first_column: bool,
+    /// `<tableStyleInfo showLastColumn>`.
+    pub show_last_column: bool,
 }
 
 /// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
@@ -510,6 +537,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
     ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
+    ws.tables = load_sheet_tables(&mut archive, &sheet_path);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1493,6 +1521,7 @@ fn parse_worksheet(
         hyperlinks: Vec::new(),
         comment_refs: Vec::new(),
         defined_names: Vec::new(),
+        tables: Vec::new(),
     }, hyperlink_rids))
 }
 
@@ -1551,6 +1580,79 @@ fn load_sheet_comment_refs(
         }
     }
     refs
+}
+
+/// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
+/// collect them for the renderer. Each table carries a ref range, style name
+/// (e.g. "TableStyleLight18"), and the banded-rows / banded-cols flags from
+/// `<tableStyleInfo>` (ECMA-376 §18.5).
+fn load_sheet_tables(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+) -> Vec<TableInfo> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
+    let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else { return Vec::new(); };
+
+    let mut table_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        if rel.attribute("Type").unwrap_or("").ends_with("/table") {
+            if let Some(t) = rel.attribute("Target") {
+                table_targets.push(t.to_string());
+            }
+        }
+    }
+
+    let mut tables: Vec<TableInfo> = Vec::new();
+    for target in table_targets {
+        let table_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(xml) = read_zip_entry(archive, &table_path) else { continue; };
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue; };
+        let root = doc.root_element();
+        let Some(ref_attr) = root.attribute("ref") else { continue };
+        let parts: Vec<&str> = ref_attr.split(':').collect();
+        let range = if parts.len() == 2 {
+            let (left, top) = parse_cell_ref(parts[0]);
+            let (right, bottom) = parse_cell_ref(parts[1]);
+            CellRange { top, left, bottom, right }
+        } else {
+            let (col, row) = parse_cell_ref(parts[0]);
+            CellRange { top: row, left: col, bottom: row, right: col }
+        };
+        let header_row_count: u32 = root.attribute("headerRowCount")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let totals_row_count: u32 = root.attribute("totalsRowCount")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let style_info = root.children().find(|n| n.tag_name().name() == "tableStyleInfo");
+        let style_name = style_info
+            .and_then(|n| n.attribute("name"))
+            .unwrap_or("TableStyleMedium2")
+            .to_string();
+        let bool_attr = |n: &roxmltree::Node, key: &str| n.attribute(key).map(|v| v == "1" || v == "true").unwrap_or(false);
+        let (show_row_stripes, show_column_stripes, show_first_column, show_last_column) = match style_info {
+            Some(n) => (
+                bool_attr(&n, "showRowStripes"),
+                bool_attr(&n, "showColumnStripes"),
+                bool_attr(&n, "showFirstColumn"),
+                bool_attr(&n, "showLastColumn"),
+            ),
+            None => (false, false, false, false),
+        };
+        tables.push(TableInfo {
+            range,
+            style_name,
+            header_row_count,
+            totals_row_count,
+            show_row_stripes,
+            show_column_stripes,
+            show_first_column,
+            show_last_column,
+        });
+    }
+    tables
 }
 
 /// Resolve hyperlink rIds to URLs from the sheet rels file.
