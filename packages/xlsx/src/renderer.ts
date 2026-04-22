@@ -705,7 +705,13 @@ function formatNumberSpec(value: number, numSpec: string): string {
 
 function applyFormatCode(num: number, formatCode: string): string {
   const sections = formatCode.split(';');
-  const section = num < 0 && sections.length > 1 ? sections[1] : sections[0];
+  // Excel number formats have up to 4 sections: positive;negative;zero;text
+  // (§18.8.30). Pick the section matching `num`, falling back to the positive
+  // section when the target one is absent.
+  let section: string;
+  if (num > 0) section = sections[0];
+  else if (num < 0) section = sections.length > 1 ? sections[1] : sections[0];
+  else section = sections.length > 2 ? sections[2] : sections[0];
   const { tokens, numSpec } = tokenizeNumberFormat(section);
   const hasPercent = tokens.some(t => t.kind === 'percent');
   const sciTok = tokens.find(t => t.kind === 'sci') as Extract<FmtToken, { kind: 'sci' }> | undefined;
@@ -1122,7 +1128,15 @@ function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfC
         if (numVal >= thresholds[i]) iconIdx = i;
       }
       if (rule.reverse) iconIdx = n - 1 - iconIdx;
-      result.iconSet = { name: rule.iconSet, index: iconIdx };
+      // Custom iconSets (Excel 2010+ x14 extension) override per-threshold icons.
+      if (rule.customIcons && rule.customIcons[iconIdx]) {
+        const ci = rule.customIcons[iconIdx];
+        if (ci.iconSet !== 'NoIcons') {
+          result.iconSet = { name: ci.iconSet, index: ci.iconId };
+        }
+      } else {
+        result.iconSet = { name: rule.iconSet, index: iconIdx };
+      }
     } else if (rule.type === 'colorScale') {
       if (numVal == null || !entry.scaleStops) continue;
       if (result.fill) continue;
@@ -1771,6 +1785,7 @@ const ICON_COLORS_4 = ['#FF0000', '#FF6600', '#FFFF00', '#00B050'];
 const ICON_COLORS_5 = ['#FF0000', '#FF6600', '#FFFF00', '#92D050', '#00B050'];
 
 function drawCfIcon(ctx: CanvasRenderingContext2D, name: string, index: number, x: number, y: number, sz: number): void {
+  if (name === 'NoIcons') return;
   const safeName = name || '3TrafficLights1';
   const nIcons = parseInt(safeName[0]) || 3;
   const palette = nIcons === 5 ? ICON_COLORS_5 : nIcons === 4 ? ICON_COLORS_4 : ICON_COLORS_3;
