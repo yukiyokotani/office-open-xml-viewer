@@ -64,6 +64,13 @@ export interface TableInfo {
   /** Accent color resolved by the parser from the built-in style name against
    *  the file's theme accents (e.g. `TableStyleLight18` → accent3). */
   accentColor: string;
+  /** Dxf index for the `wholeTable` element of a custom `<tableStyle>`
+   *  (ECMA-376 §18.8.40). When set, its border/fill apply to every cell of
+   *  the table as a base layer. Undefined for built-in style names. */
+  wholeTableDxf?: number;
+  /** Dxf index for the `headerRow` element of a custom `<tableStyle>` —
+   *  provides header background, font color/weight, and vertical separators. */
+  headerRowDxf?: number;
 }
 
 export interface DefinedName {
@@ -300,6 +307,12 @@ export interface Border {
   bottom: BorderEdge | null;
   diagonalUp?: BorderEdge | null;
   diagonalDown?: BorderEdge | null;
+  /** Inner horizontal rule between rows inside a region
+   *  (ECMA-376 §18.8.40 `tableStyleElement/border/horizontal`).
+   *  Only set on table-style dxfs; absent on cell-level borders. */
+  horizontal?: BorderEdge | null;
+  /** Inner vertical rule between columns inside a region. */
+  vertical?: BorderEdge | null;
 }
 
 export interface BorderEdge {

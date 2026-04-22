@@ -95,6 +95,17 @@ pub struct TableInfo {
     /// theme accents (e.g. `TableStyleLight18` → accent3 of theme1.xml). Used
     /// by the renderer to draw banding, header background, and rules.
     pub accent_color: String,
+    /// Dxf index for the `wholeTable` element of a custom `<tableStyle>`
+    /// (ECMA-376 §18.8.40). When set, its border/fill apply to every cell
+    /// of the table as a base layer. Built-in style names use the renderer's
+    /// accent-based fallback, not this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whole_table_dxf: Option<u32>,
+    /// Dxf index for the `headerRow` element of a custom `<tableStyle>`.
+    /// Provides the header background fill, font color/weight, and any
+    /// vertical separator borders shown between header cells.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_row_dxf: Option<u32>,
 }
 
 /// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
@@ -158,6 +169,13 @@ pub struct ChartData {
     /// Value axis title (c:valAx/c:title).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_title: Option<String>,
+    /// `c:valAx/c:numFmt@formatCode` — custom number format for the value axis
+    /// tick labels (e.g. `"$"#,##0`). When unset, tick labels use a plain
+    /// numeric format. `sourceLinked="1"` is treated as a non-override (i.e.
+    /// the axis inherits the data's format code); we still capture it so the
+    /// renderer can honor it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_format_code: Option<String>,
     /// True when `<c:legend>` is present in the chart; false means no legend.
     pub show_legend: bool,
     /// `<c:legend><c:legendPos val>` — "r" (default) | "l" | "t" | "b" | "tr".
@@ -443,6 +461,15 @@ pub struct Border {
     /// Diagonal line from top-left to bottom-right (ECMA-376 §18.8.4 diagonalDown)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagonal_down: Option<BorderEdge>,
+    /// Inner horizontal rule between rows inside a region (ECMA-376 §18.8.40
+    /// `tableStyleElement/border/horizontal`). Only set on table-style dxfs;
+    /// ignored on cell-level borders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<BorderEdge>,
+    /// Inner vertical rule between columns inside a region (same ECMA-376
+    /// section). Only set on table-style dxfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<BorderEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -537,7 +564,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(&mut archive, &sheet_path);
-    ws.charts = load_sheet_charts(&mut archive, &sheet_path);
+    ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
     ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
@@ -960,6 +987,8 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                                 "right" => b.right = edge,
                                 "top" => b.top = edge,
                                 "bottom" => b.bottom = edge,
+                                "horizontal" => b.horizontal = edge,
+                                "vertical"   => b.vertical   = edge,
                                 _ => {}
                             }
                         }
@@ -1601,6 +1630,44 @@ fn load_sheet_comment_refs(
 /// `theme_colors` is in OOXML natural order — accent1 lives at index 4, so
 /// accent_n is at `theme_colors[3 + n]`. Falls back to a neutral gray when
 /// the style name is unrecognised or the theme is missing accents.
+/// dxf indices for the ECMA-376 §18.8.40 `<tableStyleElement>` roles we care
+/// about. Built-in styles (`TableStyleLight18`, etc.) have no entry in the
+/// file's `<tableStyles>` block and fall through to accent-based rendering;
+/// custom styles (`"Gift Budget"`) reference dxfs from `<dxfs>`.
+#[derive(Debug, Clone, Default)]
+struct TableStyleElements {
+    whole_table: Option<u32>,
+    header_row: Option<u32>,
+}
+
+/// Parse `<tableStyles><tableStyle name="…"><tableStyleElement type="…" dxfId="…"/>`
+/// into a lookup keyed by table-style name.
+fn parse_table_styles_map(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> std::collections::HashMap<String, TableStyleElements> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, TableStyleElements> = HashMap::new();
+    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else { return map; };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else { return map; };
+    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    for n in doc.descendants() {
+        if n.tag_name().name() != "tableStyles" || n.tag_name().namespace() != Some(ns) { continue; }
+        for ts in n.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyle") {
+            let Some(name) = ts.attribute("name") else { continue; };
+            let mut elems = TableStyleElements::default();
+            for el in ts.children().filter(|c| c.is_element() && c.tag_name().name() == "tableStyleElement") {
+                let t = el.attribute("type").unwrap_or("");
+                let dxf: Option<u32> = el.attribute("dxfId").and_then(|s| s.parse().ok());
+                match t {
+                    "wholeTable" => elems.whole_table = dxf,
+                    "headerRow"  => elems.header_row = dxf,
+                    _ => {}
+                }
+            }
+            map.insert(name.to_string(), elems);
+        }
+    }
+    map
+}
+
 fn resolve_table_style_accent(style_name: &str, theme_colors: &[String]) -> String {
     let fallback = "#808080".to_string();
     let Some(rest) = style_name.strip_prefix("TableStyle") else { return fallback; };
@@ -1618,6 +1685,7 @@ fn load_sheet_tables(
     sheet_path: &str,
     theme_colors: &[String],
 ) -> Vec<TableInfo> {
+    let custom_styles = parse_table_styles_map(archive);
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
     let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
@@ -1670,6 +1738,10 @@ fn load_sheet_tables(
             None => (false, false, false, false),
         };
         let accent_color = resolve_table_style_accent(&style_name, theme_colors);
+        let (whole_table_dxf, header_row_dxf) = match custom_styles.get(&style_name) {
+            Some(e) => (e.whole_table, e.header_row),
+            None => (None, None),
+        };
         tables.push(TableInfo {
             range,
             style_name,
@@ -1680,6 +1752,8 @@ fn load_sheet_tables(
             show_first_column,
             show_last_column,
             accent_color,
+            whole_table_dxf,
+            header_row_dxf,
         });
     }
     tables
@@ -1881,6 +1955,7 @@ fn load_sheet_images(
 fn load_sheet_charts(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     sheet_path: &str,
+    theme_colors: &[String],
 ) -> Vec<ChartAnchor> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
@@ -1978,7 +2053,7 @@ fn load_sheet_charts(
             let Some(chart_target) = drawing_rels.get(&rid) else { continue; };
             let chart_path = resolve_zip_path(drawing_dir, chart_target);
             let Ok(chart_xml) = read_zip_entry(archive, &chart_path) else { continue; };
-            let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns) else { continue; };
+            let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns, theme_colors) else { continue; };
 
             all_charts.push(ChartAnchor {
                 from_col, from_col_off, from_row, from_row_off,
@@ -1993,7 +2068,7 @@ fn load_sheet_charts(
 // ─── Chart XML parser ────────────────────────────────────────────────────────
 
 /// Parse a `xl/charts/chartN.xml` file into a `ChartData`.
-fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
+fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -> Option<ChartData> {
     let doc = roxmltree::Document::parse(xml).ok()?;
 
     // Find c:chart root element
@@ -2026,6 +2101,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     let mut primary_type = String::new();
     let mut bar_dir      = "col".to_string();
     let mut grouping     = "clustered".to_string();
+    // `grouping` is recorded only from the first non-line chart-type element that
+    // explicitly sets it. In combo charts (e.g. `<c:barChart grouping="stacked">`
+    // followed by `<c:lineChart grouping="standard">`) the lineChart's grouping
+    // must not overwrite the bar's, since stacking is a bar/area concept.
+    let mut grouping_locked = false;
     let mut all_series: Vec<ChartSeries> = Vec::new();
     let mut shared_categories: Vec<String> = Vec::new();
     let mut show_data_labels = false;
@@ -2033,6 +2113,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
     let mut val_axis_title: Option<String> = None;
     let mut cat_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_font_size_hpt: Option<i32> = None;
+    let mut val_axis_format_code: Option<String> = None;
 
     // Recognised chart-type element names → our internal type strings
     let type_map: &[(&str, &str)] = &[
@@ -2070,6 +2151,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
                 if val_axis_font_size_hpt.is_none() {
                     val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                 }
+                if val_axis_format_code.is_none() {
+                    val_axis_format_code = child.children()
+                        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
+                        .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
+                        .filter(|s| !s.is_empty() && s != "General");
+                }
                 continue;
             }
             _ => {}
@@ -2091,7 +2178,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         for attr_node in child.children().filter(|n| n.is_element()) {
             match attr_node.tag_name().name() {
                 "barDir"   => { bar_dir  = attr_node.attribute("val").unwrap_or("col").to_string(); }
-                "grouping" => { grouping = attr_node.attribute("val").unwrap_or("clustered").to_string(); }
+                "grouping" => {
+                    let val = attr_node.attribute("val").unwrap_or("clustered").to_string();
+                    if !grouping_locked && ser_type != "line" {
+                        grouping = val;
+                        grouping_locked = true;
+                    }
+                }
                 "marker"   => {
                     chart_marker_default = attr_node.attribute("val").unwrap_or("0") != "0";
                 }
@@ -2115,7 +2208,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         for ser_node in child.children()
             .filter(|n| n.is_element() && n.tag_name().name() == "ser" && n.tag_name().namespace() == Some(c_ns))
         {
-            let s = parse_chart_series(&ser_node, c_ns, ser_type, chart_marker_default);
+            let s = parse_chart_series(&ser_node, c_ns, ser_type, chart_marker_default, theme_colors);
             if shared_categories.is_empty() && !s.categories.is_empty() {
                 shared_categories = s.categories.clone();
             }
@@ -2149,6 +2242,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str) -> Option<ChartData> {
         title_font_face,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
+        val_axis_format_code,
     })
 }
 
@@ -2232,11 +2326,53 @@ fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> 
 }
 
 /// Parse one `<c:ser>` element.
+/// Resolve the fill color under `c:spPr/a:solidFill` for a chart series.
+/// Supports `a:srgbClr` (explicit hex) and `a:schemeClr` (theme accent/dark/light).
+/// Theme colors use drawingML names (`accent1`..`accent6`, `dk1`/`dk2`/`lt1`/`lt2`)
+/// which map to the parser's natural-order theme array (accent_n at index 3+n,
+/// dk1@0, lt1@1, dk2@2, lt2@3).
+fn resolve_series_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    for n in node.descendants() {
+        let tag = n.tag_name().name();
+        if tag == "srgbClr" {
+            if let Some(v) = n.attribute("val") {
+                return Some(v.to_lowercase());
+            }
+        }
+        if tag == "schemeClr" {
+            if let Some(v) = n.attribute("val") {
+                let idx = match v {
+                    "dk1"  | "tx1" => Some(0),
+                    "lt1"  | "bg1" => Some(1),
+                    "dk2"  | "tx2" => Some(2),
+                    "lt2"  | "bg2" => Some(3),
+                    "accent1" => Some(4),
+                    "accent2" => Some(5),
+                    "accent3" => Some(6),
+                    "accent4" => Some(7),
+                    "accent5" => Some(8),
+                    "accent6" => Some(9),
+                    "hlink"    => Some(10),
+                    "folHlink" => Some(11),
+                    _ => None,
+                };
+                if let Some(i) = idx {
+                    if let Some(c) = theme_colors.get(i) {
+                        return Some(c.trim_start_matches('#').to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn parse_chart_series(
     node: &roxmltree::Node,
     c_ns: &str,
     ser_type: &str,
     chart_marker_default: bool,
+    theme_colors: &[String],
 ) -> ChartSeries {
     let name = extract_series_name(node, c_ns);
 
@@ -2247,10 +2383,9 @@ fn parse_chart_series(
     let categories = collect_str_cache(node, c_ns, cat_tag);
     let values     = collect_num_cache(node, c_ns, val_tag);
 
-    // c:spPr/a:solidFill/a:srgbClr @val — explicit series fill color
-    let color = node.descendants()
-        .find(|n| n.tag_name().name() == "srgbClr")
-        .and_then(|n| n.attribute("val").map(|v| v.to_lowercase()));
+    // Series fill color from c:spPr/a:solidFill (supports a:srgbClr and a:schemeClr).
+    // For schemeClr, resolves "accentN"/"dk1"/etc. against the workbook theme.
+    let color = resolve_series_color(node, theme_colors);
 
     // Marker visibility (ECMA-376 §21.2.2.32 — c:marker/c:symbol default is
     // "none"). A per-series <c:marker><c:symbol> overrides; otherwise fall
