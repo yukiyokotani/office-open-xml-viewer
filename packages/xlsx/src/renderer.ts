@@ -739,19 +739,22 @@ function applyFormatCode(num: number, formatCode: string): string {
 }
 
 function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const words = text.split(' ');
   const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const test = current ? `${current} ${word}` : word;
-    if (ctx.measureText(test).width <= maxWidth || !current) {
-      current = test;
-    } else {
-      lines.push(current);
-      current = word;
+  // Hard line breaks (\n from Alt+Enter) always split regardless of wrapText.
+  for (const paragraph of text.split('\n')) {
+    const words = paragraph.split(' ');
+    let current = '';
+    for (const word of words) {
+      const test = current ? `${current} ${word}` : word;
+      if (ctx.measureText(test).width <= maxWidth || !current) {
+        current = test;
+      } else {
+        lines.push(current);
+        current = word;
+      }
     }
+    lines.push(current);
   }
-  if (current) lines.push(current);
   return lines;
 }
 
@@ -1740,7 +1743,7 @@ interface RenderContext {
   worksheet: Worksheet;
   styles: Styles;
   cellMap: Map<string, Cell>;
-  mergeAnchorMap: Map<string, { totalW: number; totalH: number }>;
+  mergeAnchorMap: Map<string, { totalW: number; totalH: number; right: number; bottom: number }>;
   mergeSkipSet: Set<string>;
   cfContext: CfContext;
   colWidths: number[];
@@ -1912,7 +1915,8 @@ function renderQuadrant(
       const bW = Math.max(0, (cW - bInset * 2) * cf.dataBar.ratio);
       fillDataBar(ctx, cf.dataBar.color, aCx + bInset, aCy + bInset, bW, cH - bInset * 2, cf.dataBar.gradient);
     }
-    renderBorder(ctx, mergeBorders(border, cf.border), aCx, aCy, cW, cH);
+    const mergedBorder = resolveMergeBorder(border, aRow, aCol, info.right, info.bottom, rc.cellMap, styles);
+    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH);
 
     if (!cell) continue;
     const text = formatCellValue(cell, styles);
@@ -2045,8 +2049,13 @@ function renderQuadrant(
         ctx.stroke();
       }
 
-      // Cell borders (base + any CF borders overlaid via per-edge merge)
-      renderBorder(ctx, mergeBorders(border, cf.border), cx, cy, cellW, cellH);
+      // Cell borders (base + any CF borders overlaid via per-edge merge).
+      // For merged anchors, combine the anchor's border with the right/bottom
+      // edges from the constituent cells on those edges (ECMA-376 §18.3.1.55).
+      const baseBorder = mergeInfo
+        ? resolveMergeBorder(border, rowIndex, colIndex, mergeInfo.right, mergeInfo.bottom, cellMap, styles)
+        : border;
+      renderBorder(ctx, mergeBorders(baseBorder, cf.border), cx, cy, cellW, cellH);
 
       // AutoFilter dropdown indicator
       if (rc.autoFilterCells.has(key)) {
@@ -2092,7 +2101,12 @@ function renderQuadrant(
       // overrun (since an icon sits inside this cell's left padding).
       let drawX = cx;
       let drawW = cellW;
-      if (!mergeInfo && !xf.wrapText && !xf.textRotation) {
+      // Excel only overflows text into adjacent empty cells; numeric values
+      // that don't fit are rendered as "####" (they never spill). Cells
+      // containing hard line breaks render multi-line in place, so they don't
+      // overflow either.
+      const hasHardBreak = text.includes('\n');
+      if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak) {
         const textW = ctx.measureText(text).width;
         const textPx = textW + leftPad + paddingX;
         if (textPx > cellW) {
@@ -2364,11 +2378,26 @@ function renderQuadrant(
           ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + tW, sy); ctx.stroke();
           ctx.restore();
         }
-        let textY: number;
-        if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
-        else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
-        else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
-        ctx.fillText(text, textX, textY);
+        // Hard line breaks (\n from Alt+Enter) render as multiple lines even
+        // when wrapText is false — this matches Excel's behavior.
+        if (text.includes('\n')) {
+          const lines = text.split('\n');
+          const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
+          const totalTextH = lines.length * lineH;
+          let startY: number;
+          if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
+          else if (alignV === 'center') { startY = cy + (cellH - totalTextH) / 2; ctx.textBaseline = 'top'; }
+          else { startY = cy + cellH - totalTextH - paddingY; ctx.textBaseline = 'top'; }
+          for (let li = 0; li < lines.length; li++) {
+            ctx.fillText(lines[li], textX, startY + li * lineH);
+          }
+        } else {
+          let textY: number;
+          if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
+          else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
+          else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
+          ctx.fillText(text, textX, textY);
+        }
       }
 
       ctx.restore();
@@ -2438,7 +2467,7 @@ export function renderViewport(
     }
   }
 
-  const mergeAnchorMap = new Map<string, { totalW: number; totalH: number }>();
+  const mergeAnchorMap = new Map<string, { totalW: number; totalH: number; right: number; bottom: number }>();
   const mergeSkipSet = new Set<string>();
   for (const mc of worksheet.mergeCells ?? []) {
     let totalW = 0;
@@ -2449,7 +2478,7 @@ export function renderViewport(
     for (let r = mc.top; r <= mc.bottom; r++) {
       totalH += sp(rowHeightToPx(worksheet.rowHeights[r] ?? worksheet.defaultRowHeight));
     }
-    mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH });
+    mergeAnchorMap.set(`${mc.top}:${mc.left}`, { totalW, totalH, right: mc.right, bottom: mc.bottom });
     for (let r = mc.top; r <= mc.bottom; r++) {
       for (let c = mc.left; c <= mc.right; c++) {
         if (r === mc.top && c === mc.left) continue;
@@ -2843,10 +2872,51 @@ function renderImages(
  * "today" column marker replaces the underlying edge only, leaving top/bottom
  * from the base style intact).
  */
+/**
+ * Resolve the outer border of a merged range. Excel keeps each constituent
+ * cell's own style; the merged rectangle's outer edges come from the cells
+ * on those edges (e.g. the right edge from the rightmost column's `right`),
+ * not from the anchor cell alone. Without this the right border of an
+ * `E2:F2` merge — stored on F2 — goes missing.
+ */
+function resolveMergeBorder(
+  anchorBorder: Border,
+  anchorRow: number,
+  anchorCol: number,
+  rightCol: number,
+  bottomRow: number,
+  cellMap: Map<string, Cell>,
+  styles: Styles,
+): Border {
+  if (rightCol === anchorCol && bottomRow === anchorRow) return anchorBorder;
+  const edgeBorder = (r: number, c: number): Border | null => {
+    if (r === anchorRow && c === anchorCol) return null;
+    const cell = cellMap.get(`${r}:${c}`);
+    if (!cell) return null;
+    return resolveXf(styles, cell.styleIndex).border;
+  };
+  const rightB  = edgeBorder(anchorRow, rightCol);
+  const bottomB = edgeBorder(bottomRow, anchorCol);
+  const cornerB = edgeBorder(bottomRow, rightCol);
+  const pick = (primary: BorderEdge | null | undefined, ...rest: Array<BorderEdge | null | undefined>): BorderEdge | null => {
+    if (primary?.style) return primary;
+    for (const r of rest) if (r?.style) return r;
+    return primary ?? null;
+  };
+  return {
+    left:         anchorBorder.left,
+    top:          anchorBorder.top,
+    right:        pick(rightB?.right,   cornerB?.right,   anchorBorder.right),
+    bottom:       pick(bottomB?.bottom, cornerB?.bottom,  anchorBorder.bottom),
+    diagonalUp:   anchorBorder.diagonalUp ?? null,
+    diagonalDown: anchorBorder.diagonalDown ?? null,
+  };
+}
+
 function mergeBorders(base: Border, overlay: Border | undefined): Border {
   if (!overlay) return base;
-  const pick = (a: BorderEdge | null | undefined, b: BorderEdge | null | undefined): BorderEdge | null | undefined =>
-    (b && b.style) ? b : a;
+  const pick = (a: BorderEdge | null | undefined, b: BorderEdge | null | undefined): BorderEdge | null =>
+    (b && b.style) ? b : (a ?? null);
   return {
     left:         pick(base.left,         overlay.left),
     right:        pick(base.right,        overlay.right),
