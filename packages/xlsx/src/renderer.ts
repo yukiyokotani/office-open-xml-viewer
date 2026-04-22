@@ -921,6 +921,12 @@ function cellNumericValue(cell: Cell | undefined): number | null {
   return null;
 }
 
+function cellTextValue(cell: Cell | undefined): string | null {
+  if (!cell) return null;
+  if (cell.value.type === 'text') return cell.value.text;
+  return null;
+}
+
 function collectNumericValuesInRanges(worksheet: Worksheet, ranges: CellRange[]): number[] {
   const out: number[] = [];
   for (const row of worksheet.rows) {
@@ -1028,6 +1034,33 @@ function cellIsMatch(num: number, operator: string, args: number[]): boolean {
   }
 }
 
+function parseCellIsFormula(f: string): { text?: string; num?: number } {
+  const t = f.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return { text: t.slice(1, -1).replace(/""/g, '"') };
+  }
+  const n = parseFloat(t);
+  if (!isNaN(n)) return { num: n };
+  return { text: t };
+}
+
+function cellIsTextMatch(text: string, operator: string, args: string[]): boolean {
+  const a = args[0] ?? '';
+  const b = args[1] ?? '';
+  const ci = (s: string) => s.toLowerCase();
+  switch (operator) {
+    case 'equal':         return ci(text) === ci(a);
+    case 'notEqual':      return ci(text) !== ci(a);
+    case 'containsText':  return ci(text).includes(ci(a));
+    case 'notContains':   return !ci(text).includes(ci(a));
+    case 'beginsWith':    return ci(text).startsWith(ci(a));
+    case 'endsWith':      return ci(text).endsWith(ci(a));
+    case 'between':       return ci(text) >= ci(a) && ci(text) <= ci(b);
+    case 'notBetween':    return ci(text) <  ci(a) || ci(text) >  ci(b);
+    default: return false;
+  }
+}
+
 function interpolateHex(a: string, b: string, t: number): string {
   const pa = a.replace('#', '');
   const pb = b.replace('#', '');
@@ -1106,9 +1139,15 @@ function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfC
     }
 
     if (rule.type === 'cellIs') {
-      if (numVal == null) continue;
-      const args = rule.formulas.map(f => parseFloat(f)).filter(n => !isNaN(n));
-      if (cellIsMatch(numVal, rule.operator, args)) {
+      const parsedArgs = rule.formulas.map(parseCellIsFormula);
+      const textVal = cellTextValue(cell);
+      let matched = false;
+      if (numVal != null && parsedArgs.every(a => a.num != null)) {
+        matched = cellIsMatch(numVal, rule.operator, parsedArgs.map(a => a.num!));
+      } else if (textVal != null && parsedArgs.every(a => a.text != null)) {
+        matched = cellIsTextMatch(textVal, rule.operator, parsedArgs.map(a => a.text!));
+      }
+      if (matched) {
         applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
       }
     } else if (rule.type === 'top10') {
@@ -1856,6 +1895,12 @@ export interface TableCellStyle {
   isLastCol: boolean;
   isTopEdge: boolean;
   isBottomEdge: boolean;
+  /** Dxf for the whole-table element of a custom `<tableStyle>`
+   *  (ECMA-376 §18.8.40). Border/fill apply to every cell as a base layer. */
+  wholeTableDxf?: number;
+  /** Dxf for the header-row element of a custom `<tableStyle>`. Provides
+   *  header fill, font color/weight, and vertical separators. */
+  headerRowDxf?: number;
 }
 
 function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
@@ -1881,6 +1926,8 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
           isLastCol: t.showLastColumn && c === right,
           isTopEdge: r === top,
           isBottomEdge: r === bottom,
+          wholeTableDxf: t.wholeTableDxf,
+          headerRowDxf: t.headerRowDxf,
         });
       }
     }
@@ -2065,6 +2112,13 @@ function renderQuadrant(
       const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
       const effectiveFill = cf.fill ?? fill;
       const tableStyle = rc.tableStyleMap.get(key);
+      // Custom `<tableStyle>` dxfs (ECMA-376 §18.8.40). When present, they
+      // drive header fill / font color and inter-row borders instead of the
+      // built-in accent fallback.
+      const tsDxfWhole = (tableStyle?.wholeTableDxf != null)
+        ? (styles.dxfs ?? [])[tableStyle.wholeTableDxf] : undefined;
+      const tsDxfHeader = (tableStyle?.headerRowDxf != null)
+        ? (styles.dxfs ?? [])[tableStyle.headerRowDxf] : undefined;
 
       // Background fill (base or CF override). ECMA-376 §18.8.22 ST_PatternType.
       // - solid/gray*: blend fgColor with bgColor at the pattern's fg coverage.
@@ -2086,6 +2140,12 @@ function renderQuadrant(
             ? hexToRgba(effectiveFill.fgColor)
             : blendHex(effectiveFill.fgColor, bg, coverage);
         }
+        ctx.fillRect(cx, cy, cellW, cellH);
+      } else if (tableStyle && tableStyle.isHeader && tsDxfHeader?.fill?.fgColor) {
+        ctx.fillStyle = hexToRgba(tsDxfHeader.fill.fgColor);
+        ctx.fillRect(cx, cy, cellW, cellH);
+      } else if (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.fill?.fgColor) {
+        ctx.fillStyle = hexToRgba(tsDxfWhole.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
       } else if (tableStyle && tableStyle.isBanded) {
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
@@ -2144,17 +2204,39 @@ function renderQuadrant(
       // top of cell borders so an empty-border data cell still shows table
       // structure.
       if (tableStyle) {
-        const hp = 0.5 / dpr;
-        ctx.strokeStyle = tableStyle.accent;
-        ctx.lineWidth = tableStyle.isHeader ? 1.5 : 1;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy + cellH - hp);
-        ctx.lineTo(cx + cellW, cy + cellH - hp);
-        if (tableStyle.isTopEdge) {
-          ctx.moveTo(cx, cy + hp);
-          ctx.lineTo(cx + cellW, cy + hp);
+        const horiz = tsDxfWhole?.border?.horizontal;
+        const vert  = tsDxfWhole?.border?.vertical;
+        const wtTop = tsDxfWhole?.border?.top;
+        const wtBot = tsDxfWhole?.border?.bottom;
+        const wtLeft = tsDxfWhole?.border?.left;
+        const wtRight = tsDxfWhole?.border?.right;
+        const hdrBot = tsDxfHeader?.border?.bottom;
+        const hdrTop = tsDxfHeader?.border?.top;
+        const hasDxfBorder = !!(horiz || vert || wtTop || wtBot || wtLeft || wtRight || hdrBot || hdrTop);
+        if (hasDxfBorder) {
+          const overlay: Border = { left: null, right: null, top: null, bottom: null };
+          if (tableStyle.isTopEdge) overlay.top = wtTop ?? null;
+          else if (horiz) overlay.top = horiz;
+          if (tableStyle.isHeader && hdrBot) overlay.bottom = hdrBot;
+          else if (tableStyle.isBottomEdge) overlay.bottom = wtBot ?? null;
+          else if (horiz) overlay.bottom = horiz;
+          if (tableStyle.isFirstCol || colIndex === 0) overlay.left = wtLeft ?? null;
+          if (tableStyle.isLastCol) overlay.right = wtRight ?? null;
+          // Outer table left/right edges
+          renderBorder(ctx, overlay, cx, cy, cellW, cellH);
+        } else {
+          const hp = 0.5 / dpr;
+          ctx.strokeStyle = tableStyle.accent;
+          ctx.lineWidth = tableStyle.isHeader ? 1.5 : 1;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy + cellH - hp);
+          ctx.lineTo(cx + cellW, cy + cellH - hp);
+          if (tableStyle.isTopEdge) {
+            ctx.moveTo(cx, cy + hp);
+            ctx.lineTo(cx + cellW, cy + hp);
+          }
+          ctx.stroke();
         }
-        ctx.stroke();
       }
 
       // AutoFilter dropdown indicator
@@ -2179,7 +2261,14 @@ function renderQuadrant(
         : font;
       ctx.font = buildFont(fontForDraw, cs);
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
-      const textColor = hyperlinkUrl ? '#0563C1' : (cf.fontColor ?? font.color);
+      // Custom table-style header dxfs can override font color (ECMA-376 §18.8.40).
+      const tableFontColor =
+        (tableStyle?.isHeader && tsDxfHeader?.font?.color) ? tsDxfHeader.font.color :
+        (tableStyle && !tableStyle.isHeader && !tableStyle.isTotals && tsDxfWhole?.font?.color) ? tsDxfWhole.font.color :
+        null;
+      const textColor = hyperlinkUrl
+        ? '#0563C1'
+        : (cf.fontColor ?? tableFontColor ?? font.color);
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;
