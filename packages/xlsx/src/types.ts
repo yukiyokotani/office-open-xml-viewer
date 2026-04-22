@@ -61,6 +61,9 @@ export interface TableInfo {
   showColumnStripes: boolean;
   showFirstColumn: boolean;
   showLastColumn: boolean;
+  /** Accent color resolved by the parser from the built-in style name against
+   *  the file's theme accents (e.g. `TableStyleLight18` → accent3). */
+  accentColor: string;
 }
 
 export interface DefinedName {

@@ -1858,24 +1858,10 @@ export interface TableCellStyle {
   isBottomEdge: boolean;
 }
 
-// Office 2016 default-theme accent palette. Used only as a fallback when
-// `TableStyleLight<N>` is resolved without any file-level theme lookup.
-const DEFAULT_ACCENTS = ['#4472C4', '#ED7D31', '#A5A5A5', '#FFC000', '#5B9BD5', '#70AD47'];
-
-function accentForTableStyle(name: string): string {
-  const m = name.match(/^TableStyle(Light|Medium|Dark)(\d+)$/);
-  if (!m) return '#808080';
-  const n = parseInt(m[2], 10);
-  if (m[1] === 'Light' && n === 1) return '#000000';
-  if (m[1] === 'Medium' && n === 1) return '#808080';
-  if (m[1] === 'Dark' && n === 1) return '#000000';
-  return DEFAULT_ACCENTS[((n - 2) % 6 + 6) % 6];
-}
-
 function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
   const map = new Map<string, TableCellStyle>();
   for (const t of worksheet.tables ?? []) {
-    const accent = accentForTableStyle(t.styleName);
+    const accent = t.accentColor || '#808080';
     const hdr = Math.max(0, t.headerRowCount ?? 1);
     const tot = Math.max(0, t.totalsRowCount ?? 0);
     const { top, bottom, left, right } = t.range;

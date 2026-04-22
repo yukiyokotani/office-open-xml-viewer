@@ -91,6 +91,10 @@ pub struct TableInfo {
     pub show_first_column: bool,
     /// `<tableStyleInfo showLastColumn>`.
     pub show_last_column: bool,
+    /// Accent color resolved from the built-in style name against this file's
+    /// theme accents (e.g. `TableStyleLight18` → accent3 of theme1.xml). Used
+    /// by the renderer to draw banding, header background, and rules.
+    pub accent_color: String,
 }
 
 /// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
@@ -537,7 +541,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
     ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
-    ws.tables = load_sheet_tables(&mut archive, &sheet_path);
+    ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1586,9 +1590,33 @@ fn load_sheet_comment_refs(
 /// collect them for the renderer. Each table carries a ref range, style name
 /// (e.g. "TableStyleLight18"), and the banded-rows / banded-cols flags from
 /// `<tableStyleInfo>` (ECMA-376 §18.5).
+/// Resolve a built-in table style's accent color from the theme.
+///
+/// Built-in style names follow the pattern `TableStyle{Light|Medium|Dark}{N}`
+/// (ECMA-376 §18.5.1.4). Excel's UI lays the 21/28/11 built-ins out in a grid
+/// of rows × 7 columns: column 0 is a "none" style (no accent), columns 1–6
+/// map to accent1–accent6. So the accent index is `(N - 1) mod 7` where 0
+/// means "no accent" and 1..=6 map to the theme's accent slots.
+///
+/// `theme_colors` is in OOXML natural order — accent1 lives at index 4, so
+/// accent_n is at `theme_colors[3 + n]`. Falls back to a neutral gray when
+/// the style name is unrecognised or the theme is missing accents.
+fn resolve_table_style_accent(style_name: &str, theme_colors: &[String]) -> String {
+    let fallback = "#808080".to_string();
+    let Some(rest) = style_name.strip_prefix("TableStyle") else { return fallback; };
+    let digits_start = rest.find(|c: char| c.is_ascii_digit());
+    let Some(start) = digits_start else { return fallback; };
+    let Ok(n) = rest[start..].parse::<u32>() else { return fallback; };
+    if n == 0 { return fallback; }
+    let slot = ((n - 1) % 7) as usize;
+    if slot == 0 { return fallback; }
+    theme_colors.get(3 + slot).cloned().unwrap_or(fallback)
+}
+
 fn load_sheet_tables(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     sheet_path: &str,
+    theme_colors: &[String],
 ) -> Vec<TableInfo> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
@@ -1641,6 +1669,7 @@ fn load_sheet_tables(
             ),
             None => (false, false, false, false),
         };
+        let accent_color = resolve_table_style_accent(&style_name, theme_colors);
         tables.push(TableInfo {
             range,
             style_name,
@@ -1650,6 +1679,7 @@ fn load_sheet_tables(
             show_column_stripes,
             show_first_column,
             show_last_column,
+            accent_color,
         });
     }
     tables
