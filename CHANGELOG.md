@@ -4,6 +4,37 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.11.0 — 2026-04-22
+
+xlsx fidelity release focused on sample-9 ("Gift budget and tracker"):
+stacked combo charts keep their stacking, chart series honor theme
+accent colors, custom `<tableStyle>` elements actually style their
+cells, and `cellIs` conditional-formatting rules match text operands.
+
+### xlsx
+
+- **Stacked combo charts** (§21.2.2.17): locking `grouping` once a
+  non-line series sets it prevents a trailing `lineChart grouping=
+  "standard"` from overwriting the bar's `stacked` / `percentStacked`,
+  so bar+line combos keep stacked bars.
+- **Chart series `<a:schemeClr>` resolution** (§21.2.2.35 `c:spPr`):
+  series colors declared as `accent1`..`accent6` / `dk*` / `lt*` are
+  resolved against the file's theme color table instead of falling
+  back to palette defaults.
+- **Custom `<tableStyle>` elements** (§18.8.40): parse `wholeTable`
+  and `headerRow` dxf indices from `xl/styles.xml/tableStyles`, then
+  overlay the resolved dxf fill, font color, and horizontal / vertical
+  borders on top of cells. Built-in style names keep the existing
+  accent-based renderer unchanged. `Border` gains `horizontal` /
+  `vertical` to carry the inner-rule edges emitted only by tableStyle
+  dxfs.
+- **Text operands in `cellIs` CF rules** (§18.18.15 `ST_CfOperator`):
+  `cellIs` previously only evaluated numeric cells, so text rules like
+  `equal "Birthdays"` silently skipped every non-numeric row. Now
+  parses each `<formula>` as a quoted string literal or number, and
+  compares case-insensitively for equal / notEqual / containsText /
+  notContains / beginsWith / endsWith / between / notBetween.
+
 ## 0.10.0 — 2026-04-22
 
 xlsx number-format and volatile-function release. Cells with `TODAY()` /
