@@ -1775,6 +1775,8 @@ interface RenderContext {
   /** row:col keys for cells that carry a comment; renderer draws a small
    *  red triangle in the top-right corner (ECMA-376 §18.7.3 commentList). */
   commentCells: Set<string>;
+  /** row:col → table-style overlay (bold header, banded rows, borders). */
+  tableStyleMap: Map<string, TableCellStyle>;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1835,6 +1837,67 @@ function drawAutoFilterArrow(ctx: CanvasRenderingContext2D, cx: number, cy: numb
   ctx.closePath();
   ctx.fill();
   ctx.restore();
+}
+
+// ────────────────────────────────────────────────────────────────
+// Excel Table style overlays (ECMA-376 §18.5)
+// ────────────────────────────────────────────────────────────────
+// We don't ship the full built-in table-style catalog — instead we derive a
+// single "accent" color from the style name and overlay bold header + banded
+// fills + horizontal rules so that `TableStyle*` files render with visible
+// structure rather than as blank ranges.
+export interface TableCellStyle {
+  accent: string;
+  isHeader: boolean;
+  isTotals: boolean;
+  /** `true` when this is a banded data row that should get the stripe fill. */
+  isBanded: boolean;
+  isFirstCol: boolean;
+  isLastCol: boolean;
+  isTopEdge: boolean;
+  isBottomEdge: boolean;
+}
+
+function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
+  const map = new Map<string, TableCellStyle>();
+  for (const t of worksheet.tables ?? []) {
+    const accent = t.accentColor || '#808080';
+    const hdr = Math.max(0, t.headerRowCount ?? 1);
+    const tot = Math.max(0, t.totalsRowCount ?? 0);
+    const { top, bottom, left, right } = t.range;
+    const headerEnd = top + hdr - 1;
+    const totalsStart = bottom - tot + 1;
+    for (let r = top; r <= bottom; r++) {
+      const isHeader = hdr > 0 && r <= headerEnd;
+      const isTotals = tot > 0 && r >= totalsStart;
+      const dataIdx = (!isHeader && !isTotals) ? (r - headerEnd - 1) : -1;
+      for (let c = left; c <= right; c++) {
+        map.set(`${r}:${c}`, {
+          accent,
+          isHeader,
+          isTotals,
+          isBanded: t.showRowStripes && dataIdx >= 0 && dataIdx % 2 === 1,
+          isFirstCol: t.showFirstColumn && c === left,
+          isLastCol: t.showLastColumn && c === right,
+          isTopEdge: r === top,
+          isBottomEdge: r === bottom,
+        });
+      }
+    }
+  }
+  return map;
+}
+
+function stripeColorFor(accent: string): string {
+  // Light tint of the accent — mimics TableStyleLight* banded rows.
+  const hex = accent.replace('#', '');
+  if (hex.length < 6) return '#F2F2F2';
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const mix = (ch: number) => Math.round(ch * 0.2 + 255 * 0.8);
+  const toHex = (v: number) => v.toString(16).padStart(2, '0').toUpperCase();
+  return `#${toHex(mix(r))}${toHex(mix(g))}${toHex(mix(b))}`;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2001,6 +2064,7 @@ function renderQuadrant(
       const { font, fill, border, xf } = resolveXf(styles, styleIndex);
       const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
       const effectiveFill = cf.fill ?? fill;
+      const tableStyle = rc.tableStyleMap.get(key);
 
       // Background fill (base or CF override). ECMA-376 §18.8.22 ST_PatternType.
       // - solid/gray*: blend fgColor with bgColor at the pattern's fg coverage.
@@ -2022,6 +2086,9 @@ function renderQuadrant(
             ? hexToRgba(effectiveFill.fgColor)
             : blendHex(effectiveFill.fgColor, bg, coverage);
         }
+        ctx.fillRect(cx, cy, cellW, cellH);
+      } else if (tableStyle && tableStyle.isBanded) {
+        ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
       }
 
@@ -2072,6 +2139,24 @@ function renderQuadrant(
         : border;
       renderBorder(ctx, mergeBorders(baseBorder, cf.border), cx, cy, cellW, cellH);
 
+      // Excel Table style overlay: thin horizontal rules between rows and a
+      // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
+      // top of cell borders so an empty-border data cell still shows table
+      // structure.
+      if (tableStyle) {
+        const hp = 0.5 / dpr;
+        ctx.strokeStyle = tableStyle.accent;
+        ctx.lineWidth = tableStyle.isHeader ? 1.5 : 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + cellH - hp);
+        ctx.lineTo(cx + cellW, cy + cellH - hp);
+        if (tableStyle.isTopEdge) {
+          ctx.moveTo(cx, cy + hp);
+          ctx.lineTo(cx + cellW, cy + hp);
+        }
+        ctx.stroke();
+      }
+
       // AutoFilter dropdown indicator
       if (rc.autoFilterCells.has(key)) {
         drawAutoFilterArrow(ctx, cx, cy, cw, cellH);
@@ -2081,7 +2166,8 @@ function renderQuadrant(
       const text = formatCellValue(cell, styles);
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
-      const effectiveBold = font.bold || !!cf.fontBold;
+      const tableBold = !!(tableStyle && (tableStyle.isHeader || tableStyle.isTotals));
+      const effectiveBold = font.bold || !!cf.fontBold || tableBold;
       const effectiveItalic = font.italic || !!cf.fontItalic;
       const effectiveUnderline = font.underline || !!cf.fontUnderline;
       const effectiveStrike = font.strike || !!cf.fontStrike;
@@ -2528,6 +2614,8 @@ export function renderViewport(
     if (parsed) commentCells.add(`${parsed.row}:${parsed.col}`);
   }
 
+  const tableStyleMap = buildTableStyleMap(worksheet);
+
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
     colWidths: scrollColWidths,
@@ -2540,6 +2628,7 @@ export function renderViewport(
     autoFilterCells,
     hyperlinkMap,
     commentCells,
+    tableStyleMap,
   };
 
   // Canvas areas for each quadrant
@@ -2776,16 +2865,6 @@ function renderHeaders(
   }
   ctx.restore();
 
-  // Cover frozen area corner (where row/col headers meet)
-  if (frozenW > 0 || frozenH > 0) {
-    ctx.fillStyle = HEADER_BG;
-    if (frozenW > 0) {
-      ctx.fillRect(0, hh, hw, frozenH);
-    }
-    if (frozenH > 0) {
-      ctx.fillRect(hw, 0, frozenW, hh);
-    }
-  }
 }
 
 // ────────────────────────────────────────────────────────────────

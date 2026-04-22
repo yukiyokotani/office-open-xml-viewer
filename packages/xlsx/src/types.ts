@@ -47,6 +47,23 @@ export interface Worksheet {
    *  conditional-formatting `expression` rules that call named ranges
    *  (e.g. `task_start`, `today`). */
   definedNames?: DefinedName[];
+  /** Excel Tables on this sheet (ECMA-376 §18.5). The renderer overlays a
+   *  built-in style (bold header, banded rows) on the given ranges. */
+  tables?: TableInfo[];
+}
+
+export interface TableInfo {
+  range: CellRange;
+  styleName: string;
+  headerRowCount: number;
+  totalsRowCount: number;
+  showRowStripes: boolean;
+  showColumnStripes: boolean;
+  showFirstColumn: boolean;
+  showLastColumn: boolean;
+  /** Accent color resolved by the parser from the built-in style name against
+   *  the file's theme accents (e.g. `TableStyleLight18` → accent3). */
+  accentColor: string;
 }
 
 export interface DefinedName {
