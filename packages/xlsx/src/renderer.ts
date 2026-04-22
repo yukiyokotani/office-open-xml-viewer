@@ -921,6 +921,12 @@ function cellNumericValue(cell: Cell | undefined): number | null {
   return null;
 }
 
+function cellTextValue(cell: Cell | undefined): string | null {
+  if (!cell) return null;
+  if (cell.value.type === 'text') return cell.value.text;
+  return null;
+}
+
 function collectNumericValuesInRanges(worksheet: Worksheet, ranges: CellRange[]): number[] {
   const out: number[] = [];
   for (const row of worksheet.rows) {
@@ -1028,6 +1034,33 @@ function cellIsMatch(num: number, operator: string, args: number[]): boolean {
   }
 }
 
+function parseCellIsFormula(f: string): { text?: string; num?: number } {
+  const t = f.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return { text: t.slice(1, -1).replace(/""/g, '"') };
+  }
+  const n = parseFloat(t);
+  if (!isNaN(n)) return { num: n };
+  return { text: t };
+}
+
+function cellIsTextMatch(text: string, operator: string, args: string[]): boolean {
+  const a = args[0] ?? '';
+  const b = args[1] ?? '';
+  const ci = (s: string) => s.toLowerCase();
+  switch (operator) {
+    case 'equal':         return ci(text) === ci(a);
+    case 'notEqual':      return ci(text) !== ci(a);
+    case 'containsText':  return ci(text).includes(ci(a));
+    case 'notContains':   return !ci(text).includes(ci(a));
+    case 'beginsWith':    return ci(text).startsWith(ci(a));
+    case 'endsWith':      return ci(text).endsWith(ci(a));
+    case 'between':       return ci(text) >= ci(a) && ci(text) <= ci(b);
+    case 'notBetween':    return ci(text) <  ci(a) || ci(text) >  ci(b);
+    default: return false;
+  }
+}
+
 function interpolateHex(a: string, b: string, t: number): string {
   const pa = a.replace('#', '');
   const pb = b.replace('#', '');
@@ -1106,9 +1139,15 @@ function evaluateCf(cell: Cell | undefined, row: number, col: number, cfCtx: CfC
     }
 
     if (rule.type === 'cellIs') {
-      if (numVal == null) continue;
-      const args = rule.formulas.map(f => parseFloat(f)).filter(n => !isNaN(n));
-      if (cellIsMatch(numVal, rule.operator, args)) {
+      const parsedArgs = rule.formulas.map(parseCellIsFormula);
+      const textVal = cellTextValue(cell);
+      let matched = false;
+      if (numVal != null && parsedArgs.every(a => a.num != null)) {
+        matched = cellIsMatch(numVal, rule.operator, parsedArgs.map(a => a.num!));
+      } else if (textVal != null && parsedArgs.every(a => a.text != null)) {
+        matched = cellIsTextMatch(textVal, rule.operator, parsedArgs.map(a => a.text!));
+      }
+      if (matched) {
         applyDxfToResult(result, rule.dxfId != null ? dxfs[rule.dxfId] : null);
       }
     } else if (rule.type === 'top10') {
