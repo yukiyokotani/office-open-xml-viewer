@@ -221,9 +221,23 @@ pub enum CfRule {
     #[serde(rename_all = "camelCase")]
     AboveAverage { above_average: bool, dxf_id: Option<u32>, priority: i32 },
     #[serde(rename_all = "camelCase")]
-    IconSet { icon_set: String, cfvos: Vec<CfValue>, reverse: bool, priority: i32 },
+    IconSet {
+        icon_set: String,
+        cfvos: Vec<CfValue>,
+        reverse: bool,
+        priority: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom_icons: Option<Vec<CfIcon>>,
+    },
     #[serde(rename_all = "camelCase")]
     Other { kind: String, priority: i32 },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CfIcon {
+    pub icon_set: String,
+    pub icon_id: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1147,6 +1161,63 @@ fn parse_worksheet(
         }
     }
 
+    // Pre-scan worksheet-level extLst for x14:conditionalFormatting with
+    // iconSet rules. Excel 2010+ stores custom icon sets (custom="1") here
+    // with per-threshold `<x14:cfIcon iconSet="X" iconId="N"/>` overrides,
+    // and cfvo values inside `<xm:f>` children instead of `val` attributes.
+    // The sqref for x14 CF rules lives in a `<xm:sqref>` sibling.
+    let mut x14_icon_formats: Vec<ConditionalFormat> = Vec::new();
+    for x14_cf in doc.descendants().filter(|n| n.tag_name().name() == "conditionalFormatting" && n.tag_name().namespace().map(|u| u.contains("/spreadsheetml/2009/9")).unwrap_or(false)) {
+        let sqref: Vec<CellRange> = x14_cf.children()
+            .find(|n| n.tag_name().name() == "sqref")
+            .and_then(|n| n.text())
+            .map(parse_sqref)
+            .unwrap_or_default();
+        if sqref.is_empty() { continue; }
+        let mut rules: Vec<CfRule> = Vec::new();
+        for x14_rule in x14_cf.children().filter(|n| n.tag_name().name() == "cfRule" && n.attribute("type") == Some("iconSet")) {
+            let priority: i32 = x14_rule.attribute("priority").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(icon_node) = x14_rule.children().find(|n| n.tag_name().name() == "iconSet") else { continue };
+            let custom = icon_node.attribute("custom").map(|v| v == "1" || v == "true").unwrap_or(false);
+            let icon_set_name = icon_node.attribute("iconSet")
+                .unwrap_or(if custom { "" } else { "3TrafficLights1" })
+                .to_string();
+            let reverse = icon_node.attribute("reverse").map(|v| v == "1" || v == "true").unwrap_or(false);
+            let mut cfvos: Vec<CfValue> = Vec::new();
+            let mut custom_icons: Vec<CfIcon> = Vec::new();
+            for ch in icon_node.children().filter(|n| n.is_element()) {
+                match ch.tag_name().name() {
+                    "cfvo" => {
+                        let kind = ch.attribute("type").unwrap_or("percent").to_string();
+                        // x14:cfvo stores the value in `<xm:f>` child; attribute val fallback.
+                        let value = ch.children()
+                            .find(|n| n.tag_name().name() == "f")
+                            .and_then(|n| n.text())
+                            .map(|s| s.to_string())
+                            .or_else(|| ch.attribute("val").map(|s| s.to_string()));
+                        cfvos.push(CfValue { kind, value });
+                    }
+                    "cfIcon" => {
+                        let set = ch.attribute("iconSet").unwrap_or("NoIcons").to_string();
+                        let id = ch.attribute("iconId").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        custom_icons.push(CfIcon { icon_set: set, icon_id: id });
+                    }
+                    _ => {}
+                }
+            }
+            rules.push(CfRule::IconSet {
+                icon_set: icon_set_name,
+                cfvos,
+                reverse,
+                priority,
+                custom_icons: if custom { Some(custom_icons) } else { None },
+            });
+        }
+        if !rules.is_empty() {
+            x14_icon_formats.push(ConditionalFormat { sqref, rules });
+        }
+    }
+
     for node in doc.descendants() {
         match node.tag_name().name() {
             "sheetFormatPr" if node.tag_name().namespace() == Some(ns) => {
@@ -1387,7 +1458,7 @@ fn parse_worksheet(
                                     .collect()
                                 )
                                 .unwrap_or_default();
-                            rules.push(CfRule::IconSet { icon_set, cfvos, reverse, priority });
+                            rules.push(CfRule::IconSet { icon_set, cfvos, reverse, priority, custom_icons: None });
                         }
                         other => {
                             rules.push(CfRule::Other { kind: other.to_string(), priority });
@@ -1399,6 +1470,8 @@ fn parse_worksheet(
             _ => {}
         }
     }
+
+    conditional_formats.extend(x14_icon_formats);
 
     Ok((Worksheet {
         name: name.to_string(),

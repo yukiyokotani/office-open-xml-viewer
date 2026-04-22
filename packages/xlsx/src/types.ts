@@ -160,8 +160,13 @@ export type CfRule =
   | { type: 'dataBar'; color: string; min: CfValue; max: CfValue; priority: number; gradient: boolean }
   | { type: 'top10'; top: boolean; percent: boolean; rank: number; dxfId: number | null; priority: number }
   | { type: 'aboveAverage'; aboveAverage: boolean; dxfId: number | null; priority: number }
-  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number }
+  | { type: 'iconSet'; iconSet: string; cfvos: CfValue[]; reverse: boolean; priority: number; customIcons?: CfIcon[] }
   | { type: 'other'; kind: string; priority: number };
+
+export interface CfIcon {
+  iconSet: string;
+  iconId: number;
+}
 
 export interface CfStop {
   kind: string;
