@@ -2084,17 +2084,51 @@ function renderQuadrant(
       const iconPad = iconSz > 0 ? iconSz + 4 : 0;
       const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
 
-      // Text overflow for left-aligned non-merged non-wrap cells
+      // Text overflow into adjacent empty cells (ECMA-376 §18.3.1.4 "spans"
+      // — Excel behavior when `wrapText=false`). Left-aligned text flows
+      // rightward, right-aligned flows leftward, and centered splits evenly.
+      // We only extend the clip rect; the text itself is still drawn once.
+      // Stops at merge-cell boundaries, non-empty cells, and iconSet-left
+      // overrun (since an icon sits inside this cell's left padding).
+      let drawX = cx;
       let drawW = cellW;
-      if (!mergeInfo && !xf.wrapText && alignH !== 'right' && alignH !== 'center') {
-        const textPx = ctx.measureText(text).width + leftPad + paddingX;
+      if (!mergeInfo && !xf.wrapText && !xf.textRotation) {
+        const textW = ctx.measureText(text).width;
+        const textPx = textW + leftPad + paddingX;
         if (textPx > cellW) {
-          for (let oci = ci + 1; oci < numCols; oci++) {
-            const adjKey = `${rowIndex}:${startCol + oci}`;
-            if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
-            const adjCell = cellMap.get(adjKey);
-            if (adjCell && adjCell.value.type !== 'empty') break;
-            drawW += colWidths[oci];
+          const overflow = textPx - cellW;
+          let extendRight = 0;
+          let extendLeft = 0;
+          if (alignH === 'right') {
+            extendLeft = overflow;
+          } else if (alignH === 'center') {
+            extendLeft = overflow / 2;
+            extendRight = overflow / 2;
+          } else {
+            extendRight = overflow;
+          }
+          if (extendRight > 0) {
+            let budget = extendRight;
+            for (let oci = ci + 1; oci < numCols && budget > 0; oci++) {
+              const adjKey = `${rowIndex}:${startCol + oci}`;
+              if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
+              const adjCell = cellMap.get(adjKey);
+              if (adjCell && adjCell.value.type !== 'empty') break;
+              drawW += colWidths[oci];
+              budget -= colWidths[oci];
+            }
+          }
+          if (extendLeft > 0) {
+            let budget = extendLeft;
+            for (let oci = ci - 1; oci >= 0 && budget > 0; oci--) {
+              const adjKey = `${rowIndex}:${startCol + oci}`;
+              if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
+              const adjCell = cellMap.get(adjKey);
+              if (adjCell && adjCell.value.type !== 'empty') break;
+              drawX -= colWidths[oci];
+              drawW += colWidths[oci];
+              budget -= colWidths[oci];
+            }
           }
         }
       }
@@ -2128,7 +2162,7 @@ function renderQuadrant(
 
       ctx.save();
       ctx.beginPath();
-      ctx.rect(cx, cy, drawW, cellH);
+      ctx.rect(drawX, cy, drawW, cellH);
       ctx.clip();
 
       // Stacked text (textRotation=255): draw each character on its own line
