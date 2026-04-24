@@ -3550,14 +3550,15 @@ function adaptChartData(chart: ChartData): ChartModel {
       seriesType: s.seriesType ?? null,
       categories: s.categories.length > 0 ? s.categories : null,
       showMarker: s.showMarker ?? null,
+      valFormatCode: s.valFormatCode ?? null,
     })),
     showDataLabels: chart.showDataLabels ?? false,
     valMin: null,
     valMax: null,
     catAxisTitle: chart.catAxisTitle ?? null,
     valAxisTitle: chart.valAxisTitle ?? null,
-    catAxisHidden: false,
-    valAxisHidden: false,
+    catAxisHidden: chart.catAxisHidden ?? false,
+    valAxisHidden: chart.valAxisHidden ?? false,
     plotAreaBg: null,
     // `<c:chartSpace><c:spPr>` resolution: when the spPr element was present
     // we honor whatever it said (solid hex or `<a:noFill/>` → null =
@@ -3581,6 +3582,12 @@ function adaptChartData(chart: ChartData): ChartModel {
     valAxisFontSizeHpt: chart.valAxisFontSizeHpt ?? null,
     dataLabelFontSizeHpt: null,
     subtotalIndices: [],
+    valAxisFormatCode: chart.valAxisFormatCode ?? null,
+    barGapWidth: chart.barGapWidth ?? null,
+    barOverlap: chart.barOverlap ?? null,
+    dataLabelPosition: chart.dataLabelPosition ?? null,
+    dataLabelFontColor: chart.dataLabelFontColor ?? null,
+    dataLabelFormatCode: chart.dataLabelFormatCode ?? null,
   };
 }
 

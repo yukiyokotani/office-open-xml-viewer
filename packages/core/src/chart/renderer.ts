@@ -54,11 +54,166 @@ function niceAxisMin(dataMin: number, step: number): number {
 
 function formatChartVal(v: number): string {
   // Matches Excel's default `<c:valAx><c:numFmt formatCode="General">` which
-  // shows raw numbers — no "k"/"M" abbreviation. An upcoming change will honor
-  // the parsed formatCode per ECMA-376 §21.2.2.33 for non-General codes.
+  // shows raw numbers — no "k"/"M" abbreviation.
   if (Number.isInteger(v)) return String(v);
   // Trim trailing zeros on decimals (so 0.50 → "0.5") but cap at 6 digits.
   return v.toFixed(6).replace(/\.?0+$/, '');
+}
+
+/**
+ * Format a chart value with an Excel number-format code. Honors ECMA-376
+ * §18.8.30 section syntax (positive;negative;zero;text), common literal
+ * escapes (`"..."`, `\x`, `_x` → space), and numeric patterns built from
+ * `#`, `0`, `.`, `,`. Unknown tokens are emitted verbatim so currency
+ * symbols like `¥` or `$` keep working even when the workbook stored them
+ * unquoted. Returns the default `formatChartVal` output when `code` is null
+ * or an empty section tells the caller to hide the value.
+ */
+function formatChartValWithCode(v: number, code: string | null | undefined): string {
+  if (!code) return formatChartVal(v);
+  const sections = splitFormatSections(code);
+  // Section selection per §18.8.30: positive;negative;zero;text. When the
+  // negative section is omitted a negative number is formatted with the
+  // positive section and a leading minus, which the caller must prepend.
+  let section: string;
+  if (v > 0) section = sections[0] ?? code;
+  else if (v < 0) section = sections[1] ?? sections[0] ?? code;
+  else section = sections[2] ?? sections[0] ?? code;
+  if (section === '') return '';
+  // Negative-without-explicit-section: format absolute value with positive
+  // section and prepend '-' unless the section itself already begins with a
+  // literal minus.
+  const needsLeadingMinus = v < 0 && sections.length < 2;
+  const abs = Math.abs(v);
+  return (needsLeadingMinus ? '-' : '') + applyChartNumberSection(abs, section);
+}
+
+/**
+ * Split a format code on unescaped semicolons. Quotes, `[...]` metadata, and
+ * `\;` are treated as opaque so `"a;b"` and `\;` stay in a single section.
+ */
+function splitFormatSections(code: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (c === '\\' && i + 1 < code.length) { buf += c + code[i + 1]; i++; continue; }
+    if (c === '"') {
+      buf += c;
+      i++;
+      while (i < code.length && code[i] !== '"') { buf += code[i]; i++; }
+      if (i < code.length) buf += code[i];
+      continue;
+    }
+    if (c === '[') {
+      buf += c;
+      i++;
+      while (i < code.length && code[i] !== ']') { buf += code[i]; i++; }
+      if (i < code.length) buf += code[i];
+      continue;
+    }
+    if (c === ';') { out.push(buf); buf = ''; continue; }
+    buf += c;
+  }
+  out.push(buf);
+  return out;
+}
+
+function applyChartNumberSection(abs: number, section: string): string {
+  // Tokenize the section, separating numeric-pattern runs (`#`, `0`, `.`,
+  // `,`, `?`) from literal runs so percent / decimal handling runs once.
+  type Tok = { kind: 'lit' | 'num'; text: string };
+  const toks: Tok[] = [];
+  let i = 0;
+  let pushedNum = false;
+  let percent = false;
+  while (i < section.length) {
+    const c = section[i];
+    if (c === '"') {
+      i++;
+      let s = '';
+      while (i < section.length && section[i] !== '"') { s += section[i]; i++; }
+      if (i < section.length) i++;
+      toks.push({ kind: 'lit', text: s });
+      continue;
+    }
+    if (c === '\\' && i + 1 < section.length) {
+      toks.push({ kind: 'lit', text: section[i + 1] });
+      i += 2;
+      continue;
+    }
+    if (c === '_' && i + 1 < section.length) {
+      // `_x` pads a width of x — render as a single space, matching Excel
+      // alignment padding without caring about exact glyph metrics.
+      toks.push({ kind: 'lit', text: ' ' });
+      i += 2;
+      continue;
+    }
+    if (c === '*' && i + 1 < section.length) {
+      // `*x` fills the remaining column width with x; we can't know the
+      // column width at this layer so we drop it.
+      i += 2;
+      continue;
+    }
+    if (c === '[') {
+      i++;
+      while (i < section.length && section[i] !== ']') i++;
+      if (i < section.length) i++;
+      continue;
+    }
+    if (c === '%') { percent = true; toks.push({ kind: 'lit', text: '%' }); i++; continue; }
+    if (c === '#' || c === '0' || c === '.' || c === ',' || c === '?') {
+      let run = '';
+      while (
+        i < section.length &&
+        (section[i] === '#' || section[i] === '0' || section[i] === '.' ||
+         section[i] === ',' || section[i] === '?')
+      ) { run += section[i]; i++; }
+      toks.push({ kind: 'num', text: run });
+      pushedNum = true;
+      continue;
+    }
+    // Everything else (currency symbols like ¥, $, parens, spaces) is literal.
+    toks.push({ kind: 'lit', text: c });
+    i++;
+  }
+  if (!pushedNum) {
+    // No numeric pattern at all — section is purely literal (e.g. `"N/A"`).
+    return toks.map(t => t.text).join('');
+  }
+  const value = percent ? abs * 100 : abs;
+  // Merge numeric tokens into one pattern — Excel treats `#,##0.00` as a
+  // single pattern even when flanked by literals. We keep the literal tokens
+  // where they are and replace the first num token with the formatted number,
+  // dropping subsequent num tokens (they're all part of the same pattern).
+  let pattern = '';
+  for (const t of toks) if (t.kind === 'num') pattern += t.text;
+  const formatted = formatNumericPattern(value, pattern);
+  let seenNum = false;
+  return toks.map(t => {
+    if (t.kind === 'lit') return t.text;
+    if (seenNum) return '';
+    seenNum = true;
+    return formatted;
+  }).join('');
+}
+
+function formatNumericPattern(value: number, pattern: string): string {
+  // Detect thousands separator (a `,` between digit placeholders) and the
+  // number of decimal places (digit chars after `.`).
+  let dotIdx = pattern.indexOf('.');
+  const intPart = dotIdx >= 0 ? pattern.slice(0, dotIdx) : pattern;
+  const fracPart = dotIdx >= 0 ? pattern.slice(dotIdx + 1) : '';
+  const thousands = /,/.test(intPart);
+  const fracDigits = (fracPart.match(/[#0?]/g) ?? []).length;
+  // Minimum integer digits = count of `0` in integer part.
+  const minIntDigits = (intPart.replace(/,/g, '').match(/0/g) ?? []).length;
+  const rounded = value.toFixed(fracDigits);
+  const [ints, fracs = ''] = rounded.split('.');
+  const paddedInts = ints.padStart(minIntDigits, '0');
+  const withSeparators = thousands ? paddedInts.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : paddedInts;
+  if (fracDigits === 0) return withSeparators;
+  return `${withSeparators}.${fracs.padEnd(fracDigits, '0')}`;
 }
 
 function drawAxisTitle(
@@ -268,6 +423,66 @@ function chartCategories(chart: ChartModel): string[] {
   return n > 0 ? Array.from({ length: n }, (_, i) => String(i + 1)) : [];
 }
 
+/**
+ * Draw a bar data label with the ECMA-376 §21.2.2.16 `dLblPos` semantics.
+ *
+ * For a vertical bar the coordinates describe the rectangle top-left + width +
+ * height; for a horizontal bar they describe the bar's left-edge `bx`, top `by`,
+ * length `barL`, and thickness `barW`. When `position` is "inBase" / "inEnd" /
+ * "ctr" the label sits inside the bar; "outEnd" (default for clustered bars)
+ * nudges the text just past the far edge. An explicit `color` overrides the
+ * default dark label fill — Excel's workbook typically pairs "inBase" with a
+ * white text color so labels stay readable against the bar fill.
+ */
+function drawBarDataLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  bx: number, by: number, barL: number, barW: number,
+  orient: 'vertical' | 'horizontal',
+  position: string | null,
+  color: string | null,
+): void {
+  const pos = (position ?? 'outEnd');
+  const fill = color ? `#${color}` : '#333';
+  ctx.fillStyle = fill;
+  if (orient === 'vertical') {
+    // bx/by = top-left of bar rect (bar grows upward from by+barL toward by).
+    // barL here is bar height (pixels) and barW is bar width.
+    const cx = bx + barW / 2;
+    if (pos === 'inBase') {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(text, cx, by + barL - 2);
+    } else if (pos === 'inEnd') {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(text, cx, by + 2);
+    } else if (pos === 'ctr') {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, cx, by + barL / 2);
+    } else {
+      // outEnd / default: just above the bar's top edge (by).
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(text, cx, by - 1);
+    }
+  } else {
+    // Horizontal: bar grows to the right from bx.
+    const cy = by + barW / 2;
+    if (pos === 'inBase') {
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + 4, cy);
+    } else if (pos === 'inEnd') {
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + barL - 4, cy);
+    } else if (pos === 'ctr') {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + barL / 2, cy);
+    } else {
+      // outEnd / default: just past the bar's right edge.
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + barL + 2, cy);
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Bar chart — vertical columns + horizontal bars, clustered + stacked +
 // percentStacked. Also handles mixed bar+line series (seriesType per series).
@@ -308,8 +523,11 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     l: w * 0.12 + valTitleW + legLeftW,
   };
   if (isH) {
-    pad.l = w * 0.22 + valTitleW + legLeftW;
-    pad.b = h * 0.08 + catTitleH + legBottomH;
+    // With the category axis hidden (`c:catAx/c:delete val="1"`) there are no
+    // category tick labels to reserve room for — tighten the left margin so
+    // the bars can extend to the chart edge, matching Excel's rendering.
+    pad.l = (chart.catAxisHidden ? w * 0.03 : w * 0.22) + valTitleW + legLeftW;
+    pad.b = (chart.valAxisHidden ? h * 0.02 : h * 0.08) + catTitleH + legBottomH;
   }
 
   drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
@@ -349,7 +567,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   if (!chart.valAxisHidden) {
     for (let si = 0; si <= steps; si++) {
       const val = si * step;
-      const label = pct ? `${Math.round(val)}%` : formatChartVal(val);
+      const label = pct
+        ? `${Math.round(val)}%`
+        : formatChartValWithCode(val, chart.valAxisFormatCode);
       if (!isH) {
         const gy = py0 + ph - (val / axMax) * ph;
         ctx.strokeStyle = si === 0 ? '#aaa' : gridColor;
@@ -375,10 +595,28 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
   }
 
+  // Bar cluster geometry — ECMA-376 §21.2.2.13 (gapWidth = % of bar width
+  // between categories, default 150) and §21.2.2.25 (overlap = signed % of
+  // bar width within a cluster, default 0). Within a cluster the pitch
+  // between consecutive bars is `barW * (1 - overlap/100)`, so with N series:
+  //   clusterWidth = barW + (N - 1) * barW * (1 - overlap/100)
+  //   catGap       = clusterWidth + barW * gapWidth/100
+  //                = barW * (1 + (N-1) * (1 - overlap/100) + gapWidth/100)
+  // Solving for barW gives the formula below. Stacked charts render one bar
+  // per category so we treat them as N=1 and overlap=0.
   const catGap = !isH ? pw / n : ph / n;
-  const barW   = catGap * (stacked ? 0.6 : 0.6 / Math.max(1, barSeries.length));
-  const clusterGap = stacked ? 0 : catGap * 0.6 / Math.max(1, barSeries.length);
-  const catStart   = catGap * 0.2;
+  const nSeriesEffective = stacked ? 1 : Math.max(1, barSeries.length);
+  const overlapPct  = stacked ? 0 : (chart.barOverlap ?? 0);
+  const gapWidthPct = chart.barGapWidth ?? 150;
+  const denom = 1 + (nSeriesEffective - 1) * (1 - overlapPct / 100) + gapWidthPct / 100;
+  const barW  = catGap / denom;
+  // Pitch between bars within a cluster (not the gap — the left-edge to
+  // left-edge distance). Kept named `clusterGap` for continuity with the
+  // prior implementation, which also used it as a pitch.
+  const clusterGap = stacked ? 0 : barW * (1 - overlapPct / 100);
+  const clusterWidth = barW + (nSeriesEffective - 1) * clusterGap;
+  // Center the cluster inside the category slot.
+  const catStart   = (catGap - clusterWidth) / 2;
 
   for (let ci = 0; ci < n; ci++) {
     let stackOffset = 0;
@@ -403,24 +641,51 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barW, barH);
         if (chart.showDataLabels && val > 0) {
-          const lsz = Math.max(7, Math.min(10, barW * 0.7));
+          const lsz = Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
-          ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-          ctx.fillText(pct ? `${Math.round(val)}%` : formatChartVal(val), bx + barW / 2, by - 1);
+          const text = pct
+            ? `${Math.round(val)}%`
+            : formatChartValWithCode(
+                val,
+                chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+              );
+          drawBarDataLabel(
+            ctx, text,
+            bx, by, barW, barH,
+            'vertical',
+            chart.dataLabelPosition ?? null,
+            chart.dataLabelFontColor ?? null,
+          );
         }
       } else {
+        // Excel renders horizontal clustered bars with series 0 at the BOTTOM
+        // of each category cluster (so the legend's top entry matches the bar
+        // at the top of the plot). Reverse the per-series offset so `order=0`
+        // ends up at the bottom; stacked horizontal bars use a single anchor.
+        const siVisual = stacked ? si : (barSeries.length - 1 - si);
         const by = stacked
           ? py0 + (n - 1 - ci) * catGap + catStart
-          : py0 + (n - 1 - ci) * catGap + catStart + si * clusterGap;
+          : py0 + (n - 1 - ci) * catGap + catStart + siVisual * clusterGap;
         const barL = (val / axMax) * pw;
         const bx   = stacked ? px0 + (stackOffset / axMax) * pw : px0;
         ctx.fillStyle = color;
         ctx.fillRect(bx, by, barL, barW);
         if (chart.showDataLabels && val > 0) {
-          const lsz = Math.max(7, Math.min(10, barW * 0.7));
+          const lsz = Math.max(7, Math.min(11, barW * 0.6));
           ctx.font = `bold ${lsz}px sans-serif`;
-          ctx.fillStyle = '#333'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-          ctx.fillText(pct ? `${Math.round(val)}%` : formatChartVal(val), bx + barL + 2, by + barW / 2);
+          const text = pct
+            ? `${Math.round(val)}%`
+            : formatChartValWithCode(
+                val,
+                chart.dataLabelFormatCode ?? s.valFormatCode ?? null,
+              );
+          drawBarDataLabel(
+            ctx, text,
+            bx, by, barL, barW,
+            'horizontal',
+            chart.dataLabelPosition ?? null,
+            chart.dataLabelFontColor ?? null,
+          );
         }
       }
       if (stacked) stackOffset += val;
@@ -472,7 +737,13 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     }
   }
 
-  drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
+  // Horizontal clustered bars: Excel mirrors the series order between the
+  // plot and the legend so the legend's first entry matches the top bar. We
+  // already flipped the bar rendering; reverse the legend series too.
+  const legendChart = isH && !stacked
+    ? { ...chart, series: [...chart.series].reverse() }
+    : chart;
+  drawLegendForLayout(ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
 }
@@ -562,7 +833,7 @@ function renderLineChart(
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy);
       ctx.fillStyle = '#555'; ctx.textAlign = 'right';
-      ctx.fillText(formatChartVal(v), px0 - 6, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 6, gy);
     }
   }
 
@@ -698,7 +969,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
       ctx.lineWidth = si === 0 ? 1 : 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right';
-      ctx.fillText(formatChartVal(v), px0 - 4, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
@@ -1012,7 +1283,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5;
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      ctx.fillText(formatChartVal(v), px0 - 4, gy);
+      ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
   ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
