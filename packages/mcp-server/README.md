@@ -6,17 +6,30 @@ Agents can ask questions like *"What formulas are in Sheet1?"* or *"Extract all 
 
 ## Installation
 
-**Prerequisites:** [Rust toolchain](https://rustup.rs/) (stable)
+**Prerequisites:** [Rust toolchain](https://rustup.rs/) (stable, 1.75+)
+
+> **Note:** This is a pure-Rust binary. You do **not** need Node.js, npm, or pnpm — those are only required for the browser renderer packages in the rest of the monorepo.
 
 ```bash
-# Install the binary globally
-cargo install --path packages/mcp-server
+# 1. Clone the repository
+git clone https://github.com/yukiyokotani/office-open-xml-viewer.git
+cd office-open-xml-viewer
 
-# Verify
-ooxml-mcp-server --help   # should print nothing and wait on stdin (MCP stdio mode)
+# 2. Install the binary (builds the Rust parsers automatically)
+cargo install --path packages/mcp-server
 ```
 
-The binary is placed in `~/.cargo/bin/ooxml-mcp-server` (make sure `~/.cargo/bin` is on `PATH`).
+The binary lands in `~/.cargo/bin/ooxml-mcp-server`. Confirm it is on your `PATH`:
+
+```bash
+which ooxml-mcp-server   # → /Users/you/.cargo/bin/ooxml-mcp-server
+```
+
+If `~/.cargo/bin` is not on `PATH`, add this to your shell profile (`~/.zshrc`, `~/.bashrc`, …):
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
 
 ---
 
