@@ -1,6 +1,6 @@
 import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
-  ViewportRange, RenderViewportOptions,
+  ViewportRange, RenderViewportOptions, TextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
@@ -1972,6 +1972,7 @@ interface RenderContext {
   commentCells: Set<string>;
   /** row:col → table-style overlay (bold header, banded rows, borders). */
   tableStyleMap: Map<string, TableCellStyle>;
+  onTextRun?: (info: TextRunInfo) => void;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2747,6 +2748,10 @@ function renderQuadrant(
       }
 
       ctx.restore();
+
+      if (text && rc.onTextRun) {
+        rc.onTextRun({ text, x: cx, y: cy, width: cellW, height: cellH, row: rowIndex, col: colIndex });
+      }
     }
   }
 
@@ -2874,6 +2879,7 @@ export function renderViewport(
     hyperlinkMap,
     commentCells,
     tableStyleMap,
+    onTextRun: opts.onTextRun,
   };
 
   // Canvas areas for each quadrant

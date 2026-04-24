@@ -467,6 +467,21 @@ export interface ViewportRange {
   cols: number;
 }
 
+/** Emitted once per cell that has text, with the cell's canvas-pixel bounds. */
+export interface TextRunInfo {
+  text: string;
+  /** Canvas CSS-pixel x of the cell's top-left corner. */
+  x: number;
+  /** Canvas CSS-pixel y of the cell's top-left corner. */
+  y: number;
+  /** Cell width in canvas CSS pixels. */
+  width: number;
+  /** Cell height in canvas CSS pixels. */
+  height: number;
+  row: number;
+  col: number;
+}
+
 export interface RenderViewportOptions {
   width?: number;
   height?: number;
@@ -481,6 +496,8 @@ export interface RenderViewportOptions {
   cellScale?: number;
   /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
   loadedImages?: Map<string, HTMLImageElement>;
+  /** Called once per cell that contains text, with canvas-pixel position and cell address. */
+  onTextRun?: (info: TextRunInfo) => void;
 }
 
 export type WorkerRequest =
