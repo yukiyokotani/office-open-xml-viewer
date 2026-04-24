@@ -323,21 +323,70 @@ function formatCellValue(
   styles: Styles,
   cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
 ): string {
-  if (cell.value.type !== 'number') return cellValueText(cell.value);
+  // Resolve the effective format once so both the numeric and text paths
+  // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.17).
+  const xf = styles.cellXfs[cell.styleIndex ?? 0];
+  const styleNumFmtId = xf?.numFmtId ?? 0;
+  const styleFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId)?.formatCode ?? null;
+  const effectiveFmtId = cfNumFmt?.numFmtId ?? styleNumFmtId;
+  const effectiveFmt = cfNumFmt?.formatCode ?? styleFmt;
+
+  // Non-numeric cells still need to honour the 4th format section (text).
+  // §18.8.30: format sections are positive;negative;zero;text. An empty text
+  // section hides the value (Excel's `;;;` trick used for chart-placeholder
+  // cells like D3 in the holiday-budget sample), and `@` substitutes the
+  // original text. Cells without a 4-section format pass through unchanged.
+  if (cell.value.type !== 'number') {
+    const text = cellValueText(cell.value);
+    return effectiveFmt ? applyTextSection(text, effectiveFmt) : text;
+  }
+
   // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
   // save, which the viewer would otherwise show as a stale date. Recompute
   // them against the current system clock at render time.
   const num = recomputeVolatile(cell.formula) ?? cell.value.number;
-  // A matched CF dxf numFmt overrides the cell's own style numFmt (ECMA-376
-  // §18.8.17 — e.g. the first day of a new month in a calendar flipping from
-  // `d` to `m"月"d"日"`).
-  if (cfNumFmt) {
-    return applyFormat(num, cfNumFmt.numFmtId, cfNumFmt.formatCode);
+  return applyFormat(num, effectiveFmtId, effectiveFmt);
+}
+
+/**
+ * Apply the 4th section (text section) of an Excel number format to a text
+ * value. ECMA-376 §18.8.30:
+ *   - Fewer than 4 sections → text passes through unchanged (Excel default).
+ *   - Empty text section   → the value is hidden.
+ *   - `@` in the section   → substituted by the original text.
+ *   - Quoted / escaped literals are emitted; `[...]` metadata and
+ *     `_`/`*` pad pairs are dropped (same conventions as the numeric path).
+ */
+function applyTextSection(text: string, formatCode: string): string {
+  const sections = formatCode.split(';');
+  if (sections.length < 4) return text;
+  const section = sections[3];
+  if (section === '') return '';
+  let out = '';
+  let i = 0;
+  while (i < section.length) {
+    const ch = section[i];
+    if (ch === '"') {
+      i++;
+      while (i < section.length && section[i] !== '"') out += section[i++];
+      if (i < section.length) i++;
+    } else if (ch === '\\') {
+      if (i + 1 < section.length) out += section[i + 1];
+      i += 2;
+    } else if (ch === '[') {
+      while (i < section.length && section[i] !== ']') i++;
+      if (i < section.length) i++;
+    } else if (ch === '@') {
+      out += text;
+      i++;
+    } else if (ch === '_' || ch === '*') {
+      i += 2;
+    } else {
+      out += ch;
+      i++;
+    }
   }
-  const xf = styles.cellXfs[cell.styleIndex ?? 0];
-  const numFmtId = xf?.numFmtId ?? 0;
-  const customFmt = styles.numFmts?.find(f => f.numFmtId === numFmtId);
-  return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
+  return out;
 }
 
 /** If `formula` is a volatile builtin (TODAY/NOW), return the current Excel
