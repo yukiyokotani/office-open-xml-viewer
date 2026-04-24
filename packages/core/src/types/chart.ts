@@ -98,6 +98,23 @@ export interface ChartModel {
   dataLabelFontSizeHpt: number | null;
   /** Waterfall subtotal category indices. */
   subtotalIndices: number[];
+  /** `<c:legend><c:manualLayout>` absolute placement fractions of the chart
+   *  space (ECMA-376 §21.2.2.31). Overrides the default side-based legend
+   *  rectangle while still letting `legendPos` decide which side of the plot
+   *  gets the reserved band. null = use default layout. */
+  legendManualLayout?: LegendManualLayout | null;
+}
+
+export interface LegendManualLayout {
+  /** `"edge"` = `x`/`y` are fractions from top-left of chart space;
+   *  `"factor"` = fractions offset from the default position. */
+  xMode: string;
+  yMode: string;
+  /** Fractions of chart space width/height. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface ChartRect {

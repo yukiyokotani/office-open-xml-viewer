@@ -138,7 +138,10 @@ pub struct ChartSeries {
     pub categories: Vec<String>,
     /// Numeric values; `None` = missing data point.
     pub values: Vec<Option<f64>>,
-    /// Explicit fill color hex (from c:spPr/a:solidFill/a:srgbClr). None = use palette.
+    /// Explicit fill color hex. When the series has a `<c:spPr>` fill we resolve
+    /// it at parse time; otherwise we fall back to `theme.accent[idx+1]` (the
+    /// default Excel palette, keyed by `<c:idx>` per ECMA-376 §21.2.2.27) so the
+    /// renderer doesn't need theme access. None only when neither applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// Whether to draw data-point markers on line/scatter series. Resolved at
@@ -206,6 +209,37 @@ pub struct ChartData {
     /// Value axis tick-label font size in hundredths of a point.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_font_size_hpt: Option<i32>,
+    /// Outer `<c:chartSpace><c:spPr>` fill resolution (ECMA-376 §21.2.2.5).
+    /// `Some(hex)` for `<a:solidFill>`, `None` for `<a:noFill>` or when spPr is
+    /// absent *and* no explicit fill is declared. An absent `chart_bg` on the
+    /// JSON side (serde skips None) tells the renderer "no outer frame" —
+    /// i.e. transparent, so the underlying cell panel shows through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_bg: Option<String>,
+    /// True when the parser saw a `<c:chartSpace><c:spPr>` element at all.
+    /// Lets the renderer distinguish "spec explicitly said noFill" (present
+    /// but `chart_bg` is None) from "no spPr — use the default opaque white"
+    /// (absent).
+    pub has_chart_sp_pr: bool,
+    /// `<c:legend><c:layout><c:manualLayout>` absolute placement (ECMA-376
+    /// §21.2.2.31). All four fractions are relative to the chart space.
+    /// None = use the default side-based layout from `legend_pos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend_manual_layout: Option<LegendManualLayout>,
+}
+
+/// `<c:manualLayout>` coordinates for a legend (ECMA-376 §21.2.2.31). Fractions
+/// are of the chart space's width/height. `xMode`/`yMode` select between "edge"
+/// (fraction from top-left) and "factor" (fraction from the default position).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LegendManualLayout {
+    pub x_mode: String,
+    pub y_mode: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
@@ -2655,6 +2689,57 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
             .find(|n| n.tag_name().name() == "legendPos" && n.tag_name().namespace() == Some(c_ns))
             .and_then(|p| p.attribute("val").map(|s| s.to_string()))
     });
+    // Legend <c:layout><c:manualLayout> (ECMA-376 §21.2.2.31) — when present,
+    // gives explicit x/y/w/h fractions of the chart space. Used by the Excel
+    // templates that position a top legend into a narrow band, e.g. over the
+    // left half of the chart. We just collect the raw fractions here; the
+    // renderer decides whether to honor `edge` vs `factor` placement.
+    let legend_manual_layout = legend_node.and_then(|ln| {
+        let layout = ln.children()
+            .find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns))?;
+        let manual = layout.children()
+            .find(|n| n.tag_name().name() == "manualLayout" && n.tag_name().namespace() == Some(c_ns))?;
+        let val = |tag: &str| manual.children()
+            .find(|n| n.tag_name().name() == tag && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val").and_then(|v| v.parse::<f64>().ok()));
+        let mode = |tag: &str| manual.children()
+            .find(|n| n.tag_name().name() == tag && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val").map(|v| v.to_string()))
+            .unwrap_or_else(|| "edge".to_string());
+        Some(LegendManualLayout {
+            x_mode: mode("xMode"),
+            y_mode: mode("yMode"),
+            x: val("x").unwrap_or(0.0),
+            y: val("y").unwrap_or(0.0),
+            w: val("w").unwrap_or(0.0),
+            h: val("h").unwrap_or(0.0),
+        })
+    });
+
+    // `<c:chartSpace><c:spPr>` outer fill (ECMA-376 §21.2.2.5). When the
+    // element exists and carries `<a:noFill/>` the chart space is
+    // transparent — this sample explicitly does that so the underlying
+    // gray cell panel shows through. `<a:solidFill>` is resolved against
+    // the theme just like series fills. When the element is absent we leave
+    // `chart_bg` unset and tell the adapter to use the default opaque white
+    // via `has_chart_sp_pr=false`.
+    let chart_space_root = doc.descendants()
+        .find(|n| n.tag_name().name() == "chartSpace" && n.tag_name().namespace() == Some(c_ns));
+    let chart_sp_pr = chart_space_root.and_then(|cs| cs.children()
+        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns)));
+    let has_chart_sp_pr = chart_sp_pr.is_some();
+    let chart_bg = chart_sp_pr.and_then(|sp| {
+        // Walk direct children: noFill → None, solidFill → resolved color.
+        let mut resolved: Option<String> = None;
+        for ch in sp.children().filter(|n| n.is_element()) {
+            match ch.tag_name().name() {
+                "noFill"    => { return None; }
+                "solidFill" => { resolved = resolve_fill_color(&ch, theme_colors); break; }
+                _ => {}
+            }
+        }
+        resolved
+    });
 
     // Find c:plotArea
     let plot_area = chart_root.children()
@@ -2805,6 +2890,9 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
         val_axis_format_code,
+        chart_bg,
+        has_chart_sp_pr,
+        legend_manual_layout,
     })
 }
 
@@ -2888,13 +2976,25 @@ fn extract_chart_title(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> 
 }
 
 /// Parse one `<c:ser>` element.
-/// Resolve the fill color under `c:spPr/a:solidFill` for a chart series.
-/// Supports `a:srgbClr` (explicit hex) and `a:schemeClr` (theme accent/dark/light).
+/// Resolve the fill color from a single DrawingML fill element. The caller
+/// passes either a `<c:spPr>` (in which case we look for the first `<a:solidFill>`
+/// **as a direct child** to avoid picking up text fills nested under `<c:dLbls>`
+/// / `<c:txPr>`) or the `<a:solidFill>` directly. Supports `a:srgbClr` (explicit
+/// hex) and `a:schemeClr` (theme accent/dark/light).
 /// Theme colors use drawingML names (`accent1`..`accent6`, `dk1`/`dk2`/`lt1`/`lt2`)
-/// which map to the parser's natural-order theme array (accent_n at index 3+n,
-/// dk1@0, lt1@1, dk2@2, lt2@3).
-fn resolve_series_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
-    for n in node.descendants() {
+/// which map to the parser's natural-order theme array (dk1@0, lt1@1, dk2@2,
+/// lt2@3, accent1@4 … accent6@9).
+fn resolve_fill_color(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    // Accept either a `<a:solidFill>` directly or a `<c:spPr>` whose first
+    // fill-ish child is `<a:solidFill>`. Looking at *direct* children (not
+    // descendants) is intentional — chart series often carry label/axis text
+    // colors under `c:dLbls`/`c:txPr` which must NOT be misread as fill.
+    let solid = if fill_node.tag_name().name() == "solidFill" {
+        Some(*fill_node)
+    } else {
+        fill_node.children().find(|n| n.is_element() && n.tag_name().name() == "solidFill")
+    }?;
+    for n in solid.children().filter(|n| n.is_element()) {
         let tag = n.tag_name().name();
         if tag == "srgbClr" {
             if let Some(v) = n.attribute("val") {
@@ -2929,6 +3029,14 @@ fn resolve_series_color(node: &roxmltree::Node, theme_colors: &[String]) -> Opti
     None
 }
 
+/// Series fill color from `<c:ser><c:spPr><a:solidFill>`. Returns None when
+/// the series has no direct `<c:spPr>` or its fill isn't a recognised solid.
+fn resolve_series_color(ser_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    let sp_pr = ser_node.children()
+        .find(|n| n.is_element() && n.tag_name().name() == "spPr")?;
+    resolve_fill_color(&sp_pr, theme_colors)
+}
+
 fn parse_chart_series(
     node: &roxmltree::Node,
     c_ns: &str,
@@ -2937,6 +3045,16 @@ fn parse_chart_series(
     theme_colors: &[String],
 ) -> ChartSeries {
     let name = extract_series_name(node, c_ns);
+
+    // `<c:idx val>` (ECMA-376 §21.2.2.27) — the canonical series index Excel
+    // uses for default color selection. When absent, fall back to 0 so we
+    // still produce a deterministic palette pick. `<c:order>` is the display
+    // order (legend / stacking) and is intentionally ignored for coloring.
+    let idx: usize = node.children()
+        .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
 
     // For scatter: xVal → categories (as strings), yVal → values
     // For others:  cat  → categories,             val  → values
@@ -2947,7 +3065,17 @@ fn parse_chart_series(
 
     // Series fill color from c:spPr/a:solidFill (supports a:srgbClr and a:schemeClr).
     // For schemeClr, resolves "accentN"/"dk1"/etc. against the workbook theme.
-    let color = resolve_series_color(node, theme_colors);
+    //
+    // When the series has no explicit fill, Excel's default palette assigns
+    // `theme.accent[idx % 6 + 1]` — i.e. accent1, accent2, … cycling by
+    // `<c:idx>`. That's the rule behind "first series = green, second = red"
+    // when the theme's accent1/accent2 are green/red. We inline that
+    // resolution here so the renderer doesn't need theme access.
+    let color = resolve_series_color(node, theme_colors)
+        .or_else(|| {
+            // Theme order in `theme_colors`: dk1@0, lt1@1, dk2@2, lt2@3, accent1@4 … accent6@9.
+            theme_colors.get(4 + (idx % 6)).map(|c| c.trim_start_matches('#').to_lowercase())
+        });
 
     // Marker visibility (ECMA-376 §21.2.2.32 — c:marker/c:symbol default is
     // "none"). A per-series <c:marker><c:symbol> overrides; otherwise fall

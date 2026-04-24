@@ -157,6 +157,24 @@ function drawLegendForLayout(
   topBand: number,
 ): void {
   if (!leg) return;
+  // `<c:legend><c:manualLayout>` (§21.2.2.31) wins over the default side-based
+  // rectangle. We honor the `edge` placement mode — fractions are measured
+  // from the top-left of the chart space — which matches what Excel's built-in
+  // templates emit. `factor` mode (offset from default) is rarer; fall back to
+  // the reserved band in that case rather than guess.
+  const ml = chart.legendManualLayout;
+  if (ml && ml.xMode === 'edge' && ml.yMode === 'edge' && ml.w > 0 && ml.h > 0) {
+    const lx = x + ml.x * w;
+    const ly = y + ml.y * h;
+    const lw = ml.w * w;
+    const lh = ml.h * h;
+    // Legend is always a horizontal strip when placed on top/bottom; vertical
+    // when on left/right. A manual box wider than tall implies horizontal —
+    // matches Excel's one-row legend rendering for top/bottom manual layouts.
+    const orient = lw >= lh ? 'horizontal' : 'vertical';
+    drawLegend(ctx, chart.series, lx, ly, lw, lh, orient);
+    return;
+  }
   switch (leg.side) {
     case 'r':
       drawLegend(ctx, chart.series, x + w - leg.reserveW + 4, py0, leg.reserveW - 8, ph);

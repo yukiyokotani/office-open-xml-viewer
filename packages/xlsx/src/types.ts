@@ -136,6 +136,25 @@ export interface ChartData {
   catAxisFontSizeHpt?: number | null;
   /** Value axis tick-label font size in hpt. */
   valAxisFontSizeHpt?: number | null;
+  /** Outer chartSpace background (ECMA-376 §21.2.2.5 `<c:spPr>`). Hex without
+   *  '#' for a solid fill, undefined for `<a:noFill/>` or an absent spPr.
+   *  Combine with `hasChartSpPr` to distinguish explicit-transparent from
+   *  default-opaque-white. */
+  chartBg?: string | null;
+  /** True when the parser saw a `<c:chartSpace><c:spPr>` element. Lets the
+   *  adapter tell "spec said noFill → transparent" from "no spPr → default". */
+  hasChartSpPr?: boolean;
+  /** `<c:legend><c:manualLayout>` fractions of chart space (§21.2.2.31). */
+  legendManualLayout?: LegendManualLayout | null;
+}
+
+export interface LegendManualLayout {
+  xMode: string;
+  yMode: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface ChartAnchor {

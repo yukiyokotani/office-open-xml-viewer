@@ -3499,9 +3499,13 @@ function adaptChartData(chart: ChartData): ChartModel {
     catAxisHidden: false,
     valAxisHidden: false,
     plotAreaBg: null,
-    // Excel charts default to an opaque white chart area with a light border.
-    // Keep that appearance; pptx sets chartBg from the chartSpace spPr instead.
-    chartBg: 'FFFFFF',
+    // `<c:chartSpace><c:spPr>` resolution: when the spPr element was present
+    // we honor whatever it said (solid hex or `<a:noFill/>` → null =
+    // transparent). When spPr was absent the file is relying on the Excel
+    // default, which is an opaque white chart area — keep that so legacy
+    // charts still get their familiar frame.
+    chartBg: chart.hasChartSpPr ? (chart.chartBg ?? null) : 'FFFFFF',
+    legendManualLayout: chart.legendManualLayout ?? null,
     // <c:legend> is the authoritative signal: present → show, absent → hide.
     // A single-series bar chart in Excel typically omits <c:legend>, so we
     // must honor that rather than deriving from series count.
