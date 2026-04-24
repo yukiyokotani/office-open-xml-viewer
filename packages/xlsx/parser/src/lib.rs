@@ -3289,6 +3289,56 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 shared_categories = s.categories.clone();
             }
             all_series.push(s);
+
+            // Per-series `<c:ser><c:dLbls>` fallback for chart-level
+            // properties that Excel commonly writes on each series instead
+            // of (or in addition to) the chart-level `<c:dLbls>`. Per
+            // ECMA-376 §21.2.2.47 a series-level dLbls applies to that
+            // series's data points; for the renderer we only need one
+            // value, so the first series encountered "wins". This is how
+            // the default-color/position/format travels when Excel emits
+            // `<c:dLblPos val="inBase"/>` + `<c:txPr>` per series rather
+            // than on the chart.
+            if let Some(ser_dlbls) = ser_node.children()
+                .find(|n| n.is_element()
+                    && n.tag_name().name() == "dLbls"
+                    && n.tag_name().namespace() == Some(c_ns))
+            {
+                for d in ser_dlbls.children().filter(|n| n.is_element()) {
+                    match d.tag_name().name() {
+                        "showVal" | "showPercent" => {
+                            if d.attribute("val").unwrap_or("1") != "0" {
+                                show_data_labels = true;
+                            }
+                        }
+                        "dLblPos" => {
+                            if data_label_position.is_none() {
+                                data_label_position = d.attribute("val").map(|s| s.to_string());
+                            }
+                        }
+                        "numFmt" => {
+                            if data_label_format_code.is_none() {
+                                data_label_format_code = d.attribute("formatCode")
+                                    .map(|s| s.to_string())
+                                    .filter(|s| !s.is_empty() && s != "General");
+                            }
+                        }
+                        "txPr" => {
+                            if data_label_font_color.is_none() {
+                                for desc in d.descendants().filter(|n| n.is_element()) {
+                                    if desc.tag_name().namespace() != Some(a_ns) { continue; }
+                                    if desc.tag_name().name() != "solidFill" { continue; }
+                                    if let Some(c) = resolve_fill_color(&desc, theme_colors) {
+                                        data_label_font_color = Some(c);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
