@@ -83,18 +83,33 @@ export class XlsxWorkbook {
     const ctx = (target as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D;
     ctx.scale(dpr, dpr);
 
-    // Preload any image bitmaps that this sheet uses (data URLs → HTMLImageElement)
-    if (ws.images && ws.images.length > 0) {
+    // Preload any image bitmaps that this sheet uses (data URLs → HTMLImageElement).
+    // Images can appear either as top-level twoCellAnchor `<xdr:pic>` (captured
+    // in `ws.images`) or as a leaf inside an `<xdr:grpSp>` (captured as a
+    // ShapeGeom with `type: 'image'`). We collect both so the renderer never
+    // hits a missing bitmap during the synchronous draw pass.
+    const dataUrlsToLoad: string[] = [];
+    if (ws.images) {
+      for (const img of ws.images) dataUrlsToLoad.push(img.dataUrl);
+    }
+    if (ws.shapeGroups) {
+      for (const grp of ws.shapeGroups) {
+        for (const shape of grp.shapes) {
+          if (shape.geom.type === 'image') dataUrlsToLoad.push(shape.geom.dataUrl);
+        }
+      }
+    }
+    if (dataUrlsToLoad.length > 0) {
       await Promise.all(
-        ws.images.map(async (img) => {
-          if (this.imageCache.has(img.dataUrl)) return;
+        dataUrlsToLoad.map(async (url) => {
+          if (this.imageCache.has(url)) return;
           const el = new Image();
-          el.src = img.dataUrl;
+          el.src = url;
           await new Promise<void>((resolve, reject) => {
             el.onload = () => resolve();
             el.onerror = () => reject(new Error('image decode failed'));
           });
-          this.imageCache.set(img.dataUrl, el);
+          this.imageCache.set(url, el);
         }),
       ).catch(() => { /* swallow image failures so the grid still renders */ });
     }

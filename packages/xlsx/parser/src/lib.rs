@@ -272,6 +272,10 @@ pub enum ShapeGeom {
     Preset { name: String },
     /// Freeform path geometry (ECMA-376 §20.1.9.2 `a:custGeom`).
     Custom { paths: Vec<PathInfo> },
+    /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
+    /// `data_url` is a `data:<mime>;base64,…` URL produced from the drawing's
+    /// relationship target (png/jpg/gif/…).
+    Image { data_url: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -2059,11 +2063,16 @@ fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Opt
             }
             "schemeClr" => {
                 let v = c.attribute("val")?;
+                // `theme_colors` is collected in OOXML clrScheme document
+                // order: dk1, lt1, dk2, lt2, accent1..accent6, hlink,
+                // folHlink. See `parse_theme_colors`. The earlier mapping
+                // here had dk1/lt1 and dk2/lt2 swapped which darkened
+                // shapes that painted "lt1" (the sheet paper colour).
                 let idx = match v {
-                    "lt1" | "bg1"    => Some(0),
-                    "dk1" | "tx1"    => Some(1),
-                    "lt2" | "bg2"    => Some(2),
-                    "dk2" | "tx2"    => Some(3),
+                    "dk1" | "tx1"    => Some(0),
+                    "lt1" | "bg1"    => Some(1),
+                    "dk2" | "tx2"    => Some(2),
+                    "lt2" | "bg2"    => Some(3),
                     "accent1"        => Some(4),
                     "accent2"        => Some(5),
                     "accent3"        => Some(6),
@@ -2164,6 +2173,7 @@ fn collect_shapes(
     scale_x: f64, scale_y: f64,
     trans_x: f64, trans_y: f64,
     theme_colors: &[String],
+    rid_urls: &HashMap<String, String>,
     out: &mut Vec<ShapeInfo>,
 ) {
     for child in node.children().filter(|n| n.is_element()) {
@@ -2197,7 +2207,7 @@ fn collect_shapes(
                 (scale_x, scale_y, trans_x, trans_y)
             };
             collect_shapes(&child, root_off_x, root_off_y, root_ext_x, root_ext_y,
-                           sx, sy, tx, ty, theme_colors, out);
+                           sx, sy, tx, ty, theme_colors, rid_urls, out);
         } else if tag == "sp" {
             let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
             let Some(sp_pr) = sp_pr else { continue; };
@@ -2258,14 +2268,59 @@ fn collect_shapes(
                 stroke_width,
                 geom,
             });
+        } else if tag == "pic" {
+            // `<xdr:pic>` leaf inside a group (ECMA-376 §20.5.2.17). The image
+            // binary is resolved via the drawing's .rels file; `rid_urls` maps
+            // each r:id to its pre-encoded `data:<mime>;base64,…` URL.
+            let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr) = sp_pr else { continue; };
+            let xfrm_node = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else { continue; };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
+            let rot_raw: f64 = xfrm_n.attribute("rot")
+                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+            // Resolve <a:blip r:embed="rIdN"/>. The r:embed attribute lives in
+            // the relationships namespace, not the drawingml namespace.
+            let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+            let pic_rid = child.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "blip")
+                .and_then(|b| {
+                    b.attributes()
+                        .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
+                        .map(|a| a.value().to_string())
+                });
+            let Some(rid) = pic_rid else { continue; };
+            let Some(data_url) = rid_urls.get(&rid) else { continue; };
+
+            let root_x = trans_x + scale_x * xfrm.off_x;
+            let root_y = trans_y + scale_y * xfrm.off_y;
+            let root_w = scale_x * xfrm.ext_x;
+            let root_h = scale_y * xfrm.ext_y;
+            if root_ext_x == 0.0 || root_ext_y == 0.0 { continue; }
+            let nx = (root_x - root_off_x) / root_ext_x;
+            let ny = (root_y - root_off_y) / root_ext_y;
+            let nw = root_w / root_ext_x;
+            let nh = root_h / root_ext_y;
+            if nw <= 0.0 || nh <= 0.0 { continue; }
+
+            out.push(ShapeInfo {
+                x: nx, y: ny, w: nw, h: nh,
+                rot: rot_raw / 60000.0,
+                fill_color: None,
+                stroke_color: None,
+                stroke_width: 0,
+                geom: ShapeGeom::Image { data_url: data_url.clone() },
+            });
         }
-        // Ignore `xdr:pic` / `xdr:cxnSp` / text elements for this minimal pass.
+        // Ignore `xdr:cxnSp` / text-only elements for this minimal pass.
     }
 }
 
 fn parse_shape_anchors(
     drawing_xml: &str,
     theme_colors: &[String],
+    rid_urls: &HashMap<String, String>,
 ) -> Vec<ShapeAnchor> {
     let Ok(doc) = roxmltree::Document::parse(drawing_xml) else { return Vec::new(); };
     let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
@@ -2319,7 +2374,7 @@ fn parse_shape_anchors(
 
         let mut shapes: Vec<ShapeInfo> = Vec::new();
         collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
-                       csx, csy, tx, ty, theme_colors, &mut shapes);
+                       csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
         if shapes.is_empty() { continue; }
 
         anchors.push(ShapeAnchor {
@@ -2350,9 +2405,46 @@ fn load_sheet_shape_groups(
     for target in drawing_targets {
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
         let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
-        all.extend(parse_shape_anchors(&drawing_xml, theme_colors));
+        let rid_urls = build_drawing_rid_urls(archive, &drawing_path);
+        all.extend(parse_shape_anchors(&drawing_xml, theme_colors, &rid_urls));
     }
     all
+}
+
+/// Build a `HashMap<rId, data-URL>` for every image (png/jpg/…) target in
+/// a drawing's `.rels` file. Used by `collect_shapes` to resolve `<xdr:pic>`
+/// leaves inside a group. Mirrors the logic in `parse_drawing_anchors` but
+/// eagerly encodes each referenced image so per-shape lookup is a single
+/// HashMap hit.
+fn build_drawing_rid_urls(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    drawing_path: &str,
+) -> HashMap<String, String> {
+    let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else {
+        return HashMap::new();
+    };
+    let rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+    let rels = read_zip_entry(archive, &rels_path)
+        .ok()
+        .map(|xml| parse_rels_map(&xml))
+        .unwrap_or_default();
+
+    let mut result: HashMap<String, String> = HashMap::new();
+    for (rid, target) in rels {
+        let lower = target.to_lowercase();
+        if !(lower.ends_with(".png") || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg") || lower.ends_with(".gif")
+            || lower.ends_with(".bmp")  || lower.ends_with(".webp"))
+        {
+            continue;
+        }
+        let media_path = resolve_zip_path(drawing_dir, &target);
+        if let Some(bytes) = read_zip_bytes(archive, &media_path) {
+            let mime = mime_from_ext(&media_path);
+            result.insert(rid, format!("data:{mime};base64,{}", B64.encode(&bytes)));
+        }
+    }
+    result
 }
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse
