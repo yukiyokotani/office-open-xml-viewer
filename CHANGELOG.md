@@ -4,6 +4,96 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.12.0 — 2026-04-25
+
+xlsx fidelity release focused on sample-1 ("Holiday shopping budget") and
+sample-10 ("Calendar"): static pivot/table **slicers** now render from the
+Office 2010 extension, **chart data labels** honor per-series `txPr`
+(white-on-bar) and the `<c:dLblPos>` / `<c:numFmt>` / `<c:gapWidth>` /
+`<c:overlap>` chart attributes, and several conditional-formatting / text
+layout fixes land for the calendar sample.
+
+### xlsx
+
+- **Static slicers** (Office 2010 extension `x14:slicerList`, §A.5): parse
+  `xl/slicers*.xml` + `slicerCaches/` and render the slicer button array
+  with its header and theme-resolved accent fill. Slicers for pivot and
+  table sources both lay out correctly; "in-filter" vs "out-of-filter"
+  button colors come from the slicerStyle dxfs.
+- **Chart bar gap + overlap** (§21.2.2.13 `c:gapWidth`, §21.2.2.25
+  `c:overlap`): bar cluster geometry now uses the spec formula
+  `clusterWidth = barW · (1 + (N-1)·(1-overlap/100) + gapWidth/100)` so
+  paired bars in a two-series chart show the expected gap between
+  category clusters instead of flush-packed bars.
+- **Chart data-label position and number formats** (§21.2.2.16
+  `c:dLblPos`, §21.2.2.21 / .35 / .37): value-axis tick labels honor
+  `<c:valAx><c:numFmt>`, data labels honor `<c:dLbls><c:numFmt>` with a
+  per-series `<c:val><c:numRef><c:formatCode>` fallback, and labels
+  render at the requested position (`inBase` / `inEnd` / `ctr` /
+  `outEnd`) with collision-safe placement on horizontal bars.
+- **Per-series data-label font color** (§21.2.2.47 `c:ser/c:dLbls`):
+  Excel frequently writes the label `txPr` (including `schemeClr
+  val="bg1"` → white) on each series rather than on the chart-level
+  `<c:dLbls>`. The parser now falls back to the first series's dLbls
+  when the chart-level block omits the color, fixing white-on-bar
+  labels.
+- **Horizontal bar series ordering** (§21.2.2.28 `c:order`,
+  §21.2.2.40 `c:delete`): series are sorted by their declared order
+  and the visual stack is reversed for horizontal bars so the first
+  series appears on top (matches Excel). `<c:catAx><c:delete val="1"/>`
+  and `<c:valAx><c:delete>` hide the corresponding axis band, freeing
+  padding for the chart itself.
+- **Pie/doughnut, radar, waterfall data-label formats**: the same
+  `valAxisFormatCode` / `dataLabelFormatCode` plumbing flows through
+  non-bar renderers, so value labels on those types pick up the file's
+  Excel number-format code (e.g. `¥#,##0.00`).
+- **Transparent chart space + theme-palette series colors**
+  (§21.2.2.39 `c:chartSpace/c:spPr`): `<a:noFill>` on the chart space
+  keeps the underlying cell grid visible behind the chart (Excel's
+  default). Series `<c:spPr>` with `<a:schemeClr val="accent1"/>` etc.
+  now resolves against the file theme instead of falling through to
+  the renderer's built-in palette.
+- **Legend manual layout** (§21.2.2.31 `c:legend/c:manualLayout`):
+  absolute `x`/`y`/`w`/`h` placement fractions override the default
+  side-of-plot legend rectangle while `legendPos` still chooses which
+  side of the plot gets the reserved band.
+- **dxf numFmt override from conditional formatting** (§18.3.1.10
+  `dxf/numFmt`): `cellIs` / `top10` / `aboveAverage` etc. CF rules that
+  point to a dxf with a `<numFmt>` now apply that format code when the
+  rule matches, not just the fill and font overrides.
+- **dxf patternType=none as explicit fill clear**: treats `<patternFill
+  patternType="none"/>` inside a dxf as an explicit override that
+  unsets the base cell fill, not as "inherit base fill". Matches Excel
+  UI where the CF explicitly removes the background.
+- **4th format-section (text) honored** (§18.8.30, `;;;` idiom):
+  `#,##0;[Red](#,##0);0;@` now applies the fourth section to text-typed
+  cells; a `;;;` code correctly hides both numeric *and* text cells.
+- **`notContainsBlanks` conditional formatting** (§18.18.15
+  `ST_CfType`): the opposite of `containsBlanks`; rules of this type
+  now paint non-empty cells instead of silently skipping all cells.
+- **`<xdr:grpSp>` custom geometry** (§20.5.2.17): group-shape children
+  with `<a:custGeom>` inherit the group's frame transform, so grouped
+  freeform icons draw at the correct position and scale.
+- **Japanese calendar date format `ge.m.d`** (§18.8.30): era-prefixed
+  numeric dates (`R7.4.25`) render alongside the existing era name /
+  era year / weekday codes landed in 0.10.0.
+- **Image in grouped anchor** (`<xdr:grpSp>` + `<xdr:pic>`): pictures
+  nested inside a group anchor no longer drop; the group transform is
+  applied to the embedded image frame before rendering.
+- **CJK wrap on wrapText cells**: break opportunities between Kanji /
+  Hiragana / Katakana characters are recognized when `wrapText="1"`
+  is set, matching Excel's line-break behavior for Japanese text.
+- **CF over empty cells**: rules that previously required a cached
+  `<v>` now also evaluate empty cells against the `containsBlanks` /
+  `notContainsBlanks` / text operators.
+- **Scroll-flicker fix**: the virtual-scroll frame awaits the next
+  animation tick before clearing the canvas, eliminating the flash
+  of blank cells during fast scroll.
+- **`ShapeGeom::Image` JSON field**: serialized as `dataUrl` (camelCase)
+  to match the rest of the parser's JSON surface; fixes shape-image
+  rendering in downstream renderers that weren't converting the
+  snake_case variant.
+
 ## 0.11.0 — 2026-04-22
 
 xlsx fidelity release focused on sample-9 ("Gift budget and tracker"):

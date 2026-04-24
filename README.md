@@ -475,6 +475,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Charts (bar, line, area, radar) | ✅ |
 | | Sparklines | ❌ Not planned |
 | **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
+| | Slicers (static, Office 2010 extension) | ✅ |
 | | Pivot tables | ❌ Not planned |
 | | Data validation / comments | ❌ Not planned |
 
