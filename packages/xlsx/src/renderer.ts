@@ -1177,7 +1177,15 @@ function colorScaleAt(num: number, stops: CfStop[], stopValues: number[]): strin
 function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   if (!dxf) return;
   // First-match-wins (higher priority) for each property. See compileCf.
-  if (dxf.fill?.fgColor && !result.fill) result.fill = dxf.fill;
+  // A dxf fill overrides the cell's base fill in two cases:
+  //   • `<patternFill>` with a solid/non-empty color → paints that color
+  //   • `<patternFill patternType="none">` → explicitly CLEARS the base fill
+  //     (ECMA-376 §18.8.20). The sample-10 calendar relies on this: month
+  //     boundaries have a CF rule that clears the "inactive gray" base fill
+  //     so the row reads as a normal white cell.
+  if (dxf.fill && !result.fill && (dxf.fill.fgColor || dxf.fill.patternType === 'none')) {
+    result.fill = dxf.fill;
+  }
   if (dxf.font?.color && result.fontColor == null) result.fontColor = dxf.font.color;
   if (dxf.font?.bold && result.fontBold == null) result.fontBold = true;
   if (dxf.font?.italic && result.fontItalic == null) result.fontItalic = true;
