@@ -57,6 +57,11 @@ export interface TextRunInfo {
   shapeH: number;
   /** Shape rotation in degrees (clockwise). */
   rotation: number;
+  /**
+   * Additional rotation from a vertical text body (`vert="vert"` → 90,
+   * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
+   */
+  textBodyRotation?: number;
 }
 
 export type TextRunCallback = (run: TextRunInfo) => void;
@@ -489,7 +494,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       tx = x + insetX; ty = y + insetY;
       tw = w / Math.SQRT2; th = h / Math.SQRT2;
     }
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, onTextRun);
+    // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun);
     ctx.restore();
   }
 
@@ -2680,11 +2686,38 @@ function renderTextBody(
     // Centre of the bounding box remains fixed; swap w and h for the text layout.
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
+    const vertRot = isVert ? 90 : -90;
+
+    // Wrap onTextRun to convert from the rotated sub-frame back to the original
+    // shape frame so that _buildTextLayer can apply a single CSS rotation.
+    //
+    // In the recursive call the origin is (-bh/2, -bw/2) with axes (bh, bw).
+    // For a run at canvas (penX, cursorY) in that sub-frame:
+    //   inShapeX_rec = penX + bh/2,  inShapeY_rec = cursorY + bw/2
+    //
+    // We need the position in the *original* shape frame so that after
+    // CSS rotate(shapeRotation + vertRot) the span lands on the same pixel:
+    //   inShapeX_span = penX + bw/2 = inShapeX_rec - bh/2 + bw/2
+    //   inShapeY_span = cursorY + bh/2 = inShapeY_rec - bw/2 + bh/2
+    const wrappedOnTextRun: TextRunCallback | undefined = onTextRun
+      ? (run) => onTextRun({
+          ...run,
+          inShapeX: run.inShapeX - bh / 2 + bw / 2,
+          inShapeY: run.inShapeY - bw / 2 + bh / 2,
+          shapeX: bx,
+          shapeY: by,
+          shapeW: bw,
+          shapeH: bh,
+          rotation: shapeRotation,
+          textBodyRotation: vertRot,
+        })
+      : undefined;
+
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, onTextRun);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun);
     ctx.restore();
     return;
   }

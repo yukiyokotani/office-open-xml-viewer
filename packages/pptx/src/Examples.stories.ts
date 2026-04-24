@@ -47,15 +47,16 @@ function buildPptxTextLayer(layer: HTMLDivElement, runs: TextRunInfo[], cssWidth
 
   const shapeMap = new Map<string, HTMLDivElement>();
   for (const run of runs) {
-    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${run.rotation}`;
+    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
+    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
     if (!shapeMap.has(key)) {
       const div = document.createElement('div');
       div.style.cssText =
         `position:absolute;left:${run.shapeX}px;top:${run.shapeY}px;` +
         `width:${run.shapeW}px;height:${run.shapeH}px;pointer-events:all;overflow:hidden;`;
-      if (run.rotation !== 0) {
+      if (totalRot !== 0) {
         div.style.transformOrigin = 'center center';
-        div.style.transform = `rotate(${run.rotation}deg)`;
+        div.style.transform = `rotate(${totalRot}deg)`;
       }
       shapeMap.set(key, div);
       layer.appendChild(div);
