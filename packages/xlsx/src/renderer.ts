@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec, ShapeInfo,
+  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
 import { renderChart, type ChartModel } from '@silurus/ooxml-core';
 
@@ -2956,6 +2956,17 @@ export function renderViewport(
     );
   }
 
+  // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
+  if (worksheet.slicers && worksheet.slicers.length > 0) {
+    renderSlicers(
+      ctx, worksheet, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+    );
+  }
+
   // ── Row/col headers (drawn last, always on top) ──────────────
   renderHeaders(ctx, canvasW, canvasH,
     startRow, startCol, numRows, numCols,
@@ -3625,4 +3636,168 @@ function renderCharts(
     renderChart(ctx, adaptChartData(anchor.chart), { x: cx, y: cy, w: cw, h: ch }, ptToPx);
     ctx.restore();
   }
+}
+
+// ── renderSlicers ───────────────────────────────────────────────────────────
+//
+// Office 2010+ pivot / table slicer. We don't own a slicer engine, so this
+// renders a static button bank: header with the slicer caption, then one
+// button per saved item using the selection flags from the slicerCache. The
+// visual language (pale blue outline, white "selected" buttons on a darker
+// background, gray "deselected" buttons) intentionally mirrors Excel's
+// default slicer style — the workbook may ship a custom `slicerStyle` but
+// rendering that is deferred (the built-in look is already recognisable).
+
+const SLICER_HEADER_FONT = '600 12px "Meiryo UI", "Segoe UI", sans-serif';
+const SLICER_ITEM_FONT   = '11px "Meiryo UI", "Segoe UI", sans-serif';
+const SLICER_BG           = '#FFFFFF';
+const SLICER_BORDER       = '#BFBFBF';
+const SLICER_HEADER_BG    = '#F2F2F2';
+const SLICER_HEADER_FG    = '#404040';
+const SLICER_ITEM_SEL_BG  = '#FFFFFF';
+const SLICER_ITEM_SEL_FG  = '#000000';
+const SLICER_ITEM_SEL_BD  = '#A5A5A5';
+const SLICER_ITEM_OFF_BG  = '#E7E6E6';
+const SLICER_ITEM_OFF_FG  = '#A6A6A6';
+const SLICER_ITEM_OFF_BD  = '#C6C6C6';
+
+function renderSlicers(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+  const slicers = ws.slicers;
+  if (!slicers) return;
+
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  for (const anchor of slicers) {
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    const shX1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const shY1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const shX2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const shY2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+
+    const w = shX2 - shX1;
+    const h = shY2 - shY1;
+    if (w <= 0 || h <= 0) continue;
+
+    const x = scrollAreaX + (shX1 - scrollOriginSheetX) - scrollOffsetX;
+    const y = scrollAreaY + (shY1 - scrollOriginSheetY) - scrollOffsetY;
+
+    if (x + w < scrollAreaX || x > scrollAreaX + scrollAreaW) continue;
+    if (y + h < scrollAreaY || y > scrollAreaY + scrollAreaH) continue;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+    ctx.clip();
+
+    drawSlicerFrame(ctx, anchor.caption, anchor.items, x, y, w, h, cs);
+
+    ctx.restore();
+  }
+}
+
+function drawSlicerFrame(
+  ctx: CanvasRenderingContext2D,
+  caption: string,
+  items: SlicerItem[],
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  cs: number,
+): void {
+  // Outer frame (white with a soft gray hairline).
+  ctx.fillStyle = SLICER_BG;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = SLICER_BORDER;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  // Header band with caption.
+  const headerH = Math.max(20 * cs, 14);
+  ctx.fillStyle = SLICER_HEADER_BG;
+  ctx.fillRect(x + 1, y + 1, w - 2, headerH);
+  ctx.fillStyle = SLICER_HEADER_FG;
+  ctx.font = scaleFont(SLICER_HEADER_FONT, cs);
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  const headerPad = 6 * cs;
+  drawClippedText(ctx, caption, x + headerPad, y + headerH / 2 + 1, w - 2 * headerPad);
+
+  // Item buttons. Items expand to fill the available height (up to a
+  // minimum button size) and are clipped by the slicer rect. We don't
+  // implement scroll arrows because this renderer is non-interactive.
+  if (items.length === 0) return;
+  const gap = Math.max(1, Math.round(2 * cs));
+  const innerPad = 4 * cs;
+  const listX = x + innerPad;
+  const listY = y + headerH + innerPad;
+  const listW = w - 2 * innerPad;
+  const listH = h - headerH - 2 * innerPad;
+  if (listW <= 0 || listH <= 0) return;
+
+  // Prefer Excel's rough row height (~20 sheet-px) but compress if the
+  // slicer is shallow so at least the first items fit.
+  const preferredItemH = Math.max(18 * cs, 16);
+  const maxVisibleByH = Math.max(1, Math.floor((listH + gap) / (preferredItemH + gap)));
+  const visible = Math.min(items.length, maxVisibleByH);
+  const itemH = Math.min(preferredItemH, (listH - gap * (visible - 1)) / visible);
+  if (itemH <= 0) return;
+
+  ctx.font = scaleFont(SLICER_ITEM_FONT, cs);
+  const itemPad = 8 * cs;
+  for (let i = 0; i < visible; i++) {
+    const item = items[i];
+    const iy = listY + i * (itemH + gap);
+    const selected = item.selected;
+    ctx.fillStyle = selected ? SLICER_ITEM_SEL_BG : SLICER_ITEM_OFF_BG;
+    ctx.fillRect(listX, iy, listW, itemH);
+    ctx.strokeStyle = selected ? SLICER_ITEM_SEL_BD : SLICER_ITEM_OFF_BD;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(listX + 0.5, iy + 0.5, listW - 1, itemH - 1);
+    ctx.fillStyle = selected ? SLICER_ITEM_SEL_FG : SLICER_ITEM_OFF_FG;
+    drawClippedText(ctx, item.name, listX + itemPad, iy + itemH / 2 + 1, listW - 2 * itemPad);
+  }
+}
+
+function scaleFont(css: string, cs: number): string {
+  // Re-scale the leading `<size>px` token by `cs`. Safe fallback: leave the
+  // string as-is so the slicer remains readable when parsing fails.
+  return css.replace(/(\d+(?:\.\d+)?)px/, (_, n) => `${Math.round(Number(n) * cs)}px`);
+}
+
+function drawClippedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+): void {
+  if (maxWidth <= 0) return;
+  let s = text;
+  if (ctx.measureText(s).width > maxWidth) {
+    const ellipsis = '…';
+    while (s.length > 0 && ctx.measureText(s + ellipsis).width > maxWidth) {
+      s = s.slice(0, -1);
+    }
+    s = s.length > 0 ? s + ellipsis : '';
+  }
+  ctx.fillText(s, x, y);
 }
