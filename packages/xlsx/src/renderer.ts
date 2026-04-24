@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, Font, Fill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec,
+  Run, ChartData, GradientFillSpec, ShapeInfo,
 } from './types.js';
 import { renderChart, type ChartModel } from '@silurus/ooxml-core';
 
@@ -344,7 +344,12 @@ function recomputeVolatile(formula: string | undefined): number | null {
 // Date / time formatting  (ECMA-376 §18.8.30)
 // ────────────────────────────────────────────────────────────────
 
-// Built-in numFmtId → format code (US English locale, as per the spec)
+// Built-in numFmtId → format code. IDs 14-22 are the ECMA-376 US-English
+// built-ins; IDs 27-31 and 50-58 are East-Asian (Japanese) locale built-ins
+// that Office ships pre-assigned when the file was authored in ja-JP. The
+// spec lists the codes under §18.8.30 Table "Built-in formats" (the
+// locale-dependent block is given without format strings but the de-facto
+// codes match the ones that Office writes back when opening and re-saving).
 const BUILTIN_DATE_FMT: Record<number, string> = {
   14: 'm/d/yyyy',
   15: 'd-mmm-yy',
@@ -355,6 +360,22 @@ const BUILTIN_DATE_FMT: Record<number, string> = {
   20: 'h:mm',
   21: 'h:mm:ss',
   22: 'm/d/yyyy h:mm',
+  // Japanese locale built-ins (East-Asian Office). Values mirror what
+  // Excel ja-JP writes for these IDs.
+  27: '[$-411]ge.m.d',
+  28: '[$-411]ggge"年"m"月"d"日"',
+  29: '[$-411]ggge"年"m"月"d"日"',
+  30: 'm/d/yy',
+  31: 'yyyy"年"m"月"d"日"',
+  50: '[$-411]ge.m.d',
+  51: '[$-411]ggge"年"m"月"d"日"',
+  52: 'yyyy"年"m"月"',
+  53: 'm"月"d"日"',
+  54: '[$-411]ggge"年"m"月"d"日"',
+  55: 'yyyy"年"m"月"',
+  56: 'm"月"d"日"',
+  57: '[$-411]ge.m.d',
+  58: '[$-411]ggge"年"m"月"d"日"',
 };
 
 const MONTH_NAMES = [
@@ -748,19 +769,71 @@ function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: nu
   const lines: string[] = [];
   // Hard line breaks (\n from Alt+Enter) always split regardless of wrapText.
   for (const paragraph of text.split('\n')) {
-    const words = paragraph.split(' ');
-    let current = '';
-    for (const word of words) {
-      const test = current ? `${current} ${word}` : word;
-      if (ctx.measureText(test).width <= maxWidth || !current) {
-        current = test;
-      } else {
-        lines.push(current);
-        current = word;
-      }
-    }
-    lines.push(current);
+    lines.push(...wrapParagraphLines(ctx, paragraph, maxWidth));
   }
+  return lines;
+}
+
+/** Codepoints in the CJK ranges get broken per-character (Excel / JIS X 4051
+ *  behaviour). This mirrors the tokenizer in `layoutRichTextLines`. */
+function isCJKCodePoint(cp: number): boolean {
+  return (cp >= 0x3000 && cp <= 0x9FFF)  // CJK punctuation + CJK Unified Ideographs
+      || (cp >= 0xF900 && cp <= 0xFAFF)  // CJK Compatibility Ideographs
+      || (cp >= 0xAC00 && cp <= 0xD7AF)  // Hangul Syllables
+      || (cp >= 0xFF00 && cp <= 0xFFEF); // Halfwidth/Fullwidth
+}
+
+/** Word-wrap a single paragraph (no embedded \n). Unlike a naive
+ *  `split(' ')`, CJK characters are treated as individual break opportunities
+ *  so that Japanese headings like "夏休みアクティビティ カレンダー 2026"
+ *  actually wrap inside a merged cell. ECMA-376 doesn't spec the break
+ *  algorithm but this matches what Excel renders on the same input. */
+function wrapParagraphLines(ctx: CanvasRenderingContext2D, paragraph: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  // Tokenise: runs of non-space non-CJK, single ASCII-space runs, individual
+  // CJK characters. Then greedy-fit each token onto the current line.
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < paragraph.length) {
+    const ch = paragraph[i];
+    const cp = ch.codePointAt(0) ?? 0;
+    if (isCJKCodePoint(cp)) {
+      tokens.push(ch);
+      i += cp > 0xFFFF ? 2 : 1;
+    } else if (ch === ' ') {
+      let j = i;
+      while (j < paragraph.length && paragraph[j] === ' ') j++;
+      tokens.push(paragraph.slice(i, j));
+      i = j;
+    } else {
+      let j = i;
+      while (j < paragraph.length) {
+        const c = paragraph[j];
+        const p = c.codePointAt(0) ?? 0;
+        if (c === ' ' || isCJKCodePoint(p)) break;
+        j += p > 0xFFFF ? 2 : 1;
+      }
+      tokens.push(paragraph.slice(i, j));
+      i = j;
+    }
+  }
+  let current = '';
+  for (const tok of tokens) {
+    if (current === '') { current = tok; continue; }
+    const candidate = current + tok;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      current = candidate;
+    } else {
+      // Token doesn't fit at the end of the current line — break here.
+      // Leading spaces at the start of the next line are dropped (matches
+      // Excel: wrapped-continuation lines don't preserve the space that
+      // caused the break).
+      lines.push(current);
+      current = tok.replace(/^ +/, '');
+      if (current === '') current = tok; // all-space token (preserve width on its own line)
+    }
+  }
+  lines.push(current);
   return lines;
 }
 
@@ -1578,14 +1651,20 @@ function resolveRange(
 }
 
 function cellValueToEval(cell: Cell | undefined): EvalScalar {
-  if (!cell) return 0;
+  // An empty / missing cell is *not* the same as 0. CF expressions like
+  // `=$C5=0` or `NOT(ISBLANK($C5))` will match a missing cell if we return
+  // 0 here, which is exactly the bug that turned C5-C8 beige on sample-10.
+  // Return null and let the arithmetic / comparison operators coerce as
+  // needed (null+0 → 0, null="" → true, null=0 → false). See ECMA-376
+  // §18.18.62 and the actual Excel evaluation behaviour.
+  if (!cell) return null;
   switch (cell.value.type) {
     case 'number': return cell.value.number;
     case 'bool':   return cell.value.bool;
     case 'text':   return cell.value.text;
     case 'error':  return null;
     case 'empty':
-    default:       return 0;
+    default:       return null;
   }
 }
 
@@ -1607,7 +1686,7 @@ function callFunc(nameRaw: string, args: EvalValue[], ctx: EvalCtx): EvalValue {
     case 'TRUE':       return true;
     case 'FALSE':      return false;
     // ── Type checks ─────────────────────────────────────────────────────────
-    case 'ISBLANK':    { const s = toScalar(args[0]); return s == null || s === '' || s === 0; }
+    case 'ISBLANK':    { const s = toScalar(args[0]); return s == null || s === ''; }
     case 'ISNUMBER':   return typeof toScalar(args[0]) === 'number';
     case 'ISTEXT':     return typeof toScalar(args[0]) === 'string';
     case 'ISNONTEXT':  return typeof toScalar(args[0]) !== 'string';
@@ -2777,6 +2856,18 @@ export function renderViewport(
     );
   }
 
+  // ── Anchored shape groups (custom geometry, incl. embedded images) ────
+  if (worksheet.shapeGroups && worksheet.shapeGroups.length > 0) {
+    renderShapeGroups(
+      ctx, worksheet, cs,
+      startRow, startCol,
+      scrollOffsetX, scrollOffsetY,
+      scrollAreaX, scrollAreaY,
+      scrollAreaW, scrollAreaH,
+      opts.loadedImages,
+    );
+  }
+
   // ── Anchored charts (clipped to scrollable area) ──────────────
   if (worksheet.charts && worksheet.charts.length > 0) {
     renderCharts(
@@ -3044,6 +3135,182 @@ function renderImages(
   }
 
   ctx.restore();
+}
+
+function renderShapeGroups(
+  ctx: CanvasRenderingContext2D,
+  ws: Worksheet,
+  cs: number,
+  startRow: number,
+  startCol: number,
+  scrollOffsetX: number,
+  scrollOffsetY: number,
+  scrollAreaX: number,
+  scrollAreaY: number,
+  scrollAreaW: number,
+  scrollAreaH: number,
+  loadedImages?: Map<string, HTMLImageElement>,
+): void {
+  if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
+  const anchors = ws.shapeGroups;
+  if (!anchors || anchors.length === 0) return;
+
+  const scrollOriginSheetX = sheetXForCol(ws, startCol, cs);
+  const scrollOriginSheetY = sheetYForRow(ws, startRow, cs);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH);
+  ctx.clip();
+
+  for (const anchor of anchors) {
+    const fromCol1 = anchor.fromCol + 1;
+    const fromRow1 = anchor.fromRow + 1;
+    const toCol1   = anchor.toCol   + 1;
+    const toRow1   = anchor.toRow   + 1;
+
+    const x1 = sheetXForCol(ws, fromCol1, cs) + (anchor.fromColOff * cs) / EMU_PER_PX;
+    const y1 = sheetYForRow(ws, fromRow1, cs) + (anchor.fromRowOff * cs) / EMU_PER_PX;
+    const x2 = sheetXForCol(ws, toCol1,   cs) + (anchor.toColOff   * cs) / EMU_PER_PX;
+    const y2 = sheetYForRow(ws, toRow1,   cs) + (anchor.toRowOff   * cs) / EMU_PER_PX;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    if (w <= 0 || h <= 0) continue;
+
+    const canvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
+    const canvasY = scrollAreaY + (y1 - scrollOriginSheetY) - scrollOffsetY;
+
+    if (canvasX + w < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
+    if (canvasY + h < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
+
+    for (const shape of anchor.shapes) {
+      const sx = canvasX + shape.x * w;
+      const sy = canvasY + shape.y * h;
+      const sw = shape.w * w;
+      const sh = shape.h * h;
+      if (sw <= 0 || sh <= 0) continue;
+      drawShape(ctx, shape, sx, sy, sw, sh, loadedImages);
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeInfo,
+  sx: number, sy: number, sw: number, sh: number,
+  loadedImages?: Map<string, HTMLImageElement>,
+): void {
+  ctx.save();
+  if (shape.rot !== 0) {
+    ctx.translate(sx + sw / 2, sy + sh / 2);
+    ctx.rotate((shape.rot * Math.PI) / 180);
+    ctx.translate(-sw / 2, -sh / 2);
+  } else {
+    ctx.translate(sx, sy);
+  }
+
+  if (shape.geom.type === 'custom') {
+    for (const path of shape.geom.paths) {
+      if (path.w <= 0 || path.h <= 0) continue;
+      const kx = sw / path.w;
+      const ky = sh / path.h;
+      ctx.beginPath();
+      // Track pen position for arcTo center computation.
+      let penX = 0, penY = 0;
+      // Track subpath start for close lineTo.
+      let subX = 0, subY = 0;
+      for (const cmd of path.commands) {
+        switch (cmd.op) {
+          case 'moveTo': {
+            const px = cmd.x * kx, py = cmd.y * ky;
+            ctx.moveTo(px, py);
+            penX = subX = px; penY = subY = py;
+            break;
+          }
+          case 'lineTo': {
+            const px = cmd.x * kx, py = cmd.y * ky;
+            ctx.lineTo(px, py);
+            penX = px; penY = py;
+            break;
+          }
+          case 'cubicBezTo': {
+            const ex = cmd.x3 * kx, ey = cmd.y3 * ky;
+            ctx.bezierCurveTo(
+              cmd.x1 * kx, cmd.y1 * ky,
+              cmd.x2 * kx, cmd.y2 * ky,
+              ex, ey,
+            );
+            penX = ex; penY = ey;
+            break;
+          }
+          case 'quadBezTo': {
+            const ex = cmd.x2 * kx, ey = cmd.y2 * ky;
+            ctx.quadraticCurveTo(cmd.x1 * kx, cmd.y1 * ky, ex, ey);
+            penX = ex; penY = ey;
+            break;
+          }
+          case 'arcTo': {
+            // ECMA-376 §20.1.9.3: pen lies on ellipse at stAng;
+            // derive center from pen + stAng, then sweep swAng.
+            const rx = cmd.wr * kx, ry = cmd.hr * ky;
+            if (rx <= 0 || ry <= 0) break;
+            const stRad = (cmd.stAng / 60000) * (Math.PI / 180);
+            const swRad = (cmd.swAng / 60000) * (Math.PI / 180);
+            const cx = penX - Math.cos(stRad) * rx;
+            const cy = penY - Math.sin(stRad) * ry;
+            const endRad = stRad + swRad;
+            ctx.ellipse(cx, cy, rx, ry, 0, stRad, endRad, swRad < 0);
+            penX = cx + Math.cos(endRad) * rx;
+            penY = cy + Math.sin(endRad) * ry;
+            break;
+          }
+          case 'close':
+            ctx.closePath();
+            penX = subX; penY = subY;
+            break;
+        }
+      }
+      fillAndStroke(ctx, shape);
+    }
+  } else if (shape.geom.type === 'preset') {
+    ctx.beginPath();
+    switch (shape.geom.name) {
+      case 'ellipse':
+      case 'roundRect': {
+        const rx = sw / 2, ry = sh / 2;
+        ctx.ellipse(rx, ry, rx, ry, 0, 0, Math.PI * 2);
+        break;
+      }
+      default:
+        ctx.rect(0, 0, sw, sh);
+    }
+    fillAndStroke(ctx, shape);
+  } else if (shape.geom.type === 'image') {
+    // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
+    // calendar header). The caller pre-decodes every data URL seen in
+    // `ws.shapeGroups[*].shapes[*].geom` via XlsxWorkbook.renderViewport,
+    // so we should normally have it in `loadedImages`. If not, fall back
+    // to a silent skip — drawing an empty rect would look worse.
+    const img = loadedImages?.get(shape.geom.dataUrl);
+    if (img) {
+      ctx.drawImage(img, 0, 0, sw, sh);
+    }
+  }
+  ctx.restore();
+}
+
+function fillAndStroke(ctx: CanvasRenderingContext2D, shape: ShapeInfo): void {
+  if (shape.fillColor) {
+    ctx.fillStyle = shape.fillColor;
+    ctx.fill();
+  }
+  if (shape.strokeColor && shape.strokeWidth > 0) {
+    ctx.strokeStyle = shape.strokeColor;
+    ctx.lineWidth = Math.max(0.5, shape.strokeWidth / EMU_PER_PX);
+    ctx.stroke();
+  }
 }
 
 // ────────────────────────────────────────────────────────────────

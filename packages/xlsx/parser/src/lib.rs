@@ -42,6 +42,10 @@ pub struct Worksheet {
     pub conditional_formats: Vec<ConditionalFormat>,
     pub images: Vec<ImageAnchor>,
     pub charts: Vec<ChartAnchor>,
+    /// Grouped shapes from `<xdr:grpSp>` inside a twoCellAnchor (ECMA-376
+    /// §20.5.2.17). Each anchor flattens its shape tree to a list of leaf
+    /// shapes with normalized geometry for the renderer.
+    pub shape_groups: Vec<ShapeAnchor>,
     /// Whether to display zero values in cells (ECMA-376 §18.3.1.94)
     pub show_zeros: bool,
     /// Whether to draw default grid lines on this sheet. Mirrors the "View →
@@ -218,6 +222,84 @@ pub struct ChartAnchor {
     pub to_row: u32,
     pub to_row_off: i64,
     pub chart: ChartData,
+}
+
+/// A grouped-shape anchor (ECMA-376 §20.5.2.17, `<xdr:grpSp>` inside a
+/// `<xdr:twoCellAnchor>`). Leaf shape elements (`<xdr:sp>`) from any nesting
+/// level are flattened into `shapes` with normalized coordinates so the
+/// renderer only needs to scale to the anchor rect.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeAnchor {
+    pub from_col: u32,
+    pub from_col_off: i64,
+    pub from_row: u32,
+    pub from_row_off: i64,
+    pub to_col: u32,
+    pub to_col_off: i64,
+    pub to_row: u32,
+    pub to_row_off: i64,
+    pub shapes: Vec<ShapeInfo>,
+}
+
+/// A leaf shape extracted from a grpSp/sp tree. Position/size are normalized
+/// to [0,1] relative to the top-level grpSp extent (which itself maps to the
+/// anchor rect).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeInfo {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Rotation in degrees (clockwise). DrawingML `a:xfrm/@rot` is in 60000ths
+    /// of a degree; the parser converts to degrees here.
+    pub rot: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<String>,
+    /// Stroke width in EMU (914400 = 1 inch). 0 = no stroke.
+    pub stroke_width: i64,
+    pub geom: ShapeGeom,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ShapeGeom {
+    /// Preset geometry (rect, ellipse, roundRect, triangle, etc.).
+    /// ECMA-376 §20.1.9.18 `a:prstGeom/@prst`.
+    Preset { name: String },
+    /// Freeform path geometry (ECMA-376 §20.1.9.2 `a:custGeom`).
+    Custom { paths: Vec<PathInfo> },
+    /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
+    /// `data_url` is a `data:<mime>;base64,…` URL produced from the drawing's
+    /// relationship target (png/jpg/gif/…).
+    Image { data_url: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathInfo {
+    /// Path's own coordinate system width.
+    pub w: f64,
+    /// Path's own coordinate system height.
+    pub h: f64,
+    pub commands: Vec<PathCmd>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "op", rename_all = "camelCase")]
+pub enum PathCmd {
+    MoveTo { x: f64, y: f64 },
+    LineTo { x: f64, y: f64 },
+    CubicBezTo { x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64 },
+    QuadBezTo { x1: f64, y1: f64, x2: f64, y2: f64 },
+    /// ECMA-376 §20.1.9.3 `a:arcTo`. `stAng`/`swAng` are in 60000ths of a
+    /// degree. The start point is the current pen position; the ellipse
+    /// center is derived so the pen lies on the ellipse at `stAng`.
+    ArcTo { wr: f64, hr: f64, st_ang: f64, sw_ang: f64 },
+    Close,
 }
 
 /// An image anchored to a rectangular range of cells
@@ -565,6 +647,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(&mut archive, &sheet_path);
     ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
+    ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
     ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
     ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
@@ -1398,7 +1481,15 @@ fn parse_worksheet(
                                 .collect();
                             rules.push(CfRule::CellIs { operator, formulas, dxf_id, priority });
                         }
-                        "expression" => {
+                        "expression"
+                        | "containsBlanks" | "notContainsBlanks"
+                        | "containsText" | "notContainsText"
+                        | "beginsWith" | "endsWith"
+                        | "containsErrors" | "notContainsErrors" => {
+                            // For `containsBlanks`/`notContainsBlanks`/`containsText` etc.,
+                            // Excel serializes an equivalent boolean formula (e.g.
+                            // `LEN(TRIM(C8))>0`) as the rule's `<formula>` child
+                            // (ECMA-376 §18.3.1.10). Evaluate as an expression rule.
                             let formula = cf.children()
                                 .find(|n| n.tag_name().name() == "formula")
                                 .and_then(|n| n.text())
@@ -1547,6 +1638,7 @@ fn parse_worksheet(
         conditional_formats,
         images: Vec::new(),
         charts: Vec::new(),
+        shape_groups: Vec::new(),
         show_zeros,
         show_gridlines,
         tab_color,
@@ -1896,6 +1988,463 @@ fn parse_drawing_anchors(
         });
     }
     anchors
+}
+
+// ─── Shape group parsing ────────────────────────────────────────────────────
+//
+// ECMA-376 §20.5.2.17 `<xdr:grpSp>` / §20.1.9 DrawingML shapes. Each
+// top-level grpSp inside a twoCellAnchor has its own coordinate system:
+//   - grpSpPr/xfrm/off,ext     : group's position/size in parent coords
+//   - grpSpPr/xfrm/chOff,chExt : origin/extent of the group's child coords
+//
+// A child sp at child coord (cx, cy) maps to parent coord:
+//   parent.x = off.x + (cx - chOff.x) / chExt.cx * ext.cx
+//
+// For rendering, we chain these transforms down to the top-level grpSp and
+// then normalize each leaf shape's rect into [0,1] of the top-level ext.
+
+#[derive(Clone, Copy)]
+struct Xfrm {
+    off_x: f64, off_y: f64,
+    ext_x: f64, ext_y: f64,
+    ch_off_x: f64, ch_off_y: f64,
+    ch_ext_x: f64, ch_ext_y: f64,
+    has_ch: bool,
+}
+
+fn parse_xfrm(xfrm_node: &roxmltree::Node) -> Option<Xfrm> {
+    let mut off = (0.0_f64, 0.0_f64);
+    let mut ext = (0.0_f64, 0.0_f64);
+    let mut ch_off = (0.0_f64, 0.0_f64);
+    let mut ch_ext = (0.0_f64, 0.0_f64);
+    let mut has_ext = false;
+    let mut has_ch = false;
+    for c in xfrm_node.children() {
+        match c.tag_name().name() {
+            "off" => {
+                off.0 = c.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                off.1 = c.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            }
+            "ext" => {
+                ext.0 = c.attribute("cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                ext.1 = c.attribute("cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                has_ext = true;
+            }
+            "chOff" => {
+                ch_off.0 = c.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                ch_off.1 = c.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                has_ch = true;
+            }
+            "chExt" => {
+                ch_ext.0 = c.attribute("cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                ch_ext.1 = c.attribute("cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                has_ch = true;
+            }
+            _ => {}
+        }
+    }
+    if !has_ext { return None; }
+    Some(Xfrm {
+        off_x: off.0, off_y: off.1,
+        ext_x: ext.0, ext_y: ext.1,
+        ch_off_x: ch_off.0, ch_off_y: ch_off.1,
+        ch_ext_x: if ch_ext.0 == 0.0 { ext.0 } else { ch_ext.0 },
+        ch_ext_y: if ch_ext.1 == 0.0 { ext.1 } else { ch_ext.1 },
+        has_ch,
+    })
+}
+
+fn parse_solid_fill(fill_node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
+    for c in fill_node.children() {
+        match c.tag_name().name() {
+            "srgbClr" => {
+                let v = c.attribute("val")?;
+                return Some(format!("#{}", v.to_uppercase()));
+            }
+            "schemeClr" => {
+                let v = c.attribute("val")?;
+                // `theme_colors` is collected in OOXML clrScheme document
+                // order: dk1, lt1, dk2, lt2, accent1..accent6, hlink,
+                // folHlink. See `parse_theme_colors`. The earlier mapping
+                // here had dk1/lt1 and dk2/lt2 swapped which darkened
+                // shapes that painted "lt1" (the sheet paper colour).
+                let idx = match v {
+                    "dk1" | "tx1"    => Some(0),
+                    "lt1" | "bg1"    => Some(1),
+                    "dk2" | "tx2"    => Some(2),
+                    "lt2" | "bg2"    => Some(3),
+                    "accent1"        => Some(4),
+                    "accent2"        => Some(5),
+                    "accent3"        => Some(6),
+                    "accent4"        => Some(7),
+                    "accent5"        => Some(8),
+                    "accent6"        => Some(9),
+                    "hlink"          => Some(10),
+                    "folHlink"       => Some(11),
+                    _ => None,
+                };
+                return idx.and_then(|i| theme_colors.get(i).cloned());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse a single custGeom path element. Each path has its own coordinate
+/// system (`a:path/@w`, `@h`) that the renderer scales to the shape's rect.
+fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
+    let w: f64 = path_node.attribute("w").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let h: f64 = path_node.attribute("h").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let mut commands: Vec<PathCmd> = Vec::new();
+    for cmd in path_node.children().filter(|n| n.is_element()) {
+        let name = cmd.tag_name().name();
+        // Collect `<a:pt x=.. y=..>` points in order.
+        let pts: Vec<(f64, f64)> = cmd.children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "pt")
+            .map(|n| (
+                n.attribute("x").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                n.attribute("y").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            ))
+            .collect();
+        match name {
+            "moveTo"       => if let Some(p) = pts.first() { commands.push(PathCmd::MoveTo { x: p.0, y: p.1 }); },
+            "lnTo"         => if let Some(p) = pts.first() { commands.push(PathCmd::LineTo { x: p.0, y: p.1 }); },
+            "cubicBezTo"   => if pts.len() >= 3 {
+                commands.push(PathCmd::CubicBezTo {
+                    x1: pts[0].0, y1: pts[0].1,
+                    x2: pts[1].0, y2: pts[1].1,
+                    x3: pts[2].0, y3: pts[2].1,
+                });
+            },
+            "quadBezTo"    => if pts.len() >= 2 {
+                commands.push(PathCmd::QuadBezTo {
+                    x1: pts[0].0, y1: pts[0].1,
+                    x2: pts[1].0, y2: pts[1].1,
+                });
+            },
+            "close"        => commands.push(PathCmd::Close),
+            "arcTo" => {
+                // ECMA-376 §20.1.9.3: `wR`/`hR` in path-coord units;
+                // `stAng`/`swAng` in 60000ths of a degree.
+                let wr:     f64 = cmd.attribute("wR").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let hr:     f64 = cmd.attribute("hR").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let st_ang: f64 = cmd.attribute("stAng").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let sw_ang: f64 = cmd.attribute("swAng").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                commands.push(PathCmd::ArcTo { wr, hr, st_ang, sw_ang });
+            }
+            _ => {}
+        }
+    }
+    PathInfo { w, h, commands }
+}
+
+fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
+    for c in sp_pr.children().filter(|n| n.is_element()) {
+        match c.tag_name().name() {
+            "prstGeom" => {
+                return Some(ShapeGeom::Preset {
+                    name: c.attribute("prst").unwrap_or("rect").to_string(),
+                });
+            }
+            "custGeom" => {
+                let mut paths: Vec<PathInfo> = Vec::new();
+                for pl in c.children().filter(|n| n.is_element() && n.tag_name().name() == "pathLst") {
+                    for p in pl.children().filter(|n| n.is_element() && n.tag_name().name() == "path") {
+                        paths.push(parse_custom_path(&p));
+                    }
+                }
+                return Some(ShapeGeom::Custom { paths });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Recursively walk an `xdr:grpSp` / `xdr:sp` tree, chaining coordinate
+/// transforms, and push leaf shapes (normalized to [0,1] of `root_ext`) into
+/// `out`.
+fn collect_shapes(
+    node: &roxmltree::Node,
+    root_off_x: f64, root_off_y: f64,
+    root_ext_x: f64, root_ext_y: f64,
+    // transform from current local coords into root (top-level grpSp) coords
+    scale_x: f64, scale_y: f64,
+    trans_x: f64, trans_y: f64,
+    theme_colors: &[String],
+    rid_urls: &HashMap<String, String>,
+    out: &mut Vec<ShapeInfo>,
+) {
+    for child in node.children().filter(|n| n.is_element()) {
+        let tag = child.tag_name().name();
+        if tag == "grpSp" {
+            // Nested grpSp: compose the transform by the group's own xfrm.
+            let grp_sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
+            let xfrm = grp_sp_pr
+                .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
+                .as_ref()
+                .and_then(parse_xfrm);
+            let (sx, sy, tx, ty) = if let Some(x) = xfrm {
+                if x.has_ch && x.ch_ext_x != 0.0 && x.ch_ext_y != 0.0 {
+                    let csx = x.ext_x / x.ch_ext_x;
+                    let csy = x.ext_y / x.ch_ext_y;
+                    // Child point (cx, cy) → (x.off_x + (cx - x.ch_off_x)*csx) in parent coords,
+                    // then apply outer (scale/trans) to reach root coords.
+                    (
+                        scale_x * csx,
+                        scale_y * csy,
+                        trans_x + scale_x * (x.off_x - x.ch_off_x * csx),
+                        trans_y + scale_y * (x.off_y - x.ch_off_y * csy),
+                    )
+                } else {
+                    // No child coord system: treat as identity mapping inside the group.
+                    (scale_x, scale_y,
+                     trans_x + scale_x * x.off_x,
+                     trans_y + scale_y * x.off_y)
+                }
+            } else {
+                (scale_x, scale_y, trans_x, trans_y)
+            };
+            collect_shapes(&child, root_off_x, root_off_y, root_ext_x, root_ext_y,
+                           sx, sy, tx, ty, theme_colors, rid_urls, out);
+        } else if tag == "sp" {
+            let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr) = sp_pr else { continue; };
+            let xfrm_node = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else { continue; };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
+            let rot_raw: f64 = xfrm_n.attribute("rot")
+                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+            // Shape rect in root coords
+            let root_x = trans_x + scale_x * xfrm.off_x;
+            let root_y = trans_y + scale_y * xfrm.off_y;
+            let root_w = scale_x * xfrm.ext_x;
+            let root_h = scale_y * xfrm.ext_y;
+
+            // Normalize to [0,1] of root ext
+            if root_ext_x == 0.0 || root_ext_y == 0.0 { continue; }
+            let nx = (root_x - root_off_x) / root_ext_x;
+            let ny = (root_y - root_off_y) / root_ext_y;
+            let nw = root_w / root_ext_x;
+            let nh = root_h / root_ext_y;
+
+            let geom = parse_sp_geom(&sp_pr);
+            let Some(geom) = geom else { continue; };
+
+            // Fill
+            let mut fill_color: Option<String> = None;
+            let mut has_no_fill = false;
+            for c in sp_pr.children().filter(|n| n.is_element()) {
+                match c.tag_name().name() {
+                    "solidFill" => { fill_color = parse_solid_fill(&c, theme_colors); }
+                    "noFill"    => { has_no_fill = true; }
+                    _ => {}
+                }
+            }
+            if has_no_fill { fill_color = None; }
+
+            // Stroke (line)
+            let mut stroke_color: Option<String> = None;
+            let mut stroke_width: i64 = 0;
+            if let Some(ln) = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "ln") {
+                stroke_width = ln.attribute("w").and_then(|s| s.parse().ok()).unwrap_or(0);
+                for c in ln.children().filter(|n| n.is_element()) {
+                    if c.tag_name().name() == "solidFill" {
+                        stroke_color = parse_solid_fill(&c, theme_colors);
+                    } else if c.tag_name().name() == "noFill" {
+                        stroke_color = None;
+                        stroke_width = 0;
+                    }
+                }
+            }
+
+            out.push(ShapeInfo {
+                x: nx, y: ny, w: nw, h: nh,
+                rot: rot_raw / 60000.0,
+                fill_color,
+                stroke_color,
+                stroke_width,
+                geom,
+            });
+        } else if tag == "pic" {
+            // `<xdr:pic>` leaf inside a group (ECMA-376 §20.5.2.17). The image
+            // binary is resolved via the drawing's .rels file; `rid_urls` maps
+            // each r:id to its pre-encoded `data:<mime>;base64,…` URL.
+            let sp_pr = child.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr) = sp_pr else { continue; };
+            let xfrm_node = sp_pr.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else { continue; };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
+            let rot_raw: f64 = xfrm_n.attribute("rot")
+                .and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+            // Resolve <a:blip r:embed="rIdN"/>. The r:embed attribute lives in
+            // the relationships namespace, not the drawingml namespace.
+            let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+            let pic_rid = child.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "blip")
+                .and_then(|b| {
+                    b.attributes()
+                        .find(|a| a.name() == "embed" && a.namespace() == Some(r_ns))
+                        .map(|a| a.value().to_string())
+                });
+            let Some(rid) = pic_rid else { continue; };
+            let Some(data_url) = rid_urls.get(&rid) else { continue; };
+
+            let root_x = trans_x + scale_x * xfrm.off_x;
+            let root_y = trans_y + scale_y * xfrm.off_y;
+            let root_w = scale_x * xfrm.ext_x;
+            let root_h = scale_y * xfrm.ext_y;
+            if root_ext_x == 0.0 || root_ext_y == 0.0 { continue; }
+            let nx = (root_x - root_off_x) / root_ext_x;
+            let ny = (root_y - root_off_y) / root_ext_y;
+            let nw = root_w / root_ext_x;
+            let nh = root_h / root_ext_y;
+            if nw <= 0.0 || nh <= 0.0 { continue; }
+
+            out.push(ShapeInfo {
+                x: nx, y: ny, w: nw, h: nh,
+                rot: rot_raw / 60000.0,
+                fill_color: None,
+                stroke_color: None,
+                stroke_width: 0,
+                geom: ShapeGeom::Image { data_url: data_url.clone() },
+            });
+        }
+        // Ignore `xdr:cxnSp` / text-only elements for this minimal pass.
+    }
+}
+
+fn parse_shape_anchors(
+    drawing_xml: &str,
+    theme_colors: &[String],
+    rid_urls: &HashMap<String, String>,
+) -> Vec<ShapeAnchor> {
+    let Ok(doc) = roxmltree::Document::parse(drawing_xml) else { return Vec::new(); };
+    let xdr_ns = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let mut anchors: Vec<ShapeAnchor> = Vec::new();
+
+    for anchor in doc.descendants() {
+        if anchor.tag_name().name() != "twoCellAnchor"
+            || anchor.tag_name().namespace() != Some(xdr_ns) { continue; }
+        // Only anchors whose top-level child is `<xdr:grpSp>`.
+        let grp = anchor.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp");
+        let Some(grp) = grp else { continue; };
+        let grp_sp_pr = grp.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
+        let xfrm = grp_sp_pr
+            .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
+            .as_ref()
+            .and_then(parse_xfrm);
+        let Some(root) = xfrm else { continue; };
+        if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
+
+        // Parse from/to anchor rect
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
+        for c in anchor.children() {
+            if !c.is_element() { continue; }
+            if c.tag_name().name() == "from" || c.tag_name().name() == "to" {
+                let is_from = c.tag_name().name() == "from";
+                let mut col: u32 = 0; let mut col_off: i64 = 0;
+                let mut row: u32 = 0; let mut row_off: i64 = 0;
+                for cc in c.children() {
+                    match (cc.tag_name().name(), cc.text()) {
+                        ("col",    Some(t)) => col     = t.trim().parse().unwrap_or(0),
+                        ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                        ("row",    Some(t)) => row     = t.trim().parse().unwrap_or(0),
+                        ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+                if is_from {
+                    from_col = col; from_col_off = col_off; from_row = row; from_row_off = row_off;
+                } else {
+                    to_col = col; to_col_off = col_off; to_row = row; to_row_off = row_off;
+                }
+            }
+        }
+
+        // Map child coords → root coords with the grpSp's own chOff/chExt.
+        let csx = root.ext_x / root.ch_ext_x;
+        let csy = root.ext_y / root.ch_ext_y;
+        let tx = root.off_x - root.ch_off_x * csx;
+        let ty = root.off_y - root.ch_off_y * csy;
+
+        let mut shapes: Vec<ShapeInfo> = Vec::new();
+        collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
+                       csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
+        if shapes.is_empty() { continue; }
+
+        anchors.push(ShapeAnchor {
+            from_col, from_col_off, from_row, from_row_off,
+            to_col, to_col_off, to_row, to_row_off,
+            shapes,
+        });
+    }
+    anchors
+}
+
+fn load_sheet_shape_groups(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_path: &str,
+    theme_colors: &[String],
+) -> Vec<ShapeAnchor> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else { return Vec::new(); };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else { return Vec::new(); };
+    let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else { return Vec::new(); };
+    let mut drawing_targets: Vec<String> = Vec::new();
+    for rel in rels_doc.root_element().children().filter(|n| n.is_element()) {
+        if rel.attribute("Type").unwrap_or("").ends_with("/drawing") {
+            if let Some(t) = rel.attribute("Target") { drawing_targets.push(t.to_string()); }
+        }
+    }
+    let mut all: Vec<ShapeAnchor> = Vec::new();
+    for target in drawing_targets {
+        let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else { continue; };
+        let rid_urls = build_drawing_rid_urls(archive, &drawing_path);
+        all.extend(parse_shape_anchors(&drawing_xml, theme_colors, &rid_urls));
+    }
+    all
+}
+
+/// Build a `HashMap<rId, data-URL>` for every image (png/jpg/…) target in
+/// a drawing's `.rels` file. Used by `collect_shapes` to resolve `<xdr:pic>`
+/// leaves inside a group. Mirrors the logic in `parse_drawing_anchors` but
+/// eagerly encodes each referenced image so per-shape lookup is a single
+/// HashMap hit.
+fn build_drawing_rid_urls(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    drawing_path: &str,
+) -> HashMap<String, String> {
+    let Some((drawing_dir, drawing_file)) = drawing_path.rsplit_once('/') else {
+        return HashMap::new();
+    };
+    let rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
+    let rels = read_zip_entry(archive, &rels_path)
+        .ok()
+        .map(|xml| parse_rels_map(&xml))
+        .unwrap_or_default();
+
+    let mut result: HashMap<String, String> = HashMap::new();
+    for (rid, target) in rels {
+        let lower = target.to_lowercase();
+        if !(lower.ends_with(".png") || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg") || lower.ends_with(".gif")
+            || lower.ends_with(".bmp")  || lower.ends_with(".webp"))
+        {
+            continue;
+        }
+        let media_path = resolve_zip_path(drawing_dir, &target);
+        if let Some(bytes) = read_zip_bytes(archive, &media_path) {
+            let mime = mime_from_ext(&media_path);
+            result.insert(rid, format!("data:{mime};base64,{}", B64.encode(&bytes)));
+        }
+    }
+    result
 }
 
 /// Given a sheet path (e.g. "worksheets/sheet1.xml"), locate and parse

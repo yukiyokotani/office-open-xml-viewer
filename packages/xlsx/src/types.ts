@@ -28,6 +28,10 @@ export interface Worksheet {
   conditionalFormats: ConditionalFormat[];
   images: ImageAnchor[];
   charts: ChartAnchor[];
+  /** Grouped shapes from `<xdr:grpSp>` inside twoCellAnchors
+   *  (ECMA-376 §20.5.2.17). Each anchor holds leaf shapes pre-flattened
+   *  with normalized [0,1] geometry relative to the anchor rect. */
+  shapeGroups?: ShapeAnchor[];
   /** Whether to display zero values (ECMA-376 §18.3.1.94). Defaults to true. */
   showZeros?: boolean;
   /** Whether to draw default grid lines (ECMA-376 §18.3.1.83
@@ -141,6 +145,50 @@ export interface ChartAnchor {
   toRow: number;   toRowOff: number;
   chart: ChartData;
 }
+
+export interface ShapeAnchor {
+  fromCol: number; fromColOff: number;
+  fromRow: number; fromRowOff: number;
+  toCol: number;   toColOff: number;
+  toRow: number;   toRowOff: number;
+  shapes: ShapeInfo[];
+}
+
+export interface ShapeInfo {
+  /** Normalized [0,1] position/size relative to the anchor rect. */
+  x: number; y: number; w: number; h: number;
+  /** Rotation in degrees, clockwise. */
+  rot: number;
+  fillColor?: string;
+  strokeColor?: string;
+  /** Stroke width in EMU. 0 = no stroke. */
+  strokeWidth: number;
+  geom: ShapeGeom;
+}
+
+export type ShapeGeom =
+  | { type: 'preset'; name: string }
+  | { type: 'custom'; paths: PathInfo[] }
+  /** Bitmap picture leaf inside a `<xdr:grpSp>`. `dataUrl` is a pre-encoded
+   *  `data:<mime>;base64,…` produced by the Rust parser from the drawing's
+   *  relationship target. */
+  | { type: 'image'; dataUrl: string };
+
+export interface PathInfo {
+  w: number;
+  h: number;
+  commands: PathCmd[];
+}
+
+export type PathCmd =
+  | { op: 'moveTo'; x: number; y: number }
+  | { op: 'lineTo'; x: number; y: number }
+  | { op: 'cubicBezTo'; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }
+  | { op: 'quadBezTo'; x1: number; y1: number; x2: number; y2: number }
+  /** ECMA-376 §20.1.9.3. stAng/swAng in 60000ths of a degree. wr/hr in
+   *  the path's own coordinate units. Pen position is the arc start. */
+  | { op: 'arcTo'; wr: number; hr: number; stAng: number; swAng: number }
+  | { op: 'close' };
 
 /**
  * Image anchored to a rectangle of cells (EMU offsets within the anchor cells).
