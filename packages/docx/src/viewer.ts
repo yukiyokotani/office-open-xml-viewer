@@ -55,15 +55,15 @@ export class DocxViewer {
     return this._currentPage;
   }
 
-  goToPage(index: number): void {
+  async goToPage(index: number): Promise<void> {
     if (!this._doc) return;
     const clamped = Math.max(0, Math.min(index, this.pageCount - 1));
     this._currentPage = clamped;
-    this._render();
+    await this._render();
   }
 
-  nextPage(): void { this.goToPage(this._currentPage + 1); }
-  prevPage(): void { this.goToPage(this._currentPage - 1); }
+  async nextPage(): Promise<void> { await this.goToPage(this._currentPage + 1); }
+  async prevPage(): Promise<void> { await this.goToPage(this._currentPage - 1); }
 
   private async _render(): Promise<void> {
     if (!this._doc) return;
