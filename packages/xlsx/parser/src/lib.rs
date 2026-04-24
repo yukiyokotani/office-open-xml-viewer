@@ -275,6 +275,7 @@ pub enum ShapeGeom {
     /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
     /// `data_url` is a `data:<mime>;base64,…` URL produced from the drawing's
     /// relationship target (png/jpg/gif/…).
+    #[serde(rename_all = "camelCase")]
     Image { data_url: String },
 }
 
