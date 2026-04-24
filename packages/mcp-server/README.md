@@ -1,69 +1,47 @@
 # ooxml-mcp-server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes the OOXML Rust parsers as structured query tools for AI agents.
+A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets AI agents read Excel, Word, and PowerPoint files without any additional code.
 
-Agents can ask questions like *"What formulas are in Sheet1?"* or *"Extract all text from this presentation"* without writing any parsing code themselves.
+---
 
-## Installation
+## Quick start
 
-**Prerequisites:** [Rust toolchain](https://rustup.rs/) (stable, 1.75+)
+### Step 1 — Install Rust
 
-> **Note:** This is a pure-Rust binary. You do **not** need Node.js, npm, or pnpm — those are only required for the browser renderer packages in the rest of the monorepo.
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/yukiyokotani/office-open-xml-viewer.git
-cd office-open-xml-viewer
-
-# 2. Install the binary (builds the Rust parsers automatically)
-cargo install --path packages/mcp-server
-```
-
-The binary lands in `~/.cargo/bin/ooxml-mcp-server`. Confirm it is on your `PATH`:
+Skip this if `rustc --version` already prints a version number.
 
 ```bash
-which ooxml-mcp-server   # → /Users/you/.cargo/bin/ooxml-mcp-server
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Follow the on-screen prompt, then open a new terminal tab.
 ```
 
-If `~/.cargo/bin` is not on `PATH`, add this to your shell profile (`~/.zshrc`, `~/.bashrc`, …):
+### Step 2 — Install the MCP server
+
+No need to clone the repository. Run this single command:
+
+```bash
+cargo install --git https://github.com/yukiyokotani/office-open-xml-viewer.git \
+  --package ooxml-mcp-server
+```
+
+The first run downloads and compiles everything (~2 minutes). The binary is placed in `~/.cargo/bin/ooxml-mcp-server`.
+
+**Check it is on your PATH:**
+
+```bash
+which ooxml-mcp-server
+# expected: /Users/you/.cargo/bin/ooxml-mcp-server
+```
+
+If the command is not found, add this line to your shell profile (`~/.zshrc` or `~/.bashrc`) and open a new terminal:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
----
+### Step 3 — Configure your AI client
 
-## Available Tools
-
-### xlsx
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `xlsx_parse` | `path` | Workbook overview: sheet names, IDs |
-| `xlsx_get_sheet_names` | `path` | Array of sheet names only |
-| `xlsx_get_sheet_dimensions` | `path`, `sheet` | Max row and column in a sheet |
-| `xlsx_get_cell_range` | `path`, `sheet`, `range` | Cell values and formulas for a range (e.g. `"A1:C10"`) |
-| `xlsx_get_formulas` | `path`, `sheet` | All formula cells with their cached values |
-
-`sheet` accepts either a sheet name (`"Sheet1"`) or a 0-based index (`"0"`).
-
-### docx
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `docx_extract_text` | `path` | Plain text from the entire document |
-| `docx_get_structure` | `path` | Paragraph/table structure with style info |
-| `docx_get_tables` | `path` | All tables with cell-by-cell contents |
-
-### pptx
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `pptx_get_slides` | `path` | Slide count and each slide's title |
-| `pptx_extract_text` | `path`, `slide_index?` | Text from all slides or a specific one (0-based) |
-| `pptx_get_slide_structure` | `path`, `slide_index` | All elements with position, size, and text |
-
-All `path` parameters accept absolute paths.
+Pick the client you use and follow the instructions in the section below.
 
 ---
 
@@ -71,7 +49,7 @@ All `path` parameters accept absolute paths.
 
 ### Claude Code
 
-Add to your project's `.mcp.json` (version-controlled, shared with the team):
+Create `.mcp.json` in your project root (or `~/.claude.json` for all projects):
 
 ```json
 {
@@ -84,35 +62,19 @@ Add to your project's `.mcp.json` (version-controlled, shared with the team):
 }
 ```
 
-Or to your personal global config `~/.claude.json` (applies to every project):
+Start Claude Code in that directory and run `/mcp` to confirm the server shows as connected.
 
-```json
-{
-  "mcpServers": {
-    "ooxml": {
-      "type": "stdio",
-      "command": "ooxml-mcp-server"
-    }
-  }
-}
-```
-
-After adding the config, run `/mcp` inside Claude Code to confirm the server is connected.
-
-**Usage example:**
+**Try it:**
 
 ```
-> What sheets are in /path/to/budget.xlsx?
-
-[Claude calls xlsx_get_sheet_names with {"path": "/path/to/budget.xlsx"}]
-→ ["Summary", "Q1", "Q2", "Q3", "Q4"]
+> What sheets are in /Users/me/Documents/budget.xlsx?
 ```
 
 ---
 
 ### GitHub Copilot (VS Code)
 
-Add `.vscode/mcp.json` to your workspace root:
+Create `.vscode/mcp.json` in your workspace root:
 
 ```json
 {
@@ -125,23 +87,21 @@ Add `.vscode/mcp.json` to your workspace root:
 }
 ```
 
-Then in VS Code, open the Command Palette (`⇧⌘P`) → **"MCP: List Servers"** to confirm the server appears as *running*.
+Open the Command Palette (`⇧⌘P`) → **MCP: List Servers** to confirm the server is running.
 
-> **Note:** MCP tools are only available in **Agent mode** (`@agent` in the Copilot Chat panel). They are not accessible in Ask or Edit modes.
+> MCP tools are only available in **Agent mode**. In the Copilot Chat panel, click the mode selector and choose **Agent** before asking a question.
 
-**Usage example (Copilot Chat, Agent mode):**
+**Try it:**
 
 ```
-@agent Summarise the formulas in Sheet1 of @/path/to/model.xlsx
+Extract all text from /Users/me/Documents/deck.pptx
 ```
-
-Copilot will call `xlsx_get_formulas` and present the results.
 
 ---
 
 ### Codex CLI (OpenAI)
 
-Add to `~/.codex/config.toml` (global, all projects):
+Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.ooxml]
@@ -149,37 +109,26 @@ command = "ooxml-mcp-server"
 args = []
 ```
 
-Or to `.codex/config.toml` in the project root (project-scoped):
+Restart Codex, then run `codex mcp list` to verify registration.
 
-```toml
-[mcp_servers.ooxml]
-command = "ooxml-mcp-server"
-args = []
-```
-
-Restart Codex after editing the config. Use `codex mcp list` to verify the server is registered.
-
-**Usage example:**
+**Try it:**
 
 ```bash
-codex "Extract all text from slides 1–3 of /path/to/deck.pptx"
+codex "Show me all formulas in Sheet1 of /Users/me/Documents/model.xlsx"
 ```
-
-Codex will call `pptx_extract_text` with `slide_index` set appropriately.
 
 ---
 
-## Full path (if not on PATH)
+## Troubleshooting: command not found in MCP config
 
-If `~/.cargo/bin` is not on your `PATH`, use the absolute path to the binary:
+Some launchers (VS Code, Codex) do not inherit your shell `PATH`. If the server fails to start with a "command not found" error, use the full path to the binary instead of just the name:
 
 ```bash
-# Find the binary
-which ooxml-mcp-server         # or:
+# Find the full path
 echo ~/.cargo/bin/ooxml-mcp-server
 ```
 
-Then replace `"ooxml-mcp-server"` with the full path in any config above:
+Then in your config:
 
 ```json
 "command": "/Users/you/.cargo/bin/ooxml-mcp-server"
@@ -191,11 +140,34 @@ command = "/Users/you/.cargo/bin/ooxml-mcp-server"
 
 ---
 
-## Building from source (without installing)
+## Available tools
 
-```bash
-cargo build --release -p ooxml-mcp-server
-# binary at: target/release/ooxml-mcp-server
-```
+### xlsx (Excel)
 
-Use the path `target/release/ooxml-mcp-server` in your MCP config.
+| Tool | Parameters | What it returns |
+|------|-----------|-----------------|
+| `xlsx_parse` | `path` | All sheet names and IDs |
+| `xlsx_get_sheet_names` | `path` | Sheet name list |
+| `xlsx_get_sheet_dimensions` | `path`, `sheet` | Number of rows and columns |
+| `xlsx_get_cell_range` | `path`, `sheet`, `range` | Cell values and formulas for a range like `"A1:C10"` |
+| `xlsx_get_formulas` | `path`, `sheet` | Every formula cell with its cached value |
+
+`sheet` can be a name (`"Sheet1"`) or a 0-based index (`"0"`).
+
+### docx (Word)
+
+| Tool | Parameters | What it returns |
+|------|-----------|-----------------|
+| `docx_extract_text` | `path` | All text as plain string |
+| `docx_get_structure` | `path` | Paragraph and table structure with style info |
+| `docx_get_tables` | `path` | All tables with each cell's text |
+
+### pptx (PowerPoint)
+
+| Tool | Parameters | What it returns |
+|------|-----------|-----------------|
+| `pptx_get_slides` | `path` | Slide count and each slide's title |
+| `pptx_extract_text` | `path`, `slide_index?` | Text from all slides, or one slide (0-based index) |
+| `pptx_get_slide_structure` | `path`, `slide_index` | All shapes with position, size, and text |
+
+All `path` parameters require absolute paths (e.g. `/Users/me/Documents/file.xlsx`).
