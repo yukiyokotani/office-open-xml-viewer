@@ -11,9 +11,9 @@ use crate::tools::{
     pptx::PptxTools,
     xlsx::XlsxTools,
 };
-use crate::tools::docx::DocxPathParam;
-use crate::tools::pptx::{PptxPathParam, PptxSlideParam, PptxTextParam};
-use crate::tools::xlsx::{XlsxCellRangeParam, XlsxPathParam, XlsxSheetParam};
+use crate::tools::docx::{DocxPathParam, DocxSearchParam};
+use crate::tools::pptx::{PptxPathParam, PptxSearchParam, PptxSlideParam, PptxTextParam};
+use crate::tools::xlsx::{XlsxCellRangeParam, XlsxPathParam, XlsxSearchParam, XlsxSheetParam};
 
 #[derive(Clone)]
 pub struct OoxmlServer {
@@ -56,6 +56,11 @@ impl OoxmlServer {
         XlsxTools::xlsx_get_formulas(Parameters(p))
     }
 
+    #[tool(description = "Search for a substring in cell values and formulas across one or all sheets of an XLSX file")]
+    fn xlsx_search_cells(&self, Parameters(p): Parameters<XlsxSearchParam>) -> String {
+        XlsxTools::xlsx_search_cells(Parameters(p))
+    }
+
     // ── docx tools ────────────────────────────────────────────────────────────
 
     #[tool(description = "Extract all plain text from a DOCX file")]
@@ -73,6 +78,11 @@ impl OoxmlServer {
         DocxTools::docx_get_tables(Parameters(p))
     }
 
+    #[tool(description = "Search for a substring in all paragraph and table text of a DOCX file; returns matching excerpts with their position")]
+    fn docx_search_text(&self, Parameters(p): Parameters<DocxSearchParam>) -> String {
+        DocxTools::docx_search_text(Parameters(p))
+    }
+
     // ── pptx tools ────────────────────────────────────────────────────────────
 
     #[tool(description = "Return the number of slides and each slide's title from a PPTX file")]
@@ -88,6 +98,11 @@ impl OoxmlServer {
     #[tool(description = "Return the structure (elements with position, size, text) of a single slide")]
     fn pptx_get_slide_structure(&self, Parameters(p): Parameters<PptxSlideParam>) -> String {
         PptxTools::pptx_get_slide_structure(Parameters(p))
+    }
+
+    #[tool(description = "Search for a substring across all text in a PPTX file; returns matching slide numbers and the text snippets that matched")]
+    fn pptx_search_text(&self, Parameters(p): Parameters<PptxSearchParam>) -> String {
+        PptxTools::pptx_search_text(Parameters(p))
     }
 }
 

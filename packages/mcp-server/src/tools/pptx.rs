@@ -13,6 +13,14 @@ pub struct PptxPathParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct PptxSearchParam {
+    /// Absolute path to the PPTX file
+    pub path: String,
+    /// Case-insensitive substring to search for across all slide text
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PptxSlideParam {
     /// Absolute path to the PPTX file
     pub path: String,
@@ -254,5 +262,79 @@ impl PptxTools {
             }
         };
         serde_json::to_string(&slide_structure(slide)).unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    #[tool(description = "Search for a substring across all text in a PPTX file; returns matching slide numbers and the text snippets that matched")]
+    pub fn pptx_search_text(Parameters(p): Parameters<PptxSearchParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres_json = match pptx_parser::parse_pptx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let pres: Value = match serde_json::from_str(&pres_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let slides = pres["slides"].as_array().map(|s| s.as_slice()).unwrap_or(&[]);
+        let query_lower = p.query.to_lowercase();
+        let mut matches: Vec<Value> = Vec::new();
+
+        for slide in slides {
+            let slide_index = slide["index"].as_u64().unwrap_or(0) as usize;
+            let slide_number = slide["slideNumber"].as_u64().unwrap_or(0) as usize;
+
+            if let Some(elements) = slide["elements"].as_array() {
+                for el in elements {
+                    // Collect all text from this element
+                    let mut element_text = String::new();
+                    if let Some(tb) = el.get("textBody") {
+                        if let Some(paras) = tb["paragraphs"].as_array() {
+                            for para in paras {
+                                extract_text_runs(para, &mut element_text);
+                                element_text.push('\n');
+                            }
+                        }
+                    }
+                    // Table cells
+                    if el["type"].as_str() == Some("table") {
+                        if let Some(rows) = el["rows"].as_array() {
+                            for row in rows {
+                                if let Some(cells) = row["cells"].as_array() {
+                                    for cell in cells {
+                                        if let Some(paras) = cell["paragraphs"].as_array() {
+                                            for para in paras {
+                                                extract_text_runs(para, &mut element_text);
+                                            }
+                                        }
+                                        element_text.push('\t');
+                                    }
+                                }
+                                element_text.push('\n');
+                            }
+                        }
+                    }
+
+                    if element_text.to_lowercase().contains(&query_lower) {
+                        matches.push(serde_json::json!({
+                            "slideIndex": slide_index,
+                            "slideNumber": slide_number,
+                            "elementType": el["type"],
+                            "placeholderType": el["placeholderType"],
+                            "text": element_text.trim(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        serde_json::json!({
+            "query": p.query,
+            "matchCount": matches.len(),
+            "matches": matches,
+        })
+        .to_string()
     }
 }

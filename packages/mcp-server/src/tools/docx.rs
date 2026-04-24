@@ -12,6 +12,14 @@ pub struct DocxPathParam {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocxSearchParam {
+    /// Absolute path to the DOCX file
+    pub path: String,
+    /// Case-insensitive substring to search for in paragraph and table cell text
+    pub query: String,
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
@@ -199,5 +207,74 @@ impl DocxTools {
             .collect();
 
         serde_json::to_string(&tables).unwrap_or_else(|e| format!("Error: {}", e))
+    }
+
+    #[tool(description = "Search for a substring in all paragraph and table text of a DOCX file; returns matching excerpts with their position")]
+    pub fn docx_search_text(Parameters(p): Parameters<DocxSearchParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc_json = match docx_parser::parse_docx_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let doc: Value = match serde_json::from_str(&doc_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let body = doc["body"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+        let query_lower = p.query.to_lowercase();
+        let mut matches: Vec<Value> = Vec::new();
+
+        for (idx, element) in body.iter().enumerate() {
+            match element["type"].as_str().unwrap_or("") {
+                "paragraph" => {
+                    let mut text = String::new();
+                    collect_run_texts(&element["runs"], &mut text);
+                    if text.to_lowercase().contains(&query_lower) {
+                        matches.push(serde_json::json!({
+                            "type": "paragraph",
+                            "index": idx,
+                            "styleId": element["styleId"],
+                            "text": text.trim(),
+                        }));
+                    }
+                }
+                "table" => {
+                    if let Some(rows) = element["rows"].as_array() {
+                        for (row_idx, row) in rows.iter().enumerate() {
+                            if let Some(cells) = row["cells"].as_array() {
+                                for (col_idx, cell) in cells.iter().enumerate() {
+                                    let mut text = String::new();
+                                    if let Some(paras) = cell["paragraphs"].as_array() {
+                                        for para in paras {
+                                            collect_run_texts(&para["runs"], &mut text);
+                                        }
+                                    }
+                                    if text.to_lowercase().contains(&query_lower) {
+                                        matches.push(serde_json::json!({
+                                            "type": "tableCell",
+                                            "tableIndex": idx,
+                                            "row": row_idx,
+                                            "col": col_idx,
+                                            "text": text.trim(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        serde_json::json!({
+            "query": p.query,
+            "matchCount": matches.len(),
+            "matches": matches,
+        })
+        .to_string()
     }
 }

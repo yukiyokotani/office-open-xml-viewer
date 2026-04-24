@@ -151,8 +151,9 @@ command = "/Users/you/.cargo/bin/ooxml-mcp-server"
 | `xlsx_get_sheet_dimensions` | `path`, `sheet` | Number of rows and columns |
 | `xlsx_get_cell_range` | `path`, `sheet`, `range` | Cell values and formulas for a range like `"A1:C10"` |
 | `xlsx_get_formulas` | `path`, `sheet` | Every formula cell with its cached value |
+| `xlsx_search_cells` | `path`, `query`, `sheet?` | Cells whose value or formula contains the query string |
 
-`sheet` can be a name (`"Sheet1"`) or a 0-based index (`"0"`).
+`sheet` can be a name (`"Sheet1"`) or a 0-based index (`"0"`). For `xlsx_search_cells`, omitting `sheet` searches all sheets.
 
 ### docx (Word)
 
@@ -161,6 +162,7 @@ command = "/Users/you/.cargo/bin/ooxml-mcp-server"
 | `docx_extract_text` | `path` | All text as plain string |
 | `docx_get_structure` | `path` | Paragraph and table structure with style info |
 | `docx_get_tables` | `path` | All tables with each cell's text |
+| `docx_search_text` | `path`, `query` | Matching paragraphs and table cells with their position |
 
 ### pptx (PowerPoint)
 
@@ -169,5 +171,7 @@ command = "/Users/you/.cargo/bin/ooxml-mcp-server"
 | `pptx_get_slides` | `path` | Slide count and each slide's title |
 | `pptx_extract_text` | `path`, `slide_index?` | Text from all slides, or one slide (0-based index) |
 | `pptx_get_slide_structure` | `path`, `slide_index` | All shapes with position, size, and text |
+| `pptx_search_text` | `path`, `query` | Matching slide numbers and text snippets |
 
-All `path` parameters require absolute paths (e.g. `/Users/me/Documents/file.xlsx`).
+All `path` parameters require absolute paths (e.g. `/Users/me/Documents/file.xlsx`).  
+All search tools use **case-insensitive substring matching**.

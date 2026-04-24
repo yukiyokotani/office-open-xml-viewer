@@ -13,6 +13,16 @@ pub struct XlsxPathParam {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct XlsxSearchParam {
+    /// Absolute path to the XLSX file
+    pub path: String,
+    /// Sheet name or 0-based index; omit to search all sheets
+    pub sheet: Option<String>,
+    /// Case-insensitive substring to search for in cell values and formulas
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct XlsxSheetParam {
     /// Absolute path to the XLSX file
     pub path: String,
@@ -333,6 +343,87 @@ impl XlsxTools {
         serde_json::json!({
             "sheet": name,
             "formulas": formulas,
+        })
+        .to_string()
+    }
+
+    #[tool(description = "Search for a substring in cell values and formulas across one or all sheets of an XLSX file")]
+    pub fn xlsx_search_cells(Parameters(p): Parameters<XlsxSearchParam>) -> String {
+        let data = match read_file(&p.path) {
+            Ok(d) => d,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let wb_json = match xlsx_parser::parse_workbook_native(&data) {
+            Ok(j) => j,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let wb: Value = match serde_json::from_str(&wb_json) {
+            Ok(v) => v,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let sheets = match wb["sheets"].as_array() {
+            Some(s) => s.clone(),
+            None => return "Error: no sheets found".to_string(),
+        };
+
+        // Collect which sheets to search
+        let targets: Vec<(u32, String)> = if let Some(ref sheet_id) = p.sheet {
+            match resolve_sheet(&wb_json, sheet_id) {
+                Ok((idx, name)) => vec![(idx, name)],
+                Err(e) => return format!("Error: {}", e),
+            }
+        } else {
+            sheets
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (i as u32, s["name"].as_str().unwrap_or("").to_string()))
+                .collect()
+        };
+
+        let query_lower = p.query.to_lowercase();
+        let mut matches: Vec<Value> = Vec::new();
+
+        for (idx, name) in targets {
+            let ws_json = match xlsx_parser::parse_sheet_native(&data, idx, &name) {
+                Ok(j) => j,
+                Err(e) => return format!("Error parsing sheet '{}': {}", name, e),
+            };
+            let ws: Value = match serde_json::from_str(&ws_json) {
+                Ok(v) => v,
+                Err(e) => return format!("Error: {}", e),
+            };
+
+            if let Some(rows) = ws["rows"].as_array() {
+                for row in rows {
+                    let row_idx = row["index"].as_u64().unwrap_or(0) as u32;
+                    if let Some(cells) = row["cells"].as_array() {
+                        for cell in cells {
+                            let value = cell_display(cell);
+                            let formula = cell["formula"].as_str().unwrap_or("");
+                            let hit_value = value.to_lowercase().contains(&query_lower);
+                            let hit_formula = formula.to_lowercase().contains(&query_lower);
+                            if hit_value || hit_formula {
+                                let col = cell["col"].as_u64().unwrap_or(0) as u32;
+                                let mut entry = serde_json::json!({
+                                    "sheet": name,
+                                    "ref": format!("{}{}", col_to_letter(col), row_idx),
+                                    "value": value,
+                                });
+                                if !formula.is_empty() {
+                                    entry["formula"] = Value::String(formula.to_string());
+                                }
+                                matches.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        serde_json::json!({
+            "query": p.query,
+            "matchCount": matches.len(),
+            "matches": matches,
         })
         .to_string()
     }
