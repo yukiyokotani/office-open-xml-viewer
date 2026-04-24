@@ -19,9 +19,12 @@ export interface CellAddress {
   col: number;
 }
 
+export type SelectionMode = 'cells' | 'rows' | 'cols' | 'all';
+
 export interface CellRange {
   anchor: CellAddress;
   active: CellAddress;
+  mode: SelectionMode;
 }
 
 export class XlsxViewer {
@@ -40,6 +43,7 @@ export class XlsxViewer {
   // Selection state
   private anchorCell: CellAddress | null = null;
   private activeCell: CellAddress | null = null;
+  private selectionMode: SelectionMode = 'cells';
   private isSelecting = false;
   private selectionOverlay: HTMLDivElement;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -122,6 +126,7 @@ export class XlsxViewer {
     this.scrollHost.scrollTop = 0;
     this.anchorCell = null;
     this.activeCell = null;
+    this.selectionMode = 'cells';
     this.updateSelectionOverlay();
     this.updateTabActive(index);
     this.currentWorksheet = await this.wb.getWorksheet(index);
@@ -252,10 +257,86 @@ export class XlsxViewer {
     return { x, y, w, h };
   }
 
-  /** Returns the normalized selection range (top-left anchor, bottom-right active). */
+  /** Returns the current selection, including mode. */
   get selection(): CellRange | null {
     if (!this.anchorCell || !this.activeCell) return null;
-    return { anchor: this.anchorCell, active: this.activeCell };
+    return { anchor: this.anchorCell, active: this.activeCell, mode: this.selectionMode };
+  }
+
+  /**
+   * Returns what the header area contains at the given client coordinates.
+   * Returns null when the point is in the cell grid (not a header).
+   */
+  private getHeaderHit(
+    clientX: number,
+    clientY: number,
+  ): { kind: 'corner' } | { kind: 'row'; row: number } | { kind: 'col'; col: number } | null {
+    const ws = this.currentWorksheet;
+    if (!ws) return null;
+    const cs = this.opts.cellScale ?? 1;
+    const rect = this.canvasArea.getBoundingClientRect();
+    const lx = (clientX - rect.left) / cs;
+    const ly = (clientY - rect.top) / cs;
+
+    const inRowHeader = lx < HEADER_W;
+    const inColHeader = ly < HEADER_H;
+    if (!inRowHeader && !inColHeader) return null;
+    if (inRowHeader && inColHeader) return { kind: 'corner' };
+
+    const freezeRows = ws.freezeRows ?? 0;
+    const freezeCols = ws.freezeCols ?? 0;
+
+    if (inRowHeader) {
+      // Determine which row was clicked
+      const innerY = ly - HEADER_H;
+      if (innerY < 0) return { kind: 'corner' };
+      let frozenH = 0;
+      const frozenRowH: number[] = [];
+      for (let r = 1; r <= freezeRows; r++) {
+        const h = rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+        frozenRowH.push(h); frozenH += h;
+      }
+      if (innerY < frozenH) {
+        let acc = 0;
+        for (let r = 0; r < freezeRows; r++) {
+          acc += frozenRowH[r];
+          if (innerY < acc) return { kind: 'row', row: r + 1 };
+        }
+        return null;
+      }
+      const contentY = innerY - frozenH + this.scrollHost.scrollTop / cs;
+      let acc = 0;
+      for (let r = freezeRows + 1; r <= 1048576; r++) {
+        acc += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+        if (contentY < acc) return { kind: 'row', row: r };
+      }
+      return null;
+    }
+
+    // inColHeader
+    const innerX = lx - HEADER_W;
+    if (innerX < 0) return { kind: 'corner' };
+    let frozenW = 0;
+    const frozenColW: number[] = [];
+    for (let c = 1; c <= freezeCols; c++) {
+      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      frozenColW.push(w); frozenW += w;
+    }
+    if (innerX < frozenW) {
+      let acc = 0;
+      for (let c = 0; c < freezeCols; c++) {
+        acc += frozenColW[c];
+        if (innerX < acc) return { kind: 'col', col: c + 1 };
+      }
+      return null;
+    }
+    const contentX = innerX - frozenW + this.scrollHost.scrollLeft / cs;
+    let acc = 0;
+    for (let c = freezeCols + 1; c <= 16384; c++) {
+      acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      if (contentX < acc) return { kind: 'col', col: c };
+    }
+    return null;
   }
 
   /** Copy the selected cell range as tab-separated text to the clipboard. */
@@ -263,12 +344,33 @@ export class XlsxViewer {
     const ws = this.currentWorksheet;
     if (!ws || !this.anchorCell || !this.activeCell) return;
 
-    const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
-    const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-    const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
-    const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+    // Determine actual data extent for rows/cols/all modes
+    let maxRow = 1, maxCol = 1;
+    for (const row of ws.rows) {
+      if (row.index > maxRow) maxRow = row.index;
+      for (const cell of row.cells) {
+        if (cell.col > maxCol) maxCol = cell.col;
+      }
+    }
 
-    // Build cell map for the selection range
+    let r1: number, r2: number, c1: number, c2: number;
+    if (this.selectionMode === 'all') {
+      r1 = 1; r2 = maxRow; c1 = 1; c2 = maxCol;
+    } else if (this.selectionMode === 'rows') {
+      r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      r2 = Math.max(this.anchorCell.row, this.activeCell.row);
+      c1 = 1; c2 = maxCol;
+    } else if (this.selectionMode === 'cols') {
+      c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+      r1 = 1; r2 = maxRow;
+    } else {
+      r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      r2 = Math.max(this.anchorCell.row, this.activeCell.row);
+      c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+    }
+
     const cellMap = new Map<string, string>();
     for (const row of ws.rows) {
       if (row.index < r1 || row.index > r2) continue;
@@ -297,38 +399,108 @@ export class XlsxViewer {
     this.selectionOverlay.innerHTML = '';
     if (!this.anchorCell || !this.activeCell) return;
 
-    const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
-    const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-    const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
-    const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+    const cs = this.opts.cellScale ?? 1;
+    let x: number, y: number, w: number, h: number;
 
-    const topLeft = this.getCellRect(r1, c1);
-    const bottomRight = this.getCellRect(r2, c2);
-    if (!topLeft || !bottomRight) return;
+    if (this.selectionMode === 'all') {
+      x = HEADER_W * cs;
+      y = HEADER_H * cs;
+      w = this.canvasArea.clientWidth - HEADER_W * cs;
+      h = this.canvasArea.clientHeight - HEADER_H * cs;
+    } else if (this.selectionMode === 'rows') {
+      const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
+      const top = this.getCellRect(r1, 1);
+      const bot = this.getCellRect(r2, 1);
+      if (!top || !bot) return;
+      x = HEADER_W * cs;
+      y = top.y;
+      w = this.canvasArea.clientWidth - HEADER_W * cs;
+      h = bot.y + bot.h - top.y;
+    } else if (this.selectionMode === 'cols') {
+      const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+      const left = this.getCellRect(1, c1);
+      const right = this.getCellRect(1, c2);
+      if (!left || !right) return;
+      x = left.x;
+      y = HEADER_H * cs;
+      w = right.x + right.w - left.x;
+      h = this.canvasArea.clientHeight - HEADER_H * cs;
+    } else {
+      const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
+      const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
+      const tl = this.getCellRect(r1, c1);
+      const br = this.getCellRect(r2, c2);
+      if (!tl || !br) return;
+      x = tl.x; y = tl.y;
+      w = br.x + br.w - tl.x;
+      h = br.y + br.h - tl.y;
+    }
 
-    const x = topLeft.x;
-    const y = topLeft.y;
-    const w = bottomRight.x + bottomRight.w - topLeft.x;
-    const h = bottomRight.y + bottomRight.h - topLeft.y;
-
+    if (w <= 0 || h <= 0) return;
     const box = document.createElement('div');
     box.style.cssText =
       `position:absolute;` +
       `left:${x}px;top:${y}px;width:${w}px;height:${h}px;` +
-      `box-sizing:border-box;` +
-      `border:2px solid #1a73e8;` +
-      `background:rgba(26,115,232,0.08);` +
-      `pointer-events:none;`;
+      `box-sizing:border-box;border:2px solid #1a73e8;` +
+      `background:rgba(26,115,232,0.08);pointer-events:none;`;
     this.selectionOverlay.appendChild(box);
   }
 
   private setupSelectionEvents(): void {
     this.scrollHost.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
+
+      const headerHit = this.getHeaderHit(e.clientX, e.clientY);
+
+      if (headerHit) {
+        if (headerHit.kind === 'corner') {
+          // Select all — no drag extension needed
+          this.selectionMode = 'all';
+          this.anchorCell = { row: 1, col: 1 };
+          this.activeCell = { row: 1, col: 1 };
+          this.isSelecting = false;
+        } else if (headerHit.kind === 'row') {
+          if (e.shiftKey && this.anchorCell && this.selectionMode === 'rows') {
+            // Extend existing row selection
+            this.activeCell = { row: headerHit.row, col: 1 };
+          } else {
+            this.selectionMode = 'rows';
+            this.anchorCell = { row: headerHit.row, col: 1 };
+            this.activeCell = { row: headerHit.row, col: 1 };
+            this.isSelecting = true;
+            this.scrollHost.setPointerCapture(e.pointerId);
+          }
+        } else {
+          if (e.shiftKey && this.anchorCell && this.selectionMode === 'cols') {
+            this.activeCell = { row: 1, col: headerHit.col };
+          } else {
+            this.selectionMode = 'cols';
+            this.anchorCell = { row: 1, col: headerHit.col };
+            this.activeCell = { row: 1, col: headerHit.col };
+            this.isSelecting = true;
+            this.scrollHost.setPointerCapture(e.pointerId);
+          }
+        }
+        this.updateSelectionOverlay();
+        this.opts.onSelectionChange?.(this.selection);
+        return;
+      }
+
       const cell = this.getCellAt(e.clientX, e.clientY);
       if (!cell) return;
-      this.anchorCell = cell;
-      this.activeCell = cell;
+
+      if (e.shiftKey && this.anchorCell && this.selectionMode === 'cells') {
+        // Extend current selection; keep anchor
+        this.activeCell = cell;
+      } else {
+        this.selectionMode = 'cells';
+        this.anchorCell = cell;
+        this.activeCell = cell;
+      }
       this.isSelecting = true;
       this.scrollHost.setPointerCapture(e.pointerId);
       this.updateSelectionOverlay();
@@ -337,10 +509,23 @@ export class XlsxViewer {
 
     this.scrollHost.addEventListener('pointermove', (e: PointerEvent) => {
       if (!this.isSelecting) return;
-      const cell = this.getCellAt(e.clientX, e.clientY);
-      if (!cell) return;
-      if (cell.row === this.activeCell?.row && cell.col === this.activeCell?.col) return;
-      this.activeCell = cell;
+
+      if (this.selectionMode === 'rows') {
+        const hit = this.getHeaderHit(e.clientX, e.clientY);
+        const row = hit?.kind === 'row' ? hit.row : this.getCellAt(e.clientX, e.clientY)?.row;
+        if (!row || row === this.activeCell?.row) return;
+        this.activeCell = { row, col: 1 };
+      } else if (this.selectionMode === 'cols') {
+        const hit = this.getHeaderHit(e.clientX, e.clientY);
+        const col = hit?.kind === 'col' ? hit.col : this.getCellAt(e.clientX, e.clientY)?.col;
+        if (!col || col === this.activeCell?.col) return;
+        this.activeCell = { row: 1, col };
+      } else {
+        const cell = this.getCellAt(e.clientX, e.clientY);
+        if (!cell || (cell.row === this.activeCell?.row && cell.col === this.activeCell?.col)) return;
+        this.activeCell = cell;
+      }
+
       this.updateSelectionOverlay();
       this.opts.onSelectionChange?.(this.selection);
     });

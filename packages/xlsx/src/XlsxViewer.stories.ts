@@ -197,23 +197,34 @@ function buildSelectableUI(args: Args, autoLoadUrl?: string): HTMLElement {
 
   function onSelectionChange(sel: CellRange | null): void {
     if (!sel) {
-      selectionLabel.textContent = 'Click or drag to select cells. Ctrl+C to copy.';
+      selectionLabel.textContent = 'Click/drag cells · Click row/col headers · Click corner for all · Shift+click to extend · Ctrl+C to copy';
       copyBtn.disabled = true;
       return;
     }
-    const r1 = Math.min(sel.anchor.row, sel.active.row);
-    const r2 = Math.max(sel.anchor.row, sel.active.row);
-    const c1 = Math.min(sel.anchor.col, sel.active.col);
-    const c2 = Math.max(sel.anchor.col, sel.active.col);
     const colLabel = (n: number) => {
       let s = '';
       while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
       return s;
     };
-    const tl = `${colLabel(c1)}${r1}`;
-    const br = `${colLabel(c2)}${r2}`;
-    selectionLabel.textContent =
-      r1 === r2 && c1 === c2 ? `Selected: ${tl}` : `Selected: ${tl}:${br} (${r2 - r1 + 1}×${c2 - c1 + 1})`;
+    if (sel.mode === 'all') {
+      selectionLabel.textContent = 'Selected: all cells';
+    } else if (sel.mode === 'rows') {
+      const r1 = Math.min(sel.anchor.row, sel.active.row);
+      const r2 = Math.max(sel.anchor.row, sel.active.row);
+      selectionLabel.textContent = r1 === r2 ? `Selected: row ${r1}` : `Selected: rows ${r1}–${r2}`;
+    } else if (sel.mode === 'cols') {
+      const c1 = Math.min(sel.anchor.col, sel.active.col);
+      const c2 = Math.max(sel.anchor.col, sel.active.col);
+      selectionLabel.textContent = c1 === c2 ? `Selected: col ${colLabel(c1)}` : `Selected: cols ${colLabel(c1)}–${colLabel(c2)}`;
+    } else {
+      const r1 = Math.min(sel.anchor.row, sel.active.row);
+      const r2 = Math.max(sel.anchor.row, sel.active.row);
+      const c1 = Math.min(sel.anchor.col, sel.active.col);
+      const c2 = Math.max(sel.anchor.col, sel.active.col);
+      const tl = `${colLabel(c1)}${r1}`;
+      const br = `${colLabel(c2)}${r2}`;
+      selectionLabel.textContent = r1 === r2 && c1 === c2 ? `Selected: ${tl}` : `Selected: ${tl}:${br} (${r2 - r1 + 1}×${c2 - c1 + 1})`;
+    }
     copyBtn.disabled = false;
   }
 
