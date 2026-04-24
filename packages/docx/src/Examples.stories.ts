@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './DocxViewer.stories';
 import { DocxDocument } from './document';
+import { DocxViewer } from './viewer';
+import type { DocxTextRunInfo } from './renderer';
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -38,6 +40,18 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   return s;
 }
 
+function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
+  layer.innerHTML = '';
+  for (const run of runs) {
+    const span = document.createElement('span');
+    span.textContent = run.text;
+    span.style.cssText =
+      `position:absolute;left:${run.x}px;top:${run.y}px;` +
+      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
+    layer.appendChild(span);
+  }
+}
+
 export const ScrollView: LayoutStory = {
   name: 'ScrollView — stack all pages',
   render() {
@@ -58,13 +72,28 @@ export const ScrollView: LayoutStory = {
       .then(async (doc) => {
         status.textContent = `Rendering ${doc.pageCount} pages…`;
         const widthPx = 700;
+
         for (let i = 0; i < doc.pageCount; i++) {
+          const pageWrapper = document.createElement('div');
+          pageWrapper.style.cssText =
+            'position:relative;display:block;max-width:700px;margin:0 auto 12px;';
+
           const canvas = document.createElement('canvas');
           canvas.style.cssText =
-            'display:block;width:100%;max-width:700px;margin:0 auto 12px;' +
-            'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
-          scroller.appendChild(canvas);
-          await doc.renderPage(canvas, i, { width: widthPx });
+            'display:block;width:100%;max-width:700px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
+
+          const textLayer = document.createElement('div');
+          textLayer.style.cssText =
+            'position:absolute;top:0;left:0;width:100%;height:100%;' +
+            'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
+
+          pageWrapper.appendChild(canvas);
+          pageWrapper.appendChild(textLayer);
+          scroller.appendChild(pageWrapper);
+
+          const runs: DocxTextRunInfo[] = [];
+          await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+          buildDocxTextLayer(textLayer, runs);
         }
         status.textContent = `Loaded ${doc.pageCount} pages`;
       })
@@ -149,23 +178,31 @@ export const MasterDetail: LayoutStory = {
     detailCol.style.cssText =
       'flex:1 1 auto;border:1px solid #ccc;background:#f5f5f5;padding:12px;overflow:auto;' +
       'display:flex;align-items:flex-start;justify-content:center;';
+    layout.append(thumbCol, detailCol);
+
+    // Detail canvas + viewer with text selection
     const detailCanvas = document.createElement('canvas');
     detailCanvas.style.cssText = 'display:block;max-width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
     detailCol.appendChild(detailCanvas);
-    layout.append(thumbCol, detailCol);
+    const detailViewer = new DocxViewer(detailCanvas, {
+      enableTextSelection: true,
+      width: 600,
+    });
 
-    DocxDocument.load(SAMPLE_URL)
-      .then(async (doc) => {
+    // Load thumbnails using DocxDocument; detail viewer loads independently
+    Promise.all([
+      DocxDocument.load(SAMPLE_URL),
+      detailViewer.load(SAMPLE_URL),
+    ])
+      .then(async ([doc]) => {
         status.textContent = `Rendering ${doc.pageCount} thumbnails…`;
         const thumbEntries: HTMLDivElement[] = [];
-
-        const detailWidth = () => detailCol.clientWidth - 24;
 
         const selectPage = async (i: number) => {
           for (let k = 0; k < thumbEntries.length; k++) {
             thumbEntries[k].style.outline = k === i ? '2px solid #0366d6' : 'none';
           }
-          await doc.renderPage(detailCanvas, i, { width: Math.max(320, detailWidth()) });
+          await detailViewer.goToPage(i);
         };
 
         for (let i = 0; i < doc.pageCount; i++) {
@@ -189,7 +226,8 @@ export const MasterDetail: LayoutStory = {
           await doc.renderPage(canvas, i, { width: 180 });
         }
 
-        await selectPage(0);
+        // Highlight first thumbnail
+        if (thumbEntries.length > 0) thumbEntries[0].style.outline = '2px solid #0366d6';
         status.textContent = `Loaded ${doc.pageCount} pages`;
       })
       .catch((e: Error) => {

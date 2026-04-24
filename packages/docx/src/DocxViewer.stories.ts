@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
+import { DocxViewer } from './viewer';
 import init, { parse_docx } from './wasm/docx_parser.js';
 
 type Args = {
@@ -58,37 +59,27 @@ export function buildViewerUI(
   const canvas = document.createElement('canvas');
   container.appendChild(canvas);
 
-  const ctx: { doc: DocxDocument | null; page: number } = { doc: null, page: 0 };
+  const viewer = new DocxViewer(canvas, {
+    width: args.width,
+    dpr: window.devicePixelRatio,
+    enableTextSelection: true,
+  });
 
   const updateNav = () => {
-    const total = ctx.doc?.pageCount ?? 0;
-    pageInfo.textContent = total > 0 ? `Page ${ctx.page + 1} / ${total}` : '';
-    prevBtn.disabled = ctx.page <= 0;
-    nextBtn.disabled = ctx.page >= total - 1;
+    const total = viewer.pageCount;
+    pageInfo.textContent = total > 0 ? `Page ${viewer.currentPage + 1} / ${total}` : '';
+    prevBtn.disabled = viewer.currentPage <= 0;
+    nextBtn.disabled = viewer.currentPage >= total - 1;
   };
 
-  const render = async () => {
-    if (!ctx.doc) return;
-    await ctx.doc.renderPage(canvas, ctx.page, { width: args.width, dpr: window.devicePixelRatio });
-    canvas.style.maxWidth = '100%';
-    canvas.style.display = 'block';
-  };
-
-  prevBtn.addEventListener('click', async () => {
-    if (ctx.page > 0) { ctx.page--; await render(); updateNav(); }
-  });
-  nextBtn.addEventListener('click', async () => {
-    if (ctx.doc && ctx.page < ctx.doc.pageCount - 1) { ctx.page++; await render(); updateNav(); }
-  });
+  prevBtn.addEventListener('click', () => { viewer.prevPage(); updateNav(); });
+  nextBtn.addEventListener('click', () => { viewer.nextPage(); updateNav(); });
 
   if (autoLoadUrl) {
     status.textContent = `Loading ${autoLoadUrl}…`;
-    DocxDocument.load(autoLoadUrl)
-      .then(async (d) => {
-        ctx.doc = d;
-        ctx.page = 0;
-        status.textContent = `Loaded — ${d.pageCount} page(s)`;
-        await render();
+    viewer.load(autoLoadUrl)
+      .then(() => {
+        status.textContent = `Loaded — ${viewer.pageCount} page(s)`;
         updateNav();
       })
       .catch((e: Error) => {
@@ -97,7 +88,7 @@ export function buildViewerUI(
       });
   }
 
-  return { root, doc: ctx.doc };
+  return { root, doc: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -194,34 +185,28 @@ export const FileUpload: Story = {
 
     root.append(fileInput, status, toolbar, container);
 
-    let docRef: DocxDocument | null = null;
-    let currentPage = 0;
-    let canvas: HTMLCanvasElement | null = null;
+    let viewer: DocxViewer | null = null;
 
     const updateNav = () => {
-      const total = docRef?.pageCount ?? 0;
-      pageInfo.textContent = total > 0 ? `Page ${currentPage + 1} / ${total}` : '';
-      prevBtn.disabled = currentPage <= 0;
-      nextBtn.disabled = currentPage >= total - 1;
-    };
-
-    const render = async () => {
-      if (!docRef || !canvas) return;
-      await docRef.renderPage(canvas, currentPage, { width: args.width, dpr: window.devicePixelRatio });
-      canvas.style.maxWidth = '100%';
-      canvas.style.display = 'block';
+      const total = viewer?.pageCount ?? 0;
+      pageInfo.textContent = total > 0 ? `Page ${(viewer?.currentPage ?? 0) + 1} / ${total}` : '';
+      prevBtn.disabled = (viewer?.currentPage ?? 0) <= 0;
+      nextBtn.disabled = (viewer?.currentPage ?? 0) >= total - 1;
     };
 
     async function loadBuffer(name: string, buffer: ArrayBuffer) {
       status.textContent = `Parsing ${name}…`;
       container.innerHTML = '';
-      canvas = document.createElement('canvas');
+      const canvas = document.createElement('canvas');
       container.appendChild(canvas);
+      viewer = new DocxViewer(canvas, {
+        width: args.width,
+        dpr: window.devicePixelRatio,
+        enableTextSelection: true,
+      });
       try {
-        docRef = await DocxDocument.load(buffer);
-        currentPage = 0;
-        status.textContent = `Loaded ${name} — ${docRef.pageCount} page(s)`;
-        await render();
+        await viewer.load(buffer);
+        status.textContent = `Loaded ${name} — ${viewer.pageCount} page(s)`;
         updateNav();
       } catch (err) {
         status.textContent = `Failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -243,12 +228,8 @@ export const FileUpload: Story = {
       }
     });
 
-    prevBtn.addEventListener('click', async () => {
-      if (currentPage > 0) { currentPage--; await render(); updateNav(); }
-    });
-    nextBtn.addEventListener('click', async () => {
-      if (docRef && currentPage < docRef.pageCount - 1) { currentPage++; await render(); updateNav(); }
-    });
+    prevBtn.addEventListener('click', () => { viewer?.prevPage(); updateNav(); });
+    nextBtn.addEventListener('click', () => { viewer?.nextPage(); updateNav(); });
 
     return root;
   },

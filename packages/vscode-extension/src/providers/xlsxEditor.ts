@@ -1,0 +1,53 @@
+import * as vscode from 'vscode';
+import { getWebviewHtml } from '../webviewHtml';
+
+export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider {
+  static readonly viewType = 'ooxmlViewer.xlsxEditor';
+
+  static register(context: vscode.ExtensionContext): vscode.Disposable {
+    return vscode.window.registerCustomEditorProvider(
+      XlsxEditorProvider.viewType,
+      new XlsxEditorProvider(context),
+      { supportsMultipleEditorsPerDocument: true },
+    );
+  }
+
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  async openCustomDocument(
+    uri: vscode.Uri,
+  ): Promise<vscode.CustomDocument> {
+    return { uri, dispose: () => undefined };
+  }
+
+  async resolveCustomEditor(
+    document: vscode.CustomDocument,
+    webviewPanel: vscode.WebviewPanel,
+  ): Promise<void> {
+    webviewPanel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
+      ],
+    };
+
+    webviewPanel.webview.html = getWebviewHtml(
+      webviewPanel.webview,
+      this.context.extensionUri,
+      'xlsx',
+    );
+
+    const bytes = await vscode.workspace.fs.readFile(document.uri);
+    await webviewPanel.webview.postMessage({
+      type: 'ooxml-init',
+      fileType: 'xlsx',
+      data: Array.from(bytes),
+    });
+
+    webviewPanel.webview.onDidReceiveMessage((msg) => {
+      if (msg.type === 'copy') {
+        vscode.env.clipboard.writeText(msg.text);
+      }
+    });
+  }
+}

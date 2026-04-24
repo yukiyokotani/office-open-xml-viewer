@@ -1,5 +1,5 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
-import { renderSlide } from './renderer';
+import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
@@ -78,6 +78,8 @@ export interface RenderSlideOptions {
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio or 1. */
   dpr?: number;
+  /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
+  onTextRun?: TextRunCallback;
   /**
    * Skip drawing the play badge overlay on media elements. Used internally by
    * {@link PptxPresentation.presentSlide} so its interactive handle can draw
@@ -237,6 +239,7 @@ export class PptxPresentation {
         fetchMedia: (path) => this.getMedia(path),
         skipMediaControls: opts.skipMediaControls,
       },
+      opts.onTextRun,
     );
   }
 

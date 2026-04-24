@@ -34,6 +34,38 @@ export interface RenderContext {
   themeMinorFont: string | null;
 }
 
+/** Information about a rendered text segment for building a transparent selection overlay. */
+export interface TextRunInfo {
+  text: string;
+  /** X position in CSS px, relative to the shape's top-left corner. */
+  inShapeX: number;
+  /** Y position (top of line box) in CSS px, relative to the shape's top-left corner. */
+  inShapeY: number;
+  /** Measured text width in CSS px. */
+  w: number;
+  /** Line height in CSS px. */
+  h: number;
+  /** Font size in CSS px. */
+  fontSize: number;
+  /** Shape's left edge in canvas CSS px. */
+  shapeX: number;
+  /** Shape's top edge in canvas CSS px. */
+  shapeY: number;
+  /** Shape's width in canvas CSS px. */
+  shapeW: number;
+  /** Shape's height in canvas CSS px. */
+  shapeH: number;
+  /** Shape rotation in degrees (clockwise). */
+  rotation: number;
+  /**
+   * Additional rotation from a vertical text body (`vert="vert"` → 90,
+   * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
+   */
+  textBodyRotation?: number;
+}
+
+export type TextRunCallback = (run: TextRunInfo) => void;
+
 /**
  * Convert EMU to canvas pixels.
  * scale = canvasWidthPx / slideWidthEMU  (so that slideWidth EMU == canvasWidth px)
@@ -338,7 +370,7 @@ function clearShadow(ctx: CanvasRenderingContext2D) {
   ctx.shadowOffsetY = 0;
 }
 
-function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }) {
+function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null }, onTextRun?: TextRunCallback) {
   const x = emuToPx(el.x, scale);
   const y = emuToPx(el.y, scale);
   const w = emuToPx(el.width, scale);
@@ -358,7 +390,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     }
     if (el.textBody) {
       const defaultTextColor = el.defaultTextColor ? hexToRgba(el.defaultTextColor) : null;
-      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc);
+      renderTextBody(ctx, el.textBody, x, y, w, h, scale, defaultTextColor, el.rotation, el.flipH, el.flipV, themeDefaultColor, slideNumber, rc, onTextRun);
     }
     return;
   }
@@ -462,7 +494,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       tx = x + insetX; ty = y + insetY;
       tw = w / Math.SQRT2; th = h / Math.SQRT2;
     }
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
+    // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, onTextRun);
     ctx.restore();
   }
 
@@ -2640,6 +2673,7 @@ function renderTextBody(
   themeDefaultColor = '#000000',
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null },
+  onTextRun?: TextRunCallback,
 ) {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -2652,11 +2686,38 @@ function renderTextBody(
     // Centre of the bounding box remains fixed; swap w and h for the text layout.
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
+    const vertRot = isVert ? 90 : -90;
+
+    // Wrap onTextRun to convert from the rotated sub-frame back to the original
+    // shape frame so that _buildTextLayer can apply a single CSS rotation.
+    //
+    // In the recursive call the origin is (-bh/2, -bw/2) with axes (bh, bw).
+    // For a run at canvas (penX, cursorY) in that sub-frame:
+    //   inShapeX_rec = penX + bh/2,  inShapeY_rec = cursorY + bw/2
+    //
+    // We need the position in the *original* shape frame so that after
+    // CSS rotate(shapeRotation + vertRot) the span lands on the same pixel:
+    //   inShapeX_span = penX + bw/2 = inShapeX_rec - bh/2 + bw/2
+    //   inShapeY_span = cursorY + bh/2 = inShapeY_rec - bw/2 + bh/2
+    const wrappedOnTextRun: TextRunCallback | undefined = onTextRun
+      ? (run) => onTextRun({
+          ...run,
+          inShapeX: run.inShapeX - bh / 2 + bw / 2,
+          inShapeY: run.inShapeY - bw / 2 + bh / 2,
+          shapeX: bx,
+          shapeY: by,
+          shapeW: bw,
+          shapeH: bh,
+          rotation: shapeRotation,
+          textBodyRotation: vertRot,
+        })
+      : undefined;
+
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(isVert270 ? -Math.PI / 2 : Math.PI / 2);
     // After rotation the "width" direction of the new frame is the original height
-    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc);
+    renderTextBody(ctx, { ...body, vert: 'horz' }, -bh / 2, -bw / 2, bh, bw, scale, shapeDefaultTextColor, 0, false, false, themeDefaultColor, slideNumber, rc, wrappedOnTextRun);
     ctx.restore();
     return;
   }
@@ -2933,6 +2994,22 @@ function renderTextBody(
       ctx.font = seg.font;
       const segW = ctx.measureText(seg.text).width;
 
+      if (onTextRun && seg.text) {
+        onTextRun({
+          text: seg.text,
+          inShapeX: penX - bx,
+          inShapeY: cursorY - by,
+          w: segW,
+          h: lineHeight,
+          fontSize: seg.sizePx,
+          shapeX: bx,
+          shapeY: by,
+          shapeW: bw,
+          shapeH: bh,
+          rotation: shapeRotation,
+        });
+      }
+
       if (seg.underline) {
         ctx.beginPath();
         ctx.moveTo(penX, segBaseline + 2);
@@ -2977,7 +3054,23 @@ function renderTextBody(
         ctx.fillStyle = seg.color;
         ctx.fillText(seg.text, tabPenX, baseline);
         ctx.font = seg.font;
-        tabPenX += ctx.measureText(seg.text).width;
+        const tabSegW = ctx.measureText(seg.text).width;
+        if (onTextRun && seg.text) {
+          onTextRun({
+            text: seg.text,
+            inShapeX: tabPenX - bx,
+            inShapeY: cursorY - by,
+            w: tabSegW,
+            h: lineHeight,
+            fontSize: seg.sizePx,
+            shapeX: bx,
+            shapeY: by,
+            shapeW: bw,
+            shapeH: bh,
+            rotation: shapeRotation,
+          });
+        }
+        tabPenX += tabSegW;
       }
     }
 
@@ -3259,7 +3352,8 @@ export async function renderSlide(
   slide: Slide,
   slideWidth: number,
   slideHeight: number,
-  opts: RenderOptions = {}
+  opts: RenderOptions = {},
+  onTextRun?: TextRunCallback,
 ): Promise<HTMLCanvasElement | OffscreenCanvas> {
   const targetWidth = opts.width ?? ((canvas instanceof HTMLCanvasElement ? canvas.offsetWidth : 0) || 960);
   const scale = targetWidth / slideWidth;
@@ -3292,7 +3386,7 @@ export async function renderSlide(
   const slideNumber = slide.slideNumber;
   for (const el of slide.elements) {
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc);
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale);
     } else if (el.type === 'table') {

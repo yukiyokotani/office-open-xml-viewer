@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { buildViewerUI } from './PptxViewer.stories';
 import { PptxPresentation } from './presentation';
+import { PptxViewer } from './viewer';
+import type { TextRunInfo } from './renderer';
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -38,6 +40,37 @@ function makeStatus(root: HTMLElement): HTMLDivElement {
   return s;
 }
 
+function buildPptxTextLayer(layer: HTMLDivElement, runs: TextRunInfo[], cssWidth: number, cssHeight: number): void {
+  layer.innerHTML = '';
+  layer.style.width = `${cssWidth}px`;
+  layer.style.height = `${cssHeight}px`;
+
+  const shapeMap = new Map<string, HTMLDivElement>();
+  for (const run of runs) {
+    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
+    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
+    if (!shapeMap.has(key)) {
+      const div = document.createElement('div');
+      div.style.cssText =
+        `position:absolute;left:${run.shapeX}px;top:${run.shapeY}px;` +
+        `width:${run.shapeW}px;height:${run.shapeH}px;pointer-events:all;overflow:hidden;`;
+      if (totalRot !== 0) {
+        div.style.transformOrigin = 'center center';
+        div.style.transform = `rotate(${totalRot}deg)`;
+      }
+      shapeMap.set(key, div);
+      layer.appendChild(div);
+    }
+    const shape = shapeMap.get(key)!;
+    const span = document.createElement('span');
+    span.textContent = run.text;
+    span.style.cssText =
+      `position:absolute;left:${run.inShapeX}px;top:${run.inShapeY}px;` +
+      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;`;
+    shape.appendChild(span);
+  }
+}
+
 export const ScrollView: LayoutStory = {
   name: 'ScrollView — stack all slides',
   render() {
@@ -58,13 +91,29 @@ export const ScrollView: LayoutStory = {
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} slides…`;
         const widthPx = 800;
+        const cssHeight = Math.round(pres.slideHeight * widthPx / pres.slideWidth);
+
         for (let i = 0; i < pres.slideCount; i++) {
+          const slideWrapper = document.createElement('div');
+          slideWrapper.style.cssText =
+            'position:relative;display:block;max-width:800px;margin:0 auto 12px;';
+
           const canvas = document.createElement('canvas');
           canvas.style.cssText =
-            'display:block;width:100%;max-width:800px;margin:0 auto 12px;' +
-            'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
-          scroller.appendChild(canvas);
-          await pres.renderSlide(canvas, i, { width: widthPx });
+            'display:block;width:100%;max-width:800px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
+
+          const textLayer = document.createElement('div');
+          textLayer.style.cssText =
+            'position:absolute;top:0;left:0;width:100%;height:100%;' +
+            'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
+
+          slideWrapper.appendChild(canvas);
+          slideWrapper.appendChild(textLayer);
+          scroller.appendChild(slideWrapper);
+
+          const runs: TextRunInfo[] = [];
+          await pres.renderSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+          buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
         }
         status.textContent = `Loaded ${pres.slideCount} slides`;
       })
@@ -148,24 +197,30 @@ export const MasterDetail: LayoutStory = {
     const detailCol = document.createElement('div');
     detailCol.style.cssText =
       'flex:1 1 auto;border:1px solid #ccc;background:#f5f5f5;padding:12px;overflow:auto;' +
-      'display:flex;align-items:flex-start;justify-content:center;';
-    const detailCanvas = document.createElement('canvas');
-    detailCanvas.style.cssText = 'display:block;max-width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
-    detailCol.appendChild(detailCanvas);
+      'display:flex;align-items:flex-start;justify-content:center;position:relative;';
     layout.append(thumbCol, detailCol);
 
-    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
-      .then(async (pres) => {
+    // Detail viewer with text selection
+    const detailViewer = new PptxViewer(detailCol, {
+      width: 800,
+      useGoogleFonts: true,
+      enableTextSelection: true,
+    });
+
+    // Load thumbnails using PptxPresentation; detail viewer loads independently
+    Promise.all([
+      PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true }),
+      detailViewer.load(SAMPLE_URL),
+    ])
+      .then(async ([pres]) => {
         status.textContent = `Rendering ${pres.slideCount} thumbnails…`;
         const thumbEntries: HTMLDivElement[] = [];
-
-        const detailWidth = () => detailCol.clientWidth - 24;
 
         const selectSlide = async (i: number) => {
           for (let k = 0; k < thumbEntries.length; k++) {
             thumbEntries[k].style.outline = k === i ? '2px solid #0366d6' : 'none';
           }
-          await pres.renderSlide(detailCanvas, i, { width: Math.max(320, detailWidth()) });
+          await detailViewer.goToSlide(i);
         };
 
         for (let i = 0; i < pres.slideCount; i++) {
@@ -189,7 +244,8 @@ export const MasterDetail: LayoutStory = {
           await pres.renderSlide(canvas, i, { width: 220 });
         }
 
-        await selectSlide(0);
+        // Highlight first thumbnail
+        if (thumbEntries.length > 0) thumbEntries[0].style.outline = '2px solid #0366d6';
         status.textContent = `Loaded ${pres.slideCount} slides`;
       })
       .catch((e: Error) => {

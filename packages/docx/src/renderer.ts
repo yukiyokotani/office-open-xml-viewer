@@ -59,6 +59,23 @@ interface RenderState {
   floats: FloatRect[];
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
+  /** Callback for building a transparent text selection overlay. */
+  onTextRun?: (run: DocxTextRunInfo) => void;
+}
+
+/** Information about a rendered text segment for building a transparent selection overlay. */
+export interface DocxTextRunInfo {
+  text: string;
+  /** Left edge in canvas CSS px. */
+  x: number;
+  /** Top of line box in canvas CSS px. */
+  y: number;
+  /** Measured text width in CSS px. */
+  w: number;
+  /** Line height in CSS px. */
+  h: number;
+  /** Font size in CSS px. */
+  fontSize: number;
 }
 
 export interface RenderDocumentOptions {
@@ -69,6 +86,8 @@ export interface RenderDocumentOptions {
   totalPages?: number;
   /** Pre-computed page splits (from computePages). When provided, skips internal pagination. */
   prebuiltPages?: BodyElement[][];
+  /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
+  onTextRun?: (run: DocxTextRunInfo) => void;
 }
 
 // ===== Image preloading =====
@@ -211,6 +230,7 @@ export async function renderDocumentToCanvas(
     marginLeft: sec.marginLeft,
     floats: [],
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
+    onTextRun: opts.onTextRun,
   };
 
   // Header: top of page, starting at headerDistance
@@ -691,6 +711,17 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
 
         ctx.fillStyle = s.color ? `#${s.color}` : defaultColor;
         ctx.fillText(s.text, x, baseline + yOffset);
+
+        if (state.onTextRun && s.text) {
+          state.onTextRun({
+            text: s.text,
+            x,
+            y: state.y,
+            w: s.measuredWidth,
+            h: lineH,
+            fontSize: effSizePx,
+          });
+        }
 
         const lineColor = s.color ? `#${s.color}` : defaultColor;
         const lineW = Math.max(0.5, effSizePx * 0.05);
