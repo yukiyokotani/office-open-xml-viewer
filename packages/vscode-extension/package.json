@@ -1,0 +1,85 @@
+{
+  "name": "ooxml-viewer",
+  "displayName": "OOXML Viewer",
+  "description": "High-fidelity viewer for .xlsx, .docx, and .pptx files powered by a Rust/WASM parser and Canvas renderer.",
+  "version": "0.1.0",
+  "publisher": "silurus",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "ooxml",
+    "xlsx",
+    "docx",
+    "pptx",
+    "office",
+    "viewer",
+    "excel",
+    "word",
+    "powerpoint"
+  ],
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yukiyokotani/office-open-xml-viewer"
+  },
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "ooxmlViewer.xlsxEditor",
+        "displayName": "OOXML Viewer (XLSX)",
+        "selector": [
+          { "filenamePattern": "*.xlsx" }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "ooxmlViewer.docxEditor",
+        "displayName": "OOXML Viewer (DOCX)",
+        "selector": [
+          { "filenamePattern": "*.docx" }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "ooxmlViewer.pptxEditor",
+        "displayName": "OOXML Viewer (PPTX)",
+        "selector": [
+          { "filenamePattern": "*.pptx" }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "ooxmlViewer.copySelection",
+        "title": "Copy Selection",
+        "category": "OOXML Viewer"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "vscode:prepublish": "node esbuild.config.mjs --production",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@silurus/ooxml-pptx": "workspace:*",
+    "@silurus/ooxml-docx": "workspace:*",
+    "@silurus/ooxml-xlsx": "workspace:*"
+  }
+}

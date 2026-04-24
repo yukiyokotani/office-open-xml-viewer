@@ -1,4 +1,4 @@
-import type { RenderOptions } from './renderer';
+import type { RenderOptions, TextRunInfo } from './renderer';
 import { PptxPresentation } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 
@@ -20,6 +20,11 @@ export interface PptxViewerOptions extends RenderOptions {
    * badge over media posters.
    */
   enableMediaPlayback?: boolean;
+  /**
+   * When true, adds a transparent text overlay div over the canvas so the
+   * browser's native text selection works on slide content.
+   */
+  enableTextSelection?: boolean;
 }
 
 /**
@@ -32,6 +37,8 @@ export interface PptxViewerOptions extends RenderOptions {
  */
 export class PptxViewer {
   private readonly canvas: HTMLCanvasElement;
+  private readonly wrapper: HTMLDivElement;
+  private textLayer: HTMLDivElement | null = null;
   private engine: PptxPresentation | null = null;
   private readonly opts: PptxViewerOptions;
   private currentSlide = 0;
@@ -40,11 +47,24 @@ export class PptxViewer {
   constructor(container: HTMLElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
 
+    this.wrapper = document.createElement('div');
+    this.wrapper.style.cssText = 'position:relative;display:inline-block;';
+
     this.canvas = document.createElement('canvas');
     this.canvas.style.display = 'block';
     this.canvas.style.maxWidth = '100%';
     this.canvas.style.height = 'auto';
-    container.appendChild(this.canvas);
+    this.wrapper.appendChild(this.canvas);
+
+    if (opts.enableTextSelection) {
+      this.textLayer = document.createElement('div');
+      this.textLayer.style.cssText =
+        'position:absolute;top:0;left:0;width:100%;height:100%;' +
+        'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
+      this.wrapper.appendChild(this.textLayer);
+    }
+
+    container.appendChild(this.wrapper);
   }
 
   /** Load a PPTX from URL or ArrayBuffer and render the first slide. */
@@ -96,6 +116,9 @@ export class PptxViewer {
     this.handle?.dispose();
     this.handle = null;
 
+    const runs: TextRunInfo[] = [];
+    const onTextRun = this.textLayer ? (r: TextRunInfo) => runs.push(r) : undefined;
+
     try {
       if (this.opts.enableMediaPlayback) {
         this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
@@ -103,11 +126,54 @@ export class PptxViewer {
           dpr,
         });
       } else {
-        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr });
+        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun });
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+
+    if (this.textLayer) {
+      this._buildTextLayer(runs, targetWidth, cssHeight);
+    }
+  }
+
+  private _buildTextLayer(runs: TextRunInfo[], cssWidth: number, cssHeight: number): void {
+    const layer = this.textLayer!;
+    layer.innerHTML = '';
+    layer.style.width = `${cssWidth}px`;
+    layer.style.height = `${cssHeight}px`;
+
+    // Group runs by shape (same shapeX/shapeY/rotation)
+    type ShapeKey = string;
+    const shapeMap = new Map<ShapeKey, { div: HTMLDivElement; x: number; y: number; w: number; h: number; rot: number }>();
+
+    for (const run of runs) {
+      const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${run.rotation}`;
+      if (!shapeMap.has(key)) {
+        const div = document.createElement('div');
+        div.style.cssText =
+          `position:absolute;` +
+          `left:${run.shapeX}px;top:${run.shapeY}px;` +
+          `width:${run.shapeW}px;height:${run.shapeH}px;` +
+          `pointer-events:all;overflow:hidden;`;
+        if (run.rotation !== 0) {
+          div.style.transformOrigin = 'center center';
+          div.style.transform = `rotate(${run.rotation}deg)`;
+        }
+        shapeMap.set(key, { div, x: run.shapeX, y: run.shapeY, w: run.shapeW, h: run.shapeH, rot: run.rotation });
+        layer.appendChild(div);
+      }
+
+      const shape = shapeMap.get(key)!;
+      const span = document.createElement('span');
+      span.textContent = run.text;
+      span.style.cssText =
+        `position:absolute;` +
+        `left:${run.inShapeX}px;top:${run.inShapeY}px;` +
+        `font-size:${run.fontSize}px;line-height:${run.h}px;` +
+        `white-space:pre;color:transparent;cursor:text;`;
+      shape.div.appendChild(span);
     }
   }
 
@@ -116,6 +182,6 @@ export class PptxViewer {
     this.handle?.dispose();
     this.handle = null;
     this.engine?.destroy();
-    this.canvas.remove();
+    this.wrapper.remove();
   }
 }
