@@ -400,7 +400,17 @@ export class XlsxViewer {
     if (!this.anchorCell || !this.activeCell) return;
 
     const cs = this.opts.cellScale ?? 1;
+    const ws = this.currentWorksheet;
+    const freezeRows = ws?.freezeRows ?? 0;
+    const freezeCols = ws?.freezeCols ?? 0;
+
+    let frozenH = 0;
+    if (ws) for (let r = 1; r <= freezeRows; r++) frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+    let frozenW = 0;
+    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+
     let x: number, y: number, w: number, h: number;
+    let selR1 = 1, selC1 = 1;
 
     if (this.selectionMode === 'all') {
       x = HEADER_W * cs;
@@ -408,9 +418,9 @@ export class XlsxViewer {
       w = this.canvasArea.clientWidth - HEADER_W * cs;
       h = this.canvasArea.clientHeight - HEADER_H * cs;
     } else if (this.selectionMode === 'rows') {
-      const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
       const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      const top = this.getCellRect(r1, 1);
+      const top = this.getCellRect(selR1, 1);
       const bot = this.getCellRect(r2, 1);
       if (!top || !bot) return;
       x = HEADER_W * cs;
@@ -418,9 +428,9 @@ export class XlsxViewer {
       w = this.canvasArea.clientWidth - HEADER_W * cs;
       h = bot.y + bot.h - top.y;
     } else if (this.selectionMode === 'cols') {
-      const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      selC1 = Math.min(this.anchorCell.col, this.activeCell.col);
       const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-      const left = this.getCellRect(1, c1);
+      const left = this.getCellRect(1, selC1);
       const right = this.getCellRect(1, c2);
       if (!left || !right) return;
       x = left.x;
@@ -428,11 +438,11 @@ export class XlsxViewer {
       w = right.x + right.w - left.x;
       h = this.canvasArea.clientHeight - HEADER_H * cs;
     } else {
-      const r1 = Math.min(this.anchorCell.row, this.activeCell.row);
+      selR1 = Math.min(this.anchorCell.row, this.activeCell.row);
       const r2 = Math.max(this.anchorCell.row, this.activeCell.row);
-      const c1 = Math.min(this.anchorCell.col, this.activeCell.col);
+      selC1 = Math.min(this.anchorCell.col, this.activeCell.col);
       const c2 = Math.max(this.anchorCell.col, this.activeCell.col);
-      const tl = this.getCellRect(r1, c1);
+      const tl = this.getCellRect(selR1, selC1);
       const br = this.getCellRect(r2, c2);
       if (!tl || !br) return;
       x = tl.x; y = tl.y;
@@ -441,10 +451,16 @@ export class XlsxViewer {
     }
 
     // Clamp to header boundaries so the overlay never overlaps fixed headers.
-    const minX = HEADER_W * cs;
-    const minY = HEADER_H * cs;
-    if (x < minX) { w -= minX - x; x = minX; }
-    if (y < minY) { h -= minY - y; y = minY; }
+    if (x < HEADER_W * cs) { w -= HEADER_W * cs - x; x = HEADER_W * cs; }
+    if (y < HEADER_H * cs) { h -= HEADER_H * cs - y; y = HEADER_H * cs; }
+
+    // Clamp scrollable-region selections at the frozen pane boundary.
+    // Frozen cells legitimately live inside the frozen area; scrollable cells
+    // that have scrolled behind the frozen area must be clipped there instead.
+    const frozenBoundX = (HEADER_W + frozenW) * cs;
+    const frozenBoundY = (HEADER_H + frozenH) * cs;
+    if (selC1 > freezeCols && x < frozenBoundX) { w -= frozenBoundX - x; x = frozenBoundX; }
+    if (selR1 > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
 
     if (w <= 0 || h <= 0) return;
     const box = document.createElement('div');
