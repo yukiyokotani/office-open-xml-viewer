@@ -440,6 +440,12 @@ export class XlsxViewer {
       h = br.y + br.h - tl.y;
     }
 
+    // Clamp to header boundaries so the overlay never overlaps fixed headers.
+    const minX = HEADER_W * cs;
+    const minY = HEADER_H * cs;
+    if (x < minX) { w -= minX - x; x = minX; }
+    if (y < minY) { h -= minY - y; y = minY; }
+
     if (w <= 0 || h <= 0) return;
     const box = document.createElement('div');
     box.style.cssText =
