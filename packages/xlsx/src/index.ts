@@ -1,6 +1,6 @@
 export { XlsxWorkbook } from './workbook.js';
 export { XlsxViewer } from './viewer.js';
-export type { XlsxViewerOptions } from './viewer.js';
+export type { XlsxViewerOptions, CellAddress, CellRange } from './viewer.js';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export type {
   Workbook,
@@ -20,4 +20,5 @@ export type {
   ParsedWorkbook,
   ViewportRange,
   RenderViewportOptions,
+  TextRunInfo,
 } from './types.js';
