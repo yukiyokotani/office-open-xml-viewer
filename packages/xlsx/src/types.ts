@@ -54,6 +54,28 @@ export interface Worksheet {
   /** Excel Tables on this sheet (ECMA-376 §18.5). The renderer overlays a
    *  built-in style (bold header, banded rows) on the given ranges. */
   tables?: TableInfo[];
+  /** Pivot / table slicers (Office 2010+ extension). Each anchor carries a
+   *  caption and the saved item list (with selection flags) so the renderer
+   *  can draw a static button bank without the live pivot engine. */
+  slicers?: SlicerAnchor[];
+}
+
+export interface SlicerAnchor {
+  fromCol: number;
+  fromColOff: number;
+  fromRow: number;
+  fromRowOff: number;
+  toCol: number;
+  toColOff: number;
+  toRow: number;
+  toRowOff: number;
+  caption: string;
+  items: SlicerItem[];
+}
+
+export interface SlicerItem {
+  name: string;
+  selected: boolean;
 }
 
 export interface TableInfo {
