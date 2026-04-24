@@ -315,6 +315,11 @@ export interface Dxf {
   font: Font | null;
   fill: Fill | null;
   border: Border | null;
+  /** Number format override from the dxf (ECMA-376 §18.8.17). When a
+   *  conditional-formatting rule matches, this numFmt replaces the cell's own
+   *  style numFmt for rendering — e.g. switching a calendar cell from `d` to
+   *  `m"月"d"日"` on the first day of each month. */
+  numFmt?: NumFmt | null;
 }
 
 export interface Font {
