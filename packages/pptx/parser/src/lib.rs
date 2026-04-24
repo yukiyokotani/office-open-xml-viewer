@@ -17,6 +17,13 @@ pub fn parse_pptx(data: &[u8]) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// Native equivalent of `parse_pptx` for use from the MCP server.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
+    let presentation = parse_presentation(data).map_err(|e| e.to_string())?;
+    serde_json::to_string(&presentation).map_err(|e| e.to_string())
+}
+
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.

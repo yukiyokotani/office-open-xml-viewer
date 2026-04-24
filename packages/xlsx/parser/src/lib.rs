@@ -3829,3 +3829,54 @@ fn parse_cell_ref(r: &str) -> (u32, u32) {
     let row = row_str.parse().unwrap_or(1);
     (col, row)
 }
+
+// ===========================
+//  Native (non-WASM) API
+// ===========================
+
+/// Returns workbook overview (sheet names and metadata) as JSON.
+/// Native equivalent of `parse_xlsx` for use from the MCP server.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
+    parse_xlsx_inner(data)
+        .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
+}
+
+/// Parses a single worksheet by 0-based index and returns it as JSON.
+/// Native equivalent of `parse_sheet` for use from the MCP server.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
+    let cursor = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+
+    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
+    let sheets = parse_workbook_sheets(&wb_doc);
+
+    let sheet_meta = sheets
+        .get(sheet_index as usize)
+        .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
+
+    let rels_xml = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let rels_doc = roxmltree::Document::parse(&rels_xml).map_err(|e| e.to_string())?;
+    let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
+        .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
+
+    let theme_colors = parse_theme_colors(&mut archive);
+    let shared_strings = read_shared_strings(&mut archive, &theme_colors);
+    let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
+    let (mut ws, hyperlink_rids) =
+        parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
+            .map_err(|e| e.to_string())?;
+
+    ws.images = load_sheet_images(&mut archive, &sheet_path);
+    ws.charts = load_sheet_charts(&mut archive, &sheet_path, &theme_colors);
+    ws.shape_groups = load_sheet_shape_groups(&mut archive, &sheet_path, &theme_colors);
+    ws.hyperlinks = load_hyperlinks(&mut archive, &sheet_path, hyperlink_rids);
+    ws.comment_refs = load_sheet_comment_refs(&mut archive, &sheet_path);
+    ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
+    ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
+    ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
+
+    serde_json::to_string(&ws).map_err(|e| e.to_string())
+}

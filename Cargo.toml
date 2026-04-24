@@ -4,6 +4,7 @@ members = [
   "packages/pptx/parser",
   "packages/docx/parser",
   "packages/xlsx/parser",
+  "packages/mcp-server",
 ]
 
 [workspace.dependencies]
