@@ -35,6 +35,12 @@ export interface ChartSeries {
    * that don't parse markers (e.g. pptx today) keep their existing behavior.
    */
   showMarker?: boolean | null;
+  /**
+   * Excel number-format code for this series' values (ECMA-376 §21.2.2.37,
+   * `<c:val>/<c:numRef>/<c:formatCode>`). Used to format data labels when the
+   * chart-level `<c:dLbls><c:numFmt>` is not set. null = no series-level code.
+   */
+  valFormatCode?: string | null;
 }
 
 /**
@@ -103,6 +109,36 @@ export interface ChartModel {
    *  rectangle while still letting `legendPos` decide which side of the plot
    *  gets the reserved band. null = use default layout. */
   legendManualLayout?: LegendManualLayout | null;
+  /**
+   * `<c:valAx><c:numFmt@formatCode>` — format code applied to value-axis tick
+   * labels (ECMA-376 §21.2.2.21). null = plain numeric formatting.
+   */
+  valAxisFormatCode?: string | null;
+  /**
+   * `<c:barChart><c:gapWidth>` — space between category groups as a
+   * percentage of bar width (ECMA-376 §21.2.2.13). Default per spec is 150.
+   * null = renderer default.
+   */
+  barGapWidth?: number | null;
+  /**
+   * `<c:barChart><c:overlap>` — signed percentage overlap between bars in the
+   * same category cluster (ECMA-376 §21.2.2.25). Negative = gap, positive =
+   * overlap, 0 = flush. Range [-100, 100]. null = renderer default (0).
+   */
+  barOverlap?: number | null;
+  /**
+   * `<c:dLbls><c:dLblPos>` — data label position (ECMA-376 §21.2.2.16).
+   * "ctr"|"inBase"|"inEnd"|"outEnd"|"l"|"r"|"t"|"b"|"bestFit" etc.
+   */
+  dataLabelPosition?: string | null;
+  /** Hex (no `#`) for data label text, resolved from `<c:dLbls><c:txPr>`. */
+  dataLabelFontColor?: string | null;
+  /**
+   * `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
+   * number format (ECMA-376 §21.2.2.35). When absent, `valFormatCode` on each
+   * series is used.
+   */
+  dataLabelFormatCode?: string | null;
 }
 
 export interface LegendManualLayout {

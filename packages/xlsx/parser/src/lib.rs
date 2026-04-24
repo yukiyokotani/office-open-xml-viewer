@@ -155,6 +155,17 @@ pub struct ChartSeries {
     /// falling back to the chart-type-level `<c:lineChart><c:marker val>`
     /// (§21.2.2.33). Absent markers default to hidden for line charts.
     pub show_marker: bool,
+    /// `<c:val>/<c:numRef>/<c:numCache>/<c:formatCode>` — Excel number format
+    /// code applied to the series' numeric values (e.g. `"¥"#,##0`). When the
+    /// chart-level `<c:dLbls><c:numFmt>` is absent this governs how data
+    /// labels are formatted per ECMA-376 §21.2.2.37.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_format_code: Option<String>,
+    /// `<c:ser><c:order val>` — display order of this series (stacking
+    /// ordering + legend ordering) per ECMA-376 §21.2.2.28. Lower `order`
+    /// renders first/below; Excel's legend for horizontal bar charts reverses
+    /// this so low-order series end up at the bottom of the plot.
+    pub order: usize,
 }
 
 /// Parsed chart data extracted from `xl/charts/chartN.xml`.
@@ -215,6 +226,14 @@ pub struct ChartData {
     /// Value axis tick-label font size in hundredths of a point.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_font_size_hpt: Option<i32>,
+    /// ECMA-376 §21.2.2.40 — `<c:catAx><c:delete val="1"/>` hides the category
+    /// axis (labels, ticks, and axis line).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cat_axis_hidden: bool,
+    /// ECMA-376 §21.2.2.40 — `<c:valAx><c:delete val="1"/>` hides the value
+    /// axis (labels, ticks, and axis line).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub val_axis_hidden: bool,
     /// Outer `<c:chartSpace><c:spPr>` fill resolution (ECMA-376 §21.2.2.5).
     /// `Some(hex)` for `<a:solidFill>`, `None` for `<a:noFill>` or when spPr is
     /// absent *and* no explicit fill is declared. An absent `chart_bg` on the
@@ -232,6 +251,29 @@ pub struct ChartData {
     /// None = use the default side-based layout from `legend_pos`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legend_manual_layout: Option<LegendManualLayout>,
+    /// `<c:barChart><c:gapWidth val>` — space between category groups as a
+    /// percentage of bar width (ECMA-376 §21.2.2.13). Default per spec is 150.
+    /// None = renderer default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar_gap_width: Option<i32>,
+    /// `<c:barChart><c:overlap val>` — overlap/gap between bars in a cluster as
+    /// a signed percentage (ECMA-376 §21.2.2.25). Positive = bars overlap,
+    /// negative = gap between bars, 0 = flush. Range [-100, 100].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar_overlap: Option<i32>,
+    /// `<c:dLbls><c:dLblPos val>` (ECMA-376 §21.2.2.16). One of
+    /// "ctr"|"inBase"|"inEnd"|"outEnd"|"l"|"r"|"t"|"b"|"bestFit" etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_label_position: Option<String>,
+    /// Hex (no `#`) resolved from `<c:dLbls><c:txPr>` text fill. Used for data
+    /// label text color (e.g. "FFFFFF" when labels sit inside filled bars).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_label_font_color: Option<String>,
+    /// `<c:dLbls><c:numFmt@formatCode>` — optional chart-level override for
+    /// data label number format (ECMA-376 §21.2.2.35). Takes precedence over
+    /// per-series `val_format_code` at render time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_label_format_code: Option<String>,
 }
 
 /// `<c:manualLayout>` coordinates for a legend (ECMA-376 §21.2.2.31). Fractions
@@ -3083,6 +3125,15 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut cat_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_format_code: Option<String> = None;
+    // ECMA-376 §21.2.2.40 — `<c:delete val="1"/>` on a `<c:catAx>`/`<c:valAx>`
+    // hides the axis (labels, ticks, and lines). Default is "0" (visible).
+    let mut cat_axis_hidden = false;
+    let mut val_axis_hidden = false;
+    let mut bar_gap_width: Option<i32> = None;
+    let mut bar_overlap: Option<i32> = None;
+    let mut data_label_position: Option<String> = None;
+    let mut data_label_font_color: Option<String> = None;
+    let mut data_label_format_code: Option<String> = None;
 
     // Recognised chart-type element names → our internal type strings
     let type_map: &[(&str, &str)] = &[
@@ -3111,6 +3162,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 if cat_axis_font_size_hpt.is_none() {
                     cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                 }
+                if let Some(del) = child.children()
+                    .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
+                {
+                    if del.attribute("val").unwrap_or("0") != "0" {
+                        cat_axis_hidden = true;
+                    }
+                }
                 continue;
             }
             "valAx" => {
@@ -3125,6 +3183,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                         .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
                         .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
                         .filter(|s| !s.is_empty() && s != "General");
+                }
+                if let Some(del) = child.children()
+                    .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
+                {
+                    if del.attribute("val").unwrap_or("0") != "0" {
+                        val_axis_hidden = true;
+                    }
                 }
                 continue;
             }
@@ -3157,12 +3222,54 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 "marker"   => {
                     chart_marker_default = attr_node.attribute("val").unwrap_or("0") != "0";
                 }
+                "gapWidth" => {
+                    // ECMA-376 §21.2.2.13 — percent of bar width between category
+                    // groups (default 150 per spec). Only meaningful on bar charts.
+                    if bar_gap_width.is_none() {
+                        bar_gap_width = attr_node.attribute("val").and_then(|v| v.parse().ok());
+                    }
+                }
+                "overlap"  => {
+                    // ECMA-376 §21.2.2.25 — signed percent of bar width for the
+                    // overlap within a cluster (negative = gap).
+                    if bar_overlap.is_none() {
+                        bar_overlap = attr_node.attribute("val").and_then(|v| v.parse().ok());
+                    }
+                }
                 "dLbls"    => {
                     for d in attr_node.children().filter(|n| n.is_element()) {
                         match d.tag_name().name() {
                             "showVal" | "showPercent" => {
                                 if d.attribute("val").unwrap_or("1") != "0" {
                                     show_data_labels = true;
+                                }
+                            }
+                            "dLblPos" => {
+                                if data_label_position.is_none() {
+                                    data_label_position = d.attribute("val").map(|s| s.to_string());
+                                }
+                            }
+                            "numFmt" => {
+                                if data_label_format_code.is_none() {
+                                    data_label_format_code = d.attribute("formatCode")
+                                        .map(|s| s.to_string())
+                                        .filter(|s| !s.is_empty() && s != "General");
+                                }
+                            }
+                            "txPr" => {
+                                // Resolve first solidFill under defRPr/rPr for
+                                // the data label text color. Common Excel
+                                // pattern: <a:solidFill><a:schemeClr val="bg1"/>
+                                // → white when bars are dark.
+                                if data_label_font_color.is_none() {
+                                    for desc in d.descendants().filter(|n| n.is_element()) {
+                                        if desc.tag_name().namespace() != Some(a_ns) { continue; }
+                                        if desc.tag_name().name() != "solidFill" { continue; }
+                                        if let Some(c) = resolve_fill_color(&desc, theme_colors) {
+                                            data_label_font_color = Some(c);
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             _ => {}
@@ -3194,6 +3301,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         }
     }
 
+    // Stable-sort by `c:order` so the array is in Excel's display order.
+    // ECMA-376 §21.2.2.28 — `<c:order>` is the authoritative stacking /
+    // legend order, independent of document order.
+    all_series.sort_by_key(|s| s.order);
+
     Some(ChartData {
         chart_type: primary_type,
         bar_dir,
@@ -3215,6 +3327,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         chart_bg,
         has_chart_sp_pr,
         legend_manual_layout,
+        cat_axis_hidden,
+        val_axis_hidden,
+        bar_gap_width,
+        bar_overlap,
+        data_label_position,
+        data_label_font_color,
+        data_label_format_code,
     })
 }
 
@@ -3378,12 +3497,32 @@ fn parse_chart_series(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
 
+    // `<c:order val>` (ECMA-376 §21.2.2.28) — series display order. Used for
+    // stacking and legend ordering. Defaults to 0.
+    let order: usize = node.children()
+        .find(|n| n.tag_name().name() == "order" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
     // For scatter: xVal → categories (as strings), yVal → values
     // For others:  cat  → categories,             val  → values
     let (cat_tag, val_tag) = if ser_type == "scatter" { ("xVal", "yVal") } else { ("cat", "val") };
 
     let categories = collect_str_cache(node, c_ns, cat_tag);
     let values     = collect_num_cache(node, c_ns, val_tag);
+    // `<c:val><c:numRef><c:numCache><c:formatCode>` (ECMA-376 §21.2.2.37)
+    // preserves the Excel number format Excel stamped onto the cached values
+    // at save time; absent "General" codes return None so the renderer can
+    // fall back cleanly.
+    let val_format_code = node.children()
+        .find(|n| n.tag_name().name() == val_tag && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|val_node| val_node.descendants()
+            .find(|n| n.is_element()
+                && n.tag_name().name() == "formatCode"
+                && n.tag_name().namespace() == Some(c_ns)))
+        .and_then(|n| n.text().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty() && s != "General");
 
     // Series fill color from c:spPr/a:solidFill (supports a:srgbClr and a:schemeClr).
     // For schemeClr, resolves "accentN"/"dk1"/etc. against the workbook theme.
@@ -3423,6 +3562,8 @@ fn parse_chart_series(
         values,
         color,
         show_marker,
+        val_format_code,
+        order,
     }
 }
 

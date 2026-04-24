@@ -121,6 +121,11 @@ export interface XlsxChartSeries {
   /** Marker visibility resolved from `<c:marker>`/chart-level default
    *  (ECMA-376 §21.2.2.32). */
   showMarker?: boolean;
+  /** `<c:val>/<c:numRef>/<c:formatCode>` — Excel number format for series
+   *  values (ECMA-376 §21.2.2.37). */
+  valFormatCode?: string | null;
+  /** `<c:ser><c:order>` — stacking/legend display order (§21.2.2.28). */
+  order?: number;
 }
 
 /**
@@ -168,6 +173,26 @@ export interface ChartData {
   hasChartSpPr?: boolean;
   /** `<c:legend><c:manualLayout>` fractions of chart space (§21.2.2.31). */
   legendManualLayout?: LegendManualLayout | null;
+  /** `<c:catAx><c:delete val="1"/>` — hide the category axis (§21.2.2.40). */
+  catAxisHidden?: boolean;
+  /** `<c:valAx><c:delete val="1"/>` — hide the value axis (§21.2.2.40). */
+  valAxisHidden?: boolean;
+  /** `<c:valAx><c:numFmt@formatCode>` — number format for value-axis tick
+   *  labels (ECMA-376 §21.2.2.21). */
+  valAxisFormatCode?: string | null;
+  /** `<c:barChart><c:gapWidth>` — space between category groups as a percent
+   *  of bar width (§21.2.2.13). */
+  barGapWidth?: number | null;
+  /** `<c:barChart><c:overlap>` — signed percent overlap between bars in a
+   *  cluster (§21.2.2.25). Negative = gap. */
+  barOverlap?: number | null;
+  /** `<c:dLbls><c:dLblPos>` — data label position (§21.2.2.16). */
+  dataLabelPosition?: string | null;
+  /** Hex (no `#`) for data label text color, resolved from `<c:dLbls><c:txPr>`. */
+  dataLabelFontColor?: string | null;
+  /** `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
+   *  number format (§21.2.2.35). */
+  dataLabelFormatCode?: string | null;
 }
 
 export interface LegendManualLayout {
