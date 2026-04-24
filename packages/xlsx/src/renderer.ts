@@ -318,14 +318,24 @@ function cellValueText(value: CellValue): string {
   }
 }
 
-function formatCellValue(cell: Cell, styles: Styles): string {
+function formatCellValue(
+  cell: Cell,
+  styles: Styles,
+  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+): string {
   if (cell.value.type !== 'number') return cellValueText(cell.value);
-  const xf = styles.cellXfs[cell.styleIndex ?? 0];
-  const numFmtId = xf?.numFmtId ?? 0;
   // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
   // save, which the viewer would otherwise show as a stale date. Recompute
   // them against the current system clock at render time.
   const num = recomputeVolatile(cell.formula) ?? cell.value.number;
+  // A matched CF dxf numFmt overrides the cell's own style numFmt (ECMA-376
+  // §18.8.17 — e.g. the first day of a new month in a calendar flipping from
+  // `d` to `m"月"d"日"`).
+  if (cfNumFmt) {
+    return applyFormat(num, cfNumFmt.numFmtId, cfNumFmt.formatCode);
+  }
+  const xf = styles.cellXfs[cell.styleIndex ?? 0];
+  const numFmtId = xf?.numFmtId ?? 0;
   const customFmt = styles.numFmts?.find(f => f.numFmtId === numFmtId);
   return applyFormat(num, numFmtId, customFmt?.formatCode ?? null);
 }
@@ -973,6 +983,10 @@ interface CfResult {
   fontItalic?: boolean;
   fontUnderline?: boolean;
   fontStrike?: boolean;
+  /** Number format override from a matched CF dxf. Higher-priority rules win
+   *  (first match through the rule list). Falls back to the cell's own style
+   *  numFmt if unset. */
+  numFmt?: { numFmtId: number; formatCode: string | null };
   dataBar?: { color: string; ratio: number; gradient: boolean };
   iconSet?: { name: string; index: number };
   /** Per-edge borders from matched CF rules (merged on top of the cell's base
@@ -1163,12 +1177,26 @@ function colorScaleAt(num: number, stops: CfStop[], stopValues: number[]): strin
 function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
   if (!dxf) return;
   // First-match-wins (higher priority) for each property. See compileCf.
-  if (dxf.fill?.fgColor && !result.fill) result.fill = dxf.fill;
+  // Per ECMA-376 §18.3.1.11, a `<dxf>` is a *differential* format: any child
+  // element it contains is an override of the base cell format. So the mere
+  // presence of `dxf.fill` means "replace the base fill with this", whatever
+  // its patternType / color — including `patternType="none"` (explicit clear)
+  // and gradient fills. The paint-site guard (`patternType !== 'none' &&
+  // fgColor`) handles whether the result actually paints a color or leaves
+  // the cell transparent, so this override stays spec-faithful without
+  // second-guessing the fill's shape here.
+  if (dxf.fill && !result.fill) result.fill = dxf.fill;
   if (dxf.font?.color && result.fontColor == null) result.fontColor = dxf.font.color;
   if (dxf.font?.bold && result.fontBold == null) result.fontBold = true;
   if (dxf.font?.italic && result.fontItalic == null) result.fontItalic = true;
   if (dxf.font?.underline && result.fontUnderline == null) result.fontUnderline = true;
   if (dxf.font?.strike && result.fontStrike == null) result.fontStrike = true;
+  if (dxf.numFmt && result.numFmt == null) {
+    result.numFmt = {
+      numFmtId: dxf.numFmt.numFmtId,
+      formatCode: dxf.numFmt.formatCode || null,
+    };
+  }
   if (dxf.border) {
     // Merge per-edge — higher-priority edges stay; lower-priority edges fill
     // in unset ones. dxf `border` typically sets only the edges the rule
@@ -2123,7 +2151,7 @@ function renderQuadrant(
     renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH);
 
     if (!cell) continue;
-    const text = formatCellValue(cell, styles);
+    const text = formatCellValue(cell, styles, cf.numFmt);
     if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const effectiveBold = font.bold || !!cf.fontBold;
@@ -2324,7 +2352,7 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const text = formatCellValue(cell, styles);
+      const text = formatCellValue(cell, styles, cf.numFmt);
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
       const tableBold = !!(tableStyle && (tableStyle.isHeader || tableStyle.isTotals));

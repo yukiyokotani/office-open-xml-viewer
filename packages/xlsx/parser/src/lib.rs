@@ -275,6 +275,7 @@ pub enum ShapeGeom {
     /// Bitmap image leaf inside a `<xdr:grpSp>` tree (ECMA-376 §20.5.2.17).
     /// `data_url` is a `data:<mime>;base64,…` URL produced from the drawing's
     /// relationship target (png/jpg/gif/…).
+    #[serde(rename_all = "camelCase")]
     Image { data_url: String },
 }
 
@@ -481,6 +482,11 @@ pub struct Dxf {
     pub font: Option<Font>,
     pub fill: Option<Fill>,
     pub border: Option<Border>,
+    /// Number format override applied when the conditional-formatting rule
+    /// matches. ECMA-376 §18.8.17 allows `<dxf>` to carry a `<numFmt>` that
+    /// replaces the cell's own style numFmt (e.g. switching a calendar cell
+    /// from `d` to `m"月"d"日"` on the first of each month).
+    pub num_fmt: Option<NumFmt>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -1076,6 +1082,13 @@ fn parse_dxfs(doc: &roxmltree::Document, ns: &str, theme_colors: &[String]) -> V
                             }
                         }
                         d.border = Some(b);
+                    }
+                    "numFmt" => {
+                        let num_fmt_id = child.attribute("numFmtId")
+                            .and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let format_code = child.attribute("formatCode")
+                            .unwrap_or("").to_string();
+                        d.num_fmt = Some(NumFmt { num_fmt_id, format_code });
                     }
                     _ => {}
                 }
