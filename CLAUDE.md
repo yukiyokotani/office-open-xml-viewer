@@ -105,3 +105,12 @@ pnpm vrt
 7. **GitHub Release 作成**: `gh release create v0.x.0 --title v0.x.0 --notes "..."` でリリースノート公開。本文は CHANGELOG の該当セクションを要約し、末尾に `**Full Changelog**: https://github.com/yukiyokotani/office-open-xml-viewer/compare/v0.(x-1).0...v0.x.0` を追記する。既存 v0.12.0 のフォーマットを踏襲すること (`gh release view v0.12.0` で確認可能)。
 
 参照画像（`tests/visual/references/`）はこの手順の対象外。README のスクリーンショットは `docs/images/` 配下のみ。
+
+## VS Code 拡張のリリース手順
+
+`packages/vscode-extension` は npm ライブラリとはバージョンが独立している。リリースには `.github/workflows/publish-vscode-extension.yml` を使う。
+
+1. `packages/vscode-extension/package.json` の `version` を bump する。
+2. `git tag -a vscode-ext-v0.y.0 -m "vscode-ext-v0.y.0"` → `git push origin vscode-ext-v0.y.0`。
+3. tag push をトリガーに GitHub Actions が WASM ビルド → esbuild → `vsce publish` を実行する。`VSCE_PAT` は repo secrets に登録済み前提。
+4. 手動で検証したいときは workflow_dispatch で `dry_run=true` を指定すると `.vsix` を artifact として残すだけで publish しない。
