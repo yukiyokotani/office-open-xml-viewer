@@ -4,6 +4,61 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.13.0 — 2026-04-25
+
+UX and tooling release. The core viewer packages gain **text and cell
+selection** (PDF.js-style transparent overlay so the browser's native
+selection/copy work on top of Canvas). Two new companion packages ship
+alongside: a **VS Code extension** (`ooxml-viewer`) that registers custom
+editors for `.xlsx` / `.docx` / `.pptx`, and a **Rust MCP server**
+(`ooxml-mcp-server`) that exposes the parsers as structured tools for AI
+agents. No rendering-fidelity changes.
+
+### viewer UX
+
+- **Text selection overlay (pptx/docx/xlsx)** — each viewer now emits an
+  `onTextRun` stream from the renderer and mounts an absolute-positioned
+  `<span>` per text run above the canvas with `color: transparent`. The
+  browser's native selection, copy, and `::selection` styling all work
+  against the overlay, so users can select, Ctrl+C copy, or drag text
+  exactly as they would in a DOM-rendered document. pptx handles rotated
+  and vertical text via `transform: rotate(...)` on the overlay spans.
+- **xlsx cell selection** (`packages/xlsx`):
+  - `getCellAt(clientX, clientY)` on `XlsxViewer` hit-tests canvas
+    coordinates to row/col addresses (respects merged cells and freeze
+    panes).
+  - Four selection modes: single cell, range, row (click row header),
+    column (click col header), all (corner click). Drag to extend.
+    Shift+click extends from the current anchor.
+  - `Ctrl+C` copies the selected range as tab-separated text (TSV) to the
+    clipboard, mode-aware (full row → entire row; range → block).
+  - `onSelectionChange` callback on `XlsxViewerOptions`; `selection`
+    getter on the viewer. New exports: `CellAddress`, `CellRange`,
+    `SelectionMode`, `TextRunInfo`.
+  - Selection overlay clamps to the header/freeze-pane boundaries so the
+    highlight doesn't bleed over the sticky row/column bands.
+
+### New package: VS Code extension (`packages/vscode-extension`)
+
+- Registers `CustomEditorProvider` for `.xlsx`, `.docx`, and `.pptx`, so
+  double-clicking an Office file in the VS Code explorer opens it in the
+  same Canvas viewer used by the Storybook demo.
+- Webview bundles the existing `XlsxViewer` / `DocxViewer` / `PptxViewer`
+  classes; selection events can be relayed to the extension host via
+  `acquireVsCodeApi().postMessage()`.
+
+### New package: Rust MCP server (`packages/mcp-server`)
+
+- Exposes the existing xlsx/docx/pptx parsers as an MCP server so agents
+  (Claude, Copilot, Codex, …) can query OOXML files without shelling out
+  to `unzip` + ad-hoc Python. Structured tools include
+  `xlsx_get_cell_range`, `xlsx_get_formulas`, `docx_get_structure`,
+  `docx_get_tables`, `pptx_get_slide_structure`, and format-specific
+  search helpers.
+- Built natively from the same Rust crates (the `rlib` output of
+  `packages/{xlsx,docx,pptx}/parser`), so the parser logic is shared
+  with the browser build one-to-one.
+
 ## 0.12.0 — 2026-04-25
 
 xlsx fidelity release focused on sample-1 ("Holiday shopping budget") and

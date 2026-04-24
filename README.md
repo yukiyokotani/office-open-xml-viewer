@@ -417,6 +417,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Theme** | Scheme colors (dk1/lt1/accent1–6) | ✅ |
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
+| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 
 ---
 
@@ -448,6 +449,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | **Advanced** | Footnote / endnote reference markers | ✅ |
 | | Track changes / comments | ❌ |
 | | Mail merge fields | ❌ Not planned |
+| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
 
 ---
 
@@ -478,6 +480,17 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Slicers (static, Office 2010 extension) | ✅ |
 | | Pivot tables | ❌ Not planned |
 | | Data validation / comments | ❌ Not planned |
+| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
+| | Text selection inside cells (transparent overlay) | ✅ |
+| | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
+
+---
+
+## Companion packages
+
+- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.xlsx`, `.docx`, and `.pptx`. Open Office files directly in the editor with the same Canvas renderer plus selection/copy.
+- **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`xlsx_get_cell_range`, `docx_get_structure`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`.
 
 ---
 
