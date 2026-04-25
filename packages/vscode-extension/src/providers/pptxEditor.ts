@@ -38,14 +38,15 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     );
 
     const bytes = await vscode.workspace.fs.readFile(document.uri);
-    await webviewPanel.webview.postMessage({
-      type: 'ooxml-init',
-      fileType: 'pptx',
-      data: Array.from(bytes),
-    });
 
-    webviewPanel.webview.onDidReceiveMessage((msg) => {
-      if (msg.type === 'copy') {
+    webviewPanel.webview.onDidReceiveMessage(async (msg) => {
+      if (msg.type === 'webview-ready') {
+        await webviewPanel.webview.postMessage({
+          type: 'ooxml-init',
+          fileType: 'pptx',
+          data: Array.from(bytes),
+        });
+      } else if (msg.type === 'copy') {
         vscode.env.clipboard.writeText(msg.text);
       }
     });

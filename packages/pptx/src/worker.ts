@@ -4,8 +4,18 @@ import init, { parse_pptx, extract_media } from './wasm/pptx_parser.js';
 let ready = false;
 let currentBuffer: Uint8Array | null = null;
 
+function decodeDataUrl(url: string): ArrayBuffer | null {
+  if (!url.startsWith('data:')) return null;
+  const comma = url.indexOf(',');
+  if (comma === -1) return null;
+  const binary = atob(url.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 async function initWasm(wasmUrl: string) {
-  await init(wasmUrl);
+  await init(decodeDataUrl(wasmUrl) ?? wasmUrl);
   ready = true;
   const msg: WorkerResponse = { kind: 'ready' };
   self.postMessage(msg);

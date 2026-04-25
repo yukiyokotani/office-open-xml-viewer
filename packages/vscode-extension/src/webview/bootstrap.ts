@@ -1,36 +1,29 @@
 /**
  * Webview bootstrap script.
  *
- * This script runs inside the VSCode Webview iframe. It:
- * 1. Waits for the `ooxml-init` message from the extension host containing the file bytes.
- * 2. Instantiates the appropriate Viewer (XlsxViewer / DocxViewer / PptxViewer).
- * 3. Bridges selection events back to the extension host via acquireVsCodeApi().postMessage().
+ * Runs inside the VSCode Webview iframe. Receives the file bytes via the
+ * `ooxml-init` message and instantiates the appropriate viewer:
+ *   - xlsx: XlsxViewer (sheet-based, no scroll stack)
+ *   - docx / pptx: scroll-stacked render of every page / slide with a transparent
+ *     text layer for native selection (PDF.js-style).
  */
 
-// These globals are injected by the HTML template.
 declare const __OOXML_FILE_TYPE__: 'xlsx' | 'docx' | 'pptx';
-declare const __OOXML_WASM_URL__: string;
 
-// VSCode API bridge — available only inside a Webview context.
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
   getState(): unknown;
   setState(state: unknown): void;
 };
 
-import { XlsxViewer } from '@silurus/ooxml-xlsx';
-import { DocxViewer } from '@silurus/ooxml-docx';
-import { PptxViewer } from '@silurus/ooxml-pptx';
-import type { CellRange } from '@silurus/ooxml-xlsx';
+import { XlsxViewer, type CellRange } from '@silurus/ooxml-xlsx';
+import { DocxDocument, type DocxTextRunInfo } from '@silurus/ooxml-docx';
+import { PptxPresentation, type TextRunInfo } from '@silurus/ooxml-pptx';
 
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
 
 const statusEl = document.getElementById('status')!;
-const navBar = document.getElementById('nav-bar')!;
-const prevBtn = document.getElementById('prev-btn') as HTMLButtonElement;
-const nextBtn = document.getElementById('next-btn') as HTMLButtonElement;
-const pageInfo = document.getElementById('page-info')!;
 const viewerContainer = document.getElementById('viewer-container')!;
 
 function setStatus(msg: string): void {
@@ -41,6 +34,9 @@ function setStatus(msg: string): void {
 function hideStatus(): void {
   statusEl.style.display = 'none';
 }
+
+// Notify extension host that the webview script is ready to receive messages.
+vscodeApi.postMessage({ type: 'webview-ready' });
 
 window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
@@ -66,7 +62,7 @@ window.addEventListener('message', async (event: MessageEvent) => {
 async function initXlsx(buffer: ArrayBuffer): Promise<void> {
   hideStatus();
   const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:calc(100vh - 40px);';
+  container.style.cssText = 'width:100%;height:100vh;';
   viewerContainer.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
@@ -85,70 +81,132 @@ async function initXlsx(buffer: ArrayBuffer): Promise<void> {
   await viewer.load(buffer);
   hideStatus();
 
-  // Ctrl+C / Cmd+C: copy selection through VSCode clipboard API
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
       const sel = viewer.selection;
       if (!sel) return;
-      // Let the viewer handle copy internally (it writes to navigator.clipboard),
-      // then also notify the extension host.
       vscodeApi.postMessage({ type: 'copy-request', fileType: 'xlsx', selection: sel });
     }
   });
 }
 
-// ── DOCX ─────────────────────────────────────────────────────────────────────
+// ── DOCX (scroll view) ───────────────────────────────────────────────────────
+
+function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): void {
+  layer.replaceChildren();
+  for (const run of runs) {
+    const span = document.createElement('span');
+    span.textContent = run.text;
+    span.style.cssText =
+      `position:absolute;left:${run.x}px;top:${run.y}px;` +
+      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
+    layer.appendChild(span);
+  }
+}
 
 async function initDocx(buffer: ArrayBuffer): Promise<void> {
+  setStatus('Parsing…');
+  const doc = await DocxDocument.load(buffer);
+  setStatus(`Rendering ${doc.pageCount} page(s)…`);
+
+  const stack = document.createElement('div');
+  stack.className = 'page-stack';
+  viewerContainer.appendChild(stack);
+
+  const widthPx = Math.min(window.innerWidth - 64, 900);
+
+  for (let i = 0; i < doc.pageCount; i++) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'page-wrapper';
+    wrapper.style.maxWidth = `${widthPx}px`;
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'page-canvas';
+
+    const textLayer = document.createElement('div');
+    textLayer.className = 'text-layer';
+
+    wrapper.append(canvas, textLayer);
+    stack.appendChild(wrapper);
+
+    const runs: DocxTextRunInfo[] = [];
+    await doc.renderPage(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+    buildDocxTextLayer(textLayer, runs);
+  }
+
   hideStatus();
-  const canvas = document.createElement('canvas');
-  viewerContainer.appendChild(canvas);
-
-  const viewer = new DocxViewer(canvas, {
-    width: Math.min(window.innerWidth - 32, 900),
-    enableTextSelection: true,
-  });
-
-  await viewer.load(buffer);
-  hideStatus();
-
-  navBar.classList.add('visible');
-  updateDocxNav(viewer);
-
-  prevBtn.addEventListener('click', () => { viewer.prevPage(); updateDocxNav(viewer); });
-  nextBtn.addEventListener('click', () => { viewer.nextPage(); updateDocxNav(viewer); });
 }
 
-function updateDocxNav(viewer: DocxViewer): void {
-  pageInfo.textContent = `Page ${viewer.currentPage + 1} / ${viewer.pageCount}`;
-  prevBtn.disabled = viewer.currentPage === 0;
-  nextBtn.disabled = viewer.currentPage === viewer.pageCount - 1;
-}
+// ── PPTX (scroll view) ───────────────────────────────────────────────────────
 
-// ── PPTX ─────────────────────────────────────────────────────────────────────
+function buildPptxTextLayer(
+  layer: HTMLDivElement,
+  runs: TextRunInfo[],
+  cssWidth: number,
+  cssHeight: number,
+): void {
+  layer.replaceChildren();
+  layer.style.width = `${cssWidth}px`;
+  layer.style.height = `${cssHeight}px`;
+
+  const shapeMap = new Map<string, HTMLDivElement>();
+  for (const run of runs) {
+    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
+    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
+    let shape = shapeMap.get(key);
+    if (!shape) {
+      shape = document.createElement('div');
+      shape.style.cssText =
+        `position:absolute;left:${run.shapeX}px;top:${run.shapeY}px;` +
+        `width:${run.shapeW}px;height:${run.shapeH}px;pointer-events:all;overflow:hidden;`;
+      if (totalRot !== 0) {
+        shape.style.transformOrigin = 'center center';
+        shape.style.transform = `rotate(${totalRot}deg)`;
+      }
+      shapeMap.set(key, shape);
+      layer.appendChild(shape);
+    }
+    const span = document.createElement('span');
+    span.textContent = run.text;
+    span.style.cssText =
+      `position:absolute;left:${run.inShapeX}px;top:${run.inShapeY}px;` +
+      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;`;
+    shape.appendChild(span);
+  }
+}
 
 async function initPptx(buffer: ArrayBuffer): Promise<void> {
+  setStatus('Parsing…');
+  const pres = await PptxPresentation.load(buffer);
+  setStatus(`Rendering ${pres.slideCount} slide(s)…`);
+
+  const stack = document.createElement('div');
+  stack.className = 'page-stack';
+  viewerContainer.appendChild(stack);
+
+  const widthPx = Math.min(window.innerWidth - 64, 960);
+  const cssHeight = pres.slideWidth > 0
+    ? Math.round((pres.slideHeight * widthPx) / pres.slideWidth)
+    : Math.round((widthPx * 9) / 16);
+
+  for (let i = 0; i < pres.slideCount; i++) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'page-wrapper';
+    wrapper.style.maxWidth = `${widthPx}px`;
+
+    const canvas = document.createElement('canvas');
+    canvas.className = 'page-canvas';
+
+    const textLayer = document.createElement('div');
+    textLayer.className = 'text-layer';
+
+    wrapper.append(canvas, textLayer);
+    stack.appendChild(wrapper);
+
+    const runs: TextRunInfo[] = [];
+    await pres.renderSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+    buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
+  }
+
   hideStatus();
-  const container = document.createElement('div');
-  viewerContainer.appendChild(container);
-
-  const viewer = new PptxViewer(container, {
-    width: Math.min(window.innerWidth - 32, 960),
-    enableTextSelection: true,
-    onSlideChange(index, total) {
-      pageInfo.textContent = `Slide ${index + 1} / ${total}`;
-      prevBtn.disabled = index === 0;
-      nextBtn.disabled = index === total - 1;
-    },
-    onError(err) {
-      setStatus(`Error: ${err.message}`);
-    },
-  });
-
-  await viewer.load(buffer);
-  hideStatus();
-  navBar.classList.add('visible');
-
-  prevBtn.addEventListener('click', () => viewer.prevSlide());
-  nextBtn.addEventListener('click', () => viewer.nextSlide());
 }
