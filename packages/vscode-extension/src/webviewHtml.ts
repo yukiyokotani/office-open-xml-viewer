@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 export function getWebviewHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
-  fileType: 'xlsx' | 'docx' | 'pptx',
+  fileType: 'docx' | 'xlsx' | 'pptx',
 ): string {
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),

@@ -3,12 +3,12 @@
  *
  * Runs inside the VSCode Webview iframe. Receives the file bytes via the
  * `ooxml-init` message and instantiates the appropriate viewer:
- *   - xlsx: XlsxViewer (sheet-based, no scroll stack)
  *   - docx / pptx: scroll-stacked render of every page / slide with a transparent
  *     text layer for native selection (PDF.js-style).
+ *   - xlsx: XlsxViewer (sheet-based, no scroll stack)
  */
 
-declare const __OOXML_FILE_TYPE__: 'xlsx' | 'docx' | 'pptx';
+declare const __OOXML_FILE_TYPE__: 'docx' | 'xlsx' | 'pptx';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -45,10 +45,10 @@ window.addEventListener('message', async (event: MessageEvent) => {
   const buffer = new Uint8Array(msg.data as number[]).buffer;
 
   try {
-    if (fileType === 'xlsx') {
-      await initXlsx(buffer);
-    } else if (fileType === 'docx') {
+    if (fileType === 'docx') {
       await initDocx(buffer);
+    } else if (fileType === 'xlsx') {
+      await initXlsx(buffer);
     } else if (fileType === 'pptx') {
       await initPptx(buffer);
     }

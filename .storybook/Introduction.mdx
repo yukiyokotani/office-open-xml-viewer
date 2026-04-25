@@ -1,7 +1,7 @@
 import { Meta } from '@storybook/addon-docs/blocks';
-import pptxImg from '../docs/images/pptx.png';
 import docxImg from '../docs/images/docx.png';
 import xlsxImg from '../docs/images/xlsx.png';
+import pptxImg from '../docs/images/pptx.png';
 
 <Meta title="Introduction" />
 
@@ -75,7 +75,7 @@ import xlsxImg from '../docs/images/xlsx.png';
 <div className="sb-intro-hero">
   <h1>office-open-xml-viewer</h1>
   <p className="lead">
-    A browser-based viewer for Office Open XML documents (<code>.pptx</code>, <code>.docx</code>, <code>.xlsx</code>)
+    A browser-based viewer for Office Open XML documents (<code>.docx</code>, <code>.xlsx</code>, <code>.pptx</code>)
     that renders to an HTML Canvas. Parsers are written in Rust and compiled to WebAssembly;
     the renderers use the Canvas 2D API.
   </p>
@@ -96,14 +96,6 @@ import xlsxImg from '../docs/images/xlsx.png';
 
 <div className="sb-format-grid">
   <div className="sb-format-card">
-    <img src={pptxImg} alt="PPTX" />
-    <div className="body">
-      <h3>PowerPoint (.pptx)</h3>
-      <p>Slides with shapes, groups, tables, charts, theme inheritance, and text layout.</p>
-      <a href="./?path=/story/pptxviewer-examples--demo" target="_top">Open PptxViewer stories →</a>
-    </div>
-  </div>
-  <div className="sb-format-card">
     <img src={docxImg} alt="DOCX" />
     <div className="body">
       <h3>Word (.docx)</h3>
@@ -117,6 +109,14 @@ import xlsxImg from '../docs/images/xlsx.png';
       <h3>Excel (.xlsx)</h3>
       <p>Cells, styles, merged/frozen panes, number formats, conditional formatting, charts.</p>
       <a href="./?path=/story/xlsxviewer-examples--demo" target="_top">Open XlsxViewer stories →</a>
+    </div>
+  </div>
+  <div className="sb-format-card">
+    <img src={pptxImg} alt="PPTX" />
+    <div className="body">
+      <h3>PowerPoint (.pptx)</h3>
+      <p>Slides with shapes, groups, tables, charts, theme inheritance, and text layout.</p>
+      <a href="./?path=/story/pptxviewer-examples--demo" target="_top">Open PptxViewer stories →</a>
     </div>
   </div>
 </div>
@@ -136,7 +136,7 @@ await viewer.load(buf);
 viewer.nextSlide();
 ```
 
-Each format also exposes a headless engine — `PptxPresentation` / `DocxDocument` / `XlsxWorkbook` —
+Each format also exposes a headless engine — `DocxDocument` / `XlsxWorkbook` / `PptxPresentation` —
 that renders into any caller-supplied canvas, so you can compose scroll views,
 thumbnail grids, or master-detail panes freely. See the **Layouts** stories under each viewer.
 
