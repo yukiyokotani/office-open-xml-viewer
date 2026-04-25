@@ -4,6 +4,8 @@
 
 [![npm version](https://img.shields.io/npm/v/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
 [![npm downloads](https://img.shields.io/npm/dm/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/silurus.office-open-xml-viewer?label=VS%20Code&logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer)
+[![VS Code installs](https://img.shields.io/visual-studio-marketplace/i/silurus.office-open-xml-viewer?label=installs)](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer)
 [![license](https://img.shields.io/npm/l/@silurus/ooxml.svg)](./LICENSE)
 
 **[Demo (Storybook)](https://ooxml.silurus.dev)**
