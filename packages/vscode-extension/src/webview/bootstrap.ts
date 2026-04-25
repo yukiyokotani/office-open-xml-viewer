@@ -26,9 +26,10 @@ const fileType = __OOXML_FILE_TYPE__;
 const statusEl = document.getElementById('status')!;
 const viewerContainer = document.getElementById('viewer-container')!;
 
-function setStatus(msg: string): void {
-  statusEl.style.display = '';
+function showError(msg: string): void {
+  statusEl.dataset.state = 'error';
   statusEl.textContent = msg;
+  statusEl.style.display = '';
 }
 
 function hideStatus(): void {
@@ -53,24 +54,20 @@ window.addEventListener('message', async (event: MessageEvent) => {
       await initPptx(buffer);
     }
   } catch (err) {
-    setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
   }
 });
 
 // ── XLSX ─────────────────────────────────────────────────────────────────────
 
 async function initXlsx(buffer: ArrayBuffer): Promise<void> {
-  hideStatus();
   const container = document.createElement('div');
   container.style.cssText = 'width:100%;height:100vh;';
   viewerContainer.appendChild(container);
 
   const viewer = new XlsxViewer(container, {
-    onReady(sheetNames) {
-      setStatus(`Loaded — ${sheetNames.length} sheet(s). Click a cell to select.`);
-    },
     onError(err) {
-      setStatus(`Error: ${err.message}`);
+      showError(`Error: ${err.message}`);
     },
     onSelectionChange(sel: CellRange | null) {
       if (!sel) return;
@@ -105,9 +102,7 @@ function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): voi
 }
 
 async function initDocx(buffer: ArrayBuffer): Promise<void> {
-  setStatus('Parsing…');
   const doc = await DocxDocument.load(buffer);
-  setStatus(`Rendering ${doc.pageCount} page(s)…`);
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';
@@ -176,9 +171,7 @@ function buildPptxTextLayer(
 }
 
 async function initPptx(buffer: ArrayBuffer): Promise<void> {
-  setStatus('Parsing…');
   const pres = await PptxPresentation.load(buffer);
-  setStatus(`Rendering ${pres.slideCount} slide(s)…`);
 
   const stack = document.createElement('div');
   stack.className = 'page-stack';
