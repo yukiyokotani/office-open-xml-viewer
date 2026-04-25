@@ -1,4 +1,4 @@
-# OOXML Viewer for VS Code
+# Office Viewer
 
 A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
 
