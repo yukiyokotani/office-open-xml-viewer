@@ -23,7 +23,7 @@
     "dev": "vite",
     "build": "tsc --build && vite build",
     "preview": "vite preview",
-    "wasm": "cd parser && wasm-pack build --target web && mkdir -p ../src/wasm && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/",
+    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm",
     "vrt": "playwright test --config playwright.config.ts"
   },
   "devDependencies": {
