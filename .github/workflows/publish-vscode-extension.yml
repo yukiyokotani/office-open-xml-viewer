@@ -1,0 +1,86 @@
+name: Publish VS Code Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Package only (no publish to Marketplace)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain (for building WASM parsers) ─────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/pptx/parser
+            packages/xlsx/parser
+            packages/docx/parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # ── Node / pnpm ────────────────────────────────────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Build (WASM → library packages → extension bundle) ─────────────────
+      - name: Build WASM (all parsers)
+        run: pnpm build:wasm
+
+      - name: Build library packages (pptx/xlsx/docx/core)
+        # The extension imports @silurus/ooxml-{pptx,xlsx,docx} from workspace:*;
+        # each needs its dist/ before esbuild bundles the extension.
+        run: pnpm -r --filter "@silurus/*" build
+
+      - name: Build extension bundle (esbuild --production)
+        working-directory: packages/vscode-extension
+        run: node esbuild.config.mjs --production
+
+      # ── Package (.vsix) ────────────────────────────────────────────────────
+      # --no-dependencies: extension is fully bundled by esbuild, no node_modules needed.
+      - name: Package VSIX
+        working-directory: packages/vscode-extension
+        run: pnpm exec vsce package --no-dependencies --out ooxml-viewer.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ooxml-viewer-vsix
+          path: packages/vscode-extension/ooxml-viewer.vsix
+          if-no-files-found: error
+
+      # ── Publish ────────────────────────────────────────────────────────────
+      - name: Publish to VS Code Marketplace
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        working-directory: packages/vscode-extension
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: pnpm exec vsce publish --no-dependencies --packagePath ooxml-viewer.vsix

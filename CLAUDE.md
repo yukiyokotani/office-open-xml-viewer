@@ -99,9 +99,15 @@ pnpm vrt
    - 前リリース以降にマージされた PR を `git log --oneline` で拾い、機能追加があれば `## Feature Support` の該当行を ❌ → ✅ に反転、または新しい行を追加する。
    - bug fix / 精度向上だけなら対応表は動かさず、根拠は CHANGELOG に書く。
 3. **CHANGELOG 追記**: `CHANGELOG.md` の先頭に `## 0.x.0 — YYYY-MM-DD` セクションを追加し、docx/pptx/xlsx/charts ごとに 1〜3 行の bullet で要点を書く。ECMA-376 節番号や PR 番号を適宜併記。
-4. **バージョン bump**: ルート `package.json` と `packages/{core,pptx,xlsx,docx}/package.json` の計 5 ファイルを同じ minor バージョンへ揃える。
+4. **バージョン bump**: ルート `package.json` と `packages/{core,pptx,xlsx,docx,vscode-extension}/package.json` の計 6 ファイルを同じバージョンへ揃える。VS Code 拡張も npm ライブラリと同じ番号で進めるため、機能変更がない月でも minor を上げる。
 5. **PR 作成**: ブランチ名は `release/0.x.0`。PR タイトルは `chore(release): 0.x.0`。マージは必ず `--merge` か `--rebase`（squash 禁止）。
 6. **タグ作成**: PR マージ後、main を pull して `git tag -a v0.x.0 -m "v0.x.0"` → `git push origin v0.x.0`。
 7. **GitHub Release 作成**: `gh release create v0.x.0 --title v0.x.0 --notes "..."` でリリースノート公開。本文は CHANGELOG の該当セクションを要約し、末尾に `**Full Changelog**: https://github.com/yukiyokotani/office-open-xml-viewer/compare/v0.(x-1).0...v0.x.0` を追記する。既存 v0.12.0 のフォーマットを踏襲すること (`gh release view v0.12.0` で確認可能)。
 
 参照画像（`tests/visual/references/`）はこの手順の対象外。README のスクリーンショットは `docs/images/` 配下のみ。
+
+## VS Code 拡張のリリース
+
+`packages/vscode-extension` は npm ライブラリと**同じバージョン番号**で揃える。`v*` タグを push すると `.github/workflows/publish-vscode-extension.yml` が自動で走り、`vsce publish` が VS Code Marketplace に公開する。`VSCE_PAT` は repo secrets に登録済み前提。
+
+手動で `.vsix` を確認したいときは workflow_dispatch で `dry_run=true` を選ぶと、build と package のみ実行して artifact をアップロードする。
