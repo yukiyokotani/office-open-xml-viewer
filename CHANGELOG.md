@@ -4,6 +4,27 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.15.0 — 2026-04-25
+
+VS Code extension polish + selection overlay accuracy fix. No new format
+support compared to 0.14.1; library packages are bumped to 0.15.0 so the
+tag-driven CI keeps the npm versions in sync with the VS Code Marketplace
+release.
+
+- **VS Code extension** (`packages/vscode-extension`):
+  - Add Marketplace icon (`icon.png`, 128×128) and wire it up via `package.json#icon`.
+  - Shorten `displayName` from `Office Viewer — DOCX, XLSX, PPTX` to `Office Viewer`; supported formats remain in the description and feature list.
+  - Replace the plain text loading status with a CSS-only spinner (#107).
+  - Center the loading spinner and error status on the viewport.
+  - Open documents in the currently focused column instead of forcing a split (#114).
+- **Viewer / selection overlay** (`packages/docx`, `packages/pptx`, VS Code webview):
+  - Carry the canvas `ctx.font` shorthand (font-family / weight / style) through `TextRunInfo` / `DocxTextRunInfo` and apply it on the transparent selection `<span>` so its width tracks the drawn glyphs. Previously the overlay relied on a fallback font, which drifted at the trailing edge of European text. Kerning / ligatures are intentionally left at the browser default to match canvas behavior.
+- **Docs**:
+  - Add a forward-looking note explaining the dual-layer (canvas + transparent DOM) selection architecture as a deliberate stop-gap, with a reference to the WICG `html-in-canvas` `drawElement` API as the planned unified replacement.
+  - VS Code extension README: 3-column screenshot table for the Marketplace listing.
+  - Standardize format ordering across READMEs as DOCX → XLSX → PPTX.
+  - Add Marketplace badges to the root README.
+
 ## 0.14.1 — 2026-04-25
 
 VS Code Marketplace metadata fix. The Marketplace `vsce publish` of 0.14.0
