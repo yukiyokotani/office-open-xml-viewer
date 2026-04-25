@@ -12,5 +12,6 @@
     }
   },
   "include": ["src", "src/**/*.json"],
+  "exclude": ["src/**/*.stories.ts", "src/**/*.stories.tsx"],
   "references": [{ "path": "../core" }]
 }
