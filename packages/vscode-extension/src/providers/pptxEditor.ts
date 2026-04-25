@@ -8,7 +8,6 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     return vscode.window.registerCustomEditorProvider(
       PptxEditorProvider.viewType,
       new PptxEditorProvider(context),
-      { supportsMultipleEditorsPerDocument: true },
     );
   }
 

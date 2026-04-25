@@ -8,7 +8,6 @@ export class DocxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     return vscode.window.registerCustomEditorProvider(
       DocxEditorProvider.viewType,
       new DocxEditorProvider(context),
-      { supportsMultipleEditorsPerDocument: true },
     );
   }
 
