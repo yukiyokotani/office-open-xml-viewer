@@ -4,6 +4,40 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.14.0 — 2026-04-25
+
+VS Code extension UX overhaul. The `.docx` and `.pptx` editors switch from a
+prev/next pager to a **continuous scroll-stack** that renders every page or
+slide at once with a transparent text layer (PDF.js style). The Webview chrome
+now follows the active VS Code theme (light / dark / high-contrast) via
+`--vscode-editor-background` and `--vscode-foreground`. The Marketplace README
+gains screenshots and a privacy statement asserting zero network access.
+
+### vscode-extension
+
+- **Scroll-stack viewer** (`packages/vscode-extension`) — replaces the
+  page-by-page navigation for docx/pptx. Every page/slide is rendered
+  vertically with its own transparent text layer; selection and copy work
+  across the whole document.
+- **Theme-aware backgrounds** — body/foreground driven by VS Code CSS
+  variables; the chrome around documents follows the active theme without
+  hardcoded fallbacks.
+- **CSP + handshake** — workers accept a `data:`-URL wasm asset (decoded
+  inside the worker) so the Webview CSP can stay strict; the editor waits for
+  a `webview-ready` ping before posting the file payload, fixing an init
+  ordering race.
+- **Marketplace README** — adds screenshots (absolute raw URLs so they render
+  on the Marketplace page), a "Privacy & Security" section, and reflects the
+  scroll-view UX.
+
+### tooling
+
+- **pptx wasm script** (`packages/pptx`) — switch to `wasm-pack build
+  --out-dir`, matching xlsx/docx, so the generated `pptx_parser.d.ts` is
+  written into `src/wasm/`. Resolves the CI `Build library packages` failure
+  where per-package `tsc --build` errored on `worker.ts` with TS7016.
+- `.gitignore`: exclude `*.vsix` build output.
+
 ## 0.13.0 — 2026-04-25
 
 UX and tooling release. The core viewer packages gain **text and cell
