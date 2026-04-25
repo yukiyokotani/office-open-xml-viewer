@@ -1,59 +1,63 @@
 # OOXML Viewer for VS Code
 
-A high-fidelity viewer for `.xlsx`, `.docx`, and `.pptx` files powered by a Rust/WASM parser and HTML Canvas renderer.
+A high-fidelity viewer for `.xlsx`, `.docx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
+
+> **Private by design.** All parsing and rendering happens locally inside the VS Code Webview via WebAssembly. **No file contents, no metadata, and no telemetry leave your machine.** The extension makes no network requests.
+
+## Screenshots
+
+### XLSX
+
+![XLSX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/xlsx.png)
+
+### DOCX
+
+![DOCX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/docx.png)
+
+### PPTX
+
+![PPTX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/pptx.png)
 
 ## Features
 
-- **XLSX** — Spreadsheet viewer with cell/row/column selection, range copy (Ctrl+C), freeze-pane support, and multi-sheet tab bar.
-- **DOCX** — Word document viewer with transparent text selection overlay (native drag-to-select + copy).
-- **PPTX** — Presentation viewer with slide navigation, transparent text selection overlay, and media poster rendering.
+- **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
+- **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
+- **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
+- **Theme-aware** — Background and foreground follow the active VS Code theme (light / dark / high-contrast).
+- **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, and more rendered straight from the OOXML spec.
 
-All three formats share the same underlying Rust parser (`wasm-pack`) for maximum accuracy and speed.
+All three formats share the same Rust parser (`wasm-pack`) for accuracy and speed.
 
 ## Usage
 
-Simply open any `.xlsx`, `.docx`, or `.pptx` file in VS Code — the OOXML Viewer activates automatically as the default editor for those file types.
+Open any `.xlsx`, `.docx`, or `.pptx` file in VS Code — the OOXML Viewer takes over as the default editor for those file types.
 
-### Navigation
+If a different editor opens by default, right-click the file → **Reopen Editor With…** → select **OOXML Viewer**, then optionally **Configure default editor** to make it the default.
 
-| Format | Shortcut |
-|--------|---------|
-| PPTX | Prev / Next slide buttons in toolbar |
-| DOCX | Prev / Next page buttons in toolbar |
-| XLSX | Click tabs at the bottom to switch sheets |
+### Selection & copy
 
-### Text Selection
+- **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions, so selection feels native.
+- **XLSX** — Click a cell to select it, drag for a range, click row/column headers for full-row/column selection, click the corner box for sheet-wide selection. **Ctrl+C / Cmd+C** copies as TSV.
 
-PPTX and DOCX files support transparent text overlays. Drag to select text, then use **Ctrl+C** (or **Cmd+C** on macOS) to copy.
+## Privacy & Security
 
-For XLSX, click a cell to select it, or drag across a range. **Ctrl+C** copies the selected cells as tab-separated values.
+- **Zero network access.** The Webview's Content Security Policy disallows outbound connections to any origin other than the extension itself. There is no analytics, no font CDN, no remote API.
+- **Local file I/O only.** The extension reads bytes via `vscode.workspace.fs.readFile` and never writes back — files are opened read-only.
+- **Open source.** Source code at [github.com/yukiyokotani/office-open-xml-viewer](https://github.com/yukiyokotani/office-open-xml-viewer).
 
-## Extension Settings
-
-No settings are required. The extension activates automatically for the registered file types.
+VS Code's own telemetry is independent of this extension and can be controlled via the `telemetry.telemetryLevel` setting.
 
 ## Known Limitations
 
-- XLSX: formula evaluation is not yet supported (raw values are shown).
-- DOCX: automatic image float wrap, footnotes, and header/footer rendering may differ slightly from Word.
-- PPTX: some obscure preset shapes fall back to a rectangle placeholder.
-- Media playback (audio/video) is not supported in the Webview.
+- XLSX: formula evaluation is not yet supported (raw cached values are shown).
+- DOCX: image-anchored float wrap, footnotes, and header/footer rendering may differ slightly from Word.
+- PPTX: a small number of obscure preset shapes fall back to a rectangle placeholder.
+- Media playback (audio / video) is not supported in the Webview.
 
-## Development
+## Issues & Contributions
 
-```bash
-# Build extension + webview bundle
-cd packages/vscode-extension
-node esbuild.config.mjs
+Report bugs or request features at [github.com/yukiyokotani/office-open-xml-viewer/issues](https://github.com/yukiyokotani/office-open-xml-viewer/issues).
 
-# Watch mode
-node esbuild.config.mjs --watch
+## License
 
-# Package as .vsix
-pnpm package
-```
-
-To test in the Extension Development Host:
-1. Open this repo in VS Code.
-2. Press **F5** — a new VS Code window opens with the extension loaded.
-3. Open any `.xlsx`, `.docx`, or `.pptx` sample file from `packages/*/public/`.
+MIT
