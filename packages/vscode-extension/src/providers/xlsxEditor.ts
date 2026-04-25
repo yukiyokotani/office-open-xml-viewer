@@ -8,7 +8,6 @@ export class XlsxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     return vscode.window.registerCustomEditorProvider(
       XlsxEditorProvider.viewType,
       new XlsxEditorProvider(context),
-      { supportsMultipleEditorsPerDocument: true },
     );
   }
 
