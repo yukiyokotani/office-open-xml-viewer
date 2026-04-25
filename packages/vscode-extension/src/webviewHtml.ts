@@ -59,18 +59,20 @@ export function getWebviewHtml(
       align-items: center;
     }
     #status {
+      position: fixed;
+      inset: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 24px;
-      min-height: 80px;
+      pointer-events: none;
+      z-index: 10;
     }
     #status[data-state="error"] {
+      pointer-events: auto;
       color: var(--vscode-errorForeground, #f44747);
       font-size: 13px;
-      padding: 8px;
-      min-height: auto;
-      justify-content: flex-start;
+      padding: 16px;
+      text-align: center;
     }
     .spinner {
       width: 28px;
