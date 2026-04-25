@@ -1,18 +1,18 @@
 # OOXML Viewer for VS Code
 
-A high-fidelity viewer for `.xlsx`, `.docx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
+A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
 
 > **Private by design.** All parsing and rendering happens locally inside the VS Code Webview via WebAssembly. **No file contents, no metadata, and no telemetry leave your machine.** The extension makes no network requests.
 
 ## Screenshots
 
-### XLSX
-
-![XLSX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/xlsx.png)
-
 ### DOCX
 
 ![DOCX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/docx.png)
+
+### XLSX
+
+![XLSX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/xlsx.png)
 
 ### PPTX
 
@@ -20,8 +20,8 @@ A high-fidelity viewer for `.xlsx`, `.docx`, and `.pptx` files — powered by a 
 
 ## Features
 
-- **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
+- **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
 - **Theme-aware** — Background and foreground follow the active VS Code theme (light / dark / high-contrast).
 - **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, and more rendered straight from the OOXML spec.
@@ -30,7 +30,7 @@ All three formats share the same Rust parser (`wasm-pack`) for accuracy and spee
 
 ## Usage
 
-Open any `.xlsx`, `.docx`, or `.pptx` file in VS Code — the OOXML Viewer takes over as the default editor for those file types.
+Open any `.docx`, `.xlsx`, or `.pptx` file in VS Code — the OOXML Viewer takes over as the default editor for those file types.
 
 If a different editor opens by default, right-click the file → **Reopen Editor With…** → select **OOXML Viewer**, then optionally **Configure default editor** to make it the default.
 

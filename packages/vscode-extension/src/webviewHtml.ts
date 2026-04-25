@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 export function getWebviewHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
-  fileType: 'xlsx' | 'docx' | 'pptx',
+  fileType: 'docx' | 'xlsx' | 'pptx',
 ): string {
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
@@ -59,10 +59,28 @@ export function getWebviewHtml(
       align-items: center;
     }
     #status {
-      color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      min-height: 80px;
+    }
+    #status[data-state="error"] {
+      color: var(--vscode-errorForeground, #f44747);
       font-size: 13px;
       padding: 8px;
+      min-height: auto;
+      justify-content: flex-start;
     }
+    .spinner {
+      width: 28px;
+      height: 28px;
+      border: 3px solid color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+      border-top-color: var(--vscode-progressBar-background, var(--vscode-foreground));
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     /* docx / pptx scroll-stack styling */
     .page-stack {
       display: flex;
@@ -98,7 +116,7 @@ export function getWebviewHtml(
 <body class="${fileType === 'xlsx' ? 'layout-xlsx' : 'layout-stack'}">
   <div id="viewer-root">
     <div id="viewer-container">
-      <div id="status">Loading…</div>
+      <div id="status"><div class="spinner"></div></div>
     </div>
   </div>
   <script nonce="${nonce}">

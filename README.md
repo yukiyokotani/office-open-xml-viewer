@@ -12,11 +12,11 @@
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
-Each format also exposes a headless engine (`PptxPresentation` / `DocxDocument` / `XlsxWorkbook`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev).
+Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the `Examples` section in [the Storybook demo](https://ooxml.silurus.dev).
 
-| PPTX | DOCX | XLSX |
+| DOCX | XLSX | PPTX |
 |:---:|:---:|:---:|
-| ![pptx](docs/images/pptx.png) | ![docx](docs/images/docx.png) | ![xlsx](docs/images/xlsx.png) |
+| ![docx](docs/images/docx.png) | ![xlsx](docs/images/xlsx.png) | ![pptx](docs/images/pptx.png) |
 
 ```bash
 npm install @silurus/ooxml
@@ -33,25 +33,25 @@ pnpm add @silurus/ooxml
 ## Quick Start
 
 ```typescript
-import { PptxViewer } from '@silurus/ooxml/pptx';
-import { XlsxViewer } from '@silurus/ooxml/xlsx';
 import { DocxViewer } from '@silurus/ooxml/docx';
-
-// PPTX — viewer manages its own <canvas>
-const pptx = new PptxViewer(document.getElementById('pptx-container')!);
-const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
-await pptx.load(buf);
-pptx.nextSlide();
-
-// XLSX — viewer manages its own <canvas> + tab bar
-const xlsx = new XlsxViewer(document.getElementById('xlsx-container')!);
-await xlsx.load('/workbook.xlsx');
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { PptxViewer } from '@silurus/ooxml/pptx';
 
 // DOCX — caller provides the <canvas>
 const canvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
 const docx = new DocxViewer(canvas);
 await docx.load('/document.docx');
 docx.nextPage();
+
+// XLSX — viewer manages its own <canvas> + tab bar
+const xlsx = new XlsxViewer(document.getElementById('xlsx-container')!);
+await xlsx.load('/workbook.xlsx');
+
+// PPTX — viewer manages its own <canvas>
+const pptx = new PptxViewer(document.getElementById('pptx-container')!);
+const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
+await pptx.load(buf);
+pptx.nextSlide();
 ```
 
 ---
@@ -63,35 +63,35 @@ docx.nextPage();
 flowchart TB
     subgraph build["🦀  Build-time  (Rust → WebAssembly)"]
         direction LR
-        pptx_rs["packages/pptx/parser/src/lib.rs"]
-        xlsx_rs["packages/xlsx/parser/src/lib.rs"]
         docx_rs["packages/docx/parser/src/lib.rs"]
-        pptx_rs -- wasm-pack --> pptx_wasm["pptx_parser.wasm"]
-        xlsx_rs -- wasm-pack --> xlsx_wasm["xlsx_parser.wasm"]
+        xlsx_rs["packages/xlsx/parser/src/lib.rs"]
+        pptx_rs["packages/pptx/parser/src/lib.rs"]
         docx_rs -- wasm-pack --> docx_wasm["docx_parser.wasm"]
+        xlsx_rs -- wasm-pack --> xlsx_wasm["xlsx_parser.wasm"]
+        pptx_rs -- wasm-pack --> pptx_wasm["pptx_parser.wasm"]
     end
 
     subgraph browser["🌐  Runtime  (Browser)"]
+        subgraph docx_pkg["@silurus/ooxml · docx"]
+            DV["DocxViewer"] --> DD["DocxDocument"]
+            DD --> DR["renderer.ts\n〈Canvas 2D〉"]
+        end
+        subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
+            XV["XlsxViewer"] --> XR["renderer.ts\n〈Canvas 2D〉"]
+        end
         subgraph pptx_pkg["@silurus/ooxml · pptx"]
             PV["PptxViewer"] --> PP["PptxPresentation"]
             PP --> PW["worker.ts\n〈Web Worker — parse only〉"]
             PP --> PR["renderer.ts\n〈Canvas 2D — main thread〉"]
         end
-        subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
-            XV["XlsxViewer"] --> XR["renderer.ts\n〈Canvas 2D〉"]
-        end
-        subgraph docx_pkg["@silurus/ooxml · docx"]
-            DV["DocxViewer"] --> DD["DocxDocument"]
-            DD --> DR["renderer.ts\n〈Canvas 2D〉"]
-        end
     end
 
-    pptx_wasm --> PW
-    xlsx_wasm --> XV
     docx_wasm --> DD
-    PR --> canvas["&lt;canvas&gt;"]
+    xlsx_wasm --> XV
+    pptx_wasm --> PW
+    DR --> canvas["&lt;canvas&gt;"]
     XR --> canvas
-    DR --> canvas
+    PR --> canvas
 ```
 
 The pptx worker parses the `.pptx` archive via WASM and returns a JSON model to the main thread. Rendering runs on the main thread so the canvas shares the document's `FontFaceSet` — an `OffscreenCanvas` in a worker has its own font registry and would silently fall back to a system font, producing subtly different text measurements (and wrap positions) from the installed theme webfonts.
@@ -100,12 +100,12 @@ The pptx worker parses the `.pptx` archive via WASM and returns a JSON model to 
 
 | File | Role |
 |------|------|
-| `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
-| `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
 | `packages/docx/parser/src/lib.rs` | Rust WASM parser — DOCX ZIP → `Document` JSON |
-| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs on main thread) |
-| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll |
+| `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
+| `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
 | `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout |
+| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll |
+| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs on main thread) |
 | `packages/pptx/src/worker.ts` | Web Worker: WASM init and parsing only |
 | `packages/*/src/viewer.ts` | Public Viewer API — canvas lifecycle, navigation |
 
@@ -356,6 +356,72 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ## Feature Support
 
+### Word (.docx)
+
+| Category | Feature | Status |
+|----------|---------|--------|
+| **Document** | Page rendering | ✅ |
+| | Page size and margins | ✅ |
+| | Headers / footers (default / first / even) | ✅ |
+| | Section breaks | ❌ |
+| **Text** | Paragraphs | ✅ |
+| | Bold, italic, underline, strikethrough | ✅ |
+| | Font family, size, color | ✅ |
+| | Hyperlinks | ✅ |
+| | Superscript / subscript (`w:vertAlign`) | ✅ |
+| **Formatting** | Paragraph alignment (left/center/right/justify) | ✅ |
+| | Line spacing (auto / atLeast / exact) | ✅ |
+| | Line grid (`w:docGrid`, §17.6.5) | ✅ |
+| | Margin collapsing between paragraphs | ✅ |
+| | Indents and tab stops | ✅ |
+| | Lists (bullet and numbered) | ✅ |
+| | Paragraph styles (Heading 1–9, Normal, custom) | ✅ |
+| | Table style `w:pPr` cascade (§17.7.6) | ✅ |
+| | keepNext / keepLines / widowControl | ✅ |
+| **Elements** | Tables (with borders, fills, merges) | ✅ |
+| | Images (inline and anchored, with text wrap) | ✅ |
+| | Text boxes / drawing shapes | ✅ |
+| **Advanced** | Footnote / endnote reference markers | ✅ |
+| | Track changes / comments | ❌ |
+| | Mail merge fields | ❌ Not planned |
+| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+
+---
+
+### Excel (.xlsx)
+
+| Category | Feature | Status |
+|----------|---------|--------|
+| **Workbook** | Multiple sheets, sheet names | ✅ |
+| **Cells** | Text, number, boolean, error values | ✅ |
+| | Formula results (from cached `<v>`) | ✅ |
+| | Dates (ECMA-376 date format codes) | ✅ |
+| | Rich text (per-run formatting) | ✅ |
+| **Formatting** | Bold, italic, underline, strikethrough | ✅ |
+| | Font family, size, color | ✅ |
+| | Cell background color | ✅ |
+| | Borders | ✅ |
+| | Horizontal / vertical alignment | ✅ |
+| | Text wrapping | ✅ |
+| | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
+| **Structure** | Merged cells | ✅ |
+| | Frozen panes | ✅ |
+| | Row / column sizing (custom widths and heights) | ✅ |
+| | Hidden rows / columns | ✅ |
+| **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| | Charts (bar, line, area, radar) | ✅ |
+| | Sparklines | ❌ Not planned |
+| **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
+| | Slicers (static, Office 2010 extension) | ✅ |
+| | Pivot tables | ❌ Not planned |
+| | Data validation / comments | ❌ Not planned |
+| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
+| | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
+| | Text selection inside cells (transparent overlay) | ✅ |
+| | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
+
+---
+
 ### PowerPoint (.pptx)
 
 | Category | Feature | Status |
@@ -423,76 +489,10 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ---
 
-### Word (.docx)
-
-| Category | Feature | Status |
-|----------|---------|--------|
-| **Document** | Page rendering | ✅ |
-| | Page size and margins | ✅ |
-| | Headers / footers (default / first / even) | ✅ |
-| | Section breaks | ❌ |
-| **Text** | Paragraphs | ✅ |
-| | Bold, italic, underline, strikethrough | ✅ |
-| | Font family, size, color | ✅ |
-| | Hyperlinks | ✅ |
-| | Superscript / subscript (`w:vertAlign`) | ✅ |
-| **Formatting** | Paragraph alignment (left/center/right/justify) | ✅ |
-| | Line spacing (auto / atLeast / exact) | ✅ |
-| | Line grid (`w:docGrid`, §17.6.5) | ✅ |
-| | Margin collapsing between paragraphs | ✅ |
-| | Indents and tab stops | ✅ |
-| | Lists (bullet and numbered) | ✅ |
-| | Paragraph styles (Heading 1–9, Normal, custom) | ✅ |
-| | Table style `w:pPr` cascade (§17.7.6) | ✅ |
-| | keepNext / keepLines / widowControl | ✅ |
-| **Elements** | Tables (with borders, fills, merges) | ✅ |
-| | Images (inline and anchored, with text wrap) | ✅ |
-| | Text boxes / drawing shapes | ✅ |
-| **Advanced** | Footnote / endnote reference markers | ✅ |
-| | Track changes / comments | ❌ |
-| | Mail merge fields | ❌ Not planned |
-| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
-
----
-
-### Excel (.xlsx)
-
-| Category | Feature | Status |
-|----------|---------|--------|
-| **Workbook** | Multiple sheets, sheet names | ✅ |
-| **Cells** | Text, number, boolean, error values | ✅ |
-| | Formula results (from cached `<v>`) | ✅ |
-| | Dates (ECMA-376 date format codes) | ✅ |
-| | Rich text (per-run formatting) | ✅ |
-| **Formatting** | Bold, italic, underline, strikethrough | ✅ |
-| | Font family, size, color | ✅ |
-| | Cell background color | ✅ |
-| | Borders | ✅ |
-| | Horizontal / vertical alignment | ✅ |
-| | Text wrapping | ✅ |
-| | Number formats (`0.00`, `%`, `#,##0`, custom date/time) | ✅ |
-| **Structure** | Merged cells | ✅ |
-| | Frozen panes | ✅ |
-| | Row / column sizing (custom widths and heights) | ✅ |
-| | Hidden rows / columns | ✅ |
-| **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
-| | Charts (bar, line, area, radar) | ✅ |
-| | Sparklines | ❌ Not planned |
-| **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
-| | Slicers (static, Office 2010 extension) | ✅ |
-| | Pivot tables | ❌ Not planned |
-| | Data validation / comments | ❌ Not planned |
-| **Interaction** | Cell selection (single / range / row / column / all) | ✅ |
-| | Shift+click to extend, Ctrl+C to copy as TSV | ✅ |
-| | Text selection inside cells (transparent overlay) | ✅ |
-| | `onSelectionChange` callback, `getCellAt(x, y)` API | ✅ |
-
----
-
 ## Companion packages
 
-- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.xlsx`, `.docx`, and `.pptx`. Open Office files directly in the editor with the same Canvas renderer plus selection/copy.
-- **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`xlsx_get_cell_range`, `docx_get_structure`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`.
+- **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`. Open Office files directly in the editor with the same Canvas renderer plus selection/copy.
+- **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`.
 
 ---
 
@@ -521,9 +521,9 @@ pnpm build
 ### WASM build (individual packages)
 
 ```bash
-cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/
-cd packages/xlsx/parser && wasm-pack build --target web && cp pkg/xlsx_parser_bg.wasm  pkg/xlsx_parser.js  ../src/wasm/
 cd packages/docx/parser && wasm-pack build --target web && cp pkg/docx_parser_bg.wasm  pkg/docx_parser.js  ../src/wasm/
+cd packages/xlsx/parser && wasm-pack build --target web && cp pkg/xlsx_parser_bg.wasm  pkg/xlsx_parser.js  ../src/wasm/
+cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg.wasm pkg/pptx_parser.js ../src/wasm/
 ```
 
 ## Security & Privacy

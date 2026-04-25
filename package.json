@@ -1,17 +1,17 @@
 {
   "name": "@silurus/ooxml",
   "version": "0.14.1",
-  "description": "Browser-based OOXML viewer (pptx/xlsx/docx) — Rust/WASM parser + Canvas renderer",
+  "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
   "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
   "keywords": [
     "ooxml",
-    "pptx",
-    "xlsx",
     "docx",
-    "powerpoint",
-    "excel",
+    "xlsx",
+    "pptx",
     "word",
+    "excel",
+    "powerpoint",
     "viewer",
     "canvas",
     "wasm",
@@ -39,20 +39,20 @@
       "require": "./dist/index.cjs",
       "types": "./dist/types/index.d.ts"
     },
-    "./pptx": {
-      "import": "./dist/pptx.mjs",
-      "require": "./dist/pptx.cjs",
-      "types": "./dist/types/pptx.d.ts"
+    "./docx": {
+      "import": "./dist/docx.mjs",
+      "require": "./dist/docx.cjs",
+      "types": "./dist/types/docx.d.ts"
     },
     "./xlsx": {
       "import": "./dist/xlsx.mjs",
       "require": "./dist/xlsx.cjs",
       "types": "./dist/types/xlsx.d.ts"
     },
-    "./docx": {
-      "import": "./dist/docx.mjs",
-      "require": "./dist/docx.cjs",
-      "types": "./dist/types/docx.d.ts"
+    "./pptx": {
+      "import": "./dist/pptx.mjs",
+      "require": "./dist/pptx.cjs",
+      "types": "./dist/types/pptx.d.ts"
     }
   },
   "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
@@ -62,7 +62,7 @@
     "typecheck": "tsc --build",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "build:wasm": "pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-docx wasm",
+    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm",
     "vrt": "pnpm -r vrt"
   },
   "devDependencies": {

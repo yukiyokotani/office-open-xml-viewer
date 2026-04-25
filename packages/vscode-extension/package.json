@@ -1,7 +1,7 @@
 {
   "name": "office-open-xml-viewer",
-  "displayName": "Office Viewer — XLSX, DOCX, PPTX",
-  "description": "High-fidelity viewer for Office files (.xlsx / .docx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
+  "displayName": "Office Viewer — DOCX, XLSX, PPTX",
+  "description": "High-fidelity viewer for Office files (.docx / .xlsx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
   "version": "0.14.1",
   "publisher": "silurus",
   "license": "MIT",
@@ -14,13 +14,13 @@
   ],
   "keywords": [
     "ooxml",
-    "xlsx",
     "docx",
+    "xlsx",
     "pptx",
     "office",
     "viewer",
-    "excel",
     "word",
+    "excel",
     "powerpoint"
   ],
   "repository": {
@@ -32,18 +32,18 @@
   "contributes": {
     "customEditors": [
       {
-        "viewType": "ooxmlViewer.xlsxEditor",
-        "displayName": "OOXML Viewer (XLSX)",
-        "selector": [
-          { "filenamePattern": "*.xlsx" }
-        ],
-        "priority": "default"
-      },
-      {
         "viewType": "ooxmlViewer.docxEditor",
         "displayName": "OOXML Viewer (DOCX)",
         "selector": [
           { "filenamePattern": "*.docx" }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "ooxmlViewer.xlsxEditor",
+        "displayName": "OOXML Viewer (XLSX)",
+        "selector": [
+          { "filenamePattern": "*.xlsx" }
         ],
         "priority": "default"
       },
@@ -77,8 +77,8 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "@silurus/ooxml-pptx": "workspace:*",
     "@silurus/ooxml-docx": "workspace:*",
-    "@silurus/ooxml-xlsx": "workspace:*"
+    "@silurus/ooxml-xlsx": "workspace:*",
+    "@silurus/ooxml-pptx": "workspace:*"
   }
 }
