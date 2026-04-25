@@ -94,9 +94,14 @@ function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[]): voi
   for (const run of runs) {
     const span = document.createElement('span');
     span.textContent = run.text;
+    // Mirror the canvas font (incl. weight / style / family) so glyph widths
+    // line up. `letter-spacing` is reset so parent CSS cannot drift the
+    // selection edge. Kerning / ligatures are left at the browser default
+    // because canvas applies them by default too.
     span.style.cssText =
       `position:absolute;left:${run.x}px;top:${run.y}px;` +
-      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
+      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
+      `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
     layer.appendChild(span);
   }
 }
@@ -163,9 +168,11 @@ function buildPptxTextLayer(
     }
     const span = document.createElement('span');
     span.textContent = run.text;
+    // See buildDocxTextLayer: mirror canvas font, only reset letter-spacing.
     span.style.cssText =
       `position:absolute;left:${run.inShapeX}px;top:${run.inShapeY}px;` +
-      `font-size:${run.fontSize}px;line-height:${run.h}px;white-space:pre;color:transparent;cursor:text;`;
+      `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
+      `white-space:pre;color:transparent;cursor:text;`;
     shape.appendChild(span);
   }
 }

@@ -84,10 +84,16 @@ export class DocxViewer {
     for (const run of runs) {
       const span = document.createElement('span');
       span.textContent = run.text;
+      // The `font` shorthand must precede `line-height` because the shorthand
+      // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
+      // CSS rule cannot drift the trailing edge of the selection. Kerning /
+      // ligatures are left at the browser default ('auto') because canvas
+      // `measureText` / `fillText` also apply them by default — forcing them
+      // off here would make the span wider than the drawn text.
       span.style.cssText =
         `position:absolute;` +
         `left:${run.x}px;top:${run.y}px;` +
-        `font-size:${run.fontSize}px;line-height:${run.h}px;` +
+        `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
         `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
       layer.appendChild(span);
     }

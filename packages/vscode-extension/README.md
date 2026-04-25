@@ -6,17 +6,9 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 
 ## Screenshots
 
-### DOCX
-
-![DOCX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/docx.png)
-
-### XLSX
-
-![XLSX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/xlsx.png)
-
-### PPTX
-
-![PPTX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/pptx.png)
+| DOCX | XLSX | PPTX |
+|:---:|:---:|:---:|
+| ![DOCX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/docx.png) | ![XLSX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/xlsx.png) | ![PPTX viewer](https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/pptx.png) |
 
 ## Features
 
@@ -36,7 +28,7 @@ If a different editor opens by default, right-click the file → **Reopen Editor
 
 ### Selection & copy
 
-- **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions, so selection feels native.
+- **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions, so selection feels native. *(This dual-layer rendering is planned to be unified once the Canvas [`drawElement`](https://github.com/WICG/html-in-canvas) API ships across browsers.)*
 - **XLSX** — Click a cell to select it, drag for a range, click row/column headers for full-row/column selection, click the corner box for sheet-wide selection. **Ctrl+C / Cmd+C** copies as TSV.
 
 ## Privacy & Security
