@@ -68,12 +68,11 @@ export function getWebviewHtml(
       z-index: 10;
     }
     #status[data-state="error"] {
-      position: static;
       pointer-events: auto;
       color: var(--vscode-errorForeground, #f44747);
       font-size: 13px;
-      padding: 8px;
-      justify-content: flex-start;
+      padding: 16px;
+      text-align: center;
     }
     .spinner {
       width: 28px;
