@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.14.1 — 2026-04-25
+
+VS Code Marketplace metadata fix. The Marketplace `vsce publish` of 0.14.0
+failed because the extension `name` (`ooxml-viewer`) collided with an existing
+listing. This release renames the extension and broadens the displayName so
+that users searching the Marketplace for "Office", "XLSX", "DOCX", or "PPTX"
+discover it.
+
+- **Rename** (`packages/vscode-extension`):
+  - `name`: `ooxml-viewer` → `office-open-xml-viewer`
+  - `displayName`: `OOXML Viewer` → `Office Viewer — XLSX, DOCX, PPTX`
+  - `description`: emphasizes Office file support and the local-only privacy
+    posture for Marketplace searchers.
+- Library packages (`@silurus/ooxml{,-pptx,-xlsx,-docx,-core}`) are bumped to
+  0.14.1 to keep tag-driven CI in sync; **no code changes for the libraries.**
+
 ## 0.14.0 — 2026-04-25
 
 VS Code extension UX overhaul. The `.docx` and `.pptx` editors switch from a

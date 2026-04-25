@@ -1,8 +1,8 @@
 {
-  "name": "ooxml-viewer",
-  "displayName": "OOXML Viewer",
-  "description": "High-fidelity viewer for .xlsx, .docx, and .pptx files powered by a Rust/WASM parser and Canvas renderer.",
-  "version": "0.14.0",
+  "name": "office-open-xml-viewer",
+  "displayName": "Office Viewer — XLSX, DOCX, PPTX",
+  "description": "High-fidelity viewer for Office files (.xlsx / .docx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
+  "version": "0.14.1",
   "publisher": "silurus",
   "license": "MIT",
   "engines": {
