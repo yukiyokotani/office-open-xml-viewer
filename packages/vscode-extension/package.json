@@ -2,7 +2,7 @@
   "name": "ooxml-viewer",
   "displayName": "OOXML Viewer",
   "description": "High-fidelity viewer for .xlsx, .docx, and .pptx files powered by a Rust/WASM parser and Canvas renderer.",
-  "version": "0.1.0",
+  "version": "0.13.0",
   "publisher": "silurus",
   "license": "MIT",
   "engines": {

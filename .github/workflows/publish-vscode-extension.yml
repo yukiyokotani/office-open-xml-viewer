@@ -3,7 +3,7 @@ name: Publish VS Code Extension
 on:
   push:
     tags:
-      - 'vscode-ext-v*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       dry_run:
