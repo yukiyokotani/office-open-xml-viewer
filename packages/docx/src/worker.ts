@@ -3,11 +3,21 @@ import type { WorkerRequest, WorkerResponse } from './types';
 
 let initPromise: Promise<unknown> | null = null;
 
+function decodeDataUrl(url: string): ArrayBuffer | null {
+  if (!url.startsWith('data:')) return null;
+  const comma = url.indexOf(',');
+  if (comma === -1) return null;
+  const binary = atob(url.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
 
   if (req.type === 'init') {
-    initPromise = init(req.wasmUrl);
+    initPromise = init(decodeDataUrl(req.wasmUrl) ?? req.wasmUrl);
     return;
   }
 

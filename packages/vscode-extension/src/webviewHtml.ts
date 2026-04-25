@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 
 /**
  * Generate the HTML for the webview panel.
@@ -14,9 +13,6 @@ export function getWebviewHtml(
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
   );
-  const wasmUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'dist', `${fileType}_parser_bg.wasm`),
-  );
 
   const nonce = getNonce();
 
@@ -30,72 +26,83 @@ export function getWebviewHtml(
              img-src ${webview.cspSource} data: blob:;
              media-src ${webview.cspSource} blob:;
              font-src ${webview.cspSource};
-             script-src 'nonce-${nonce}';
+             script-src 'nonce-${nonce}' 'wasm-unsafe-eval';
+             worker-src data: blob:;
              style-src 'unsafe-inline';
-             connect-src ${webview.cspSource};" />
+             connect-src ${webview.cspSource} data: blob:;" />
   <title>OOXML Viewer</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; overflow: hidden; }
-    body { background: var(--vscode-editor-background, #1e1e1e); }
-    #viewer-root {
+    html, body {
       width: 100%;
       height: 100%;
-      overflow: auto;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family, sans-serif);
+    }
+    /* xlsx fills the whole viewport; docx/pptx scroll inside #viewer-root. */
+    body.layout-xlsx { overflow: hidden; }
+    body.layout-stack { overflow: auto; }
+    #viewer-root {
+      width: 100%;
+      min-height: 100%;
       display: flex;
       justify-content: center;
       align-items: flex-start;
       padding: 16px;
     }
-    #viewer-container {
-      max-width: 100%;
+    body.layout-xlsx #viewer-root { padding: 0; height: 100%; }
+    #viewer-container { max-width: 100%; width: 100%; }
+    body.layout-stack #viewer-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
     }
     #status {
-      color: var(--vscode-foreground, #ccc);
-      font-family: var(--vscode-font-family, sans-serif);
+      color: var(--vscode-descriptionForeground, var(--vscode-foreground));
       font-size: 13px;
       padding: 8px;
     }
-    /* Slide/page navigation bar */
-    #nav-bar {
-      display: none;
+    /* docx / pptx scroll-stack styling */
+    .page-stack {
+      display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 8px;
-      padding: 4px 0 8px;
-      font-family: var(--vscode-font-family, sans-serif);
-      font-size: 13px;
-      color: var(--vscode-foreground, #ccc);
+      gap: 16px;
+      width: 100%;
     }
-    #nav-bar.visible { display: flex; }
-    #nav-bar button {
-      background: var(--vscode-button-background, #0e639c);
-      color: var(--vscode-button-foreground, #fff);
-      border: none;
-      border-radius: 2px;
-      padding: 2px 10px;
-      cursor: pointer;
-      font-size: 12px;
+    .page-wrapper {
+      position: relative;
+      width: 100%;
+      margin: 0 auto;
     }
-    #nav-bar button:disabled {
-      opacity: 0.4;
-      cursor: default;
+    .page-canvas {
+      display: block;
+      width: 100%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    }
+    .text-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      pointer-events: none;
+      user-select: text;
+      -webkit-user-select: text;
     }
   </style>
 </head>
-<body>
+<body class="${fileType === 'xlsx' ? 'layout-xlsx' : 'layout-stack'}">
   <div id="viewer-root">
     <div id="viewer-container">
-      <div id="nav-bar">
-        <button id="prev-btn">← Prev</button>
-        <span id="page-info"></span>
-        <button id="next-btn">Next →</button>
-      </div>
       <div id="status">Loading…</div>
     </div>
   </div>
   <script nonce="${nonce}">
     window.__OOXML_FILE_TYPE__ = ${JSON.stringify(fileType)};
-    window.__OOXML_WASM_URL__ = ${JSON.stringify(wasmUri.toString())};
   </script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
