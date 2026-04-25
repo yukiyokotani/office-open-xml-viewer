@@ -84,10 +84,15 @@ export class DocxViewer {
     for (const run of runs) {
       const span = document.createElement('span');
       span.textContent = run.text;
+      // The `font` shorthand must precede `line-height` because the shorthand
+      // resets `line-height` to `normal`. Disable kerning / ligatures / letter-spacing
+      // to match canvas `measureText` so the span width tracks the drawn glyph width
+      // exactly (otherwise the trailing edge of the selection drifts).
       span.style.cssText =
         `position:absolute;` +
         `left:${run.x}px;top:${run.y}px;` +
-        `font-size:${run.fontSize}px;line-height:${run.h}px;` +
+        `font:${run.font};line-height:${run.h}px;` +
+        `font-kerning:none;font-feature-settings:"liga" 0,"kern" 0;letter-spacing:0;` +
         `white-space:pre;color:transparent;cursor:text;pointer-events:all;`;
       layer.appendChild(span);
     }

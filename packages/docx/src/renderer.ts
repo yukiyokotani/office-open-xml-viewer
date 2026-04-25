@@ -76,6 +76,8 @@ export interface DocxTextRunInfo {
   h: number;
   /** Font size in CSS px. */
   fontSize: number;
+  /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
+  font: string;
 }
 
 export interface RenderDocumentOptions {
@@ -720,6 +722,7 @@ function renderParagraph(para: DocParagraph, state: RenderState, suppressSpaceBe
             w: s.measuredWidth,
             h: lineH,
             fontSize: effSizePx,
+            font: ctx.font,
           });
         }
 

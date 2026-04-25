@@ -325,5 +325,5 @@ export interface RenderPageOptions {
   dpr?: number;
   defaultTextColor?: string;
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number }) => void;
+  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string }) => void;
 }

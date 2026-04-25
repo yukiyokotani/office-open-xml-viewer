@@ -47,6 +47,8 @@ export interface TextRunInfo {
   h: number;
   /** Font size in CSS px. */
   fontSize: number;
+  /** CSS `font` shorthand used for canvas drawing (e.g. `"bold 16px Arial"`). */
+  font: string;
   /** Shape's left edge in canvas CSS px. */
   shapeX: number;
   /** Shape's top edge in canvas CSS px. */
@@ -3002,6 +3004,7 @@ function renderTextBody(
           w: segW,
           h: lineHeight,
           fontSize: seg.sizePx,
+          font: seg.font,
           shapeX: bx,
           shapeY: by,
           shapeW: bw,
@@ -3063,6 +3066,7 @@ function renderTextBody(
             w: tabSegW,
             h: lineHeight,
             fontSize: seg.sizePx,
+            font: seg.font,
             shapeX: bx,
             shapeY: by,
             shapeW: bw,
