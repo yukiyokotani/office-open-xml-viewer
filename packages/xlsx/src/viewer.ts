@@ -47,6 +47,9 @@ export class XlsxViewer {
   private isSelecting = false;
   private selectionOverlay: HTMLDivElement;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+  // Pending touch/pen tap: only commit selection on pointerup if movement stays within tap threshold,
+  // so swipe-to-scroll on mobile doesn't change the selected cell.
+  private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
@@ -472,64 +475,91 @@ export class XlsxViewer {
     this.selectionOverlay.appendChild(box);
   }
 
+  private applyPointerSelection(clientX: number, clientY: number, shiftKey: boolean, pointerId: number, allowDrag: boolean): void {
+    const headerHit = this.getHeaderHit(clientX, clientY);
+
+    if (headerHit) {
+      if (headerHit.kind === 'corner') {
+        // Select all — no drag extension needed
+        this.selectionMode = 'all';
+        this.anchorCell = { row: 1, col: 1 };
+        this.activeCell = { row: 1, col: 1 };
+        this.isSelecting = false;
+      } else if (headerHit.kind === 'row') {
+        if (shiftKey && this.anchorCell && this.selectionMode === 'rows') {
+          this.activeCell = { row: headerHit.row, col: 1 };
+        } else {
+          this.selectionMode = 'rows';
+          this.anchorCell = { row: headerHit.row, col: 1 };
+          this.activeCell = { row: headerHit.row, col: 1 };
+          if (allowDrag) {
+            this.isSelecting = true;
+            this.scrollHost.setPointerCapture(pointerId);
+          }
+        }
+      } else {
+        if (shiftKey && this.anchorCell && this.selectionMode === 'cols') {
+          this.activeCell = { row: 1, col: headerHit.col };
+        } else {
+          this.selectionMode = 'cols';
+          this.anchorCell = { row: 1, col: headerHit.col };
+          this.activeCell = { row: 1, col: headerHit.col };
+          if (allowDrag) {
+            this.isSelecting = true;
+            this.scrollHost.setPointerCapture(pointerId);
+          }
+        }
+      }
+      this.updateSelectionOverlay();
+      this.opts.onSelectionChange?.(this.selection);
+      return;
+    }
+
+    const cell = this.getCellAt(clientX, clientY);
+    if (!cell) return;
+
+    if (shiftKey && this.anchorCell && this.selectionMode === 'cells') {
+      this.activeCell = cell;
+    } else {
+      this.selectionMode = 'cells';
+      this.anchorCell = cell;
+      this.activeCell = cell;
+    }
+    if (allowDrag) {
+      this.isSelecting = true;
+      this.scrollHost.setPointerCapture(pointerId);
+    }
+    this.updateSelectionOverlay();
+    this.opts.onSelectionChange?.(this.selection);
+  }
+
   private setupSelectionEvents(): void {
+    // Distance (CSS px) beyond which a touch/pen pointerdown→pointerup is treated as a swipe (scroll), not a tap.
+    const TAP_SLOP = 8;
+
     this.scrollHost.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
 
-      const headerHit = this.getHeaderHit(e.clientX, e.clientY);
-
-      if (headerHit) {
-        if (headerHit.kind === 'corner') {
-          // Select all — no drag extension needed
-          this.selectionMode = 'all';
-          this.anchorCell = { row: 1, col: 1 };
-          this.activeCell = { row: 1, col: 1 };
-          this.isSelecting = false;
-        } else if (headerHit.kind === 'row') {
-          if (e.shiftKey && this.anchorCell && this.selectionMode === 'rows') {
-            // Extend existing row selection
-            this.activeCell = { row: headerHit.row, col: 1 };
-          } else {
-            this.selectionMode = 'rows';
-            this.anchorCell = { row: headerHit.row, col: 1 };
-            this.activeCell = { row: headerHit.row, col: 1 };
-            this.isSelecting = true;
-            this.scrollHost.setPointerCapture(e.pointerId);
-          }
-        } else {
-          if (e.shiftKey && this.anchorCell && this.selectionMode === 'cols') {
-            this.activeCell = { row: 1, col: headerHit.col };
-          } else {
-            this.selectionMode = 'cols';
-            this.anchorCell = { row: 1, col: headerHit.col };
-            this.activeCell = { row: 1, col: headerHit.col };
-            this.isSelecting = true;
-            this.scrollHost.setPointerCapture(e.pointerId);
-          }
-        }
-        this.updateSelectionOverlay();
-        this.opts.onSelectionChange?.(this.selection);
+      // Touch / pen: defer selection until pointerup so swipe-to-scroll doesn't change the cell.
+      // Mouse: select immediately to preserve drag-to-extend behavior.
+      if (e.pointerType !== 'mouse') {
+        this.pendingTap = { x: e.clientX, y: e.clientY, shiftKey: e.shiftKey, pointerId: e.pointerId };
         return;
       }
 
-      const cell = this.getCellAt(e.clientX, e.clientY);
-      if (!cell) return;
-
-      if (e.shiftKey && this.anchorCell && this.selectionMode === 'cells') {
-        // Extend current selection; keep anchor
-        this.activeCell = cell;
-      } else {
-        this.selectionMode = 'cells';
-        this.anchorCell = cell;
-        this.activeCell = cell;
-      }
-      this.isSelecting = true;
-      this.scrollHost.setPointerCapture(e.pointerId);
-      this.updateSelectionOverlay();
-      this.opts.onSelectionChange?.(this.selection);
+      this.applyPointerSelection(e.clientX, e.clientY, e.shiftKey, e.pointerId, true);
     });
 
     this.scrollHost.addEventListener('pointermove', (e: PointerEvent) => {
+      // Cancel a pending tap once the pointer moves beyond the slop — the user is scrolling.
+      if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
+        const dx = e.clientX - this.pendingTap.x;
+        const dy = e.clientY - this.pendingTap.y;
+        if (dx * dx + dy * dy > TAP_SLOP * TAP_SLOP) {
+          this.pendingTap = null;
+        }
+      }
+
       if (!this.isSelecting) return;
 
       if (this.selectionMode === 'rows') {
@@ -552,7 +582,22 @@ export class XlsxViewer {
       this.opts.onSelectionChange?.(this.selection);
     });
 
-    this.scrollHost.addEventListener('pointerup', () => {
+    this.scrollHost.addEventListener('pointerup', (e: PointerEvent) => {
+      if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
+        const dx = e.clientX - this.pendingTap.x;
+        const dy = e.clientY - this.pendingTap.y;
+        if (dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP) {
+          this.applyPointerSelection(e.clientX, e.clientY, this.pendingTap.shiftKey, e.pointerId, false);
+        }
+        this.pendingTap = null;
+      }
+      this.isSelecting = false;
+    });
+
+    this.scrollHost.addEventListener('pointercancel', (e: PointerEvent) => {
+      if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
+        this.pendingTap = null;
+      }
       this.isSelecting = false;
     });
 
