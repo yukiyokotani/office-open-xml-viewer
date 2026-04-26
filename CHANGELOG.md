@@ -4,6 +4,36 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.17.0 — 2026-04-27
+
+Minor release. Handwritten ink strokes now render via PowerPoint's
+rasterized fallback, plus rendering accuracy fixes for the PowerPoint
+engine.
+
+- **PPTX engine** (`packages/pptx`):
+  - `mc:AlternateContent` now walks `mc:Fallback` when `mc:Choice`
+    produces no output (previously Choice was always taken and Fallback
+    silently discarded). PowerPoint embeds ink / handwriting as
+    `p:contentPart` (InkML) inside Choice with a rasterized `p:pic`
+    inside Fallback; this restores those strokes.
+  - When the Choice subtree is an ink `p:contentPart`, the fallback PNG
+    is rendered at its natural pixel size centered in the bounding box
+    rather than always stretched. Empty / single-tap strokes (whose
+    fallback PNG is only a few pixels) no longer blow up into blocky
+    artifacts. Visible strokes are unaffected.
+  - Fix preset-shape arc visual-to-parametric angle conversion for
+    non-square shape boxes (ECMA-376 §20.1.9.18 `<a:arcTo>`). The
+    path-executor was using canvas-scaled radii where path-local radii
+    were required, skewing every arc segment when `sx ≠ sy`. Visible
+    on `cloudCallout` placed in a landscape box, where the inner cloud
+    detail arcs were misaligned even though the outline looked plausible.
+  - `PptxViewer` wrapper sets `vertical-align: top` so the inline-block
+    line-box descender (~6 px on default font metrics) no longer leaks
+    the host container's background through below the canvas.
+- **VS Code extension** (`packages/vscode-extension`):
+  - Downsize `icon.png` to 512×512 to match the practical Marketplace
+    icon range. No functional change.
+
 ## 0.16.1 — 2026-04-26
 
 Patch release. Project icon refresh.
