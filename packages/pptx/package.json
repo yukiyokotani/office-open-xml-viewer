@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-pptx",
   "private": true,
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "PPTX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
