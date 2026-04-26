@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.15.2 — 2026-04-26
+
+Patch release. Project icon refresh.
+
+- **Project icon**:
+  - Adopt a new high-resolution master at `docs/images/icon.png` (2048×2048)
+    and reference it from the root README.
+  - **VS Code extension** (`packages/vscode-extension`):
+    - Replace the previous 128×128 Marketplace icon with the new master so the
+      Marketplace listing renders crisply on retina displays.
+    - Show the icon at the top of the extension README (via the GitHub raw
+      URL — Marketplace ignores relative image paths).
+    - Add a `cp ../../docs/images/icon.png ./icon.png` step to
+      `vscode:prepublish` so the bundled `.vsix` icon is always re-synced from
+      the master at publish time and never drifts.
+
 ## 0.15.1 — 2026-04-26
 
 Patch release. Mobile UX fix for the XLSX viewer plus Storybook tidy-up.
