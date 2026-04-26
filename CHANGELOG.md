@@ -4,6 +4,21 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.15.1 — 2026-04-26
+
+Patch release. Mobile UX fix for the XLSX viewer plus Storybook tidy-up.
+
+- **XLSX viewer** (`packages/xlsx`):
+  - Distinguish tap from swipe on touch / pen input. `pointerdown` no longer
+    commits a cell selection for non-mouse pointers; the gesture is buffered
+    and only commits on `pointerup` if the pointer stayed within an 8 px slop.
+    A swipe to scroll on a phone or tablet now leaves the selected cell
+    alone. Mouse input is unchanged so drag-to-extend keeps working.
+- **Storybook**:
+  - Drop the `Selectable — file upload` / `Selectable — sample-1.xlsx`
+    stories. The public demo already exercises cell selection, so the stories
+    were redundant.
+
 ## 0.15.0 — 2026-04-25
 
 VS Code extension polish + selection overlay accuracy fix. No new format
