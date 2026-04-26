@@ -76,29 +76,38 @@ flowchart TB
     end
 
     subgraph browser["🌐  Runtime  (Browser)"]
+        subgraph core_pkg["@silurus/ooxml-core  (shared primitives)"]
+            CORE["renderChart · resolveFill · applyStroke\nbuildCustomPath · autoResize · shared types"]
+        end
         subgraph docx_pkg["@silurus/ooxml · docx"]
             DV["DocxViewer"] --> DD["DocxDocument"]
-            DD --> DR["renderer.ts\n〈Canvas 2D〉"]
+            DD --> DW["worker.ts\n〈Web Worker — parse only〉"]
+            DD --> DR["renderer.ts\n〈Canvas 2D — main thread〉"]
         end
         subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
-            XV["XlsxViewer"] --> XR["renderer.ts\n〈Canvas 2D〉"]
+            XV["XlsxViewer"] --> XB["XlsxWorkbook"]
+            XB --> XW["worker.ts\n〈Web Worker — parse only〉"]
+            XB --> XR["renderer.ts\n〈Canvas 2D — main thread〉"]
         end
         subgraph pptx_pkg["@silurus/ooxml · pptx"]
             PV["PptxViewer"] --> PP["PptxPresentation"]
             PP --> PW["worker.ts\n〈Web Worker — parse only〉"]
             PP --> PR["renderer.ts\n〈Canvas 2D — main thread〉"]
         end
+        DR -. uses .-> CORE
+        XR -. uses .-> CORE
+        PR -. uses .-> CORE
     end
 
-    docx_wasm --> DD
-    xlsx_wasm --> XV
+    docx_wasm --> DW
+    xlsx_wasm --> XW
     pptx_wasm --> PW
     DR --> canvas["&lt;canvas&gt;"]
     XR --> canvas
     PR --> canvas
 ```
 
-The pptx worker parses the `.pptx` archive via WASM and returns a JSON model to the main thread. Rendering runs on the main thread so the canvas shares the document's `FontFaceSet` — an `OffscreenCanvas` in a worker has its own font registry and would silently fall back to a system font, producing subtly different text measurements (and wrap positions) from the installed theme webfonts.
+All three formats follow the same shape: the worker parses the `.docx` / `.xlsx` / `.pptx` archive via WASM and posts a JSON model back to the main thread, where the renderer draws to the canvas. Rendering stays on the main thread so the canvas shares the document's `FontFaceSet` — an `OffscreenCanvas` in a worker has its own font registry and would silently fall back to a system font, producing subtly different text measurements (and wrap positions) from the installed theme webfonts. `@silurus/ooxml-core` holds the cross-format primitives that the three renderers all depend on: a unified chart renderer (bar / line / area / radar / waterfall), shape helpers (`resolveFill`, `applyStroke`, `buildCustomPath`, `hexToRgba`), the `autoResize` viewer utility, and the shared type definitions.
 
 ### Key files
 
@@ -107,11 +116,12 @@ The pptx worker parses the `.pptx` archive via WASM and returns a JSON model to 
 | `packages/docx/parser/src/lib.rs` | Rust WASM parser — DOCX ZIP → `Document` JSON |
 | `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
 | `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
-| `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout |
-| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll |
-| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (runs on main thread) |
-| `packages/pptx/src/worker.ts` | Web Worker: WASM init and parsing only |
+| `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout (main thread) |
+| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll (main thread) |
+| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (main thread) |
+| `packages/*/src/worker.ts` | Web Worker: WASM init and parsing only (one per format) |
 | `packages/*/src/viewer.ts` | Public Viewer API — canvas lifecycle, navigation |
+| `packages/core/src/index.ts` | Cross-format primitives — chart renderer, shape helpers, `autoResize`, shared types |
 
 </details>
 
