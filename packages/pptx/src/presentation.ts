@@ -298,7 +298,12 @@ export class PptxPresentation {
       dpr,
       slideWidthEmu: this._presentation.slideWidth,
       fetchMedia: (path) => this.getMedia(path),
-      drawBase: () => this.renderSlide(canvas, slideIndex, { width, dpr, skipMediaControls: true }),
+      drawBase: () => this.renderSlide(canvas, slideIndex, {
+        width,
+        dpr,
+        skipMediaControls: true,
+        onTextRun: opts.onTextRun,
+      }),
     });
   }
 

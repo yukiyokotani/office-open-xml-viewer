@@ -43,7 +43,15 @@ window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
   if (msg.type !== 'ooxml-init') return;
 
-  const buffer = new Uint8Array(msg.data as number[]).buffer;
+  let buffer: ArrayBuffer;
+  try {
+    const res = await fetch(msg.url);
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+    buffer = await res.arrayBuffer();
+  } catch (err) {
+    showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
 
   try {
     if (fileType === 'docx') {
@@ -204,7 +212,7 @@ async function initPptx(buffer: ArrayBuffer): Promise<void> {
     stack.appendChild(wrapper);
 
     const runs: TextRunInfo[] = [];
-    await pres.renderSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
+    await pres.presentSlide(canvas, i, { width: widthPx, onTextRun: (r) => runs.push(r) });
     buildPptxTextLayer(textLayer, runs, widthPx, cssHeight);
   }
 
