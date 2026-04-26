@@ -4,6 +4,14 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.16.1 — 2026-04-26
+
+Patch release. Project icon refresh.
+
+- **Project icon**: replace `docs/images/icon.png` with a refreshed master
+  and resync `packages/vscode-extension/icon.png` from it. README and the
+  VS Code Marketplace listing now show the updated artwork.
+
 ## 0.16.0 — 2026-04-26
 
 Minor release. Audio / video–embedded files now open in the VS Code
