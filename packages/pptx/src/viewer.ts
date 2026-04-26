@@ -48,7 +48,10 @@ export class PptxViewer {
     this.opts = opts;
 
     this.wrapper = document.createElement('div');
-    this.wrapper.style.cssText = 'position:relative;display:inline-block;';
+    // vertical-align:top removes the inline-block baseline descender gap that
+    // otherwise lets the host container's background show through below the
+    // canvas (~6 px on default font metrics).
+    this.wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
 
     this.canvas = document.createElement('canvas');
     this.canvas.style.display = 'block';

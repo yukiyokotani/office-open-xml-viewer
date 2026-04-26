@@ -2957,6 +2957,23 @@ fn parse_picture(
     })
 }
 
+/// Decode (width, height) from a base64-encoded PNG data URL by reading the
+/// IHDR chunk. Returns None for non-PNG payloads or malformed data.
+fn png_size_from_data_url(data_url: &str) -> Option<(u32, u32)> {
+    let prefix = "data:image/png;base64,";
+    let b64 = data_url.strip_prefix(prefix)?;
+    let bytes = B64.decode(b64).ok()?;
+    if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    Some((w, h))
+}
+
+/// EMU per CSS pixel at PowerPoint's default 96 DPI (914400 EMU/inch ÷ 96).
+const EMU_PER_PX_96DPI: i64 = 9525;
+
 fn mime_from_ext(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
         "png"  => "image/png",
@@ -3605,14 +3622,53 @@ fn parse_sp_tree_node(
             }
         }
         "AlternateContent" => {
-            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp).
-            // Process mc:Choice first; mc:Fallback is a lower-fidelity version we skip.
-            let choice = node.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
-                .or_else(|| node.children().find(|n| n.is_element() && n.tag_name().name() == "Fallback"));
-            if let Some(choice_node) = choice {
+            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp,
+            // or p:contentPart for ink/handwriting). Try Choice first; if it produces
+            // nothing (Choice contains an element we don't render, like contentPart),
+            // fall back to Fallback which usually carries a rasterized p:pic alternative.
+            let before = out.len();
+            let choice_node = node.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "Choice");
+            // Choice contains p:contentPart → ink/handwriting. PowerPoint renders the
+            // InkML directly; the Fallback PNG is a low-resolution rasterization at
+            // the stroke's actual pixel extent. For empty/single-tap strokes the PNG
+            // is only a few pixels and should not be stretched to the bounding box.
+            let is_ink_fallback = choice_node.is_some_and(|c| {
+                c.descendants().any(|n| n.is_element() && n.tag_name().name() == "contentPart")
+            });
+            if let Some(choice_node) = choice_node {
                 for child_node in choice_node.children().filter(|n| n.is_element()) {
                     parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                }
+            }
+            if out.len() == before {
+                if let Some(fallback_node) = node.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
+                {
+                    for child_node in fallback_node.children().filter(|n| n.is_element()) {
+                        parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                    }
+                }
+                if is_ink_fallback {
+                    // Render the fallback PNG at its natural pixel size centered
+                    // inside the original bounding box, so a 6×6 px empty-stroke
+                    // PNG is drawn as a 6×6 px dot rather than stretched into a
+                    // blocky cross. Visible strokes whose PNG natural size already
+                    // matches the box keep their existing extent.
+                    for el in &mut out[before..] {
+                        if let SlideElement::Picture(p) = el {
+                            if let Some((nat_w_px, nat_h_px)) = png_size_from_data_url(&p.data_url) {
+                                let nat_w = (nat_w_px as i64) * EMU_PER_PX_96DPI;
+                                let nat_h = (nat_h_px as i64) * EMU_PER_PX_96DPI;
+                                if nat_w < p.width && nat_h < p.height {
+                                    p.x += (p.width - nat_w) / 2;
+                                    p.y += (p.height - nat_h) / 2;
+                                    p.width = nat_w;
+                                    p.height = nat_h;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
