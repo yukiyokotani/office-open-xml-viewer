@@ -68,7 +68,7 @@
   "scripts": {
     "compile": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
-    "vscode:prepublish": "node esbuild.config.mjs --production",
+    "vscode:prepublish": "cp ../../docs/images/icon.png ./icon.png && node esbuild.config.mjs --production",
     "package": "vsce package"
   },
   "devDependencies": {

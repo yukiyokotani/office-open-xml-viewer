@@ -1,5 +1,9 @@
 > **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — was implemented by [Claude](https://claude.ai)** (Anthropic's AI assistant) through iterative prompting. No human-written application code exists in this repository.
 
+<p align="center">
+  <img src="docs/images/icon.png" alt="office-open-xml-viewer" width="160" height="160">
+</p>
+
 # office-open-xml-viewer
 
 [![npm version](https://img.shields.io/npm/v/@silurus/ooxml.svg)](https://www.npmjs.com/package/@silurus/ooxml)

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/yukiyokotani/office-open-xml-viewer/main/docs/images/icon.png" alt="OOXML Viewer" width="160" height="160">
+</p>
+
 # OOXML Viewer for VS Code
 
 A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
