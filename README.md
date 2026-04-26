@@ -457,6 +457,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | SmartArt | ❌ |
 | | OLE objects | ❌ |
 | | Video / audio (poster + interactive playback) | ✅ |
+| | Ink / handwriting (`p:contentPart`, raster fallback) | ✅ |
 | **Shape geometry** | 130+ preset shapes (`prstGeom`) | ✅ |
 | | Custom geometry (`custGeom`) | ✅ |
 | | Rotation and flip (flipH / flipV) | ✅ |
