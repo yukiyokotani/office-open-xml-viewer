@@ -3605,14 +3605,25 @@ fn parse_sp_tree_node(
             }
         }
         "AlternateContent" => {
-            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp).
-            // Process mc:Choice first; mc:Fallback is a lower-fidelity version we skip.
-            let choice = node.children()
+            // mc:AlternateContent wraps modern elements (e.g. chartEx inside grpSp,
+            // or p:contentPart for ink/handwriting). Try Choice first; if it produces
+            // nothing (Choice contains an element we don't render, like contentPart),
+            // fall back to Fallback which usually carries a rasterized p:pic alternative.
+            let before = out.len();
+            if let Some(choice_node) = node.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "Choice")
-                .or_else(|| node.children().find(|n| n.is_element() && n.tag_name().name() == "Fallback"));
-            if let Some(choice_node) = choice {
+            {
                 for child_node in choice_node.children().filter(|n| n.is_element()) {
                     parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                }
+            }
+            if out.len() == before {
+                if let Some(fallback_node) = node.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "Fallback")
+                {
+                    for child_node in fallback_node.children().filter(|n| n.is_element()) {
+                        parse_sp_tree_node(child_node, lph, slide_dir, rels, smartart_drawings, zip, theme, out, skip_placeholders, group_fill);
+                    }
                 }
             }
         }
