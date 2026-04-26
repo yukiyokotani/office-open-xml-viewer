@@ -4,6 +4,35 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.16.0 — 2026-04-26
+
+Minor release. Audio / video–embedded files now open in the VS Code
+extension and play back interactively.
+
+- **VS Code extension** (`packages/vscode-extension`):
+  - Replace the `Array.from(bytes)` + `webview.postMessage` data path with
+    `webview.asWebviewUri()` + `fetch().arrayBuffer()` in the webview. The
+    previous IPC route serialized file bytes as a JSON number array, which
+    hung the spinner indefinitely on media-embedded pptx (50–200 MB) and,
+    after a stop-gap that sent `Uint8Array` directly, returned zero-byte
+    buffers (`Could not find EOCD` for every file) because VS Code's
+    webview `postMessage` does not reliably structured-clone typed arrays.
+    Same approach the bundled PDF viewer uses; native binary path, no IPC
+    size or type cliff.
+  - Switch the scroll-stack pptx renderer from `PptxPresentation.renderSlide`
+    to `presentSlide` so embedded audio / video become clickable with a
+    canvas-native play / pause / progress bar.
+- **PPTX engine** (`packages/pptx`):
+  - `presentSlide` now forwards `opts.onTextRun` to its inner `renderSlide`
+    call so the transparent text-selection layer keeps working when
+    interactive playback is enabled. The same bug existed when calling
+    `PptxViewer` with both `enableMediaPlayback: true` and
+    `enableTextSelection: true`; fixed at the engine level so both paths
+    benefit.
+  - `createPresentationHandle` now skips its `requestAnimationFrame` loop
+    and pointer wiring for slides without media, so a 50-slide deck no
+    longer spawns 50 idle animation loops.
+
 ## 0.15.2 — 2026-04-26
 
 Patch release. Project icon refresh.

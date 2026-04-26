@@ -446,7 +446,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Charts (pie, scatter, bubble) | ❌ |
 | | SmartArt | ❌ |
 | | OLE objects | ❌ |
-| | Video / audio | ❌ |
+| | Video / audio (poster + interactive playback) | ✅ |
 | **Shape geometry** | 130+ preset shapes (`prstGeom`) | ✅ |
 | | Custom geometry (`custGeom`) | ✅ |
 | | Rotation and flip (flipH / flipV) | ✅ |
