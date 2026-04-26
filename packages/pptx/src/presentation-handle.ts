@@ -228,13 +228,17 @@ export async function createPresentationHandle(
     if (wasPlaying) void state.media.play().catch(() => undefined);
   };
 
-  canvas.addEventListener('pointerdown', onPointerDown);
-  canvas.addEventListener('pointermove', onPointerMove);
-  canvas.addEventListener('pointerleave', onPointerLeave);
-  canvas.addEventListener('pointerup', onPointerUp);
-  canvas.addEventListener('pointercancel', onPointerUp);
-  canvas.style.cursor = 'pointer';
-  tick();
+  // Slides without media: no playback overlay, so skip the RAF loop and
+  // pointer wiring. drawBase has already painted the canvas; nothing more to do.
+  if (states.length > 0) {
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerleave', onPointerLeave);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
+    canvas.style.cursor = 'pointer';
+    tick();
+  }
 
   return {
     play(mediaPath) {

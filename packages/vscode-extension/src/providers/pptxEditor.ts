@@ -27,6 +27,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider {
       enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
+        vscode.Uri.joinPath(document.uri, '..'),
       ],
     };
 
@@ -36,14 +37,14 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider {
       'pptx',
     );
 
-    const bytes = await vscode.workspace.fs.readFile(document.uri);
+    const docUrl = webviewPanel.webview.asWebviewUri(document.uri).toString();
 
     webviewPanel.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === 'webview-ready') {
         await webviewPanel.webview.postMessage({
           type: 'ooxml-init',
           fileType: 'pptx',
-          data: Array.from(bytes),
+          url: docUrl,
         });
       } else if (msg.type === 'copy') {
         vscode.env.clipboard.writeText(msg.text);
