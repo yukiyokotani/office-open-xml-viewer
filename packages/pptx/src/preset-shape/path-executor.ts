@@ -83,8 +83,15 @@ export function applyPresetPath(
         break;
       }
       case 'a': {
-        const wR = evaluator.resolve(cmd[1]) * sx;
-        const hR = evaluator.resolve(cmd[2]) * sy;
+        // Path-local radii: visual-to-parametric conversion is computed in
+        // path-local space (where the OOXML visual angle is defined). The
+        // canvas-scaled radii are used only for the actual pixel placement.
+        // When sx ≠ sy (e.g. cloudCallout in a non-square box) using the
+        // scaled ratio here would skew the start/sweep angles.
+        const wR_local = evaluator.resolve(cmd[1]);
+        const hR_local = evaluator.resolve(cmd[2]);
+        const wR = wR_local * sx;
+        const hR = hR_local * sy;
         const stDeg = evaluator.resolve(cmd[3]) * DEG60K_TO_RAD;
         const swDeg = evaluator.resolve(cmd[4]) * DEG60K_TO_RAD;
         // OOXML arc uses visual angles; Canvas's ellipse() takes parametric.
@@ -94,7 +101,7 @@ export function applyPresetPath(
         // produce start==end and nothing is drawn.
         const TWO_PI = Math.PI * 2;
         const visualToParam = (v: number) =>
-          Math.atan2(wR * Math.sin(v), hR * Math.cos(v));
+          Math.atan2(wR_local * Math.sin(v), hR_local * Math.cos(v));
         const stP = visualToParam(stDeg);
         const fullRevs = Math.trunc(swDeg / TWO_PI);
         const remainder = swDeg - fullRevs * TWO_PI;
@@ -102,7 +109,7 @@ export function applyPresetPath(
         if (remainder > 0 && delta < 0) delta += TWO_PI;
         else if (remainder < 0 && delta > 0) delta -= TWO_PI;
         const endP = stP + delta + fullRevs * TWO_PI;
-        // Back-solve center from pen & start angle.
+        // Back-solve center from pen & start angle (canvas-scaled radii).
         const cx = penX - wR * Math.cos(stP);
         const cy = penY - hR * Math.sin(stP);
         if (Math.abs(wR) > 1e-6 && Math.abs(hR) > 1e-6) {
