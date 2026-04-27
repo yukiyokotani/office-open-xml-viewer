@@ -424,7 +424,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hidden rows / columns | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
 | | Charts (bar, line, area, radar) | ✅ |
-| | Sparklines | ❌ Not planned |
+| | Sparklines (`x14:sparklineGroup` — line / column / win-loss, with markers and high/low/first/last/negative highlights) | ✅ |
 | **Advanced** | Conditional formatting (`cellIs`, `colorScale`, `dataBar`, `iconSet`, `top10`, `aboveAverage`) | ✅ |
 | | Slicers (static, Office 2010 extension) | ✅ |
 | | Pivot tables | ❌ Not planned |

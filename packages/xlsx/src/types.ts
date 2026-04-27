@@ -58,6 +58,52 @@ export interface Worksheet {
    *  caption and the saved item list (with selection flags) so the renderer
    *  can draw a static button bank without the live pivot engine. */
   slicers?: SlicerAnchor[];
+  /** Sparkline groups (Office 2010+ extension `x14:sparklineGroup`).
+   *  Cross-sheet `<xm:f>` data references are resolved to numeric values at
+   *  parse time, and theme + tint colors are flattened to `#RRGGBB`. */
+  sparklineGroups?: SparklineGroup[];
+}
+
+export interface SparklineGroup {
+  /** `line` (default) | `column` | `stem` (win-loss). */
+  kind: 'line' | 'column' | 'stem';
+  markers: boolean;
+  high: boolean;
+  low: boolean;
+  first: boolean;
+  last: boolean;
+  negative: boolean;
+  /** Show the horizontal axis line through 0 when data crosses it. */
+  displayXAxis: boolean;
+  /** `gap` (default) | `zero` | `span`. */
+  displayEmptyCellsAs: string;
+  /** `individual` (default) | `group` | `custom`. */
+  minAxisType: string;
+  maxAxisType: string;
+  manualMin?: number;
+  manualMax?: number;
+  /** Stroke weight in pt for `line`. ECMA-376 default 0.75. */
+  lineWeight: number;
+  /** Resolved RGB hex strings (theme/tint already flattened by the parser). */
+  colorSeries?: string;
+  colorNegative?: string;
+  colorAxis?: string;
+  colorMarkers?: string;
+  colorFirst?: string;
+  colorLast?: string;
+  colorHigh?: string;
+  colorLow?: string;
+  sparklines: Sparkline[];
+}
+
+export interface Sparkline {
+  /** 1-based row of the destination cell (`<xm:sqref>`). */
+  row: number;
+  /** 1-based column of the destination cell. */
+  col: number;
+  /** Numeric values resolved from the `<xm:f>` range. `null` for empty
+   *  / non-numeric cells; honored as gaps at render time. */
+  values: (number | null)[];
 }
 
 export interface SlicerAnchor {

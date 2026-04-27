@@ -78,6 +78,83 @@ pub struct Worksheet {
     /// and referenced pivotCacheDefinition so the renderer can draw a static
     /// button list with the saved selection state.
     pub slicers: Vec<SlicerAnchor>,
+    /// Sparkline groups defined in the worksheet's `<extLst>` (Office 2010
+    /// extension `http://schemas.microsoft.com/office/spreadsheetml/2009/9/main`,
+    /// element `<x14:sparklineGroup>`, ECMA-376 §18.2 / Part 4).
+    pub sparkline_groups: Vec<SparklineGroup>,
+}
+
+/// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting
+/// for every individual sparkline cell that belongs to the group.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparklineGroup {
+    /// `line` (default) | `column` | `stem` (win/loss).
+    pub kind: SparklineType,
+    /// Show a marker dot at every data point (line type only).
+    pub markers: bool,
+    /// Highlight high / low / first / last / negative points.
+    pub high: bool,
+    pub low: bool,
+    pub first: bool,
+    pub last: bool,
+    pub negative: bool,
+    /// Show the horizontal axis line when data crosses zero.
+    pub display_x_axis: bool,
+    /// `gap` (default) | `zero` | `span` — how empty cells in the source
+    /// range are treated. We only honor `gap` (default) at render time.
+    pub display_empty_cells_as: String,
+    /// Per-axis-bound type: `individual` (default) / `group` / `custom`.
+    pub min_axis_type: String,
+    pub max_axis_type: String,
+    /// Used when *AxisType=`custom`. f64::NAN otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_max: Option<f64>,
+    /// Stroke weight in pt (line type). ECMA-376 default 0.75.
+    pub line_weight: f64,
+    /// Resolved RGB hex strings (e.g. `#4472C4`) — theme + tint flattened
+    /// at parse time so the renderer never sees a theme index. `None` means
+    /// the property was not specified and the renderer should fall back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_series: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_negative: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_axis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_markers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_first: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_last: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_high: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_low: Option<String>,
+    /// Individual sparklines (one per destination cell).
+    pub sparklines: Vec<Sparkline>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum SparklineType {
+    Line,
+    Column,
+    Stem,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sparkline {
+    /// 1-based row of the cell that displays this sparkline (`<xm:sqref>`).
+    pub row: u32,
+    /// 1-based column of the cell.
+    pub col: u32,
+    /// Numeric values resolved from the `<xm:f>` data range. `None` for
+    /// empty / non-numeric / out-of-bounds cells.
+    pub values: Vec<Option<f64>>,
 }
 
 /// Excel Table metadata (ECMA-376 §18.5 `<table>`). The renderer overlays a
@@ -774,6 +851,7 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
+    ws.sparkline_groups = load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1777,6 +1855,7 @@ fn parse_worksheet(
         defined_names: Vec::new(),
         tables: Vec::new(),
         slicers: Vec::new(),
+        sparkline_groups: Vec::new(),
     }, hyperlink_rids))
 }
 
@@ -3749,6 +3828,176 @@ fn parse_sqref(s: &str) -> Vec<CellRange> {
     }).collect()
 }
 
+/// Split an `<xm:f>` reference like `Sheet1!A1:A10` or `'My Sheet'!$B$3:$B$8`
+/// into `(sheet_name, range)`. Returns `None` if the reference has no sheet
+/// qualifier — sparkline data refs always do, so unqualified is treated as
+/// "same sheet" by callers.
+fn split_sheet_ref(s: &str) -> (Option<String>, String) {
+    let s = s.trim();
+    let Some(bang) = s.rfind('!') else { return (None, s.to_string()); };
+    let mut sheet = s[..bang].to_string();
+    // Strip absolute-ref dollars from the range part.
+    let range = s[bang + 1..].replace('$', "");
+    // Quoted sheet names ('foo''s sheet' uses doubled quotes for inner ').
+    if sheet.starts_with('\'') && sheet.ends_with('\'') {
+        sheet = sheet[1..sheet.len() - 1].replace("''", "'");
+    }
+    (Some(sheet), range)
+}
+
+/// Read a worksheet XML and extract numeric `<v>` values for the cells in
+/// `range`. Returns one value per cell in row-major order across the range.
+/// Empty cells, non-numeric values, and cells outside the range yield `None`.
+///
+/// This is intentionally lighter than `parse_row_cells`: sparklines only need
+/// raw numbers, no styles, formulas, or shared strings.
+fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> {
+    let total = ((range.bottom - range.top + 1) as usize)
+        .saturating_mul((range.right - range.left + 1) as usize);
+    let mut values: Vec<Option<f64>> = vec![None; total];
+    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else { return values; };
+    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let row_span = (range.right - range.left + 1) as usize;
+    for c in doc.descendants().filter(|n| n.tag_name().name() == "c" && n.tag_name().namespace() == Some(ns)) {
+        let Some(r_attr) = c.attribute("r") else { continue };
+        let (col, row) = parse_cell_ref(r_attr);
+        if row < range.top || row > range.bottom || col < range.left || col > range.right {
+            continue;
+        }
+        // Only honor numeric / formula-numeric cells. `t` of "s" / "str" /
+        // "inlineStr" / "b" / "e" all map to None for sparkline values.
+        let t = c.attribute("t").unwrap_or("");
+        if matches!(t, "s" | "str" | "inlineStr" | "b" | "e") { continue; }
+        let v = c.children()
+            .find(|n| n.tag_name().name() == "v" && n.tag_name().namespace() == Some(ns))
+            .and_then(|n| n.text())
+            .and_then(|s| s.trim().parse::<f64>().ok());
+        if let Some(num) = v {
+            let idx = (row - range.top) as usize * row_span + (col - range.left) as usize;
+            if idx < values.len() {
+                values[idx] = Some(num);
+            }
+        }
+    }
+    values
+}
+
+/// Walk the worksheet XML's `<extLst>` and produce one `SparklineGroup` per
+/// `<x14:sparklineGroup>`. Resolves cross-sheet `<xm:f>` data references by
+/// reading the referenced sheet from the archive (cached per call to avoid
+/// re-reads). Theme colors are flattened to `#RRGGBB` via `parse_color`.
+fn load_sheet_sparklines(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    sheet_xml: &str,
+    sheets: &[SheetMeta],
+    rels_doc: &roxmltree::Document,
+    theme_colors: &[String],
+) -> Vec<SparklineGroup> {
+    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else { return Vec::new(); };
+    let mut groups: Vec<SparklineGroup> = Vec::new();
+    // Cache: sheet name → loaded XML. Saves re-reading when many sparklines
+    // reference the same source sheet (typical: one "data" sheet feeds many
+    // dashboard sparklines).
+    let mut xml_cache: HashMap<String, Option<String>> = HashMap::new();
+
+    let parse_bool_attr = |n: &roxmltree::Node, key: &str, default: bool| -> bool {
+        match n.attribute(key) {
+            Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+            None => default,
+        }
+    };
+    let parse_f64_attr = |n: &roxmltree::Node, key: &str| -> Option<f64> {
+        n.attribute(key).and_then(|v| v.parse::<f64>().ok())
+    };
+
+    for group_node in doc.descendants().filter(|n| n.tag_name().name() == "sparklineGroup") {
+        let kind = match group_node.attribute("type").unwrap_or("line") {
+            "column" => SparklineType::Column,
+            "stacked" => SparklineType::Stem,  // historical alias
+            "stem" => SparklineType::Stem,
+            // ECMA-376 lists `line` and a planned `stairStep`; treat unknown
+            // types as line (closest visual fallback).
+            _ => SparklineType::Line,
+        };
+
+        let resolve_color = |child_name: &str| -> Option<String> {
+            group_node.children()
+                .find(|n| n.is_element() && n.tag_name().name() == child_name)
+                .and_then(|n| parse_color(&n, theme_colors))
+        };
+
+        let mut sparklines: Vec<Sparkline> = Vec::new();
+        // <x14:sparklines> is the wrapper; <x14:sparkline> are the children.
+        for sparklines_node in group_node.children().filter(|n| n.is_element() && n.tag_name().name() == "sparklines") {
+            for sl in sparklines_node.children().filter(|n| n.is_element() && n.tag_name().name() == "sparkline") {
+                let f_text = sl.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "f")
+                    .and_then(|n| n.text())
+                    .unwrap_or("");
+                let sqref_text = sl.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "sqref")
+                    .and_then(|n| n.text())
+                    .unwrap_or("");
+                if f_text.is_empty() || sqref_text.is_empty() { continue; }
+                let (col, row) = parse_cell_ref(sqref_text.trim());
+                let (source_sheet, range_str) = split_sheet_ref(f_text);
+                let ranges = parse_sqref(&range_str);
+                let Some(range) = ranges.into_iter().next() else { continue };
+
+                // Look up source sheet XML (cross-sheet ref). When the ref
+                // has no sheet qualifier, fall back to the *current* sheet
+                // XML.
+                let source_xml: Option<&str> = match source_sheet {
+                    Some(name) => {
+                        if !xml_cache.contains_key(&name) {
+                            let path = sheets.iter()
+                                .find(|s| s.name == name)
+                                .and_then(|s| resolve_sheet_path(rels_doc, &s.r_id))
+                                .map(|p| format!("xl/{}", p));
+                            let xml = path.and_then(|p| read_zip_entry(archive, &p).ok());
+                            xml_cache.insert(name.clone(), xml);
+                        }
+                        xml_cache.get(&name).and_then(|o| o.as_deref())
+                    }
+                    None => Some(sheet_xml),
+                };
+                let values = source_xml
+                    .map(|xml| extract_range_values(xml, &range))
+                    .unwrap_or_default();
+
+                sparklines.push(Sparkline { row, col, values });
+            }
+        }
+
+        groups.push(SparklineGroup {
+            kind,
+            markers: parse_bool_attr(&group_node, "markers", false),
+            high: parse_bool_attr(&group_node, "high", false),
+            low: parse_bool_attr(&group_node, "low", false),
+            first: parse_bool_attr(&group_node, "first", false),
+            last: parse_bool_attr(&group_node, "last", false),
+            negative: parse_bool_attr(&group_node, "negative", false),
+            display_x_axis: parse_bool_attr(&group_node, "displayXAxis", false),
+            display_empty_cells_as: group_node.attribute("displayEmptyCellsAs").unwrap_or("gap").to_string(),
+            min_axis_type: group_node.attribute("minAxisType").unwrap_or("individual").to_string(),
+            max_axis_type: group_node.attribute("maxAxisType").unwrap_or("individual").to_string(),
+            manual_min: parse_f64_attr(&group_node, "manualMin"),
+            manual_max: parse_f64_attr(&group_node, "manualMax"),
+            line_weight: parse_f64_attr(&group_node, "lineWeight").unwrap_or(0.75),
+            color_series: resolve_color("colorSeries"),
+            color_negative: resolve_color("colorNegative"),
+            color_axis: resolve_color("colorAxis"),
+            color_markers: resolve_color("colorMarkers"),
+            color_first: resolve_color("colorFirst"),
+            color_last: resolve_color("colorLast"),
+            color_high: resolve_color("colorHigh"),
+            color_low: resolve_color("colorLow"),
+            sparklines,
+        });
+    }
+    groups
+}
+
 fn parse_row_cells(
     row_node: &roxmltree::Node,
     shared_strings: &[SharedString],
@@ -3877,6 +4126,7 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
     ws.defined_names = parse_defined_names_for_sheet(&wb_doc, sheet_index);
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
+    ws.sparkline_groups = load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
 
     serde_json::to_string(&ws).map_err(|e| e.to_string())
 }
