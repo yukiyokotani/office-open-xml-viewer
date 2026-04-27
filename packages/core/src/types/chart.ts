@@ -101,6 +101,8 @@ export interface ChartDataLabelOverride {
   position?: string;
   fontColor?: string;
   fontSizeHpt?: number;
+  /** `<a:defRPr b="1">` inside the per-idx rich text. */
+  fontBold?: boolean;
 }
 
 export interface ChartSeriesDataLabels {
@@ -111,6 +113,10 @@ export interface ChartSeriesDataLabels {
   position?: string;
   fontColor?: string;
   formatCode?: string;
+  /** Series-level bold default for data labels. */
+  fontBold?: boolean;
+  /** Series-level font size for data labels (OOXML hundredths of a point). */
+  fontSizeHpt?: number;
 }
 
 export interface ChartErrBars {
@@ -224,6 +230,24 @@ export interface ChartModel {
    * series is used.
    */
   dataLabelFormatCode?: string | null;
+  /** `<c:title>...defRPr@b>` chart title bold flag. */
+  titleFontBold?: boolean | null;
+  /** `<c:catAx><c:txPr>...defRPr@b>` X-axis tick label bold flag. */
+  catAxisFontBold?: boolean | null;
+  /** `<c:valAx><c:txPr>...defRPr@b>` Y-axis tick label bold flag. */
+  valAxisFontBold?: boolean | null;
+  /**
+   * `<c:catAx><c:crosses val>` (`autoZero` | `min` | `max`). Drives the Y
+   * coordinate where the X axis is drawn. Default `autoZero` puts the X
+   * axis at y=0 — that's how Excel "Project Timeline" templates split
+   * milestones (positive Y) above and tasks (negative Y) below the axis.
+   */
+  catAxisCrosses?: string | null;
+  /** `<c:catAx><c:crossesAt val>` — explicit numeric override for the
+   *  crossing point. Takes precedence over `catAxisCrosses`. */
+  catAxisCrossesAt?: number | null;
+  valAxisCrosses?: string | null;
+  valAxisCrossesAt?: number | null;
   /**
    * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
    * the renderer formats X-axis tick labels with this code (e.g. dates).

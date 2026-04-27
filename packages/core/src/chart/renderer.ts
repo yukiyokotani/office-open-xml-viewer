@@ -1405,7 +1405,8 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   // Y-axis gridlines + labels.
   if (!chart.valAxisHidden) {
-    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
+    ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px sans-serif`;
     const yStep = niceStep(yMax - yMin);
     const ySteps = Math.round((yMax - yMin) / yStep) + 1;
     for (let si = 0; si < ySteps; si++) {
@@ -1418,26 +1419,50 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     }
   }
 
+  // X-axis Y position. `<c:catAx><c:crossesAt>` wins; otherwise honor
+  // `<c:catAx><c:crosses>` (`autoZero` / `min` / `max`). The `autoZero`
+  // default puts the axis at y=0 if the data range crosses zero —
+  // that's what makes Excel "Project Timeline" templates split
+  // milestones (positive Y) above the timeline ruler and tasks
+  // (negative Y) below. Clamped to the plot rect so the axis line
+  // stays visible when the data doesn't actually cross.
+  let xAxisY = py0 + ph;
+  if (chart.catAxisCrossesAt != null) {
+    xAxisY = clamp(toY(chart.catAxisCrossesAt), py0, py0 + ph);
+  } else {
+    const c = chart.catAxisCrosses ?? 'autoZero';
+    if (c === 'autoZero' && yMin < 0 && yMax > 0) {
+      xAxisY = clamp(toY(0), py0, py0 + ph);
+    } else if (c === 'min') {
+      xAxisY = py0 + ph;
+    } else if (c === 'max') {
+      xAxisY = py0;
+    }
+  }
+
   // X-axis line (always drawn — the timeline ruler in Gantt-style scatter
   // charts depends on this line's stroke). Tick labels are skipped when the
   // category axis is hidden via `<c:delete val="1"/>`.
   ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
   if (!chart.valAxisHidden) {
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
   }
 
   // X-axis tick labels (catAxis), formatted via catAxisFormatCode (typically
-  // a date code like "m/d/yyyy"). Skipped when catAxisHidden.
+  // a date code like "m/d/yyyy"). Skipped when catAxisHidden. Drawn just
+  // below the axis line wherever it sits (axis crossing in the middle of
+  // the plot still anchors the labels to the line itself).
   if (!chart.catAxisHidden) {
-    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    const tickFontPx = Math.max(8, Math.min(11, ph / 20));
+    ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px sans-serif`;
     const xStep = niceStep(xMax - xMin);
     const xSteps = Math.round((xMax - xMin) / xStep) + 1;
     ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (let si = 0; si < xSteps; si++) {
       const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
-      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, py0 + ph + 4);
+      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, xAxisY + 4);
     }
   }
 
@@ -1691,10 +1716,13 @@ function drawSeriesDataLabels(
       continue;
     }
     const pos = ovr?.position ?? seriesDef?.position ?? 'r';
-    const fontSizePx = ovr?.fontSizeHpt ? (ovr.fontSizeHpt / 100) * ptToPx
+    const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
+    const fontSizePx = sizeHpt
+      ? (sizeHpt / 100) * ptToPx
       : Math.max(9, Math.min(11, ph / 25));
     const color = ovr?.fontColor ?? seriesDef?.fontColor;
-    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color);
+    const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
+    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color, bold);
   }
 }
 
@@ -1705,9 +1733,10 @@ function drawDataLabelText(
   position: string,
   fontSizePx: number,
   color: string | undefined,
+  bold: boolean,
 ): void {
   ctx.save();
-  ctx.font = `${fontSizePx}px sans-serif`;
+  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px sans-serif`;
   ctx.fillStyle = color ? `#${color}` : '#333';
   const offset = fontSizePx * 0.6;
   let tx = cx, ty = cy;
@@ -1743,6 +1772,10 @@ function drawDataLabelText(
     lineY += lineH;
   }
   ctx.restore();
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 function dashPatternForPreset(preset: string | undefined): number[] {
