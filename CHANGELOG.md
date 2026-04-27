@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.20.0 — 2026-04-28
+
+Minor release. Built-in PowerPoint table styles and additional XLSX cell alignments.
+
+- **PPTX engine** (`packages/pptx`):
+  - **74 built-in table style presets**: all PowerPoint ribbon table styles
+    (Themed 1/2, Light 1/2/3, Medium 1/2/3/4, Dark 1/2 × accent variants)
+    are now resolved from a hard-coded GUID catalog when no
+    `ppt/tableStyles.xml` definition is present. Fills and borders are
+    computed directly from the presentation theme (PR #146,
+    ECMA-376 §19.3.1.39; GUID catalog from LibreOffice MPL 2.0 source).
+- **XLSX engine** (`packages/xlsx`):
+  - **Cell alignment — `centerContinuous`, `fill`, `distributed`,
+    `justify`, `readingOrder`**: five additional `<xf alignment>` modes
+    are now parsed and applied during cell rendering (PR #145).
+
 ## 0.19.0 — 2026-04-27
 
 Minor release. Spec-faithful improvements to scatter chart rendering
