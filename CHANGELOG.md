@@ -4,6 +4,17 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.18.2 — 2026-04-27
+
+Patch release. Sparkline visual polish.
+
+- **Core sparkline** (`packages/core/src/sparkline/renderer.ts`):
+  - Vertical padding inside the cell switched from a 2 px cap to a
+    proportional 20 % of the cell height (with a 2 px floor). The peak
+    / trough of the line and high / low marker dots no longer overlap
+    the row separators, and the breathing room stays consistent across
+    zoom levels.
+
 ## 0.18.1 — 2026-04-27
 
 Patch release. One sparkline correctness fix.
