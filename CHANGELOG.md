@@ -4,6 +4,44 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.18.0 — 2026-04-27
+
+Minor release. Excel scatter / bubble charts gain a spec-faithful set of
+features so Gantt-style "Project Timeline" templates render against the
+reference. Sparkline release reused — no docx/pptx behavioral changes.
+
+- **PPTX engine** (`packages/xlsx`, `packages/core`):
+  - Per-point `<c:dPt>` overrides (color, marker shape / size / fill /
+    line) — ECMA-376 §21.2.2.39.
+  - `<c:marker>` symbol / size resolution with all 10 ECMA shapes
+    (circle / square / diamond / triangle / x / plus / star / dot /
+    dash / picture). `picture` falls back to circle pending image-marker
+    resolution.
+  - `<c:dLbl>` per-point custom data labels (§21.2.2.45) with rich-text
+    flattening and `<a:fld type="CELLRANGE">` substitution from the
+    series' `<c15:datalabelsRange>` cache. Position (`l`/`r`/`t`/`b`/
+    `ctr`/`outEnd`) is honored.
+  - `<c:errBars>` (§21.2.2.20) X / Y direction with all five
+    `errValType` modes — `cust` (cell-range), `fixedVal`, `stdErr`,
+    `stdDev`, `percentage`. Cust values can be signed (Vertex42 Gantt
+    uses negative minus values to flip stems toward the X-axis).
+    Dashed strokes and end caps via `<a:prstDash>` / `<c:noEndCap>`.
+  - `<c:title><c:layout>` and `<c:plotArea><c:layout>` manual layout
+    (§21.2.2.27) — when present, used directly for absolute placement.
+  - Scatter's dual `<c:valAx>` blocks are now disambiguated by
+    `<c:axPos>` so X-axis (`b`/`t`) and Y-axis (`l`/`r`) settings end
+    up in their respective slots. `<c:scaling><c:min/max>` and
+    `<c:numFmt>` are picked up per axis. `<c:delete val="1"/>` on
+    either axis hides it correctly.
+  - `formatChartValWithCode` recognises date format codes (m/d/y/h/s
+    outside quotes) and routes through a new `formatExcelDate` so
+    scatter X-axis tick labels for date series come out as
+    `2018/4/12` instead of raw serial numbers.
+
+The unified `ChartModel` / `ChartSeries` gained the corresponding
+optional fields. PPTX charts continue rendering unchanged — the PPTX
+parser hasn't been updated to populate them yet (follow-up).
+
 ## 0.17.0 — 2026-04-27
 
 Minor release. Handwritten ink strokes now render via PowerPoint's
