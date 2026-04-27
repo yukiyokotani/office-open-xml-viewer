@@ -320,6 +320,9 @@ pub struct DataLabelOverride {
     /// Font size in OOXML hundredths of a point.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size_hpt: Option<i32>,
+    /// `<a:defRPr b="1">` inside the per-idx rich text. None = inherit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_bold: Option<bool>,
 }
 
 /// Series-level `<c:dLbls>` defaults applied to every point that doesn't
@@ -337,6 +340,13 @@ pub struct SeriesDataLabels {
     pub font_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// `<c:dLbls><c:txPr>...defRPr@b>` series-level bold default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_bold: Option<bool>,
+    /// `<c:dLbls><c:txPr>...defRPr@sz>` series-level font size in OOXML
+    /// hundredths of a point (e.g. 1200 = 12 pt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
 }
 
 /// Error bars (`<c:errBars>`, ECMA-376 §21.2.2.20).
@@ -478,6 +488,31 @@ pub struct ChartData {
     /// per-series `val_format_code` at render time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_label_format_code: Option<String>,
+    /// `<c:title><c:tx><c:rich><a:p><a:pPr><a:defRPr@b>` — bold flag for
+    /// the chart title. None = inherit (treat as not bold).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_font_bold: Option<bool>,
+    /// `<c:catAx><c:txPr>...defRPr@b>` — bold flag for X-axis tick labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_bold: Option<bool>,
+    /// `<c:valAx><c:txPr>...defRPr@b>` — bold flag for Y-axis tick labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_bold: Option<bool>,
+    /// `<c:catAx><c:crosses val>` — where the X axis sits along the Y axis
+    /// (`autoZero` = at value 0, `min` = at the data min, `max` = at the
+    /// data max). Default `autoZero`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_crosses: Option<String>,
+    /// `<c:catAx><c:crossesAt val>` — explicit numeric crossing point;
+    /// takes precedence over `cat_axis_crosses`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_crosses_at: Option<f64>,
+    /// `<c:valAx><c:crosses val>` and `<c:crossesAt val>` mirroring the
+    /// catAx fields above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_crosses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_crosses_at: Option<f64>,
     /// `<c:catAx><c:numFmt@formatCode>` (or scatter's X-axis valAx). Used
     /// to format the bottom-axis tick labels, e.g. `"m/d/yyyy"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3296,6 +3331,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let title_font_size_hpt = extract_chart_title_size(&chart_root, c_ns, a_ns);
     let title_font_color = extract_chart_title_color(&chart_root, c_ns, a_ns);
     let title_font_face = extract_chart_title_face(&chart_root, c_ns, a_ns);
+    let title_font_bold = extract_chart_title_bold(&chart_root, c_ns, a_ns);
 
     // Legend presence: <c:chart><c:legend> is the authoritative signal. Absence
     // means Excel hides the legend (default for a single-series chart with no
@@ -3399,6 +3435,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut cat_axis_max: Option<f64> = None;
     let mut val_axis_min: Option<f64> = None;
     let mut val_axis_max: Option<f64> = None;
+    let mut cat_axis_font_bold: Option<bool> = None;
+    let mut val_axis_font_bold: Option<bool> = None;
+    let mut cat_axis_crosses: Option<String> = None;
+    let mut cat_axis_crosses_at: Option<f64> = None;
+    let mut val_axis_crosses: Option<String> = None;
+    let mut val_axis_crosses_at: Option<f64> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
     let mut data_label_position: Option<String> = None;
@@ -3435,10 +3477,16 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 if cat_axis_format_code.is_none() {
                     cat_axis_format_code = extract_axis_format_code(&child, c_ns);
                 }
+                if cat_axis_font_bold.is_none() {
+                    cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                }
                 if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
                     if cat_axis_min.is_none() { cat_axis_min = mn; }
                     if cat_axis_max.is_none() { cat_axis_max = mx; }
                 }
+                let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
+                if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
                 if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
                 continue;
             }
@@ -3463,6 +3511,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     if cat_axis_font_size_hpt.is_none() {
                         cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                     }
+                    if cat_axis_font_bold.is_none() {
+                        cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                    }
+                    let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                    if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
+                    if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
                     if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
                 } else {
                     if val_axis_title.is_none() {
@@ -3474,10 +3528,16 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     if val_axis_format_code.is_none() {
                         val_axis_format_code = extract_axis_format_code(&child, c_ns);
                     }
+                    if val_axis_font_bold.is_none() {
+                        val_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
+                    }
                     if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
                         if val_axis_min.is_none() { val_axis_min = mn; }
                         if val_axis_max.is_none() { val_axis_max = mx; }
                     }
+                    let (cr, cra) = extract_axis_crosses(&child, c_ns);
+                    if val_axis_crosses.is_none() { val_axis_crosses = cr; }
+                    if val_axis_crosses_at.is_none() { val_axis_crosses_at = cra; }
                     if axis_is_deleted(&child, c_ns) { val_axis_hidden = true; }
                 }
                 continue;
@@ -3660,6 +3720,13 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         title_font_size_hpt,
         title_font_color,
         title_font_face,
+        title_font_bold,
+        cat_axis_font_bold,
+        val_axis_font_bold,
+        cat_axis_crosses,
+        cat_axis_crosses_at,
+        val_axis_crosses,
+        val_axis_crosses_at,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
         val_axis_format_code,
@@ -3689,6 +3756,34 @@ fn extract_axis_format_code(axis_node: &roxmltree::Node, c_ns: &str) -> Option<S
         .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
         .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
         .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// `<c:catAx|valAx><c:txPr>...defRPr@b>` — bold flag for axis tick labels.
+fn extract_axis_tick_label_bold(axis_node: &roxmltree::Node, c_ns: &str) -> Option<bool> {
+    let txpr = axis_node.children()
+        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))?;
+    txpr.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" { return None; }
+        n.attribute("b").map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
+/// `<c:catAx|valAx><c:crosses>` and `<c:crossesAt>` — where the axis sits
+/// along its perpendicular axis. `crosses` is a string ("autoZero" |
+/// "min" | "max"); `crossesAt` is an explicit numeric override that
+/// takes precedence at render time.
+fn extract_axis_crosses(axis_node: &roxmltree::Node, c_ns: &str) -> (Option<String>, Option<f64>) {
+    let crosses = axis_node.children()
+        .find(|n| n.tag_name().name() == "crosses" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let crosses_at = axis_node.children()
+        .find(|n| n.tag_name().name() == "crossesAt" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    (crosses, crosses_at)
 }
 
 /// Read explicit `<c:scaling><c:min>` / `<c:scaling><c:max>` values, returning
@@ -3775,6 +3870,21 @@ fn extract_chart_title_size(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str
         let tag = n.tag_name().name();
         if tag != "defRPr" && tag != "rPr" { return None; }
         n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+    })
+}
+
+/// Extract chart title bold flag from the first `a:defRPr@b` / `a:rPr@b`
+/// inside `c:title`. Returns None when not specified (renderer treats as
+/// not bold).
+fn extract_chart_title_bold(chart_root: &roxmltree::Node, c_ns: &str, a_ns: &str) -> Option<bool> {
+    let title_node = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))?;
+    title_node.descendants().find_map(|n| {
+        if !n.is_element() { return None; }
+        if n.tag_name().namespace() != Some(a_ns) { return None; }
+        let tag = n.tag_name().name();
+        if tag != "defRPr" && tag != "rPr" { return None; }
+        n.attribute("b").map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     })
 }
 
@@ -4236,6 +4346,22 @@ fn parse_data_labels(
                 .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
                 .and_then(|def| extract_solid_fill_in_drawingml(&def, theme_colors))
         });
+    let font_bold_default = d_lbls.children()
+        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr"))
+                .and_then(|n| n.attribute("b"))
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        });
+    let font_size_default = d_lbls.children()
+        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr"))
+                .and_then(|n| n.attribute("sz"))
+                .and_then(|v| v.parse::<i32>().ok())
+        });
 
     let series_defaults = SeriesDataLabels {
         show_val: bool_attr(&d_lbls, "showVal"),
@@ -4245,6 +4371,8 @@ fn parse_data_labels(
         position: position.clone(),
         font_color: font_color.clone(),
         format_code,
+        font_bold: font_bold_default,
+        font_size_hpt: font_size_default,
     };
 
     let mut overrides = Vec::new();
@@ -4291,14 +4419,22 @@ fn parse_data_labels(
             .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
             .and_then(|def| def.attribute("sz"))
             .and_then(|v| v.parse::<i32>().ok());
-        overrides.push(DataLabelOverride { idx, text, position: pos, font_color, font_size_hpt });
+        let font_bold = dl.descendants()
+            .find(|n| n.is_element() && (n.tag_name().name() == "defRPr" || n.tag_name().name() == "rPr"))
+            .and_then(|def| def.attribute("b"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        overrides.push(DataLabelOverride { idx, text, position: pos, font_color, font_size_hpt, font_bold });
     }
 
     let any_default = series_defaults.show_val
         || series_defaults.show_cat_name
         || series_defaults.show_ser_name
         || series_defaults.show_percent
-        || series_defaults.position.is_some();
+        || series_defaults.position.is_some()
+        || series_defaults.font_color.is_some()
+        || series_defaults.format_code.is_some()
+        || series_defaults.font_bold.is_some()
+        || series_defaults.font_size_hpt.is_some();
     let series_out = if any_default { Some(series_defaults) } else { None };
     (series_out, overrides)
 }

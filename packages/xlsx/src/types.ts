@@ -211,6 +211,7 @@ export interface DataLabelOverride {
   position?: string;
   fontColor?: string;
   fontSizeHpt?: number;
+  fontBold?: boolean;
 }
 
 export interface SeriesDataLabels {
@@ -221,6 +222,8 @@ export interface SeriesDataLabels {
   position?: string;
   fontColor?: string;
   formatCode?: string;
+  fontBold?: boolean;
+  fontSizeHpt?: number;
 }
 
 export interface ErrBars {
@@ -302,6 +305,19 @@ export interface ChartData {
   /** `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
    *  number format (§21.2.2.35). */
   dataLabelFormatCode?: string | null;
+  /** `<c:title>...defRPr@b>` chart title bold flag. */
+  titleFontBold?: boolean;
+  /** `<c:catAx><c:txPr>...defRPr@b>` X-axis tick label bold flag. */
+  catAxisFontBold?: boolean;
+  /** `<c:valAx><c:txPr>...defRPr@b>` Y-axis tick label bold flag. */
+  valAxisFontBold?: boolean;
+  /** `<c:catAx><c:crosses val>` (`autoZero` | `min` | `max`). Drives where
+   *  the X axis sits along the Y axis. Default `autoZero`. */
+  catAxisCrosses?: string;
+  /** `<c:catAx><c:crossesAt val>` explicit numeric crossing. */
+  catAxisCrossesAt?: number;
+  valAxisCrosses?: string;
+  valAxisCrossesAt?: number;
   /** `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). */
   catAxisFormatCode?: string;
   /** `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. */
