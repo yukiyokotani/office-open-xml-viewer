@@ -19,7 +19,6 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **DOCX** — Continuous **scroll view** of every page with a transparent text layer (PDF.js-style) — drag to select, copy as plain text.
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly.
-- **Theme-aware** — Background and foreground follow the active VS Code theme (light / dark / high-contrast).
 - **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, and more rendered straight from the OOXML spec.
 
 All three formats share the same Rust parser (`wasm-pack`) for accuracy and speed.
