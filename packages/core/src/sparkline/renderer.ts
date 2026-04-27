@@ -179,12 +179,10 @@ function computeFlagged(
     if (numeric[i] != null) { lastIdx = i; break; }
   }
   const present = numeric.filter((v): v is number => v != null);
-  let highIdx = -1, lowIdx = -1;
+  let hi = NaN, lo = NaN;
   if (present.length > 0) {
-    const hi = Math.max(...present);
-    const lo = Math.min(...present);
-    highIdx = numeric.findIndex(v => v === hi);
-    lowIdx = numeric.findIndex(v => v === lo);
+    hi = Math.max(...present);
+    lo = Math.min(...present);
   }
   if (m.negative && m.colorNegative) {
     for (let i = 0; i < numeric.length; i++) {
@@ -194,8 +192,20 @@ function computeFlagged(
   }
   if (m.first && m.colorFirst && firstIdx >= 0) flagged[firstIdx] = m.colorFirst;
   if (m.last && m.colorLast && lastIdx >= 0) flagged[lastIdx] = m.colorLast;
-  if (m.high && m.colorHigh && highIdx >= 0) flagged[highIdx] = m.colorHigh;
-  if (m.low && m.colorLow && lowIdx >= 0) flagged[lowIdx] = m.colorLow;
+  // ECMA-376 §18.18.74 doesn't say so explicitly, but Excel highlights
+  // *every* point tied for the high or low value (not just the first
+  // occurrence). With a 12-point series of 9 zeros + 3 non-zeros and
+  // `low="1"`, all 9 zero points are dotted, not just the first.
+  if (m.high && m.colorHigh && !Number.isNaN(hi)) {
+    for (let i = 0; i < numeric.length; i++) {
+      if (numeric[i] === hi) flagged[i] = m.colorHigh;
+    }
+  }
+  if (m.low && m.colorLow && !Number.isNaN(lo)) {
+    for (let i = 0; i < numeric.length; i++) {
+      if (numeric[i] === lo) flagged[i] = m.colorLow;
+    }
+  }
   return flagged;
 }
 
