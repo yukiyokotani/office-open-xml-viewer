@@ -60,11 +60,14 @@ export function renderSparkline(
   if (values.length === 0 || rect.w <= 0 || rect.h <= 0) return;
 
   // Inset the drawing area so strokes / markers don't kiss the cell edge.
-  // Half a pixel on each side is plenty at typical sizes; a marker radius
-  // worth on the top / bottom keeps high / low dots inside.
+  // Excel reserves ~20% of the cell height as top + bottom margin so the
+  // peak / trough of the line sits clearly inside the row separators
+  // rather than coinciding with them. The proportional rule scales with
+  // zoom so the breathing room stays visually consistent; floored at 2 px
+  // so tiny cells still get a hair of clearance.
   const series = model.colorSeries ?? '#5B9BD5';
   const PAD_X = Math.min(2, rect.w * 0.08);
-  const PAD_Y = Math.min(2, rect.h * 0.12);
+  const PAD_Y = Math.max(2, rect.h * 0.20);
   const dx = rect.x + PAD_X;
   const dy = rect.y + PAD_Y;
   const dw = Math.max(1, rect.w - PAD_X * 2);
