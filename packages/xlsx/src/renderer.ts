@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, type ChartModel } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, type ChartModel, type SparklineModel } from '@silurus/ooxml-core';
 
 const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
@@ -1972,6 +1972,10 @@ interface RenderContext {
   commentCells: Set<string>;
   /** row:col → table-style overlay (bold header, banded rows, borders). */
   tableStyleMap: Map<string, TableCellStyle>;
+  /** row:col → render-ready SparklineModel for cells that host an
+   *  `x14:sparkline`. Built once at viewport start by flattening the
+   *  parser's SparklineGroup + per-cell Sparkline pair. */
+  sparklineMap: Map<string, SparklineModel>;
   onTextRun?: (info: TextRunInfo) => void;
 }
 
@@ -2087,6 +2091,70 @@ function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
           headerRowDxf: t.headerRowDxf,
         });
       }
+    }
+  }
+  return map;
+}
+
+/** Flatten the worksheet's parsed `sparklineGroups` into a per-cell render
+ *  model. Each Sparkline inherits its group's formatting; min/max are
+ *  computed from the values when the group's `*AxisType` is `individual`,
+ *  shared across the group when `group`, or taken from `manualMin/Max` when
+ *  `custom`. The renderer can then look up `row:col` and call core's
+ *  `renderSparkline` without further work. */
+function buildSparklineMap(worksheet: Worksheet): Map<string, SparklineModel> {
+  const map = new Map<string, SparklineModel>();
+  for (const g of worksheet.sparklineGroups ?? []) {
+    // Group-wide min/max if needed.
+    let groupMin = Infinity, groupMax = -Infinity;
+    if (g.minAxisType === 'group' || g.maxAxisType === 'group') {
+      for (const sl of g.sparklines) {
+        for (const v of sl.values) {
+          if (typeof v === 'number') {
+            if (v < groupMin) groupMin = v;
+            if (v > groupMax) groupMax = v;
+          }
+        }
+      }
+      if (!isFinite(groupMin) || !isFinite(groupMax)) {
+        groupMin = 0; groupMax = 1;
+      }
+    }
+    for (const sl of g.sparklines) {
+      const numeric = sl.values.filter((v): v is number => typeof v === 'number');
+      const indMin = numeric.length ? Math.min(...numeric) : 0;
+      const indMax = numeric.length ? Math.max(...numeric) : 1;
+      const min = g.minAxisType === 'custom' && typeof g.manualMin === 'number'
+        ? g.manualMin
+        : g.minAxisType === 'group' ? groupMin : indMin;
+      const max = g.maxAxisType === 'custom' && typeof g.manualMax === 'number'
+        ? g.manualMax
+        : g.maxAxisType === 'group' ? groupMax : indMax;
+      map.set(`${sl.row}:${sl.col}`, {
+        kind: g.kind,
+        values: sl.values,
+        min,
+        max,
+        displayEmptyCellsAs: (g.displayEmptyCellsAs === 'zero' || g.displayEmptyCellsAs === 'span')
+          ? g.displayEmptyCellsAs
+          : 'gap',
+        displayXAxis: g.displayXAxis,
+        lineWeight: g.lineWeight,
+        markers: g.markers,
+        high: g.high,
+        low: g.low,
+        first: g.first,
+        last: g.last,
+        negative: g.negative,
+        colorSeries: g.colorSeries,
+        colorNegative: g.colorNegative,
+        colorAxis: g.colorAxis,
+        colorMarkers: g.colorMarkers,
+        colorFirst: g.colorFirst,
+        colorLast: g.colorLast,
+        colorHigh: g.colorHigh,
+        colorLow: g.colorLow,
+      });
     }
   }
   return map;
@@ -2321,6 +2389,15 @@ function renderQuadrant(
         const barInset = 2;
         const barW = Math.max(0, (cellW - barInset * 2) * cf.dataBar.ratio);
         fillDataBar(ctx, cf.dataBar.color, cx + barInset, cy + barInset, barW, cellH - barInset * 2, cf.dataBar.gradient);
+      }
+
+      // Sparkline (Office 2010 x14:sparklineGroup). Drawn after the cell
+      // background but before borders / text so borders frame the sparkline
+      // and any cell text overlays it (matches Excel's z-order, and lets
+      // a label like "Trend" share the same cell as the sparkline).
+      const sparkModel = rc.sparklineMap.get(key);
+      if (sparkModel) {
+        renderSparkline(ctx, { x: cx, y: cy, w: cellW, h: cellH }, sparkModel);
       }
 
       // Grid lines – draw only right + bottom edges once per cell (avoids double-drawing at
@@ -2865,6 +2942,7 @@ export function renderViewport(
   }
 
   const tableStyleMap = buildTableStyleMap(worksheet);
+  const sparklineMap = buildSparklineMap(worksheet);
 
   const rc: RenderContext = {
     worksheet, styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext,
@@ -2879,6 +2957,7 @@ export function renderViewport(
     hyperlinkMap,
     commentCells,
     tableStyleMap,
+    sparklineMap,
     onTextRun: opts.onTextRun,
   };
 
