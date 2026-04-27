@@ -4,6 +4,57 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.19.0 — 2026-04-27
+
+Minor release. Spec-faithful improvements to scatter chart rendering
+on the XLSX side and an Excel-matching font cascade for cell text.
+
+- **PPTX engine** (`packages/xlsx`, `packages/core`):
+  - **Scatter X-axis position**: parse `<c:catAx><c:crosses>` /
+    `<c:crossesAt>` and draw the X-axis line at the resolved Y
+    coordinate (`autoZero` → `toY(0)`). The Vertex42 "Project
+    Timeline" template puts milestones above and tasks below the
+    timeline ruler — that finally renders correctly because the
+    ruler now sits at y=0 instead of the bottom of the plot rect
+    (PR #140).
+  - **Bold and font sizes from `<c:txPr>` / `<a:defRPr>`**: chart
+    title, both axis tick labels, series-level `<c:dLbls>`
+    defaults (size 1200/1400 = 12 / 14 pt), and per-idx `<c:dLbl>`
+    rich text now honor `b="1"` and `sz="..."` (PR #140).
+  - **Axis line styling**: `<c:catAx | valAx><c:spPr><a:ln>`
+    resolved color and width are applied to the axis line stroke
+    (sample-26's 5 pt 50 % gray timeline ruler now renders as
+    intended) (PR #141).
+  - **Auto-derived axis range snaps to nice round values**: when
+    `<c:scaling><c:min/max>` aren't set, we expand both ends to a
+    multiple of `niceStep`. Sample-26 X-axis now spans
+    2018/2/19 .. 2018/10/27 in 50-day steps, matching Excel
+    (PR #141).
+  - **Tick marks honor `<c:majorTickMark>` / `<c:minorTickMark>`**:
+    the XLSX adapter was hard-coding `'cross'`; replaced with the
+    parsed value (default `'out'` per ECMA-376 §21.2.2.49). Scatter
+    renderer now actually calls `drawAxisTick` at every major tick
+    on both axes; tick stroke inherits the axis line color and
+    width (PR #142).
+- **XLSX cell font** (`packages/xlsx`):
+  - Calibri-styled cells fell back to system Arial / Helvetica on
+    macOS / Linux, which is ~10–15 % wider per character at every
+    weight × size — visible on `demo/sample-1` where the B2 title
+    overflowed past column F instead of stopping inside column E.
+    Add an opt-in `useGoogleFonts` to `XlsxWorkbook.load` (and
+    forwarded from `XlsxViewer`'s constructor option) that loads
+    [Carlito](https://fonts.google.com/specimen/Carlito) and
+    [Caladea](https://fonts.google.com/specimen/Caladea) — Google's
+    metric-compatible substitutes for Calibri and Cambria. With the
+    substitutes loaded, advance widths match Excel and column
+    layout shows the title fitting inside the same cells Excel
+    does. Default off — zero third-party requests until the host
+    opts in (PR #143).
+
+The unified `ChartModel` and `ChartSeries` gained matching optional
+fields. PPTX charts continue rendering unchanged — the PPTX parser
+will pick up the same fields in a follow-up release.
+
 ## 0.18.2 — 2026-04-27
 
 Patch release. Sparkline visual polish.
