@@ -6,7 +6,16 @@ import type {
 } from './types.js';
 import { renderChart, renderSparkline, type ChartModel, type SparklineModel } from '@silurus/ooxml-core';
 
-const DEFAULT_FONT_FAMILY = 'Calibri, Arial, sans-serif';
+// Default font stack. Calibri is the workbook default font in Excel; on
+// systems without Office (macOS / Linux) the browser would otherwise fall
+// back to Arial / Helvetica, which is meaningfully wider than Calibri at
+// every weight/size combination. Carlito is the Google-released, metric-
+// compatible Calibri clone (same advance widths and ascender / descender
+// metrics) and is loaded opt-in by `XlsxWorkbook.load({ useGoogleFonts:
+// true })`. Listing it in the cascade means: Calibri (Windows / Office)
+// → Carlito (loaded webfont) → Arial → sans-serif. Caladea is the same
+// for Cambria.
+const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
 const MDW = 7;
 const ROW_HEIGHT_TO_PX = 4 / 3;
