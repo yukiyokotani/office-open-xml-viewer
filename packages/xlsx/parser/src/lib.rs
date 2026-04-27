@@ -1013,6 +1013,10 @@ pub struct CellXf {
     /// Shrink text to fit the cell width (ECMA-376 §18.8.44)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub shrink_to_fit: bool,
+    /// `<alignment readingOrder>` (ECMA-376 §18.8.1) — 0 = context (default),
+    /// 1 = left-to-right, 2 = right-to-left. Drives canvas `direction`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_order: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -1328,7 +1332,17 @@ fn resolve_sheet_path(doc: &roxmltree::Document, r_id: &str) -> Option<String> {
     for node in doc.descendants() {
         if node.tag_name().name() == "Relationship" && node.tag_name().namespace() == Some(ns) {
             if node.attribute("Id") == Some(r_id) {
-                return node.attribute("Target").map(|s| s.to_string());
+                let target = node.attribute("Target")?;
+                // ECMA-376 / Open Packaging Conventions: Target may be a
+                // package-absolute path (`/xl/worksheets/sheet1.xml`, used
+                // by openpyxl and some online tools) or a path relative to
+                // the .rels file's parent (`worksheets/sheet1.xml`, the
+                // common Office-saved form). Callers prepend `xl/` to the
+                // returned value, so strip a leading `/xl/` to convert
+                // absolute paths into the relative form they expect.
+                let t = target.strip_prefix('/').unwrap_or(target);
+                let t = t.strip_prefix("xl/").unwrap_or(t);
+                return Some(t.to_string());
             }
         }
     }
@@ -1687,6 +1701,7 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
                 let mut indent = None;
                 let mut text_rotation = None;
                 let mut shrink_to_fit = false;
+                let mut reading_order: Option<u32> = None;
                 for child in xf_node.children() {
                     if child.tag_name().name() == "alignment" {
                         align_h = child.attribute("horizontal").map(|s| s.to_string());
@@ -1695,9 +1710,10 @@ fn parse_cell_xfs(doc: &roxmltree::Document, ns: &str) -> Vec<CellXf> {
                         indent = child.attribute("indent").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
                         text_rotation = child.attribute("textRotation").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
                         shrink_to_fit = child.attribute("shrinkToFit").map(|v| v == "1" || v == "true").unwrap_or(false);
+                        reading_order = child.attribute("readingOrder").and_then(|s| s.parse::<u32>().ok()).filter(|&v| v > 0);
                     }
                 }
-                xfs.push(CellXf { font_id, fill_id, border_id, num_fmt_id, align_h, align_v, wrap_text, indent, text_rotation, shrink_to_fit });
+                xfs.push(CellXf { font_id, fill_id, border_id, num_fmt_id, align_h, align_v, wrap_text, indent, text_rotation, shrink_to_fit, reading_order });
             }
             break;
         }

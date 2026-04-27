@@ -2526,6 +2526,27 @@ function renderQuadrant(
       const iconPad = iconSz > 0 ? iconSz + 4 : 0;
       const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
 
+      // ECMA-376 §18.18.40 ST_HorizontalAlignment value `centerContinuous`:
+      // text is centered across the **selection range** — the leftmost cell
+      // with content + adjacent empty cells to the right that also carry
+      // `centerContinuous`. Cells stay independent (unlike merge), but the
+      // centering uses the combined width. Walk right collecting empty
+      // centerContinuous neighbours so we know how wide to center over.
+      let centerContinuousW = cellW;
+      let centerContinuousX = cx;
+      if (alignH === 'centerContinuous' && !mergeInfo) {
+        for (let oci = ci + 1; oci < numCols; oci++) {
+          const adjKey = `${rowIndex}:${startCol + oci}`;
+          if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
+          const adjCell = cellMap.get(adjKey);
+          if (adjCell && adjCell.value.type !== 'empty') break;
+          const adjStyleIndex = adjCell?.styleIndex ?? 0;
+          const adjXf = resolveXf(styles, adjStyleIndex).xf;
+          if (adjXf.alignH !== 'centerContinuous') break;
+          centerContinuousW += colWidths[oci];
+        }
+      }
+
       // Text overflow into adjacent empty cells (ECMA-376 §18.3.1.4 "spans"
       // — Excel behavior when `wrapText=false`). Left-aligned text flows
       // rightward, right-aligned flows leftward, and centered splits evenly.
@@ -2537,9 +2558,10 @@ function renderQuadrant(
       // Excel only overflows text into adjacent empty cells; numeric values
       // that don't fit are rendered as "####" (they never spill). Cells
       // containing hard line breaks render multi-line in place, so they don't
-      // overflow either.
+      // overflow either. Skip overflow for centerContinuous — its centering
+      // is across the selection range, handled below.
       const hasHardBreak = text.includes('\n');
-      if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak) {
+      if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak && alignH !== 'centerContinuous') {
         const textW = ctx.measureText(text).width;
         const textPx = textW + leftPad + paddingX;
         if (textPx > cellW) {
@@ -2580,6 +2602,37 @@ function renderQuadrant(
         }
       }
 
+      // ECMA-376 §18.18.40 horizontal alignment:
+      // - `fill`: repeat the cell content until the cell fills horizontally.
+      //   We resolve to the repeated string here; layout is then standard
+      //   left-aligned.
+      // - `distributed`: distribute characters evenly across the cell width
+      //   so the first char hugs the left edge and the last hugs the right.
+      //   Implemented via Canvas `letterSpacing` (a string CSS length).
+      // - `justify`: full-line justification. Multi-line distribution would
+      //   need the wrap engine; for the single-line case we fall back to
+      //   `distributed` if the text is short, else left-aligned (matches
+      //   what Excel does when justify cannot expand a one-line string).
+      // Anything we don't recognise falls through to left-align (general).
+      let drawText = text;
+      let letterSpacingPx = 0;
+      if (alignH === 'fill' && !isNumeric && text.length > 0) {
+        const innerW = Math.max(1, cellW - paddingX * 2);
+        const oneW = ctx.measureText(text).width;
+        if (oneW > 0 && oneW < innerW) {
+          const reps = Math.max(1, Math.floor(innerW / oneW));
+          drawText = text.repeat(reps);
+        }
+      }
+      if (alignH === 'distributed' || (alignH === 'justify' && !xf.wrapText && !hasHardBreak)) {
+        const innerW = Math.max(1, cellW - paddingX * 2);
+        const naturalW = ctx.measureText(drawText).width;
+        const gaps = Math.max(1, [...drawText].length - 1);
+        if (naturalW < innerW) {
+          letterSpacingPx = Math.max(0, (innerW - naturalW) / gaps);
+        }
+      }
+
       let textX: number;
       let textAlign: CanvasTextAlign;
       if (alignH === 'right') {
@@ -2588,6 +2641,16 @@ function renderQuadrant(
       } else if (alignH === 'center') {
         textX = cx + cellW / 2;
         textAlign = 'center';
+      } else if (alignH === 'centerContinuous') {
+        textX = centerContinuousX + centerContinuousW / 2;
+        textAlign = 'center';
+        // Expand the draw rect so the clip below covers the whole span.
+        drawX = centerContinuousX;
+        drawW = centerContinuousW;
+      } else if (alignH === 'distributed' || (alignH === 'justify' && !xf.wrapText && !hasHardBreak)) {
+        // Distribute characters evenly: first hugs left edge, last hugs right.
+        textX = cx + paddingX;
+        textAlign = 'left';
       } else {
         textX = cx + leftPad;
         textAlign = 'left';
@@ -2657,6 +2720,18 @@ function renderQuadrant(
       }
 
       ctx.textAlign = textAlign;
+      // ECMA-376 §18.18.39 distributed / §18.18.40 readingOrder. Canvas
+      // `letterSpacing` (CSS length string, supported in modern browsers)
+      // implements distributed by stretching the gap between glyphs;
+      // `direction` flips the writing direction for RTL languages.
+      if (letterSpacingPx > 0) {
+        try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${letterSpacingPx}px`; } catch { /* ignore */ }
+      }
+      if (xf.readingOrder === 2) {
+        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'rtl'; } catch { /* ignore */ }
+      } else if (xf.readingOrder === 1) {
+        try { (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction = 'ltr'; } catch { /* ignore */ }
+      }
 
       // Rich text: draw each run with its own font. Only supported for the
       // non-wrap path (wrap with mixed fonts is significantly more complex).
@@ -2829,7 +2904,7 @@ function renderQuadrant(
           if (alignV === 'top') { ctx.textBaseline = 'top'; textY = cy + paddingY; }
           else if (alignV === 'center') { ctx.textBaseline = 'middle'; textY = cy + cellH / 2; }
           else { ctx.textBaseline = 'bottom'; textY = cy + cellH - paddingY; }
-          ctx.fillText(text, textX, textY);
+          ctx.fillText(drawText, textX, textY);
         }
       }
 
