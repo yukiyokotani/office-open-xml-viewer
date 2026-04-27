@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
+mod table_style_presets;
+
 // ===========================
 //  Public WASM entry points
 // ===========================
@@ -3220,7 +3222,11 @@ fn parse_table(
     let table_styles = table_styles_xml.as_deref()
         .map(|xml| parse_table_styles_xml(xml, theme))
         .unwrap_or_default();
-    let style = style_id.as_deref().and_then(|id| table_styles.get(id));
+    let style_owned: Option<TableStyleDef> = style_id.as_deref().and_then(|id| {
+        table_styles.get(id).cloned()
+            .or_else(|| table_style_presets::lookup_builtin_table_style(id, theme))
+    });
+    let style = style_owned.as_ref();
 
     let cols: Vec<i64> = tbl
         .children()
