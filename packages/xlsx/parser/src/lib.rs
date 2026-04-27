@@ -243,6 +243,133 @@ pub struct ChartSeries {
     /// renders first/below; Excel's legend for horizontal bar charts reverses
     /// this so low-order series end up at the bottom of the plot.
     pub order: usize,
+    /// `<c:marker><c:symbol val>` (ECMA-376 §21.2.2.32). One of
+    /// "circle"|"square"|"diamond"|"triangle"|"x"|"plus"|"star"|"dot"|
+    /// "dash"|"picture"|"none". Absent = renderer-default circle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_symbol: Option<String>,
+    /// `<c:marker><c:size val>` (ECMA-376 §21.2.2.34) — marker side length
+    /// in points. Default is renderer-defined (~5 pt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_size: Option<u32>,
+    /// `<c:marker><c:spPr><a:solidFill>` resolved hex (no `#`). Marker fill
+    /// independent of series stroke color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_fill: Option<String>,
+    /// `<c:marker><c:spPr><a:ln><a:solidFill>` resolved hex (no `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_line: Option<String>,
+    /// Per-data-point overrides (`<c:dPt idx>`, ECMA-376 §21.2.2.39). Each
+    /// entry overrides marker / fill for a single point in the series.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub data_point_overrides: Vec<DataPointOverride>,
+    /// Per-data-point custom labels (`<c:dLbl idx>` inside `<c:dLbls>`,
+    /// ECMA-376 §21.2.2.45). Custom rich text — including
+    /// `<a:fld type="CELLRANGE">` field references — is resolved to a plain
+    /// string at parse time.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub data_label_overrides: Vec<DataLabelOverride>,
+    /// Series-level `<c:dLbls>` defaults (showVal / showSerName / etc.). When
+    /// neither this nor `data_label_overrides` is present, series labels are
+    /// suppressed even when the chart-level `data_label_position` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_data_labels: Option<SeriesDataLabels>,
+    /// Error bars (`<c:errBars>`, ECMA-376 §21.2.2.20). Up to two per series
+    /// (one for X, one for Y). `cust` / `fixedVal` / `stdErr` / `stdDev` /
+    /// `percentage` are all resolved to absolute plus/minus arrays at parse
+    /// time so the renderer just draws lines.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub err_bars: Vec<ErrBars>,
+}
+
+/// Per-point override pulled from `<c:dPt idx="N">` siblings of a series
+/// (ECMA-376 §21.2.2.39). Any unset field falls back to the series-level
+/// value.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DataPointOverride {
+    pub idx: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_fill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_line: Option<String>,
+}
+
+/// Custom data label for one point (`<c:dLbl idx="N">`).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DataLabelOverride {
+    pub idx: u32,
+    /// Resolved text. Empty when the label is intentionally blank
+    /// (e.g. an empty `<a:p>`); the renderer should still skip drawing
+    /// for that idx because Excel deletes it.
+    pub text: String,
+    /// `<c:dLblPos val>` — "l"|"r"|"t"|"b"|"ctr"|"outEnd"|"bestFit". When
+    /// `None` the series-level / chart-level position applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    /// Resolved font color hex (no `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    /// Font size in OOXML hundredths of a point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_hpt: Option<i32>,
+}
+
+/// Series-level `<c:dLbls>` defaults applied to every point that doesn't
+/// have its own `<c:dLbl>` override.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesDataLabels {
+    pub show_val: bool,
+    pub show_cat_name: bool,
+    pub show_ser_name: bool,
+    pub show_percent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_code: Option<String>,
+}
+
+/// Error bars (`<c:errBars>`, ECMA-376 §21.2.2.20).
+///
+/// `errValType="cust"` — values come from `<c:plus>/<c:minus>/<c:numRef>`,
+/// possibly cross-sheet. We resolve those at parse time into arrays. For
+/// `fixedVal` / `stdErr` / `stdDev` / `percentage` the parser computes the
+/// absolute per-point delta from the series values so the renderer just
+/// draws line segments without needing the raw type info.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrBars {
+    /// "x" | "y".
+    pub dir: String,
+    /// "plus" | "minus" | "both" — drives whether plus / minus is rendered.
+    pub bar_type: String,
+    /// Absolute positive deltas per point. `None` = no bar in that
+    /// direction at that index.
+    pub plus: Vec<Option<f64>>,
+    /// Absolute negative deltas per point.
+    pub minus: Vec<Option<f64>>,
+    /// `<c:noEndCap val>` — when true the renderer skips the perpendicular
+    /// cap line at the bar tip (ECMA-376 §21.2.2.21).
+    pub no_end_cap: bool,
+    /// Resolved stroke hex (no `#`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Stroke width in EMU (`<a:ln w>`). 12700 EMU = 1 pt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_width_emu: Option<u32>,
+    /// `<a:prstDash val>` — "solid"|"dash"|"dot"|"dashDot"|...
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dash: Option<String>,
 }
 
 /// Parsed chart data extracted from `xl/charts/chartN.xml`.
@@ -351,6 +478,56 @@ pub struct ChartData {
     /// per-series `val_format_code` at render time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_label_format_code: Option<String>,
+    /// `<c:catAx><c:numFmt@formatCode>` (or scatter's X-axis valAx). Used
+    /// to format the bottom-axis tick labels, e.g. `"m/d/yyyy"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_format_code: Option<String>,
+    /// `<c:catAx><c:scaling><c:min/max>` — only meaningful for scatter
+    /// charts (where the X axis is numeric). None = derive from data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_max: Option<f64>,
+    /// `<c:valAx><c:scaling><c:min/max>` — explicit Y-axis range. None =
+    /// derive from data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_max: Option<f64>,
+    /// `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27) absolute
+    /// placement for the chart title. When present, overrides the renderer's
+    /// auto-positioning; absent = current default layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_manual_layout: Option<ManualLayout>,
+    /// `<c:plotArea><c:layout><c:manualLayout>` absolute placement for the
+    /// plot area, with `layoutTarget=inner` (default) describing the inner
+    /// plot rect (no axes / labels) or `outer` describing the outer rect
+    /// (axes + labels included).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_area_manual_layout: Option<ManualLayout>,
+}
+
+/// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualLayout {
+    /// "edge" (fraction is from top-left of chart) | "factor" (fraction
+    /// from default position). ECMA-376 §21.2.2.32 ST_LayoutMode.
+    pub x_mode: String,
+    pub y_mode: String,
+    /// "inner" (excludes axes) | "outer" (includes axes). Only meaningful
+    /// for plotArea; harmless for title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_target: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    /// Width / height fractions. `None` = let the renderer auto-fit
+    /// (corresponds to ECMA-376 only-(x,y) layouts where the size keeps its
+    /// auto value).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
 }
 
 /// `<c:manualLayout>` coordinates for a legend (ECMA-376 §21.2.2.31). Fractions
@@ -3184,9 +3361,18 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         resolved
     });
 
+    // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
+    let title_manual_layout = chart_root.children()
+        .find(|n| n.tag_name().name() == "title" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|t| t.children().find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns)))
+        .and_then(|l| extract_manual_layout(&l, c_ns));
+
     // Find c:plotArea
     let plot_area = chart_root.children()
         .find(|n| n.tag_name().name() == "plotArea" && n.tag_name().namespace() == Some(c_ns))?;
+    let plot_area_manual_layout = plot_area.children()
+        .find(|n| n.tag_name().name() == "layout" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|l| extract_manual_layout(&l, c_ns));
 
     let mut primary_type = String::new();
     let mut bar_dir      = "col".to_string();
@@ -3208,6 +3394,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     // hides the axis (labels, ticks, and lines). Default is "0" (visible).
     let mut cat_axis_hidden = false;
     let mut val_axis_hidden = false;
+    let mut cat_axis_format_code: Option<String> = None;
+    let mut cat_axis_min: Option<f64> = None;
+    let mut cat_axis_max: Option<f64> = None;
+    let mut val_axis_min: Option<f64> = None;
+    let mut val_axis_max: Option<f64> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
     let mut data_label_position: Option<String> = None;
@@ -3241,34 +3432,53 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 if cat_axis_font_size_hpt.is_none() {
                     cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
                 }
-                if let Some(del) = child.children()
-                    .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
-                {
-                    if del.attribute("val").unwrap_or("0") != "0" {
-                        cat_axis_hidden = true;
-                    }
+                if cat_axis_format_code.is_none() {
+                    cat_axis_format_code = extract_axis_format_code(&child, c_ns);
                 }
+                if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                    if cat_axis_min.is_none() { cat_axis_min = mn; }
+                    if cat_axis_max.is_none() { cat_axis_max = mx; }
+                }
+                if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
                 continue;
             }
             "valAx" => {
-                if val_axis_title.is_none() {
-                    val_axis_title = extract_chart_title(&child, c_ns, a_ns);
-                }
-                if val_axis_font_size_hpt.is_none() {
-                    val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
-                }
-                if val_axis_format_code.is_none() {
-                    val_axis_format_code = child.children()
-                        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
-                        .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
-                        .filter(|s| !s.is_empty() && s != "General");
-                }
-                if let Some(del) = child.children()
-                    .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
-                {
-                    if del.attribute("val").unwrap_or("0") != "0" {
-                        val_axis_hidden = true;
+                // Scatter charts use two `<c:valAx>` (no catAx). Disambiguate
+                // by `<c:axPos val>` — `b`(bottom)/`t`(top) → X axis, `l`/`r`
+                // → Y axis. For non-scatter charts the first valAx hit is
+                // always Y.
+                let ax_pos = child.children()
+                    .find(|n| n.tag_name().name() == "axPos" && n.tag_name().namespace() == Some(c_ns))
+                    .and_then(|n| n.attribute("val"))
+                    .unwrap_or("");
+                let is_x_axis = matches!(ax_pos, "b" | "t");
+                if is_x_axis {
+                    if cat_axis_format_code.is_none() {
+                        cat_axis_format_code = extract_axis_format_code(&child, c_ns);
                     }
+                    if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                        if cat_axis_min.is_none() { cat_axis_min = mn; }
+                        if cat_axis_max.is_none() { cat_axis_max = mx; }
+                    }
+                    if cat_axis_font_size_hpt.is_none() {
+                        cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
+                    }
+                    if axis_is_deleted(&child, c_ns) { cat_axis_hidden = true; }
+                } else {
+                    if val_axis_title.is_none() {
+                        val_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                    }
+                    if val_axis_font_size_hpt.is_none() {
+                        val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
+                    }
+                    if val_axis_format_code.is_none() {
+                        val_axis_format_code = extract_axis_format_code(&child, c_ns);
+                    }
+                    if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
+                        if val_axis_min.is_none() { val_axis_min = mn; }
+                        if val_axis_max.is_none() { val_axis_max = mx; }
+                    }
+                    if axis_is_deleted(&child, c_ns) { val_axis_hidden = true; }
                 }
                 continue;
             }
@@ -3463,7 +3673,80 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         data_label_position,
         data_label_font_color,
         data_label_format_code,
+        cat_axis_format_code,
+        cat_axis_min,
+        cat_axis_max,
+        val_axis_min,
+        val_axis_max,
+        title_manual_layout,
+        plot_area_manual_layout,
     })
+}
+
+/// `<c:catAx|valAx><c:numFmt@formatCode>` (ECMA-376 §21.2.2.21).
+fn extract_axis_format_code(axis_node: &roxmltree::Node, c_ns: &str) -> Option<String> {
+    axis_node.children()
+        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
+        .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// Read explicit `<c:scaling><c:min>` / `<c:scaling><c:max>` values, returning
+/// `(min, max)` where each is `None` if the axis didn't override that bound.
+fn extract_axis_scaling(axis_node: &roxmltree::Node, c_ns: &str) -> Option<(Option<f64>, Option<f64>)> {
+    let scaling = axis_node.children()
+        .find(|n| n.tag_name().name() == "scaling" && n.tag_name().namespace() == Some(c_ns))?;
+    let mn = scaling.children()
+        .find(|n| n.tag_name().name() == "min" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    let mx = scaling.children()
+        .find(|n| n.tag_name().name() == "max" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<f64>().ok());
+    if mn.is_some() || mx.is_some() {
+        Some((mn, mx))
+    } else {
+        None
+    }
+}
+
+/// `<c:catAx|valAx><c:delete val="1"/>` — true when the axis is hidden.
+fn axis_is_deleted(axis_node: &roxmltree::Node, c_ns: &str) -> bool {
+    axis_node.children()
+        .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+/// Extract a `<c:layout><c:manualLayout>` block. The given `layout_node` is
+/// `<c:layout>` (parent of `<c:manualLayout>`). Returns None when the layout
+/// is auto (no `manualLayout` child).
+fn extract_manual_layout(layout_node: &roxmltree::Node, c_ns: &str) -> Option<ManualLayout> {
+    let ml = layout_node.children()
+        .find(|n| n.tag_name().name() == "manualLayout" && n.tag_name().namespace() == Some(c_ns))?;
+    let mut x_mode = "edge".to_string();
+    let mut y_mode = "edge".to_string();
+    let mut layout_target: Option<String> = None;
+    let mut x = 0.0_f64;
+    let mut y = 0.0_f64;
+    let mut w: Option<f64> = None;
+    let mut h: Option<f64> = None;
+    for ch in ml.children().filter(|n| n.is_element() && n.tag_name().namespace() == Some(c_ns)) {
+        let val = ch.attribute("val").map(|s| s.to_string());
+        match ch.tag_name().name() {
+            "xMode" => { if let Some(v) = val { x_mode = v; } }
+            "yMode" => { if let Some(v) = val { y_mode = v; } }
+            "layoutTarget" => { layout_target = val; }
+            "x" => { if let Some(v) = ch.attribute("val").and_then(|s| s.parse::<f64>().ok()) { x = v; } }
+            "y" => { if let Some(v) = ch.attribute("val").and_then(|s| s.parse::<f64>().ok()) { y = v; } }
+            "w" => { w = ch.attribute("val").and_then(|s| s.parse::<f64>().ok()); }
+            "h" => { h = ch.attribute("val").and_then(|s| s.parse::<f64>().ok()); }
+            _ => {}
+        }
+    }
+    Some(ManualLayout { x_mode, y_mode, layout_target, x, y, w, h })
 }
 
 /// Extract a category/value axis tick-label font size (hundredths of a point)
@@ -3671,18 +3954,23 @@ fn parse_chart_series(
     // "none"). A per-series <c:marker><c:symbol> overrides; otherwise fall
     // back to the chart-type-level <c:lineChart><c:marker val> flag. Scatter
     // charts default to visible markers even without an explicit flag.
-    let show_marker = if let Some(mk) = node.children()
-        .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns))
-    {
-        match mk.children().find(|n| n.tag_name().name() == "symbol" && n.tag_name().namespace() == Some(c_ns)) {
-            Some(sym) => sym.attribute("val").map(|v| v != "none").unwrap_or(true),
-            None => true,
-        }
-    } else if ser_type == "scatter" {
-        true
-    } else {
-        chart_marker_default
+    let marker_node = node.children()
+        .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns));
+    let (marker_symbol, marker_size, marker_fill, marker_line) = parse_marker_block(marker_node, c_ns, theme_colors);
+    let show_marker = match (&marker_symbol, ser_type) {
+        (Some(sym), _)   => sym != "none",
+        (None, "scatter") => true,
+        _                 => chart_marker_default,
     };
+
+    let data_point_overrides = parse_data_point_overrides(node, c_ns, theme_colors);
+    // `<c15:datalabelsRange>` lookup table for `<a:fld type="CELLRANGE">`
+    // labels. Excel saves the actual cached label strings here; we resolve
+    // CELLRANGE field placeholders against this at parse time so the
+    // renderer just receives plain strings.
+    let dlbl_range_cache = collect_dlbl_range_cache(node, c_ns);
+    let (series_data_labels, data_label_overrides) = parse_data_labels(node, c_ns, theme_colors, &dlbl_range_cache);
+    let err_bars = parse_error_bars(node, c_ns, &values, theme_colors);
 
     ChartSeries {
         name,
@@ -3693,7 +3981,477 @@ fn parse_chart_series(
         show_marker,
         val_format_code,
         order,
+        marker_symbol,
+        marker_size,
+        marker_fill,
+        marker_line,
+        data_point_overrides,
+        data_label_overrides,
+        series_data_labels,
+        err_bars,
     }
+}
+
+/// Parse `<c:marker>` into (symbol, size, fill, line) — all hex colors are
+/// returned without `#`. ECMA-376 §21.2.2.32 / §21.2.2.34. The fill and
+/// line colors come from `<c:spPr>` nested inside marker.
+fn parse_marker_block(
+    marker_node: Option<roxmltree::Node>,
+    c_ns: &str,
+    theme_colors: &[String],
+) -> (Option<String>, Option<u32>, Option<String>, Option<String>) {
+    let Some(mk) = marker_node else { return (None, None, None, None); };
+    let symbol = mk.children()
+        .find(|n| n.tag_name().name() == "symbol" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let size = mk.children()
+        .find(|n| n.tag_name().name() == "size" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok());
+    let sp_pr = mk.children()
+        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+    let fill = sp_pr.and_then(|p| extract_solid_fill_in_drawingml(&p, theme_colors));
+    let line = sp_pr.and_then(|p| {
+        let ln = p.children().find(|n| n.tag_name().name() == "ln");
+        ln.and_then(|l| extract_solid_fill_in_drawingml(&l, theme_colors))
+    });
+    (symbol, size, fill, line)
+}
+
+/// Locate the first `a:solidFill > a:srgbClr@val` or `a:schemeClr@val` under
+/// `node` (children only, not deep descendants — chart spPr is structured
+/// shallowly). Returns the resolved hex without `#`. Handles theme refs and
+/// `lumMod`/`lumOff`/`tint`/`shade`/`alpha` color transforms by delegating
+/// to `apply_color_transforms`.
+fn extract_solid_fill_in_drawingml(
+    parent: &roxmltree::Node,
+    theme_colors: &[String],
+) -> Option<String> {
+    for fill in parent.children().filter(|n| n.is_element() && n.tag_name().name() == "solidFill") {
+        for clr in fill.children().filter(|n| n.is_element()) {
+            match clr.tag_name().name() {
+                "srgbClr" => {
+                    if let Some(rgb) = clr.attribute("val") {
+                        return Some(apply_color_transforms(rgb, &clr));
+                    }
+                }
+                "schemeClr" => {
+                    if let Some(scheme) = clr.attribute("val") {
+                        let base = resolve_scheme_color(scheme, theme_colors);
+                        if let Some(b) = base {
+                            return Some(apply_color_transforms(&b, &clr));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Look up a scheme color name ("dk1"/"lt1"/"dk2"/"lt2"/"accent1"…"accent6"
+/// /"hlink"/"folHlink") in the workbook theme color table. Returns hex
+/// (no `#`) or None when unknown.
+fn resolve_scheme_color(name: &str, theme_colors: &[String]) -> Option<String> {
+    // Theme order (parse_theme_colors): dk1@0, lt1@1, dk2@2, lt2@3,
+    // accent1@4..accent6@9, hlink@10, folHlink@11.
+    let idx = match name {
+        "dk1" | "tx1" | "bg2" => 0,
+        "lt1" | "bg1" | "tx2" => 1,
+        "dk2" => 2,
+        "lt2" => 3,
+        "accent1" => 4, "accent2" => 5, "accent3" => 6,
+        "accent4" => 7, "accent5" => 8, "accent6" => 9,
+        "hlink" => 10, "folHlink" => 11,
+        _ => return None,
+    };
+    theme_colors.get(idx).map(|s| s.trim_start_matches('#').to_string())
+}
+
+/// Apply DrawingML color transforms (`lumMod`/`lumOff`/`tint`/`shade`/
+/// `alpha` — drop alpha) found as children of a color element. Returns a
+/// hex string without `#`. Already-existing `apply_tint` handles
+/// lumMod-style brightness changes for the simpler `lumMod-only` case;
+/// this widens it to combine multiple transforms.
+fn apply_color_transforms(base_hex: &str, color_el: &roxmltree::Node) -> String {
+    let cleaned = base_hex.trim_start_matches('#');
+    let r = u8::from_str_radix(&cleaned.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
+    let g = u8::from_str_radix(&cleaned.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
+    let b = u8::from_str_radix(&cleaned.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
+    let mut rf = r as f64 / 255.0;
+    let mut gf = g as f64 / 255.0;
+    let mut bf = b as f64 / 255.0;
+    for child in color_el.children().filter(|n| n.is_element()) {
+        let pct = child.attribute("val")
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| v / 100000.0);
+        let Some(p) = pct else { continue };
+        match child.tag_name().name() {
+            "lumMod"  => { rf *= p; gf *= p; bf *= p; }
+            "lumOff"  => { rf += p; gf += p; bf += p; }
+            "tint"    => {
+                // ECMA-376: lighten toward 1.0 by `p` (0..1).
+                rf = rf + (1.0 - rf) * p;
+                gf = gf + (1.0 - gf) * p;
+                bf = bf + (1.0 - bf) * p;
+            }
+            "shade"   => {
+                // Darken toward 0 by `1 - p`.
+                rf *= p; gf *= p; bf *= p;
+            }
+            // alpha is dropped — we render opaque.
+            _ => {}
+        }
+    }
+    let clamp = |v: f64| -> u8 { (v.max(0.0).min(1.0) * 255.0).round() as u8 };
+    format!("{:02X}{:02X}{:02X}", clamp(rf), clamp(gf), clamp(bf))
+}
+
+/// Walk every `<c:dPt>` direct child of the series and collect per-point
+/// overrides. Multiple `<c:dPt>` per series is normal; each one targets a
+/// single `<c:idx>` (ECMA-376 §21.2.2.39).
+fn parse_data_point_overrides(
+    ser_node: &roxmltree::Node,
+    c_ns: &str,
+    theme_colors: &[String],
+) -> Vec<DataPointOverride> {
+    let mut result = Vec::new();
+    for dpt in ser_node.children().filter(|n| n.is_element() && n.tag_name().name() == "dPt" && n.tag_name().namespace() == Some(c_ns)) {
+        let idx = dpt.children()
+            .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let sp_pr = dpt.children()
+            .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+        let color = sp_pr.and_then(|p| extract_solid_fill_in_drawingml(&p, theme_colors));
+        let mk = dpt.children()
+            .find(|n| n.tag_name().name() == "marker" && n.tag_name().namespace() == Some(c_ns));
+        let (marker_symbol, marker_size, marker_fill, marker_line) = parse_marker_block(mk, c_ns, theme_colors);
+        result.push(DataPointOverride {
+            idx, color, marker_symbol, marker_size, marker_fill, marker_line,
+        });
+    }
+    result
+}
+
+/// Resolve `<c:ser><c:extLst><c:ext><c15:datalabelsRange>` cache: index →
+/// label text. Used to substitute `<a:fld type="CELLRANGE">` placeholders.
+/// Returns indices in 0..ptCount; missing entries are empty strings.
+fn collect_dlbl_range_cache(ser_node: &roxmltree::Node, c_ns: &str) -> HashMap<u32, String> {
+    let mut map: HashMap<u32, String> = HashMap::new();
+    let Some(ext_lst) = ser_node.children().find(|n| n.tag_name().name() == "extLst" && n.tag_name().namespace() == Some(c_ns)) else { return map; };
+    for ext in ext_lst.children().filter(|n| n.is_element() && n.tag_name().name() == "ext" && n.tag_name().namespace() == Some(c_ns)) {
+        for range in ext.descendants().filter(|n| n.is_element() && n.tag_name().name() == "datalabelsRange") {
+            for cache in range.children().filter(|n| n.is_element() && n.tag_name().name() == "dlblRangeCache") {
+                for pt in cache.children().filter(|n| n.is_element() && n.tag_name().name() == "pt" && n.tag_name().namespace() == Some(c_ns)) {
+                    let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<u32>().ok()) else { continue };
+                    let v = pt.children()
+                        .find(|n| n.tag_name().name() == "v" && n.tag_name().namespace() == Some(c_ns))
+                        .and_then(|n| n.text())
+                        .unwrap_or("")
+                        .to_string();
+                    map.insert(idx, v);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Walk a `<c:tx><c:rich>` (or any DrawingML rich-text root) and reduce it
+/// to plain text. `<a:fld type="CELLRANGE">` placeholders are substituted
+/// from `cellrange_cache` keyed by `idx`. Other field types and runs are
+/// concatenated. Newlines come from paragraph breaks.
+fn flatten_rich_text(
+    rich_root: &roxmltree::Node,
+    cellrange_cache: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    let mut first_para = true;
+    for p in rich_root.descendants().filter(|n| n.is_element() && n.tag_name().name() == "p") {
+        if !first_para { out.push('\n'); }
+        first_para = false;
+        for child in p.children().filter(|n| n.is_element()) {
+            match child.tag_name().name() {
+                "r" => {
+                    if let Some(t) = child.children().find(|n| n.tag_name().name() == "t") {
+                        if let Some(s) = t.text() { out.push_str(s); }
+                    }
+                }
+                "fld" => {
+                    let typ = child.attribute("type").unwrap_or("");
+                    if typ == "CELLRANGE" {
+                        if let Some(s) = cellrange_cache { out.push_str(s); }
+                    } else {
+                        // VALUE/SERIESNAME/CATEGORYNAME field placeholders are
+                        // resolved by the renderer using the series data, since
+                        // they don't need cell-range expansion. We embed a marker
+                        // so the renderer can recognise them.
+                        if let Some(t) = child.children().find(|n| n.tag_name().name() == "t") {
+                            if let Some(s) = t.text() { out.push_str(s); }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Parse `<c:dLbls>` (series-level defaults + per-idx overrides).
+fn parse_data_labels(
+    ser_node: &roxmltree::Node,
+    c_ns: &str,
+    theme_colors: &[String],
+    cellrange_cache: &HashMap<u32, String>,
+) -> (Option<SeriesDataLabels>, Vec<DataLabelOverride>) {
+    let Some(d_lbls) = ser_node.children()
+        .find(|n| n.tag_name().name() == "dLbls" && n.tag_name().namespace() == Some(c_ns))
+    else { return (None, Vec::new()); };
+
+    let bool_attr = |n: &roxmltree::Node, name: &str| {
+        n.children()
+            .find(|c| c.tag_name().name() == name && c.tag_name().namespace() == Some(c_ns))
+            .and_then(|c| c.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    };
+
+    let position = d_lbls.children()
+        .find(|n| n.tag_name().name() == "dLblPos" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string());
+    let format_code = d_lbls.children()
+        .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("formatCode"))
+        .map(|s| s.to_string());
+    let font_color = d_lbls.children()
+        .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|tx| {
+            tx.descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+                .and_then(|def| extract_solid_fill_in_drawingml(&def, theme_colors))
+        });
+
+    let series_defaults = SeriesDataLabels {
+        show_val: bool_attr(&d_lbls, "showVal"),
+        show_cat_name: bool_attr(&d_lbls, "showCatName"),
+        show_ser_name: bool_attr(&d_lbls, "showSerName"),
+        show_percent: bool_attr(&d_lbls, "showPercent"),
+        position: position.clone(),
+        font_color: font_color.clone(),
+        format_code,
+    };
+
+    let mut overrides = Vec::new();
+    for dl in d_lbls.children().filter(|n| n.is_element() && n.tag_name().name() == "dLbl" && n.tag_name().namespace() == Some(c_ns)) {
+        let idx = dl.children()
+            .find(|n| n.tag_name().name() == "idx" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        // <c:delete val="1"/> — the user explicitly removed this point's
+        // label. Render as empty text so the renderer skips it.
+        let deleted = dl.children()
+            .find(|n| n.tag_name().name() == "delete" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let pos = dl.children()
+            .find(|n| n.tag_name().name() == "dLblPos" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .map(|s| s.to_string());
+        let cache_for_idx = cellrange_cache.get(&idx).map(|s| s.as_str());
+        let text = if deleted {
+            String::new()
+        } else {
+            // Custom text lives at `<c:tx><c:rich>` (ECMA-376 §21.2.2.46).
+            // Without `<c:tx>` the override is metadata-only (e.g. only a
+            // position change); show the cellrange cache value when
+            // available, else empty.
+            let tx = dl.children()
+                .find(|n| n.tag_name().name() == "tx" && n.tag_name().namespace() == Some(c_ns));
+            match tx {
+                Some(tx_node) => flatten_rich_text(&tx_node, cache_for_idx),
+                None => cache_for_idx.unwrap_or("").to_string(),
+            }
+        };
+        let font_color = dl.children()
+            .find(|n| n.tag_name().name() == "txPr" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|tx| {
+                tx.descendants()
+                    .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+                    .and_then(|def| extract_solid_fill_in_drawingml(&def, theme_colors))
+            });
+        let font_size_hpt = dl.descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "defRPr")
+            .and_then(|def| def.attribute("sz"))
+            .and_then(|v| v.parse::<i32>().ok());
+        overrides.push(DataLabelOverride { idx, text, position: pos, font_color, font_size_hpt });
+    }
+
+    let any_default = series_defaults.show_val
+        || series_defaults.show_cat_name
+        || series_defaults.show_ser_name
+        || series_defaults.show_percent
+        || series_defaults.position.is_some();
+    let series_out = if any_default { Some(series_defaults) } else { None };
+    (series_out, overrides)
+}
+
+/// Parse all `<c:errBars>` direct children of a series and resolve per-
+/// point plus / minus deltas to absolute numbers. Each errBars block fixes
+/// a direction (x|y); a series can have at most one of each direction.
+fn parse_error_bars(
+    ser_node: &roxmltree::Node,
+    c_ns: &str,
+    series_values: &[Option<f64>],
+    theme_colors: &[String],
+) -> Vec<ErrBars> {
+    let mut result = Vec::new();
+    for eb in ser_node.children().filter(|n| n.is_element() && n.tag_name().name() == "errBars" && n.tag_name().namespace() == Some(c_ns)) {
+        let dir = eb.children()
+            .find(|n| n.tag_name().name() == "errDir" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("y")
+            .to_string();
+        let bar_type = eb.children()
+            .find(|n| n.tag_name().name() == "errBarType" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("both")
+            .to_string();
+        let val_type = eb.children()
+            .find(|n| n.tag_name().name() == "errValType" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .unwrap_or("fixedVal")
+            .to_string();
+        let no_end_cap = eb.children()
+            .find(|n| n.tag_name().name() == "noEndCap" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.attribute("val"))
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let n_points = series_values.len();
+        let mut plus: Vec<Option<f64>> = vec![None; n_points];
+        let mut minus: Vec<Option<f64>> = vec![None; n_points];
+
+        match val_type.as_str() {
+            "cust" => {
+                for (slot, target) in [("plus", &mut plus), ("minus", &mut minus)] {
+                    let Some(side) = eb.children().find(|n| n.tag_name().name() == slot && n.tag_name().namespace() == Some(c_ns)) else { continue };
+                    let vals = extract_num_block(&side, c_ns, n_points);
+                    if !vals.is_empty() {
+                        let len = vals.len().min(target.len());
+                        for i in 0..len { target[i] = vals[i]; }
+                    }
+                }
+            }
+            "fixedVal" => {
+                let v = eb.children()
+                    .find(|n| n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                for i in 0..n_points {
+                    plus[i] = Some(v);
+                    minus[i] = Some(v);
+                }
+            }
+            "percentage" => {
+                // Each point's bar = abs(value) * pct/100.
+                let pct = eb.children()
+                    .find(|n| n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns))
+                    .and_then(|n| n.attribute("val"))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                for (i, v) in series_values.iter().enumerate() {
+                    if let Some(val) = v {
+                        let d = val.abs() * pct / 100.0;
+                        plus[i] = Some(d); minus[i] = Some(d);
+                    }
+                }
+            }
+            "stdErr" | "stdDev" => {
+                let nums: Vec<f64> = series_values.iter().filter_map(|v| *v).collect();
+                if !nums.is_empty() {
+                    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                    let var = nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+                    let std = var.sqrt();
+                    let mult = eb.children()
+                        .find(|n| n.tag_name().name() == "val" && n.tag_name().namespace() == Some(c_ns))
+                        .and_then(|n| n.attribute("val"))
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(1.0);
+                    let sample = if val_type == "stdErr" {
+                        std / (nums.len() as f64).sqrt()
+                    } else { std };
+                    let delta = sample * mult;
+                    for i in 0..n_points {
+                        plus[i] = Some(delta); minus[i] = Some(delta);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let sp_pr = eb.children()
+            .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns));
+        let color = sp_pr.and_then(|p| {
+            let ln = p.children().find(|n| n.tag_name().name() == "ln");
+            match ln {
+                Some(l) => extract_solid_fill_in_drawingml(&l, theme_colors),
+                None => extract_solid_fill_in_drawingml(&p, theme_colors),
+            }
+        });
+        let line_width_emu = sp_pr
+            .and_then(|p| p.children().find(|n| n.tag_name().name() == "ln"))
+            .and_then(|ln| ln.attribute("w"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let dash = sp_pr
+            .and_then(|p| p.children().find(|n| n.tag_name().name() == "ln"))
+            .and_then(|ln| ln.children().find(|n| n.tag_name().name() == "prstDash"))
+            .and_then(|n| n.attribute("val"))
+            .map(|s| s.to_string());
+
+        result.push(ErrBars {
+            dir, bar_type,
+            plus, minus,
+            no_end_cap,
+            color, line_width_emu, dash,
+        });
+    }
+    result
+}
+
+/// Read a `<c:numRef><c:numCache>` or `<c:numLit>` block under `parent` and
+/// return per-point values keyed by `<c:pt idx>`. Length is at least
+/// `expected_len` (padded with None).
+fn extract_num_block(parent: &roxmltree::Node, c_ns: &str, expected_len: usize) -> Vec<Option<f64>> {
+    let cache = parent.descendants()
+        .find(|n| n.is_element()
+            && (n.tag_name().name() == "numCache" || n.tag_name().name() == "numLit")
+            && n.tag_name().namespace() == Some(c_ns));
+    let Some(cache) = cache else { return Vec::new(); };
+    let pt_count: usize = cache.children()
+        .find(|n| n.tag_name().name() == "ptCount" && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(expected_len);
+    let len = pt_count.max(expected_len);
+    let mut values: Vec<Option<f64>> = vec![None; len];
+    for pt in cache.children().filter(|n| n.tag_name().name() == "pt" && n.tag_name().namespace() == Some(c_ns)) {
+        let Some(idx) = pt.attribute("idx").and_then(|v| v.parse::<usize>().ok()) else { continue };
+        let v = pt.children()
+            .find(|n| n.tag_name().name() == "v" && n.tag_name().namespace() == Some(c_ns))
+            .and_then(|n| n.text())
+            .and_then(|s| s.trim().parse::<f64>().ok());
+        if idx < values.len() { values[idx] = v; }
+    }
+    values
 }
 
 /// Extract series name from `c:tx`.

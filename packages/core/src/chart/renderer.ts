@@ -71,6 +71,12 @@ function formatChartVal(v: number): string {
  */
 function formatChartValWithCode(v: number, code: string | null | undefined): string {
   if (!code) return formatChartVal(v);
+  // Detect Excel date format codes (m/d/y/h/s tokens outside quotes) and
+  // route to the date formatter. Charts use this on the X axis of scatter
+  // / time-series charts where the value is a serial date.
+  if (isDateFormatCode(code)) {
+    return formatExcelDate(v, code);
+  }
   const sections = splitFormatSections(code);
   // Section selection per §18.8.30: positive;negative;zero;text. When the
   // negative section is omitted a negative number is formatted with the
@@ -86,6 +92,101 @@ function formatChartValWithCode(v: number, code: string | null | undefined): str
   const needsLeadingMinus = v < 0 && sections.length < 2;
   const abs = Math.abs(v);
   return (needsLeadingMinus ? '-' : '') + applyChartNumberSection(abs, section);
+}
+
+/**
+ * True when `code` contains date tokens (m / d / y / h / s) outside of
+ * quotes. Heuristic but robust: ECMA-376 number-format codes never use
+ * those letters as numeric placeholders.
+ */
+function isDateFormatCode(code: string): boolean {
+  let inQuote = false;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (c === '"') { inQuote = !inQuote; continue; }
+    if (inQuote) continue;
+    if (c === '\\') { i++; continue; }
+    if (c === '[') {
+      while (i < code.length && code[i] !== ']') i++;
+      continue;
+    }
+    if (c === 'y' || c === 'Y' || c === 'd' || c === 'D'
+        || c === 'm' || c === 'M' || c === 'h' || c === 'H' || c === 's' || c === 'S') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Format an Excel serial date with the supplied code. Uses the conventional
+ * 1900-based epoch with the spec's leap-year bug (i.e. serial 60 maps to
+ * March 1, 1900, treating Feb 29, 1900 as a real day). For most chart
+ * usage (post-1900 dates) this matches Excel's display.
+ */
+function formatExcelDate(serial: number, code: string): string {
+  // Days since 1899-12-30 (so serial 1 → 1900-01-01). The leap-year bug
+  // means serials 60..62 are off by one if you use a strict Date — we
+  // mimic Excel by subtracting an extra day for serials < 60.
+  const baseUtcMs = Date.UTC(1899, 11, 30);
+  const adjusted = serial < 60 ? serial + 1 : serial;
+  const ms = baseUtcMs + Math.floor(adjusted) * 86400000;
+  const date = new Date(ms);
+  const yyyy = date.getUTCFullYear();
+  const M = date.getUTCMonth() + 1;
+  const D = date.getUTCDate();
+  const totalSeconds = (serial - Math.floor(serial)) * 86400;
+  const hh = Math.floor(totalSeconds / 3600);
+  const mm = Math.floor((totalSeconds % 3600) / 60);
+  const ss = Math.floor(totalSeconds % 60);
+  let out = '';
+  let inQuote = false;
+  let i = 0;
+  while (i < code.length) {
+    const c = code[i];
+    if (c === '"') { inQuote = !inQuote; i++; continue; }
+    if (inQuote) { out += c; i++; continue; }
+    if (c === '\\' && i + 1 < code.length) { out += code[i + 1]; i += 2; continue; }
+    if (c === '[') {
+      while (i < code.length && code[i] !== ']') i++;
+      if (i < code.length) i++;
+      continue;
+    }
+    // Token runs.
+    if (c === 'y' || c === 'Y') {
+      let n = 0; while (i < code.length && (code[i] === 'y' || code[i] === 'Y')) { n++; i++; }
+      out += n >= 3 ? String(yyyy) : String(yyyy % 100).padStart(2, '0');
+      continue;
+    }
+    if (c === 'm' || c === 'M') {
+      let n = 0; while (i < code.length && (code[i] === 'm' || code[i] === 'M')) { n++; i++; }
+      // `mm` after an h/hh switches to minutes; use a simple lookbehind.
+      const prev = (out.match(/[Hh]+\W*$/));
+      if (prev) {
+        out += n >= 2 ? String(mm).padStart(2, '0') : String(mm);
+      } else {
+        out += n >= 2 ? String(M).padStart(2, '0') : String(M);
+      }
+      continue;
+    }
+    if (c === 'd' || c === 'D') {
+      let n = 0; while (i < code.length && (code[i] === 'd' || code[i] === 'D')) { n++; i++; }
+      out += n >= 2 ? String(D).padStart(2, '0') : String(D);
+      continue;
+    }
+    if (c === 'h' || c === 'H') {
+      let n = 0; while (i < code.length && (code[i] === 'h' || code[i] === 'H')) { n++; i++; }
+      out += n >= 2 ? String(hh).padStart(2, '0') : String(hh);
+      continue;
+    }
+    if (c === 's' || c === 'S') {
+      let n = 0; while (i < code.length && (code[i] === 's' || code[i] === 'S')) { n++; i++; }
+      out += n >= 2 ? String(ss).padStart(2, '0') : String(ss);
+      continue;
+    }
+    out += c; i++;
+  }
+  return out;
 }
 
 /**
@@ -1232,17 +1333,40 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
   const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
   const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
-  const pad = {
-    t: titleH + legTopH + h * 0.02,
-    r: legRightW + w * 0.05,
-    b: h * 0.12 + catTitleH + legBottomH,
-    l: w * 0.12 + valTitleW + legLeftW,
-  };
 
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  // Title placement — manual layout overrides the auto position.
+  if (chart.title) {
+    const tml = chart.titleManualLayout;
+    if (tml && (tml.x !== undefined || tml.y !== undefined)) {
+      const tx = x + tml.x * w;
+      const ty = y + tml.y * h;
+      drawChartTitle(ctx, chart, tx, ty, (tml.w ?? 0.5) * w, titleFontPx);
+    } else {
+      drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+    }
+  }
 
-  const px0 = x + pad.l; const py0 = y + pad.t;
-  const pw = w - pad.l - pad.r; const ph = h - pad.t - pad.b;
+  // Plot area placement: honor `<c:plotArea><c:manualLayout>` when present.
+  // ECMA-376: layoutTarget="inner" (default) describes the inner plot rect
+  // (no axes / labels); "outer" includes axes. For scatter we treat both
+  // identically (the inner padding stays the same).
+  const pml = chart.plotAreaManualLayout;
+  let px0: number, py0: number, pw: number, ph: number;
+  if (pml && pml.w != null && pml.h != null) {
+    px0 = x + pml.x * w;
+    py0 = y + pml.y * h;
+    pw  = pml.w * w;
+    ph  = pml.h * h;
+  } else {
+    const pad = {
+      t: titleH + legTopH + h * 0.02,
+      r: legRightW + w * 0.05,
+      b: (chart.catAxisHidden ? h * 0.04 : h * 0.12) + catTitleH + legBottomH,
+      l: (chart.valAxisHidden ? w * 0.04 : w * 0.12) + valTitleW + legLeftW,
+    };
+    px0 = x + pad.l; py0 = y + pad.t;
+    pw = w - pad.l - pad.r; ph = h - pad.t - pad.b;
+  }
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {
@@ -1250,6 +1374,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
     ctx.fillRect(px0, py0, pw, ph);
   }
 
+  // X / Y data extents.
   const allX: number[] = []; const allY: number[] = [];
   for (const s of chart.series) {
     const cats = s.categories ?? [];
@@ -1266,13 +1391,19 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   let yMin = Math.min(...allY); let yMax = Math.max(...allY);
   if (xMin === xMax) { xMin -= 1; xMax += 1; }
   if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  // Apply explicit `<c:valAx><c:scaling><c:min/max>` and `<c:catAx>` scaling
+  // when present; otherwise pad up to zero on the value axis (matches Excel
+  // for charts whose data is all positive).
   if (chart.valMin != null) yMin = chart.valMin;
   else if (yMin > 0) yMin = 0;
   if (chart.valMax != null) yMax = chart.valMax;
+  if (chart.catAxisMin != null) xMin = chart.catAxisMin;
+  if (chart.catAxisMax != null) xMax = chart.catAxisMax;
 
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
 
+  // Y-axis gridlines + labels.
   if (!chart.valAxisHidden) {
     ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
     const yStep = niceStep(yMax - yMin);
@@ -1286,28 +1417,346 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
     }
   }
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
 
-  const markerR = Math.max(3, ph * 0.015);
+  // X-axis line (always drawn — the timeline ruler in Gantt-style scatter
+  // charts depends on this line's stroke). Tick labels are skipped when the
+  // category axis is hidden via `<c:delete val="1"/>`.
+  ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px0, py0 + ph); ctx.lineTo(px0 + pw, py0 + ph); ctx.stroke();
+  if (!chart.valAxisHidden) {
+    ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+  }
+
+  // X-axis tick labels (catAxis), formatted via catAxisFormatCode (typically
+  // a date code like "m/d/yyyy"). Skipped when catAxisHidden.
+  if (!chart.catAxisHidden) {
+    ctx.font = `${Math.max(8, Math.min(11, ph / 20))}px sans-serif`;
+    const xStep = niceStep(xMax - xMin);
+    const xSteps = Math.round((xMax - xMin) / xStep) + 1;
+    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let si = 0; si < xSteps; si++) {
+      const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
+      const gx = toX(v);
+      ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, py0 + ph + 4);
+    }
+  }
+
+  // Render each series. Order: error bars (behind), markers, then data
+  // labels (in front). dPt overrides apply per point for color and marker
+  // shape; dLbl overrides apply per point for label text and position.
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
-    if (s.showMarker === false) continue;
-    const color = chartColor(si, s);
-    ctx.fillStyle = color;
+    const fallbackColor = chartColor(si, s);
     const cats = s.categories ?? [];
-    for (let ci = 0; ci < s.values.length; ci++) {
-      const yv = s.values[ci]; if (yv == null) continue;
-      const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
-      if (isNaN(xv)) continue;
-      ctx.beginPath(); ctx.arc(toX(xv), toY(yv), markerR, 0, Math.PI * 2); ctx.fill();
+
+    // Error bars (drawn first so markers overlay the bar tip).
+    for (const eb of s.errBars ?? []) {
+      drawSeriesErrorBars(ctx, s, eb, cats, useIndexX, toX, toY, fallbackColor);
     }
+
+    // Markers (skip when symbol="none" or series-level showMarker is false).
+    const hideMarkers = s.showMarker === false
+      || (typeof s.markerSymbol === 'string' && s.markerSymbol === 'none');
+    if (!hideMarkers) {
+      for (let ci = 0; ci < s.values.length; ci++) {
+        const yv = s.values[ci]; if (yv == null) continue;
+        const xv = useIndexX ? ci : parseFloat(cats[ci] ?? '0');
+        if (isNaN(xv)) continue;
+        const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+        const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle') as string;
+        const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+        const fill = dpt?.markerFill
+          ?? dpt?.color
+          ?? s.markerFill
+          ?? fallbackColor;
+        const line = dpt?.markerLine ?? s.markerLine ?? null;
+        drawMarker(ctx, toX(xv), toY(yv), symbol, sizePt, fill, line, ptToPx);
+      }
+    }
+
+    // Per-point data labels (`<c:dLbl idx>`) and series-level defaults.
+    drawSeriesDataLabels(ctx, s, cats, useIndexX, toX, toY, ph, ptToPx);
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
   if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
   if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
+}
+
+/** Draw a single ECMA-376 §21.2.2.32 marker shape centered at `(cx, cy)`.
+ *  `sizePt` is the spec's marker side length in points (Excel's default
+ *  is 5). `fill` and `line` are hex strings without `#`; `line` may be
+ *  null in which case no outline is drawn. `picture` falls back to a
+ *  square because we don't ship the embedded image yet. */
+function drawMarker(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  symbol: string,
+  sizePt: number,
+  fill: string,
+  line: string | null,
+  ptToPx: number,
+): void {
+  const sizePx = Math.max(2, sizePt * ptToPx);
+  const half = sizePx / 2;
+  ctx.save();
+  ctx.fillStyle = `#${fill}`;
+  if (line) {
+    ctx.strokeStyle = `#${line}`;
+    ctx.lineWidth = 1;
+  }
+  switch (symbol) {
+    case 'square': {
+      ctx.fillRect(cx - half, cy - half, sizePx, sizePx);
+      if (line) ctx.strokeRect(cx - half, cy - half, sizePx, sizePx);
+      break;
+    }
+    case 'diamond': {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - half);
+      ctx.lineTo(cx + half, cy);
+      ctx.lineTo(cx, cy + half);
+      ctx.lineTo(cx - half, cy);
+      ctx.closePath();
+      ctx.fill();
+      if (line) ctx.stroke();
+      break;
+    }
+    case 'triangle': {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - half);
+      ctx.lineTo(cx + half, cy + half);
+      ctx.lineTo(cx - half, cy + half);
+      ctx.closePath();
+      ctx.fill();
+      if (line) ctx.stroke();
+      break;
+    }
+    case 'x': {
+      ctx.strokeStyle = `#${fill}`;
+      ctx.lineWidth = Math.max(1, sizePx * 0.18);
+      ctx.beginPath();
+      ctx.moveTo(cx - half, cy - half); ctx.lineTo(cx + half, cy + half);
+      ctx.moveTo(cx - half, cy + half); ctx.lineTo(cx + half, cy - half);
+      ctx.stroke();
+      break;
+    }
+    case 'plus': {
+      ctx.strokeStyle = `#${fill}`;
+      ctx.lineWidth = Math.max(1, sizePx * 0.18);
+      ctx.beginPath();
+      ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
+      ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half);
+      ctx.stroke();
+      break;
+    }
+    case 'star': {
+      // 5-point star inscribed in a circle of radius `half`.
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? half : half * 0.45;
+        const a = -Math.PI / 2 + i * Math.PI / 5;
+        const px = cx + Math.cos(a) * r;
+        const py = cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      if (line) ctx.stroke();
+      break;
+    }
+    case 'dot': {
+      // Excel's "dot" is a small filled circle ~half the size of "circle".
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, sizePx * 0.25), 0, Math.PI * 2); ctx.fill();
+      break;
+    }
+    case 'dash': {
+      const dh = Math.max(1, sizePx * 0.25);
+      ctx.fillRect(cx - half, cy - dh / 2, sizePx, dh);
+      break;
+    }
+    case 'picture':
+    case 'circle':
+    default: {
+      ctx.beginPath();
+      ctx.arc(cx, cy, half, 0, Math.PI * 2);
+      ctx.fill();
+      if (line) ctx.stroke();
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+/** Draw error bars for one series + one direction. Each segment is a line
+ *  from the data point to the offset point, plus an optional perpendicular
+ *  end-cap (skipped when `eb.noEndCap`). */
+function drawSeriesErrorBars(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  eb: NonNullable<ChartSeries['errBars']>[number],
+  cats: string[],
+  useIndexX: boolean,
+  toX: (v: number) => number,
+  toY: (v: number) => number,
+  fallbackColor: string,
+): void {
+  ctx.save();
+  ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
+  ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / 12700) : 1;
+  ctx.setLineDash(dashPatternForPreset(eb.dash));
+  const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
+  const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
+  const isX = eb.dir === 'x';
+  const capHalf = ctx.lineWidth * 1.5;
+  for (let i = 0; i < s.values.length; i++) {
+    const yv = s.values[i]; if (yv == null) continue;
+    const xv = useIndexX ? i : parseFloat(cats[i] ?? '0');
+    if (isNaN(xv)) continue;
+    const px = toX(xv); const py = toY(yv);
+    const drawSeg = (dataDelta: number) => {
+      let x2 = px, y2 = py;
+      if (isX) {
+        // X delta is in data X units, so map (xv + delta) → px. For the
+        // minus side delta is already a positive magnitude, flip the sign.
+        x2 = toX(xv + dataDelta);
+      } else {
+        // Y delta similar; positive moves the bar toward higher data values
+        // (visually upward for our orientation).
+        y2 = toY(yv + dataDelta);
+      }
+      ctx.beginPath();
+      ctx.moveTo(px, py); ctx.lineTo(x2, y2); ctx.stroke();
+      if (!eb.noEndCap) {
+        ctx.save(); ctx.setLineDash([]);
+        ctx.beginPath();
+        if (isX) {
+          ctx.moveTo(x2, y2 - capHalf); ctx.lineTo(x2, y2 + capHalf);
+        } else {
+          ctx.moveTo(x2 - capHalf, y2); ctx.lineTo(x2 + capHalf, y2);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    };
+    // ECMA-376 §21.2.2.20: plus side is `point + plus[i]`, minus side is
+    // `point - minus[i]`. For `cust` errValType the values may be signed
+    // (e.g. negative minus values that effectively flip direction); for
+    // `fixedVal`/`stdErr`/`stdDev`/`percentage` the parser stores positive
+    // magnitudes, so the same formula gives the expected direction.
+    if (drawPlus) {
+      const v = eb.plus[i]; if (v != null) drawSeg(v);
+    }
+    if (drawMinus) {
+      const v = eb.minus[i]; if (v != null) drawSeg(-v);
+    }
+  }
+  ctx.restore();
+}
+
+/** Draw per-point data labels: position-aware text near each marker. */
+function drawSeriesDataLabels(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  cats: string[],
+  useIndexX: boolean,
+  toX: (v: number) => number,
+  toY: (v: number) => number,
+  ph: number,
+  ptToPx: number,
+): void {
+  const overrides = s.dataLabelOverrides ?? [];
+  if (overrides.length === 0 && !s.seriesDataLabels) return;
+  const seriesDef = s.seriesDataLabels;
+  for (let i = 0; i < s.values.length; i++) {
+    const yv = s.values[i]; if (yv == null) continue;
+    const xv = useIndexX ? i : parseFloat(cats[i] ?? '0');
+    if (isNaN(xv)) continue;
+    const ovr = overrides.find(o => o.idx === i);
+    let text: string;
+    if (ovr) {
+      // `<c:delete val="1"/>` produced an empty text — skip drawing.
+      if (ovr.text === '') continue;
+      text = ovr.text;
+    } else if (seriesDef && (seriesDef.showVal || seriesDef.showSerName || seriesDef.showCatName)) {
+      const parts: string[] = [];
+      if (seriesDef.showCatName && !useIndexX) parts.push(cats[i] ?? '');
+      if (seriesDef.showSerName) parts.push(s.name);
+      if (seriesDef.showVal) {
+        parts.push(formatChartValWithCode(yv, seriesDef.formatCode ?? null));
+      }
+      text = parts.filter(Boolean).join(' ');
+      if (!text) continue;
+    } else {
+      continue;
+    }
+    const pos = ovr?.position ?? seriesDef?.position ?? 'r';
+    const fontSizePx = ovr?.fontSizeHpt ? (ovr.fontSizeHpt / 100) * ptToPx
+      : Math.max(9, Math.min(11, ph / 25));
+    const color = ovr?.fontColor ?? seriesDef?.fontColor;
+    drawDataLabelText(ctx, toX(xv), toY(yv), text, pos, fontSizePx, color);
+  }
+}
+
+function drawDataLabelText(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  text: string,
+  position: string,
+  fontSizePx: number,
+  color: string | undefined,
+): void {
+  ctx.save();
+  ctx.font = `${fontSizePx}px sans-serif`;
+  ctx.fillStyle = color ? `#${color}` : '#333';
+  const offset = fontSizePx * 0.6;
+  let tx = cx, ty = cy;
+  switch (position) {
+    case 'l':
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      tx = cx - offset; break;
+    case 'r':
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      tx = cx + offset; break;
+    case 't':
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ty = cy - offset; break;
+    case 'b':
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ty = cy + offset; break;
+    case 'ctr':
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      break;
+    default:
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      tx = cx + offset; break;
+  }
+  // Multi-line labels: split on newline and stack vertically.
+  const lines = text.split(/\r?\n/);
+  const lineH = fontSizePx * 1.15;
+  const totalH = lineH * lines.length;
+  let lineY = ty;
+  if (ctx.textBaseline === 'middle') lineY = ty - (totalH - lineH) / 2;
+  else if (ctx.textBaseline === 'bottom') lineY = ty - (totalH - lineH);
+  for (const line of lines) {
+    ctx.fillText(line, tx, lineY);
+    lineY += lineH;
+  }
+  ctx.restore();
+}
+
+function dashPatternForPreset(preset: string | undefined): number[] {
+  if (!preset) return [];
+  switch (preset) {
+    case 'solid':                  return [];
+    case 'dot':       case 'sysDot': return [1, 2];
+    case 'dash':      case 'sysDash':return [4, 2];
+    case 'lgDash':                  return [8, 3];
+    case 'dashDot':   case 'sysDashDot':   return [4, 2, 1, 2];
+    case 'lgDashDot':                       return [8, 3, 1, 3];
+    case 'dashDotDot':case 'sysDashDotDot':case 'lgDashDotDot': return [4, 2, 1, 2, 1, 2];
+    default: return [];
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
