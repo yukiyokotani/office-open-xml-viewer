@@ -318,6 +318,12 @@ export interface ChartData {
   catAxisCrossesAt?: number;
   valAxisCrosses?: string;
   valAxisCrossesAt?: number;
+  /** Axis line color (hex without `#`) and width in EMU, from
+   *  `<c:catAx|valAx><c:spPr><a:ln>`. */
+  catAxisLineColor?: string;
+  catAxisLineWidthEmu?: number;
+  valAxisLineColor?: string;
+  valAxisLineWidthEmu?: number;
   /** `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). */
   catAxisFormatCode?: string;
   /** `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. */
