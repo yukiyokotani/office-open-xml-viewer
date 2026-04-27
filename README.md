@@ -500,7 +500,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Cell borders | ✅ |
 | | Cell fills (solid / gradient) | ✅ |
 | | Cell diagonal lines (`lnTlToBr` / `lnBlToTr`) | ✅ |
-| | Table theme styles | ❌ |
+| | Table theme styles (74 built-in PowerPoint presets) | ✅ |
 | **Theme** | Scheme colors (dk1/lt1/accent1–6) | ✅ |
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
