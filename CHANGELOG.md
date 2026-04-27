@@ -4,6 +4,18 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.18.1 — 2026-04-27
+
+Patch release. One sparkline correctness fix.
+
+- **Core sparkline** (`packages/core/src/sparkline/renderer.ts`):
+  - `computeFlagged` now marks **every** point tied for the high or low
+    value, not just the first occurrence. Excel does the same. Visible
+    on `private/sample-7.xlsx` Q10 (3 non-zero leading values + 9 zeros
+    under `low="1"`): all 9 zero points are now dotted. Other
+    highlights (`first` / `last` / `negative`) are unchanged — only
+    `high` / `low` had the tied-value case.
+
 ## 0.18.0 — 2026-04-27
 
 Minor release. Excel scatter / bubble charts gain a spec-faithful set of
