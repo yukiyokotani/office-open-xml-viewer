@@ -612,6 +612,9 @@ export interface CellXf {
   /** Text rotation: 1–90 = counter-clockwise °, 91–180 = (val−90)° clockwise, 255 = stacked */
   textRotation?: number;
   shrinkToFit?: boolean;
+  /** `<alignment readingOrder>` (ECMA-376 §18.8.1) — 0 = context (default),
+   *  1 = LTR, 2 = RTL. Drives canvas `direction`. */
+  readingOrder?: number;
 }
 
 export interface ParsedWorkbook {
