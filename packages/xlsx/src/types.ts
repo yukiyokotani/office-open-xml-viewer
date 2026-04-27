@@ -324,6 +324,12 @@ export interface ChartData {
   catAxisLineWidthEmu?: number;
   valAxisLineColor?: string;
   valAxisLineWidthEmu?: number;
+  /** `<c:catAx | valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
+   *  one of `none`/`out`/`in`/`cross` (ECMA-376 §21.2.2.49). */
+  catAxisMajorTickMark?: string;
+  catAxisMinorTickMark?: string;
+  valAxisMajorTickMark?: string;
+  valAxisMinorTickMark?: string;
   /** `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). */
   catAxisFormatCode?: string;
   /** `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. */
