@@ -40,6 +40,7 @@ export function buildViewerUI(
 
   const viewer = new XlsxViewer(viewerContainer, {
     cellScale: args.scale,
+    useGoogleFonts: true,
     onReady: (names) => {
       status.textContent = `Loaded — ${names.length} sheet(s)`;
     },
@@ -138,6 +139,7 @@ export const FileUpload: Story = {
       viewerContainer.innerHTML = '';
       viewer = new XlsxViewer(viewerContainer, {
         cellScale: args.scale,
+        useGoogleFonts: true,
         onReady: (names) => { status.textContent = `${names.length} sheet(s)`; },
         onSheetChange: (_idx, name) => { status.textContent = `Sheet: ${name}`; },
         onError: (err) => { status.textContent = `Error: ${err.message}`; },

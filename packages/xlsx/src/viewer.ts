@@ -12,6 +12,14 @@ export interface XlsxViewerOptions {
   onError?: (err: Error) => void;
   /** Called when the selected cell range changes. null means no selection. */
   onSelectionChange?: (selection: CellRange | null) => void;
+  /**
+   * Opt in to Google-Fonts-hosted, metric-compatible substitutes for the
+   * Office default fonts (Carlito for Calibri, Caladea for Cambria) so
+   * column layouts match Excel on systems without Office installed.
+   * Default `false`. See `XlsxWorkbook.LoadOptions.useGoogleFonts` for the
+   * privacy implications.
+   */
+  useGoogleFonts?: boolean;
 }
 
 export interface CellAddress {
@@ -114,7 +122,7 @@ export class XlsxViewer {
 
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
-      await this.wb.load(source);
+      await this.wb.load(source, { useGoogleFonts: this.opts.useGoogleFonts });
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(0);

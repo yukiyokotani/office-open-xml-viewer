@@ -3,6 +3,76 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 import { renderViewport } from './renderer.js';
 
+/** Office font name → Google Fonts URL for a metric-compatible substitute.
+ *  These pairings are the well-known Office substitutes that Microsoft and
+ *  Google both publish and ship on Linux distributions:
+ *    Calibri → Carlito (same metrics — advance widths, ascender / descender)
+ *    Cambria → Caladea (likewise)
+ *  Loading them on a system that lacks Calibri / Cambria (macOS, Linux
+ *  without Office) keeps text width measurements close to Excel's. */
+const OFFICE_FONT_FALLBACK_MAP: Record<string, string> = {
+  'calibri': 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+  'cambria': 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+};
+
+async function preloadOfficeFonts(fontNames: Iterable<string>): Promise<void> {
+  if (typeof document === 'undefined') return;
+  const seen = new Set<string>();
+  const families: string[] = [];
+  for (const name of fontNames) {
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const url = OFFICE_FONT_FALLBACK_MAP[key];
+    if (!url) continue;
+    if (document.querySelector(`link[href="${url}"]`)) continue;
+    try {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = url;
+      document.head.appendChild(link);
+    } catch {
+      // Network or DOM error — silently skip; renderer falls back to system fonts.
+    }
+    // We need the *substitute* family loaded into FontFaceSet, not the
+    // requested Office name. Map calibri → Carlito, cambria → Caladea.
+    families.push(key === 'calibri' ? 'Carlito' : key === 'cambria' ? 'Caladea' : name);
+  }
+  // Trigger explicit loads so Canvas measureText sees real glyph metrics
+  // before the first render. @font-face declarations alone don't fetch.
+  const loads: Promise<unknown>[] = [];
+  for (const family of families) {
+    for (const weight of ['400', '700']) {
+      for (const style of ['normal', 'italic']) {
+        loads.push(
+          document.fonts.load(`${style} ${weight} 16px "${family}"`).catch(() => undefined),
+        );
+      }
+    }
+  }
+  await Promise.race([
+    Promise.all(loads).then(() => document.fonts.ready),
+    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+  ]);
+}
+
+/** Options for {@link XlsxWorkbook.load}. */
+export interface LoadOptions {
+  /**
+   * Opt in to loading Office-font metric substitutes (Carlito for Calibri,
+   * Caladea for Cambria) from Google Fonts (`fonts.googleapis.com`). Without
+   * these the canvas falls back to system Arial / Helvetica which is
+   * noticeably wider per character, so column layouts diverge from Excel.
+   *
+   * When enabled, end-user IP / User-Agent is sent to Google, which may have
+   * privacy / GDPR implications for your application. Default `false` — host
+   * the substitute webfonts yourself and reference them via `@font-face` in
+   * your application CSS to avoid the third-party request.
+   */
+  useGoogleFonts?: boolean;
+}
+
 export class XlsxWorkbook {
   private worker: Worker;
   private parsedWorkbook: ParsedWorkbook | null = null;
@@ -17,13 +87,24 @@ export class XlsxWorkbook {
     this.worker.postMessage({ type: 'init', wasmUrl });
   }
 
-  async load(source: string | ArrayBuffer): Promise<void> {
+  async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
     const data =
       typeof source === 'string'
         ? await fetch(source).then((r) => r.arrayBuffer())
         : source;
     this.rawData = data;
     this.parsedWorkbook = await this.sendMessage({ type: 'parse', data: data.slice(0) }) as ParsedWorkbook;
+    if (opts.useGoogleFonts) {
+      // Walk every styled font in the workbook and queue Google Fonts
+      // substitutes for any Office faces (Calibri → Carlito, Cambria →
+      // Caladea). Documents that use only system fonts produce zero
+      // network requests.
+      const names = new Set<string>();
+      for (const f of this.parsedWorkbook.styles?.fonts ?? []) {
+        if (f.name) names.add(f.name);
+      }
+      await preloadOfficeFonts(names);
+    }
   }
 
   get sheetNames(): string[] {
