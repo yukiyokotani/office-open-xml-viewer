@@ -41,6 +41,91 @@ export interface ChartSeries {
    * chart-level `<c:dLbls><c:numFmt>` is not set. null = no series-level code.
    */
   valFormatCode?: string | null;
+  /**
+   * `<c:marker><c:symbol val>` (ECMA-376 §21.2.2.32) — point marker shape.
+   * One of "circle"|"square"|"diamond"|"triangle"|"x"|"plus"|"star"|
+   * "dot"|"dash"|"picture"|"none". null = renderer default (circle when
+   * showMarker is true).
+   */
+  markerSymbol?: string | null;
+  /**
+   * `<c:marker><c:size val>` (ECMA-376 §21.2.2.34) — marker side length in
+   * points. null = renderer default (~5 pt).
+   */
+  markerSize?: number | null;
+  /** `<c:marker><c:spPr><a:solidFill>` resolved hex (no `#`). */
+  markerFill?: string | null;
+  /** `<c:marker><c:spPr><a:ln><a:solidFill>` resolved hex (no `#`). */
+  markerLine?: string | null;
+  /**
+   * Per-data-point overrides (ECMA-376 §21.2.2.39 `<c:dPt>`). Keyed by point
+   * index. Any unset field falls back to the series-level value.
+   */
+  dataPointOverrides?: ChartDataPointOverride[] | null;
+  /**
+   * Per-data-point custom labels (ECMA-376 §21.2.2.45 `<c:dLbl idx>`).
+   * `text` is the resolved plain string — `<a:fld type="CELLRANGE">`
+   * placeholders are already substituted at parse time. An empty string
+   * means the point's label was deleted with `<c:delete val="1"/>` and
+   * the renderer should skip it.
+   */
+  dataLabelOverrides?: ChartDataLabelOverride[] | null;
+  /**
+   * Series-level `<c:dLbls>` block (showVal / showSerName / position).
+   * Applied to every point lacking its own `<c:dLbl>` override.
+   */
+  seriesDataLabels?: ChartSeriesDataLabels | null;
+  /**
+   * `<c:errBars>` per-series error bars (ECMA-376 §21.2.2.20). Up to two
+   * (one per direction). Plus / minus deltas are absolute per-point values
+   * regardless of `errValType`.
+   */
+  errBars?: ChartErrBars[] | null;
+}
+
+export interface ChartDataPointOverride {
+  idx: number;
+  /** Resolved fill hex (no `#`). */
+  color?: string;
+  markerSymbol?: string;
+  markerSize?: number;
+  markerFill?: string;
+  markerLine?: string;
+}
+
+export interface ChartDataLabelOverride {
+  idx: number;
+  /** Empty string = label deleted (skip drawing). */
+  text: string;
+  /** "l"|"r"|"t"|"b"|"ctr"|"outEnd"|"bestFit". undefined = inherit. */
+  position?: string;
+  fontColor?: string;
+  fontSizeHpt?: number;
+}
+
+export interface ChartSeriesDataLabels {
+  showVal: boolean;
+  showCatName: boolean;
+  showSerName: boolean;
+  showPercent: boolean;
+  position?: string;
+  fontColor?: string;
+  formatCode?: string;
+}
+
+export interface ChartErrBars {
+  /** "x" | "y". */
+  dir: string;
+  /** "plus" | "minus" | "both". */
+  barType: string;
+  plus: (number | null)[];
+  minus: (number | null)[];
+  noEndCap: boolean;
+  /** Resolved hex (no `#`). */
+  color?: string;
+  lineWidthEmu?: number;
+  /** "solid"|"dash"|"dot"|"dashDot"|... */
+  dash?: string;
 }
 
 /**
@@ -139,6 +224,45 @@ export interface ChartModel {
    * series is used.
    */
   dataLabelFormatCode?: string | null;
+  /**
+   * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
+   * the renderer formats X-axis tick labels with this code (e.g. dates).
+   */
+  catAxisFormatCode?: string | null;
+  /**
+   * `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. Used by
+   * scatter / bubble charts whose X axis is numeric. null = derive from
+   * data extents.
+   */
+  catAxisMin?: number | null;
+  catAxisMax?: number | null;
+  /**
+   * `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27) absolute
+   * placement for the chart title.
+   */
+  titleManualLayout?: ChartManualLayout | null;
+  /**
+   * `<c:plotArea><c:layout><c:manualLayout>` absolute placement for the
+   * plot area. `layoutTarget="inner"` (default) describes the inner plot
+   * rect (no axes / labels); `outer` describes the outer rect (axes
+   * included).
+   */
+  plotAreaManualLayout?: ChartManualLayout | null;
+}
+
+/**
+ * `<c:manualLayout>` block. Fractions are of the chart-space rect.
+ * `xMode`/`yMode`: "edge" = absolute fraction from top-left, "factor" =
+ * fraction offset from default position.
+ */
+export interface ChartManualLayout {
+  xMode: string;
+  yMode: string;
+  layoutTarget?: string;
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
 }
 
 export interface LegendManualLayout {

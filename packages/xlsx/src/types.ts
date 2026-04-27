@@ -172,6 +172,69 @@ export interface XlsxChartSeries {
   valFormatCode?: string | null;
   /** `<c:ser><c:order>` — stacking/legend display order (§21.2.2.28). */
   order?: number;
+  /** `<c:marker><c:symbol val>` — point marker shape (ECMA-376 §21.2.2.32). */
+  markerSymbol?: string;
+  /** `<c:marker><c:size val>` — point marker side length in pt (§21.2.2.34). */
+  markerSize?: number;
+  /** `<c:marker><c:spPr>` resolved fill (no `#`). */
+  markerFill?: string;
+  /** `<c:marker><c:spPr><a:ln>` resolved stroke (no `#`). */
+  markerLine?: string;
+  /** `<c:dPt>` per-data-point overrides (§21.2.2.39). */
+  dataPointOverrides?: DataPointOverride[];
+  /** Per-idx custom data labels (`<c:dLbl idx>`, §21.2.2.45). Custom rich
+   *  text is flattened to plain string at parse time; CELLRANGE field
+   *  placeholders are resolved against the series' `<c15:datalabelsRange>`
+   *  cache. */
+  dataLabelOverrides?: DataLabelOverride[];
+  /** Series-level `<c:dLbls>` defaults applied to every point lacking its
+   *  own override. */
+  seriesDataLabels?: SeriesDataLabels;
+  /** `<c:errBars>` (§21.2.2.20). At parse time, plus / minus deltas are
+   *  resolved into absolute per-point values regardless of `errValType`. */
+  errBars?: ErrBars[];
+}
+
+export interface DataPointOverride {
+  idx: number;
+  color?: string;
+  markerSymbol?: string;
+  markerSize?: number;
+  markerFill?: string;
+  markerLine?: string;
+}
+
+export interface DataLabelOverride {
+  idx: number;
+  text: string;
+  /** "l"|"r"|"t"|"b"|"ctr"|"outEnd"|"bestFit" or undefined → inherit. */
+  position?: string;
+  fontColor?: string;
+  fontSizeHpt?: number;
+}
+
+export interface SeriesDataLabels {
+  showVal: boolean;
+  showCatName: boolean;
+  showSerName: boolean;
+  showPercent: boolean;
+  position?: string;
+  fontColor?: string;
+  formatCode?: string;
+}
+
+export interface ErrBars {
+  /** "x" | "y". */
+  dir: string;
+  /** "plus" | "minus" | "both". */
+  barType: string;
+  plus: (number | null)[];
+  minus: (number | null)[];
+  noEndCap: boolean;
+  /** Resolved RGB hex (no `#`). */
+  color?: string;
+  lineWidthEmu?: number;
+  dash?: string;
 }
 
 /**
@@ -239,6 +302,29 @@ export interface ChartData {
   /** `<c:dLbls><c:numFmt@formatCode>` — chart-level override for data label
    *  number format (§21.2.2.35). */
   dataLabelFormatCode?: string | null;
+  /** `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). */
+  catAxisFormatCode?: string;
+  /** `<c:catAx><c:scaling><c:min/max>` — explicit X-axis range. */
+  catAxisMin?: number;
+  catAxisMax?: number;
+  /** `<c:valAx><c:scaling><c:min/max>` — explicit Y-axis range. */
+  valAxisMin?: number;
+  valAxisMax?: number;
+  /** `<c:title><c:layout><c:manualLayout>` (§21.2.2.27) absolute placement. */
+  titleManualLayout?: ManualLayout;
+  /** `<c:plotArea><c:layout><c:manualLayout>` — `layoutTarget=inner` /
+   *  `outer` controls whether axes are inside the rect or outside. */
+  plotAreaManualLayout?: ManualLayout;
+}
+
+export interface ManualLayout {
+  xMode: string;
+  yMode: string;
+  layoutTarget?: string;
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
 }
 
 export interface LegendManualLayout {
