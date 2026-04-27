@@ -498,6 +498,18 @@ pub struct ChartData {
     /// `<c:valAx><c:txPr>...defRPr@b>` — bold flag for Y-axis tick labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_font_bold: Option<bool>,
+    /// `<c:catAx><c:majorTickMark val>` (ECMA-376 §21.2.2.49) — one of
+    /// `none` / `out` / `in` / `cross`. Default `out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_major_tick_mark: Option<String>,
+    /// `<c:catAx><c:minorTickMark val>` — same vocabulary. Default `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_minor_tick_mark: Option<String>,
+    /// `<c:valAx><c:majorTickMark val>` and `<c:minorTickMark val>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_major_tick_mark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_minor_tick_mark: Option<String>,
     /// `<c:catAx><c:spPr><a:ln>` resolved color (hex without `#`) and
     /// width in EMU. Renders the X-axis line itself; default light gray
     /// at 1 px when absent.
@@ -3452,6 +3464,10 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut cat_axis_line_width_emu: Option<u32> = None;
     let mut val_axis_line_color: Option<String> = None;
     let mut val_axis_line_width_emu: Option<u32> = None;
+    let mut cat_axis_major_tick_mark: Option<String> = None;
+    let mut cat_axis_minor_tick_mark: Option<String> = None;
+    let mut val_axis_major_tick_mark: Option<String> = None;
+    let mut val_axis_minor_tick_mark: Option<String> = None;
     let mut cat_axis_crosses: Option<String> = None;
     let mut cat_axis_crosses_at: Option<f64> = None;
     let mut val_axis_crosses: Option<String> = None;
@@ -3500,6 +3516,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     if cat_axis_line_color.is_none() { cat_axis_line_color = col; }
                     if cat_axis_line_width_emu.is_none() { cat_axis_line_width_emu = w; }
                 }
+                if cat_axis_major_tick_mark.is_none() {
+                    cat_axis_major_tick_mark = extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                }
+                if cat_axis_minor_tick_mark.is_none() {
+                    cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, c_ns, "minorTickMark");
+                }
                 if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
                     if cat_axis_min.is_none() { cat_axis_min = mn; }
                     if cat_axis_max.is_none() { cat_axis_max = mx; }
@@ -3539,6 +3561,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                         if cat_axis_line_color.is_none() { cat_axis_line_color = col; }
                         if cat_axis_line_width_emu.is_none() { cat_axis_line_width_emu = w; }
                     }
+                    if cat_axis_major_tick_mark.is_none() {
+                        cat_axis_major_tick_mark = extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                    }
+                    if cat_axis_minor_tick_mark.is_none() {
+                        cat_axis_minor_tick_mark = extract_axis_tick_mark(&child, c_ns, "minorTickMark");
+                    }
                     let (cr, cra) = extract_axis_crosses(&child, c_ns);
                     if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
                     if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
@@ -3567,6 +3595,12 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                         let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
                         if val_axis_line_color.is_none() { val_axis_line_color = col; }
                         if val_axis_line_width_emu.is_none() { val_axis_line_width_emu = w; }
+                    }
+                    if val_axis_major_tick_mark.is_none() {
+                        val_axis_major_tick_mark = extract_axis_tick_mark(&child, c_ns, "majorTickMark");
+                    }
+                    if val_axis_minor_tick_mark.is_none() {
+                        val_axis_minor_tick_mark = extract_axis_tick_mark(&child, c_ns, "minorTickMark");
                     }
                     if axis_is_deleted(&child, c_ns) { val_axis_hidden = true; }
                 }
@@ -3761,6 +3795,10 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         cat_axis_line_width_emu,
         val_axis_line_color,
         val_axis_line_width_emu,
+        cat_axis_major_tick_mark,
+        cat_axis_minor_tick_mark,
+        val_axis_major_tick_mark,
+        val_axis_minor_tick_mark,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
         val_axis_format_code,
@@ -3790,6 +3828,15 @@ fn extract_axis_format_code(axis_node: &roxmltree::Node, c_ns: &str) -> Option<S
         .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
         .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
         .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// `<c:catAx|valAx><c:majorTickMark val>` / `<c:minorTickMark val>` —
+/// `none` / `out` / `in` / `cross` (ECMA-376 §21.2.2.49 ST_TickMark).
+fn extract_axis_tick_mark(axis_node: &roxmltree::Node, c_ns: &str, name: &str) -> Option<String> {
+    axis_node.children()
+        .find(|n| n.tag_name().name() == name && n.tag_name().namespace() == Some(c_ns))
+        .and_then(|n| n.attribute("val"))
+        .map(|s| s.to_string())
 }
 
 /// `<c:catAx|valAx><c:spPr><a:ln>` — resolved color (no `#`) and width

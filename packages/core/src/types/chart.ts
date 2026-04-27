@@ -181,6 +181,9 @@ export interface ChartModel {
   valAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
   /** `<c:catAx><c:majorTickMark>`. */
   catAxisMajorTickMark: 'cross' | 'out' | 'in' | 'none' | string;
+  /** `<c:valAx | catAx><c:minorTickMark>`. ECMA-376 default is "none". */
+  valAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
+  catAxisMinorTickMark?: 'cross' | 'out' | 'in' | 'none' | string | null;
   /** Title font size in OOXML hundredths of a point (1600 = 16pt). null = default. */
   titleFontSizeHpt: number | null;
   /** Title font color as a hex string without '#' (e.g. "1B4332"). null = default. */

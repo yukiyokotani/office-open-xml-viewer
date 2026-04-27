@@ -449,16 +449,23 @@ function drawLegendForLayout(
 
 function drawAxisTick(
   ctx: CanvasRenderingContext2D,
-  mode: string,
+  mode: string | null | undefined,
   axis: 'val' | 'cat',
   anchorXOrY: number,
   perpendicular: number,
+  color?: string,
+  lineWidth?: number,
 ): void {
   if (mode === 'none' || !mode) return;
-  const len = 4;
-  const prev = ctx.strokeStyle;
-  ctx.strokeStyle = '#888';
-  ctx.lineWidth = 1;
+  // Tick length scales mildly with the axis line weight so a thick
+  // ruler-style axis (e.g. Vertex42 Gantt 5 pt) produces ticks that
+  // are visible without being huge.
+  const baseLen = 4;
+  const len = lineWidth ? Math.max(baseLen, lineWidth + 2) : baseLen;
+  const prevS = ctx.strokeStyle;
+  const prevW = ctx.lineWidth;
+  ctx.strokeStyle = color ?? '#888';
+  ctx.lineWidth = lineWidth ?? 1;
   ctx.beginPath();
   if (axis === 'val') {
     // val axis is vertical (x = anchor, y varies). Ticks extend horizontally.
@@ -478,7 +485,8 @@ function drawAxisTick(
     ctx.lineTo(xc, y0 + inner);
   }
   ctx.stroke();
-  ctx.strokeStyle = prev;
+  ctx.strokeStyle = prevS;
+  ctx.lineWidth = prevW;
 }
 
 function chartTitleFontPx(chart: ChartModel, h: number, ptToPx: number): number {
@@ -1414,7 +1422,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
 
-  // Y-axis gridlines + labels.
+  // Y-axis gridlines + labels + major tick marks.
   if (!chart.valAxisHidden) {
     const yTickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.valAxisFontBold ? 'bold ' : ''}${yTickFontPx}px sans-serif`;
@@ -1427,6 +1435,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       ctx.beginPath(); ctx.moveTo(px0, gy); ctx.lineTo(px0 + pw, gy); ctx.stroke();
       ctx.fillStyle = '#555'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       ctx.fillText(formatChartValWithCode(v, chart.valAxisFormatCode), px0 - 4, gy);
+      const yAxisLineColor = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : undefined;
+      const yAxisLineWidth = chart.valAxisLineWidthEmu
+        ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700) : undefined;
+      drawAxisTick(ctx, chart.valAxisMajorTickMark, 'val', px0, gy, yAxisLineColor, yAxisLineWidth);
     }
   }
 
@@ -1476,7 +1488,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   // X-axis tick labels (catAxis), formatted via catAxisFormatCode (typically
   // a date code like "m/d/yyyy"). Skipped when catAxisHidden. Drawn just
   // below the axis line wherever it sits (axis crossing in the middle of
-  // the plot still anchors the labels to the line itself).
+  // the plot still anchors the labels to the line itself). Major tick
+  // marks also get drawn here so `<c:majorTickMark val="cross">` produces
+  // the crossing ruler look that templates like the Vertex42 timeline
+  // depend on.
   if (!chart.catAxisHidden) {
     const tickFontPx = Math.max(8, Math.min(11, ph / 20));
     ctx.font = `${chart.catAxisFontBold ? 'bold ' : ''}${tickFontPx}px sans-serif`;
@@ -1487,6 +1502,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
       const v = xMin + si * xStep; if (v > xMax + xStep * 0.01) break;
       const gx = toX(v);
       ctx.fillText(formatChartValWithCode(v, chart.catAxisFormatCode), gx, xAxisY + 4);
+      const xAxisLineColor = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : undefined;
+      const xAxisLineWidth = chart.catAxisLineWidthEmu
+        ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700) : undefined;
+      drawAxisTick(ctx, chart.catAxisMajorTickMark, 'cat', xAxisY, gx, xAxisLineColor, xAxisLineWidth);
     }
   }
 

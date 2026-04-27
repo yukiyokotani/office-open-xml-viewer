@@ -3680,8 +3680,14 @@ function adaptChartData(chart: ChartData): ChartModel {
     showLegend: chart.showLegend ?? false,
     legendPos: chart.legendPos ?? null,
     catAxisCrossBetween: 'between',
-    valAxisMajorTickMark: 'cross',
-    catAxisMajorTickMark: 'cross',
+    // Default `out` per ECMA-376 §21.2.2.49 ST_TickMark when the spec
+    // didn't say. (We previously hard-coded `cross` which made every
+    // chart pretend it had crossing ticks even when the file said
+    // none / out.)
+    valAxisMajorTickMark: chart.valAxisMajorTickMark ?? 'out',
+    catAxisMajorTickMark: chart.catAxisMajorTickMark ?? 'out',
+    valAxisMinorTickMark: chart.valAxisMinorTickMark ?? null,
+    catAxisMinorTickMark: chart.catAxisMinorTickMark ?? null,
     titleFontSizeHpt: chart.titleFontSizeHpt ?? null,
     titleFontColor: chart.titleFontColor ?? null,
     titleFontFace: chart.titleFontFace ?? null,
