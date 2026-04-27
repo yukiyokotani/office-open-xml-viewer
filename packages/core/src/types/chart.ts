@@ -248,6 +248,12 @@ export interface ChartModel {
   catAxisCrossesAt?: number | null;
   valAxisCrosses?: string | null;
   valAxisCrossesAt?: number | null;
+  /** Axis line color (hex without `#`) and width in EMU from
+   *  `<c:catAx|valAx><c:spPr><a:ln>`. */
+  catAxisLineColor?: string | null;
+  catAxisLineWidthEmu?: number | null;
+  valAxisLineColor?: string | null;
+  valAxisLineWidthEmu?: number | null;
   /**
    * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
    * the renderer formats X-axis tick labels with this code (e.g. dates).

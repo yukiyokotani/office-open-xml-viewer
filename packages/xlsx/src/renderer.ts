@@ -3638,6 +3638,10 @@ function adaptChartData(chart: ChartData): ChartModel {
     catAxisCrossesAt: chart.catAxisCrossesAt ?? null,
     valAxisCrosses: chart.valAxisCrosses ?? null,
     valAxisCrossesAt: chart.valAxisCrossesAt ?? null,
+    catAxisLineColor: chart.catAxisLineColor ?? null,
+    catAxisLineWidthEmu: chart.catAxisLineWidthEmu ?? null,
+    valAxisLineColor: chart.valAxisLineColor ?? null,
+    valAxisLineWidthEmu: chart.valAxisLineWidthEmu ?? null,
     series: chart.series.map(s => ({
       name: s.name,
       color: s.color ?? null,

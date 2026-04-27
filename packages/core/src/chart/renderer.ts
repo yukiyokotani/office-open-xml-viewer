@@ -1399,6 +1399,17 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   if (chart.valMax != null) yMax = chart.valMax;
   if (chart.catAxisMin != null) xMin = chart.catAxisMin;
   if (chart.catAxisMax != null) xMax = chart.catAxisMax;
+  // Excel snaps auto-derived axis bounds outward to a multiple of the
+  // step so both ends land on round numbers (e.g. dates jump to a date
+  // before the first task and after the last). When the spec set min /
+  // max explicitly we leave them alone.
+  if (chart.catAxisMin == null || chart.catAxisMax == null) {
+    const step = niceStep(xMax - xMin);
+    if (step > 0) {
+      if (chart.catAxisMin == null) xMin = Math.floor(xMin / step) * step;
+      if (chart.catAxisMax == null) xMax = Math.ceil(xMax / step) * step;
+    }
+  }
 
   const toX = (v: number) => px0 + ((v - xMin) / (xMax - xMin)) * pw;
   const toY = (v: number) => py0 + ph - ((v - yMin) / (yMax - yMin)) * ph;
@@ -1442,11 +1453,24 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
 
   // X-axis line (always drawn — the timeline ruler in Gantt-style scatter
   // charts depends on this line's stroke). Tick labels are skipped when the
-  // category axis is hidden via `<c:delete val="1"/>`.
-  ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+  // category axis is hidden via `<c:delete val="1"/>`. Color and weight come
+  // from `<c:catAx><c:spPr><a:ln>` when present; default otherwise.
+  ctx.save();
+  ctx.strokeStyle = chart.catAxisLineColor ? `#${chart.catAxisLineColor}` : '#888';
+  ctx.lineWidth = chart.catAxisLineWidthEmu
+    ? Math.max(0.5, chart.catAxisLineWidthEmu / 12700)
+    : 1;
+  ctx.lineCap = 'butt';
   ctx.beginPath(); ctx.moveTo(px0, xAxisY); ctx.lineTo(px0 + pw, xAxisY); ctx.stroke();
+  ctx.restore();
   if (!chart.valAxisHidden) {
+    ctx.save();
+    ctx.strokeStyle = chart.valAxisLineColor ? `#${chart.valAxisLineColor}` : '#888';
+    ctx.lineWidth = chart.valAxisLineWidthEmu
+      ? Math.max(0.5, chart.valAxisLineWidthEmu / 12700)
+      : 1;
     ctx.beginPath(); ctx.moveTo(px0, py0); ctx.lineTo(px0, py0 + ph); ctx.stroke();
+    ctx.restore();
   }
 
   // X-axis tick labels (catAxis), formatted via catAxisFormatCode (typically

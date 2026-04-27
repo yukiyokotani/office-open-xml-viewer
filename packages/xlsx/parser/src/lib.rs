@@ -498,6 +498,17 @@ pub struct ChartData {
     /// `<c:valAx><c:txPr>...defRPr@b>` — bold flag for Y-axis tick labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub val_axis_font_bold: Option<bool>,
+    /// `<c:catAx><c:spPr><a:ln>` resolved color (hex without `#`) and
+    /// width in EMU. Renders the X-axis line itself; default light gray
+    /// at 1 px when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_line_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cat_axis_line_width_emu: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_line_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val_axis_line_width_emu: Option<u32>,
     /// `<c:catAx><c:crosses val>` — where the X axis sits along the Y axis
     /// (`autoZero` = at value 0, `min` = at the data min, `max` = at the
     /// data max). Default `autoZero`.
@@ -3437,6 +3448,10 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut val_axis_max: Option<f64> = None;
     let mut cat_axis_font_bold: Option<bool> = None;
     let mut val_axis_font_bold: Option<bool> = None;
+    let mut cat_axis_line_color: Option<String> = None;
+    let mut cat_axis_line_width_emu: Option<u32> = None;
+    let mut val_axis_line_color: Option<String> = None;
+    let mut val_axis_line_width_emu: Option<u32> = None;
     let mut cat_axis_crosses: Option<String> = None;
     let mut cat_axis_crosses_at: Option<f64> = None;
     let mut val_axis_crosses: Option<String> = None;
@@ -3480,6 +3495,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                 if cat_axis_font_bold.is_none() {
                     cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
                 }
+                if cat_axis_line_color.is_none() || cat_axis_line_width_emu.is_none() {
+                    let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                    if cat_axis_line_color.is_none() { cat_axis_line_color = col; }
+                    if cat_axis_line_width_emu.is_none() { cat_axis_line_width_emu = w; }
+                }
                 if let Some((mn, mx)) = extract_axis_scaling(&child, c_ns) {
                     if cat_axis_min.is_none() { cat_axis_min = mn; }
                     if cat_axis_max.is_none() { cat_axis_max = mx; }
@@ -3514,6 +3534,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     if cat_axis_font_bold.is_none() {
                         cat_axis_font_bold = extract_axis_tick_label_bold(&child, c_ns);
                     }
+                    if cat_axis_line_color.is_none() || cat_axis_line_width_emu.is_none() {
+                        let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                        if cat_axis_line_color.is_none() { cat_axis_line_color = col; }
+                        if cat_axis_line_width_emu.is_none() { cat_axis_line_width_emu = w; }
+                    }
                     let (cr, cra) = extract_axis_crosses(&child, c_ns);
                     if cat_axis_crosses.is_none() { cat_axis_crosses = cr; }
                     if cat_axis_crosses_at.is_none() { cat_axis_crosses_at = cra; }
@@ -3538,6 +3563,11 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                     let (cr, cra) = extract_axis_crosses(&child, c_ns);
                     if val_axis_crosses.is_none() { val_axis_crosses = cr; }
                     if val_axis_crosses_at.is_none() { val_axis_crosses_at = cra; }
+                    if val_axis_line_color.is_none() || val_axis_line_width_emu.is_none() {
+                        let (col, w) = extract_axis_line_style(&child, c_ns, theme_colors);
+                        if val_axis_line_color.is_none() { val_axis_line_color = col; }
+                        if val_axis_line_width_emu.is_none() { val_axis_line_width_emu = w; }
+                    }
                     if axis_is_deleted(&child, c_ns) { val_axis_hidden = true; }
                 }
                 continue;
@@ -3727,6 +3757,10 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         cat_axis_crosses_at,
         val_axis_crosses,
         val_axis_crosses_at,
+        cat_axis_line_color,
+        cat_axis_line_width_emu,
+        val_axis_line_color,
+        val_axis_line_width_emu,
         cat_axis_font_size_hpt,
         val_axis_font_size_hpt,
         val_axis_format_code,
@@ -3756,6 +3790,22 @@ fn extract_axis_format_code(axis_node: &roxmltree::Node, c_ns: &str) -> Option<S
         .find(|n| n.tag_name().name() == "numFmt" && n.tag_name().namespace() == Some(c_ns))
         .and_then(|n| n.attribute("formatCode").map(|s| s.to_string()))
         .filter(|s| !s.is_empty() && s != "General")
+}
+
+/// `<c:catAx|valAx><c:spPr><a:ln>` — resolved color (no `#`) and width
+/// (EMU) for the axis line itself. None when not set.
+fn extract_axis_line_style(
+    axis_node: &roxmltree::Node,
+    c_ns: &str,
+    theme_colors: &[String],
+) -> (Option<String>, Option<u32>) {
+    let Some(sp_pr) = axis_node.children()
+        .find(|n| n.tag_name().name() == "spPr" && n.tag_name().namespace() == Some(c_ns))
+    else { return (None, None); };
+    let Some(ln) = sp_pr.children().find(|n| n.tag_name().name() == "ln") else { return (None, None); };
+    let width = ln.attribute("w").and_then(|v| v.parse::<u32>().ok());
+    let color = extract_solid_fill_in_drawingml(&ln, theme_colors);
+    (color, width)
 }
 
 /// `<c:catAx|valAx><c:txPr>...defRPr@b>` — bold flag for axis tick labels.
