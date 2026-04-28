@@ -2333,6 +2333,34 @@ function renderQuadrant(
     const ch = rowHeights[ri];
     if (cy + ch <= clipY || cy >= clipY + clipH) continue;
 
+    // Pre-compute centerContinuous ranges in this row. ECMA-376 §18.18.40:
+    // a contiguous run of cells whose alignment is `centerContinuous` is
+    // treated as a single visual span — Excel hides the default gridlines
+    // inside the run so the centered text (or empty span) reads as one.
+    // Detect runs of length ≥ 2 (regardless of whether they contain text)
+    // and mark the internal right edges for suppression.
+    const suppressRightGridCol = new Set<number>();
+    let runStart = -1;
+    for (let ci = 0; ci <= numCols; ci++) {
+      let isCC = false;
+      if (ci < numCols) {
+        const ckey = `${rowIndex}:${startCol + ci}`;
+        if (!mergeSkipSet.has(ckey) && !mergeAnchorMap.has(ckey)) {
+          const c = cellMap.get(ckey);
+          const cXf = resolveXf(styles, c?.styleIndex ?? 0).xf;
+          isCC = cXf.alignH === 'centerContinuous';
+        }
+      }
+      if (isCC) {
+        if (runStart < 0) runStart = ci;
+      } else {
+        if (runStart >= 0 && ci - runStart >= 2) {
+          for (let k = runStart; k < ci - 1; k++) suppressRightGridCol.add(k);
+        }
+        runStart = -1;
+      }
+    }
+
     for (let ci = 0; ci < numCols; ci++) {
       const colIndex = startCol + ci;
       const cx = originX + colXs[ci];
@@ -2425,8 +2453,10 @@ function renderQuadrant(
         ctx.strokeStyle = '#d0d0d0';
         ctx.lineWidth = 0.5;
         ctx.beginPath();
-        ctx.moveTo(cx + cellW + hp, cy);          // right edge
-        ctx.lineTo(cx + cellW + hp, cy + cellH);
+        if (!suppressRightGridCol.has(ci)) {
+          ctx.moveTo(cx + cellW + hp, cy);        // right edge
+          ctx.lineTo(cx + cellW + hp, cy + cellH);
+        }
         ctx.moveTo(cx, cy + cellH + hp);           // bottom edge
         ctx.lineTo(cx + cellW, cy + cellH + hp);
         if (ri === 0) {                            // top edge for first row
