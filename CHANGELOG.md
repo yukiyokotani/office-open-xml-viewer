@@ -4,6 +4,12 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.21.1 — 2026-04-29
+
+Patch release. Re-capture `docs/images/xlsx.png` at the correct landscape
+dimensions (1246×735) — the 0.21.0 update accidentally shipped a
+narrow 668×1200 portrait crop.
+
 ## 0.21.0 — 2026-04-29
 
 Patch-level release. XLSX overflow rendering fixes and refreshed project icon.

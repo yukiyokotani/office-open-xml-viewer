@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-docx",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "DOCX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",
