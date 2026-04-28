@@ -4,6 +4,24 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.21.0 — 2026-04-29
+
+Patch-level release. XLSX overflow rendering fixes and refreshed project icon.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **`centerContinuous` overflow**: when text was wider than the
+    selection range, it was clipped at the range boundary. Excel keeps
+    overflowing the text symmetrically into adjacent empty cells, so the
+    renderer now extends the draw rect using the same logic as
+    `center` alignment (PR #148, ECMA-376 §18.18.40).
+  - **Neighbour fill no longer overpaints overflow text**: cell text is
+    drawn in a deferred second pass after every cell's background, so
+    e.g. a left-aligned overflow stays visible on top of an adjacent
+    cell with a non-default fill — matching Excel's z-order (PR #148).
+- **Assets**:
+  - Refreshed `docs/images/icon.png` and the VS Code extension icon
+    (PR #149).
+
 ## 0.20.0 — 2026-04-28
 
 Minor release. Built-in PowerPoint table styles and additional XLSX cell alignments.

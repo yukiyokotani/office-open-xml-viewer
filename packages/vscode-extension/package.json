@@ -2,7 +2,7 @@
   "name": "office-open-xml-viewer",
   "displayName": "Office Viewer — DOCX, XLSX, PPTX",
   "description": "High-fidelity viewer for Office files (.docx / .xlsx / .pptx). Local-only — files never leave your machine. Powered by a Rust/WASM parser and Canvas renderer.",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "publisher": "silurus",
   "license": "MIT",
   "icon": "icon.png",
