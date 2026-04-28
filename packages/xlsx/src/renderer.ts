@@ -2336,10 +2336,12 @@ function renderQuadrant(
     // Pre-compute centerContinuous ranges in this row. ECMA-376 §18.18.40:
     // a contiguous run of cells whose alignment is `centerContinuous` is
     // treated as a single visual span — Excel hides the default gridlines
-    // inside the run so the centered text (or empty span) reads as one.
+    // *and* the explicit cell borders inside the run, so the run reads as
+    // one merged-looking span with only the outer perimeter visible.
     // Detect runs of length ≥ 2 (regardless of whether they contain text)
-    // and mark the internal right edges for suppression.
+    // and mark the internal vertical edges for suppression.
     const suppressRightGridCol = new Set<number>();
+    const suppressLeftGridCol = new Set<number>();
     let runStart = -1;
     for (let ci = 0; ci <= numCols; ci++) {
       let isCC = false;
@@ -2356,6 +2358,7 @@ function renderQuadrant(
       } else {
         if (runStart >= 0 && ci - runStart >= 2) {
           for (let k = runStart; k < ci - 1; k++) suppressRightGridCol.add(k);
+          for (let k = runStart + 1; k < ci; k++) suppressLeftGridCol.add(k);
         }
         runStart = -1;
       }
@@ -2476,7 +2479,17 @@ function renderQuadrant(
       const baseBorder = mergeInfo
         ? resolveMergeBorder(border, rowIndex, colIndex, mergeInfo.right, mergeInfo.bottom, cellMap, styles)
         : border;
-      renderBorder(ctx, mergeBorders(baseBorder, cf.border), cx, cy, cellW, cellH);
+      let mergedBorder = mergeBorders(baseBorder, cf.border);
+      // centerContinuous: hide internal vertical borders so the run reads as
+      // one visual span (matches Excel — see precompute block above).
+      if (suppressRightGridCol.has(ci) || suppressLeftGridCol.has(ci)) {
+        mergedBorder = {
+          ...mergedBorder,
+          left: suppressLeftGridCol.has(ci) ? null : mergedBorder.left,
+          right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
+        };
+      }
+      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
 
       // Excel Table style overlay: thin horizontal rules between rows and a
       // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
