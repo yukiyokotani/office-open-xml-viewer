@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.21.2 — 2026-04-29
+
+Patch release. XLSX `centerContinuous` border rendering fixes.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **Default gridlines hidden inside `centerContinuous` runs**: a
+    contiguous run of cells with `horizontal="centerContinuous"` is now
+    rendered as a single visual span — internal default gridlines are
+    suppressed so the centered text reads as one (PR #152, ECMA-376
+    §18.18.40).
+  - **Explicit cell borders also hidden inside `centerContinuous`
+    runs**: matching Excel's behavior, internal `left`/`right` borders
+    of cells inside a centerContinuous run are masked, leaving only the
+    outer perimeter visible — even when the run cells carry an
+    explicit thin/medium/thick box border (PR #153).
+
 ## 0.21.1 — 2026-04-29
 
 Patch release. Re-capture `docs/images/xlsx.png` at the correct landscape
