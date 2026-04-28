@@ -2220,6 +2220,12 @@ function renderQuadrant(
   ctx.rect(clipX, clipY, clipW, clipH);
   ctx.clip();
 
+  // Deferred text drawing. Excel renders cell text on top of *all* cell
+  // backgrounds, so a left-aligned overflow into an adjacent empty cell with
+  // a white fill stays visible. If we drew fill+text per cell in one pass,
+  // the next cell's fill would overpaint the previous cell's overflow.
+  const textTasks: Array<() => void> = [];
+
   // Pre-pass: merge cells whose anchor lies outside this viewport quadrant but whose
   // span overlaps it (e.g. scrolled past the anchor row/col, or the anchor is in a
   // frozen quadrant while we are rendering the scrollable quadrant).
@@ -2491,6 +2497,7 @@ function renderQuadrant(
       const text = formatCellValue(cell, styles, cf.numFmt);
       if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
 
+      textTasks.push(() => {
       const tableBold = !!(tableStyle && (tableStyle.isHeader || tableStyle.isTotals));
       const effectiveBold = font.bold || !!cf.fontBold || tableBold;
       const effectiveItalic = font.italic || !!cf.fontItalic;
@@ -2534,6 +2541,7 @@ function renderQuadrant(
       // centerContinuous neighbours so we know how wide to center over.
       let centerContinuousW = cellW;
       let centerContinuousX = cx;
+      let centerContinuousLastCi = ci;
       if (alignH === 'centerContinuous' && !mergeInfo) {
         for (let oci = ci + 1; oci < numCols; oci++) {
           const adjKey = `${rowIndex}:${startCol + oci}`;
@@ -2544,6 +2552,7 @@ function renderQuadrant(
           const adjXf = resolveXf(styles, adjStyleIndex).xf;
           if (adjXf.alignH !== 'centerContinuous') break;
           centerContinuousW += colWidths[oci];
+          centerContinuousLastCi = oci;
         }
       }
 
@@ -2553,24 +2562,27 @@ function renderQuadrant(
       // We only extend the clip rect; the text itself is still drawn once.
       // Stops at merge-cell boundaries, non-empty cells, and iconSet-left
       // overrun (since an icon sits inside this cell's left padding).
-      let drawX = cx;
-      let drawW = cellW;
+      let drawX = alignH === 'centerContinuous' ? centerContinuousX : cx;
+      let drawW = alignH === 'centerContinuous' ? centerContinuousW : cellW;
       // Excel only overflows text into adjacent empty cells; numeric values
       // that don't fit are rendered as "####" (they never spill). Cells
       // containing hard line breaks render multi-line in place, so they don't
-      // overflow either. Skip overflow for centerContinuous — its centering
-      // is across the selection range, handled below.
+      // overflow either. centerContinuous overflows symmetrically across the
+      // selection range — text stays centered on the original range, but the
+      // clip rect extends into adjacent empty cells when the text is wider.
       const hasHardBreak = text.includes('\n');
-      if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak && alignH !== 'centerContinuous') {
+      if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak) {
         const textW = ctx.measureText(text).width;
-        const textPx = textW + leftPad + paddingX;
-        if (textPx > cellW) {
-          const overflow = textPx - cellW;
+        const isCenterCont = alignH === 'centerContinuous';
+        const textPx = isCenterCont ? textW + paddingX * 2 : textW + leftPad + paddingX;
+        const containerW = isCenterCont ? centerContinuousW : cellW;
+        if (textPx > containerW) {
+          const overflow = textPx - containerW;
           let extendRight = 0;
           let extendLeft = 0;
           if (alignH === 'right') {
             extendLeft = overflow;
-          } else if (alignH === 'center') {
+          } else if (alignH === 'center' || isCenterCont) {
             extendLeft = overflow / 2;
             extendRight = overflow / 2;
           } else {
@@ -2578,7 +2590,8 @@ function renderQuadrant(
           }
           if (extendRight > 0) {
             let budget = extendRight;
-            for (let oci = ci + 1; oci < numCols && budget > 0; oci++) {
+            const startOci = isCenterCont ? centerContinuousLastCi + 1 : ci + 1;
+            for (let oci = startOci; oci < numCols && budget > 0; oci++) {
               const adjKey = `${rowIndex}:${startCol + oci}`;
               if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
               const adjCell = cellMap.get(adjKey);
@@ -2642,11 +2655,10 @@ function renderQuadrant(
         textX = cx + cellW / 2;
         textAlign = 'center';
       } else if (alignH === 'centerContinuous') {
+        // Center on the original selection range; drawX/drawW already covers
+        // the range (and any overflow extension into empty neighbours).
         textX = centerContinuousX + centerContinuousW / 2;
         textAlign = 'center';
-        // Expand the draw rect so the clip below covers the whole span.
-        drawX = centerContinuousX;
-        drawW = centerContinuousW;
       } else if (alignH === 'distributed' || (alignH === 'justify' && !xf.wrapText && !hasHardBreak)) {
         // Distribute characters evenly: first hugs left edge, last hugs right.
         textX = cx + paddingX;
@@ -2689,7 +2701,7 @@ function renderQuadrant(
           charY += charH;
         }
         ctx.restore();
-        continue;
+        return;
       }
 
       // Rotated text: translate to cell center, rotate, draw, restore
@@ -2703,7 +2715,7 @@ function renderQuadrant(
         ctx.textBaseline = 'middle';
         ctx.fillText(text, 0, 0);
         ctx.restore();
-        continue;
+        return;
       }
 
       // shrinkToFit: scale context horizontally if text is wider than cell
@@ -2913,8 +2925,11 @@ function renderQuadrant(
       if (text && rc.onTextRun) {
         rc.onTextRun({ text, x: cx, y: cy, width: cellW, height: cellH, row: rowIndex, col: colIndex });
       }
+      });
     }
   }
+
+  for (const task of textTasks) task();
 
   ctx.restore();
 }
