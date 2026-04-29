@@ -62,6 +62,14 @@ export interface Worksheet {
    *  Cross-sheet `<xm:f>` data references are resolved to numeric values at
    *  parse time, and theme + tint colors are flattened to `#RRGGBB`. */
   sparklineGroups?: SparklineGroup[];
+  /** Family name of the workbook's Normal-style font, resolved by the parser
+   *  from `<cellStyleXfs>[0].fontId` → `<fonts>[fontId].name.val`. The
+   *  renderer uses this together with `defaultFontSize` to compute the Max
+   *  Digit Width for column-width pixel conversion (ECMA-376 §18.3.1.13).
+   *  Workbook-wide value, denormalized onto every worksheet. */
+  defaultFontFamily?: string;
+  /** Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`). */
+  defaultFontSize?: number;
 }
 
 export interface SparklineGroup {

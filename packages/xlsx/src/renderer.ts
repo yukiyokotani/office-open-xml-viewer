@@ -17,16 +17,14 @@ import { renderChart, renderSparkline, type ChartModel, type SparklineModel } fr
 // for Cambria.
 const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
-// Max Digit Width of the Normal-style font (Calibri 11 pt at 96 DPI).
-// ECMA-376 §18.3.1.13 uses MDW to convert the column-width character
-// measure into pixels.  Empirical measurement with Canvas2D (Calibri /
-// Carlito 11pt, 96 DPI) yields ≈ 8 px for the widest digit, matching
-// the EMU offsets that Excel 365 writes into <xdr:twoCellAnchor> (e.g.
-// a 12.25-char column stored as 932 657 EMU ≈ 97.9 px → colWidthToPx
-// returns 98 with MDW=8).  The older MDW=7 value came from the
-// traditional GDI metrics; it produced columns that were ≈14 % too
-// narrow, causing anchor colOff values to overflow the rendered column.
-const MDW = 8;
+// Fallback Max Digit Width of the Normal-style font when the workbook's
+// default font isn't known. Calibri 11 pt at 96 DPI ≈ 8 px (Canvas2D
+// measurement), matching the EMU offsets Excel 365 writes into
+// <xdr:twoCellAnchor>. ECMA-376 §18.3.1.13 defines MDW as the maximum
+// rendered width among the digits 0-9 in the workbook's Normal-style font,
+// so the spec-correct value depends on which font and point size that style
+// resolves to (e.g. Meiryo UI 10 pt yields MDW ≈ 6 px).
+const MDW_FALLBACK = 8;
 /** Standard pt → CSS px conversion at 96 DPI. ECMA-376 §18.4.11 (font sz),
  * §18.8.5 (border width margins, etc.) all express their dimensions in
  * points. Multiply by this constant to obtain the display pixel value. */
@@ -38,8 +36,49 @@ export const HEADER_H = 22;
 // Thin line drawn between frozen and scrollable areas
 const FREEZE_LINE_COLOR = '#7a7a7a';
 
-export function colWidthToPx(w: number): number {
-  return Math.trunc(((256 * w + 128 / MDW) / 256) * MDW);
+/** Cache of Max Digit Width per "family:sizePt" key. The Canvas2D
+ *  `measureText` call is cheap but not free; column-width conversion is
+ *  invoked many times per render so we memoize. */
+const mdwCache = new Map<string, number>();
+
+/** Measure the Max Digit Width (ECMA-376 §18.3.1.13) for an arbitrary font
+ *  using Canvas2D. The maximum of `measureText('0'..'9').width` is taken,
+ *  rounded to the nearest pixel to match Excel's storage of integer pixel
+ *  widths in `<col>` width values. */
+export function computeMdw(family: string, sizePt: number): number {
+  const key = `${family}:${sizePt}`;
+  const cached = mdwCache.get(key);
+  if (cached !== undefined) return cached;
+  const sizePx = sizePt * PT_TO_PX;
+  // Off-DOM canvas: avoids touching the document tree from background calls.
+  const canvas = (typeof OffscreenCanvas !== 'undefined')
+    ? new OffscreenCanvas(1, 1)
+    : (typeof document !== 'undefined' ? document.createElement('canvas') : null);
+  if (!canvas) return MDW_FALLBACK;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return MDW_FALLBACK;
+  // Quote the family so multi-word names like "Meiryo UI" parse as one face.
+  ctx.font = `${sizePx}px "${family}", ${DEFAULT_FONT_FAMILY}`;
+  let mdw = 0;
+  for (const d of '0123456789') {
+    const w = ctx.measureText(d).width;
+    if (w > mdw) mdw = w;
+  }
+  const out = Math.round(mdw) || MDW_FALLBACK;
+  mdwCache.set(key, out);
+  return out;
+}
+
+/** Resolve the Max Digit Width for a worksheet's Normal-style font. Falls
+ *  back to the Calibri 11 pt baseline (~8 px) when the parser couldn't
+ *  determine the workbook's default font. */
+export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFontSize?: number }): number {
+  if (!ws.defaultFontFamily || !ws.defaultFontSize) return MDW_FALLBACK;
+  return computeMdw(ws.defaultFontFamily, ws.defaultFontSize);
+}
+
+export function colWidthToPx(w: number, mdw: number = MDW_FALLBACK): number {
+  return Math.trunc(((256 * w + 128 / mdw) / 256) * mdw);
 }
 
 /** Convert a row height value from the parser into CSS pixels.
@@ -2008,6 +2047,10 @@ interface RenderContext {
    *  `x14:sparkline`. Built once at viewport start by flattening the
    *  parser's SparklineGroup + per-cell Sparkline pair. */
   sparklineMap: Map<string, SparklineModel>;
+  /** Max Digit Width resolved for the worksheet's Normal-style font
+   *  (ECMA-376 §18.3.1.13). Used by `colWidthToPx` to convert character-
+   *  unit column widths into pixels. */
+  mdw: number;
   onTextRun?: (info: TextRunInfo) => void;
 }
 
@@ -2276,7 +2319,7 @@ function renderQuadrant(
     } else {
       let dx = 0;
       for (let c = aCol; c < startCol; c++) {
-        dx += Math.round(colWidthToPx(rc.worksheet.colWidths[c] ?? rc.worksheet.defaultColWidth) * cs);
+        dx += Math.round(colWidthToPx(rc.worksheet.colWidths[c] ?? rc.worksheet.defaultColWidth, rc.mdw) * cs);
       }
       aCx = originX - pixOffsetX - dx;
     }
@@ -3059,6 +3102,10 @@ export function renderViewport(
 ): void {
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
+  // Resolve MDW once per render — workbook-wide value derived from the
+  // Normal-style font (ECMA-376 §18.3.1.13). Cached internally per
+  // (family, sizePt) so repeated renders are O(1).
+  const mdw = getMdwForWorksheet(worksheet);
   const canvasW = ctx.canvas.width / dpr;
   const canvasH = ctx.canvas.height / dpr;
 
@@ -3080,7 +3127,7 @@ export function renderViewport(
   // ── Compute frozen area pixel sizes (scaled) ─────────────────
   const frozenColWidths: number[] = [];
   for (let c = 1; c <= freezeCols; c++) {
-    frozenColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth)));
+    frozenColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw)));
   }
   const frozenRowHeights: number[] = [];
   for (let r = 1; r <= freezeRows; r++) {
@@ -3092,7 +3139,7 @@ export function renderViewport(
   // ── Scrollable col/row pixel widths (scaled) ─────────────────
   const scrollColWidths: number[] = [];
   for (let c = startCol; c < startCol + numCols; c++) {
-    scrollColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth)));
+    scrollColWidths.push(sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw)));
   }
   const scrollRowHeights: number[] = [];
   for (let r = startRow; r < startRow + numRows; r++) {
@@ -3112,7 +3159,7 @@ export function renderViewport(
   for (const mc of worksheet.mergeCells ?? []) {
     let totalW = 0;
     for (let c = mc.left; c <= mc.right; c++) {
-      totalW += sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth));
+      totalW += sp(colWidthToPx(worksheet.colWidths[c] ?? worksheet.defaultColWidth, mdw));
     }
     let totalH = 0;
     for (let r = mc.top; r <= mc.bottom; r++) {
@@ -3170,6 +3217,7 @@ export function renderViewport(
     commentCells,
     tableStyleMap,
     sparklineMap,
+    mdw,
     onTextRun: opts.onTextRun,
   };
 
@@ -3443,9 +3491,10 @@ function sheetXForCol(
   col1: number, // 1-indexed column number
   cs: number,
 ): number {
+  const mdw = getMdwForWorksheet(ws);
   let x = 0;
   for (let c = 1; c < col1; c++) {
-    x += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth) * cs);
+    x += Math.round(colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw) * cs);
   }
   return x;
 }
