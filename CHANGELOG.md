@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.22.1 — 2026-04-29
+
+Patch release. Fix a visible layout shift on the Storybook demo when
+the user first scrolled.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **Force every Carlito / Caladea FontFace to actually load before
+    paint**: `document.fonts.load("16px Carlito")` only triggers the
+    sub-ranges that match characters already present in the live DOM.
+    Canvas-only text didn't qualify, so on systems without Calibri the
+    first paint fell back to sans-serif metrics and the moment a scroll
+    re-rendered, the browser had lazy-loaded the substitute and switched
+    to its real metrics — a visible reflow. Iterate `document.fonts` for
+    the requested families and call `face.load()` directly, bypassing
+    the unicode-range gating.
+
 ## 0.22.0 — 2026-04-29
 
 Minor release rolling up the v0.21.x XLSX engine work and refreshing the
