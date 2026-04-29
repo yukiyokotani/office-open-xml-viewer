@@ -2094,18 +2094,61 @@ export interface TableCellStyle {
   /** Dxf for the header-row element of a custom `<tableStyle>`. Provides
    *  header fill, font color/weight, and vertical separators. */
   headerRowDxf?: number;
+  /** Per-edge flags for border suppression on cells at the outer edge of a
+   *  table with "None" style (ECMA-376 §18.5.1.4: absent `name` = no style).
+   *  Excel bakes table-generated borders into the cell's `xf` but does not
+   *  render them when the table style is None. We replicate this by nulling
+   *  out the corresponding edge before calling `renderBorder`. */
+  suppressEdge?: { left: boolean; right: boolean; top: boolean; bottom: boolean };
 }
 
 function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
   const map = new Map<string, TableCellStyle>();
   for (const t of worksheet.tables ?? []) {
-    // ECMA-376 §18.5.1.4: empty styleName means the table has "None" style —
-    // no visual table formatting overlay should be applied.
-    if (!t.styleName) continue;
+    const { top, bottom, left, right } = t.range;
+
+    if (!t.styleName) {
+      // ECMA-376 §18.5.1.4: absent `name` = "None" style — no visual table
+      // formatting. However Excel bakes table-generated borders into the cells'
+      // own `xf` styles and suppresses them at render time when the style is
+      // None. We replicate this by recording `suppressEdge` for every outer-
+      // edge cell so the renderer can null out those borders before drawing.
+      for (let r = top; r <= bottom; r++) {
+        const isTopEdge    = r === top;
+        const isBottomEdge = r === bottom;
+        if (!isTopEdge && !isBottomEdge) continue; // only need rows at the edges
+        for (let c = left; c <= right; c++) {
+          const isLeftEdge  = c === left;
+          const isRightEdge = c === right;
+          if (!isLeftEdge && !isRightEdge && !isTopEdge && !isBottomEdge) continue;
+          map.set(`${r}:${c}`, {
+            accent: '', isHeader: false, isTotals: false, isBanded: false,
+            isFirstCol: false, isLastCol: false,
+            isTopEdge, isBottomEdge,
+            suppressEdge: { left: isLeftEdge, right: isRightEdge, top: isTopEdge, bottom: isBottomEdge },
+          });
+        }
+      }
+      // Also record left/right edge cells for non-edge rows
+      for (let r = top + 1; r < bottom; r++) {
+        const entry = (c: number, isLeft: boolean): [string, TableCellStyle] => [
+          `${r}:${c}`,
+          {
+            accent: '', isHeader: false, isTotals: false, isBanded: false,
+            isFirstCol: false, isLastCol: false,
+            isTopEdge: false, isBottomEdge: false,
+            suppressEdge: { left: isLeft, right: !isLeft, top: false, bottom: false },
+          },
+        ];
+        map.set(...entry(left, true));
+        map.set(...entry(right, false));
+      }
+      continue;
+    }
+
     const accent = t.accentColor || '#808080';
     const hdr = Math.max(0, t.headerRowCount ?? 1);
     const tot = Math.max(0, t.totalsRowCount ?? 0);
-    const { top, bottom, left, right } = t.range;
     const headerEnd = top + hdr - 1;
     const totalsStart = bottom - tot + 1;
     for (let r = top; r <= bottom; r++) {
@@ -2555,6 +2598,19 @@ function renderQuadrant(
         if (leftRight?.style) {
           mergedBorder = { ...mergedBorder, left: leftRight };
         }
+      }
+      // Suppress outer-edge borders for "None"-style table cells.
+      // Excel bakes table-generated borders into the cell xf but does not
+      // render them when tableStyleInfo has no name (ECMA-376 §18.5.1.4).
+      const se = tableStyle?.suppressEdge;
+      if (se) {
+        mergedBorder = {
+          ...mergedBorder,
+          ...(se.left   && { left:   null }),
+          ...(se.right  && { right:  null }),
+          ...(se.top    && { top:    null }),
+          ...(se.bottom && { bottom: null }),
+        };
       }
       renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
 
