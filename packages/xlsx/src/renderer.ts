@@ -3741,11 +3741,11 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
     // ECMA-376 §18.18.3 ST_BorderStyle "double": two parallel thin lines
     // with a small gap. Drawn as a 1-px line on either side of the cell
     // edge so the pair reads as a ~3-px-thick double rule, matching Excel.
-    // The *outer* line is extended past the cell corners by `off` so the
-    // outer rectangle closes properly when adjacent edges (top + left,
-    // etc.) are also double — without the extension each corner would
-    // show a gap at the outside while the inner pair connects via the
-    // perpendicular crossing. Diagonals fall back to single line (Excel
+    // The outer line extends past the cell corners by `off` so adjacent
+    // doubled edges close cleanly; the inner line is *shortened* by `off`
+    // on each end so the two perpendicular inner lines meet exactly at the
+    // inner corner (without the trim they cross past the corner forming a
+    // small "+" overhang). Diagonals fall back to single line (Excel
     // doesn't render a doubled diagonal either).
     if (edge.style === 'double' && kind !== 'd') {
       ctx.strokeStyle = color;
@@ -3757,14 +3757,14 @@ function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, 
         const isTop = y1 === y;
         const outerY = isTop ? y - off : y + h + off;
         const innerY = isTop ? y + off : y + h - off;
-        ctx.moveTo(x - off, outerY); ctx.lineTo(x + w + off, outerY);
-        ctx.moveTo(x, innerY);       ctx.lineTo(x + w, innerY);
+        ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
+        ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
         const outerX = isLeft ? x - off : x + w + off;
         const innerX = isLeft ? x + off : x + w - off;
-        ctx.moveTo(outerX, y - off); ctx.lineTo(outerX, y + h + off);
-        ctx.moveTo(innerX, y);       ctx.lineTo(innerX, y + h);
+        ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
+        ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
       ctx.stroke();
       continue;
