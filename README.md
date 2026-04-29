@@ -423,6 +423,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody`) | ✅ |
 | | Charts (bar, line, area, radar, scatter / bubble) | ✅ |
 | | Chart markers (circle / square / diamond / triangle / x / plus / star / dot / dash, per-point `<c:dPt>` overrides) | ✅ |
 | | Chart data labels (`<c:dLbl>` per-point with CELLRANGE / VALUE / SERIESNAME / CATEGORYNAME field references, position `l`/`r`/`t`/`b`/`ctr`/`outEnd`) | ✅ |

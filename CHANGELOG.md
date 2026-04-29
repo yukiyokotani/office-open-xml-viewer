@@ -4,6 +4,38 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.23.0 — 2026-04-30
+
+Minor release adding drawing-shape text rendering for XLSX and correcting
+column-width pixel conversion for Calibri 11pt.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **Shape textboxes rendered**: stand-alone `<xdr:sp>` elements in
+    `<xdr:twoCellAnchor>` (i.e. textboxes not inside a `<xdr:grpSp>` group)
+    are now parsed and drawn. The parser extracts `<xdr:txBody>` content —
+    paragraph alignment, per-run bold/italic/size/color/font — and the
+    renderer draws them with word-wrap and body anchor support
+    (ECMA-376 §20.5.2, §20.1.7.2).
+  - **Theme fill / text-color fallback**: when a shape has no explicit
+    `<a:solidFill>` in `<xdr:spPr>`, the fill color and default text color
+    are now resolved from `<xdr:style>/<a:fillRef>` and `<a:fontRef>`
+    (theme accent/lt/dk slots), matching Excel's style-inheritance chain.
+  - **Vertical centering fix**: `drawShapeText` with `anchor="ctr"` now
+    correctly centers the text block regardless of whether `blockH > innerH`
+    — the previous `Math.max(0, …)` clamp caused text to appear
+    top-aligned in those cases.
+  - **Row-border z-order fix**: each cell now inherits the bottom edge of
+    the cell directly above as its own top edge, so the uniform thick
+    bottom-border spanning D2–Q2 is no longer overdrawn by the next row's
+    `fillRect` pass (PR #164).
+  - **MDW corrected to 8** (ECMA-376 §18.3.1.13): the Max Digit Width
+    constant was updated from 7 to 8 to match Canvas2D measurements of
+    Calibri/Carlito 11pt at 96 DPI and the actual column EMU widths that
+    Excel 365 writes into drawing XML. This makes the default 8-char column
+    64 px (matches Excel 100% zoom) and fixes drawing-anchor `colOff` values
+    that exceeded the column width with MDW=7 (PR #165).
+    ⚠ VRT reference images will differ — column widths are ~14 % wider.
+
 ## 0.22.1 — 2026-04-29
 
 Patch release. Fix a visible layout shift on the Storybook demo when
