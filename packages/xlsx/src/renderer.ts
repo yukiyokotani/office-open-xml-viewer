@@ -2592,7 +2592,11 @@ function renderQuadrant(
           mergedBorder = { ...mergedBorder, top: aboveBottom };
         }
       }
-      if (!mergedBorder.left?.style) {
+      if (!mergedBorder.left?.style && !suppressLeftGridCol.has(ci)) {
+        // Skip the inherit when the left edge was deliberately suppressed for
+        // a centerContinuous run (ECMA-376 §18.18.40) — otherwise the
+        // neighbour's xf.right re-introduces the internal vertical that we
+        // just hid.
         const leftCell = cellMap.get(`${rowIndex}:${colIndex - 1}`);
         const leftRight = leftCell
           ? resolveXf(styles, leftCell.styleIndex).border.right
