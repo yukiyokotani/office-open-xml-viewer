@@ -193,6 +193,31 @@ pub struct TableInfo {
     /// vertical separator borders shown between header cells.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_row_dxf: Option<u32>,
+    /// Per-column DXF references (ECMA-376 §18.5.1.3 `tableColumn`). Length
+    /// matches the number of `<tableColumn>` children in the table XML, so
+    /// `columns[c - range.left]` gives the DXFs for the cell column. The
+    /// renderer can use these to apply column-level overlays for named-style
+    /// tables that don't pre-bake column DXFs into the cell `xf`. For files
+    /// where Excel pre-bakes the result into `xf` (the common case), reading
+    /// the cell `xf` already reflects the column DXF and these fields are
+    /// purely informational.
+    pub columns: Vec<TableColumnInfo>,
+}
+
+/// Per-column DXF references inside a `<table>` element
+/// (ECMA-376 §18.5.1.3 `tableColumn`).
+#[derive(Debug, Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TableColumnInfo {
+    /// `<tableColumn dataDxfId>` — applied to data-region cells in this column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dxf_id: Option<u32>,
+    /// `<tableColumn headerRowDxfId>` — applied to the header cell of this column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_row_dxf_id: Option<u32>,
+    /// `<tableColumn totalsRowDxfId>` — applied to the totals cell of this column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_row_dxf_id: Option<u32>,
 }
 
 /// Workbook- or sheet-scoped defined name (ECMA-376 §18.2.5 `definedName`).
@@ -2368,6 +2393,19 @@ fn load_sheet_tables(
             Some(e) => (e.whole_table, e.header_row),
             None => (None, None),
         };
+        // ECMA-376 §18.5.1.3: each `<tableColumn>` may carry its own
+        // `dataDxfId`, `headerRowDxfId`, `totalsRowDxfId`. We collect them in
+        // document order so the renderer can index them via
+        // `columns[cellCol - range.left]`.
+        let columns: Vec<TableColumnInfo> = root
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "tableColumn")
+            .map(|tc| TableColumnInfo {
+                data_dxf_id:       tc.attribute("dataDxfId").and_then(|s| s.parse().ok()),
+                header_row_dxf_id: tc.attribute("headerRowDxfId").and_then(|s| s.parse().ok()),
+                totals_row_dxf_id: tc.attribute("totalsRowDxfId").and_then(|s| s.parse().ok()),
+            })
+            .collect();
         tables.push(TableInfo {
             range,
             style_name,
@@ -2380,6 +2418,7 @@ fn load_sheet_tables(
             accent_color,
             whole_table_dxf,
             header_row_dxf,
+            columns,
         });
     }
     tables

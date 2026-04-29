@@ -143,6 +143,23 @@ export interface TableInfo {
   /** Dxf index for the `headerRow` element of a custom `<tableStyle>` —
    *  provides header background, font color/weight, and vertical separators. */
   headerRowDxf?: number;
+  /** Per-column DXF references (ECMA-376 §18.5.1.3 `tableColumn`). Index by
+   *  `cellCol - range.left`. The renderer can use these to apply column-level
+   *  overlays for named-style tables; for files where Excel pre-bakes the
+   *  column DXF result into the cell `xf` (the common case), reading `xf` is
+   *  sufficient and these fields are informational. */
+  columns: TableColumnInfo[];
+}
+
+/** Per-column DXF references inside a `<table>` element
+ *  (ECMA-376 §18.5.1.3 `tableColumn`). */
+export interface TableColumnInfo {
+  /** `<tableColumn dataDxfId>` — applied to data cells in this column. */
+  dataDxfId?: number;
+  /** `<tableColumn headerRowDxfId>` — applied to the header cell of this column. */
+  headerRowDxfId?: number;
+  /** `<tableColumn totalsRowDxfId>` — applied to the totals cell of this column. */
+  totalsRowDxfId?: number;
 }
 
 export interface DefinedName {
