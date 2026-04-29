@@ -2099,6 +2099,9 @@ export interface TableCellStyle {
 function buildTableStyleMap(worksheet: Worksheet): Map<string, TableCellStyle> {
   const map = new Map<string, TableCellStyle>();
   for (const t of worksheet.tables ?? []) {
+    // ECMA-376 §18.5.1.4: empty styleName means the table has "None" style —
+    // no visual table formatting overlay should be applied.
+    if (!t.styleName) continue;
     const accent = t.accentColor || '#808080';
     const hdr = Math.max(0, t.headerRowCount ?? 1);
     const tot = Math.max(0, t.totalsRowCount ?? 0);

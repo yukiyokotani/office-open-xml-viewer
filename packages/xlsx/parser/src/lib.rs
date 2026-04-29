@@ -2346,9 +2346,12 @@ fn load_sheet_tables(
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let style_info = root.children().find(|n| n.tag_name().name() == "tableStyleInfo");
+        // ECMA-376 §18.5.1.4: when `name` is absent the table has "None" style —
+        // no visual table formatting. Default to "" rather than a named style so
+        // the renderer can skip table-style overlay for these cells.
         let style_name = style_info
             .and_then(|n| n.attribute("name"))
-            .unwrap_or("TableStyleMedium2")
+            .unwrap_or("")
             .to_string();
         let bool_attr = |n: &roxmltree::Node, key: &str| n.attribute(key).map(|v| v == "1" || v == "true").unwrap_or(false);
         let (show_row_stripes, show_column_stripes, show_first_column, show_last_column) = match style_info {
