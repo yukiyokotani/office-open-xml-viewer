@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.24.1 — 2026-04-30
+
+Patch release fixing column-width pixel conversion for files whose Normal
+style is not Calibri 11 pt.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **Max Digit Width derived from the workbook's Normal-style font**
+    (ECMA-376 §18.3.1.13): the renderer previously hard-coded `MDW = 8`
+    (the value for Calibri 11 pt at 96 DPI), so files whose Normal style
+    points to a different face produced columns at the wrong pixel width.
+    The parser now resolves `<cellStyleXfs>[0].fontId` →
+    `<fonts>[fontId].name.val` / `.sz.val` and exposes
+    `Worksheet.defaultFontFamily` / `defaultFontSize`. The renderer
+    measures the actual maximum digit width using Canvas2D's
+    `measureText` (cached per `(family, sizePt)` key) and threads it
+    through `RenderContext`. `colWidthToPx(w, mdw?)` now accepts MDW as
+    a parameter; both `renderer.ts` and `viewer.ts` pass the resolved
+    value. For Meiryo UI 10 pt the measured MDW is ≈ 6 px, so e.g.
+    sample-10.xlsx column C (`width="21.125"` chars) now renders at
+    127 px to match Excel — was ~174 px before. Calibri 11 pt files are
+    unchanged (MDW measurement still ≈ 8) (PR #172).
+
 ## 0.24.0 — 2026-04-30
 
 Minor release fixing spurious horizontal borders inside None-style Excel
