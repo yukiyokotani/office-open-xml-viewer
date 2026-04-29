@@ -18,7 +18,10 @@ import { renderChart, renderSparkline, type ChartModel, type SparklineModel } fr
 const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
 const MDW = 7;
-const ROW_HEIGHT_TO_PX = 4 / 3;
+/** Standard pt → CSS px conversion at 96 DPI. ECMA-376 §18.4.11 (font sz),
+ * §18.8.5 (border width margins, etc.) all express their dimensions in
+ * points. Multiply by this constant to obtain the display pixel value. */
+const PT_TO_PX = 4 / 3;
 
 export const HEADER_W = 50;
 export const HEADER_H = 22;
@@ -30,8 +33,19 @@ export function colWidthToPx(w: number): number {
   return Math.trunc(((256 * w + 128 / MDW) / 256) * MDW);
 }
 
+/** Convert a row height value from the parser into CSS pixels.
+ *
+ * ECMA-376 §18.3.1.73 (`row.ht`) and §18.3.1.81 (`sheetFormatPr.defaultRowHeight`)
+ * both nominally specify "point size", but in practice every Excel-saved file
+ * we have access to stores row heights as their *display pixel* equivalent —
+ * e.g. a row that Excel shows at 21 px is written as `ht="21"`, not the
+ * 15.75 pt that 21 px would correspond to under 4/3 conversion. Applying the
+ * pt→px conversion here therefore made all rows visibly taller than Excel
+ * (sample-27 row 4 rendered 28 px instead of 21 px). The parser already
+ * normalizes the "intrinsic default" to 20 (CSS px) so callers can treat
+ * every value here as already-resolved display pixels. */
 export function rowHeightToPx(h: number): number {
-  return Math.round(h * ROW_HEIGHT_TO_PX);
+  return Math.round(h);
 }
 
 function hexToRgba(hex: string, alpha = 1): string {
@@ -282,7 +296,7 @@ function blendHex(fgHex: string, bgHex: string, fgCoverage: number): string {
 function buildFont(font: Font, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
-  const sizePx = Math.max(1, Math.round(font.size * ROW_HEIGHT_TO_PX * cs));
+  const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
   const family = font.name ? `"${font.name}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
   return `${style}${weight}${sizePx}px ${family}`;
 }
@@ -2305,7 +2319,7 @@ function renderQuadrant(
     const isNumeric = cell.value.type === 'number';
     const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
     const alignV = xf.alignV ?? 'bottom';
-    const indentPx = xf.indent ? Math.round(xf.indent * font.size * ROW_HEIGHT_TO_PX * 0.5) : 0;
+    const indentPx = xf.indent ? Math.round(xf.indent * font.size * PT_TO_PX * 0.5) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
 
     ctx.save();
@@ -2583,7 +2597,7 @@ function renderQuadrant(
       const alignH = xf.alignH ?? (isNumeric ? 'right' : 'left');
       const alignV = xf.alignV ?? 'bottom';
       // Indent: each level ≈ one character width (ECMA-376 §18.8.44)
-      const indentPx = xf.indent ? Math.round(xf.indent * font.size * ROW_HEIGHT_TO_PX * 0.5) : 0;
+      const indentPx = xf.indent ? Math.round(xf.indent * font.size * PT_TO_PX * 0.5) : 0;
       // IconSet: reserve space on the left for the icon
       const iconSz = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
       const iconPad = iconSz > 0 ? iconSz + 4 : 0;
@@ -2745,7 +2759,7 @@ function renderQuadrant(
 
       // Stacked text (textRotation=255): draw each character on its own line
       if (isStacked) {
-        const charH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.1);
+        const charH = Math.round(font.size * PT_TO_PX * 1.1);
         const totalH = text.length * charH;
         let charY = alignV === 'top' ? cy + paddingY
           : alignV === 'center' ? cy + (cellH - totalH) / 2
@@ -2810,7 +2824,7 @@ function renderQuadrant(
         // Rich text with wrapping: per-run fonts, break on spaces and CJK boundaries
         const wrapW = cellW - leftPad - paddingX;
         const rLines = layoutRichTextLines(ctx, runs, fontForDraw, cs, wrapW);
-        const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * ROW_HEIGHT_TO_PX * 1.2), 0);
+        const totalH = rLines.reduce((s, l) => s + Math.round(l.maxFontSize * PT_TO_PX * 1.2), 0);
         let yy: number;
         if (alignV === 'top') yy = cy + paddingY;
         else if (alignV === 'center') yy = cy + (cellH - totalH) / 2;
@@ -2818,7 +2832,7 @@ function renderQuadrant(
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         for (const line of rLines) {
-          const lineH = Math.round(line.maxFontSize * ROW_HEIGHT_TO_PX * 1.2);
+          const lineH = Math.round(line.maxFontSize * PT_TO_PX * 1.2);
           const totalW = line.segments.reduce((s, seg) => s + seg.width, 0);
           let xx: number;
           if (alignH === 'right') xx = cx + cellW - paddingX - totalW;
@@ -2829,7 +2843,7 @@ function renderQuadrant(
             const segColor = cf.fontColor ?? seg.font.color;
             ctx.fillStyle = segColor ? hexToRgba(segColor) : '#000000';
             ctx.fillText(seg.text, xx, yy);
-            const rSizePx = Math.round(seg.font.size * ROW_HEIGHT_TO_PX);
+            const rSizePx = Math.round(seg.font.size * PT_TO_PX);
             if (seg.font.underline) {
               ctx.save();
               ctx.strokeStyle = segColor ? hexToRgba(segColor) : '#000000';
@@ -2851,7 +2865,7 @@ function renderQuadrant(
         }
       } else if (xf.wrapText) {
         const lines = wrapTextLines(ctx, text, cellW - leftPad - paddingX);
-        const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
+        const lineH = Math.round(font.size * PT_TO_PX * 1.2);
         const totalTextH = lines.length * lineH;
         let startY: number;
         if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
@@ -2885,7 +2899,7 @@ function renderQuadrant(
           const runColor = cf.fontColor ?? rf.color;
           ctx.fillStyle = runColor ? hexToRgba(runColor) : '#000000';
           ctx.fillText(runs[i].text, runX, textY);
-          const rSizePx = Math.round(rf.size * ROW_HEIGHT_TO_PX);
+          const rSizePx = Math.round(rf.size * PT_TO_PX);
           if (rf.underline) {
             const uy = alignV === 'top'
               ? cy + paddingY + rSizePx + 1
@@ -2925,7 +2939,7 @@ function renderQuadrant(
             width: tW,
           };
         };
-        const sizePx = Math.round(font.size * ROW_HEIGHT_TO_PX);
+        const sizePx = Math.round(font.size * PT_TO_PX);
 
         if (fontForDraw.underline || hyperlinkUrl) {
           const { x: ux, width: tW } = overlayX();
@@ -2958,7 +2972,7 @@ function renderQuadrant(
         // when wrapText is false — this matches Excel's behavior.
         if (text.includes('\n')) {
           const lines = text.split('\n');
-          const lineH = Math.round(font.size * ROW_HEIGHT_TO_PX * 1.2);
+          const lineH = Math.round(font.size * PT_TO_PX * 1.2);
           const totalTextH = lines.length * lineH;
           let startY: number;
           if (alignV === 'top') { startY = cy + paddingY; ctx.textBaseline = 'top'; }
@@ -3706,18 +3720,57 @@ function mergeBorders(base: Border, overlay: Border | undefined): Border {
 }
 
 function renderBorder(ctx: CanvasRenderingContext2D, border: Border, x: number, y: number, w: number, h: number): void {
-  const edges: Array<{ edge: BorderEdge | null | undefined; x1: number; y1: number; x2: number; y2: number }> = [
-    { edge: border.top,         x1: x,     y1: y,     x2: x + w, y2: y },
-    { edge: border.bottom,      x1: x,     y1: y + h, x2: x + w, y2: y + h },
-    { edge: border.left,        x1: x,     y1: y,     x2: x,     y2: y + h },
-    { edge: border.right,       x1: x + w, y1: y,     x2: x + w, y2: y + h },
-    { edge: border.diagonalUp,  x1: x,     y1: y + h, x2: x + w, y2: y },
-    { edge: border.diagonalDown,x1: x,     y1: y,     x2: x + w, y2: y + h },
+  type EdgeRef = {
+    edge: BorderEdge | null | undefined;
+    x1: number; y1: number; x2: number; y2: number;
+    /** 'h' = horizontal (top/bottom), 'v' = vertical (left/right),
+     *  'd' = diagonal (no doubling support). */
+    kind: 'h' | 'v' | 'd';
+  };
+  const edges: EdgeRef[] = [
+    { edge: border.top,         x1: x,     y1: y,     x2: x + w, y2: y,     kind: 'h' },
+    { edge: border.bottom,      x1: x,     y1: y + h, x2: x + w, y2: y + h, kind: 'h' },
+    { edge: border.left,        x1: x,     y1: y,     x2: x,     y2: y + h, kind: 'v' },
+    { edge: border.right,       x1: x + w, y1: y,     x2: x + w, y2: y + h, kind: 'v' },
+    { edge: border.diagonalUp,  x1: x,     y1: y + h, x2: x + w, y2: y,     kind: 'd' },
+    { edge: border.diagonalDown,x1: x,     y1: y,     x2: x + w, y2: y + h, kind: 'd' },
   ];
-  for (const { edge, x1, y1, x2, y2 } of edges) {
+  for (const { edge, x1, y1, x2, y2, kind } of edges) {
     if (!edge || !edge.style || edge.style === 'none') continue;
+    const color = edge.color ? hexToRgba(edge.color) : '#000000';
+    // ECMA-376 §18.18.3 ST_BorderStyle "double": two parallel thin lines
+    // with a small gap. Drawn as a 1-px line on either side of the cell
+    // edge so the pair reads as a ~3-px-thick double rule, matching Excel.
+    // The *outer* line is extended past the cell corners by `off` so the
+    // outer rectangle closes properly when adjacent edges (top + left,
+    // etc.) are also double — without the extension each corner would
+    // show a gap at the outside while the inner pair connects via the
+    // perpendicular crossing. Diagonals fall back to single line (Excel
+    // doesn't render a doubled diagonal either).
+    if (edge.style === 'double' && kind !== 'd') {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      const off = 1;
+      ctx.beginPath();
+      if (kind === 'h') {
+        const isTop = y1 === y;
+        const outerY = isTop ? y - off : y + h + off;
+        const innerY = isTop ? y + off : y + h - off;
+        ctx.moveTo(x - off, outerY); ctx.lineTo(x + w + off, outerY);
+        ctx.moveTo(x, innerY);       ctx.lineTo(x + w, innerY);
+      } else {
+        const isLeft = x1 === x;
+        const outerX = isLeft ? x - off : x + w + off;
+        const innerX = isLeft ? x + off : x + w - off;
+        ctx.moveTo(outerX, y - off); ctx.lineTo(outerX, y + h + off);
+        ctx.moveTo(innerX, y);       ctx.lineTo(innerX, y + h);
+      }
+      ctx.stroke();
+      continue;
+    }
     ctx.beginPath();
-    ctx.strokeStyle = edge.color ? hexToRgba(edge.color) : '#000000';
+    ctx.strokeStyle = color;
     ctx.lineWidth = borderStyleWidth(edge.style);
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
