@@ -390,6 +390,35 @@ export interface ShapeInfo {
   /** Stroke width in EMU. 0 = no stroke. */
   strokeWidth: number;
   geom: ShapeGeom;
+  /** Optional text body (`<xdr:txBody>`, ECMA-376 §20.5.2.34). Present for
+   *  text boxes (`txBox="1"`) and any other shape that carries visible text. */
+  text?: ShapeText;
+}
+
+export interface ShapeText {
+  /** `<a:bodyPr@anchor>` — vertical alignment of the text block within the
+   *  shape rect. `t` (top, default), `ctr` (middle), `b` (bottom). */
+  anchor: string;
+  /** `<a:bodyPr@wrap>` — `square` (wrap to width) | `none`. */
+  wrap: string;
+  paragraphs: ShapeParagraph[];
+}
+
+export interface ShapeParagraph {
+  /** `<a:pPr@algn>` — `l` (default) | `ctr` | `r` | `just` | `dist`. */
+  align: string;
+  runs: ShapeTextRun[];
+}
+
+export interface ShapeTextRun {
+  text: string;
+  bold: boolean;
+  italic: boolean;
+  /** Font size in points (already converted from `<a:rPr@sz>` 100ths-of-a-pt).
+   *  0 = inherit (renderer falls back to its default). */
+  size: number;
+  color?: string;
+  fontFace?: string;
 }
 
 export type ShapeGeom =
