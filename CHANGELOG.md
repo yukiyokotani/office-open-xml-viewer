@@ -4,6 +4,48 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.21.3 — 2026-04-29
+
+Patch release. XLSX cell sizing, border-style coverage, and
+`centerContinuous` run accounting fixes.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **`centerContinuous` run split at value-bearing anchors**: ECMA-376
+    §18.18.40 says spanned cells reference the same style id while only
+    the anchor holds a value. Two adjacent anchors therefore form two
+    separate runs, with the border between them visible. The renderer
+    now closes the previous run and starts a fresh one whenever it
+    encounters a centerContinuous cell that itself carries a value
+    (PR #155).
+  - **`defaultColWidth` derived from `baseColWidth`**: ECMA-376
+    §18.3.1.81 specifies that when `<sheetFormatPr>` provides
+    `baseColWidth` but no `defaultColWidth`, the default column width
+    is `baseColWidth + 5 px / maxDigitWidth` characters (4 px margin +
+    1 px gridline). The Rust parser now applies that fallback so
+    sample-27.xlsx (`baseColWidth="10"`, no `defaultColWidth`) renders
+    columns at 75 px instead of the previous 8.43-char baseline
+    (PR #156).
+  - **`defaultRowHeight` honored only when `customHeight` is true**:
+    ECMA-376 §18.3.1.81 `customHeight` describes the
+    `defaultRowHeight` attribute as informational unless the flag is
+    set; Excel falls back to its intrinsic 20-px baseline otherwise.
+    The parser now matches that behavior (PR #157).
+  - **Row heights treated as display pixels (1:1)**: Excel writes row
+    heights as the resolved display-pixel value rather than the
+    nominal point size — `defaultRowHeight="20"` renders 20 px,
+    `ht="21"` with `thickBot` renders 21 px, etc. The renderer's
+    pt→px multiplier is dropped for row metrics (the 4/3 conversion
+    is preserved for fonts, indent, and line-height) and the parser
+    intrinsic moves from 15 → 20 (PR #158).
+  - **`double` border style** (ECMA-376 §18.18.3 `ST_BorderStyle`):
+    previously rendered as a single line because the dispatcher only
+    handled thick / medium / dashed-family / dotted / hair. Now drawn
+    as two parallel 1-px lines flanking the cell edge with closed
+    corners — outer pair extended past corners by 1 px so adjacent
+    doubled edges meet outside, inner pair trimmed by 1 px so the
+    perpendicular inner segments meet exactly at the inner corner
+    (PRs #158, #159).
+
 ## 0.21.2 — 2026-04-29
 
 Patch release. XLSX `centerContinuous` border rendering fixes.
