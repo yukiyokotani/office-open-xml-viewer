@@ -1823,8 +1823,25 @@ fn parse_worksheet(
     for node in doc.descendants() {
         match node.tag_name().name() {
             "sheetFormatPr" if node.tag_name().namespace() == Some(ns) => {
-                if let Some(v) = node.attribute("defaultColWidth").and_then(|s| s.parse().ok()) {
+                // ECMA-376 §18.3.1.81: when `defaultColWidth` is absent but
+                // `baseColWidth` is given, the default column width (in
+                // characters) is `baseColWidth + 5 px / maxDigitWidth` —
+                // 4 px margin padding (2 px each side) + 1 px gridline.
+                // We use the same `MDW = 7` constant as the renderer (the
+                // Calibri 11 baseline). Without this fallback, files that
+                // rely solely on `baseColWidth` rendered too narrow because
+                // we silently fell back to the 8.43 default.
+                let default_col_width_explicit: Option<f64> = node
+                    .attribute("defaultColWidth")
+                    .and_then(|s| s.parse().ok());
+                if let Some(v) = default_col_width_explicit {
                     default_col_width = v;
+                } else if let Some(base) = node
+                    .attribute("baseColWidth")
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    const MDW: f64 = 7.0;
+                    default_col_width = base + 5.0 / MDW;
                 }
                 if let Some(v) = node.attribute("defaultRowHeight").and_then(|s| s.parse().ok()) {
                     default_row_height = v;
