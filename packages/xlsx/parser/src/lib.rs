@@ -656,6 +656,51 @@ pub struct ShapeInfo {
     /// Stroke width in EMU (914400 = 1 inch). 0 = no stroke.
     pub stroke_width: i64,
     pub geom: ShapeGeom,
+    /// Text content from `<xdr:txBody>` (ECMA-376 §20.5.2.34). Present on
+    /// shapes that carry visible text — typically text boxes (`txBox="1"`)
+    /// but also any `<xdr:sp>` whose `<a:p>` runs render visibly. `None`
+    /// when the shape has no text body or only contains an empty paragraph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<ShapeText>,
+}
+
+/// Text body inside a shape (`<xdr:txBody>`, ECMA-376 §20.1.2.2). Holds
+/// the paragraphs plus body-level formatting (`<a:bodyPr>`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeText {
+    /// `<a:bodyPr@anchor>` — vertical alignment of the text block within the
+    /// shape rect. `t` (top, default), `ctr` (middle), `b` (bottom),
+    /// `just`/`dist` (treated as top).
+    pub anchor: String,
+    /// `<a:bodyPr@wrap>` — `square` (default = wrap to shape width),
+    /// `none` (no wrap).
+    pub wrap: String,
+    pub paragraphs: Vec<ShapeParagraph>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeParagraph {
+    /// `<a:pPr@algn>` — `l` (default), `ctr`, `r`, `just`, `dist`.
+    pub align: String,
+    pub runs: Vec<ShapeTextRun>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTextRun {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    /// Font size in points (`<a:rPr@sz>` is in 100ths of a point; this field
+    /// is already converted). 0 means "inherit from default" → renderer falls
+    /// back to its own default.
+    pub size: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_face: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2625,6 +2670,95 @@ fn parse_custom_path(path_node: &roxmltree::Node) -> PathInfo {
     PathInfo { w, h, commands }
 }
 
+/// Parse `<xdr:txBody>` into a `ShapeText`. Returns `None` if the body
+/// contains no visible runs. Run formatting follows ECMA-376 §21.1.2.3.1
+/// (`<a:rPr>`): `sz` is hundredths of a point, `b="1"` = bold, `i="1"`
+/// = italic, `<a:solidFill>` overrides shape-level font color, and
+/// `<a:latin@typeface>` selects the Latin font face (we don't yet
+/// distinguish East-Asian / complex-script fonts — `<a:ea>` and `<a:cs>`
+/// are ignored for typeface).
+fn parse_tx_body(tx_body: &roxmltree::Node, theme_colors: &[String]) -> Option<ShapeText> {
+    let mut anchor = String::from("t");
+    let mut wrap = String::from("square");
+    let mut paragraphs: Vec<ShapeParagraph> = Vec::new();
+    for c in tx_body.children().filter(|n| n.is_element()) {
+        match c.tag_name().name() {
+            "bodyPr" => {
+                if let Some(a) = c.attribute("anchor") { anchor = a.to_string(); }
+                if let Some(w) = c.attribute("wrap") { wrap = w.to_string(); }
+            }
+            "p" => {
+                let mut align = String::from("l");
+                let mut runs: Vec<ShapeTextRun> = Vec::new();
+                for pc in c.children().filter(|n| n.is_element()) {
+                    match pc.tag_name().name() {
+                        "pPr" => {
+                            if let Some(a) = pc.attribute("algn") { align = a.to_string(); }
+                        }
+                        "r" => {
+                            // Run text + run-level formatting.
+                            let mut text = String::new();
+                            let mut bold = false;
+                            let mut italic = false;
+                            let mut size: f64 = 0.0;
+                            let mut color: Option<String> = None;
+                            let mut font_face: Option<String> = None;
+                            for rc in pc.children().filter(|n| n.is_element()) {
+                                match rc.tag_name().name() {
+                                    "rPr" => {
+                                        bold = rc.attribute("b").map(|v| v == "1").unwrap_or(false);
+                                        italic = rc.attribute("i").map(|v| v == "1").unwrap_or(false);
+                                        size = rc.attribute("sz")
+                                            .and_then(|s| s.parse::<f64>().ok())
+                                            .map(|v| v / 100.0)
+                                            .unwrap_or(0.0);
+                                        for rpc in rc.children().filter(|n| n.is_element()) {
+                                            match rpc.tag_name().name() {
+                                                "solidFill" => {
+                                                    color = parse_solid_fill(&rpc, theme_colors);
+                                                }
+                                                "latin" => {
+                                                    font_face = rpc.attribute("typeface").map(String::from);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    "t" => {
+                                        if let Some(t) = rc.text() { text.push_str(t); }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if !text.is_empty() {
+                                runs.push(ShapeTextRun { text, bold, italic, size, color, font_face });
+                            }
+                        }
+                        "br" => {
+                            // Soft line break: emit an empty run with a newline marker.
+                            // We collapse to a literal newline since the renderer paints
+                            // each \n as a wrapped line.
+                            runs.push(ShapeTextRun {
+                                text: "\n".into(),
+                                bold: false, italic: false, size: 0.0,
+                                color: None, font_face: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !runs.is_empty() {
+                    paragraphs.push(ShapeParagraph { align, runs });
+                }
+            }
+            _ => {}
+        }
+    }
+    if paragraphs.is_empty() { None } else {
+        Some(ShapeText { anchor, wrap, paragraphs })
+    }
+}
+
 fn parse_sp_geom(sp_pr: &roxmltree::Node) -> Option<ShapeGeom> {
     for c in sp_pr.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
@@ -2746,6 +2880,41 @@ fn collect_shapes(
                 }
             }
 
+            // <xdr:style> drives fallbacks: <a:fillRef> supplies a fill when
+            // <xdr:spPr> didn't, and <a:fontRef> supplies the run-default text
+            // color (ECMA-376 §20.5.2.30 `<xdr:style>`). Real-world text boxes
+            // saved by Excel often leave `<xdr:spPr>` without `<a:solidFill>`
+            // and rely on the style's fillRef + fontRef pair (e.g. accent1
+            // background + lt1 white text). We resolve scheme colors here
+            // against the workbook theme and apply them as fallbacks.
+            let style_node = child.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "style");
+            let style_fill = style_node.as_ref()
+                .and_then(|s| s.children().find(|n| n.is_element() && n.tag_name().name() == "fillRef"))
+                .and_then(|n| parse_solid_fill(&n, theme_colors));
+            let style_text_color = style_node.as_ref()
+                .and_then(|s| s.children().find(|n| n.is_element() && n.tag_name().name() == "fontRef"))
+                .and_then(|n| parse_solid_fill(&n, theme_colors));
+            if fill_color.is_none() && !has_no_fill {
+                fill_color = style_fill;
+            }
+
+            // Text body (txBox shapes carry visible text inside
+            // `<xdr:txBody>`; non-textbox shapes may also have one).
+            let mut text = child
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "txBody")
+                .and_then(|tb| parse_tx_body(&tb, theme_colors));
+            if let (Some(t), Some(default_color)) = (text.as_mut(), style_text_color) {
+                for p in t.paragraphs.iter_mut() {
+                    for r in p.runs.iter_mut() {
+                        if r.color.is_none() {
+                            r.color = Some(default_color.clone());
+                        }
+                    }
+                }
+            }
+
             out.push(ShapeInfo {
                 x: nx, y: ny, w: nw, h: nh,
                 rot: rot_raw / 60000.0,
@@ -2753,6 +2922,7 @@ fn collect_shapes(
                 stroke_color,
                 stroke_width,
                 geom,
+                text,
             });
         } else if tag == "pic" {
             // `<xdr:pic>` leaf inside a group (ECMA-376 §20.5.2.17). The image
@@ -2797,6 +2967,7 @@ fn collect_shapes(
                 stroke_color: None,
                 stroke_width: 0,
                 geom: ShapeGeom::Image { data_url: data_url.clone() },
+                text: None,
             });
         }
         // Ignore `xdr:cxnSp` / text-only elements for this minimal pass.
@@ -2815,18 +2986,8 @@ fn parse_shape_anchors(
     for anchor in doc.descendants() {
         if anchor.tag_name().name() != "twoCellAnchor"
             || anchor.tag_name().namespace() != Some(xdr_ns) { continue; }
-        // Only anchors whose top-level child is `<xdr:grpSp>`.
-        let grp = anchor.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp");
-        let Some(grp) = grp else { continue; };
-        let grp_sp_pr = grp.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
-        let xfrm = grp_sp_pr
-            .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
-            .as_ref()
-            .and_then(parse_xfrm);
-        let Some(root) = xfrm else { continue; };
-        if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
 
-        // Parse from/to anchor rect
+        // Parse from/to anchor rect (shared between grpSp and stand-alone sp paths)
         let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) = (0u32, 0i64, 0u32, 0i64);
         let (mut to_col,   mut to_col_off,   mut to_row,   mut to_row_off)   = (0u32, 0i64, 0u32, 0i64);
         for c in anchor.children() {
@@ -2852,15 +3013,49 @@ fn parse_shape_anchors(
             }
         }
 
-        // Map child coords → root coords with the grpSp's own chOff/chExt.
-        let csx = root.ext_x / root.ch_ext_x;
-        let csy = root.ext_y / root.ch_ext_y;
-        let tx = root.off_x - root.ch_off_x * csx;
-        let ty = root.off_y - root.ch_off_y * csy;
-
+        // Two top-level layouts ECMA-376 allows under <xdr:twoCellAnchor>:
+        //   (a) <xdr:grpSp> wrapping a tree of nested groups + leaves; and
+        //   (b) a single <xdr:sp> / <xdr:pic> directly under the anchor
+        //       (no grouping wrapper). The grpSp path uses the group's xfrm
+        //       to define the anchor's drawing-coord system; the stand-alone
+        //       path treats the shape as filling 100 % of the anchor rect.
         let mut shapes: Vec<ShapeInfo> = Vec::new();
-        collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
-                       csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
+        if let Some(grp) = anchor.children().find(|n| n.is_element() && n.tag_name().name() == "grpSp") {
+            let grp_sp_pr = grp.children().find(|n| n.is_element() && n.tag_name().name() == "grpSpPr");
+            let xfrm = grp_sp_pr
+                .and_then(|n| n.children().find(|c| c.is_element() && c.tag_name().name() == "xfrm"))
+                .as_ref()
+                .and_then(parse_xfrm);
+            let Some(root) = xfrm else { continue; };
+            if !root.has_ch || root.ch_ext_x == 0.0 || root.ch_ext_y == 0.0 { continue; }
+
+            // Map child coords → root coords with the grpSp's own chOff/chExt.
+            let csx = root.ext_x / root.ch_ext_x;
+            let csy = root.ext_y / root.ch_ext_y;
+            let tx = root.off_x - root.ch_off_x * csx;
+            let ty = root.off_y - root.ch_off_y * csy;
+
+            collect_shapes(&grp, root.off_x, root.off_y, root.ext_x, root.ext_y,
+                           csx, csy, tx, ty, theme_colors, rid_urls, &mut shapes);
+        } else if let Some(sp) = anchor.children().find(|n| n.is_element() && (n.tag_name().name() == "sp" || n.tag_name().name() == "pic")) {
+            // Stand-alone sp/pic: the shape's own xfrm gives its absolute EMU
+            // rect, but for our rendering pipeline the anchor's from/to
+            // already defines the on-sheet rect, and the leaf occupies it
+            // 100 %. Build a synthetic root coord-system whose origin matches
+            // the shape's xfrm so collect_shapes normalizes the leaf to (0,0)
+            // (1,1).
+            let sp_pr = sp.children().find(|n| n.is_element() && n.tag_name().name() == "spPr");
+            let Some(sp_pr_node) = sp_pr else { continue; };
+            let xfrm_node = sp_pr_node.children().find(|n| n.is_element() && n.tag_name().name() == "xfrm");
+            let Some(xfrm_n) = xfrm_node else { continue; };
+            let Some(xfrm) = parse_xfrm(&xfrm_n) else { continue; };
+            if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 { continue; }
+            collect_shapes(&anchor, xfrm.off_x, xfrm.off_y, xfrm.ext_x, xfrm.ext_y,
+                           1.0, 1.0, 0.0, 0.0, theme_colors, rid_urls, &mut shapes);
+        } else {
+            continue;
+        }
+
         if shapes.is_empty() { continue; }
 
         anchors.push(ShapeAnchor {

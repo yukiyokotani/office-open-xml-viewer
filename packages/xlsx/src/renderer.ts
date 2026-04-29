@@ -2516,6 +2516,34 @@ function renderQuadrant(
           right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
         };
       }
+      // Inherit the cell-above's bottom edge as our top, and the cell-left's
+      // right edge as our left, when our own edge is unset. The neighbor's
+      // edge was drawn during its row/col iteration, but our cell's fill
+      // (drawn just above) over-painted the half of that line lying inside
+      // our cell. Re-drawing it as our top/left (after our fill) restores
+      // the boundary line. Without this, e.g. a row whose every cell defines
+      // a medium bottom but the row below leaves top unset (sample-7 row 2)
+      // ends up with the bottom border half-erased on every cell except the
+      // ones whose row-below cell happens to define a top border — making
+      // the row look uneven.
+      if (!mergedBorder.top?.style) {
+        const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
+        const aboveBottom = aboveCell
+          ? resolveXf(styles, aboveCell.styleIndex).border.bottom
+          : null;
+        if (aboveBottom?.style) {
+          mergedBorder = { ...mergedBorder, top: aboveBottom };
+        }
+      }
+      if (!mergedBorder.left?.style) {
+        const leftCell = cellMap.get(`${rowIndex}:${colIndex - 1}`);
+        const leftRight = leftCell
+          ? resolveXf(styles, leftCell.styleIndex).border.right
+          : null;
+        if (leftRight?.style) {
+          mergedBorder = { ...mergedBorder, left: leftRight };
+        }
+      }
       renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH);
 
       // Excel Table style overlay: thin horizontal rules between rows and a
@@ -3640,7 +3668,147 @@ function drawShape(
       ctx.drawImage(img, 0, 0, sw, sh);
     }
   }
+  // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after
+  // fill/stroke so it sits on top of the shape's background.
+  if (shape.text) {
+    drawShapeText(ctx, shape.text, sw, sh);
+  }
   ctx.restore();
+}
+
+/**
+ * Render a shape's `<xdr:txBody>` content into the local (already-translated)
+ * coordinate system spanning [0..sw, 0..sh].
+ *
+ * Handles only the subset that real-world Excel files exercise heavily —
+ * single column of paragraphs, per-run bold/italic/size/color/font, paragraph
+ * align (`l`/`ctr`/`r`), body anchor (`t`/`ctr`/`b`). Text wrapping uses
+ * canvas measurements when `bodyPr@wrap="square"` (the default), and the
+ * inset is the OOXML default (`lIns=91440 EMU` ≈ 7.2 pt on each side, plus
+ * `tIns=45720 EMU` ≈ 3.6 pt top/bottom). We approximate inset as a fixed
+ * 7 px / 4 px since `bodyPr@*Ins` is rarely overridden in practice.
+ */
+function drawShapeText(
+  ctx: CanvasRenderingContext2D,
+  txt: import('./types.js').ShapeText,
+  sw: number, sh: number,
+): void {
+  if (sw <= 0 || sh <= 0 || txt.paragraphs.length === 0) return;
+  const padX = 7;
+  const padY = 4;
+  const innerW = Math.max(0, sw - padX * 2);
+  const innerH = Math.max(0, sh - padY * 2);
+  if (innerW <= 0 || innerH <= 0) return;
+
+  type Line = { runs: { text: string; run: import('./types.js').ShapeTextRun }[]; align: string; height: number; ascent: number };
+
+  const runFont = (run: import('./types.js').ShapeTextRun): { font: string; size: number } => {
+    const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
+    const px = size * PT_TO_PX;
+    const family = run.fontFace ? `"${run.fontFace}", ${DEFAULT_FONT_FAMILY}` : DEFAULT_FONT_FAMILY;
+    const weight = run.bold ? 'bold ' : '';
+    const italic = run.italic ? 'italic ' : '';
+    return { font: `${italic}${weight}${px}px ${family}`, size: px };
+  };
+
+  // Wrap each paragraph into lines.
+  const wrap = txt.wrap !== 'none';
+  const lines: Line[] = [];
+  for (const p of txt.paragraphs) {
+    const align = p.align || 'l';
+    let lineRuns: Line['runs'] = [];
+    let lineW = 0;
+    let lineHeight = 0;
+    let lineAscent = 0;
+    const flushLine = () => {
+      lines.push({ runs: lineRuns, align, height: lineHeight, ascent: lineAscent });
+      lineRuns = [];
+      lineW = 0;
+      lineHeight = 0;
+      lineAscent = 0;
+    };
+    for (const run of p.runs) {
+      const { font, size: pxSize } = runFont(run);
+      lineHeight = Math.max(lineHeight, pxSize * 1.2);
+      lineAscent = Math.max(lineAscent, pxSize * 0.85);
+      ctx.font = font;
+      // Split on explicit newlines (from <a:br/>) first.
+      const segments = run.text.split('\n');
+      for (let s = 0; s < segments.length; s++) {
+        if (s > 0) flushLine();
+        const seg = segments[s];
+        if (!seg) continue;
+        if (!wrap) {
+          lineRuns.push({ text: seg, run });
+          lineW += ctx.measureText(seg).width;
+          continue;
+        }
+        // Greedy word-wrap. Treat each character as a possible break point
+        // for CJK; for spaces, prefer breaking on space boundaries. We do a
+        // simple character-level greedy wrap which works adequately for
+        // both Latin and CJK.
+        let buf = '';
+        for (const ch of seg) {
+          const candidate = buf + ch;
+          const cw = ctx.measureText(candidate).width;
+          if (lineW + cw > innerW && (buf.length > 0 || lineRuns.length > 0)) {
+            if (buf) {
+              lineRuns.push({ text: buf, run });
+              lineW += ctx.measureText(buf).width;
+            }
+            flushLine();
+            buf = ch;
+            ctx.font = font;
+            lineHeight = Math.max(lineHeight, pxSize * 1.2);
+            lineAscent = Math.max(lineAscent, pxSize * 0.85);
+          } else {
+            buf = candidate;
+          }
+        }
+        if (buf) {
+          lineRuns.push({ text: buf, run });
+          lineW += ctx.measureText(buf).width;
+        }
+      }
+    }
+    flushLine();
+  }
+
+  // Total text block height
+  const blockH = lines.reduce((s, l) => s + l.height, 0);
+
+  // Vertical anchor — ECMA-376 §20.1.7.2 <a:bodyPr anchor>.
+  // For 'ctr' we intentionally skip Math.max(0,...) so the block stays
+  // visually centered even when blockH exceeds innerH (text clips at edge).
+  let y0 = padY;
+  if (txt.anchor === 'ctr') y0 = padY + (innerH - blockH) / 2;
+  else if (txt.anchor === 'b') y0 = padY + Math.max(0, innerH - blockH);
+
+  // Use 'middle' baseline: fillText(x, y) draws with the em-box midpoint at y.
+  // This gives clean per-line centering without manual ascent bookkeeping.
+  ctx.textBaseline = 'middle';
+  let lineTop = y0;
+  for (const line of lines) {
+    const drawY = lineTop + line.height / 2;
+    // Compute total line width to align horizontally
+    let totalW = 0;
+    for (const r of line.runs) {
+      const { font } = runFont(r.run);
+      ctx.font = font;
+      totalW += ctx.measureText(r.text).width;
+    }
+    let x = padX;
+    if (line.align === 'ctr') x = padX + Math.max(0, (innerW - totalW) / 2);
+    else if (line.align === 'r') x = padX + Math.max(0, innerW - totalW);
+    for (const r of line.runs) {
+      const { font } = runFont(r.run);
+      ctx.font = font;
+      ctx.fillStyle = r.run.color ?? '#000000';
+      ctx.fillText(r.text, x, drawY);
+      x += ctx.measureText(r.text).width;
+    }
+    lineTop += line.height;
+  }
 }
 
 function fillAndStroke(ctx: CanvasRenderingContext2D, shape: ShapeInfo): void {
