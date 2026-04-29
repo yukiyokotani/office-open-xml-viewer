@@ -4,6 +4,39 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.24.0 — 2026-04-30
+
+Minor release fixing spurious horizontal borders inside None-style Excel
+tables and exposing column-level DXF references on `TableInfo`.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **Skip the table-style overlay for "None"-style tables**
+    (ECMA-376 §18.5.1.4): when `<tableStyleInfo>` has no `name` attribute
+    the table uses the "None" style — no visual table formatting overlay
+    should be applied. The previous renderer always entered the overlay
+    block, whose fallback `else` branch drew a horizontal accent rule on
+    every cell of the table. The Rust parser now defaults `style_name` to
+    `""` (instead of `"TableStyleMedium2"`) when `name` is absent, and
+    `buildTableStyleMap` skips tables with empty `styleName`. Eliminates
+    the spurious horizontal borders that were visible across all 13 None-
+    style tables of sample-7.xlsx (PR #167).
+  - **Spec-faithful cell-border rendering**: an interim `suppressEdge`
+    heuristic that tried to hide the leftmost-totals-cell xf borders for
+    None-style tables (PR #168/#169) was reverted — those borders are
+    legitimate user-set formatting per ECMA-376 §18.8.45 and Excel does
+    render them. The B/C boundary across rows 50-60 is now a uniform
+    thick teal vertical line, supplied by `B.right=thick` on most rows
+    and `C.left=thick` on totals rows (same theme=5 colour at the same
+    column boundary) (PR #170).
+  - **Column-level DXF references** (ECMA-376 §18.5.1.3 `tableColumn`):
+    the parser now exposes `TableInfo.columns: TableColumnInfo[]` with
+    each column's `dataDxfId` / `headerRowDxfId` / `totalsRowDxfId`. The
+    renderer does not consume them yet (Excel pre-bakes column DXF
+    results into the cell `xf` for the common case), but the data is
+    available for future named-style overlay logic that needs to layer
+    column-specific DXFs on top of `wholeTable`/`headerRow` overlays
+    (PR #170).
+
 ## 0.23.0 — 2026-04-30
 
 Minor release adding drawing-shape text rendering for XLSX and correcting
