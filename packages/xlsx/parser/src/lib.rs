@@ -82,6 +82,17 @@ pub struct Worksheet {
     /// extension `http://schemas.microsoft.com/office/spreadsheetml/2009/9/main`,
     /// element `<x14:sparklineGroup>`, ECMA-376 §18.2 / Part 4).
     pub sparkline_groups: Vec<SparklineGroup>,
+    /// Family name of the workbook's Normal-style font, resolved from
+    /// `<cellStyleXfs>[0].fontId` → `<fonts>[fontId].name.val`. Used by the
+    /// renderer to compute the Max Digit Width (ECMA-376 §18.3.1.13) for the
+    /// active sheet's column widths. Denormalized onto every worksheet for
+    /// renderer convenience; the value is workbook-wide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_family: Option<String>,
+    /// Point size of the workbook's Normal-style font (`<fonts>[N].sz.val`).
+    /// Used together with `default_font_family` to compute Max Digit Width.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_font_size: Option<f64>,
 }
 
 /// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting
@@ -1161,6 +1172,9 @@ pub fn parse_sheet(data: &[u8], sheet_index: u32, name: &str) -> Result<String, 
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
     ws.sparkline_groups = load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
+    let (df_family, df_size) = parse_default_font(&mut archive);
+    ws.default_font_family = df_family;
+    ws.default_font_size = df_size;
 
     serde_json::to_string(&ws).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -1504,6 +1518,46 @@ fn parse_si_node(
         text,
         runs: if has_runs { Some(runs) } else { None },
     }
+}
+
+/// Resolve the workbook's Normal-style font (family name + point size) by
+/// following `<cellStyleXfs>[0].fontId` → `<fonts>[fontId]`. Returns `(None,
+/// None)` if `xl/styles.xml` is missing or malformed. The renderer uses this
+/// to compute the Max Digit Width for column-width pixel conversion
+/// (ECMA-376 §18.3.1.13).
+fn parse_default_font(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> (Option<String>, Option<f64>) {
+    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else { return (None, None); };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else { return (None, None); };
+    let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let mut font_id: usize = 0;
+    for n in doc.descendants() {
+        if n.tag_name().name() == "cellStyleXfs" && n.tag_name().namespace() == Some(ns) {
+            if let Some(xf) = n.children().find(|c| c.is_element() && c.tag_name().name() == "xf") {
+                font_id = xf.attribute("fontId").and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+            break;
+        }
+    }
+    for fonts_node in doc.descendants() {
+        if fonts_node.tag_name().name() != "fonts" || fonts_node.tag_name().namespace() != Some(ns) { continue; }
+        if let Some(font_node) = fonts_node.children()
+            .filter(|c| c.is_element() && c.tag_name().name() == "font")
+            .nth(font_id)
+        {
+            let mut name = None;
+            let mut sz = None;
+            for child in font_node.children() {
+                match child.tag_name().name() {
+                    "name" => name = child.attribute("val").map(|s| s.to_string()),
+                    "sz"   => sz = child.attribute("val").and_then(|s| s.parse().ok()),
+                    _ => {}
+                }
+            }
+            return (name, sz);
+        }
+        break;
+    }
+    (None, None)
 }
 
 fn parse_styles(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, theme_colors: &[String]) -> Result<Styles, String> {
@@ -2203,6 +2257,8 @@ fn parse_worksheet(
         tables: Vec::new(),
         slicers: Vec::new(),
         sparkline_groups: Vec::new(),
+        default_font_family: None,
+        default_font_size: None,
     }, hyperlink_rids))
 }
 
@@ -5397,6 +5453,9 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
     ws.tables = load_sheet_tables(&mut archive, &sheet_path, &theme_colors);
     ws.slicers = load_sheet_slicers(&mut archive, &sheet_path);
     ws.sparkline_groups = load_sheet_sparklines(&mut archive, &sheet_xml, &sheets, &rels_doc, &theme_colors);
+    let (df_family, df_size) = parse_default_font(&mut archive);
+    ws.default_font_family = df_family;
+    ws.default_font_size = df_size;
 
     serde_json::to_string(&ws).map_err(|e| e.to_string())
 }

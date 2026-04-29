@@ -1,6 +1,6 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { ViewportRange, Worksheet } from './types.js';
-import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx } from './renderer.js';
+import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, getMdwForWorksheet } from './renderer.js';
 
 const TAB_BAR_H = 30;
 
@@ -175,7 +175,7 @@ export class XlsxViewer {
     let frozenW = 0;
     const frozenColW: number[] = [];
     for (let c = 1; c <= freezeCols; c++) {
-      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       frozenColW.push(w);
       frozenW += w;
     }
@@ -216,7 +216,7 @@ export class XlsxViewer {
       col = -1;
       let acc = 0;
       for (let c = freezeCols + 1; c <= 16384; c++) {
-        acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+        acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
         if (contentX < acc) { col = c; break; }
       }
       if (col === -1) return null;
@@ -238,13 +238,13 @@ export class XlsxViewer {
     let x: number;
     if (col <= freezeCols) {
       let acc = HEADER_W;
-      for (let c = 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      for (let c = 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       x = acc * cs;
     } else {
       let frozenW = 0;
-      for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       let acc = HEADER_W + frozenW;
-      for (let c = freezeCols + 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      for (let c = freezeCols + 1; c < col; c++) acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       x = (acc - this.scrollHost.scrollLeft / cs) * cs;
     }
 
@@ -262,7 +262,7 @@ export class XlsxViewer {
       y = (acc - this.scrollHost.scrollTop / cs) * cs;
     }
 
-    const w = colWidthToPx(ws.colWidths[col] ?? ws.defaultColWidth) * cs;
+    const w = colWidthToPx(ws.colWidths[col] ?? ws.defaultColWidth, getMdwForWorksheet(ws)) * cs;
     const h = rowHeightToPx(ws.rowHeights[row] ?? ws.defaultRowHeight) * cs;
 
     return { x, y, w, h };
@@ -330,7 +330,7 @@ export class XlsxViewer {
     let frozenW = 0;
     const frozenColW: number[] = [];
     for (let c = 1; c <= freezeCols; c++) {
-      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      const w = colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       frozenColW.push(w); frozenW += w;
     }
     if (innerX < frozenW) {
@@ -344,7 +344,7 @@ export class XlsxViewer {
     const contentX = innerX - frozenW + this.scrollHost.scrollLeft / cs;
     let acc = 0;
     for (let c = freezeCols + 1; c <= 16384; c++) {
-      acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      acc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       if (contentX < acc) return { kind: 'col', col: c };
     }
     return null;
@@ -418,7 +418,7 @@ export class XlsxViewer {
     let frozenH = 0;
     if (ws) for (let r = 1; r <= freezeRows; r++) frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
     let frozenW = 0;
-    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+    if (ws) for (let c = 1; c <= freezeCols; c++) frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
 
     let x: number, y: number, w: number, h: number;
     let selR1 = 1, selC1 = 1;
@@ -666,7 +666,7 @@ export class XlsxViewer {
     // Compute frozen area pixel size
     let frozenW = 0;
     for (let c = 1; c <= freezeCols; c++) {
-      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
     }
     let frozenH = 0;
     for (let r = 1; r <= freezeRows; r++) {
@@ -688,7 +688,7 @@ export class XlsxViewer {
     // Spacer = header + frozen area + scrollable area (all in logical px, then scale)
     let totalW = HEADER_W + frozenW;
     for (let c = freezeCols + 1; c <= maxCol; c++) {
-      totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      totalW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
     }
     let totalH = HEADER_H + frozenH;
     for (let r = freezeRows + 1; r <= maxRow; r++) {
@@ -715,7 +715,7 @@ export class XlsxViewer {
     // Compute frozen area in logical (unscaled) pixels
     let frozenW = 0;
     for (let c = 1; c <= freezeCols; c++) {
-      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth);
+      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
     }
     let frozenH = 0;
     for (let r = 1; r <= freezeRows; r++) {
@@ -732,7 +732,7 @@ export class XlsxViewer {
     let xAcc = 0;
     let offsetX = 0;
     while (true) {
-      const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth);
+      const cw = colWidthToPx(ws.colWidths[startCol] ?? ws.defaultColWidth, getMdwForWorksheet(ws));
       if (xAcc + cw > logicalScrollX) { offsetX = logicalScrollX - xAcc; break; }
       xAcc += cw;
       startCol++;
@@ -759,7 +759,7 @@ export class XlsxViewer {
     let cols = 0;
     { let xAcc = -offsetX; let c = startCol;
       while (xAcc < cellW + offsetX && c <= 16384) {
-        xAcc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth); cols++; c++;
+        xAcc += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, getMdwForWorksheet(ws)); cols++; c++;
       }
       cols += 2;
     }
