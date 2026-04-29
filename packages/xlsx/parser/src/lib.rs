@@ -1738,7 +1738,14 @@ fn parse_worksheet(
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
-    let mut default_row_height = 15.0;
+    // Intrinsic default row height in *display pixels* — Excel's baseline
+    // for the Calibri 11 normal style. ECMA-376 §18.3.1.81 nominally
+    // measures `defaultRowHeight` in points, but Excel actually writes the
+    // pixel-equivalent value (sample-27 stores `defaultRowHeight="20"` and
+    // Excel displays 20 px on screen — see the renderer-side `rowHeightToPx`
+    // comment). Storing 20 here and skipping the pt→px multiplication keeps
+    // both code paths consistent.
+    let mut default_row_height = 20.0;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
     let mut show_gridlines = true;
@@ -1823,25 +1830,8 @@ fn parse_worksheet(
     for node in doc.descendants() {
         match node.tag_name().name() {
             "sheetFormatPr" if node.tag_name().namespace() == Some(ns) => {
-                // ECMA-376 §18.3.1.81: when `defaultColWidth` is absent but
-                // `baseColWidth` is given, the default column width (in
-                // characters) is `baseColWidth + 5 px / maxDigitWidth` —
-                // 4 px margin padding (2 px each side) + 1 px gridline.
-                // We use the same `MDW = 7` constant as the renderer (the
-                // Calibri 11 baseline). Without this fallback, files that
-                // rely solely on `baseColWidth` rendered too narrow because
-                // we silently fell back to the 8.43 default.
-                let default_col_width_explicit: Option<f64> = node
-                    .attribute("defaultColWidth")
-                    .and_then(|s| s.parse().ok());
-                if let Some(v) = default_col_width_explicit {
+                if let Some(v) = node.attribute("defaultColWidth").and_then(|s| s.parse().ok()) {
                     default_col_width = v;
-                } else if let Some(base) = node
-                    .attribute("baseColWidth")
-                    .and_then(|s| s.parse::<f64>().ok())
-                {
-                    const MDW: f64 = 7.0;
-                    default_col_width = base + 5.0 / MDW;
                 }
                 // ECMA-376 §18.3.1.81 customHeight: "'True' if
                 // defaultRowHeight value has been manually set, or is
@@ -1863,7 +1853,7 @@ fn parse_worksheet(
                     if custom_height {
                         default_row_height = v;
                     }
-                    // else: leave intrinsic 15.0 in place
+                    // else: leave intrinsic 20 (px) in place
                 }
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
