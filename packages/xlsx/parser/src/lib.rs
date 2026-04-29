@@ -1826,8 +1826,27 @@ fn parse_worksheet(
                 if let Some(v) = node.attribute("defaultColWidth").and_then(|s| s.parse().ok()) {
                     default_col_width = v;
                 }
-                if let Some(v) = node.attribute("defaultRowHeight").and_then(|s| s.parse().ok()) {
-                    default_row_height = v;
+                // ECMA-376 §18.3.1.81 customHeight: "'True' if
+                // defaultRowHeight value has been manually set, or is
+                // different from the default value." When customHeight is
+                // false/absent, the written defaultRowHeight is purely
+                // informational — applications use their intrinsic default
+                // (15 pt for the Calibri 11 baseline → 20 px at 96 DPI).
+                // Honoring the file value unconditionally caused sample-27
+                // (defaultRowHeight=20pt, no customHeight) to render rows
+                // at 27 px instead of Excel's actual 20 px.
+                let custom_height = node
+                    .attribute("customHeight")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if let Some(v) = node
+                    .attribute("defaultRowHeight")
+                    .and_then(|s| s.parse::<f64>().ok())
+                {
+                    if custom_height {
+                        default_row_height = v;
+                    }
+                    // else: leave intrinsic 15.0 in place
                 }
             }
             "col" if node.tag_name().namespace() == Some(ns) => {
