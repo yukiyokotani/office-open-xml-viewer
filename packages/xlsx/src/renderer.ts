@@ -17,7 +17,16 @@ import { renderChart, renderSparkline, type ChartModel, type SparklineModel } fr
 // for Cambria.
 const DEFAULT_FONT_FAMILY = '"Calibri", "Carlito", "Cambria", "Caladea", Arial, sans-serif';
 const DEFAULT_FONT_SIZE = 11;
-const MDW = 7;
+// Max Digit Width of the Normal-style font (Calibri 11 pt at 96 DPI).
+// ECMA-376 §18.3.1.13 uses MDW to convert the column-width character
+// measure into pixels.  Empirical measurement with Canvas2D (Calibri /
+// Carlito 11pt, 96 DPI) yields ≈ 8 px for the widest digit, matching
+// the EMU offsets that Excel 365 writes into <xdr:twoCellAnchor> (e.g.
+// a 12.25-char column stored as 932 657 EMU ≈ 97.9 px → colWidthToPx
+// returns 98 with MDW=8).  The older MDW=7 value came from the
+// traditional GDI metrics; it produced columns that were ≈14 % too
+// narrow, causing anchor colOff values to overflow the rendered column.
+const MDW = 8;
 /** Standard pt → CSS px conversion at 96 DPI. ECMA-376 §18.4.11 (font sz),
  * §18.8.5 (border width margins, etc.) all express their dimensions in
  * points. Multiply by this constant to obtain the display pixel value. */
