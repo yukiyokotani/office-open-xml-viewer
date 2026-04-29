@@ -4,6 +4,32 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.22.0 — 2026-04-29
+
+Minor release rolling up the v0.21.x XLSX engine work and refreshing the
+README screenshot.
+
+- **Assets**:
+  - Re-captured `docs/images/xlsx.png` at 1886×1064 (was 1246×735) so
+    the xlsx column in the README screenshot table matches the docx /
+    pptx column widths instead of rendering visibly narrower.
+- **XLSX engine** (cumulative since 0.21.0):
+  - `centerContinuous` runs hide their internal default gridlines and
+    explicit cell borders, leaving only the outer perimeter visible —
+    matching Excel's merged-cell-style appearance (PRs #152, #153,
+    #155, ECMA-376 §18.18.40).
+  - `defaultColWidth` derived from `baseColWidth` when the file omits
+    the explicit attribute (PR #156, ECMA-376 §18.3.1.81).
+  - `defaultRowHeight` honored only when `customHeight="1"` is set;
+    otherwise the renderer falls back to its 20-px intrinsic baseline,
+    matching Excel (PR #157).
+  - Row heights treated as 1:1 display pixels rather than the nominal
+    point size — Excel writes the resolved pixel value into `ht`, so
+    the previous 4/3 conversion produced rows ~33 % too tall (PR #158).
+  - `double` border style (ECMA-376 §18.18.3 ST_BorderStyle) now
+    rendered as two parallel 1-px lines with closed corners (PRs #158,
+    #159).
+
 ## 0.21.3 — 2026-04-29
 
 Patch release. XLSX cell sizing, border-style coverage, and
