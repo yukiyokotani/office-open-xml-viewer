@@ -2618,7 +2618,10 @@ function renderQuadrant(
       // thicker bottom edge under the header row (ECMA-376 §18.5). Drawn on
       // top of cell borders so an empty-border data cell still shows table
       // structure.
-      if (tableStyle) {
+      // Skip for "None"-style table cells (identified by `suppressEdge` being
+      // present): those cells only need the border-suppression path above, not
+      // the named-style overlay.
+      if (tableStyle && !tableStyle.suppressEdge) {
         const horiz = tsDxfWhole?.border?.horizontal;
         const vert  = tsDxfWhole?.border?.vertical;
         const wtTop = tsDxfWhole?.border?.top;
