@@ -4,6 +4,24 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.24.2 — 2026-04-30
+
+Patch release fixing a centerContinuous regression introduced by the
+0.23.0 row-z-order fix.
+
+- **XLSX engine** (`packages/xlsx`):
+  - **centerContinuous internal verticals stay hidden** (ECMA-376
+    §18.18.40 ST_HorizontalAlignment): the row-z-order repair added in
+    0.23.0 — which inherits the cell-to-the-left's `xf.right` as the
+    current cell's `left` when the latter is unset — also fired for the
+    *empty* left edges that the centerContinuous block deliberately
+    nulled, re-introducing the internal verticals between e.g. A3-D3 and
+    E3-H3 in sample-27. Gate the inherit pass on
+    `!suppressLeftGridCol.has(ci)` so cells participating in a
+    centerContinuous run keep the run reading as one visual span. The
+    top-inherit doesn't need the guard because centerContinuous only
+    suppresses verticals (PR #174).
+
 ## 0.24.1 — 2026-04-30
 
 Patch release fixing column-width pixel conversion for files whose Normal
