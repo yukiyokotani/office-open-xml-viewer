@@ -2338,29 +2338,42 @@ function renderQuadrant(
     // treated as a single visual span — Excel hides the default gridlines
     // *and* the explicit cell borders inside the run, so the run reads as
     // one merged-looking span with only the outer perimeter visible.
-    // Detect runs of length ≥ 2 (regardless of whether they contain text)
-    // and mark the internal vertical edges for suppression.
+    //
+    // A run is bounded by either (a) a non-centerContinuous cell, or
+    // (b) another centerContinuous cell that itself carries a value —
+    // the spec says spanned cells reference the same style id while only
+    // the anchor holds the displayed value. Two anchors in a row therefore
+    // mean two adjacent runs, with the border between them visible.
     const suppressRightGridCol = new Set<number>();
     const suppressLeftGridCol = new Set<number>();
     let runStart = -1;
+    const closeRun = (endExclusive: number) => {
+      if (runStart >= 0 && endExclusive - runStart >= 2) {
+        for (let k = runStart; k < endExclusive - 1; k++) suppressRightGridCol.add(k);
+        for (let k = runStart + 1; k < endExclusive; k++) suppressLeftGridCol.add(k);
+      }
+      runStart = -1;
+    };
     for (let ci = 0; ci <= numCols; ci++) {
       let isCC = false;
+      let hasValue = false;
       if (ci < numCols) {
         const ckey = `${rowIndex}:${startCol + ci}`;
         if (!mergeSkipSet.has(ckey) && !mergeAnchorMap.has(ckey)) {
           const c = cellMap.get(ckey);
           const cXf = resolveXf(styles, c?.styleIndex ?? 0).xf;
           isCC = cXf.alignH === 'centerContinuous';
+          hasValue = !!(c && c.value && c.value.type !== 'empty');
         }
       }
-      if (isCC) {
-        if (runStart < 0) runStart = ci;
-      } else {
-        if (runStart >= 0 && ci - runStart >= 2) {
-          for (let k = runStart; k < ci - 1; k++) suppressRightGridCol.add(k);
-          for (let k = runStart + 1; k < ci; k++) suppressLeftGridCol.add(k);
-        }
-        runStart = -1;
+      if (!isCC) {
+        closeRun(ci);
+      } else if (hasValue && runStart >= 0 && ci > runStart) {
+        // New anchor: close previous run [runStart, ci) and start a fresh one.
+        closeRun(ci);
+        runStart = ci;
+      } else if (runStart < 0) {
+        runStart = ci;
       }
     }
 
