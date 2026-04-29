@@ -26,33 +26,48 @@ async function preloadOfficeFonts(fontNames: Iterable<string>): Promise<void> {
     seen.add(key);
     const url = OFFICE_FONT_FALLBACK_MAP[key];
     if (!url) continue;
-    if (document.querySelector(`link[href="${url}"]`)) continue;
-    try {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = url;
-      document.head.appendChild(link);
-    } catch {
-      // Network or DOM error — silently skip; renderer falls back to system fonts.
+    if (!document.querySelector(`link[href="${url}"]`)) {
+      try {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = url;
+        document.head.appendChild(link);
+      } catch {
+        // Network or DOM error — silently skip; renderer falls back to system fonts.
+      }
     }
     // We need the *substitute* family loaded into FontFaceSet, not the
     // requested Office name. Map calibri → Carlito, cambria → Caladea.
     families.push(key === 'calibri' ? 'Carlito' : key === 'cambria' ? 'Caladea' : name);
   }
-  // Trigger explicit loads so Canvas measureText sees real glyph metrics
-  // before the first render. @font-face declarations alone don't fetch.
-  const loads: Promise<unknown>[] = [];
-  for (const family of families) {
-    for (const weight of ['400', '700']) {
-      for (const style of ['normal', 'italic']) {
-        loads.push(
-          document.fonts.load(`${style} ${weight} 16px "${family}"`).catch(() => undefined),
-        );
-      }
-    }
+  if (families.length === 0) return;
+  // Wait for the @font-face stylesheet(s) to register their FontFace
+  // entries with `document.fonts`. After a fresh `<link rel=stylesheet>`
+  // append the FontFaceSet is briefly empty; poll up to ~500 ms.
+  const targetFamilies = new Set(families.map((f) => f.toLowerCase()));
+  let registeredFaces: FontFace[] = [];
+  for (let i = 0; i < 25; i++) {
+    registeredFaces = [...document.fonts].filter((f) =>
+      targetFamilies.has(f.family.toLowerCase()),
+    );
+    if (registeredFaces.length > 0) break;
+    await new Promise<void>((r) => setTimeout(r, 20));
   }
+  // Force every matching FontFace to actually download. The previous
+  // implementation relied on `document.fonts.load("16px Carlito")` but
+  // that only triggers fetches for sub-ranges that match characters
+  // already present in the *DOM* — for canvas-only text the FontFace
+  // entries stay in the `unloaded` state, so the first render falls back
+  // to sans-serif and the metrics shift the moment a scroll triggers a
+  // re-render after the browser has lazy-loaded the font (see issue:
+  // visible layout shift on the deployed Storybook demo).
+  // Calling `face.load()` directly on each FontFace bypasses the
+  // unicode-range gating and guarantees the file is fetched and
+  // rasterized before we paint.
   await Promise.race([
-    Promise.all(loads).then(() => document.fonts.ready),
+    Promise.allSettled(registeredFaces.map((f) => f.load())).then(() =>
+      document.fonts.ready,
+    ),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
   ]);
 }
