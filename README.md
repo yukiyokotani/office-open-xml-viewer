@@ -542,7 +542,7 @@ cd packages/pptx/parser && wasm-pack build --target web && cp pkg/pptx_parser_bg
 
 - **Canvas-only rendering.** Documents are decoded and drawn to an `HTMLCanvasElement`. No script, link, form, or other active content from the source file is executed or injected into the DOM.
 - **ZIP decompression cap.** Each entry in the source archive is limited to 512 MiB of uncompressed output to block zip-bomb DoS.
-- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, PPTX theme webfonts are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to `PptxPresentation.load()` / `new PptxViewer(...)`. Enabling that option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
+- **No network by default.** The library does not send telemetry or analytics, and does not contact third-party services unless you ask it to. In particular, theme webfonts (and Office font metric substitutes for XLSX) are **not** loaded from Google Fonts unless you pass `useGoogleFonts: true` to the relevant `Viewer` / `load(...)` options — supported uniformly by `DocxViewer`, `PptxViewer`, and `XlsxViewer`. Enabling that option causes the end-user's browser to send an HTTP request (IP and User-Agent) to `fonts.googleapis.com`, which may have GDPR implications for your application — consider self-hosting the required fonts via `@font-face` instead.
 - **XML parsing.** Uses `roxmltree`, which does not resolve external entities (XXE-safe by default).
 
 ## License

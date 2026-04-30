@@ -1,7 +1,31 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
+import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
 import type { BodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
 import { computePages, renderDocumentToCanvas } from './renderer';
+
+/** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
+ *  PPTX map — these are the well-known free webfont alternatives Microsoft
+ *  Office templates pull from. Substitutes that diverge from the requested
+ *  family name (Calibri → Carlito, Cambria → Caladea) include
+ *  `loadFamily` so the FontFaceSet load is driven against the substitute. */
+const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
+  'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
+  'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
+  'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'roboto':            { url: 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'lato':              { url: 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'montserrat':        { url: 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+};
+
+/** Options for {@link DocxDocument.load}. Re-exports the shared
+ *  `LoadOptions` shape from `@silurus/ooxml-core`. */
+export type LoadOptions = CoreLoadOptions;
 
 export class DocxDocument {
   private _document: Document | null = null;
@@ -14,7 +38,7 @@ export class DocxDocument {
     this._worker.postMessage({ type: 'init', wasmUrl });
   }
 
-  static async load(source: string | ArrayBuffer): Promise<DocxDocument> {
+  static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
     const doc = new DocxDocument();
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
@@ -25,6 +49,12 @@ export class DocxDocument {
       buffer = source;
     }
     await doc._parse(buffer);
+    if (opts.useGoogleFonts) {
+      await preloadGoogleFonts(
+        [doc._document?.majorFont, doc._document?.minorFont],
+        DOCX_GOOGLE_FONTS,
+      );
+    }
     return doc;
   }
 

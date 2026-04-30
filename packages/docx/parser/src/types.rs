@@ -7,6 +7,17 @@ pub struct Document {
     pub body: Vec<BodyElement>,
     pub headers: HeadersFooters,
     pub footers: HeadersFooters,
+    /// ECMA-376 §17.7.4 theme `<a:fontScheme><a:majorFont><a:latin@typeface>`
+    /// — the heading typeface declared by the document theme. `None` when
+    /// the document has no theme part or no Latin major typeface is
+    /// declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major_font: Option<String>,
+    /// ECMA-376 §17.7.4 theme `<a:fontScheme><a:minorFont><a:latin@typeface>`
+    /// — the body typeface declared by the document theme. `None` when the
+    /// document has no theme part or no Latin minor typeface is declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor_font: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]

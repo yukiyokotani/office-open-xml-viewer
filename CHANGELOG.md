@@ -11,7 +11,9 @@ changes that remain compatible with existing API surfaces.
 - **pptx**: `PptxViewer` constructor signature changed from
   `new PptxViewer(container: HTMLElement)` to `new PptxViewer(canvas: HTMLCanvasElement)`.
   Callers must now create and place the `<canvas>` element themselves; the viewer
-  wraps it internally (same reparent pattern as `DocxViewer`).
+  wraps it internally (same reparent pattern as `DocxViewer`). `XlsxViewer` keeps
+  its `container: HTMLElement` argument because it owns a sheet-tab DOM bar in
+  addition to the grid canvas.
 
   **Migration**:
   ```diff
@@ -19,6 +21,32 @@ changes that remain compatible with existing API surfaces.
   +const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
   +const pptx = new PptxViewer(canvas);
   ```
+
+### Features
+
+- **docx**: `DocxViewer` / `DocxDocument.load` now accept a
+  `useGoogleFonts?: boolean` option matching the existing PPTX / XLSX shape.
+  When `true`, the viewer preloads Google Fonts substitutes for theme-declared
+  typefaces (`<a:fontScheme><a:majorFont|minorFont><a:latin>`) so canvas text
+  measurement matches Word's. Default `false` to avoid third-party requests.
+- **core**: `LoadOptions` and `preloadGoogleFonts` are now exported from
+  `@silurus/ooxml-core`. The three format packages (`docx`, `pptx`, `xlsx`)
+  re-export their own `LoadOptions` from this shared shape so an application
+  can pass the same options object to any viewer.
+- **docx parser**: theme `majorFont` / `minorFont` (Latin axis) are now
+  serialized into the parsed `Document` JSON. Existing renderer behavior is
+  unchanged; the new fields are read by `DocxDocument.load(...,
+  { useGoogleFonts: true })` to drive font preload.
+
+### Bug Fixes
+
+- **docx**: wrapper now sets `vertical-align:top` and forces
+  `canvas { display: block }` to eliminate the ~6 px baseline-descender gap
+  that previously let the host container's background color show through
+  below the rendered page.
+- **pptx**: same baseline-gap fix applied to `PptxViewer`'s wrapper and to
+  the low-level `renderSlide(canvas, ...)` path so direct callers do not
+  inherit the gap either.
 
 ## 0.24.3 — 2026-04-30
 

@@ -1,0 +1,74 @@
+name: VRT
+
+# Visual regression tests against the canvas-based renderers. Runs on every
+# pull request to catch parser / renderer regressions before they ship — the
+# motivating case is that prior to 0.25.0 the WASM artifacts in `main` were
+# not rebuilt between commits, so a parser fix that landed in `lib.rs` could
+# silently regress in published builds because nobody re-ran `build:wasm`.
+# This workflow always rebuilds WASM from source before running Playwright.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  vrt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/pptx/parser
+            packages/xlsx/parser
+            packages/docx/parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Rebuild WASM (all parsers)
+        # Critical: do NOT skip even if `packages/*/src/wasm/*.wasm` exists in
+        # the checkout — that file is gitignored, so this step is what makes
+        # CI test the *current* parser source rather than a stale artifact.
+        run: pnpm build:wasm
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run VRT
+        run: pnpm vrt
+
+      - name: Upload diff artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrt-diffs
+          path: |
+            packages/*/tests/visual/diffs/
+            packages/*/tests/visual/screenshots/
+          if-no-files-found: ignore
+          retention-days: 7

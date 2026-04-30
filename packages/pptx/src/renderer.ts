@@ -3370,6 +3370,11 @@ export async function renderSlide(
   // CSS size only applies to the visible HTMLCanvasElement (not OffscreenCanvas)
   if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
     canvas.style.width = `${canvasW}px`;
+    // Mirror the docx renderer: when callers use `renderSlide(canvas, ...)`
+    // directly without the {@link PptxViewer} wrapper, set `display:block`
+    // as a safety net so the inline-element baseline does not leave a
+    // descender gap below the canvas. Respect any user-specified value.
+    if (!canvas.style.display) canvas.style.display = 'block';
   }
 
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;

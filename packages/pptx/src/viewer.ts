@@ -56,6 +56,11 @@ export class PptxViewer {
     // otherwise lets the host container's background show through below the
     // canvas (~6 px on default font metrics).
     this.wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
+    // Force `display:block` on the canvas so it does not inherit the inline
+    // baseline of an enclosing wrapper, which would otherwise leave a 4–6px
+    // descender gap between the canvas bottom and the wrapper bottom — the
+    // host container's background would show through that strip.
+    if (!canvas.style.display) canvas.style.display = 'block';
     if (parent) parent.insertBefore(this.wrapper, canvas);
     this.wrapper.appendChild(canvas);
 

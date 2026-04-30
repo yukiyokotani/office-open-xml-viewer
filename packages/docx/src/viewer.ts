@@ -1,8 +1,9 @@
 import { DocxDocument } from './document';
+import type { LoadOptions } from './document';
 import type { RenderPageOptions } from './types';
 import type { DocxTextRunInfo } from './renderer';
 
-export interface DocxViewerOptions extends RenderPageOptions {
+export interface DocxViewerOptions extends RenderPageOptions, LoadOptions {
   container?: HTMLElement;
   /**
    * When true, adds a transparent text overlay div over the canvas so the
@@ -30,6 +31,11 @@ export class DocxViewer {
     // otherwise lets the host container's background show through below the
     // canvas (~6 px on default font metrics).
     this._wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
+    // Force `display:block` on the canvas so it does not inherit the inline
+    // baseline of the wrapper, which would otherwise leave a 4–6px descender
+    // gap between the canvas bottom and the wrapper bottom — the host
+    // container's background would show through that strip.
+    if (!canvas.style.display) canvas.style.display = 'block';
     if (parent) {
       parent.insertBefore(this._wrapper, canvas);
     }
@@ -45,7 +51,7 @@ export class DocxViewer {
   }
 
   async load(source: string | ArrayBuffer): Promise<void> {
-    this._doc = await DocxDocument.load(source);
+    this._doc = await DocxDocument.load(source, { useGoogleFonts: this._opts.useGoogleFonts });
     this._currentPage = 0;
     await this._render();
   }

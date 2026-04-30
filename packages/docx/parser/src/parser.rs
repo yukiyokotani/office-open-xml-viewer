@@ -77,7 +77,10 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let headers = load_header_footer_set(&mut zip, &refs.headers, "hdr", &style_map, &mut num_map, &theme);
     let footers = load_header_footer_set(&mut zip, &refs.footers, "ftr", &style_map, &mut num_map, &theme);
 
-    Ok(Document { section, body, headers, footers })
+    let major_font = theme.theme_font("major", "latin");
+    let minor_font = theme.theme_font("minor", "latin");
+
+    Ok(Document { section, body, headers, footers, major_font, minor_font })
 }
 
 /// Resolve scheme color names (accent1..6, dk1, dk2, lt1, lt2, hlink, folHlink)
@@ -157,6 +160,13 @@ impl ThemeColors {
             return self.resolve_font(r);
         }
         Some(s)
+    }
+
+    /// Read a theme typeface directly by group ("major" / "minor") and axis
+    /// ("latin" / "ea" / "cs"). Used by the document loader to expose the
+    /// heading / body fonts to TS callers (e.g. for Google Fonts preload).
+    pub fn theme_font(&self, group: &str, axis: &str) -> Option<String> {
+        self.fonts.get(&format!("{group}/{axis}")).cloned()
     }
 
     /// Resolve an rFonts theme reference (e.g. "minorHAnsi" → minor.latin,
