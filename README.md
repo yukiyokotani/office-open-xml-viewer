@@ -53,8 +53,7 @@ await xlsx.load('/workbook.xlsx');
 
 // PPTX — viewer manages its own <canvas>
 const pptx = new PptxViewer(document.getElementById('pptx-container')!);
-const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
-await pptx.load(buf);
+await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
 
@@ -150,13 +149,7 @@ export function PptxViewerComponent({ src }: { src: string }) {
       onSlideChange: (i, total) => setSlide({ current: i, total }),
     });
     viewerRef.current = viewer;
-
-    let cancelled = false;
-    fetch(src)
-      .then(r => r.arrayBuffer())
-      .then(buf => { if (!cancelled) viewer.load(buf); });
-
-    return () => { cancelled = true; };
+    viewer.load(src);
   }, [src]);
 
   return (
@@ -192,8 +185,7 @@ onMounted(async () => {
   viewer = new PptxViewer(container.value!, {
     onSlideChange: (i, t) => { current.value = i; total.value = t; },
   });
-  const buf = await fetch(props.src).then(r => r.arrayBuffer());
-  await viewer.load(buf);
+  await viewer.load(props.src);
 });
 </script>
 
@@ -242,9 +234,7 @@ export class PptxViewerComponent implements AfterViewInit {
     this.viewer = new PptxViewer(this.containerEl().nativeElement, {
       onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
     });
-    fetch('/deck.pptx')
-      .then(r => r.arrayBuffer())
-      .then(buf => this.viewer!.load(buf));
+    this.viewer.load('/deck.pptx');
   }
 
   prev(): void { this.viewer?.prevSlide(); }
@@ -276,8 +266,7 @@ export class PptxViewerComponent implements AfterViewInit {
     viewer = new PptxViewer(container, {
       onSlideChange: (i, t) => { current = i; total = t; },
     });
-    const buf = await fetch(src).then(r => r.arrayBuffer());
-    await viewer.load(buf);
+    await viewer.load(src);
   });
 </script>
 
@@ -309,8 +298,7 @@ export function PptxViewerComponent(props: { src: string }) {
     viewer = new PptxViewer(containerEl, {
       onSlideChange: (i, t) => { setCurrent(i); setTotal(t); },
     });
-    const buf = await fetch(props.src).then(r => r.arrayBuffer());
-    await viewer.load(buf);
+    await viewer.load(props.src);
   });
 
   onCleanup(() => { /* viewer?.destroy?.() */ });
@@ -349,8 +337,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
     viewer = new PptxViewer(containerRef.value, {
       onSlideChange: (i, t) => { current.value = i; total.value = t; },
     });
-    const buf = await fetch(src).then(r => r.arrayBuffer());
-    await viewer.load(buf);
+    await viewer.load(src);
   });
 
   return (

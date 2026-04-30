@@ -75,15 +75,7 @@ export function buildViewerUI(
 
   if (autoLoadUrl) {
     status.textContent = 'Loading…';
-    fetch(autoLoadUrl)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status} from ${autoLoadUrl}`);
-        return r.arrayBuffer();
-      })
-      .then((buf) => {
-        status.textContent = 'Parsing…';
-        return viewer.load(buf);
-      })
+    viewer.load(autoLoadUrl)
       .then(() => {
         status.textContent = 'Loaded';
         spinner.remove();
