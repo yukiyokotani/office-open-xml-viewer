@@ -48,12 +48,13 @@ await docx.load('/document.docx');
 docx.nextPage();
 
 // XLSX — viewer manages its own <canvas> + tab bar
-const xlsx = new XlsxViewer(document.getElementById('xlsx-container')!);
+const container = document.getElementById('xlsx-container') as HTMLElement;
+const xlsx = new XlsxViewer(container);
 await xlsx.load('/workbook.xlsx');
 
 // PPTX — caller provides the <canvas>
-const pptxCanvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
-const pptx = new PptxViewer(pptxCanvas);
+const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const pptx = new PptxViewer(canvas);
 await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```

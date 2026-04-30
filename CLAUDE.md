@@ -48,6 +48,19 @@ Rust/WASM parser + TypeScript Canvas renderer 構成。
 - Excel / PowerPoint / Word の UI 挙動（spec に書かれていないランタイム autofit 等）を reverse-engineering して合わせる場合は、事前にユーザー承認を得ること。迷ったら spec 通りを選ぶ。
 - 既存コードに上の原則に反するコードが残っている場合は、触る機会があったら正道に寄せる。
 
+## コード例の規約
+
+README・ドキュメント・Storybook の public-facing なコード例では以下のルールを守る:
+
+- **型アサーションは `as Type` を使う。後置 `!` (non-null assertion) は使わない。**
+  ```typescript
+  // OK
+  const canvas = document.getElementById('my-canvas') as HTMLCanvasElement;
+  // NG
+  const canvas = document.getElementById('my-canvas')!;
+  ```
+- **変数名**: canvas を受け取る viewer (`DocxViewer`, `PptxViewer`) には `canvas`、container を受け取る viewer (`XlsxViewer`) には `container` を使う。
+
 ## WASM ビルド手順
 
 ```bash
