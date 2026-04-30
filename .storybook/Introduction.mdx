@@ -45,8 +45,15 @@ import pptxImg from '../docs/images/pptx.png';
   }
   .sb-format-card img {
     width: 100%;
-    height: 160px;
+    /* Use a 16:9 aspect-ratio so the screenshot scales with the card width.
+       The previous fixed 160px height left a thin strip of imagery on wide
+       viewports while the card body kept its padding. object-position keeps
+       the document's title region anchored at the top of the crop, which
+       matters for the docx screenshot (1400x1980 — taller than 16:9, so
+       cover would otherwise cut the title). */
+    aspect-ratio: 16 / 9;
     object-fit: cover;
+    object-position: top center;
     border-bottom: 1px solid #e5e7eb;
     background: #f3f4f6;
   }

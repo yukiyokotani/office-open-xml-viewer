@@ -201,7 +201,9 @@ export const MasterDetail: LayoutStory = {
     layout.append(thumbCol, detailCol);
 
     // Detail viewer with text selection
-    const detailViewer = new PptxViewer(detailCol, {
+    const detailCanvas = document.createElement('canvas');
+    detailCol.appendChild(detailCanvas);
+    const detailViewer = new PptxViewer(detailCanvas, {
       width: 800,
       useGoogleFonts: true,
       enableTextSelection: true,

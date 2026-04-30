@@ -1,76 +1,28 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
+import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
-/** Available via Google Fonts; key is lowercase font family name. */
-const GOOGLE_FONTS_MAP: Record<string, string> = {
-  'nunito sans': 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'nunito': 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'open sans': 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'roboto': 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'lato': 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'montserrat': 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'poppins': 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'raleway': 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'playfair display': 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+/** Theme-referenced typefaces commonly used by PPTX templates. Keys are
+ *  lower-cased family names; loadFamily is omitted because Google Fonts
+ *  ships the same family name in those entries. */
+const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
+  'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'roboto':            { url: 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'lato':              { url: 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'montserrat':        { url: 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-async function preloadThemeFonts(majorFont: string | null, minorFont: string | null): Promise<void> {
-  if (typeof document === 'undefined') return;
-  const loaded = new Set<string>();
-  const families: string[] = [];
-  for (const fontName of [majorFont, minorFont]) {
-    if (!fontName) continue;
-    const key = fontName.toLowerCase();
-    if (loaded.has(key)) continue;
-    loaded.add(key);
-    families.push(fontName);
-    const url = GOOGLE_FONTS_MAP[key];
-    if (!url) continue;
-    if (document.querySelector(`link[href="${url}"]`)) continue;
-    try {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = url;
-      document.head.appendChild(link);
-    } catch {
-      // silently ignore font loading errors
-    }
-  }
-  // @font-face declarations are passive — the font file is only fetched when a
-  // glyph is requested. Trigger an explicit load for the weights we care about
-  // so the canvas does not measure/draw against a system fallback.
-  const loads: Promise<unknown>[] = [];
-  for (const family of families) {
-    for (const weight of ['400', '700']) {
-      for (const style of ['normal', 'italic']) {
-        loads.push(
-          document.fonts.load(`${style} ${weight} 16px "${family}"`).catch(() => undefined)
-        );
-      }
-    }
-  }
-  await Promise.race([
-    Promise.all(loads).then(() => document.fonts.ready),
-    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
-  ]);
-}
-
-/** Options for {@link PptxPresentation.load}. */
-export interface LoadOptions {
-  /**
-   * Opt in to loading theme-declared webfonts from Google Fonts
-   * (`fonts.googleapis.com`). When enabled, end-user IP/User-Agent is sent to
-   * Google, which may have privacy/GDPR implications for your application.
-   *
-   * Default: `false` — the canvas falls back to locally available fonts. Host
-   * the required webfonts yourself and reference them via `@font-face` in your
-   * application CSS to match the document's theme fonts.
-   */
-  useGoogleFonts?: boolean;
-}
+/** Options for {@link PptxPresentation.load}. Re-exports the shared
+ *  `LoadOptions` shape from `@silurus/ooxml-core`. */
+export type LoadOptions = CoreLoadOptions;
 
 /** Options for rendering a single slide onto a canvas. */
 export interface RenderSlideOptions {
@@ -185,7 +137,10 @@ export class PptxPresentation {
     }
     await pres._parse(buffer);
     if (opts.useGoogleFonts) {
-      await preloadThemeFonts(pres._presentation!.majorFont, pres._presentation!.minorFont);
+      await preloadGoogleFonts(
+        [pres._presentation!.majorFont, pres._presentation!.minorFont],
+        PPTX_GOOGLE_FONTS,
+      );
     }
     return pres;
   }

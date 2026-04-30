@@ -1,92 +1,30 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
+import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse } from './types.js';
 import { renderViewport } from './renderer.js';
 
-/** Office font name → Google Fonts URL for a metric-compatible substitute.
- *  These pairings are the well-known Office substitutes that Microsoft and
- *  Google both publish and ship on Linux distributions:
- *    Calibri → Carlito (same metrics — advance widths, ascender / descender)
- *    Cambria → Caladea (likewise)
- *  Loading them on a system that lacks Calibri / Cambria (macOS, Linux
- *  without Office) keeps text width measurements close to Excel's. */
-const OFFICE_FONT_FALLBACK_MAP: Record<string, string> = {
-  'calibri': 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-  'cambria': 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+/** Office font name → metric-compatible Google Fonts substitute. These are
+ *  the well-known pairings Microsoft and Google both publish and ship on
+ *  Linux distributions: Calibri → Carlito, Cambria → Caladea (same advance
+ *  widths and ascender / descender). Loading the substitute on a system
+ *  that lacks the Office face keeps text width measurements close to
+ *  Excel's. The substitute font-family differs from the requested name, so
+ *  `loadFamily` redirects FontFaceSet loading appropriately. */
+const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
+  'calibri': {
+    url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+    loadFamily: 'Carlito',
+  },
+  'cambria': {
+    url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap',
+    loadFamily: 'Caladea',
+  },
 };
 
-async function preloadOfficeFonts(fontNames: Iterable<string>): Promise<void> {
-  if (typeof document === 'undefined') return;
-  const seen = new Set<string>();
-  const families: string[] = [];
-  for (const name of fontNames) {
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const url = OFFICE_FONT_FALLBACK_MAP[key];
-    if (!url) continue;
-    if (!document.querySelector(`link[href="${url}"]`)) {
-      try {
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = url;
-        document.head.appendChild(link);
-      } catch {
-        // Network or DOM error — silently skip; renderer falls back to system fonts.
-      }
-    }
-    // We need the *substitute* family loaded into FontFaceSet, not the
-    // requested Office name. Map calibri → Carlito, cambria → Caladea.
-    families.push(key === 'calibri' ? 'Carlito' : key === 'cambria' ? 'Caladea' : name);
-  }
-  if (families.length === 0) return;
-  // Wait for the @font-face stylesheet(s) to register their FontFace
-  // entries with `document.fonts`. After a fresh `<link rel=stylesheet>`
-  // append the FontFaceSet is briefly empty; poll up to ~500 ms.
-  const targetFamilies = new Set(families.map((f) => f.toLowerCase()));
-  let registeredFaces: FontFace[] = [];
-  for (let i = 0; i < 25; i++) {
-    registeredFaces = [...document.fonts].filter((f) =>
-      targetFamilies.has(f.family.toLowerCase()),
-    );
-    if (registeredFaces.length > 0) break;
-    await new Promise<void>((r) => setTimeout(r, 20));
-  }
-  // Force every matching FontFace to actually download. The previous
-  // implementation relied on `document.fonts.load("16px Carlito")` but
-  // that only triggers fetches for sub-ranges that match characters
-  // already present in the *DOM* — for canvas-only text the FontFace
-  // entries stay in the `unloaded` state, so the first render falls back
-  // to sans-serif and the metrics shift the moment a scroll triggers a
-  // re-render after the browser has lazy-loaded the font (see issue:
-  // visible layout shift on the deployed Storybook demo).
-  // Calling `face.load()` directly on each FontFace bypasses the
-  // unicode-range gating and guarantees the file is fetched and
-  // rasterized before we paint.
-  await Promise.race([
-    Promise.allSettled(registeredFaces.map((f) => f.load())).then(() =>
-      document.fonts.ready,
-    ),
-    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
-  ]);
-}
-
-/** Options for {@link XlsxWorkbook.load}. */
-export interface LoadOptions {
-  /**
-   * Opt in to loading Office-font metric substitutes (Carlito for Calibri,
-   * Caladea for Cambria) from Google Fonts (`fonts.googleapis.com`). Without
-   * these the canvas falls back to system Arial / Helvetica which is
-   * noticeably wider per character, so column layouts diverge from Excel.
-   *
-   * When enabled, end-user IP / User-Agent is sent to Google, which may have
-   * privacy / GDPR implications for your application. Default `false` — host
-   * the substitute webfonts yourself and reference them via `@font-face` in
-   * your application CSS to avoid the third-party request.
-   */
-  useGoogleFonts?: boolean;
-}
+/** Options for {@link XlsxWorkbook.load}. Re-exports the shared
+ *  `LoadOptions` shape from `@silurus/ooxml-core`. */
+export type LoadOptions = CoreLoadOptions;
 
 export class XlsxWorkbook {
   private worker: Worker;
@@ -118,7 +56,7 @@ export class XlsxWorkbook {
       for (const f of this.parsedWorkbook.styles?.fonts ?? []) {
         if (f.name) names.add(f.name);
       }
-      await preloadOfficeFonts(names);
+      await preloadGoogleFonts(names, XLSX_GOOGLE_FONTS);
     }
   }
 

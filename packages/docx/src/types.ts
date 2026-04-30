@@ -5,6 +5,10 @@ export interface Document {
   body: BodyElement[];
   headers: HeadersFooters;
   footers: HeadersFooters;
+  /** Theme `<a:fontScheme><a:majorFont><a:latin@typeface>` (heading face). */
+  majorFont?: string;
+  /** Theme `<a:fontScheme><a:minorFont><a:latin@typeface>` (body face). */
+  minorFont?: string;
 }
 
 export interface HeadersFooters {

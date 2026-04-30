@@ -63,6 +63,7 @@ export function buildViewerUI(
     width: args.width,
     dpr: window.devicePixelRatio,
     enableTextSelection: true,
+    useGoogleFonts: true,
   });
 
   const updateNav = () => {
@@ -203,6 +204,7 @@ export const FileUpload: Story = {
         width: args.width,
         dpr: window.devicePixelRatio,
         enableTextSelection: true,
+        useGoogleFonts: true,
       });
       try {
         await viewer.load(buffer);

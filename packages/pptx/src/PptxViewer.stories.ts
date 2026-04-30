@@ -58,7 +58,10 @@ export function buildViewerUI(
   const spinner = createCanvasSpinner();
   container.appendChild(spinner);
 
-  const viewer = new PptxViewer(container, {
+  const canvas = document.createElement('canvas');
+  container.appendChild(canvas);
+
+  const viewer = new PptxViewer(canvas, {
     width: args.width,
     useGoogleFonts: true,
     enableTextSelection: true,
@@ -226,7 +229,9 @@ export const FileUpload: Story = {
       status.textContent = `Parsing ${name}…`;
       viewer?.destroy();
       container.innerHTML = '';
-      viewer = new PptxViewer(container, {
+      const canvas = document.createElement('canvas');
+      container.appendChild(canvas);
+      viewer = new PptxViewer(canvas, {
         width: args.width,
         enableMediaPlayback: true,
         onSlideChange: (idx, total) => {
