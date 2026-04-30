@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-xlsx",
   "private": true,
-  "version": "0.24.2",
+  "version": "0.24.3",
   "description": "XLSX parser and Canvas renderer (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <yokotani.yuki@gmail.com>",

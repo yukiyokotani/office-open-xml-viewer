@@ -4,6 +4,28 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.24.3 — 2026-04-30
+
+Documentation-only patch standardizing the `Viewer.load` examples across
+all three formats.
+
+- **Documentation** (`README.md`, Storybook):
+  - **README Quick Start + framework examples now show `viewer.load(url)`
+    for PPTX**: previously the README and the six framework code samples
+    (React / Vue / Angular / Svelte / SolidJS / Qwik) demonstrated the
+    PPTX viewer being driven through a manual
+    `fetch(url).then(r => r.arrayBuffer()).then(viewer.load)` dance,
+    while the DOCX and XLSX examples passed the URL string directly to
+    `viewer.load(url)`. The asymmetry was misleading: `PptxViewer.load`
+    has always accepted `string | ArrayBuffer` and internally calls
+    `fetch + arrayBuffer` for the string form, identical to
+    `DocxViewer` and `XlsxViewer`. Updated all examples to the
+    URL-string form so the three viewers read the same way (PR #176).
+  - **Storybook `buildViewerUI` helpers (PPTX, XLSX) pass the URL
+    directly**: matched the existing DOCX `buildViewerUI` style by
+    dropping the manual fetch + ArrayBuffer step and letting the viewer
+    do the network call itself (PR #176).
+
 ## 0.24.2 — 2026-04-30
 
 Patch release fixing a centerContinuous regression introduced by the
