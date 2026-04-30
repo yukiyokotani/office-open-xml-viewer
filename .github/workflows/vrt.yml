@@ -57,7 +57,7 @@ jobs:
         run: pnpm build:wasm
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm --filter @silurus/ooxml-pptx exec playwright install --with-deps chromium
 
       - name: Run VRT
         run: pnpm vrt
