@@ -26,7 +26,10 @@ export class DocxViewer {
     // Wrap canvas in a positioned container for the optional text layer overlay
     const parent = canvas.parentElement;
     this._wrapper = document.createElement('div');
-    this._wrapper.style.cssText = 'position:relative;display:inline-block;';
+    // vertical-align:top removes the inline-block baseline descender gap that
+    // otherwise lets the host container's background show through below the
+    // canvas (~6 px on default font metrics).
+    this._wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
     if (parent) {
       parent.insertBefore(this._wrapper, canvas);
     }
