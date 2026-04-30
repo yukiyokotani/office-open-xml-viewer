@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.25.0 — 2026-04-30
+
+### Breaking Changes
+
+- **pptx**: `PptxViewer` constructor signature changed from
+  `new PptxViewer(container: HTMLElement)` to `new PptxViewer(canvas: HTMLCanvasElement)`.
+  Callers must now create and place the `<canvas>` element themselves; the viewer
+  wraps it internally (same reparent pattern as `DocxViewer`).
+
+  **Migration**:
+  ```diff
+  -const pptx = new PptxViewer(document.getElementById('pptx-container')!);
+  +const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+  +const pptx = new PptxViewer(canvas);
+  ```
+
 ## 0.24.3 — 2026-04-30
 
 Documentation-only patch standardizing the `Viewer.load` examples across

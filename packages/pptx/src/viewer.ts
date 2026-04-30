@@ -30,8 +30,10 @@ export interface PptxViewerOptions extends RenderOptions {
 /**
  * Opinionated single-canvas PPTX viewer.
  *
- * Creates a <canvas> element, appends it to the provided container, and manages
- * slide navigation.
+ * Accepts a caller-supplied `<canvas>` element and wraps it in a positioned
+ * container for the optional text-selection overlay.  The wrapper is inserted
+ * into the canvas's existing parent (reparent), so the canvas stays at its
+ * original position in the DOM.
  *
  * For custom layouts (multi-canvas, thumbnails, scroll view) use PptxPresentation directly.
  */
@@ -44,20 +46,18 @@ export class PptxViewer {
   private currentSlide = 0;
   private handle: PresentationHandle | null = null;
 
-  constructor(container: HTMLElement, opts: PptxViewerOptions = {}) {
+  constructor(canvas: HTMLCanvasElement, opts: PptxViewerOptions = {}) {
     this.opts = opts;
+    this.canvas = canvas;
 
+    const parent = canvas.parentElement;
     this.wrapper = document.createElement('div');
     // vertical-align:top removes the inline-block baseline descender gap that
     // otherwise lets the host container's background show through below the
     // canvas (~6 px on default font metrics).
     this.wrapper.style.cssText = 'position:relative;display:inline-block;vertical-align:top;';
-
-    this.canvas = document.createElement('canvas');
-    this.canvas.style.display = 'block';
-    this.canvas.style.maxWidth = '100%';
-    this.canvas.style.height = 'auto';
-    this.wrapper.appendChild(this.canvas);
+    if (parent) parent.insertBefore(this.wrapper, canvas);
+    this.wrapper.appendChild(canvas);
 
     if (opts.enableTextSelection) {
       this.textLayer = document.createElement('div');
@@ -66,8 +66,6 @@ export class PptxViewer {
         'overflow:hidden;pointer-events:none;user-select:text;-webkit-user-select:text;';
       this.wrapper.appendChild(this.textLayer);
     }
-
-    container.appendChild(this.wrapper);
   }
 
   /** Load a PPTX from URL or ArrayBuffer and render the first slide. */

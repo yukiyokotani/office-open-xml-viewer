@@ -51,8 +51,9 @@ docx.nextPage();
 const xlsx = new XlsxViewer(document.getElementById('xlsx-container')!);
 await xlsx.load('/workbook.xlsx');
 
-// PPTX — viewer manages its own <canvas>
-const pptx = new PptxViewer(document.getElementById('pptx-container')!);
+// PPTX — caller provides the <canvas>
+const pptxCanvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const pptx = new PptxViewer(pptxCanvas);
 await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
@@ -137,15 +138,15 @@ import { useEffect, useRef, useState } from 'react';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
 export function PptxViewerComponent({ src }: { src: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const viewerRef   = useRef<PptxViewer | null>(null);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const viewerRef  = useRef<PptxViewer | null>(null);
   const [slide, setSlide] = useState({ current: 0, total: 0 });
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    const viewer = new PptxViewer(container, {
+    const viewer = new PptxViewer(canvas, {
       onSlideChange: (i, total) => setSlide({ current: i, total }),
     });
     viewerRef.current = viewer;
@@ -154,7 +155,7 @@ export function PptxViewerComponent({ src }: { src: string }) {
 
   return (
     <div>
-      <div ref={containerRef} style={{ width: 800 }} />
+      <canvas ref={canvasRef} style={{ width: 800 }} />
       <button onClick={() => viewerRef.current?.prevSlide()}>‹ Prev</button>
       <span> {slide.current + 1} / {slide.total} </span>
       <button onClick={() => viewerRef.current?.nextSlide()}>Next ›</button>
@@ -176,13 +177,13 @@ import { PptxViewer } from '@silurus/ooxml/pptx';
 
 const props = defineProps<{ src: string }>();
 
-const container = useTemplateRef<HTMLDivElement>('container');
+const canvas  = useTemplateRef<HTMLCanvasElement>('canvas');
 let viewer: PptxViewer | null = null;
 const current = ref(0);
 const total   = ref(0);
 
 onMounted(async () => {
-  viewer = new PptxViewer(container.value!, {
+  viewer = new PptxViewer(canvas.value!, {
     onSlideChange: (i, t) => { current.value = i; total.value = t; },
   });
   await viewer.load(props.src);
@@ -191,7 +192,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <div ref="container" style="width: 800px" />
+    <canvas ref="canvas" style="width: 800px" />
     <button @click="viewer?.prevSlide()">‹ Prev</button>
     <span> {{ current + 1 }} / {{ total }} </span>
     <button @click="viewer?.nextSlide()">Next ›</button>
@@ -217,7 +218,7 @@ import { PptxViewer } from '@silurus/ooxml/pptx';
   standalone: true,
   template: `
     <div>
-      <div #container style="width: 800px"></div>
+      <canvas #canvas style="width: 800px"></canvas>
       <button (click)="prev()">‹ Prev</button>
       <span> {{ current() + 1 }} / {{ total() }} </span>
       <button (click)="next()">Next ›</button>
@@ -225,13 +226,13 @@ import { PptxViewer } from '@silurus/ooxml/pptx';
   `,
 })
 export class PptxViewerComponent implements AfterViewInit {
-  containerEl = viewChild.required<ElementRef<HTMLDivElement>>('container');
+  canvasEl = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
   current = signal(0);
   total   = signal(0);
   private viewer?: PptxViewer;
 
   ngAfterViewInit(): void {
-    this.viewer = new PptxViewer(this.containerEl().nativeElement, {
+    this.viewer = new PptxViewer(this.canvasEl().nativeElement, {
       onSlideChange: (i, t) => { this.current.set(i); this.total.set(t); },
     });
     this.viewer.load('/deck.pptx');
@@ -257,13 +258,13 @@ export class PptxViewerComponent implements AfterViewInit {
 
   let { src }: { src: string } = $props();
 
-  let container: HTMLDivElement;
+  let canvas: HTMLCanvasElement;
   let viewer: PptxViewer;
   let current = $state(0);
   let total   = $state(0);
 
   onMount(async () => {
-    viewer = new PptxViewer(container, {
+    viewer = new PptxViewer(canvas, {
       onSlideChange: (i, t) => { current = i; total = t; },
     });
     await viewer.load(src);
@@ -271,7 +272,7 @@ export class PptxViewerComponent implements AfterViewInit {
 </script>
 
 <div>
-  <div bind:this={container} style="width: 800px"></div>
+  <canvas bind:this={canvas} style="width: 800px"></canvas>
   <button onclick={() => viewer?.prevSlide()}>‹ Prev</button>
   <span> {current + 1} / {total} </span>
   <button onclick={() => viewer?.nextSlide()}>Next ›</button>
@@ -289,13 +290,13 @@ import { createSignal, onMount, onCleanup } from 'solid-js';
 import { PptxViewer } from '@silurus/ooxml/pptx';
 
 export function PptxViewerComponent(props: { src: string }) {
-  let containerEl!: HTMLDivElement;
+  let canvasEl!: HTMLCanvasElement;
   let viewer: PptxViewer | undefined;
   const [current, setCurrent] = createSignal(0);
   const [total,   setTotal  ] = createSignal(0);
 
   onMount(async () => {
-    viewer = new PptxViewer(containerEl, {
+    viewer = new PptxViewer(canvasEl, {
       onSlideChange: (i, t) => { setCurrent(i); setTotal(t); },
     });
     await viewer.load(props.src);
@@ -305,7 +306,7 @@ export function PptxViewerComponent(props: { src: string }) {
 
   return (
     <div>
-      <div ref={containerEl} style={{ width: '800px' }} />
+      <canvas ref={canvasEl} style={{ width: '800px' }} />
       <button onClick={() => viewer?.prevSlide()}>‹ Prev</button>
       <span> {current() + 1} / {total()} </span>
       <button onClick={() => viewer?.nextSlide()}>Next ›</button>
@@ -325,16 +326,16 @@ import { component$, useSignal, useVisibleTask$ } from '@builder.io/qwik';
 import type { PptxViewer as PptxViewerType } from '@silurus/ooxml/pptx';
 
 export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
-  const containerRef = useSignal<HTMLDivElement>();
+  const canvasRef = useSignal<HTMLCanvasElement>();
   const current = useSignal(0);
   const total   = useSignal(0);
   let viewer: PptxViewerType | undefined;
 
   // useVisibleTask$ runs only in the browser, never during SSR
   useVisibleTask$(async () => {
-    if (!containerRef.value) return;
+    if (!canvasRef.value) return;
     const { PptxViewer } = await import('@silurus/ooxml/pptx');
-    viewer = new PptxViewer(containerRef.value, {
+    viewer = new PptxViewer(canvasRef.value, {
       onSlideChange: (i, t) => { current.value = i; total.value = t; },
     });
     await viewer.load(src);
@@ -342,7 +343,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
   return (
     <div>
-      <div ref={containerRef} style={{ width: '800px' }} />
+      <canvas ref={canvasRef} style={{ width: '800px' }} />
       <button onClick$={() => viewer?.prevSlide()}>‹ Prev</button>
       <span> {current.value + 1} / {total.value} </span>
       <button onClick$={() => viewer?.nextSlide()}>Next ›</button>
