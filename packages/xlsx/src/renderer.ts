@@ -3250,7 +3250,9 @@ export async function prepareWorksheetMath(ws: Worksheet, math: MathRenderer): P
   }
 }
 
-function drawShapeText(
+// Exported for the headless line-height probe in packages/node (no other
+// production consumer; the orchestrator calls it via `drawShape` above).
+export function drawShapeText(
   ctx: CanvasRenderingContext2D,
   txt: import('./types.js').ShapeText,
   sw: number, sh: number,
@@ -3294,6 +3296,19 @@ function drawShapeText(
     let lineAscent = 0;
     let hasMath = false;
     const flushLine = () => {
+      // A blank line (empty paragraph, or a line that only saw a <a:br>) never
+      // had its height raised by a text/math run, so it would collapse to 0 and
+      // pull the following text up. ECMA-376 §21.1.2.2.6/§21.1.2.3 — the
+      // paragraph mark still reserves one line at its run size. The xlsx shape
+      // model carries no per-paragraph endParaRPr/defRPr, so fall back to the
+      // nearest text size in the paragraph (matching the inline-math inherit at
+      // `lastTextPt`) and finally DEFAULT_FONT_SIZE. Same synthetic 1.2 leading
+      // / 0.85 ascent the text-run branch uses — xlsx has no real font metrics.
+      if (lineHeight === 0) {
+        const px = (lastTextPt || DEFAULT_FONT_SIZE) * PT_TO_PX * cs;
+        lineHeight = px * 1.2;
+        lineAscent = px * 0.85;
+      }
       lines.push({ segs, align, height: lineHeight, ascent: lineAscent, hasMath });
       segs = []; lineW = 0; lineHeight = 0; lineAscent = 0; hasMath = false;
     };
