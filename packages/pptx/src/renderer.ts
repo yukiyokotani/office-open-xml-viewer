@@ -73,6 +73,7 @@ import {
   isSymbolFontFamily,
   drawUnderline,
   intendedSingleLinePx,
+  measureAdvanceWithTrailingSpace,
 } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
@@ -695,7 +696,14 @@ export function layoutParagraph(
     if (!text) return;
     ctx.font = font;
     const lsPx = extras?.letterSpacingPx ?? 0;
-    const baseW = ctx.measureText(text).width;
+    // `measureAdvanceWithTrailingSpace` (not raw measureText): runs are tokenized
+    // on whitespace (`split(/(\s+)/)`), so an inter-word space is pushed as a lone
+    // " " token whose `measureText(" ").width` is 0 on trimming engines (Firefox,
+    // WebKit/Safari) — the token would carry no advance and adjacent words would
+    // collide. The core helper restores the space advance; on Chrome/skia it is a
+    // pure pass-through. The draw pen advances by this same stored `w` (no
+    // re-measure), so measure==draw on every engine.
+    const baseW = measureAdvanceWithTrailingSpace(ctx, text);
     // Letter spacing adds an extra gap between every character, including
     // after the last one — matches the "advance width" semantics of OOXML
     // spc (each glyph's advance grows by spc points). Tab stops measure the
@@ -925,7 +933,10 @@ export function layoutParagraph(
       }
 
       ctx.font = font;
-      const tokW = ctx.measureText(token).width;
+      // Trailing-whitespace-robust so a lone " " wrap token keeps its advance on
+      // trimming engines (see the `push` measure above): the width fed to the
+      // wrap-fit decision must match the width the token is drawn at.
+      const tokW = measureAdvanceWithTrailingSpace(ctx, token);
       const isWhitespace = /^\s+$/.test(token);
 
       // If already in tab mode, collect all text into tabStop.segments (no wrap)
