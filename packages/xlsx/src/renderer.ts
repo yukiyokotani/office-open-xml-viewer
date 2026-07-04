@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, measureAdvanceWithTrailingSpace, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -926,7 +926,10 @@ export function layoutRichTextLines(
     // Measure at the *draw* font so a super/subscript token reserves its reduced
     // (~65%) glyph width; the segment keeps the run's full size for line height.
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
-    const w = ctx.measureText(text).width;
+    // Trailing-space-robust (a wrapped token can end in a space that trimming
+    // engines drop; the draw pen advances by the stored width — see the core
+    // helper docs).
+    const w = measureAdvanceWithTrailingSpace(ctx, text);
     if (cur.length > 0 && curW + w > maxWidth) {
       // Kinsoku at the wrap boundary (ECMA-376 §17.15.1.58–.60): retract
       // trailing code points of the line being closed so it does not end with
@@ -958,10 +961,12 @@ export function layoutRichTextLines(
         } else {
           const keepText = keepCps.join('');
           last.text = keepText;
-          last.width = ctx.measureText(keepText).width;
+          // keepText can end at a whitespace (LB13 retract extends to the last
+          // space) — measure trailing-space-robustly so it keeps that advance.
+          last.width = measureAdvanceWithTrailingSpace(ctx, keepText);
         }
         const moveText = moveCps.join('');
-        carry = { text: moveText, font: last.font, width: ctx.measureText(moveText).width };
+        carry = { text: moveText, font: last.font, width: measureAdvanceWithTrailingSpace(ctx, moveText) };
       }
       flush();
       if (carry) {
@@ -1153,7 +1158,12 @@ function drawRichLine(
   const segs: RichSeg[] = lineRuns.map((r) => {
     const font = applyRunFont(baseFont, r);
     ctx.font = buildFont(vertAlignDrawFont(font), cs);
-    return { text: r.text, font, width: ctx.measureText(r.text).width };
+    // Trailing-space-robust: a rich run can end in a space at an inter-run word
+    // boundary, whose advance Firefox/WebKit trim from measureText. The draw pen
+    // (drawResolvedRichLine) advances by this stored `width`, so trimming would
+    // collide the next run — the core helper restores the space (pass-through on
+    // Chrome/skia).
+    return { text: r.text, font, width: measureAdvanceWithTrailingSpace(ctx, r.text) };
   });
   const totalWidth = segs.reduce((a, s) => a + s.width, 0);
   let startX: number;
@@ -3794,7 +3804,12 @@ export function drawShapeText(
         const piece = pieces[s];
         if (!piece) continue;
         if (!wrap) {
-          const w = ctx.measureText(piece).width;
+          // `measureAdvanceWithTrailingSpace` (not raw measureText): a piece may
+          // end in whitespace whose advance Firefox/WebKit trim from measureText,
+          // which would collapse an inter-word space at the piece edge. The core
+          // helper restores it (pass-through on Chrome/skia); the draw pen
+          // advances by this stored `w`, so measure==draw on every engine.
+          const w = measureAdvanceWithTrailingSpace(ctx, piece);
           segs.push({ kind: 'text', text: piece, font, color, w });
           lineW += w;
           continue;
@@ -3809,7 +3824,10 @@ export function drawShapeText(
           const cw = ctx.measureText(candidate).width;
           if (lineW + cw > lineAvailW() && (buf.length > 0 || segs.length > 0)) {
             if (buf) {
-              const w = ctx.measureText(buf).width;
+              // A wrap buffer flushed here can end in a space; measure it
+              // trailing-space-robustly so the space keeps its advance on
+              // trimming engines (measure==draw with the draw pen below).
+              const w = measureAdvanceWithTrailingSpace(ctx, buf);
               segs.push({ kind: 'text', text: buf, font, color, w });
               lineW += w;
             }
@@ -3825,7 +3843,9 @@ export function drawShapeText(
           }
         }
         if (buf) {
-          const w = ctx.measureText(buf).width;
+          // Final buffer of the piece — same trailing-space-robust measure so a
+          // word ending in a space keeps its advance (see above).
+          const w = measureAdvanceWithTrailingSpace(ctx, buf);
           segs.push({ kind: 'text', text: buf, font, color, w });
           lineW += w;
         }
