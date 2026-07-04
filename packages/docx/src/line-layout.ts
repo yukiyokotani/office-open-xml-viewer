@@ -34,6 +34,7 @@ import {
   isComplexScriptCodePoint,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  measureAdvanceWithTrailingSpace,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
@@ -1709,13 +1710,18 @@ export function layoutLines(
   // character-grid delta. This is the SINGLE source of truth shared with the
   // draw paths (gridWidth) — every line-break / fit / tab measurement uses it so
   // line wrapping packs the grid's char count and the box matches what is drawn.
-  const segAdvance = (s: LayoutTextSeg): number =>
-    gridWidth(measureText(s).width, s.text, gridDeltaPx);
+  // `measureAdvanceWithTrailingSpace` (not the raw `ctx.measureText().width`) so a trailing
+  // inter-word space keeps its advance on engines whose measureText trims trailing
+  // whitespace — see the core helper (@silurus/ooxml-core → text/measure-space.ts).
+  const segAdvance = (s: LayoutTextSeg): number => {
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
+    return gridWidth(measureAdvanceWithTrailingSpace(ctx, s.text), s.text, gridDeltaPx);
+  };
   // Grid advance of an arbitrary string under a segment's font (for split
   // prefixes/tails). Selects the font, then applies the same gridWidth model.
   const strAdvance = (s: LayoutTextSeg, text: string): number => {
     setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
-    return gridWidth(ctx.measureText(text).width, text, gridDeltaPx);
+    return gridWidth(measureAdvanceWithTrailingSpace(ctx, text), text, gridDeltaPx);
   };
 
   // Width of a queued segment, for right/center tab look-ahead.
@@ -1948,10 +1954,12 @@ export function layoutLines(
 
     // ── Text segment ─────────────────────────────────────
     const s = seg as LayoutTextSeg;
-    const m = measureText(s);
+    const m = measureText(s); // sets ctx.font; also feeds ascent/descent below
     // Advance = natural width + character-grid delta (the SINGLE model shared
     // with the draw paths; 0 unless an active grid AND a pure-EA segment).
-    const w = gridWidth(m.width, s.text, gridDeltaPx);
+    // `measureAdvanceWithTrailingSpace` (not `m.width`) so a trailing inter-word space keeps
+    // its advance on engines whose measureText trims trailing whitespace.
+    const w = gridWidth(measureAdvanceWithTrailingSpace(ctx, s.text), s.text, gridDeltaPx);
     // Line-height tracks the un-scaled pt font so super/sub don't shrink the line.
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
@@ -2240,7 +2248,10 @@ export function rescaleLayoutLines(
     const effPx = calcEffectiveFontPx(s, scale);
     ctx.font = buildFont(s.bold, s.italic, effPx, s.fontFamily, fontFamilyClasses);
     const m = ctx.measureText(s.text);
-    const advance = gridWidth(m.width, s.text, gridDeltaPx);
+    // `measureAdvanceWithTrailingSpace` (not `m.width`) so a trailing inter-word space keeps
+    // its advance at the paint scale too, on engines whose measureText trims
+    // trailing whitespace (must match the layoutLines advance so measure==draw).
+    const advance = gridWidth(measureAdvanceWithTrailingSpace(ctx, s.text), s.text, gridDeltaPx);
     // §17.3.2.33 — a small-caps run's LINE BOX follows the FULL run size (measure
     // the box at fullPx, not the 2pt-reduced glyphs); super/subscript keeps its
     // shrunk contribution. Mirrors layoutLines' fullPx / metricEmPx split.

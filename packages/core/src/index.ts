@@ -292,6 +292,11 @@ export {
   type SegStretch,
 } from './text/line-distribute';
 export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-positions';
+// Trailing-whitespace-robust text advance: `measureText` excludes a run's
+// trailing/lone whitespace on Firefox & WebKit/Safari but includes it on
+// Chrome/Blink & skia-canvas. Shared so docx/pptx/xlsx keep inter-word spaces
+// from collapsing on trimming engines (measure==draw on every engine).
+export { measureAdvanceWithTrailingSpace } from './text/measure-space';
 // Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
 // slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
 export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';
