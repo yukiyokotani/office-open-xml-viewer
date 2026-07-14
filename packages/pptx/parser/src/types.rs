@@ -1038,6 +1038,10 @@ pub(crate) enum TextRun {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TextRunData {
     pub(crate) text: String,
+    /// Stable source ranges for ordinary slide-owned DrawingML text. Empty for
+    /// generated fields and inherited layout/master content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_refs: Vec<ooxml_common::source::TextSourceRef>,
     /// None = not set (inherit from paragraph/body/layout defaults); Some(true/false) = explicit
     pub(crate) bold: Option<bool>,
     /// None = not set; Some(true/false) = explicit

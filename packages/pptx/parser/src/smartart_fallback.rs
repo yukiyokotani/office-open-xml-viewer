@@ -456,6 +456,7 @@ fn default_paragraph() -> Paragraph {
 fn default_run() -> TextRunData {
     TextRunData {
         text: String::new(),
+        source_refs: Vec::new(),
         bold: None,
         italic: None,
         underline: false,

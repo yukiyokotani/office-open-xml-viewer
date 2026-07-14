@@ -7,7 +7,7 @@ export {
   type RenderSlideToBitmapOptions,
 } from './presentation';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
-export { buildPptxTextLayer } from './text-layer';
+export { buildPptxTextLayer, getPptxTextRunAtNode } from './text-layer';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location
 // shape. `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export {
@@ -27,6 +27,8 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // password-protected or legacy-binary .ppt file). Re-exported so
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.
 export { OoxmlError, type OoxmlErrorCode } from '@silurus/ooxml-core';
+export type { TextSourcePathStep, TextSourceRef } from '@silurus/ooxml-core';
+export { sliceTextSourceRefs } from '@silurus/ooxml-core';
 export type {
   Presentation,
   Slide,

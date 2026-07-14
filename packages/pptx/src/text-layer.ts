@@ -1,6 +1,19 @@
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
+const textRunByNode = new WeakMap<Node, PptxTextRunInfo>();
+
+/** Return the rendered run associated with a text-layer node or its ancestors. */
+export function getPptxTextRunAtNode(node: Node | null): PptxTextRunInfo | undefined {
+  let current = node;
+  while (current) {
+    const run = textRunByNode.get(current);
+    if (run) return run;
+    current = current.parentNode;
+  }
+  return undefined;
+}
+
 /**
  * Build the transparent text-selection overlay for a rendered pptx slide. Unlike
  * docx (flat spans), pptx groups runs into one positioned `<div>` per shape frame
@@ -76,6 +89,7 @@ export function buildPptxTextLayer(
     const shape = shapeMap.get(key)!;
     const span = document.createElement('span');
     span.textContent = run.text;
+    textRunByNode.set(span, run);
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /

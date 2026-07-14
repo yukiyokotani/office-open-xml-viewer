@@ -87,6 +87,9 @@ import {
   buildWarpEnvelope,
   warpGlyphTransform,
   followPathUScale,
+  offsetTextSourceRefs,
+  sliceTextSourceRefs,
+  type TextSourceRef,
 } from '@silurus/ooxml-core';
 import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
@@ -137,6 +140,8 @@ export interface RenderContext {
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface PptxTextRunInfo {
   text: string;
+  /** Stable OOXML source ranges covered by this rendered segment. */
+  sourceRefs?: TextSourceRef[];
   /** X position in CSS px, relative to the shape's top-left corner. */
   inShapeX: number;
   /** Y position (top of line box) in CSS px, relative to the shape's top-left corner. */
@@ -362,6 +367,8 @@ export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promis
 
 type LayoutSegment = {
   text: string;
+  /** Stable OOXML source ranges rebased to this segment's UTF-16 text. */
+  sourceRefs?: TextSourceRef[];
   font: string;
   /** Inline DrawingML TAB, classified UAX#9 S during visual ordering (#916). */
   isTab?: true;
@@ -1326,7 +1333,36 @@ export function layoutParagraph(
   // Always emit the last (possibly empty) line
   lines.push(currentLine);
 
+  attachParagraphSourceRefs(lines, para);
   return lines;
+}
+
+/**
+ * Project parser-level run mappings onto the final visual segments. The
+ * all-text equality guard intentionally drops metadata when the renderer has
+ * transformed content (fields, caps, symbols, tabs, or generated text), since
+ * claiming a source offset there would be less useful than omitting it.
+ */
+function attachParagraphSourceRefs(lines: LayoutLine[], para: Paragraph): void {
+  let sourceText = '';
+  const sourceRefs: TextSourceRef[] = [];
+
+  for (const run of para.runs) {
+    if (run.type !== 'text') continue;
+    sourceRefs.push(...offsetTextSourceRefs(run.sourceRefs, sourceText.length));
+    sourceText += run.text;
+  }
+
+  if (sourceRefs.length === 0) return;
+  const segments = lines.flatMap((line) => line.segments.filter((segment) => !segment.math && !segment.isTab));
+  if (segments.map((segment) => segment.text).join('') !== sourceText) return;
+
+  let textOffset = 0;
+  for (const segment of segments) {
+    const refs = sliceTextSourceRefs(sourceRefs, textOffset, textOffset + segment.text.length);
+    if (refs.length > 0) segment.sourceRefs = refs;
+    textOffset += segment.text.length;
+  }
 }
 
 // ===== Element renderers =====
@@ -3805,6 +3841,7 @@ export function renderTextBody(
       if (onTextRun && seg.text) {
         onTextRun({
           text: seg.text,
+          sourceRefs: seg.sourceRefs,
           inShapeX: penX - bx,
           inShapeY: cursorY - by,
           w: segW + jext,
@@ -5434,6 +5471,15 @@ async function renderSlideLeased(
   if (superseded()) return canvas;
 
   const slideNumber = slide.slideNumber;
+  const sourceOnTextRun: TextRunCallback | undefined = onTextRun
+    ? (run) => onTextRun({
+        ...run,
+        sourceRefs: run.sourceRefs?.map((ref) => ({
+          ...ref,
+          partName: ref.partName ?? slide.partName,
+        })),
+      })
+    : undefined;
 
   // Warm the bitmap caches for every image-bearing element concurrently.
   // The draw loop below still awaits in element order (z-order), but each
@@ -5514,7 +5560,7 @@ async function renderSlideLeased(
     // stop so we don't paint this (now stale) slide over the newer one.
     if (superseded()) return canvas;
     if (el.type === 'shape') {
-      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, onTextRun, opts.fetchImage);
+      renderShape(ctx, el, scale, themeDefaultColor, slideNumber, rc, sourceOnTextRun, opts.fetchImage);
     } else if (el.type === 'picture') {
       await renderPicture(ctx, el, scale, opts.fetchImage);
     } else if (el.type === 'table') {

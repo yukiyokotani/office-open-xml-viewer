@@ -956,6 +956,7 @@ pub(crate) fn parse_paragraph(
                     .and_then(|n| parse_color_node(n, theme));
                 runs.push(TextRun::Text(TextRunData {
                     text,
+                    source_refs: Vec::new(),
                     bold,
                     italic,
                     underline: false,
@@ -1190,6 +1191,7 @@ pub(crate) fn parse_run(
 ) -> Option<TextRunData> {
     let t_node = child(r_node, "t")?;
     let text = t_node.text().unwrap_or("").to_owned();
+    let source_refs = pptx_text_source_refs(t_node);
     let r_pr = child(r_node, "rPr");
 
     // Attribute with rPr → defRPr fallback; None means "not set" (inherit from body/layout defaults)
@@ -1357,6 +1359,7 @@ pub(crate) fn parse_run(
 
     Some(TextRunData {
         text,
+        source_refs,
         bold,
         italic,
         underline,
@@ -1379,4 +1382,46 @@ pub(crate) fn parse_run(
         outline,
         highlight,
     })
+}
+
+/// Return source metadata only for text physically stored in a slide part.
+/// Layout/master text can be rendered into the slide but belongs to another
+/// package part whose name is not available in this parser call.
+fn pptx_text_source_refs(
+    t_node: roxmltree::Node<'_, '_>,
+) -> Vec<ooxml_common::source::TextSourceRef> {
+    let root = t_node.document().root_element();
+    if root.tag_name().name() != "sld" {
+        return Vec::new();
+    }
+
+    ooxml_common::source::text_source_ref(t_node, None)
+        .into_iter()
+        .collect()
+}
+
+#[cfg(test)]
+mod source_ref_tests {
+    use super::*;
+
+    #[test]
+    fn slide_run_keeps_namespace_path_and_utf16_source_range() {
+        let doc = roxmltree::Document::parse(
+            r#"<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>A😀B</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+        )
+        .unwrap();
+        let run_node = doc
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "r")
+            .unwrap();
+        let run = parse_run(run_node, None, &HashMap::new(), &HashMap::new()).unwrap();
+
+        assert_eq!(run.source_refs.len(), 1);
+        let source = &run.source_refs[0];
+        assert_eq!(source.text_end, 4);
+        assert_eq!(source.source_end, 4);
+        assert_eq!(source.path.first().unwrap().local_name, "sld");
+        assert_eq!(source.path.last().unwrap().local_name, "t");
+        assert!(source.part_name.is_none());
+    }
 }

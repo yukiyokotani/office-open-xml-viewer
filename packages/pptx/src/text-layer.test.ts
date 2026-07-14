@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildPptxTextLayer } from './text-layer.js';
+import { buildPptxTextLayer, getPptxTextRunAtNode } from './text-layer.js';
 import type { PptxTextRunInfo } from './renderer';
 
 // node env: no document. Recording DOM stub (see docx text-layer.test.ts). pptx
@@ -104,6 +104,26 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     expect(spanA.style['line-height']).toBe('12px');
     expect(spanA.style['letter-spacing']).toBe('0');
     expect(spanA.style.color).toBe('transparent');
+  });
+
+  it('maps a selection-layer span back to its rendered source run', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const sourceRun = run({
+      sourceRefs: [{
+        partName: 'ppt/slides/slide1.xml',
+        path: [{ localName: 't', index: 0 }],
+        textStart: 0,
+        textEnd: 1,
+        sourceStart: 0,
+        sourceEnd: 1,
+      }],
+    });
+
+    buildPptxTextLayer(layer as unknown as HTMLDivElement, [sourceRun], 100, 100);
+
+    const span = layer.children[0].children[0];
+    expect(getPptxTextRunAtNode(span as unknown as Node)).toBe(sourceRun);
   });
 
   it('splits runs of different shapes into separate group divs', () => {
