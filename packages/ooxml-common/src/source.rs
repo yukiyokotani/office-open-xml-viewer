@@ -57,6 +57,8 @@ pub fn element_path(node: Node<'_, '_>) -> Vec<SourcePathStep> {
             let tag = element.tag_name();
             let index = element
                 .prev_siblings()
+                // roxmltree includes the node itself as the first item.
+                .skip(1)
                 .filter(|sibling| {
                     sibling.is_element()
                         && sibling.tag_name().name() == tag.name()

@@ -10336,15 +10336,17 @@ mod cs_toggle_tests {
     #[test]
     fn merged_text_nodes_keep_independent_utf16_source_ranges() {
         let run = run_of(
-            r#"<w:p><w:r><w:t>A😀</w:t><w:t>B</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t>A😀</w:t><w:noBreakHyphen/><w:t>B</w:t></w:r></w:p>"#,
         );
 
-        assert_eq!(run.text, "A😀B");
+        assert_eq!(run.text, "A😀-B");
         assert_eq!(run.source_refs.len(), 2);
         assert_eq!(run.source_refs[0].text_start, 0);
         assert_eq!(run.source_refs[0].text_end, 3);
-        assert_eq!(run.source_refs[1].text_start, 3);
-        assert_eq!(run.source_refs[1].text_end, 4);
+        // The generated no-break hyphen occupies [3, 4) in the merged run but
+        // intentionally has no source reference of its own.
+        assert_eq!(run.source_refs[1].text_start, 4);
+        assert_eq!(run.source_refs[1].text_end, 5);
         assert_eq!(run.source_refs[0].part_name.as_deref(), Some("word/document.xml"));
         assert_eq!(run.source_refs[0].path.last().unwrap().index, 0);
         assert_eq!(run.source_refs[1].path.last().unwrap().index, 1);
