@@ -1395,9 +1395,7 @@ fn pptx_text_source_refs(
         return Vec::new();
     }
 
-    ooxml_common::source::text_source_ref(t_node, None)
-        .into_iter()
-        .collect()
+    vec![ooxml_common::source::text_source_ref(t_node, None)]
 }
 
 #[cfg(test)]
