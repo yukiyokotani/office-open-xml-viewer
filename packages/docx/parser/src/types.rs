@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use ooxml_common::source::TextSourceRef;
+
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {
@@ -1304,6 +1306,10 @@ pub struct FieldRun {
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
     pub text: String,
+    /// Identity mappings from this run's UTF-16 text to source XML text nodes.
+    /// Empty for generated or otherwise non-editable text.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_refs: Vec<TextSourceRef>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,

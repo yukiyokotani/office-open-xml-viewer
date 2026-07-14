@@ -3096,6 +3096,33 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.east_asian_vert_compress == b.east_asian_vert_compress
 }
 
+fn append_text_run(target: &mut TextRun, mut appended: TextRun) {
+    let text_offset = target.text.encode_utf16().count() as u32;
+    for source in &mut appended.source_refs {
+        source.text_start += text_offset;
+        source.text_end += text_offset;
+    }
+    target.text.push_str(&appended.text);
+    target.source_refs.append(&mut appended.source_refs);
+}
+
+fn docx_text_source_refs(
+    node: roxmltree::Node<'_, '_>,
+) -> Vec<ooxml_common::source::TextSourceRef> {
+    let root_name = node
+        .ancestors()
+        .filter(|ancestor| ancestor.is_element())
+        .last()
+        .map(|root| root.tag_name().name());
+    if root_name != Some("document") {
+        return Vec::new();
+    }
+    vec![ooxml_common::source::text_source_ref(
+        node,
+        Some("word/document.xml"),
+    )]
+}
+
 /// Prepend the zero-advance host-character metrics for a floating DrawingML
 /// payload. The metrics belong to the enclosing WordprocessingML `<w:r>`, so a
 /// group expanded into multiple drawing runs must still receive exactly one.
@@ -3309,6 +3336,7 @@ fn parse_run_inner(
                 if !text.is_empty() {
                     let this = TextRun {
                         text,
+                        source_refs: docx_text_source_refs(child),
                         bold,
                         italic,
                         underline,
@@ -3357,7 +3385,7 @@ fn parse_run_inner(
                         Some(DocRun::Text(prev))
                             if merge_here && text_runs_mergeable(prev, &this) =>
                         {
-                            prev.text.push_str(&this.text);
+                            append_text_run(prev, this);
                         }
                         _ => runs.push(DocRun::Text(Box::new(this))),
                     }
@@ -3384,6 +3412,7 @@ fn parse_run_inner(
                         .or_else(|| font_family.clone());
                     runs.push(DocRun::Text(Box::new(TextRun {
                         text: c.to_string(),
+                        source_refs: Vec::new(),
                         bold,
                         italic,
                         underline,
@@ -3439,6 +3468,7 @@ fn parse_run_inner(
                 // w:tab emits a horizontal tab character; layout handles tab stop alignment.
                 runs.push(DocRun::Text(Box::new(TextRun {
                     text: "\t".to_string(),
+                    source_refs: Vec::new(),
                     bold,
                     italic,
                     underline,
@@ -3534,6 +3564,7 @@ fn parse_run_inner(
                 // collapses to one run and the boundary vanishes entirely.
                 let this = TextRun {
                     text: "-".to_string(),
+                    source_refs: Vec::new(),
                     bold,
                     italic,
                     underline,
@@ -3580,7 +3611,7 @@ fn parse_run_inner(
                 };
                 match runs.last_mut() {
                     Some(DocRun::Text(prev)) if text_runs_mergeable(prev, &this) => {
-                        prev.text.push_str(&this.text);
+                        append_text_run(prev, this);
                     }
                     _ => runs.push(DocRun::Text(Box::new(this))),
                 }
@@ -3731,6 +3762,7 @@ fn parse_run_inner(
                 let id_str = attr_w(child, "id").unwrap_or_default();
                 runs.push(DocRun::Text(Box::new(TextRun {
                     text: id_str.clone(),
+                    source_refs: Vec::new(),
                     bold,
                     italic,
                     underline,
@@ -10299,6 +10331,23 @@ mod cs_toggle_tests {
         // §17.3.2.7 <w:cs/> — the complex-script run toggle.
         let run = run_of(r#"<w:p><w:r><w:rPr><w:cs/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
         assert_eq!(run.cs, Some(true));
+    }
+
+    #[test]
+    fn merged_text_nodes_keep_independent_utf16_source_ranges() {
+        let run = run_of(
+            r#"<w:p><w:r><w:t>A😀</w:t><w:t>B</w:t></w:r></w:p>"#,
+        );
+
+        assert_eq!(run.text, "A😀B");
+        assert_eq!(run.source_refs.len(), 2);
+        assert_eq!(run.source_refs[0].text_start, 0);
+        assert_eq!(run.source_refs[0].text_end, 3);
+        assert_eq!(run.source_refs[1].text_start, 3);
+        assert_eq!(run.source_refs[1].text_end, 4);
+        assert_eq!(run.source_refs[0].part_name.as_deref(), Some("word/document.xml"));
+        assert_eq!(run.source_refs[0].path.last().unwrap().index, 0);
+        assert_eq!(run.source_refs[1].path.last().unwrap().index, 1);
     }
 
     #[test]

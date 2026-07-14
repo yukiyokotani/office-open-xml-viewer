@@ -2,6 +2,19 @@ import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 
+const textRunByNode = new WeakMap<Node, DocxTextRunInfo>();
+
+/** Return the rendered run associated with a text-layer node or its ancestors. */
+export function getDocxTextRunAtNode(node: Node | null): DocxTextRunInfo | undefined {
+  let current = node;
+  while (current) {
+    const run = textRunByNode.get(current);
+    if (run) return run;
+    current = current.parentNode;
+  }
+  return undefined;
+}
+
 /**
  * Build the transparent text-selection overlay for a rendered docx page: one
  * absolutely-positioned, color-transparent `<span>` per {@link DocxTextRunInfo}
@@ -60,6 +73,7 @@ export function buildDocxTextLayer(
   for (const run of runs) {
     const span = document.createElement('span');
     span.textContent = run.text;
+    textRunByNode.set(span, run);
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildDocxTextLayer } from './text-layer.js';
+import { buildDocxTextLayer, getDocxTextRunAtNode } from './text-layer.js';
 import type { DocxTextRunInfo } from './renderer';
 
 // The vitest env is `node` (no document). Following renderer.textbox-image.test.ts's
@@ -111,6 +111,24 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(a.style.cssText).toMatch(/font:[^;]+;line-height:/);
     expect(b.textContent).toBe('World');
     expect(b.style.left).toBe(`${(50 / 700) * 100}%`);
+  });
+
+  it('maps a selection-layer span back to its rendered source run', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const sourceRefs = [{
+      partName: 'word/document.xml',
+      path: [{ localName: 't', index: 0 }],
+      textStart: 0,
+      textEnd: 1,
+      sourceStart: 0,
+      sourceEnd: 1,
+    }];
+    const sourceRun = run({ sourceRefs });
+
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [sourceRun], 100, 100);
+
+    expect(getDocxTextRunAtNode(layer.children[0] as unknown as Node)).toBe(sourceRun);
   });
 
   // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into

@@ -52,8 +52,9 @@ import {
   fillDoubleBorder,
   drawUnderline,
   renderChart,
+  sliceTextSourceRefs,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric, TextSourceRef } from '@silurus/ooxml-core';
 import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
@@ -644,6 +645,8 @@ function canonicalParagraphTextScaleEligible(
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface DocxTextRunInfo {
   text: string;
+  /** Source mappings rebased to this callback segment's UTF-16 text. */
+  sourceRefs?: TextSourceRef[];
   /** Left edge in canvas CSS px. */
   x: number;
   /** Top of line box in canvas CSS px. */
@@ -9918,8 +9921,15 @@ function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
           const letterSpacingPx = !verticalUpright && !s.tateChuYoko
             ? segLetterSpacingPx(s, drawGridDeltaPx, scale)
             : 0;
+          const sourceOffset = s.src?.charOffset ?? 0;
+          const sourceRefs = sliceTextSourceRefs(
+            s.sourceRefs,
+            sourceOffset,
+            sourceOffset + s.text.length,
+          );
           state.onTextRun({
             text: s.text,
+            ...(sourceRefs.length > 0 ? { sourceRefs } : {}),
             x: place ? place.left : x,
             y: place ? place.top : state.y,
             w: spanW,

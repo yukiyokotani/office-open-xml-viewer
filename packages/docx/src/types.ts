@@ -1,6 +1,6 @@
 // ===== Output JSON model (mirrors Rust types) =====
 
-import type { MathNode, ChartModel, Duotone } from '@silurus/ooxml-core';
+import type { MathNode, ChartModel, Duotone, TextSourceRef } from '@silurus/ooxml-core';
 
 export interface DocxDocumentModel {
   section: SectionProps;
@@ -1164,6 +1164,8 @@ export interface FieldRun {
 
 export interface DocxTextRun {
   text: string;
+  /** Stable source mappings for ordinary text in `word/document.xml`. */
+  sourceRefs?: TextSourceRef[];
   bold: boolean;
   italic: boolean;
   underline: boolean;
@@ -1651,7 +1653,17 @@ export interface RenderPageOptions {
    *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
    *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span
    *  applies about its top-left; absent for horizontal pages. */
-  onTextRun?: (run: { text: string; x: number; y: number; w: number; h: number; fontSize: number; font: string; transform?: string }) => void;
+  onTextRun?: (run: {
+    text: string;
+    sourceRefs?: TextSourceRef[];
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    fontSize: number;
+    font: string;
+    transform?: string;
+  }) => void;
   /** Default `true`. When false, ECMA-376 §17.13.5 track-changes runs render
    *  in their normal style (no author colour, no underline / strikethrough)
    *  — equivalent to Word's "Final / No Markup" view. */

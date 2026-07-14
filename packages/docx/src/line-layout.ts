@@ -19,7 +19,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, ImageRun, ShapeTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { MathNode, KinsokuRules, ChartModel, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric, TextSourceRef } from '@silurus/ooxml-core';
 import type { RenderState, DecodedImage } from './renderer.js';
 import {
   classifyCjkFont,
@@ -47,6 +47,7 @@ import {
   parseDateTimePictureSwitch,
   fontAdvanceBiasEm,
   normalizeLocalFontMetricFamily,
+  sliceTextSourceRefs,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
@@ -68,6 +69,8 @@ interface LayoutSegSource {
 
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
+  /** Full source mapping for the unsplit layout segment. */
+  sourceRefs?: TextSourceRef[];
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
@@ -2214,7 +2217,9 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
     vertAlign: 'super' | 'sub' | null,
     sourceRunIndex: number,
     sourceFragmentIndex?: number,
+    sourceTextStart?: number,
   ) => {
+    const firstOutputIndex = segs.length;
     // §17.3.2.33 small caps are sized per character: lowercase LETTERS render two
     // points smaller, uppercase letters and non-alphabetic characters at the full
     // run size. `reduced` (set per case-piece in the loop below) carries that onto
@@ -2456,6 +2461,22 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
         }
       }
     }
+
+    const emitted = segs
+      .slice(firstOutputIndex)
+      .filter((segment): segment is LayoutTextSeg => 'text' in segment);
+    if (
+      sourceTextStart !== undefined
+      && emitted.map((segment) => segment.text).join('') === text
+    ) {
+      let offset = sourceTextStart;
+      const refs = (base as DocxTextRun).sourceRefs;
+      for (const segment of emitted) {
+        const sourceRefs = sliceTextSourceRefs(refs, offset, offset + segment.text.length);
+        if (sourceRefs.length > 0) segment.sourceRefs = sourceRefs;
+        offset += segment.text.length;
+      }
+    }
   };
 
   for (const [runIndex, run] of runs.entries()) {
@@ -2480,12 +2501,15 @@ export function buildSegments(runs: DocRun[], environment: LineLayoutEnvironment
       }
       // Split on tab chars so tab alignment can be resolved during layout.
       const parts = t.text.split('\t');
+      let sourceTextStart = 0;
       for (let i = 0; i < parts.length; i++) {
         if (parts[i].length > 0) {
-          pushTextPiece(parts[i], t, t.vertAlign, runIndex, i);
+          pushTextPiece(parts[i], t, t.vertAlign, runIndex, i, sourceTextStart);
         }
+        sourceTextStart += parts[i].length;
         if (i < parts.length - 1) {
           segs.push({ isTab: true, fontSize: t.fontSize, measuredWidth: 0, bold: t.bold, italic: t.italic });
+          sourceTextStart += 1;
         }
       }
     } else if (run.type === 'image') {
