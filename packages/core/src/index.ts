@@ -22,10 +22,13 @@ export type {
   TabStop,
   TextBody,
   TextOutline,
+  TextSourcePathStep,
+  TextSourceRef,
   TextRun,
   TextRunData,
   TileInfo,
 } from './types/common';
+export { offsetTextSourceRefs, sliceTextSourceRefs } from './text/source-ref';
 export type {
   ChartDataLabelOverride,
   ChartDataPointOverride,

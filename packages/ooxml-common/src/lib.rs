@@ -16,6 +16,7 @@ pub mod math;
 pub mod mce;
 pub mod ns;
 pub mod rels;
+pub mod source;
 pub mod text;
 pub mod theme;
 pub mod units;

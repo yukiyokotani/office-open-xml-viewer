@@ -197,6 +197,32 @@ export interface Stroke {
   cmpd?: string;
 }
 
+/** One namespace-aware step from an OOXML part root to a source element. */
+export interface TextSourcePathStep {
+  /** Namespace URI, rather than an author-chosen XML prefix. */
+  namespaceUri?: string;
+  localName: string;
+  /** Zero-based ordinal among element siblings with the same expanded name. */
+  index: number;
+}
+
+/**
+ * Identity mapping from a UTF-16 interval in parsed/rendered text to one XML
+ * text node. `partName + path` identifies the node; both interval pairs are
+ * half-open.
+ */
+export interface TextSourceRef {
+  /** Normalized OPC part name, e.g. `word/document.xml`. */
+  partName?: string;
+  path: TextSourcePathStep[];
+  /** UTF-16 interval in the containing text value. */
+  textStart: number;
+  textEnd: number;
+  /** UTF-16 interval in the XML text node. */
+  sourceStart: number;
+  sourceEnd: number;
+}
+
 export interface TextBody {
   /** Vertical anchor: "t" | "ctr" | "b" */
   verticalAnchor: string;
@@ -319,6 +345,8 @@ export interface EquationRun {
 export interface TextRunData {
   type: 'text';
   text: string;
+  /** Stable source mappings for file-authored text. Absent for generated text. */
+  sourceRefs?: TextSourceRef[];
   /** null = not set, inherit from paragraph/body defaults */
   bold: boolean | null;
   /** null = not set, inherit from paragraph/body defaults */
