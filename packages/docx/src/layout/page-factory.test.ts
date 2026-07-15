@@ -1,0 +1,451 @@
+import { describe, expect, it } from 'vitest';
+import { createCanvasFontRoute } from '@silurus/ooxml-core';
+import type { SectionLayoutContext } from '../layout-context.js';
+import {
+  accumulatePagePaintNode,
+  accumulatePageSectionRegion,
+  bodyFlowDomainId,
+  createLayoutPageAccumulator,
+  createLayoutPage,
+  createParityBlankLayoutPage,
+  finalizeLayoutPage,
+} from './page-factory.js';
+import { assertDocumentLayout } from './invariants.js';
+import type {
+  DocumentLayout,
+  DrawingLayout,
+  LayoutRect,
+  ParagraphLayout,
+  SourceRef,
+} from './types.js';
+
+const rect = (xPt: number, yPt: number, widthPt: number, heightPt: number): LayoutRect => ({
+  xPt,
+  yPt,
+  widthPt,
+  heightPt,
+});
+
+const source = (path: readonly number[]): SourceRef => ({
+  story: 'body',
+  storyInstance: 'body',
+  path,
+});
+
+function section(
+  textDirection: string,
+  columns: readonly Readonly<{ xPt: number; wPt: number }>[],
+): SectionLayoutContext {
+  return {
+    geometry: {
+      pageWidth: 612,
+      pageHeight: 792,
+      marginTop: 72,
+      marginRight: 72,
+      marginBottom: 72,
+      marginLeft: 72,
+      headerDistance: 36,
+      footerDistance: 36,
+    },
+    columns,
+    grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+    textDirection,
+    verticalAlignment: 'top',
+  };
+}
+
+function drawing(id: string, flowDomainId: string, bounds: LayoutRect): DrawingLayout {
+  return {
+    kind: 'drawing',
+    id,
+    source: source([Number(id.replace(/\D/g, '')) || 0]),
+    flowDomainId,
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: bounds.heightPt,
+    ordinaryFlow: true,
+    commands: [],
+  };
+}
+
+function bookmarkParagraph(
+  id: string,
+  flowDomainId: string,
+  bookmark: string,
+  bounds: LayoutRect,
+): ParagraphLayout {
+  return {
+    kind: 'paragraph',
+    id,
+    source: source([3]),
+    flowDomainId,
+    flowBounds: bounds,
+    inkBounds: bounds,
+    advancePt: bounds.heightPt,
+    ordinaryFlow: true,
+    spacing: { beforePt: 0, afterPt: 0 },
+    contextualSpacing: false,
+    lines: [{
+      range: { start: 0, end: 1 },
+      bounds,
+      baselinePt: bounds.yPt + 10,
+      advancePt: bounds.heightPt,
+      placements: [{
+        kind: 'text',
+        text: 'x',
+        range: { start: 0, end: 1 },
+        origin: { xPt: bounds.xPt, yPt: bounds.yPt + 10 },
+        bounds,
+        advancePt: bounds.widthPt,
+        clusters: [{
+          range: { start: 0, end: 1 },
+          offset: { xPt: 0, yPt: 0 },
+          advancePt: bounds.widthPt,
+        }],
+        paintOps: [],
+        color: { kind: 'default' },
+        fontRoute: createCanvasFontRoute('sans-serif', 'generic'),
+        fontSizePt: 10,
+        fontWeight: 400,
+        fontStyle: 'normal',
+        direction: 'ltr',
+        decorations: [],
+        bookmark,
+      }],
+    }],
+    borders: [],
+    resources: [],
+    drawings: [],
+    textBoxes: [],
+    events: [],
+    exclusions: [],
+  };
+}
+
+describe('createLayoutPage', () => {
+  it('accumulates page inputs without mutating prior flow state', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const initial = createLayoutPageAccumulator({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:body',
+      section: bodySection,
+    });
+    const withRegion = accumulatePageSectionRegion(initial, {
+      id: 'region:body',
+      sectionOccurrenceId: 'section:body',
+      section: bodySection,
+      writingMode: 'horizontal-tb',
+      blockStartPt: 72,
+      blockEndPt: 720,
+      columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+    });
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
+    const node = drawing('drawing-1', domainId, rect(72, 100, 50, 10));
+    const complete = accumulatePagePaintNode(withRegion, {
+      layer: 'body',
+      node,
+    }, true);
+
+    expect(initial.sectionRegions).toEqual([]);
+    expect(initial.paint).toEqual([]);
+    expect(withRegion.paint).toEqual([]);
+    expect(complete.readingOrder).toEqual([node]);
+    expect(finalizeLayoutPage(complete, {
+      displayNumber: 1,
+      format: 'decimal',
+      sectionOccurrenceId: 'section:body',
+    }).layers.body).toEqual([node]);
+  });
+
+  it('creates physical geometry and distinct body domains for continuous section regions', () => {
+    const first = section('lrTb', [
+      { xPt: 72, wPt: 220 },
+      { xPt: 320, wPt: 220 },
+    ]);
+    const second = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const firstDomain = bodyFlowDomainId(0, 'region:first', 0);
+    const secondDomain = bodyFlowDomainId(0, 'region:second', 0);
+    const firstNode = drawing('drawing-1', firstDomain, rect(72, 100, 200, 20));
+    const secondNode = drawing('drawing-2', secondDomain, rect(72, 360, 200, 20));
+
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:first',
+      section: first,
+      sectionRegions: [
+        {
+          id: 'region:first',
+          sectionOccurrenceId: 'section:first',
+          section: first,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 72,
+          blockEndPt: 330,
+          columns: [
+            { inlineStartPt: 72, inlineExtentPt: 220 },
+            { inlineStartPt: 320, inlineExtentPt: 220 },
+          ],
+        },
+        {
+          id: 'region:second',
+          sectionOccurrenceId: 'section:second',
+          section: second,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 330,
+          blockEndPt: 720,
+          columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+        },
+      ],
+      paint: [
+        { layer: 'body', node: firstNode },
+        { layer: 'body', node: secondNode },
+      ],
+      readingOrder: [firstNode, secondNode],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:first',
+      },
+    });
+
+    expect(page.geometry).toEqual({
+      xPt: 0,
+      yPt: 0,
+      widthPt: 612,
+      heightPt: 792,
+      contentTopPt: 72,
+      contentBottomPt: 720,
+    });
+    expect(page.sectionRegions).toHaveLength(2);
+    expect(page.sectionRegions?.map((region) => region.flowDomainIds)).toEqual([
+      [
+        bodyFlowDomainId(0, 'region:first', 0),
+        bodyFlowDomainId(0, 'region:first', 1),
+      ],
+      [bodyFlowDomainId(0, 'region:second', 0)],
+    ]);
+    expect(page.flowDomains.map((domain) => domain.bounds)).toEqual([
+      rect(72, 72, 220, 258),
+      rect(320, 72, 220, 258),
+      rect(72, 330, 468, 390),
+    ]);
+    expect(page.sectionOccurrenceId).toBe('section:first');
+    expect(page.pageNumber).toEqual({
+      displayNumber: 1,
+      format: 'decimal',
+      sectionOccurrenceId: 'section:first',
+    });
+  });
+
+  it('retains a logical-to-physical transform for vertical section regions', () => {
+    const vertical = section('tbRl', [{ xPt: 72, wPt: 648 }]);
+
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:vertical',
+      section: vertical,
+      sectionRegions: [{
+        id: 'region:vertical',
+        sectionOccurrenceId: 'section:vertical',
+        section: vertical,
+        writingMode: 'vertical-rl',
+        blockStartPt: 72,
+        blockEndPt: 540,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 648 }],
+      }],
+      paint: [],
+      readingOrder: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:vertical',
+      },
+    });
+
+    expect(page.sectionRegions?.[0]?.coordinateSpace).toEqual({
+      writingMode: 'vertical-rl',
+      logicalToPhysical: { a: 0, b: 1, c: -1, d: 0, e: 612, f: 0 },
+    });
+    expect(page.flowDomains[0]?.bounds).toEqual(rect(72, 72, 468, 648));
+  });
+
+  it('builds layer order, reading order, and clone-safe bookmark ownership', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const domainId = bodyFlowDomainId(2, 'region:body', 0);
+    const behind = drawing('drawing-1', domainId, rect(72, 80, 50, 10));
+    const paragraph = bookmarkParagraph('paragraph-3', domainId, 'destination', rect(72, 100, 50, 12));
+
+    const page = createLayoutPage({
+      pageIndex: 2,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:body',
+      section: bodySection,
+      sectionRegions: [{
+        id: 'region:body',
+        sectionOccurrenceId: 'section:body',
+        section: bodySection,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 720,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+      }],
+      paint: [
+        { layer: 'behindText', node: behind },
+        { layer: 'body', node: paragraph },
+      ],
+      readingOrder: [paragraph],
+      pageNumber: {
+        displayNumber: 7,
+        format: 'lowerRoman',
+        sectionOccurrenceId: 'section:body',
+      },
+    });
+
+    expect(page.layers.behindText).toEqual([behind]);
+    expect(page.layers.body).toEqual([paragraph]);
+    expect(page.layers.paintOrder).toEqual([
+      { layer: 'behindText', nodeId: 'drawing-1' },
+      { layer: 'body', nodeId: 'paragraph-3' },
+    ]);
+    expect(page.readingOrder).toEqual(['paragraph-3']);
+    expect(page.bookmarkStarts).toEqual([{
+      name: 'destination',
+      nodeId: 'paragraph-3',
+      sectionOccurrenceId: 'section:body',
+    }]);
+    expect(structuredClone(page)).toEqual(page);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+  });
+
+  it('lets invariants reject unknown retained section and bookmark ownership', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
+    const paragraph = bookmarkParagraph('paragraph-3', domainId, 'destination', rect(72, 100, 50, 12));
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:body',
+      section: bodySection,
+      sectionRegions: [{
+        id: 'region:body',
+        sectionOccurrenceId: 'section:body',
+        section: bodySection,
+        writingMode: 'horizontal-tb',
+        blockStartPt: 72,
+        blockEndPt: 720,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+      }],
+      paint: [{ layer: 'body', node: paragraph }],
+      readingOrder: [paragraph],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:body',
+      },
+    });
+    const unknownPageNumberOwner: DocumentLayout = {
+      pages: [{
+        ...page,
+        pageNumber: { ...page.pageNumber!, sectionOccurrenceId: 'section:unknown' },
+      }],
+      diagnostics: [],
+    };
+    const unknownBookmarkNode: DocumentLayout = {
+      pages: [{
+        ...page,
+        bookmarkStarts: [{
+          ...page.bookmarkStarts![0]!,
+          nodeId: 'paragraph:unknown',
+        }],
+      }],
+      diagnostics: [],
+    };
+
+    expect(() => assertDocumentLayout(unknownPageNumberOwner)).toThrow(/page number section owner/);
+    expect(() => assertDocumentLayout(unknownBookmarkNode)).toThrow(/bookmark node/);
+  });
+});
+
+describe('createParityBlankLayoutPage', () => {
+  it('owns the blank page with the outgoing section and emits no flow or paint', () => {
+    const outgoing = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+
+    const page = createParityBlankLayoutPage({
+      pageIndex: 3,
+      physicalPage: {
+        widthPt: 612,
+        heightPt: 792,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+      sectionOccurrenceId: 'section:outgoing',
+      section: outgoing,
+      pageNumber: {
+        displayNumber: 4,
+        format: 'decimal',
+        sectionOccurrenceId: 'section:outgoing',
+      },
+    });
+
+    expect(page.parityBlank).toBe(true);
+    expect(page.sectionOccurrenceId).toBe('section:outgoing');
+    expect(page.sectionRegions).toEqual([]);
+    expect(page.flowDomains).toEqual([]);
+    expect(page.layers.paintOrder).toEqual([]);
+    expect(page.readingOrder).toEqual([]);
+    expect(page.bookmarkStarts).toEqual([]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+
+    const invalidBlank: DocumentLayout = {
+      pages: [{
+        ...page,
+        flowDomains: [{
+          id: 'unexpected',
+          kind: 'body',
+          bounds: rect(72, 72, 468, 648),
+        }],
+      }],
+      diagnostics: [],
+    };
+    expect(() => assertDocumentLayout(invalidBlank)).toThrow(/parity blank/);
+  });
+});

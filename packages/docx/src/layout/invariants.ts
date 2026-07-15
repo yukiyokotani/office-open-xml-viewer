@@ -214,6 +214,31 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       domains.set(domain.id, domain);
     });
 
+    if (page.parityBlank && (
+      page.flowDomains.length > 0
+      || (page.sectionRegions?.length ?? 0) > 0
+      || pageLayerNodes(page).length > 0
+      || page.layers.paintOrder.length > 0
+      || page.readingOrder.length > 0
+      || (page.bookmarkStarts?.length ?? 0) > 0
+    )) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `pages[${pageIndex}] parity blank retains page content`,
+      );
+    }
+
+    const sectionOccurrenceIds = new Set<string>();
+    if (page.sectionOccurrenceId !== undefined) {
+      if (page.sectionOccurrenceId.length === 0) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `pages[${pageIndex}] has an empty section occurrence id`,
+        );
+      }
+      sectionOccurrenceIds.add(page.sectionOccurrenceId);
+    }
+
     if (page.sectionRegions) {
       const regionIds = new Set<string>();
       const bodyOwnership = new Map<string, number>();
@@ -223,6 +248,13 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           throw new LayoutInvariantError('INVALID_REFERENCE', `${path} has an invalid region id`);
         }
         regionIds.add(region.id);
+        if (region.sectionOccurrenceId.length === 0) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${path} has an empty section occurrence id`,
+          );
+        }
+        sectionOccurrenceIds.add(region.sectionOccurrenceId);
         requireFinite(region.blockStartPt, `${path}.blockStartPt`);
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
         if (region.blockEndPt < region.blockStartPt) {
@@ -243,6 +275,25 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           );
         }
       });
+    }
+
+    if (page.pageNumber) {
+      requireFinite(page.pageNumber.displayNumber, `pages[${pageIndex}].pageNumber.displayNumber`);
+      if (!Number.isInteger(page.pageNumber.displayNumber)) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `pages[${pageIndex}] page number is not an integer`,
+        );
+      }
+      if (
+        page.pageNumber.format.length === 0
+        || !sectionOccurrenceIds.has(page.pageNumber.sectionOccurrenceId)
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `pages[${pageIndex}] has an invalid page number section owner`,
+        );
+      }
     }
 
     const ordinary: PaintNode[] = [];
@@ -284,6 +335,27 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
         throw new LayoutInvariantError('INVALID_REFERENCE', `invalid reading-order reference ${nodeId}`);
       }
       read.add(nodeId);
+    });
+
+    const bookmarkNames = new Set<string>();
+    page.bookmarkStarts?.forEach((bookmark) => {
+      if (
+        bookmark.name.length === 0
+        || bookmarkNames.has(bookmark.name)
+        || !nodes.has(bookmark.nodeId)
+      ) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `invalid bookmark node ${bookmark.nodeId}`,
+        );
+      }
+      if (!sectionOccurrenceIds.has(bookmark.sectionOccurrenceId)) {
+        throw new LayoutInvariantError(
+          'INVALID_REFERENCE',
+          `bookmark ${bookmark.name} has an invalid section owner`,
+        );
+      }
+      bookmarkNames.add(bookmark.name);
     });
 
     for (let index = 0; index < ordinary.length; index += 1) {
