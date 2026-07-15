@@ -220,6 +220,7 @@ import {
   normalizeInternalDocumentModel,
   sectionPlacementInputFromBody,
 } from './parser-model.js';
+import { createBodySectionIndex, type BodySectionOccurrence } from './layout/context.js';
 import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
@@ -2823,6 +2824,42 @@ export function computePages(
   // footnote references are placed on the current page.
   const footnoteReservePt: number[] = [0];
 
+  // Build section ownership once. The paginator used to rescan the remainder of
+  // `body` independently for columns, start type, frame, numbering, and HF facts;
+  // those scans could drift and were O(body × sections). The occurrence index is
+  // the single acquisition-derived authority for every section-scoped lookup.
+  const bodySectionGeom: SectionGeom = sectionGeomOf(section);
+  const bodyVertical = isVerticalSection(section);
+  const bodyPhysGeom: SectionGeom = bodyVertical ? physicalGeomOf(bodySectionGeom) : bodySectionGeom;
+  const bodyFrame: ResolvedSectionFrame = {
+    geom: bodySectionGeom,
+    textDirection: section.textDirection ?? null,
+    vertical: bodyVertical,
+    columnsSpec: section.columns ?? null,
+  };
+  const sectionIndex = createBodySectionIndex({
+    body,
+    section: { ...section, ...bodyPhysGeom },
+    headers: EMPTY_HEADERS_FOOTERS,
+    footers: EMPTY_HEADERS_FOOTERS,
+    fontFamilyClasses: {},
+  } as DocxDocumentModel);
+  const sectionOccurrenceFrom = (startIdx: number): BodySectionOccurrence =>
+    sectionIndex.sectionAtBodyIndex(Math.max(0, Math.min(startIdx, body.length)));
+  const sectionFrameFromOccurrence = (
+    occurrence: BodySectionOccurrence,
+  ): ResolvedSectionFrame => {
+    if (occurrence.final) return bodyFrame;
+    const textDirection = occurrence.textDirection ?? null;
+    const vertical = isVerticalTextDirection(textDirection);
+    return {
+      geom: vertical ? logicalGeomOf(occurrence.geometry) : occurrence.geometry,
+      textDirection,
+      vertical,
+      columnsSpec: occurrence.columns,
+    };
+  };
+
   // ECMA-376 §17.6.4 newspaper columns are PER-SECTION. A `<w:sectPr>` carried in
   // a paragraph's `pPr` (or a loose mid-body one) ends a section; the parser emits
   // a `SectionBreak` marker carrying THAT section's `<w:cols>`. The FINAL section's
@@ -2832,25 +2869,9 @@ export function computePages(
   // section's columns. A `<w:cols>`-less section (columns == null) ⇒ one full-width
   // column (computeColumns's single-column path), exactly as before.
   const sectionColumnsFrom = (startIdx: number): ColumnGeom[] => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') {
-        // Resolve this section's cols by swapping in its ColumnsSpec AND its
-        // resolved LOGICAL page geometry. `computeColumns` derives the text band
-        // from pageWidth/marginLeft/marginRight (ECMA-376 §17.6.13 pgSz +
-        // §17.6.11 pgMar), which are PER-SECTION — and for a VERTICAL section
-        // (issue #1000) the band lives in the SWAPPED logical frame, so this
-        // consumes the same `markerFrame` the geometry rail stamps (never the
-        // raw physical `e.geom`). Spread over the body-level `section` so only
-        // the page-box fields are overridden (`SectionGeom`'s names/semantics
-        // match `SectionProps` — see the SectionGeom warning comment). For a
-        // horizontal marker `markerFrame(e).geom` is `e.geom` verbatim (or the
-        // body-level physical geometry for a `geom`-less inheriting marker,
-        // §17.18.77) — value-identical to the pre-#1000 spread.
-        return computeColumns({ ...section, ...markerFrame(e).geom, columns: e.columns ?? null });
-      }
-    }
-    return computeColumns(section);
+    const occurrence = sectionOccurrenceFrom(startIdx);
+    const frame = sectionFrameFromOccurrence(occurrence);
+    return computeColumns({ ...section, ...frame.geom, columns: occurrence.columns });
   };
 
   // ECMA-376 §17.6.22 (ST_SectionMark): a section's `<w:type>` specifies how
@@ -2872,13 +2893,8 @@ export function computePages(
   // emitting a PageBreak after the cover's content — so the continuous section
   // after a cover lands on the next page regardless of this upcoming-section
   // reading. See `parse_body_elements` (cover-page page-fill) in the parser.
-  const sectionKindFrom = (startIdx: number): string => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') return e.kind ?? 'nextPage';
-    }
-    return section.sectionStart ?? 'nextPage';
-  };
+  const sectionKindFrom = (startIdx: number): string =>
+    sectionOccurrenceFrom(startIdx).startType;
 
   // Whether `body[idx]` is an empty section-break spacer whose break is CONTINUOUS
   // — the precise trigger for Word's spacing-before suppression (see
@@ -2924,16 +2940,12 @@ export function computePages(
   // stamps this on each element so the renderer can pick the active section's
   // header/footer per page without re-deriving the body→page mapping.
   const sectionHFFrom = (startIdx: number): PaginatedBodyElement['sectionHF'] => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') {
-        return {
-          headers: e.headers ?? EMPTY_HEADERS_FOOTERS,
-          footers: e.footers ?? EMPTY_HEADERS_FOOTERS,
-          titlePage: e.titlePage ?? false,
-        };
-      }
-    }
+    const occurrence = sectionOccurrenceFrom(startIdx);
+    if (!occurrence.final) return {
+      headers: occurrence.headers,
+      footers: occurrence.footers,
+      titlePage: occurrence.titlePage,
+    };
     // Final section: the body-level set. `undefined` ⇒ the renderer's fallback
     // (doc.headers/footers/section.titlePage), which IS this same set.
     return undefined;
@@ -2959,33 +2971,8 @@ export function computePages(
   // markers, so every element gets the body-level frame — behaviour-neutral
   // (the geom object is `bodySectionGeom` itself, identical to the pre-#1000
   // stamps).
-  const bodySectionGeom: SectionGeom = sectionGeomOf(section);
-  const bodyVertical = isVerticalSection(section);
-  const bodyPhysGeom: SectionGeom = bodyVertical ? physicalGeomOf(bodySectionGeom) : bodySectionGeom;
-  const bodyFrame: ResolvedSectionFrame = {
-    geom: bodySectionGeom,
-    textDirection: section.textDirection ?? null,
-    vertical: bodyVertical,
-    columnsSpec: section.columns ?? null,
-  };
-  const markerFrame = (e: Extract<BodyElement, { type: 'sectionBreak' }>): ResolvedSectionFrame => {
-    const textDirection = e.textDirection ?? null;
-    const vertical = isVerticalTextDirection(textDirection);
-    const phys = e.geom ?? bodyPhysGeom;
-    return {
-      geom: vertical ? logicalGeomOf(phys) : phys,
-      textDirection,
-      vertical,
-      columnsSpec: e.columns ?? null,
-    };
-  };
-  const sectionFrameFrom = (startIdx: number): ResolvedSectionFrame => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') return markerFrame(e);
-    }
-    return bodyFrame;
-  };
+  const sectionFrameFrom = (startIdx: number): ResolvedSectionFrame =>
+    sectionFrameFromOccurrence(sectionOccurrenceFrom(startIdx));
 
   // ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
   // of the section that OWNS the content starting at body index `startIdx`.
@@ -2995,13 +2982,8 @@ export function computePages(
   // `section.pageNumType`. `null` ⇒ no restart / decimal (numbering continues).
   // Stamped on each element so `computePageNumbering` can resolve each physical
   // page's owning section's numbering without re-deriving the body→page mapping.
-  const sectionPageNumTypeFrom = (startIdx: number): PageNumType | null => {
-    for (let j = startIdx; j < body.length; j++) {
-      const e = body[j];
-      if (e.type === 'sectionBreak') return e.pageNumType ?? null;
-    }
-    return section.pageNumType ?? null;
-  };
+  const sectionPageNumTypeFrom = (startIdx: number): PageNumType | null =>
+    sectionOccurrenceFrom(startIdx).pageNumType;
 
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
