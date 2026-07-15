@@ -191,6 +191,42 @@ function reframePlacement(
     ...placement,
     origin: reframePoint(placement.origin, reframe),
     bounds: reframeRect(placement.bounds, reframe),
+    advancePt: placement.advancePt * reframe.scaleX,
+    // Point-valued offsets and advances belong to the acquired object frame.
+    // Font selection, authored font size, and dimensionless glyph scaling stay
+    // acquisition facts because page admission must not reshape or repartition.
+    clusters: placement.clusters.map((cluster) => ({
+      ...cluster,
+      offset: {
+        xPt: cluster.offset.xPt * reframe.scaleX,
+        yPt: cluster.offset.yPt * reframe.scaleY,
+      },
+      advancePt: cluster.advancePt * reframe.scaleX,
+    })),
+    paintOps: placement.paintOps.map((operation) => ({
+      ...operation,
+      offset: {
+        xPt: operation.offset.xPt * reframe.scaleX,
+        yPt: operation.offset.yPt * reframe.scaleY,
+      },
+      letterSpacingPt: operation.letterSpacingPt * reframe.scaleX,
+    })),
+    ...(placement.characterSpacingPt !== undefined ? {
+      characterSpacingPt: placement.characterSpacingPt * reframe.scaleX,
+    } : {}),
+    ...(placement.fitText ? {
+      fitText: {
+        ...placement.fitText,
+        perGapPt: placement.fitText.perGapPt * reframe.scaleX,
+        trailingPadPt: placement.fitText.trailingPadPt * reframe.scaleX,
+      },
+    } : {}),
+    ...(placement.positionPt !== undefined ? {
+      positionPt: placement.positionPt * reframe.scaleY,
+    } : {}),
+    ...(placement.ownedTrailingSlackPt !== undefined ? {
+      ownedTrailingSlackPt: placement.ownedTrailingSlackPt * reframe.scaleX,
+    } : {}),
     decorations: placement.decorations.map((decoration) => ({
       ...decoration,
       from: reframePoint(decoration.from, reframe),
@@ -207,6 +243,7 @@ function reframePlacement(
     ...(placement.ruby ? {
       ruby: {
         ...placement.ruby,
+        advancePt: placement.ruby.advancePt * reframe.scaleX,
         paintOps: placement.ruby.paintOps.map((operation) => ({
           ...operation, origin: reframePoint(operation.origin, reframe),
         })),
@@ -241,6 +278,7 @@ function reframePlacement(
   };
   if (placement.kind === 'tab') return {
     ...placement,
+    advancePt: placement.advancePt * reframe.scaleX,
     ...(placement.bounds ? { bounds: reframeRect(placement.bounds, reframe) } : {}),
     ...(placement.leaderGlyphs ? {
       leaderGlyphs: placement.leaderGlyphs.map((operation) => ({
@@ -248,9 +286,11 @@ function reframePlacement(
       })),
     } : {}),
   };
-  return placement.bounds
-    ? { ...placement, bounds: reframeRect(placement.bounds, reframe) }
-    : placement;
+  return {
+    ...placement,
+    bounds: reframeRect(placement.bounds, reframe),
+    advancePt: placement.advancePt * reframe.scaleX,
+  };
 }
 
 function reframeParagraphGeometry(

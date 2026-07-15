@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import {
   layoutParagraph,
+  acquireShapeTextBoxLayout,
   paragraphLayoutFromMeasurement,
   planLine,
   sliceParagraphLayout,
@@ -9,7 +10,10 @@ import {
 } from './paragraph.js';
 import type {
   AcquiredParagraphLayoutInput,
+  DrawingPlacement,
   ParagraphLayout,
+  ResourcePlacement,
+  TabPlacement,
   TextBoxLayout,
   TextPlacement,
 } from './types.js';
@@ -1086,22 +1090,130 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       pageParity: 'odd',
     });
     const sourceDrawing = acquired.drawings[0]!;
+    let measuredFont = '10px sans-serif';
+    const measureContext = {
+      get font() { return measuredFont; },
+      set font(value: string) { measuredFont = value; },
+      measureText(value: string) {
+        const size = Number.parseFloat(/([\d.]+)px/u.exec(measuredFont)?.[1] ?? '10');
+        return {
+          width: [...value].length * size / 2,
+          fontBoundingBoxAscent: size * .8, fontBoundingBoxDescent: size * .2,
+          actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2,
+        } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const textServices = createLayoutServices({
+      section: {
+        pageWidth: 200, pageHeight: 300,
+        marginTop: 20, marginRight: 10, marginBottom: 20, marginLeft: 10,
+        headerDistance: 10, footerDistance: 10,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as never, { measureContext });
+    const acquiredTextBox = acquireShapeTextBoxLayout({
+      textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textAnchor: 't', textBlocks: [{
+        text: 'AB', fontSizePt: 10, color: '112233', alignment: 'left',
+        runs: [{ text: 'AB', fontSizePt: 10, color: '112233' }],
+      }],
+    } as never, sourceDrawing.flowBounds, {
+      id: 'relative-size-textbox', source: sourceDrawing.source,
+      flowDomainId: acquired.flowDomainId, context: acquisitionContext,
+      measurer: { context: measureContext, fontFamilyClasses: {} },
+      environment: {
+        pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+        layoutServices: textServices,
+      },
+    });
+    if (!acquiredTextBox) throw new Error('expected acquired non-empty textbox');
+    const acquiredTextParagraph = acquiredTextBox.paragraphs[0]!;
+    const acquiredTextLine = acquiredTextParagraph.lines[0]!;
+    const acquiredText = acquiredTextLine.placements.find((placement) => placement.kind === 'text');
+    if (!acquiredText || acquiredText.kind !== 'text') throw new Error('expected retained text');
+    const retainedText: TextPlacement = {
+      ...acquiredText,
+      advancePt: 7,
+      clusters: acquiredText.clusters.map((cluster, index) => ({
+        ...cluster,
+        offset: { xPt: index + 2, yPt: index + 1 },
+        advancePt: index + 6,
+      })),
+      paintOps: acquiredText.paintOps.map((operation, index) => ({
+        ...operation,
+        offset: { xPt: index + 3, yPt: index + 2 },
+        letterSpacingPt: index + 1,
+        scaleX: 0.8,
+      })),
+      characterSpacingPt: 1,
+      fitText: { regionIndex: 0, perGapPt: 2, trailingPadPt: 1 },
+      positionPt: 2,
+      ownedTrailingSlackPt: 1,
+      ruby: {
+        text: 'ル', advancePt: 4, authored: { raisePt: 2 },
+        paintOps: [{
+          text: 'ル', origin: {
+            xPt: acquiredText.origin.xPt + 1,
+            yPt: acquiredText.origin.yPt - 2,
+          },
+          fontRoute: acquiredText.fontRoute, fontSizePt: 6,
+          fontWeight: 400, fontStyle: 'normal', color: acquiredText.color,
+          inkBounds: { xMinPt: 0, xMaxPt: 4, ascentPt: 5, descentPt: 1 },
+        }],
+      },
+      emphasis: {
+        authored: 'dot',
+        glyphs: [{
+          text: '•', origin: {
+            xPt: acquiredText.origin.xPt + 2,
+            yPt: acquiredText.origin.yPt - 3,
+          },
+          fontRoute: acquiredText.fontRoute, fontSizePt: 5,
+          fontWeight: 400, fontStyle: 'normal', color: acquiredText.color,
+        }],
+        paths: [{
+          kind: 'polyline' as const,
+          points: [
+            { xPt: acquiredText.origin.xPt + 1, yPt: acquiredText.origin.yPt - 1 },
+            { xPt: acquiredText.origin.xPt + 3, yPt: acquiredText.origin.yPt - 1 },
+          ],
+          fill: '#000000', stroke: null, strokeWidthPt: 0.5,
+        }],
+      },
+    };
+    const tabPlacement: TabPlacement = {
+      kind: 'tab' as const, range: { start: 2, end: 3 },
+      bounds: { xPt: 24, yPt: 16, widthPt: 4, heightPt: 8 },
+      advancePt: 4, leader: 'dot' as const,
+      leaderGlyphs: [{
+        text: '.', origin: { xPt: 25, yPt: 22 },
+        fontRoute: acquiredText.fontRoute, fontSizePt: 10,
+        fontWeight: 400, fontStyle: 'normal' as const, color: acquiredText.color,
+      }],
+    };
+    const resourcePlacement: ResourcePlacement = {
+      kind: 'resource' as const, range: { start: 3, end: 4 },
+      resourceKey: 'image:inline', resourceKind: 'image' as const,
+      bounds: { xPt: 28, yPt: 16, widthPt: 5, heightPt: 8 }, advancePt: 5,
+    };
+    const inlineDrawingPlacement: DrawingPlacement = {
+      kind: 'drawing' as const, range: { start: 4, end: 5 },
+      drawingId: 'inline:drawing',
+      bounds: { xPt: 33, yPt: 16, widthPt: 6, heightPt: 8 }, advancePt: 6,
+    };
     const textBoxParagraph: ParagraphLayout = {
-      kind: 'paragraph', id: 'relative-size-textbox-paragraph', source: sourceDrawing.source,
-      flowDomainId: `${acquired.flowDomainId}:textbox`, ordinaryFlow: true,
-      flowBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
-      inkBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
-      advancePt: 8, spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
-      lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
+      ...acquiredTextParagraph,
+      lines: [{
+        ...acquiredTextLine,
+        placements: [retainedText, tabPlacement, resourcePlacement, inlineDrawingPlacement],
+      }],
     };
     const textBox: TextBoxLayout = {
-      kind: 'textbox', id: 'relative-size-textbox', source: sourceDrawing.source,
-      flowDomainId: acquired.flowDomainId, ordinaryFlow: false,
-      flowBounds: sourceDrawing.flowBounds, inkBounds: sourceDrawing.flowBounds,
+      ...acquiredTextBox,
       clipBounds: { xPt: 14, yPt: 15, widthPt: 20, heightPt: 12 },
-      contentBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
-      advancePt: 0, paragraphs: [textBoxParagraph], writingMode: 'horizontal-tb',
-      insets: { topPt: 1, rightPt: 1, bottomPt: 1, leftPt: 1 },
+      paragraphs: [textBoxParagraph],
     };
     const acquiredTransaction: ParagraphLayout = {
       ...acquired,
@@ -1149,15 +1261,90 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(drawing.clip).toEqual({
       kind: 'polygon', points: [{ xPt: 12, yPt: 13 }, { xPt: 72, yPt: 53 }],
     });
+    const scaleX = expected.geometry.objectFrame.widthPt / sourceDrawing.flowBounds.widthPt;
+    const scaleY = expected.geometry.objectFrame.heightPt / sourceDrawing.flowBounds.heightPt;
+    const expectedPoint = (point: { xPt: number; yPt: number }) => ({
+      xPt: expected.geometry.objectFrame.xPt
+        + (point.xPt - sourceDrawing.flowBounds.xPt) * scaleX,
+      yPt: expected.geometry.objectFrame.yPt
+        + (point.yPt - sourceDrawing.flowBounds.yPt) * scaleY,
+    });
+    const expectedRect = (rect: { xPt: number; yPt: number; widthPt: number; heightPt: number }) => ({
+      ...expectedPoint(rect), widthPt: rect.widthPt * scaleX, heightPt: rect.heightPt * scaleY,
+    });
     expect(normalized.textBoxes[0]).toMatchObject({
       flowBounds: expected.geometry.objectFrame,
       inkBounds: expected.geometry.objectFrame,
       clipBounds: { xPt: 15, yPt: 15.666666666666666, widthPt: 30, heightPt: 16 },
-      contentBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
+      contentBounds: expectedRect(acquiredTextBox.contentBounds!),
       paragraphs: [{
-        flowBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
-        inkBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
+        flowBounds: expectedRect(acquiredTextParagraph.flowBounds),
+        inkBounds: expectedRect(acquiredTextParagraph.inkBounds),
       }],
+    });
+    const normalizedLine = normalized.textBoxes[0]!.paragraphs[0]!.lines[0]!;
+    const normalizedText = normalizedLine.placements[0];
+    if (normalizedText?.kind !== 'text') throw new Error('expected normalized text');
+    expect(normalizedText).toMatchObject({
+      range: retainedText.range,
+      origin: expectedPoint(retainedText.origin),
+      bounds: expectedRect(retainedText.bounds),
+      advancePt: retainedText.advancePt * scaleX,
+      clusters: retainedText.clusters.map((cluster) => ({
+        range: cluster.range,
+        offset: { xPt: cluster.offset.xPt * scaleX, yPt: cluster.offset.yPt * scaleY },
+        advancePt: cluster.advancePt * scaleX,
+      })),
+      paintOps: retainedText.paintOps.map((operation) => ({
+        range: operation.range,
+        offset: { xPt: operation.offset.xPt * scaleX, yPt: operation.offset.yPt * scaleY },
+        letterSpacingPt: operation.letterSpacingPt * scaleX,
+        scaleX: operation.scaleX,
+      })),
+      characterSpacingPt: retainedText.characterSpacingPt! * scaleX,
+      fitText: {
+        ...retainedText.fitText,
+        perGapPt: retainedText.fitText!.perGapPt * scaleX,
+        trailingPadPt: retainedText.fitText!.trailingPadPt * scaleX,
+      },
+      positionPt: retainedText.positionPt! * scaleY,
+      ownedTrailingSlackPt: retainedText.ownedTrailingSlackPt! * scaleX,
+      fontSizePt: retainedText.fontSizePt,
+      ruby: {
+        advancePt: retainedText.ruby!.advancePt * scaleX,
+        paintOps: [{
+          origin: expectedPoint(retainedText.ruby!.paintOps[0]!.origin),
+          fontSizePt: retainedText.ruby!.paintOps[0]!.fontSizePt,
+          inkBounds: retainedText.ruby!.paintOps[0]!.inkBounds,
+        }],
+      },
+      emphasis: {
+        glyphs: [{
+          origin: expectedPoint(retainedText.emphasis!.glyphs![0]!.origin),
+          fontSizePt: retainedText.emphasis!.glyphs![0]!.fontSizePt,
+        }],
+        paths: [{
+          points: retainedText.emphasis!.paths![0]!.points.map(expectedPoint),
+          strokeWidthPt: retainedText.emphasis!.paths![0]!.strokeWidthPt,
+        }],
+      },
+    });
+    const [normalizedTab, normalizedResource, normalizedInlineDrawing] = normalizedLine.placements.slice(1);
+    expect(normalizedTab).toMatchObject({
+      kind: 'tab', bounds: expectedRect(tabPlacement.bounds!),
+      advancePt: tabPlacement.advancePt * scaleX,
+      leaderGlyphs: [{
+        origin: expectedPoint(tabPlacement.leaderGlyphs![0]!.origin),
+        fontSizePt: tabPlacement.leaderGlyphs![0]!.fontSizePt,
+      }],
+    });
+    expect(normalizedResource).toMatchObject({
+      kind: 'resource', bounds: expectedRect(resourcePlacement.bounds),
+      advancePt: resourcePlacement.advancePt * scaleX,
+    });
+    expect(normalizedInlineDrawing).toMatchObject({
+      kind: 'drawing', bounds: expectedRect(inlineDrawingPlacement.bounds),
+      advancePt: inlineDrawingPlacement.advancePt * scaleX,
     });
     expect(normalized.exclusions[0]).toEqual(expect.objectContaining({
       bounds: expected.geometry.wrapBounds,
