@@ -45,6 +45,16 @@ import {
 } from './numbering-marker.js';
 import { deepFreezePlainData } from './plain-data.js';
 import { retainedBorderTreatment } from './border-treatment.js';
+import {
+  translateDrawing,
+  translateLine,
+  translateParagraphLayout,
+  translatePlacement,
+  translatePoint,
+  translateRect,
+  translateTextBox,
+} from './retained-geometry-translation.js';
+export { translateParagraphLayout } from './retained-geometry-translation.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import {
   centeredLeaderGlyphOrigins,
@@ -72,13 +82,11 @@ export {
 export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput } from './text.js';
 import type {
-  ClipPathData,
   DrawingLayout,
   DrawingPaintCommand,
   AcquiredParagraphLayoutInput,
   InlineResourceLayout,
   LineLayout,
-  LayoutNodeId,
   LayoutRect,
   ParagraphLayout,
   ParagraphPlacement,
@@ -2804,239 +2812,6 @@ export function paragraphLayoutFromMeasurement(
       bounds: { xPt: paragraphXPt, yPt: measured.contentStartYPt, widthPt: 0, heightPt: contentHeightPt },
     } : undefined,
   });
-}
-
-interface LayoutTranslation {
-  readonly xPt: number;
-  readonly yPt: number;
-}
-
-function translatePoint(point: PointPt, delta: LayoutTranslation): PointPt {
-  return { ...point, xPt: point.xPt + delta.xPt, yPt: point.yPt + delta.yPt };
-}
-
-function translateRect(rect: LayoutRect, delta: LayoutTranslation): LayoutRect {
-  return { ...rect, xPt: rect.xPt + delta.xPt, yPt: rect.yPt + delta.yPt };
-}
-
-function translateClip(clip: ClipPathData, delta: LayoutTranslation): ClipPathData {
-  return clip.kind === 'rect'
-    ? { ...clip, rect: translateRect(clip.rect, delta) }
-    : { ...clip, points: clip.points.map((point) => translatePoint(point, delta)) };
-}
-
-function translateDrawingCommand(
-  command: DrawingPaintCommand,
-  delta: LayoutTranslation,
-): DrawingPaintCommand {
-  if (command.kind === 'noop') return command;
-  if (command.kind === 'drawingml-shape') return {
-    ...command,
-    plan: {
-      ...command.plan,
-      rect: {
-        ...command.plan.rect,
-        x: command.plan.rect.x + delta.xPt,
-        y: command.plan.rect.y + delta.yPt,
-      },
-    },
-  };
-  return { ...command, rect: translateRect(command.rect, delta) };
-}
-
-function translateDrawing(drawing: DrawingLayout, delta: LayoutTranslation): DrawingLayout {
-  return {
-    ...drawing,
-    flowBounds: translateRect(drawing.flowBounds, delta),
-    inkBounds: translateRect(drawing.inkBounds, delta),
-    ...(drawing.clipBounds
-      ? { clipBounds: translateRect(drawing.clipBounds, delta) }
-      : {}),
-    ...(drawing.transform
-      ? { transform: {
-          ...drawing.transform,
-          e: drawing.transform.e + delta.xPt,
-          f: drawing.transform.f + delta.yPt,
-        } }
-      : {}),
-    ...(drawing.clip ? { clip: translateClip(drawing.clip, delta) } : {}),
-    commands: drawing.commands.map((command) => translateDrawingCommand(command, delta)),
-  };
-}
-
-function translatePlacement(
-  placement: ParagraphPlacement,
-  delta: LayoutTranslation,
-  drawingTranslations?: ReadonlyMap<LayoutNodeId, LayoutTranslation>,
-): ParagraphPlacement {
-  if (placement.kind === 'text') return {
-    ...placement,
-    origin: translatePoint(placement.origin, delta),
-    bounds: translateRect(placement.bounds, delta),
-    decorations: placement.decorations.map((decoration) => ({
-      ...decoration,
-      from: translatePoint(decoration.from, delta),
-      to: translatePoint(decoration.to, delta),
-      ...(decoration.path
-        ? { path: decoration.path.map((point) => translatePoint(point, delta)) }
-        : {}),
-    })),
-    ...(placement.highlightFragments ? { highlightFragments: placement.highlightFragments.map((fragment) => ({
-      ...fragment,
-      rect: translateRect(fragment.rect, delta),
-    })) } : {}),
-    ...(placement.ruby ? { ruby: {
-      ...placement.ruby,
-      paintOps: placement.ruby.paintOps.map((operation) => ({
-        ...operation,
-        origin: translatePoint(operation.origin, delta),
-      })),
-    } } : {}),
-    ...(placement.emphasis ? { emphasis: {
-      ...placement.emphasis,
-      ...(placement.emphasis.glyphs ? { glyphs: placement.emphasis.glyphs.map((glyph) => ({
-        ...glyph,
-        origin: translatePoint(glyph.origin, delta),
-      })) } : {}),
-      ...(placement.emphasis.paths ? { paths: placement.emphasis.paths.map((path) => ({
-        ...path,
-        points: path.points.map((point) => translatePoint(point, delta)),
-      })) } : {}),
-    } } : {}),
-    ...(placement.runBorderFragments ? {
-      runBorderFragments: placement.runBorderFragments.map((border) => ({
-        ...border,
-        from: translatePoint(border.from, delta),
-        to: translatePoint(border.to, delta),
-      })),
-    } : {}),
-  };
-  if (placement.kind === 'anchor-host') return {
-    ...placement,
-    bounds: translateRect(placement.bounds, delta),
-    baselinePt: placement.baselinePt + delta.yPt,
-  };
-  if (placement.kind === 'drawing') return {
-    ...placement,
-    bounds: translateRect(
-      placement.bounds,
-      drawingTranslations?.get(placement.drawingId) ?? delta,
-    ),
-  };
-  if (placement.kind === 'tab' && placement.leaderGlyphs) return {
-    ...placement,
-    ...(placement.bounds ? { bounds: translateRect(placement.bounds, delta) } : {}),
-    leaderGlyphs: placement.leaderGlyphs.map((operation) => ({
-      ...operation,
-      origin: translatePoint(operation.origin, delta),
-    })),
-  };
-  if (placement.bounds) return {
-    ...placement,
-    bounds: translateRect(placement.bounds, delta),
-  };
-  return placement;
-}
-
-function translateLine(
-  line: LineLayout,
-  delta: LayoutTranslation,
-  drawingTranslations?: ReadonlyMap<LayoutNodeId, LayoutTranslation>,
-): LineLayout {
-  return {
-    ...line,
-    bounds: translateRect(line.bounds, delta),
-    baselinePt: line.baselinePt + delta.yPt,
-    placements: line.placements.map((placement) =>
-      translatePlacement(placement, delta, drawingTranslations)),
-  };
-}
-
-/** Translate host-owned retained geometry while preserving axes owned by the
- * page anchor solver. This is the only relocation primitive used after a
- * local frame acquisition, so nested anchors cannot be measured a second time. */
-export function translateParagraphLayout(
-  paragraph: ParagraphLayout,
-  delta: LayoutTranslation,
-): ParagraphLayout {
-  const anchorOwnership = new Map(paragraph.drawings.flatMap((drawing) =>
-    drawing.anchorLayer ? [[drawing.anchorLayer.occurrenceId, drawing.anchorLayer] as const] : []));
-  const textBoxTranslations = new Map<LayoutNodeId, LayoutTranslation>();
-  const drawingTranslations = new Map<LayoutNodeId, LayoutTranslation>();
-  paragraph.drawings.forEach((drawing) => {
-    const drawingDelta = {
-      xPt: drawing.anchorLayer?.horizontalOwnership === 'page' ? 0 : delta.xPt,
-      yPt: drawing.anchorLayer?.verticalOwnership === 'page' ? 0 : delta.yPt,
-    };
-    drawingTranslations.set(drawing.id, drawingDelta);
-    drawing.textBoxIds?.forEach((id) => textBoxTranslations.set(id, drawingDelta));
-  });
-  return {
-    ...paragraph,
-    flowBounds: translateRect(paragraph.flowBounds, delta),
-    inkBounds: translateRect(paragraph.inkBounds, delta),
-    ...(paragraph.clipBounds
-      ? { clipBounds: translateRect(paragraph.clipBounds, delta) }
-      : {}),
-    lines: paragraph.lines.map((line) => translateLine(line, delta, drawingTranslations)),
-    borders: paragraph.borders.map((border) => ({
-      ...border,
-      from: translatePoint(border.from, delta),
-      to: translatePoint(border.to, delta),
-    })),
-    drawings: paragraph.drawings.map((drawing) => {
-      const drawingDelta = {
-        xPt: drawing.anchorLayer?.horizontalOwnership === 'page' ? 0 : delta.xPt,
-        yPt: drawing.anchorLayer?.verticalOwnership === 'page' ? 0 : delta.yPt,
-      };
-      return translateDrawing(drawing, drawingDelta);
-    }),
-    textBoxes: paragraph.textBoxes.map((textBox) => translateTextBox(
-      textBox,
-      textBoxTranslations.get(textBox.id) ?? delta,
-    )),
-    exclusions: paragraph.exclusions.map((exclusion) => {
-      const owner = exclusion.anchorOccurrenceId
-        ? anchorOwnership.get(exclusion.anchorOccurrenceId)
-        : undefined;
-      const exclusionDelta = {
-        xPt: owner?.horizontalOwnership === 'page' ? 0 : delta.xPt,
-        yPt: exclusion.verticalOwnership === 'page' || owner?.verticalOwnership === 'page'
-          ? 0 : delta.yPt,
-      };
-      return {
-        ...exclusion,
-        bounds: translateRect(exclusion.bounds, exclusionDelta),
-        polygon: exclusion.polygon.map((point) => translatePoint(point, exclusionDelta)),
-      };
-    }),
-    ...(paragraph.paragraphMark
-      ? { paragraphMark: {
-          ...paragraph.paragraphMark,
-          bounds: translateRect(paragraph.paragraphMark.bounds, delta),
-        } }
-      : {}),
-  };
-}
-
-function translateTextBox(textBox: TextBoxLayout, delta: LayoutTranslation): TextBoxLayout {
-  const pageRelativeContent = textBox.verticalMode === undefined;
-  return {
-    ...textBox,
-    flowBounds: translateRect(textBox.flowBounds, delta),
-    inkBounds: translateRect(textBox.inkBounds, delta),
-    ...(textBox.clipBounds
-      ? { clipBounds: translateRect(textBox.clipBounds, delta) }
-      : {}),
-    ...(textBox.contentBounds
-      ? { contentBounds: pageRelativeContent
-          ? translateRect(textBox.contentBounds, delta)
-          : textBox.contentBounds }
-      : {}),
-    paragraphs: pageRelativeContent
-      ? textBox.paragraphs.map((paragraph) => translateParagraphLayout(paragraph, delta))
-      : textBox.paragraphs,
-  };
 }
 
 const translatePointY = (point: PointPt, yPt: number): PointPt =>
