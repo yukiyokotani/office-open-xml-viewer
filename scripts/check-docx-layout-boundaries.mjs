@@ -22,6 +22,13 @@ const OCCURRENCE_PROJECTION_RUNTIME_ENTRIES = [
   `${LAYOUT_SOURCE}/occurrence-projection.ts`,
   `${LAYOUT_SOURCE}/retained-geometry-translation.ts`,
 ];
+// Keep the final projection boundary reviewable by construction. A new pure
+// helper must be deliberately reviewed and added here; broad path categories
+// would silently turn acquisition or environment dependencies into runtime edges.
+const OCCURRENCE_PROJECTION_RUNTIME_ALLOWLIST = new Set([
+  ...OCCURRENCE_PROJECTION_RUNTIME_ENTRIES,
+  `${LAYOUT_SOURCE}/plain-data.ts`,
+]);
 
 const FINAL_RENDERER_EXPORTS = new Set([
   'DocxTextRunInfo',
@@ -942,22 +949,6 @@ function assertLayoutParserModelBoundaries(root) {
   }
 }
 
-function isForbiddenOccurrenceProjectionRuntimePath(path) {
-  return path === `${DOCX_SOURCE}/renderer.ts`
-    || path === PARSER_MODEL
-    || path.startsWith(`${PAINT_SOURCE}/`)
-    || path.split('/').some((segment) => (
-      /(?:^|[-_.])(?:canvas|dom|worker)(?=$|[-_.])/i.test(segment)
-    ))
-    || /(?:^|\/)[^/]*(?:paragraph|table)[^/]*(?:acquisition|measure)[^/]*\.tsx?$/i.test(path)
-    || path === `${LAYOUT_SOURCE}/paragraph.ts`
-    || path === `${LAYOUT_SOURCE}/table.ts`
-    || path === `${LAYOUT_SOURCE}/table-acquisition.ts`
-    || path === `${LAYOUT_SOURCE}/text.ts`
-    || path === `${DOCX_SOURCE}/paragraph-measure.ts`
-    || path === `${DOCX_SOURCE}/line-layout.ts`;
-}
-
 function assertOccurrenceProjectionRuntimeBoundaries(root) {
   const graph = dependencyGraph(root);
   for (const entryRelative of OCCURRENCE_PROJECTION_RUNTIME_ENTRIES) {
@@ -976,19 +967,16 @@ function assertOccurrenceProjectionRuntimeBoundaries(root) {
           );
         }
         if (!edge.specifier.startsWith('.')) {
-          if (/(?:^|[/@-])(?:canvas|dom|worker)(?:$|[/@-])/i.test(edge.specifier)) {
-            fail(
-              'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
-              `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> ${edge.specifier}`,
-            );
-          }
-          continue;
+          fail(
+            'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
+            `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> ${edge.specifier}`,
+          );
         }
         const dependency = resolveLocalImport(current.path, edge.specifier);
         if (!dependency) continue;
         const chain = [...current.chain, dependency];
         const dependencyRelative = posixPath(relative(root, dependency));
-        if (isForbiddenOccurrenceProjectionRuntimePath(dependencyRelative)) {
+        if (!OCCURRENCE_PROJECTION_RUNTIME_ALLOWLIST.has(dependencyRelative)) {
           fail(
             'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
             chain.map((path) => posixPath(relative(root, path))).join(' -> '),

@@ -948,18 +948,23 @@ test('rejects runtime impurity reachable from retained occurrence projection', (
   );
 });
 
-test('allows ordinary modules whose names merely contain a forbidden token substring', () => {
+test('allows the reviewed occurrence projection runtime helper graph', () => {
   const root = initializeRepository();
   establishA1Baseline(root);
   write(
     root,
-    'packages/docx/src/layout/random.ts',
-    'export const randomValue = 1;\n',
+    'packages/docx/src/layout/plain-data.ts',
+    'export const snapshotPlainData = (value) => value;\n',
+  );
+  write(
+    root,
+    'packages/docx/src/layout/retained-geometry-translation.ts',
+    "import { snapshotPlainData } from './plain-data.js';\nexport const translate = snapshotPlainData;\n",
   );
   write(
     root,
     'packages/docx/src/layout/occurrence-projection.ts',
-    "import { randomValue } from './random.js';\nexport const project = randomValue;\n",
+    "import { translate } from './retained-geometry-translation.js';\nexport const project = translate;\n",
   );
 
   const result = runChecker(root, '--base-ref', 'main');
@@ -967,28 +972,26 @@ test('allows ordinary modules whose names merely contain a forbidden token subst
   assert.equal(result.status, 0, result.output);
 });
 
-test('rejects Canvas, DOM, and worker module tokens at file or directory boundaries', () => {
-  const root = initializeRepository();
-  establishA1Baseline(root);
-  const cases = [
-    ['packages/docx/src/canvas-page.ts', '../canvas-page.js'],
-    ['packages/docx/src/render-worker.ts', '../render-worker.js'],
-    ['packages/docx/src/dom-adapter.ts', '../dom-adapter.js'],
-    ['packages/docx/src/layout/dom/adapter.ts', './dom/adapter.js'],
-  ];
-  for (const [path, specifier] of cases) {
-    write(root, path, 'export const forbiddenRuntime = 1;\n');
+for (const [path, specifier] of [
+  ['packages/docx/src/layout/text-measure.ts', './text-measure.js'],
+  [null, 'node:worker_threads'],
+  [null, 'jsdom'],
+]) {
+  test(`rejects occurrence projection runtime dependency outside the allowlist: ${specifier}`, () => {
+    const root = initializeRepository();
+    establishA1Baseline(root);
+    if (path) write(root, path, 'export const forbiddenRuntime = 1;\n');
     write(
       root,
       'packages/docx/src/layout/occurrence-projection.ts',
-      `import { forbiddenRuntime } from '${specifier}';\nexport const project = forbiddenRuntime;\n`,
+      `import * as forbiddenRuntime from '${specifier}';\nexport const project = forbiddenRuntime;\n`,
     );
 
     const result = runChecker(root, '--base-ref', 'main');
-    assert.notEqual(result.status, 0, path);
-    assert.match(result.output, /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/, path);
-  }
-});
+    assert.notEqual(result.status, 0, specifier);
+    assert.match(result.output, /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/, specifier);
+  });
+}
 
 test('allows retained and legacy layout to share parser-independent primitives', () => {
   const root = initializeLayoutParserBoundaryRepository();
