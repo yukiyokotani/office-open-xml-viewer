@@ -31,6 +31,8 @@ export interface SectionBoundaryOptions {
 export interface PageFlowState {
   readonly pageIndex: number;
   readonly columnIndex: number;
+  /** Whether this physical page already owns placed body content. */
+  readonly pageHasContent: boolean;
   /** Page-absolute logical block coordinate (pt), independent of writing mode. */
   readonly cursorBlockPt: number;
   /** Logical block origin of the physical page's body content. */
@@ -72,13 +74,36 @@ export function createPageFlowState(
   const pageContentStartBlockPt = overrides.pageContentStartBlockPt ?? contentStart;
   const regionStartBlockPt = overrides.regionStartBlockPt ?? pageContentStartBlockPt;
   const cursorBlockPt = overrides.cursorBlockPt ?? regionStartBlockPt;
+  const deepestColumnBlockPt = overrides.deepestColumnBlockPt ?? cursorBlockPt;
+  const pageIndex = overrides.pageIndex ?? 0;
+  const columnIndex = overrides.columnIndex ?? 0;
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    throw new RangeError('Page index must be a non-negative integer');
+  }
+  if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= section.columns.length) {
+    throw new RangeError('Column index must identify a column in the active section');
+  }
+  if (![pageContentStartBlockPt, regionStartBlockPt, cursorBlockPt, deepestColumnBlockPt]
+    .every(Number.isFinite)) {
+    throw new RangeError('Page-flow cursors must be finite');
+  }
+  if (
+    pageContentStartBlockPt > regionStartBlockPt
+    || regionStartBlockPt > cursorBlockPt
+    || cursorBlockPt > deepestColumnBlockPt
+  ) {
+    throw new RangeError(
+      'Page-flow cursors must be ordered page start <= region start <= cursor <= deepest edge',
+    );
+  }
   return Object.freeze({
-    pageIndex: overrides.pageIndex ?? 0,
-    columnIndex: overrides.columnIndex ?? 0,
+    pageIndex,
+    columnIndex,
+    pageHasContent: overrides.pageHasContent ?? false,
     cursorBlockPt,
     pageContentStartBlockPt,
     regionStartBlockPt,
-    deepestColumnBlockPt: overrides.deepestColumnBlockPt ?? cursorBlockPt,
+    deepestColumnBlockPt,
     section,
   });
 }
@@ -104,6 +129,7 @@ export function placeFlowNode(
   const blockEndPt = blockStartPt + node.advancePt;
   return transition(Object.freeze({
     ...state,
+    pageHasContent: true,
     cursorBlockPt: blockEndPt,
     deepestColumnBlockPt: Math.max(state.deepestColumnBlockPt, blockEndPt),
   }), [{
@@ -168,6 +194,16 @@ export function applyAuthoredBreak(
   if (authoredBreak === 'column') {
     return advanceColumnOrPage(state, 'explicit-break');
   }
+  if (
+    authoredBreak === 'pageBreakBefore'
+    && !state.pageHasContent
+    && state.columnIndex === 0
+    && state.cursorBlockPt === state.pageContentStartBlockPt
+  ) {
+    // §17.3.1.23 requires the paragraph to begin on a new page. A paragraph
+    // already at the start of an otherwise empty page satisfies that condition.
+    return transition(state, []);
+  }
   return advanceToPage(
     state,
     state.section,
@@ -196,6 +232,7 @@ export function beginSection(
       cursorBlockPt: regionTop,
       regionStartBlockPt: regionTop,
       deepestColumnBlockPt: regionTop,
+      pageHasContent: state.pageHasContent,
     }), [{ type: 'begin-section', section }]);
   }
 
@@ -221,9 +258,10 @@ export function beginSection(
       ]);
     }
 
-    // ST_SectionMark defines nextColumn but not the no-following-column case.
-    // Opening the next page preserves forward flow as an explicit compatibility
-    // fallback; it is not presented as normative behavior from §17.18.77.
+    // §17.18.77 starts the new section in the following column on the page.
+    // §17.6.4 defines each section's finite ordered column set; when either the
+    // outgoing page or incoming section has no column at that next index, the
+    // total page-flow successor is column zero of the next physical page.
     const nextPage = advanceToPage(state, section, 'section-break');
     return transition(nextPage.state, [
       ...nextPage.events,

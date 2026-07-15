@@ -149,6 +149,28 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function collectRetainedNodeIds(node: PaintNode, ids: Set<string>): void {
+  ids.add(node.id);
+  if (node.kind === 'paragraph') {
+    node.drawings.forEach((drawing) => collectRetainedNodeIds(drawing, ids));
+    node.textBoxes.forEach((textBox) => collectRetainedNodeIds(textBox, ids));
+    return;
+  }
+  if (node.kind === 'table') {
+    node.rows.forEach((row) => {
+      ids.add(row.id);
+      row.cells.forEach((cell) => {
+        ids.add(cell.id);
+        cell.blocks.forEach((block) => collectRetainedNodeIds(block.layout, ids));
+      });
+    });
+    return;
+  }
+  if (node.kind === 'textbox') {
+    node.paragraphs.forEach((paragraph) => collectRetainedNodeIds(paragraph, ids));
+  }
+}
+
 function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.transform) {
     for (const key of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
@@ -201,6 +223,12 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
 export function assertDocumentLayout(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
   layout.pages.forEach((page, pageIndex) => {
+    if (!Number.isInteger(page.pageIndex) || page.pageIndex !== pageIndex) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `pages[${pageIndex}] has invalid page index ${page.pageIndex}`,
+      );
+    }
     requireRect(page.geometry, `pages[${pageIndex}].geometry`);
     requireFinite(page.geometry.contentTopPt, `pages[${pageIndex}].geometry.contentTopPt`);
     requireFinite(page.geometry.contentBottomPt, `pages[${pageIndex}].geometry.contentBottomPt`);
@@ -306,9 +334,11 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       throw error;
     }
     const nodes = new Map<string, PaintNode>();
+    const retainedNodeIds = new Set<string>();
     pageLayerNodes(page).forEach(({ node }, nodeIndex) => {
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
+      collectRetainedNodeIds(node, retainedNodeIds);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);
@@ -342,7 +372,7 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       if (
         bookmark.name.length === 0
         || bookmarkNames.has(bookmark.name)
-        || !nodes.has(bookmark.nodeId)
+        || !retainedNodeIds.has(bookmark.nodeId)
       ) {
         throw new LayoutInvariantError(
           'INVALID_REFERENCE',

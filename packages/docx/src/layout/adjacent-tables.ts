@@ -1,10 +1,14 @@
-import {
-  tableAcquisitionInput,
-  tableParticipatesInOrdinaryFlow,
-} from '../parser-model.js';
 import type { BodyElement } from '../types.js';
 
 export type TableBodyElement = Extract<BodyElement, { type: 'table' }>;
+
+export interface AdjacentTableSequenceInput {
+  readonly element: BodyElement;
+  readonly table: Readonly<{
+    readonly effectiveStyleId: string | null;
+    readonly ordinaryFlow: boolean;
+  }> | null;
+}
 
 export type NormalizedBodySequenceEntry =
   | Readonly<{ kind: 'body-element'; element: BodyElement }>
@@ -14,11 +18,9 @@ export type NormalizedBodySequenceEntry =
     tables: readonly TableBodyElement[];
   }>;
 
-function groupingIdentity(element: BodyElement): string | null {
-  if (element.type !== 'table') return null;
-  const facts = tableAcquisitionInput(element);
-  if (!tableParticipatesInOrdinaryFlow(element)) return null;
-  return facts.table?.effectiveStyleId ?? null;
+function groupingIdentity(input: AdjacentTableSequenceInput): string | null {
+  if (input.element.type !== 'table' || !input.table?.ordinaryFlow) return null;
+  return input.table.effectiveStyleId;
 }
 
 /**
@@ -29,7 +31,7 @@ function groupingIdentity(element: BodyElement): string | null {
  * not mistaken for effective floating placement.
  */
 export function normalizeAdjacentTables(
-  body: readonly BodyElement[],
+  body: readonly AdjacentTableSequenceInput[],
 ): readonly NormalizedBodySequenceEntry[] {
   const result: NormalizedBodySequenceEntry[] = [];
   let pendingStyleId: string | null = null;
@@ -49,8 +51,9 @@ export function normalizeAdjacentTables(
     pendingTables = [];
   };
 
-  for (const element of body) {
-    const styleId = groupingIdentity(element);
+  for (const input of body) {
+    const { element } = input;
+    const styleId = groupingIdentity(input);
     if (styleId !== null && element.type === 'table') {
       if (pendingTables.length > 0 && pendingStyleId !== styleId) flush();
       pendingStyleId = styleId;

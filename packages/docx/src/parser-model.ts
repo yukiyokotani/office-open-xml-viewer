@@ -18,6 +18,7 @@ import type {
 } from './types.js';
 import type {
   NumberingMarkerShapeInput,
+  FloatingTablePositionInput,
   SourceRef,
   TableColumnLayoutInput,
   TableFormatInput,
@@ -43,6 +44,11 @@ import {
   type NormalizedTextBoxParagraphInput,
 } from './layout/textbox-input.js';
 import { tableCellHorizontalSpacingInsets } from './layout/table-columns.js';
+import {
+  sectionGeometry,
+  type BodySectionIndexInput,
+  type BodySectionOccurrence,
+} from './layout/context.js';
 
 export interface InternalRunFontSlots {
   readonly direct: TextFontSlots;
@@ -256,12 +262,28 @@ export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisiti
 /** Word-effective flow classification acquired before tblpPr defaults erase the
  * distinction between authored positioning and an ignored positioning payload. */
 export function tableParticipatesInOrdinaryFlow(table: Readonly<DocTable>): boolean {
-  return tableAcquisitionInput(table).table?.ordinaryFlow ?? table.tblpPr == null;
+  return tableFormatInput(table).ordinaryFlow;
 }
 
 /** Positioning payload only when Word treats the authored tblpPr as effective. */
 export function effectiveTablePositioning(table: Readonly<DocTable>): TblpPr | null {
-  return tableParticipatesInOrdinaryFlow(table) ? null : (table.tblpPr ?? null);
+  return tableFormatInput(table).positioning === null ? null : (table.tblpPr ?? null);
+}
+
+function floatingTablePositionInput(positioning: TblpPr): FloatingTablePositionInput {
+  return {
+    leftFromTextPt: positioning.leftFromText,
+    rightFromTextPt: positioning.rightFromText,
+    topFromTextPt: positioning.topFromText,
+    bottomFromTextPt: positioning.bottomFromText,
+    horzAnchor: positioning.horzAnchor,
+    horzSpecified: positioning.horzSpecified,
+    vertAnchor: positioning.vertAnchor,
+    xPt: positioning.tblpX,
+    yPt: positioning.tblpY,
+    ...(positioning.tblpXSpec == null ? {} : { xAlign: positioning.tblpXSpec }),
+    ...(positioning.tblpYSpec == null ? {} : { yAlign: positioning.tblpYSpec }),
+  };
 }
 
 type TableLexicalWidth = Readonly<{
@@ -480,6 +502,7 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
   const cached = tableFormatInputs.get(table);
   if (cached) return cached;
   const acquisition = tableAcquisitionInput(table);
+  const ordinaryFlow = acquisition.table?.ordinaryFlow ?? table.tblpPr == null;
   const rows = table.rows.map((row, rowIndex) => {
     const rowWire = acquisition.rows[rowIndex]?.row ?? null;
     const exception = rowWire?.exception ?? null;
@@ -510,6 +533,11 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
     };
   });
   const input = snapshotPlainData({
+    effectiveStyleId: acquisition.table?.effectiveStyleId ?? null,
+    ordinaryFlow,
+    positioning: ordinaryFlow || table.tblpPr == null
+      ? null
+      : floatingTablePositionInput(table.tblpPr),
     rows,
     // Word applies selected first-row tblPrEx values table-wide
     // ([MS-OI29500] 2.1.156/.158/.167).
@@ -517,6 +545,22 @@ export function tableFormatInput(table: Readonly<DocTable>): TableFormatInput {
   }, 'DOCX table format input') as TableFormatInput;
   tableFormatInputs.set(table, input);
   return input;
+}
+
+export function adjacentTableSequenceInput(
+  body: readonly BodyElement[],
+): readonly import('./layout/adjacent-tables.js').AdjacentTableSequenceInput[] {
+  return Object.freeze(body.map((element) => {
+    if (element.type !== 'table') return Object.freeze({ element, table: null });
+    const format = tableFormatInput(element);
+    return Object.freeze({
+      element,
+      table: Object.freeze({
+        effectiveStyleId: format.effectiveStyleId,
+        ordinaryFlow: format.ordinaryFlow,
+      }),
+    });
+  }));
 }
 
 export interface CellIntrinsicWidths {
@@ -741,6 +785,77 @@ export function sectionPlacementInputFromBody(
     return inputs.endingSections.get(index) ?? inputs.finalSection;
   }
   return inputs.finalSection;
+}
+
+const EMPTY_SECTION_HEADERS_FOOTERS: HeadersFooters = Object.freeze({
+  default: null,
+  first: null,
+  even: null,
+});
+
+/**
+ * Acquire every §17.6.18 paragraph-owned occurrence and the final §17.6.17
+ * occurrence before layout. Equal-looking sections remain distinct entries;
+ * layout receives no document-model scanning capability or parser-private wire.
+ */
+export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexInput {
+  const inheritedGeometry = sectionGeometry(doc.section);
+  const occurrences: BodySectionOccurrence[] = [];
+  let startBodyIndex = 0;
+
+  doc.body.forEach((element, bodyIndex) => {
+    if (element.type !== 'sectionBreak') return;
+    const placement = sectionPlacementInputFromBody(doc.body, doc.section, bodyIndex);
+    const ordinal = occurrences.length;
+    occurrences.push({
+      sectionOccurrenceId: placement.sectionId,
+      ordinal,
+      startBodyIndex,
+      endBodyIndex: bodyIndex,
+      markerBodyIndex: bodyIndex,
+      final: false,
+      startType: element.kind ?? 'nextPage',
+      columns: element.columns ?? null,
+      // A paragraph-owned sectPr can omit pgSz/pgMar; inherit the final
+      // physical page box rather than manufacturing defaults after acquisition.
+      geometry: element.geom ?? inheritedGeometry,
+      textDirection: element.textDirection ?? null,
+      pageNumType: element.pageNumType ?? null,
+      headers: element.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
+      footers: element.footers ?? EMPTY_SECTION_HEADERS_FOOTERS,
+      titlePage: element.titlePage ?? false,
+      vAlign: placement.vAlign,
+      lineNumbering: placement.lineNumbering,
+      placement,
+    });
+    startBodyIndex = bodyIndex + 1;
+  });
+
+  const placement = sectionPlacementInputFromBody(doc.body, doc.section, doc.body.length);
+  occurrences.push({
+    sectionOccurrenceId: placement.sectionId,
+    ordinal: occurrences.length,
+    startBodyIndex,
+    endBodyIndex: doc.body.length - 1,
+    markerBodyIndex: null,
+    final: true,
+    startType: doc.section.sectionStart ?? 'nextPage',
+    columns: doc.section.columns ?? null,
+    geometry: inheritedGeometry,
+    textDirection: doc.section.textDirection ?? null,
+    pageNumType: doc.section.pageNumType ?? null,
+    headers: doc.headers ?? EMPTY_SECTION_HEADERS_FOOTERS,
+    footers: doc.footers ?? EMPTY_SECTION_HEADERS_FOOTERS,
+    titlePage: doc.section.titlePage,
+    vAlign: placement.vAlign,
+    lineNumbering: placement.lineNumbering,
+    placement,
+  });
+
+  return snapshotPlainData({
+    bodyLength: doc.body.length,
+    occurrences,
+  }, 'DOCX body section index input') as BodySectionIndexInput;
 }
 
 /** Resolved transitional VML facts emitted by the parser in addition to the

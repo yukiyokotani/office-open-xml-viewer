@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeAdjacentTables } from './adjacent-tables.js';
+import {
+  normalizeAdjacentTables,
+  type AdjacentTableSequenceInput,
+} from './adjacent-tables.js';
 import type { BodyElement } from '../types.js';
 
 function table(
@@ -38,12 +41,22 @@ function publicTable(): BodyElement {
   return value;
 }
 
+function input(
+  element: BodyElement,
+  effectiveStyleId: string | null = null,
+  ordinaryFlow = true,
+): AdjacentTableSequenceInput {
+  return { element, table: element.type === 'table' ? { effectiveStyleId, ordinaryFlow } : null };
+}
+
 describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
   it('groups directly adjacent in-flow tables by preserved effective style identity', () => {
     const first = table('SameStyle', true, 36);
     const second = table('SameStyle', true, 144);
 
-    expect(normalizeAdjacentTables([first, second])).toEqual([{
+    expect(normalizeAdjacentTables([
+      input(first, 'SameStyle'), input(second, 'SameStyle'),
+    ])).toEqual([{
       kind: 'adjacent-table-group',
       effectiveStyleId: 'SameStyle',
       tables: [first, second],
@@ -54,7 +67,7 @@ describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
     const first = table('StyleA', true, 72);
     const second = table('StyleB', true, 72);
 
-    expect(normalizeAdjacentTables([first, second])).toEqual([
+    expect(normalizeAdjacentTables([input(first, 'StyleA'), input(second, 'StyleB')])).toEqual([
       { kind: 'body-element', element: first },
       { kind: 'body-element', element: second },
     ]);
@@ -65,7 +78,9 @@ describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
     const hidden = paragraph(true);
     const second = table('SameStyle', true, 72);
 
-    expect(normalizeAdjacentTables([first, hidden, second])).toEqual([
+    expect(normalizeAdjacentTables([
+      input(first, 'SameStyle'), input(hidden), input(second, 'SameStyle'),
+    ])).toEqual([
       { kind: 'body-element', element: first },
       { kind: 'body-element', element: hidden },
       { kind: 'body-element', element: second },
@@ -77,7 +92,9 @@ describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
     const floating = table('SameStyle', false, 72);
     const second = table('SameStyle', true, 72);
 
-    expect(normalizeAdjacentTables([first, floating, second])).toEqual([
+    expect(normalizeAdjacentTables([
+      input(first, 'SameStyle'), input(floating, 'SameStyle', false), input(second, 'SameStyle'),
+    ])).toEqual([
       { kind: 'body-element', element: first },
       { kind: 'body-element', element: floating },
       { kind: 'body-element', element: second },
@@ -88,7 +105,7 @@ describe('adjacent table normalization (ECMA-376 Part 1 §17.4.37)', () => {
     const first = publicTable();
     const second = publicTable();
 
-    expect(normalizeAdjacentTables([first, second])).toEqual([
+    expect(normalizeAdjacentTables([input(first), input(second)])).toEqual([
       { kind: 'body-element', element: first },
       { kind: 'body-element', element: second },
     ]);

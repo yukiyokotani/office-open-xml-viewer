@@ -1,12 +1,6 @@
-import {
-  sectionPlacementInputFromBody,
-  type SectionPlacementInput,
-} from '../parser-model.js';
 import type {
-  BodyElement,
   ColumnGeom,
   ColumnsSpec,
-  DocxDocumentModel,
   HeadersFooters,
   LineNumbering,
   PageNumType,
@@ -85,13 +79,11 @@ export function physicalSectionGeometry(logical: SectionGeom): SectionGeom {
   };
 }
 
-type SectionBreak = Extract<BodyElement, { type: 'sectionBreak' }>;
-
-const EMPTY_HEADERS_FOOTERS: HeadersFooters = Object.freeze({
-  default: null,
-  first: null,
-  even: null,
-});
+export interface SectionPlacementFacts {
+  readonly sectionId: string;
+  readonly vAlign: string | null;
+  readonly lineNumbering: Readonly<LineNumbering> | null;
+}
 
 /**
  * One lexical section occurrence in body order. Equal section properties do not
@@ -120,7 +112,13 @@ export interface BodySectionOccurrence {
   readonly titlePage: boolean;
   readonly vAlign: string | null;
   readonly lineNumbering: Readonly<LineNumbering> | null;
-  readonly placement: SectionPlacementInput;
+  readonly placement: SectionPlacementFacts;
+}
+
+/** Complete parser-boundary projection; layout does not scan document nodes. */
+export interface BodySectionIndexInput {
+  readonly bodyLength: number;
+  readonly occurrences: readonly BodySectionOccurrence[];
 }
 
 export interface BodySectionIndex {
@@ -142,116 +140,39 @@ export function sectionGeometry(section: SectionProps): SectionGeom {
   };
 }
 
-function endingSectionOccurrence(
-  marker: SectionBreak,
-  markerBodyIndex: number,
-  startBodyIndex: number,
-  ordinal: number,
-  placement: SectionPlacementInput,
-  inheritedGeometry: SectionGeom,
-): BodySectionOccurrence {
-  return Object.freeze({
-    sectionOccurrenceId: placement.sectionId,
-    ordinal,
-    startBodyIndex,
-    endBodyIndex: markerBodyIndex,
-    markerBodyIndex,
-    final: false,
-    startType: marker.kind ?? 'nextPage',
-    columns: marker.columns ?? null,
-    // A paragraph-owned sectPr may omit pgSz/pgMar. The parser deliberately
-    // preserves that absence; the existing renderer inherits the final physical
-    // page box rather than manufacturing spec defaults at this later boundary.
-    geometry: marker.geom ?? inheritedGeometry,
-    textDirection: marker.textDirection ?? null,
-    pageNumType: marker.pageNumType ?? null,
-    headers: marker.headers ?? EMPTY_HEADERS_FOOTERS,
-    footers: marker.footers ?? EMPTY_HEADERS_FOOTERS,
-    titlePage: marker.titlePage ?? false,
-    vAlign: placement.vAlign,
-    lineNumbering: placement.lineNumbering,
-    placement,
-  });
-}
-
-function finalSectionOccurrence(
-  doc: DocxDocumentModel,
-  startBodyIndex: number,
-  ordinal: number,
-  placement: SectionPlacementInput,
-  geometry: SectionGeom,
-): BodySectionOccurrence {
-  return Object.freeze({
-    sectionOccurrenceId: placement.sectionId,
-    ordinal,
-    startBodyIndex,
-    endBodyIndex: doc.body.length - 1,
-    markerBodyIndex: null,
-    final: true,
-    startType: doc.section.sectionStart ?? 'nextPage',
-    columns: doc.section.columns ?? null,
-    geometry,
-    textDirection: doc.section.textDirection ?? null,
-    pageNumType: doc.section.pageNumType ?? null,
-    headers: doc.headers ?? EMPTY_HEADERS_FOOTERS,
-    footers: doc.footers ?? EMPTY_HEADERS_FOOTERS,
-    titlePage: doc.section.titlePage,
-    vAlign: placement.vAlign,
-    lineNumbering: placement.lineNumbering,
-    placement,
-  });
-}
-
 /**
- * Pre-index ECMA-376 §17.6.18 paragraph-owned sectPr markers and the final
- * body-level §17.6.17 sectPr. A marker belongs to the section it terminates;
- * ownership switches at the following body index. Construction is O(body), and
- * every subsequent source-index lookup is a single array access.
+ * Index a complete §17.6.18/§17.6.17 occurrence projection. Construction is
+ * O(occurrences + body), and subsequent source-index lookup is one array access.
  */
-export function createBodySectionIndex(doc: DocxDocumentModel): BodySectionIndex {
-  const inheritedGeometry = Object.freeze(sectionGeometry(doc.section));
-  const occurrences: BodySectionOccurrence[] = [];
-  const occurrenceOrdinalByBodyIndex = new Array<number>(doc.body.length + 1);
-  let startBodyIndex = 0;
-
-  for (let bodyIndex = 0; bodyIndex < doc.body.length; bodyIndex += 1) {
-    const element = doc.body[bodyIndex];
-    if (element?.type !== 'sectionBreak') continue;
-
-    const ordinal = occurrences.length;
-    const placement = sectionPlacementInputFromBody(doc.body, doc.section, bodyIndex);
-    occurrences.push(endingSectionOccurrence(
-      element,
-      bodyIndex,
-      startBodyIndex,
-      ordinal,
-      placement,
-      inheritedGeometry,
-    ));
-    for (let ownedIndex = startBodyIndex; ownedIndex <= bodyIndex; ownedIndex += 1) {
+export function createBodySectionIndex(input: BodySectionIndexInput): BodySectionIndex {
+  if (!Number.isInteger(input.bodyLength) || input.bodyLength < 0 || input.occurrences.length === 0) {
+    throw new RangeError('A body section index requires a non-negative length and occurrences');
+  }
+  const occurrenceOrdinalByBodyIndex = new Array<number>(input.bodyLength + 1);
+  let expectedStart = 0;
+  input.occurrences.forEach((occurrence, ordinal) => {
+    const last = ordinal === input.occurrences.length - 1;
+    if (
+      occurrence.ordinal !== ordinal
+      || occurrence.startBodyIndex !== expectedStart
+      || occurrence.endBodyIndex !== (last ? input.bodyLength - 1 : occurrence.markerBodyIndex)
+      || occurrence.final !== last
+      || (last ? occurrence.markerBodyIndex !== null : occurrence.markerBodyIndex === null)
+    ) {
+      throw new RangeError(`Invalid section occurrence ${ordinal}`);
+    }
+    for (
+      let ownedIndex = occurrence.startBodyIndex;
+      ownedIndex <= occurrence.endBodyIndex;
+      ownedIndex += 1
+    ) {
       occurrenceOrdinalByBodyIndex[ownedIndex] = ordinal;
     }
-    startBodyIndex = bodyIndex + 1;
-  }
-
-  const finalOrdinal = occurrences.length;
-  const finalPlacement = sectionPlacementInputFromBody(
-    doc.body,
-    doc.section,
-    doc.body.length,
-  );
-  occurrences.push(finalSectionOccurrence(
-    doc,
-    startBodyIndex,
-    finalOrdinal,
-    finalPlacement,
-    inheritedGeometry,
-  ));
-  for (let ownedIndex = startBodyIndex; ownedIndex <= doc.body.length; ownedIndex += 1) {
-    occurrenceOrdinalByBodyIndex[ownedIndex] = finalOrdinal;
-  }
-
-  const retainedOccurrences = Object.freeze(occurrences);
+    expectedStart = occurrence.endBodyIndex + 1;
+  });
+  const finalOrdinal = input.occurrences.length - 1;
+  occurrenceOrdinalByBodyIndex[input.bodyLength] = finalOrdinal;
+  const retainedOccurrences = Object.freeze([...input.occurrences]);
   const retainedOrdinals = Object.freeze(occurrenceOrdinalByBodyIndex);
   return Object.freeze({
     occurrences: retainedOccurrences,

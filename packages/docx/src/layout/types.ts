@@ -942,6 +942,9 @@ export interface TableRowFormatInput {
 
 /** Immutable parser/model projection consumed by table acquisition. */
 export interface TableFormatInput {
+  readonly effectiveStyleId: string | null;
+  readonly ordinaryFlow: boolean;
+  readonly positioning: FloatingTablePositionInput | null;
   readonly rows: readonly TableRowFormatInput[];
   readonly firstRowException: TableRowExceptionInput | null;
 }

@@ -219,6 +219,7 @@ import {
   textBoxAcquisitionInput,
 } from './parser-model.js';
 import {
+  bodySectionIndexInput,
   normalizeInternalDocumentModel,
   sectionPlacementInputFromBody,
 } from './parser-model.js';
@@ -2812,13 +2813,13 @@ export function computePages(
     vertical: bodyVertical,
     columnsSpec: section.columns ?? null,
   };
-  const sectionIndex = createBodySectionIndex({
+  const sectionIndex = createBodySectionIndex(bodySectionIndexInput({
     body,
     section: { ...section, ...bodyPhysGeom },
     headers: EMPTY_HEADERS_FOOTERS,
     footers: EMPTY_HEADERS_FOOTERS,
     fontFamilyClasses: {},
-  } as DocxDocumentModel);
+  } as DocxDocumentModel));
   const sectionOccurrenceFrom = (startIdx: number): BodySectionOccurrence =>
     sectionIndex.sectionAtBodyIndex(Math.max(0, Math.min(startIdx, body.length)));
   const sectionFrameFromOccurrence = (

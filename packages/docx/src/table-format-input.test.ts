@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { tableFormatInput } from './parser-model.js';
-import type { DocTable } from './types.js';
+import { adjacentTableSequenceInput, tableFormatInput } from './parser-model.js';
+import type { BodyElement, DocTable } from './types.js';
 
 const noBorders = {
   top: null, bottom: null, left: null, right: null, insideH: null, insideV: null,
@@ -40,6 +40,67 @@ function table(
 }
 
 describe('table format acquisition adapter', () => {
+  it('retains effective style, ordinary-flow classification, and positioning atomically', () => {
+    const source = table([], {
+      effectiveStyleId: 'PositionedStyle',
+      ordinaryFlow: false,
+      grid: { authored: false, columns: [], requiredColumnCount: 0 },
+      preferredWidth: null, layout: null, cellSpacing: null,
+    });
+    source.tblpPr = {
+      leftFromText: 1, rightFromText: 2, topFromText: 3, bottomFromText: 4,
+      horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page',
+      tblpX: 5, tblpY: 6, tblpXSpec: 'center', tblpYSpec: 'bottom',
+    };
+
+    const input = tableFormatInput(source);
+
+    expect(input).toMatchObject({
+      effectiveStyleId: 'PositionedStyle',
+      ordinaryFlow: false,
+      positioning: {
+        leftFromTextPt: 1, rightFromTextPt: 2, topFromTextPt: 3, bottomFromTextPt: 4,
+        horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page',
+        xPt: 5, yPt: 6, xAlign: 'center', yAlign: 'bottom',
+      },
+    });
+    source.tblpPr.horzAnchor = 'text';
+    expect(input.positioning?.horzAnchor).toBe('margin');
+    expect(Object.isFrozen(input.positioning)).toBe(true);
+
+    const ignored = table([], {
+      effectiveStyleId: 'OrdinaryStyle', ordinaryFlow: true,
+      grid: { authored: false, columns: [], requiredColumnCount: 0 },
+      preferredWidth: null, layout: null, cellSpacing: null,
+    });
+    ignored.tblpPr = { ...source.tblpPr };
+    expect(tableFormatInput(ignored)).toMatchObject({
+      effectiveStyleId: 'OrdinaryStyle', ordinaryFlow: true, positioning: null,
+    });
+  });
+
+  it('projects adjacent body values with cached effective table facts', () => {
+    const source = table([], {
+      effectiveStyleId: 'ProjectedStyle', ordinaryFlow: true,
+      grid: { authored: false, columns: [], requiredColumnCount: 0 },
+      preferredWidth: null, layout: null, cellSpacing: null,
+    }) as DocTable & { type: 'table' };
+    source.type = 'table';
+    const paragraph = { type: 'paragraph', runs: [] } as unknown as BodyElement;
+
+    const projected = adjacentTableSequenceInput([source, paragraph]);
+
+    expect(projected).toEqual([
+      {
+        element: source,
+        table: { effectiveStyleId: 'ProjectedStyle', ordinaryFlow: true },
+      },
+      { element: paragraph, table: null },
+    ]);
+    expect(Object.isFrozen(projected)).toBe(true);
+    expect(Object.isFrozen(projected[0]?.table)).toBe(true);
+  });
+
   it('distinguishes omitted hRule from explicit auto and converts twips once', () => {
     const input = tableFormatInput(table([
       row({

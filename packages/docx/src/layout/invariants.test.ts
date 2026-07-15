@@ -250,6 +250,26 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
   });
 
+  it('requires non-negative sequential page identity', () => {
+    const base = documentWith([]);
+    const negative: DocumentLayout = {
+      ...base,
+      pages: [{ ...base.pages[0]!, pageIndex: -1 }],
+    };
+    const skipped: DocumentLayout = {
+      ...base,
+      pages: [{ ...base.pages[0]!, pageIndex: 2 }],
+    };
+    const duplicate: DocumentLayout = {
+      ...base,
+      pages: [base.pages[0]!, { ...base.pages[0]! }],
+    };
+
+    expect(() => assertDocumentLayout(negative)).toThrow(/page index/);
+    expect(() => assertDocumentLayout(skipped)).toThrow(/page index/);
+    expect(() => assertDocumentLayout(duplicate)).toThrow(/page index/);
+  });
+
   it('requires every body flow domain to belong to exactly one page-local section region', () => {
     const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
     const layout = {

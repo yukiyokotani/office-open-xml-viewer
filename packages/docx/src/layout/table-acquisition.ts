@@ -4,12 +4,7 @@ import type {
   DocParagraph,
   DocTable,
   TableBorders,
-  TblpPr,
 } from '../types.js';
-import {
-  effectiveTablePositioning,
-  tableParticipatesInOrdinaryFlow,
-} from '../parser-model.js';
 import {
   acquireTableCellBlocks,
   isStructuralTrailingParagraph,
@@ -79,22 +74,6 @@ export interface NestedFloatingTableOccurrence {
   readonly overlap: 'never' | 'overlap';
   readonly positioning: FloatingTablePositionInput;
   readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
-}
-
-function floatingPositionInput(positioning: TblpPr): FloatingTablePositionInput {
-  return {
-    leftFromTextPt: positioning.leftFromText,
-    rightFromTextPt: positioning.rightFromText,
-    topFromTextPt: positioning.topFromText,
-    bottomFromTextPt: positioning.bottomFromText,
-    horzAnchor: positioning.horzAnchor,
-    horzSpecified: positioning.horzSpecified,
-    vertAnchor: positioning.vertAnchor,
-    xPt: positioning.tblpX,
-    yPt: positioning.tblpY,
-    ...(positioning.tblpXSpec == null ? {} : { xAlign: positioning.tblpXSpec }),
-    ...(positioning.tblpYSpec == null ? {} : { yAlign: positioning.tblpYSpec }),
-  };
 }
 
 function nextRegularParagraphIndex(
@@ -247,10 +226,11 @@ export function acquireRetainedTable<State>(
                 dependencies,
               );
               nestedById[nested.layout.id] = nested;
-              const effectivePositioning = effectiveTablePositioning(nestedTable);
+              const nestedFormat = dependencies.tableFormat(nestedTable);
+              const effectivePositioning = nestedFormat.positioning;
               if (effectivePositioning) {
                 const sourceBlockIndex = nestedPath[nestedPath.length - 1]!;
-                const positioning = floatingPositionInput(effectivePositioning);
+                const positioning = effectivePositioning;
                 const overlap = nestedTable.overlap === 'never' ? 'never' : 'overlap';
                 const acquiredTextOffsetPt = dependencies.registerFloatingTable(cellState, {
                   child: nested.layout,
@@ -301,7 +281,7 @@ export function acquireRetainedTable<State>(
           // position only for anchoring; they do not participate in cell flow.
           if (
             sourceElement?.type === 'table'
-            && !tableParticipatesInOrdinaryFlow(sourceElement)
+            && dependencies.tableFormat(sourceElement).ordinaryFlow === false
           ) return [];
           return [{
             layout,
@@ -339,7 +319,7 @@ export function acquireRetainedTable<State>(
     id: flowDomainId,
     source: { story: 'body', storyInstance: 'body', path: [...sourcePath] },
     flowDomainId,
-    ordinaryFlow: tableParticipatesInOrdinaryFlow(table),
+    ordinaryFlow: format.ordinaryFlow,
     alignment: physicalAlignment(table.jc, bidiVisual),
     indentPt: tableIndentPt,
     bidiVisual,

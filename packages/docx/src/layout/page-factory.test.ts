@@ -17,6 +17,8 @@ import type {
   LayoutRect,
   ParagraphLayout,
   SourceRef,
+  TableLayout,
+  TextBoxLayout,
 } from './types.js';
 
 const rect = (xPt: number, yPt: number, widthPt: number, heightPt: number): LayoutRect => ({
@@ -122,6 +124,44 @@ function bookmarkParagraph(
   };
 }
 
+function bookmarkTextBox(
+  id: string,
+  flowDomainId: string,
+  paragraph: ParagraphLayout,
+  bounds: LayoutRect,
+): TextBoxLayout {
+  return {
+    kind: 'textbox', id, source: source([4]), flowDomainId,
+    flowBounds: bounds, inkBounds: bounds, advancePt: 0, ordinaryFlow: false,
+    paragraphs: [paragraph], writingMode: 'horizontal-tb',
+    insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+  };
+}
+
+function bookmarkTable(
+  id: string,
+  flowDomainId: string,
+  blocks: readonly (ParagraphLayout | TableLayout)[],
+  bounds: LayoutRect,
+): TableLayout {
+  return {
+    kind: 'table', id, source: source([5]), flowDomainId,
+    flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt, ordinaryFlow: true,
+    columnWidthsPt: [bounds.widthPt], borders: [],
+    rows: [{
+      kind: 'table-row', id: `${id}:row`, source: source([5, 0]), flowDomainId,
+      flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt, ordinaryFlow: true,
+      heightPt: bounds.heightPt, contentHeightPt: bounds.heightPt,
+      cells: [{
+        kind: 'table-cell', id: `${id}:cell`, source: source([5, 0, 0]), flowDomainId,
+        flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt, ordinaryFlow: true,
+        contentBounds: bounds, verticalMerge: 'none', vAlign: 'top',
+        blocks: blocks.map((layout) => ({ layout, offsetPt: 0, advancePt: layout.advancePt })),
+      }],
+    }],
+  };
+}
+
 describe('createLayoutPage', () => {
   it('accumulates page inputs without mutating prior flow state', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
@@ -130,10 +170,8 @@ describe('createLayoutPage', () => {
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:body',
       section: bodySection,
@@ -181,10 +219,8 @@ describe('createLayoutPage', () => {
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:first',
       section: first,
@@ -260,10 +296,8 @@ describe('createLayoutPage', () => {
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:vertical',
       section: vertical,
@@ -292,21 +326,67 @@ describe('createLayoutPage', () => {
     expect(page.flowDomains[0]?.bounds).toEqual(rect(72, 72, 468, 648));
   });
 
+  it('uses caller-resolved effective body edges for positive and negative margin policies', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const positive = createParityBlankLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792,
+        contentTopPt: 96, contentBottomPt: 676,
+      },
+      sectionOccurrenceId: 'section:positive', section: bodySection,
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:positive' },
+    });
+    const negative = createParityBlankLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792,
+        contentTopPt: 36, contentBottomPt: 738,
+      },
+      sectionOccurrenceId: 'section:negative', section: bodySection,
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:negative' },
+    });
+
+    expect(positive.geometry).toMatchObject({ contentTopPt: 96, contentBottomPt: 676 });
+    expect(negative.geometry).toMatchObject({ contentTopPt: 36, contentBottomPt: 738 });
+  });
+
+  it('keeps resolved body edges independent of the vertical-lr coordinate transform', () => {
+    const vertical = section('tbLr', [{ xPt: 40, wPt: 700 }]);
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792,
+        contentTopPt: 88, contentBottomPt: 690,
+      },
+      sectionOccurrenceId: 'section:vertical-lr', section: vertical,
+      sectionRegions: [{
+        id: 'region:vertical-lr', sectionOccurrenceId: 'section:vertical-lr',
+        section: vertical, writingMode: 'vertical-lr', blockStartPt: 54, blockEndPt: 564,
+        columns: [{ inlineStartPt: 40, inlineExtentPt: 700 }],
+      }],
+      paint: [], readingOrder: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:vertical-lr' },
+    });
+
+    expect(page.geometry).toMatchObject({ contentTopPt: 88, contentBottomPt: 690 });
+    expect(page.sectionRegions?.[0]?.coordinateSpace?.logicalToPhysical)
+      .toEqual({ a: 0, b: 1, c: 1, d: 0, e: 0, f: 0 });
+  });
+
   it('builds layer order, reading order, and clone-safe bookmark ownership', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
-    const domainId = bodyFlowDomainId(2, 'region:body', 0);
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
     const behind = drawing('drawing-1', domainId, rect(72, 80, 50, 10));
     const paragraph = bookmarkParagraph('paragraph-3', domainId, 'destination', rect(72, 100, 50, 12));
 
     const page = createLayoutPage({
-      pageIndex: 2,
+      pageIndex: 0,
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:body',
       section: bodySection,
@@ -347,6 +427,56 @@ describe('createLayoutPage', () => {
     expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
   });
 
+  it('validates bookmark destinations against nested tables and text boxes in the retained graph', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
+    const nestedParagraph = bookmarkParagraph(
+      'paragraph:nested-table', domainId, 'nested-table-destination', rect(80, 110, 100, 12),
+    );
+    const nestedTable = bookmarkTable(
+      'table:nested', domainId, [nestedParagraph], rect(78, 105, 120, 20),
+    );
+    const outerTable = bookmarkTable(
+      'table:outer', domainId, [nestedTable], rect(72, 100, 150, 30),
+    );
+    const textBoxParagraph = bookmarkParagraph(
+      'paragraph:textbox', domainId, 'textbox-destination', rect(250, 150, 100, 12),
+    );
+    const textBox = bookmarkTextBox(
+      'textbox:outer', domainId, textBoxParagraph, rect(240, 140, 120, 30),
+    );
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: {
+        widthPt: 612, heightPt: 792,
+        contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:body', section: bodySection,
+      sectionRegions: [{
+        id: 'region:body', sectionOccurrenceId: 'section:body', section: bodySection,
+        writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+      }],
+      paint: [{ layer: 'body', node: outerTable }, { layer: 'front', node: textBox }],
+      readingOrder: [outerTable, textBox],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
+    });
+
+    expect(page.bookmarkStarts).toEqual([
+      {
+        name: 'nested-table-destination',
+        nodeId: 'paragraph:nested-table',
+        sectionOccurrenceId: 'section:body',
+      },
+      {
+        name: 'textbox-destination',
+        nodeId: 'paragraph:textbox',
+        sectionOccurrenceId: 'section:body',
+      },
+    ]);
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
+  });
+
   it('lets invariants reject unknown retained section and bookmark ownership', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
     const domainId = bodyFlowDomainId(0, 'region:body', 0);
@@ -356,10 +486,8 @@ describe('createLayoutPage', () => {
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:body',
       section: bodySection,
@@ -404,18 +532,29 @@ describe('createLayoutPage', () => {
 });
 
 describe('createParityBlankLayoutPage', () => {
+  it('rejects a negative physical page index at construction', () => {
+    const outgoing = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+
+    expect(() => createParityBlankLayoutPage({
+      pageIndex: -1,
+      physicalPage: {
+        widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720,
+      },
+      sectionOccurrenceId: 'section:outgoing', section: outgoing,
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:outgoing' },
+    })).toThrow(RangeError);
+  });
+
   it('owns the blank page with the outgoing section and emits no flow or paint', () => {
     const outgoing = section('lrTb', [{ xPt: 72, wPt: 468 }]);
 
     const page = createParityBlankLayoutPage({
-      pageIndex: 3,
+      pageIndex: 0,
       physicalPage: {
         widthPt: 612,
         heightPt: 792,
-        marginTopPt: 72,
-        marginRightPt: 72,
-        marginBottomPt: 72,
-        marginLeftPt: 72,
+        contentTopPt: 72,
+        contentBottomPt: 720,
       },
       sectionOccurrenceId: 'section:outgoing',
       section: outgoing,

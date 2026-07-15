@@ -20,10 +20,9 @@ import type {
 export interface PhysicalPageInput {
   readonly widthPt: number;
   readonly heightPt: number;
-  readonly marginTopPt: number;
-  readonly marginRightPt: number;
-  readonly marginBottomPt: number;
-  readonly marginLeftPt: number;
+  /** Effective main-story edges after §17.6.11 header/footer interaction. */
+  readonly contentTopPt: number;
+  readonly contentBottomPt: number;
 }
 
 export interface LogicalColumnInput {
@@ -135,11 +134,18 @@ function pageGeometry(page: PhysicalPageInput): LayoutPage['geometry'] {
     yPt: 0,
     widthPt: page.widthPt,
     heightPt: page.heightPt,
-    // Signed pgMar values affect header/footer overlap, while the body content
-    // edge is the authored distance from the physical page edge (§17.6.11).
-    contentTopPt: Math.abs(page.marginTopPt),
-    contentBottomPt: page.heightPt - Math.abs(page.marginBottomPt),
+    // §17.6.11 makes positive top/bottom edges depend on header/footer extent,
+    // while negative values ignore that extent. The page owner resolves those
+    // facts; this factory only retains the resulting effective coordinates.
+    contentTopPt: page.contentTopPt,
+    contentBottomPt: page.contentBottomPt,
   };
+}
+
+function requirePageIndex(pageIndex: number): void {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    throw new RangeError('Layout page index must be a non-negative integer');
+  }
 }
 
 function buildRegions(
@@ -269,6 +275,7 @@ function bookmarkStarts(
 }
 
 export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
+  requirePageIndex(input.pageIndex);
   const { regions, domains, sectionByDomain } = buildRegions(
     input.pageIndex,
     input.physicalPage,
@@ -296,6 +303,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
 export function createLayoutPageAccumulator(
   input: LayoutPageAccumulatorInput,
 ): LayoutPageAccumulator {
+  requirePageIndex(input.pageIndex);
   return Object.freeze({
     ...input,
     sectionRegions: Object.freeze([]),
@@ -338,6 +346,7 @@ export function finalizeLayoutPage(
 export function createParityBlankLayoutPage(
   input: ParityBlankLayoutPageInput,
 ): LayoutPage {
+  requirePageIndex(input.pageIndex);
   return {
     pageIndex: input.pageIndex,
     geometry: pageGeometry(input.physicalPage),

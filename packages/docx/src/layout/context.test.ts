@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { bodySectionIndexInput } from '../parser-model.js';
 import {
   createBodySectionIndex,
   logicalSectionGeometry,
@@ -124,7 +125,7 @@ describe('pre-indexed body section ownership', () => {
       paragraph('final'),
     ], { sectionStart: 'oddPage' });
 
-    const index = createBodySectionIndex(doc);
+    const index = createBodySectionIndex(bodySectionIndexInput(doc));
 
     expect(ids(index.occurrences)).toEqual([
       'section:cover',
@@ -188,7 +189,7 @@ describe('pre-indexed body section ownership', () => {
     doc.headers = finalHeaders;
     doc.footers = finalFooters;
 
-    const [ending, final] = createBodySectionIndex(doc).occurrences;
+    const [ending, final] = createBodySectionIndex(bodySectionIndexInput(doc)).occurrences;
 
     expect(ending).toMatchObject({
       sectionOccurrenceId: 'section:landscape',
@@ -235,7 +236,7 @@ describe('pre-indexed body section ownership', () => {
       paragraph('final'),
     ], finalGeometry);
 
-    const index = createBodySectionIndex(doc);
+    const index = createBodySectionIndex(bodySectionIndexInput(doc));
 
     expect(index.occurrences[0]?.geometry).toEqual(finalGeometry);
     expect(index.occurrences[0]?.headers).toEqual(EMPTY_HF);
@@ -249,7 +250,7 @@ describe('pre-indexed body section ownership', () => {
       marker({ sectionId: 'section:0', kind: 'nextPage' }),
       paragraph('final'),
     ]);
-    const index = createBodySectionIndex(doc);
+    const index = createBodySectionIndex(bodySectionIndexInput(doc));
     const final = index.sectionAtBodyIndex(2);
 
     doc.body.splice(0, doc.body.length);

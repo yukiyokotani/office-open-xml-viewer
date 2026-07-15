@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bodySectionIndexInput,
   normalizeInternalDocumentModel,
   sectionPlacementInputFrom,
   sectionPlacementInputFromBody,
@@ -67,6 +68,28 @@ describe('parser-private section placement projection', () => {
     expect(workerFinal.sectionId).toBe('section:1');
     expect(Object.isFrozen(workerEnding)).toBe(true);
     expect(Object.isFrozen(workerEnding.lineNumbering)).toBe(true);
+  });
+
+  it('projects distinct section occurrences and body ownership as immutable plain input', () => {
+    const input = model();
+    input.body.push({ type: 'paragraph', runs: [] } as unknown as BodyElement);
+
+    const projected = bodySectionIndexInput(input);
+
+    expect(projected.bodyLength).toBe(2);
+    expect(projected.occurrences.map((occurrence) => ({
+      id: occurrence.sectionOccurrenceId,
+      start: occurrence.startBodyIndex,
+      end: occurrence.endBodyIndex,
+      final: occurrence.final,
+    }))).toEqual([
+      { id: 'section:0', start: 0, end: 0, final: false },
+      { id: 'section:1', start: 1, end: 1, final: true },
+    ]);
+    expect(Object.isFrozen(projected)).toBe(true);
+    expect(Object.isFrozen(projected.occurrences)).toBe(true);
+    expect(Object.isFrozen(projected.occurrences[0]?.placement.lineNumbering)).toBe(true);
+    expect(structuredClone(projected)).toEqual(projected);
   });
 
   it('snapshots placement facts without freezing or retaining caller-owned nested objects', () => {
