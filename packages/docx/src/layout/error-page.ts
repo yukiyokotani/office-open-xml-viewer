@@ -187,8 +187,31 @@ export function layoutParseErrorPage(
       },
       flowDomains: [{ id: 'parse-error', kind: 'body', bounds: frame }],
       section,
+      sectionOccurrenceId: 'parse-error:section',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: {
+        displayNumber: 1,
+        format: 'decimal',
+        sectionOccurrenceId: 'parse-error:section',
+      },
+      sectionRegions: [{
+        id: 'parse-error:region',
+        sectionOccurrenceId: 'parse-error:section',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: frame.yPt,
+        blockEndPt: frame.yPt + frame.heightPt,
+        flowDomainIds: ['parse-error'],
+        section,
+      }],
       layers: {
-        paintOrder: [{ layer: 'body', nodeId: node.id }],
+        paintOrder: [{
+          layer: 'body', nodeId: node.id, coordinateSpace: 'logical-body-points',
+          logicalBlock: { blockStartPt: frame.yPt, blockExtentPt: frame.heightPt },
+        }],
         background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
       },
       readingOrder: [node.id],

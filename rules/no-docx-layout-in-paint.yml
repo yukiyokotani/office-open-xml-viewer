@@ -15,7 +15,9 @@ rule:
         - not:
             any:
               - regex: "^import\\s+type\\b[\\s\\S]*from\\s+['\"]\\.\\./layout/types(?:\\.js)?['\"]\\s*;?$"
-              - regex: "^import\\s*\\{\\s*orderedPagePaintNodes\\s*\\}\\s*from\\s*['\"]\\.\\./layout/page-graph(?:\\.js)?['\"]\\s*;?$"
+              # These graph-only resolvers validate retained IDs; they do not
+              # acquire, measure, or paginate layout geometry.
+              - regex: "^import\\s*\\{\\s*(?:orderedPagePaintNodes|orderedPagePaintEntries)\\s*\\}\\s*from\\s*['\"]\\.\\./layout/page-graph(?:\\.js)?['\"]\\s*;?$"
     - all:
         - kind: import_statement
         - regex: "from\\s+['\"]\\.\\./(types|renderer|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"

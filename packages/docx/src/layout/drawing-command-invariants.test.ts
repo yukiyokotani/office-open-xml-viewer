@@ -27,8 +27,16 @@ function layoutWith(command: DrawingLayout['commands'][number]): DocumentLayout 
         bounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 648 },
       }],
       section: {} as DocumentLayout['pages'][number]['section'],
+      sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: { writingMode: 'horizontal-tb', logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+        blockStartPt: 72, blockEndPt: 720, flowDomainIds: ['body'],
+        section: {} as DocumentLayout['pages'][number]['section'],
+      }],
       layers: {
-        paintOrder: [{ layer: 'front', nodeId: drawing.id }],
+        paintOrder: [{ layer: 'front', nodeId: drawing.id, coordinateSpace: 'physical-page-points' }],
         background: [], behindText: [], header: [], body: [], notes: [],
         front: [drawing], footer: [],
       },

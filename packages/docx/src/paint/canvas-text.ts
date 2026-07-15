@@ -144,6 +144,34 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
       return textBox ? [textBox] : [];
     });
   const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void => {
+    const pageOwned = drawing.anchorLayer?.horizontalOwnership === 'page'
+      && drawing.anchorLayer?.verticalOwnership === 'page';
+    if (pageOwned && context.pageToLocal) {
+      context.ctx.save();
+      context.ctx.transform(
+        context.pageToLocal.a,
+        context.pageToLocal.b,
+        context.pageToLocal.c,
+        context.pageToLocal.d,
+        context.pageToLocal.e,
+        context.pageToLocal.f,
+      );
+      try {
+        const physicalContext = {
+          ...context,
+          pointToCss: scaleAffine(context.scale),
+          pageToLocal: undefined,
+          onTextRun: context.onPhysicalTextRun,
+        };
+        paintDrawingLayout(drawing, physicalContext);
+        for (const textBox of textBoxesFor(drawing)) {
+          paintTextBoxLayout(textBox, physicalContext);
+        }
+      } finally {
+        context.ctx.restore();
+      }
+      return;
+    }
     const translation = context.layoutTranslationPt;
     const undoX = drawing.anchorLayer?.horizontalOwnership === 'page'
       ? -(translation?.xPt ?? 0) : 0;

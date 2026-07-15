@@ -12,6 +12,7 @@ import type { TextRunPaintInfo } from './text-run-info.js';
 export interface PaintPageOptions {
   readonly scale: number;
   readonly dpr: number;
+  readonly onTextRun?: (run: TextRunPaintInfo) => void;
 }
 
 export interface PaintCanvas2D {
@@ -32,6 +33,7 @@ export interface PaintCanvas2D {
   translate(x: number, y: number): void;
   rotate(angle: number): void;
   scale(x: number, y: number): void;
+  transform(a: number, b: number, c: number, d: number, e: number, f: number): void;
   drawImage(image: CanvasImageSource, ...coordinates: number[]): void;
   save(): void;
   restore(): void;
@@ -76,7 +78,11 @@ export interface CanvasPaintContext {
    * production Canvas transform that can affect point geometry.
    */
   readonly pointToCss?: Matrix2DData;
+  /** Re-enters physical page points for explicitly page-owned nested geometry. */
+  readonly pageToLocal?: Matrix2DData;
   readonly onTextRun?: (run: TextRunPaintInfo) => void;
+  /** Callback in the physical page frame for a nested page-owned occurrence. */
+  readonly onPhysicalTextRun?: (run: TextRunPaintInfo) => void;
   readonly textRunTransform?: Readonly<{
     translateXPt: number;
     translateYPt: number;

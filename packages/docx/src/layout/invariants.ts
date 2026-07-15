@@ -1,5 +1,6 @@
 import { LayoutInvariantError } from './diagnostics.js';
-import { orderedPagePaintNodes, pageLayerNodes, PageGraphError } from './page-graph.js';
+import { canonicalLogicalToPhysical, mapAffineRect, sameAffine } from './affine.js';
+import { orderedPagePaintEntries, pageLayerNodes, PageGraphError } from './page-graph.js';
 import type {
   DeepReadonly,
   DocumentLayout,
@@ -8,6 +9,7 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutPage,
+  PageSectionRegion,
   PaintNode,
   PointPt,
 } from './types.js';
@@ -275,11 +277,11 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
 
     if (page.parityBlank && (
       page.flowDomains.length > 0
-      || (page.sectionRegions?.length ?? 0) > 0
+      || page.sectionRegions.length > 0
       || pageLayerNodes(page).length > 0
       || page.layers.paintOrder.length > 0
       || page.readingOrder.length > 0
-      || (page.bookmarkStarts?.length ?? 0) > 0
+      || page.bookmarkStarts.length > 0
     )) {
       throw new LayoutInvariantError(
         'INVALID_REFERENCE',
@@ -288,17 +290,16 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     }
 
     const sectionOccurrenceIds = new Set<string>();
-    if (page.sectionOccurrenceId !== undefined) {
-      if (page.sectionOccurrenceId.length === 0) {
-        throw new LayoutInvariantError(
-          'INVALID_REFERENCE',
-          `pages[${pageIndex}] has an empty section occurrence id`,
-        );
-      }
-      sectionOccurrenceIds.add(page.sectionOccurrenceId);
+    if (page.sectionOccurrenceId.length === 0) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `pages[${pageIndex}] has an empty section occurrence id`,
+      );
     }
+    sectionOccurrenceIds.add(page.sectionOccurrenceId);
 
-    if (page.sectionRegions) {
+    const regionByDomain = new Map<string, PageSectionRegion>();
+    {
       const regionIds = new Set<string>();
       const bodyOwnership = new Map<string, number>();
       page.sectionRegions.forEach((region, regionIndex) => {
@@ -314,6 +315,16 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           );
         }
         sectionOccurrenceIds.add(region.sectionOccurrenceId);
+        if (!region.coordinateSpace) {
+          throw new LayoutInvariantError('INVALID_REFERENCE', `${path} has no coordinate space`);
+        }
+        const expectedMatrix = canonicalLogicalToPhysical(
+          region.coordinateSpace.writingMode,
+          page.geometry.widthPt,
+        );
+        if (!sameAffine(region.coordinateSpace.logicalToPhysical, expectedMatrix)) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a noncanonical matrix`);
+        }
         requireFinite(region.blockStartPt, `${path}.blockStartPt`);
         requireFinite(region.blockEndPt, `${path}.blockEndPt`);
         if (region.blockEndPt < region.blockStartPt) {
@@ -324,6 +335,7 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
             throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
           }
           bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
+          regionByDomain.set(domainId, region);
         });
       });
       page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {
@@ -336,7 +348,7 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       });
     }
 
-    if (page.pageNumber) {
+    {
       requireFinite(page.pageNumber.displayNumber, `pages[${pageIndex}].pageNumber.displayNumber`);
       if (!Number.isInteger(page.pageNumber.displayNumber)) {
         throw new LayoutInvariantError(
@@ -355,9 +367,10 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       }
     }
 
-    const ordinary: PaintNode[] = [];
+    const ordinary: Array<Readonly<{ node: PaintNode; bounds: LayoutRect }>> = [];
+    let paintEntries;
     try {
-      orderedPagePaintNodes(page);
+      paintEntries = orderedPagePaintEntries(page);
     } catch (error) {
       if (error instanceof PageGraphError) {
         throw new LayoutInvariantError('INVALID_REFERENCE', error.message);
@@ -366,7 +379,8 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     }
     const nodes = new Map<string, PaintNode>();
     const retainedNodeIds = new Set<string>();
-    pageLayerNodes(page).forEach(({ node }, nodeIndex) => {
+    paintEntries.forEach((entry, nodeIndex) => {
+      const { node } = entry;
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
       collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
@@ -379,15 +393,74 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       if (!domain) {
         throw new LayoutInvariantError('INVALID_REFERENCE', `${node.id} references missing flow domain ${node.flowDomainId}`);
       }
-      if (!node.ordinaryFlow) return;
-      if (domain.kind === 'body'
-        && node.flowBounds.yPt + node.flowBounds.heightPt > page.geometry.contentBottomPt) {
-        throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses contentBottomPt`);
+      const region = regionByDomain.get(node.flowDomainId);
+      let physicalBounds = node.flowBounds;
+      if (entry.coordinateSpace === 'logical-body-points') {
+        if (!region) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${node.id} has no owning logical section region`,
+          );
+        }
+        physicalBounds = mapAffineRect(
+          region.coordinateSpace.logicalToPhysical,
+          node.flowBounds,
+        );
       }
-      if (!contains(domain.bounds, node.flowBounds)) {
+      if (entry.coordinateSpace === 'upright-physical-page-points') {
+        if (node.kind !== 'table') {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${node.id} uses upright physical coordinates without a table root`,
+          );
+        }
+        if (region?.coordinateSpace.writingMode === 'vertical-lr') {
+          // Upright root-table placement is an observed vertical-rl Office
+          // compatibility contract; no mirrored vertical-lr evidence exists.
+          throw new LayoutInvariantError(
+            'UNSUPPORTED_FEATURE',
+            `${node.id} has unsupported vertical-lr upright table placement`,
+          );
+        }
+      }
+      if (node.kind === 'table' && 'floatingTableCoordinateSpace' in node) {
+        const expected = entry.coordinateSpace === 'upright-physical-page-points'
+          ? 'upright-physical-page-points'
+          : 'logical-page-points';
+        if (node.floatingTableCoordinateSpace !== undefined
+          && node.floatingTableCoordinateSpace !== expected) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${node.id} has mismatched floating-table coordinate space`,
+          );
+        }
+      }
+      if (!node.ordinaryFlow) return;
+      if (entry.layer === 'body') {
+        const footprint = entry.logicalBlock;
+        if (!footprint
+          || !Number.isFinite(footprint.blockStartPt)
+          || !Number.isFinite(footprint.blockExtentPt)
+          || footprint.blockExtentPt < 0) {
+          throw new LayoutInvariantError(
+            'INVALID_GEOMETRY',
+            `${node.id} has an invalid logical block footprint`,
+          );
+        }
+        if (region && (
+          footprint.blockStartPt < region.blockStartPt
+          || footprint.blockStartPt + footprint.blockExtentPt > region.blockEndPt
+        )) {
+          throw new LayoutInvariantError(
+            'FLOW_DOMAIN_INVASION',
+            `${node.id} logical block footprint crosses region ${region.id}`,
+          );
+        }
+      }
+      if (!contains(domain.bounds, physicalBounds)) {
         throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${node.id} crosses flow domain ${domain.id}`);
       }
-      ordinary.push(node);
+      ordinary.push({ node, bounds: physicalBounds });
     });
 
     const read = new Set<string>();
@@ -399,7 +472,7 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     });
 
     const bookmarkNames = new Set<string>();
-    page.bookmarkStarts?.forEach((bookmark) => {
+    page.bookmarkStarts.forEach((bookmark) => {
       if (
         bookmark.name.length === 0
         || bookmarkNames.has(bookmark.name)
@@ -424,9 +497,9 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
         const first = ordinary[index];
         const second = ordinary[other];
         if (first && second
-          && first.flowDomainId === second.flowDomainId
-          && overlaps(first.flowBounds, second.flowBounds)) {
-          throw new LayoutInvariantError('FLOW_OVERLAP', `${first.id} overlaps ${second.id}`);
+          && first.node.flowDomainId === second.node.flowDomainId
+          && overlaps(first.bounds, second.bounds)) {
+          throw new LayoutInvariantError('FLOW_OVERLAP', `${first.node.id} overlaps ${second.node.id}`);
         }
       }
     }

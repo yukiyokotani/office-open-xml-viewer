@@ -1309,6 +1309,22 @@ test('audits dependencies of the retained page graph allowed in paint', () => {
   assert.match(result.output, /canvas-page\.ts.*page-graph\.ts.*measurement\.ts/s);
 });
 
+test('allows retained affine algebra in paint but audits its transitive dependencies', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-affine-edge-'));
+  write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');
+  write(root, 'packages/docx/src/layout/types.ts', 'export interface Matrix { a: number; }\n');
+  write(root, 'packages/docx/src/layout/affine.ts', "import type { Matrix } from './types.js';\nexport const identity: Matrix = { a: 1 };\n");
+  write(root, 'packages/docx/src/paint/affine.ts', "export { identity } from '../layout/affine.js';\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/layout/affine.ts', "import { measure } from '../measurement.js';\nexport const identity = measure();\n");
+  write(root, 'packages/docx/src/measurement.ts', 'export function measure() { return { a: 1 }; }\n');
+  const rejected = runChecker(root, '--final');
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.output, /FORBIDDEN_PAINT_EDGE/);
+  assert.match(rejected.output, /paint\/affine\.ts.*layout\/affine\.ts.*measurement\.ts/s);
+});
+
 test('rejects non-literal dynamic paint imports', () => {
   const root = mkdtempSync(join(tmpdir(), 'docx-layout-boundary-dynamic-edge-'));
   write(root, 'packages/docx/src/renderer.ts', 'export function paginateDocument() {}\nexport function renderDocumentToCanvas() {}\n');

@@ -24,8 +24,16 @@ function resourceLayout(
         id: 'body', kind: 'body', bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
       }],
       section: {} as SectionLayoutContext,
+      sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: { writingMode: 'horizontal-tb', logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+        blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+        section: {} as SectionLayoutContext,
+      }],
       layers: {
-        paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
+        paintOrder: [{ layer: 'body', nodeId: 'drawing-1', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: bounds.yPt, blockExtentPt: bounds.heightPt } }],
         background: [], behindText: [], header: [], notes: [], front: [], footer: [],
         body: [{
           kind: 'drawing',
@@ -47,7 +55,7 @@ function resourceLayout(
 
 function canvasTarget() {
   const ctx = {
-    save() {}, restore() {}, setTransform() {}, clearRect() {},
+    save() {}, restore() {}, setTransform() {}, transform() {}, clearRect() {},
   } as unknown as CanvasRenderingContext2D;
   const target = {
     width: 0, height: 0, getContext: () => ctx,

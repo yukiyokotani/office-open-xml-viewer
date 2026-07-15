@@ -273,6 +273,7 @@ function paintBoundaryViolations(root) {
   const paintRoot = resolve(root, PAINT_SOURCE);
   const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
   const pageGraph = resolve(root, LAYOUT_SOURCE, 'page-graph.ts');
+  const retainedAffine = resolve(root, LAYOUT_SOURCE, 'affine.ts');
   const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
   const violations = [];
   const nonLiteral = [];
@@ -312,12 +313,17 @@ function paintBoundaryViolations(root) {
         }
         const chain = [...current.chain, dependency];
         const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedContract = (edge.typeOnly && dependency === layoutTypes) || dependency === pageGraph;
+        // The affine module is clone-safe retained-coordinate algebra shared by
+        // factory, invariants, and paint; it owns no acquisition capability.
+        const allowedContract = (edge.typeOnly && dependency === layoutTypes)
+          || dependency === pageGraph
+          || dependency === retainedAffine;
         if (!insidePaint && !allowedContract) {
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
-        if ((insidePaint || dependency === pageGraph) && !visited.has(dependency)) {
+        if ((insidePaint || dependency === pageGraph || dependency === retainedAffine)
+          && !visited.has(dependency)) {
           visited.add(dependency);
           stack.push({ path: dependency, chain });
         }

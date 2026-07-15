@@ -8,6 +8,7 @@ import type {
   FlowDomain,
   LayoutRect,
   LayoutServices,
+  PageSectionRegion,
   PaintNode,
   SourceRef,
   TableEdgeInputs,
@@ -15,6 +16,7 @@ import type {
 } from './types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import { createCanvasFontRoute } from '@silurus/ooxml-core';
+import { canonicalLogicalToPhysical, mapAffineRect } from './affine.js';
 
 const source = (index: number): SourceRef => ({
   story: 'body',
@@ -104,8 +106,29 @@ function documentWith(
       },
       flowDomains: [bodyDomain],
       section: {} as SectionLayoutContext,
+      sectionOccurrenceId: 'section:0',
+      parityBlank: false,
+      bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: {
+          writingMode: 'horizontal-tb',
+          logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        },
+        blockStartPt: 72, blockEndPt: 720, flowDomainIds: ['body'],
+        section: {} as SectionLayoutContext,
+      }],
       layers: {
-        paintOrder: nodes.map((node) => ({ layer: 'body' as const, nodeId: node.id })),
+        paintOrder: nodes.map((node) => ({
+          layer: 'body' as const,
+          nodeId: node.id,
+          coordinateSpace: 'logical-body-points' as const,
+          logicalBlock: {
+            blockStartPt: node.flowBounds.yPt,
+            blockExtentPt: node.flowBounds.heightPt,
+          },
+        })),
         background: [],
         behindText: [],
         header: [],
@@ -133,7 +156,7 @@ describe('assertDocumentLayout', () => {
   it('rejects ordinary flow that enters the bottom margin', () => {
     const layout = documentWith([drawing('n1', rect(72, 710, 200, 20))]);
 
-    expect(() => assertDocumentLayout(layout)).toThrow(/BOTTOM_MARGIN_INVASION/);
+    expect(() => assertDocumentLayout(layout)).toThrow(/FLOW_DOMAIN_INVASION/);
   });
 
   it('allows floating overlap, negative-spacing ink, and clipped overhang', () => {
@@ -169,8 +192,8 @@ describe('assertDocumentLayout', () => {
         layers: {
           ...base.pages[0]!.layers,
           paintOrder: [
-            { layer: 'body', nodeId: body.id },
-            { layer: 'footer', nodeId: footer.id },
+            { layer: 'body', nodeId: body.id, coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 690, blockExtentPt: 20 } },
+            { layer: 'footer', nodeId: footer.id, coordinateSpace: 'physical-page-points' },
           ],
           body: [body],
           footer: [footer],
@@ -194,6 +217,14 @@ describe('assertDocumentLayout', () => {
           { id: 'cell:1', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
           { id: 'cell:2', kind: 'tableCell', bounds: rect(90, 90, 100, 40) },
         ],
+        sectionRegions: [],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: base.pages[0]!.layers.paintOrder.map((entry) => ({
+            ...entry,
+            coordinateSpace: 'physical-page-points' as const,
+          })),
+        },
       }],
     };
 
@@ -209,7 +240,7 @@ describe('assertDocumentLayout', () => {
       ...base,
       pages: [{
         ...base.pages[0]!,
-        layers: { ...base.pages[0]!.layers, paintOrder: [{ layer: 'body', nodeId: 'unknown' }] },
+        layers: { ...base.pages[0]!.layers, paintOrder: [{ layer: 'body', nodeId: 'unknown', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 100, blockExtentPt: 30 } }] },
       }],
     };
     expect(() => assertDocumentLayout(badPaint)).toThrow(/INVALID_REFERENCE/);
@@ -235,8 +266,8 @@ describe('assertDocumentLayout', () => {
         layers: {
           ...base.pages[0]!.layers,
           paintOrder: [
-            { layer: 'body', nodeId: 'n1' },
-            { layer: 'body', nodeId: 'n1' },
+            { layer: 'body', nodeId: 'n1', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 100, blockExtentPt: 20 } },
+            { layer: 'body', nodeId: 'n1', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 100, blockExtentPt: 20 } },
           ],
         },
       }],
@@ -296,6 +327,10 @@ describe('assertDocumentLayout', () => {
         sectionRegions: [{
           id: 'section-region:0',
           sectionOccurrenceId: 'section:0',
+          coordinateSpace: {
+            writingMode: 'horizontal-tb' as const,
+            logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          },
           blockStartPt: 72,
           blockEndPt: 720,
           flowDomainIds: [],
@@ -305,6 +340,180 @@ describe('assertDocumentLayout', () => {
     } as DocumentLayout;
 
     expect(() => assertDocumentLayout(layout)).toThrow(/section region ownership/);
+  });
+
+  it.each(['vertical-rl', 'vertical-lr'] as const)(
+    'maps %s logical bounds once before physical domain containment',
+    (writingMode) => {
+      const matrix = canonicalLogicalToPhysical(writingMode, 641);
+      const logical = rect(91, 307, 47, 23);
+      const mapped = mapAffineRect(matrix, logical);
+      const node = drawing(`mapped-${writingMode}`, logical);
+      const base = documentWith([node]);
+      const layout: DocumentLayout = {
+        ...base,
+        pages: [{
+          ...base.pages[0]!,
+          geometry: { ...base.pages[0]!.geometry, widthPt: 641, heightPt: 733 },
+          flowDomains: [{ id: 'body', kind: 'body', bounds: mapped }],
+          sectionRegions: [{
+            ...base.pages[0]!.sectionRegions[0]!,
+            coordinateSpace: { writingMode, logicalToPhysical: matrix },
+            blockStartPt: 0,
+            blockEndPt: 641,
+          }],
+        }],
+      };
+
+      expect(mapped).not.toEqual(logical);
+      expect(() => assertDocumentLayout(layout)).not.toThrow();
+      const overflow = structuredClone(layout);
+      const overflowNode = overflow.pages[0]!.layers.body[0] as {
+        flowBounds: { heightPt: number };
+        inkBounds: { heightPt: number };
+      };
+      overflowNode.flowBounds.heightPt += 1;
+      overflowNode.inkBounds.heightPt += 1;
+      expect(() => assertDocumentLayout(overflow)).toThrow(/FLOW_DOMAIN_INVASION/);
+    },
+  );
+
+  it('rejects missing, non-finite, wrong-direction, and wrong-page-width matrices', () => {
+    const logical = rect(91, 307, 47, 23);
+    const matrix = canonicalLogicalToPhysical('vertical-rl', 641);
+    const node = drawing('matrix-node', logical);
+    const base = documentWith([node]);
+    const valid: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        geometry: { ...base.pages[0]!.geometry, widthPt: 641, heightPt: 733 },
+        flowDomains: [{ id: 'body', kind: 'body', bounds: mapAffineRect(matrix, logical) }],
+        sectionRegions: [{
+          ...base.pages[0]!.sectionRegions[0]!,
+          coordinateSpace: { writingMode: 'vertical-rl', logicalToPhysical: matrix },
+          blockStartPt: 0, blockEndPt: 641,
+        }],
+      }],
+    };
+    expect(() => assertDocumentLayout(structuredClone(valid))).not.toThrow();
+    expect(layoutFingerprint(structuredClone(valid))).toBe(layoutFingerprint(valid));
+
+    const missing = structuredClone(valid) as unknown as { pages: Array<{ sectionRegions: Array<{ coordinateSpace?: unknown }> }> };
+    delete missing.pages[0]!.sectionRegions[0]!.coordinateSpace;
+    expect(() => assertDocumentLayout(missing as unknown as DocumentLayout)).toThrow(/coordinate space/);
+    for (const bad of [
+      { ...matrix, e: Number.NaN },
+      canonicalLogicalToPhysical('vertical-lr', 641),
+      canonicalLogicalToPhysical('vertical-rl', 640),
+    ]) {
+      const invalid = structuredClone(valid);
+      (invalid.pages[0]!.sectionRegions[0]!.coordinateSpace as {
+        logicalToPhysical: typeof bad;
+      }).logicalToPhysical = bad;
+      expect(() => assertDocumentLayout(invalid)).toThrow(/INVALID_GEOMETRY/);
+    }
+  });
+
+  it('validates mixed horizontal and vertical regions independently', () => {
+    const horizontal = drawing('mixed-horizontal', rect(20, 30, 40, 20), { flowDomainId: 'horizontal' });
+    const vertical = drawing('mixed-vertical', rect(100, 300, 50, 20), { flowDomainId: 'vertical' });
+    const verticalMatrix = canonicalLogicalToPhysical('vertical-rl', 641);
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        geometry: { ...base.pages[0]!.geometry, widthPt: 641, heightPt: 733 },
+        flowDomains: [
+          { id: 'horizontal', kind: 'body', bounds: horizontal.flowBounds },
+          { id: 'vertical', kind: 'body', bounds: mapAffineRect(verticalMatrix, vertical.flowBounds) },
+        ],
+        sectionRegions: [
+          { ...base.pages[0]!.sectionRegions[0]!, id: 'horizontal', flowDomainIds: ['horizontal'], blockStartPt: 0, blockEndPt: 733 },
+          { ...base.pages[0]!.sectionRegions[0]!, id: 'vertical', flowDomainIds: ['vertical'], blockStartPt: 0, blockEndPt: 641, coordinateSpace: { writingMode: 'vertical-rl', logicalToPhysical: verticalMatrix } },
+        ],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: [
+            { layer: 'body', nodeId: horizontal.id, coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 30, blockExtentPt: 20 } },
+            { layer: 'body', nodeId: vertical.id, coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 300, blockExtentPt: 20 } },
+          ],
+          body: [horizontal, vertical],
+        },
+        readingOrder: [horizontal.id, vertical.id],
+      }],
+    };
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+  });
+
+  it('requires an explicit upright table block footprint and matching float coordinate space', () => {
+    const matrix = canonicalLogicalToPhysical('vertical-rl', 641);
+    const bounds = rect(371, 90, 50, 80);
+    const table = {
+      kind: 'table' as const, id: 'upright-table', source: source(9), flowDomainId: 'body',
+      flowBounds: bounds, inkBounds: bounds, advancePt: 80, ordinaryFlow: true,
+      columnWidthsPt: [50], rows: [], borders: [],
+      floatingTables: [], resolvedFloatingTables: [],
+      floatingTableCoordinateSpace: 'upright-physical-page-points' as const,
+    };
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        geometry: { ...base.pages[0]!.geometry, widthPt: 641, heightPt: 733 },
+        flowDomains: [{ id: 'body', kind: 'body', bounds: rect(300, 60, 200, 300) }],
+        sectionRegions: [{
+          ...base.pages[0]!.sectionRegions[0]!,
+          coordinateSpace: { writingMode: 'vertical-rl', logicalToPhysical: matrix },
+          blockStartPt: 0, blockEndPt: 641,
+        }],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: [{
+            layer: 'body', nodeId: table.id,
+            coordinateSpace: 'upright-physical-page-points',
+            logicalBlock: { blockStartPt: 220, blockExtentPt: 50 },
+          }],
+          body: [table],
+        },
+        readingOrder: [table.id],
+      }],
+    };
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+    expect(table.advancePt).toBe(80);
+    expect(layout.pages[0]!.layers.paintOrder[0]!.logicalBlock?.blockExtentPt).toBe(50);
+
+    const missingFootprint = structuredClone(layout);
+    delete (missingFootprint.pages[0]!.layers.paintOrder[0] as { logicalBlock?: unknown }).logicalBlock;
+    expect(() => assertDocumentLayout(missingFootprint)).toThrow(/logical block footprint/);
+    const wrongFloatSpace = structuredClone(layout);
+    const wrongTable = wrongFloatSpace.pages[0]!.layers.body[0] as unknown as {
+      floatingTableCoordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
+    };
+    wrongTable.floatingTableCoordinateSpace = 'logical-page-points';
+    expect(() => assertDocumentLayout(wrongFloatSpace)).toThrow(/mismatched floating-table/);
+    const doubleMapped = structuredClone(layout);
+    (doubleMapped.pages[0]!.layers.paintOrder[0] as {
+      coordinateSpace: 'logical-body-points' | 'upright-physical-page-points';
+    }).coordinateSpace = 'logical-body-points';
+    (doubleMapped.pages[0]!.layers.body[0] as unknown as {
+      floatingTableCoordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
+    }).floatingTableCoordinateSpace
+      = 'logical-page-points';
+    expect(() => assertDocumentLayout(doubleMapped)).toThrow(/FLOW_DOMAIN_INVASION/);
+
+    const unsupported = structuredClone(layout);
+    const unsupportedRegions = unsupported.pages[0]!.sectionRegions as PageSectionRegion[];
+    unsupportedRegions[0] = {
+      ...unsupported.pages[0]!.sectionRegions[0]!,
+      coordinateSpace: {
+        writingMode: 'vertical-lr',
+        logicalToPhysical: canonicalLogicalToPhysical('vertical-lr', 641),
+      },
+    };
+    expect(() => assertDocumentLayout(unsupported)).toThrow(/UNSUPPORTED_FEATURE/);
   });
 });
 

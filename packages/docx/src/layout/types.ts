@@ -689,6 +689,18 @@ export type PageLayerId =
 export interface PagePaintEntry {
   readonly layer: PageLayerId;
   readonly nodeId: LayoutNodeId;
+  readonly coordinateSpace: PageOccurrenceCoordinateSpace;
+  readonly logicalBlock?: LogicalBlockFootprint;
+}
+
+export type PageOccurrenceCoordinateSpace =
+  | 'logical-body-points'
+  | 'physical-page-points'
+  | 'upright-physical-page-points';
+
+export interface LogicalBlockFootprint {
+  readonly blockStartPt: number;
+  readonly blockExtentPt: number;
 }
 
 export interface PageLayers {
@@ -709,7 +721,7 @@ export interface PageSectionRegion {
   readonly sectionOccurrenceId: string;
   /** Logical inline/block coordinates are retained independently of physical
    * x/y so vertical sections do not silently inherit horizontal Y-flow rules. */
-  readonly coordinateSpace?: Readonly<{
+  readonly coordinateSpace: Readonly<{
     writingMode: WritingMode;
     logicalToPhysical: Matrix2DData;
   }>;
@@ -736,14 +748,11 @@ export interface LayoutPage {
   readonly geometry: PageGeometry;
   readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
-  /** Transitional optionals keep pre-A6 producers compiling while the canonical
-   * page factory becomes the sole producer; A6 removes that migration latitude. */
-  readonly sectionOccurrenceId?: string;
-  readonly parityBlank?: boolean;
-  readonly bookmarkStarts?: readonly PageBookmarkStart[];
-  readonly pageNumber?: PageNumberMetadata;
-  /** Transitional until A6's canonical page producer is the only producer. */
-  readonly sectionRegions?: readonly PageSectionRegion[];
+  readonly sectionOccurrenceId: string;
+  readonly parityBlank: boolean;
+  readonly bookmarkStarts: readonly PageBookmarkStart[];
+  readonly pageNumber: PageNumberMetadata;
+  readonly sectionRegions: readonly PageSectionRegion[];
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }

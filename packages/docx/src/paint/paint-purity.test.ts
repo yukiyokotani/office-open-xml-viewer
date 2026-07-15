@@ -13,6 +13,7 @@ describe('paintLayoutPage', () => {
       save() {},
       restore() {},
       setTransform() {},
+      transform() {},
       clearRect() {},
       fillRect(...args: number[]) {
         fills.push({ fill: currentFill, args });
@@ -43,8 +44,16 @@ describe('paintLayoutPage', () => {
           bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 },
         }],
         section: {} as SectionLayoutContext,
+        sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+        sectionRegions: [{
+          id: 'region:0', sectionOccurrenceId: 'section:0',
+          coordinateSpace: { writingMode: 'horizontal-tb', logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+          blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+          section: {} as SectionLayoutContext,
+        }],
         layers: {
-          paintOrder: [{ layer: 'body', nodeId: 'drawing-1' }],
+          paintOrder: [{ layer: 'body', nodeId: 'drawing-1', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 20, blockExtentPt: 40 } }],
           background: [],
           behindText: [],
           header: [],
@@ -78,7 +87,7 @@ describe('paintLayoutPage', () => {
 
   it('rejects missing and duplicate paint references instead of dropping content', async () => {
     const context = {
-      save() {}, restore() {}, setTransform() {}, clearRect() {}, fillRect() {},
+      save() {}, restore() {}, setTransform() {}, transform() {}, clearRect() {}, fillRect() {},
       fillStyle: '',
     } as unknown as CanvasRenderingContext2D;
     const target = { width: 0, height: 0, getContext: () => context } as unknown as HTMLCanvasElement;
@@ -98,8 +107,16 @@ describe('paintLayoutPage', () => {
       geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
       flowDomains: [{ id: 'body', kind: 'body' as const, bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 } }],
       section: {} as SectionLayoutContext,
+      sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      sectionRegions: [{
+        id: 'region:0', sectionOccurrenceId: 'section:0',
+        coordinateSpace: { writingMode: 'horizontal-tb' as const, logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+        blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+        section: {} as SectionLayoutContext,
+      }],
       layers: {
-        paintOrder: [{ layer: 'body' as const, nodeId: 'missing' }],
+        paintOrder: [{ layer: 'body' as const, nodeId: 'missing', coordinateSpace: 'logical-body-points' as const, logicalBlock: { blockStartPt: 20, blockExtentPt: 40 } }],
         background: [], behindText: [], header: [], body: [node], notes: [], front: [], footer: [],
       },
       readingOrder: [node.id],
@@ -109,8 +126,8 @@ describe('paintLayoutPage', () => {
 
     const duplicate: DocumentLayout = {
       pages: [{ ...page, layers: { ...page.layers, body: [node, node], paintOrder: [
-        { layer: 'body', nodeId: node.id },
-        { layer: 'body', nodeId: node.id },
+        { layer: 'body', nodeId: node.id, coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 20, blockExtentPt: 40 } },
+        { layer: 'body', nodeId: node.id, coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 20, blockExtentPt: 40 } },
       ] } }],
       diagnostics: [],
     };
@@ -123,7 +140,7 @@ describe('paintLayoutPage', () => {
     const context = {
       get fillStyle() { return currentFill; },
       set fillStyle(value: string | CanvasGradient | CanvasPattern) { currentFill = String(value); },
-      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      save() {}, restore() {}, setTransform() {}, transform() {}, clearRect() {},
       beginPath() {}, rect() {}, clip() {}, translate() {}, rotate() {}, scale() {},
       fillRect(x: number, y: number, width: number, height: number) {
         fills.push([x, y, width, height, currentFill]);
@@ -160,8 +177,16 @@ describe('paintLayoutPage', () => {
         geometry: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 200, contentTopPt: 10, contentBottomPt: 190 },
         flowDomains: [{ id: 'body', kind: 'body', bounds: { xPt: 10, yPt: 10, widthPt: 80, heightPt: 180 } }],
         section: {} as SectionLayoutContext,
+        sectionOccurrenceId: 'section:0', parityBlank: false, bookmarkStarts: [],
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:0' },
+        sectionRegions: [{
+          id: 'region:0', sectionOccurrenceId: 'section:0',
+          coordinateSpace: { writingMode: 'horizontal-tb', logicalToPhysical: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } },
+          blockStartPt: 10, blockEndPt: 190, flowDomainIds: ['body'],
+          section: {} as SectionLayoutContext,
+        }],
         layers: {
-          paintOrder: [{ layer: 'body', nodeId: 'table-0' }],
+          paintOrder: [{ layer: 'body', nodeId: 'table-0', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 20, blockExtentPt: 16 } }],
           background: [], behindText: [], header: [], body: [table], notes: [], front: [], footer: [],
         },
         readingOrder: ['table-0'],

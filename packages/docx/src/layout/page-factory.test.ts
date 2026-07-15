@@ -16,6 +16,7 @@ import type {
   DrawingLayout,
   LayoutRect,
   ParagraphLayout,
+  PageLayerId,
   SourceRef,
   TableLayout,
   TextBoxLayout,
@@ -162,6 +163,22 @@ function bookmarkTable(
   };
 }
 
+function paintEntry(layer: PageLayerId, node: DrawingLayout | ParagraphLayout | TableLayout | TextBoxLayout) {
+  return {
+    layer,
+    node,
+    coordinateSpace: layer === 'body'
+      ? 'logical-body-points' as const
+      : 'physical-page-points' as const,
+    ...(layer === 'body' && node.ordinaryFlow ? {
+      logicalBlock: {
+        blockStartPt: node.flowBounds.yPt,
+        blockExtentPt: node.flowBounds.heightPt,
+      },
+    } : {}),
+  };
+}
+
 describe('createLayoutPage', () => {
   it('accumulates page inputs without mutating prior flow state', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
@@ -187,10 +204,7 @@ describe('createLayoutPage', () => {
     });
     const domainId = bodyFlowDomainId(0, 'region:body', 0);
     const node = drawing('drawing-1', domainId, rect(72, 100, 50, 10));
-    const complete = accumulatePagePaintNode(withRegion, {
-      layer: 'body',
-      node,
-    }, true);
+    const complete = accumulatePagePaintNode(withRegion, paintEntry('body', node), true);
 
     expect(initial.sectionRegions).toEqual([]);
     expect(initial.paint).toEqual([]);
@@ -248,8 +262,8 @@ describe('createLayoutPage', () => {
         },
       ],
       paint: [
-        { layer: 'body', node: firstNode },
-        { layer: 'body', node: secondNode },
+        paintEntry('body', firstNode),
+        paintEntry('body', secondNode),
       ],
       readingOrder: [firstNode, secondNode],
       pageNumber: {
@@ -400,8 +414,8 @@ describe('createLayoutPage', () => {
         columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
       }],
       paint: [
-        { layer: 'behindText', node: behind },
-        { layer: 'body', node: paragraph },
+        paintEntry('behindText', behind),
+        paintEntry('body', paragraph),
       ],
       readingOrder: [paragraph],
       pageNumber: {
@@ -414,8 +428,8 @@ describe('createLayoutPage', () => {
     expect(page.layers.behindText).toEqual([behind]);
     expect(page.layers.body).toEqual([paragraph]);
     expect(page.layers.paintOrder).toEqual([
-      { layer: 'behindText', nodeId: 'drawing-1' },
-      { layer: 'body', nodeId: 'paragraph-3' },
+      { layer: 'behindText', nodeId: 'drawing-1', coordinateSpace: 'physical-page-points' },
+      { layer: 'body', nodeId: 'paragraph-3', coordinateSpace: 'logical-body-points', logicalBlock: { blockStartPt: 100, blockExtentPt: 12 } },
     ]);
     expect(page.readingOrder).toEqual(['paragraph-3']);
     expect(page.bookmarkStarts).toEqual([{
@@ -457,7 +471,7 @@ describe('createLayoutPage', () => {
         writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
         columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
       }],
-      paint: [{ layer: 'body', node: outerTable }, { layer: 'front', node: textBox }],
+      paint: [paintEntry('body', outerTable), paintEntry('front', textBox)],
       readingOrder: [outerTable, textBox],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
     });
@@ -496,7 +510,7 @@ describe('createLayoutPage', () => {
         writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
         columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
       }],
-      paint: [{ layer: 'body', node: outer }], readingOrder: [outer],
+      paint: [paintEntry('body', outer)], readingOrder: [outer],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
     });
 
@@ -522,7 +536,7 @@ describe('createLayoutPage', () => {
         writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
         columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
       }],
-      paint: [{ layer: 'front', node: textBox }], readingOrder: [textBox],
+      paint: [paintEntry('front', textBox)], readingOrder: [textBox],
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
     });
 
@@ -553,7 +567,7 @@ describe('createLayoutPage', () => {
         blockEndPt: 720,
         columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
       }],
-      paint: [{ layer: 'body', node: paragraph }],
+      paint: [paintEntry('body', paragraph)],
       readingOrder: [paragraph],
       pageNumber: {
         displayNumber: 1,

@@ -1,11 +1,10 @@
 import type { SectionLayoutContext } from '../layout-context.js';
+import { canonicalLogicalToPhysical, mapAffineRect } from './affine.js';
 import { PAGE_LAYER_IDS, type PageLayerNode } from './page-graph.js';
 import type {
   DeepReadonly,
   FlowDomain,
   LayoutPage,
-  LayoutRect,
-  Matrix2DData,
   PageBookmarkStart,
   PageLayers,
   PageNumberMetadata,
@@ -76,58 +75,6 @@ export function bodyFlowDomainId(
   return `page:${pageIndex}:region:${encodeURIComponent(regionId)}:column:${columnIndex}`;
 }
 
-function logicalToPhysicalMatrix(
-  writingMode: WritingMode,
-  page: PhysicalPageInput,
-): Matrix2DData {
-  switch (writingMode) {
-    case 'vertical-rl':
-      // ECMA-376 §17.6.20: logical inline advances down; logical block advances
-      // right-to-left. Keeping this transform makes physical bounds derivable.
-      return { a: 0, b: 1, c: -1, d: 0, e: page.widthPt, f: 0 };
-    case 'vertical-lr':
-      return { a: 0, b: 1, c: 1, d: 0, e: 0, f: 0 };
-    case 'horizontal-tb':
-      return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
-  }
-}
-
-function transformPoint(
-  matrix: Matrix2DData,
-  inlinePt: number,
-  blockPt: number,
-): Readonly<{ xPt: number; yPt: number }> {
-  return {
-    xPt: matrix.a * inlinePt + matrix.c * blockPt + matrix.e,
-    yPt: matrix.b * inlinePt + matrix.d * blockPt + matrix.f,
-  };
-}
-
-function physicalBounds(
-  matrix: Matrix2DData,
-  inlineStartPt: number,
-  inlineEndPt: number,
-  blockStartPt: number,
-  blockEndPt: number,
-): LayoutRect {
-  const points = [
-    transformPoint(matrix, inlineStartPt, blockStartPt),
-    transformPoint(matrix, inlineEndPt, blockStartPt),
-    transformPoint(matrix, inlineStartPt, blockEndPt),
-    transformPoint(matrix, inlineEndPt, blockEndPt),
-  ];
-  const x = points.map((point) => point.xPt);
-  const y = points.map((point) => point.yPt);
-  const xPt = Math.min(...x);
-  const yPt = Math.min(...y);
-  return {
-    xPt,
-    yPt,
-    widthPt: Math.max(...x) - xPt,
-    heightPt: Math.max(...y) - yPt,
-  };
-}
-
 function pageGeometry(page: PhysicalPageInput): LayoutPage['geometry'] {
   requireEffectivePageEdges(page);
   return {
@@ -179,19 +126,21 @@ function buildRegions(
   const sectionByDomain = new Map<string, string>();
 
   for (const input of inputs) {
-    const logicalToPhysical = logicalToPhysicalMatrix(input.writingMode, physicalPage);
+    const logicalToPhysical = canonicalLogicalToPhysical(
+      input.writingMode,
+      physicalPage.widthPt,
+    );
     const flowDomainIds = input.columns.map((column, columnIndex) => {
       const id = bodyFlowDomainId(pageIndex, input.id, columnIndex);
       domains.push({
         id,
         kind: 'body',
-        bounds: physicalBounds(
-          logicalToPhysical,
-          column.inlineStartPt,
-          column.inlineStartPt + column.inlineExtentPt,
-          input.blockStartPt,
-          input.blockEndPt,
-        ),
+        bounds: mapAffineRect(logicalToPhysical, {
+          xPt: column.inlineStartPt,
+          yPt: input.blockStartPt,
+          widthPt: column.inlineExtentPt,
+          heightPt: input.blockEndPt - input.blockStartPt,
+        }),
       });
       sectionByDomain.set(id, input.sectionOccurrenceId);
       return id;
@@ -214,7 +163,12 @@ function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
   const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
   for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
   return {
-    paintOrder: entries.map(({ layer, node }) => ({ layer, nodeId: node.id })),
+    paintOrder: entries.map(({ layer, node, coordinateSpace, logicalBlock }) => ({
+      layer,
+      nodeId: node.id,
+      coordinateSpace,
+      ...(logicalBlock ? { logicalBlock } : {}),
+    })),
     background: nodes.get('background')!,
     behindText: nodes.get('behindText')!,
     header: nodes.get('header')!,
