@@ -8,6 +8,7 @@ import type {
 } from '../layout/types.js';
 import type { ResolvedPaintResource } from './resource-session.js';
 import type { TextRunPaintInfo } from './text-run-info.js';
+import type { PageFrameAdapter } from './page-frame.js';
 
 export interface PaintPageOptions {
   readonly scale: number;
@@ -78,8 +79,8 @@ export interface CanvasPaintContext {
    * production Canvas transform that can affect point geometry.
    */
   readonly pointToCss?: Matrix2DData;
-  /** Re-enters physical page points for explicitly page-owned nested geometry. */
-  readonly pageToLocal?: Matrix2DData;
+  /** Plain-data ownership of the live retained coordinate frame. */
+  readonly pageFrame?: PageFrameAdapter;
   readonly onTextRun?: (run: TextRunPaintInfo) => void;
   /** Callback in the physical page frame for a nested page-owned occurrence. */
   readonly onPhysicalTextRun?: (run: TextRunPaintInfo) => void;

@@ -162,7 +162,8 @@ describe('paintLayoutPage', () => {
       kind: 'table-row', id: 'row-0',
       source: { story: 'body', storyInstance: 'body', path: [0, 0] },
       flowDomainId: 'body', ordinaryFlow: true,
-      flowBounds: bounds, inkBounds: bounds, advancePt: 16, cells: [cell],
+      flowBounds: bounds, inkBounds: bounds, advancePt: 16,
+      heightPt: 16, contentHeightPt: 16, cells: [cell],
     };
     const table = {
       kind: 'table', id: 'table-0',
@@ -170,6 +171,7 @@ describe('paintLayoutPage', () => {
       flowDomainId: 'body', ordinaryFlow: true,
       flowBounds: bounds, inkBounds: bounds, advancePt: 16,
       columnWidthsPt: [80], rows: [row], borders: [],
+      paintReadyFloatingTables: { kind: 'none' },
     };
     const layout = {
       pages: [{

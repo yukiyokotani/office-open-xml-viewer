@@ -173,6 +173,7 @@ function complexParagraph(): ParagraphLayout {
     advancePt: 0, ordinaryFlow: false, commands: [],
     anchorLayer: {
       occurrenceId: 'textbox-anchor:source', behindDoc: false, relativeHeight: 1,
+      coordinateSpace: 'physical-page-points',
       sourceOrder: 0, horizontalOwnership: 'host', verticalOwnership: 'host',
     },
   };
@@ -208,6 +209,7 @@ function complexParagraph(): ParagraphLayout {
     textBoxIds: ['textbox:source'],
     anchorLayer: {
       occurrenceId: 'anchor:source',
+      coordinateSpace: 'physical-page-points',
       behindDoc: false,
       relativeHeight: 1,
       sourceOrder: 0,

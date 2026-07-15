@@ -13,11 +13,14 @@ import type {
   LayoutRect,
   Matrix2DData,
   PageOccurrenceCoordinateSpace,
+  PagePaintNode,
   ParagraphLayout,
+  PaintReadyTableLayout,
   ResolvedFloatingTablePlacementLayout,
   TableCellLayout,
   TableLayout,
   TableRowLayout,
+  TextBoxLayout,
   WritingMode,
 } from '../layout/types.js';
 import type { SectionLayoutContext } from '../layout-context.js';
@@ -69,7 +72,7 @@ function table(
   bounds: LayoutRect,
   child?: ParagraphLayout,
   background = '#abcdef',
-): TableLayout {
+): PaintReadyTableLayout {
   const cell: TableCellLayout = {
     kind: 'table-cell', id: `${id}:cell`,
     source: { story: 'body', storyInstance: 'body', path: [0, 0, 0] },
@@ -92,6 +95,7 @@ function table(
     flowDomainId: domain, ordinaryFlow: true,
     flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt,
     columnWidthsPt: [bounds.widthPt], rows: [row], borders: [],
+    paintReadyFloatingTables: { kind: 'none' },
   };
 }
 
@@ -99,7 +103,7 @@ type RegionInput = Readonly<{
   id: string;
   domain: string;
   mode: WritingMode;
-  node: ParagraphLayout | TableLayout;
+  node: PagePaintNode;
   coordinateSpace?: PageOccurrenceCoordinateSpace;
   logicalBlockExtentPt?: number;
 }>;
@@ -271,6 +275,63 @@ describe('canonical page coordinate paint', () => {
     });
   });
 
+  it('keeps distinct-margin exact clips and auto growth on canonical physical Y', async () => {
+    const pageWidthPt = 333;
+    const blockCursorPt = 73;
+    const tableWidthPt = 80;
+    const physicalLeftPt = pageWidthPt - blockCursorPt - tableWidthPt;
+    const physicalTopPt = 37;
+    const exactBounds = rect(physicalLeftPt, physicalTopPt, tableWidthPt, 80);
+    const autoBounds = rect(physicalLeftPt, physicalTopPt + 80, tableWidthPt, 110);
+    const exactChild = paragraph('exact-overflow', 'body', rect(0, 0, 30, 10));
+    const autoChild = paragraph('auto-growth', 'body', rect(0, 0, 30, 10));
+    const cell = (
+      id: string,
+      bounds: LayoutRect,
+      child: ParagraphLayout,
+      offsetPt: number,
+      clipBounds?: LayoutRect,
+    ): TableCellLayout => ({
+      kind: 'table-cell', id, source: child.source, flowDomainId: 'body', ordinaryFlow: true,
+      flowBounds: bounds, inkBounds: bounds, contentBounds: bounds, advancePt: bounds.heightPt,
+      verticalMerge: 'none', vAlign: 'top', background: { color: id === 'exact-cell' ? '#aa1111' : '#11aa11' },
+      blocks: [{ layout: child, offsetPt, advancePt: child.advancePt }],
+      ...(clipBounds ? { clipBounds } : {}),
+    });
+    const row = (id: string, bounds: LayoutRect, cells: readonly TableCellLayout[]): TableRowLayout => ({
+      kind: 'table-row', id, source: cells[0]!.source, flowDomainId: 'body', ordinaryFlow: true,
+      flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt,
+      heightPt: bounds.heightPt, contentHeightPt: bounds.heightPt, cells,
+    });
+    const node: PaintReadyTableLayout = {
+      kind: 'table', id: 'exact-auto-upright', source: exactChild.source,
+      flowDomainId: 'body', ordinaryFlow: true,
+      flowBounds: rect(physicalLeftPt, physicalTopPt, tableWidthPt, 190),
+      inkBounds: rect(physicalLeftPt, physicalTopPt, tableWidthPt, 190),
+      advancePt: 190, columnWidthsPt: [tableWidthPt], borders: [],
+      rows: [
+        row('exact-row', exactBounds, [cell('exact-cell', exactBounds, exactChild, 90, exactBounds)]),
+        row('auto-row', autoBounds, [cell('auto-cell', autoBounds, autoChild, 90)]),
+      ],
+      paintReadyFloatingTables: { kind: 'none' },
+    };
+    const layout = documentFor([{
+      id: 'region', domain: 'body', mode: 'vertical-rl', node,
+      coordinateSpace: 'upright-physical-page-points', logicalBlockExtentPt: tableWidthPt,
+    }], pageWidthPt);
+    const canvas = canvasTarget();
+    await paintLayoutPage(layout, 0, canvas.target, { scale: 1, dpr: 1 });
+
+    expect(physicalLeftPt).toBe(180);
+    expect(canvas.clips).toContainEqual(exactBounds);
+    expect(canvas.fills).toContainEqual({ ...exactBounds, fill: '#aa1111' });
+    expect(canvas.fills).toContainEqual({ ...autoBounds, fill: '#11aa11' });
+    expect(canvas.texts.find(({ text }) => text === 'auto-growth')?.point.yPt)
+      .toBeGreaterThan(autoBounds.yPt + 80);
+    expect(node.advancePt).toBe(190);
+    expect(layout.pages[0]!.layers.paintOrder[0]!.logicalBlock?.blockExtentPt).toBe(tableWidthPt);
+  });
+
   it('keeps a page-owned nested drawing physical beneath a logical vertical host', async () => {
     const physicalRect = rect(250, 30, 9, 5);
     const drawing: DrawingLayout = {
@@ -279,6 +340,7 @@ describe('canonical page coordinate paint', () => {
       advancePt: 0, commands: [{ kind: 'fill-rect', rect: physicalRect, fill: '#fedcba' }],
       anchorLayer: {
         occurrenceId: 'anchor:0', behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+        coordinateSpace: 'physical-page-points',
         horizontalOwnership: 'page', verticalOwnership: 'page',
       },
     };
@@ -291,43 +353,153 @@ describe('canonical page coordinate paint', () => {
     expect(canvas.texts).toContainEqual({ text: 'host', point: { xPt: 1244, yPt: 44 } });
   });
 
-  it('paints retained upright nested floats before the parent border without resolving or measuring', async () => {
-    const outer = table('outer', 'body', rect(180, 40, 100, 40));
-    const nested = table('nested', 'body', rect(220, 48, 25, 12), undefined, '#123456');
-    const source = {
-      kind: 'floating-table-placement', occurrenceId: 'float:0', ownership: 'source',
-      physicalPageIndex: 0, displayPageNumber: 1, hostCellId: 'outer:cell',
-      sourceBlockIndex: 0, anchorBlockIndex: 0, tableId: nested.id, overlap: 'never',
-      positioning: {} as never, anchorBounds: nested.flowBounds, child: nested,
-    } as const;
-    const resolved: ResolvedFloatingTablePlacementLayout = {
-      kind: 'resolved-floating-table-placement', occurrenceId: 'float:0',
-      xPt: 220, yPt: 48, bounds: nested.flowBounds, exclusionBounds: rect(218, 46, 29, 16),
-      overlap: 'never', child: nested, source,
+  it('keeps partial anchor relocation ownership on one non-singular physical frame', async () => {
+    const bounds = rect(250, 30, 9, 5);
+    const anchored = (
+      id: string,
+      fill: string,
+      horizontalOwnership: 'page' | 'host',
+      verticalOwnership: 'page' | 'host',
+    ): DrawingLayout => ({
+      kind: 'drawing', id, source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+      flowDomainId: 'body', ordinaryFlow: false, flowBounds: bounds, inkBounds: bounds,
+      advancePt: 0, commands: [{ kind: 'fill-rect', rect: bounds, fill }],
+      anchorLayer: {
+        occurrenceId: `anchor:${id}`, behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+        coordinateSpace: 'physical-page-points',
+        horizontalOwnership, verticalOwnership,
+      },
+    });
+    const host = paragraph('partial', 'body', rect(11, 17, 23, 7), {
+      drawings: [
+        anchored('horizontal-page', '#110000', 'page', 'host'),
+        anchored('vertical-page', '#001100', 'host', 'page'),
+      ],
+    });
+    const layout = documentFor([{ id: 'region', domain: 'body', mode: 'vertical-rl', node: host }]);
+    const canvas = canvasTarget();
+    await paintLayoutPage(layout, 0, canvas.target, { scale: 1, dpr: 1 });
+
+    expect(canvas.fills).toContainEqual({ ...bounds, fill: '#110000' });
+    expect(canvas.fills).toContainEqual({ ...bounds, fill: '#001100' });
+    const partialFills = canvas.fills.filter((fill) => fill.fill === '#110000' || fill.fill === '#001100');
+    expect(partialFills.every((fill) => fill.widthPt > 0 && fill.heightPt > 0)).toBe(true);
+  });
+
+  it('re-enters the physical page below translated table and vertical text-box frames', async () => {
+    const physical = rect(250, 30, 9, 5);
+    const pageDrawing = (id: string, fill: string): DrawingLayout => ({
+      kind: 'drawing', id, source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+      flowDomainId: 'body', ordinaryFlow: false, flowBounds: physical, inkBounds: physical,
+      advancePt: 0, commands: [{ kind: 'fill-rect', rect: physical, fill }],
+      anchorLayer: {
+        occurrenceId: `anchor:${id}`, behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+        coordinateSpace: 'physical-page-points',
+        horizontalOwnership: 'page', verticalOwnership: 'page',
+      },
+    });
+    const tableChild = paragraph('table-child', 'body', rect(5, 7, 20, 8), {
+      drawings: [pageDrawing('table-page-anchor', '#aa0000')],
+    });
+    const tableNode = table('translated-table', 'body', rect(50, 70, 80, 30), tableChild);
+    const textBoxChild = paragraph('textbox-child', 'body', rect(0, 0, 20, 8), {
+      drawings: [pageDrawing('textbox-page-anchor', '#00aa00')],
+    });
+    const textBox: TextBoxLayout = {
+      kind: 'textbox', id: 'vertical-textbox', source: textBoxChild.source,
+      flowDomainId: 'textbox:0', ordinaryFlow: false,
+      flowBounds: rect(70, 90, 40, 20), inkBounds: rect(70, 90, 40, 20), advancePt: 0,
+      paragraphs: [textBoxChild], writingMode: 'vertical-rl', verticalMode: 'vert',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
     };
+    const textBoxHost = {
+      ...paragraph('textbox-host', 'body', rect(20, 40, 30, 10)),
+      textBoxes: [textBox],
+    };
+    const layout = documentFor([
+      { id: 'table-region', domain: 'body', mode: 'vertical-rl', node: tableNode },
+      { id: 'textbox-region', domain: 'body-2', mode: 'vertical-rl', node: { ...textBoxHost, flowDomainId: 'body-2' } },
+    ]);
+    const canvas = canvasTarget();
+    await paintLayoutPage(layout, 0, canvas.target, { scale: 1, dpr: 1 });
+
+    expect(canvas.fills).toContainEqual({ ...physical, fill: '#aa0000' });
+    expect(canvas.fills).toContainEqual({ ...physical, fill: '#00aa00' });
+  });
+
+  it('paints relocated upright floats in destination source order before the parent border', async () => {
+    const domain = 'page:1:region:destination:column:1';
+    const outer = table('outer', domain, rect(180, 40, 100, 40));
+    const nested = table('nested', domain, rect(220, 48, 25, 12), undefined, '#123456');
+    const second = table('nested-2', domain, rect(245, 64, 25, 12), undefined, '#654321');
+    const placement = (
+      occurrenceId: string,
+      child: PaintReadyTableLayout,
+      exclusionBounds: LayoutRect,
+      sourceBlockIndex: number,
+    ): ResolvedFloatingTablePlacementLayout => {
+      const source = {
+        kind: 'floating-table-placement' as const, occurrenceId, ownership: 'source' as const,
+        physicalPageIndex: 1, displayPageNumber: 7, hostCellId: 'outer:cell',
+        sourceBlockIndex, anchorBlockIndex: sourceBlockIndex, tableId: child.id, overlap: 'never' as const,
+        positioning: {} as never, anchorBounds: child.flowBounds, child,
+      };
+      return {
+        kind: 'resolved-floating-table-placement', occurrenceId,
+        xPt: child.flowBounds.xPt, yPt: child.flowBounds.yPt,
+        bounds: child.flowBounds, exclusionBounds, overlap: 'never', child, source,
+      };
+    };
+    const resolved = placement('float:0', nested, rect(218, 46, 29, 16), 0);
+    const resolvedSecond = placement('float:1', second, rect(243, 62, 29, 16), 1);
     const fragment = {
       ...outer,
-      floatingTables: [source], resolvedFloatingTables: [resolved],
-      floatingTableCoordinateSpace: 'upright-physical-page-points' as const,
+      paintReadyFloatingTables: {
+        kind: 'resolved' as const,
+        coordinateSpace: 'upright-physical-page-points' as const,
+        unresolved: [], placements: [resolved, resolvedSecond],
+      },
       borders: [{
         edge: 'right' as const, from: { xPt: 280, yPt: 40 }, to: { xPt: 280, yPt: 80 },
         color: '#000000', widthPt: 1, authoredStyle: 'single', style: 'solid' as const,
       }],
     };
-    const layout = documentFor([{
-      id: 'region', domain: 'body', mode: 'vertical-rl', node: fragment,
+    const onePage = documentFor([{
+      id: 'destination', domain, mode: 'vertical-rl', node: fragment,
       coordinateSpace: 'upright-physical-page-points', logicalBlockExtentPt: 100,
     }]);
+    const destination = {
+      ...onePage.pages[0]!, pageIndex: 1,
+      pageNumber: { displayNumber: 7, format: 'decimal', sectionOccurrenceId: 'section:0' },
+    };
+    const blank = {
+      ...destination, pageIndex: 0, parityBlank: true,
+      pageNumber: { displayNumber: 6, format: 'decimal', sectionOccurrenceId: 'section:0' },
+      flowDomains: [], sectionRegions: [],
+      layers: {
+        paintOrder: [], background: [], behindText: [], header: [], body: [],
+        notes: [], front: [], footer: [],
+      },
+      readingOrder: [],
+    };
+    const layout: DocumentLayout = { pages: [blank, destination], diagnostics: [] };
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
     const canvas = canvasTarget();
-    await expect(paintLayoutPage(layout, 0, canvas.target, { scale: 1, dpr: 1 })).resolves.toBeUndefined();
+    await expect(paintLayoutPage(layout, 1, canvas.target, { scale: 1, dpr: 1 })).resolves.toBeUndefined();
 
     expect(canvas.fills).toContainEqual({ ...rect(220, 48, 25, 12), fill: '#123456' });
+    expect(canvas.fills).toContainEqual({ ...rect(245, 64, 25, 12), fill: '#654321' });
     expect(canvas.operations.indexOf('fill:#123456')).toBeLessThan(
+      canvas.operations.indexOf('fill:#654321'),
+    );
+    expect(canvas.operations.indexOf('fill:#654321')).toBeLessThan(
       canvas.operations.indexOf('stroke:#000000'),
     );
     expect(resolved).toMatchObject({
       bounds: rect(220, 48, 25, 12), exclusionBounds: rect(218, 46, 29, 16),
-      source: { physicalPageIndex: 0 },
+      source: { physicalPageIndex: 1, displayPageNumber: 7 },
     });
+    expect(resolved.child.flowDomainId).toBe(domain);
+    expect(resolvedSecond.source.sourceBlockIndex).toBe(1);
   });
 });

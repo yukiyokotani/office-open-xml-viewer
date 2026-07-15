@@ -7,6 +7,7 @@ import { composeAffine, scaleAffine, translationAffine } from './affine.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import { paintParagraphLayout } from './canvas-text.js';
 import type { CanvasPaintContext } from './types.js';
+import { descendPageFrame } from './page-frame.js';
 
 function paintPlacedChild(
   layout: ParagraphLayout | TableLayout,
@@ -37,6 +38,7 @@ function paintPlacedChild(
     const childContext = {
       ...context,
       pointToCss,
+      pageFrame: descendPageFrame(context.pageFrame, translationAffine(dxPt, dyPt)),
       textRunTransform: {
         translateXPt: parentTextTransform.translateXPt + dxPt,
         translateYPt: parentTextTransform.translateYPt + dyPt,
@@ -171,6 +173,7 @@ export function paintPlacedTableLayout(
     const placedContext: CanvasPaintContext = {
       ...context,
       pointToCss,
+      pageFrame: descendPageFrame(context.pageFrame, translationAffine(dxPt, dyPt)),
       textRunTransform: {
         translateXPt: dxPt,
         translateYPt: dyPt,

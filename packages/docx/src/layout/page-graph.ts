@@ -3,7 +3,7 @@ import type {
   LogicalBlockFootprint,
   PageOccurrenceCoordinateSpace,
   PageLayerId,
-  PaintNode,
+  PagePaintNode,
 } from './types.js';
 
 export const PAGE_LAYER_IDS = [
@@ -22,7 +22,7 @@ void pageLayersAreExhaustive;
 
 export type PageLayerNode = Readonly<{
   layer: PageLayerId;
-  node: PaintNode;
+  node: PagePaintNode;
   coordinateSpace: PageOccurrenceCoordinateSpace;
   logicalBlock?: LogicalBlockFootprint;
 }>;
@@ -39,7 +39,7 @@ export function pageLayerNodes(page: LayoutPage): readonly PageLayerNode[] {
 }
 
 export function orderedPagePaintEntries(page: LayoutPage): readonly PageLayerNode[] {
-  const nodes = new Map<string, Readonly<{ layer: PageLayerId; node: PaintNode }>>();
+  const nodes = new Map<string, Readonly<{ layer: PageLayerId; node: PagePaintNode }>>();
   for (const layer of PAGE_LAYER_IDS) for (const node of page.layers[layer]) {
     const entry = { layer, node };
     if (nodes.has(entry.node.id)) throw new PageGraphError(`Duplicate paint node ${entry.node.id}`);
@@ -69,6 +69,6 @@ export function orderedPagePaintEntries(page: LayoutPage): readonly PageLayerNod
   return ordered;
 }
 
-export function orderedPagePaintNodes(page: LayoutPage): readonly PaintNode[] {
+export function orderedPagePaintNodes(page: LayoutPage): readonly PagePaintNode[] {
   return orderedPagePaintEntries(page).map((entry) => entry.node);
 }

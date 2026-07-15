@@ -157,6 +157,9 @@ export interface DrawingLayout extends LayoutNodeBase {
     behindDoc: boolean;
     relativeHeight: number;
     sourceOrder: number;
+    /** Anchor-frame acquisition resolves both retained axes in page points;
+     * axis ownership below controls relocation, not the geometry basis. */
+    coordinateSpace: 'physical-page-points';
     horizontalOwnership: 'page' | 'host';
     verticalOwnership: 'page' | 'host';
   }>;
@@ -662,6 +665,23 @@ export interface ResolvedFloatingTablePlacementLayout {
   readonly source: FloatingTablePlacementLayout;
 }
 
+export type PaintReadyFloatingTables =
+  | Readonly<{
+      kind: 'none';
+    }>
+  | Readonly<{
+      kind: 'resolved';
+      coordinateSpace: FloatRegistryCoordinateSpace;
+      unresolved: readonly FloatingTablePlacementLayout[];
+      placements: readonly ResolvedFloatingTablePlacementLayout[];
+    }>;
+
+/** A table admitted to the retained page graph. The discriminant prevents
+ * Canvas paint and invariants from discovering hidden fragment properties. */
+export interface PaintReadyTableLayout extends TableLayout {
+  readonly paintReadyFloatingTables: PaintReadyFloatingTables;
+}
+
 export interface TextBoxLayout extends LayoutNodeBase {
   readonly kind: 'textbox';
   readonly paragraphs: readonly ParagraphLayout[];
@@ -676,6 +696,7 @@ export interface NoteLayout extends LayoutNodeBase {
 }
 
 export type PaintNode = ParagraphLayout | TableLayout | DrawingLayout | TextBoxLayout | NoteLayout;
+export type PagePaintNode = Exclude<PaintNode, TableLayout> | PaintReadyTableLayout;
 
 export type PageLayerId =
   | 'background'
@@ -705,13 +726,13 @@ export interface LogicalBlockFootprint {
 
 export interface PageLayers {
   readonly paintOrder: readonly PagePaintEntry[];
-  readonly background: readonly PaintNode[];
-  readonly behindText: readonly PaintNode[];
-  readonly header: readonly PaintNode[];
-  readonly body: readonly PaintNode[];
-  readonly notes: readonly PaintNode[];
-  readonly front: readonly PaintNode[];
-  readonly footer: readonly PaintNode[];
+  readonly background: readonly PagePaintNode[];
+  readonly behindText: readonly PagePaintNode[];
+  readonly header: readonly PagePaintNode[];
+  readonly body: readonly PagePaintNode[];
+  readonly notes: readonly PagePaintNode[];
+  readonly front: readonly PagePaintNode[];
+  readonly footer: readonly PagePaintNode[];
 }
 
 /** One section-owned body-flow region on a physical page. A continuous section

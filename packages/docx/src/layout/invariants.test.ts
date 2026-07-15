@@ -9,7 +9,7 @@ import type {
   LayoutRect,
   LayoutServices,
   PageSectionRegion,
-  PaintNode,
+  PagePaintNode,
   SourceRef,
   TableEdgeInputs,
   TableLayoutInput,
@@ -93,7 +93,7 @@ function serviceStubs(): LayoutServices {
 }
 
 function documentWith(
-  nodes: readonly PaintNode[],
+  nodes: readonly PagePaintNode[],
   diagnostics: DocumentLayout['diagnostics'] = [],
 ): DocumentLayout {
   return {
@@ -454,8 +454,11 @@ describe('assertDocumentLayout', () => {
       kind: 'table' as const, id: 'upright-table', source: source(9), flowDomainId: 'body',
       flowBounds: bounds, inkBounds: bounds, advancePt: 80, ordinaryFlow: true,
       columnWidthsPt: [50], rows: [], borders: [],
-      floatingTables: [], resolvedFloatingTables: [],
-      floatingTableCoordinateSpace: 'upright-physical-page-points' as const,
+      paintReadyFloatingTables: {
+        kind: 'resolved' as const,
+        coordinateSpace: 'upright-physical-page-points' as const,
+        unresolved: [], placements: [],
+      },
     };
     const base = documentWith([]);
     const layout: DocumentLayout = {
@@ -490,17 +493,21 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(missingFootprint)).toThrow(/logical block footprint/);
     const wrongFloatSpace = structuredClone(layout);
     const wrongTable = wrongFloatSpace.pages[0]!.layers.body[0] as unknown as {
-      floatingTableCoordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
+      paintReadyFloatingTables: {
+        coordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
+      };
     };
-    wrongTable.floatingTableCoordinateSpace = 'logical-page-points';
+    wrongTable.paintReadyFloatingTables.coordinateSpace = 'logical-page-points';
     expect(() => assertDocumentLayout(wrongFloatSpace)).toThrow(/mismatched floating-table/);
     const doubleMapped = structuredClone(layout);
     (doubleMapped.pages[0]!.layers.paintOrder[0] as {
       coordinateSpace: 'logical-body-points' | 'upright-physical-page-points';
     }).coordinateSpace = 'logical-body-points';
     (doubleMapped.pages[0]!.layers.body[0] as unknown as {
-      floatingTableCoordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
-    }).floatingTableCoordinateSpace
+      paintReadyFloatingTables: {
+        coordinateSpace: 'logical-page-points' | 'upright-physical-page-points';
+      };
+    }).paintReadyFloatingTables.coordinateSpace
       = 'logical-page-points';
     expect(() => assertDocumentLayout(doubleMapped)).toThrow(/FLOW_DOMAIN_INVASION/);
 
@@ -514,6 +521,99 @@ describe('assertDocumentLayout', () => {
       },
     };
     expect(() => assertDocumentLayout(unsupported)).toThrow(/UNSUPPORTED_FEATURE/);
+  });
+
+  it('validates every paint-ready floating-table destination edge', () => {
+    const rootBounds = rect(300, 60, 200, 300);
+    const childBounds = rect(340, 120, 40, 30);
+    const child = {
+      kind: 'table' as const, id: 'nested-table', source: source(11), flowDomainId: 'body',
+      flowBounds: childBounds, inkBounds: childBounds, advancePt: 30, ordinaryFlow: false,
+      columnWidthsPt: [40], rows: [], borders: [],
+    };
+    const sourcePlacement = {
+      kind: 'floating-table-placement' as const,
+      occurrenceId: 'float:11', ownership: 'source' as const,
+      physicalPageIndex: 0, displayPageNumber: 7,
+      hostCellId: 'root:cell', sourceBlockIndex: 0, anchorBlockIndex: 0,
+      tableId: child.id, overlap: 'never' as const, positioning: {} as never,
+      anchorBounds: childBounds, child,
+    };
+    const placement = {
+      kind: 'resolved-floating-table-placement' as const,
+      occurrenceId: sourcePlacement.occurrenceId,
+      xPt: childBounds.xPt, yPt: childBounds.yPt,
+      bounds: childBounds, exclusionBounds: rect(338, 118, 44, 34),
+      overlap: 'never' as const, child, source: sourcePlacement,
+    };
+    const root = {
+      kind: 'table' as const, id: 'root-table', source: source(10), flowDomainId: 'body',
+      flowBounds: rect(320, 90, 100, 80), inkBounds: rect(320, 90, 100, 80),
+      advancePt: 80, ordinaryFlow: true, columnWidthsPt: [100], borders: [],
+      rows: [{
+        kind: 'table-row' as const, id: 'root:row', source: source(10), flowDomainId: 'body',
+        flowBounds: rect(320, 90, 100, 80), inkBounds: rect(320, 90, 100, 80),
+        advancePt: 80, ordinaryFlow: true, heightPt: 80, contentHeightPt: 80,
+        cells: [{
+          kind: 'table-cell' as const, id: 'root:cell', source: source(10), flowDomainId: 'body',
+          flowBounds: rect(320, 90, 100, 80), inkBounds: rect(320, 90, 100, 80),
+          contentBounds: rect(322, 92, 96, 76), advancePt: 80, ordinaryFlow: true,
+          verticalMerge: 'none' as const, vAlign: 'top' as const, blocks: [],
+        }],
+      }],
+      paintReadyFloatingTables: {
+        kind: 'resolved' as const,
+        coordinateSpace: 'upright-physical-page-points' as const,
+        unresolved: [], placements: [placement],
+      },
+    };
+    const base = documentWith([]);
+    const layout: DocumentLayout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!, pageIndex: 0,
+        geometry: { ...base.pages[0]!.geometry, widthPt: 641, heightPt: 733 },
+        pageNumber: { displayNumber: 7, format: 'decimal', sectionOccurrenceId: 'section:0' },
+        flowDomains: [{ id: 'body', kind: 'body', bounds: rootBounds }],
+        sectionRegions: [{
+          ...base.pages[0]!.sectionRegions[0]!,
+          coordinateSpace: {
+            writingMode: 'vertical-rl',
+            logicalToPhysical: canonicalLogicalToPhysical('vertical-rl', 641),
+          },
+          blockStartPt: 0, blockEndPt: 641,
+        }],
+        layers: {
+          ...base.pages[0]!.layers,
+          paintOrder: [{
+            layer: 'body', nodeId: root.id,
+            coordinateSpace: 'upright-physical-page-points',
+            logicalBlock: { blockStartPt: 220, blockExtentPt: 100 },
+          }],
+          body: [root],
+        },
+        readingOrder: [root.id],
+      }],
+    };
+    expect(() => assertDocumentLayout(layout)).not.toThrow();
+
+    const mutate = (change: (copy: any) => void, error: RegExp): void => {
+      const copy = structuredClone(layout);
+      change(copy);
+      expect(() => assertDocumentLayout(copy)).toThrow(error);
+    };
+    mutate((copy) => { delete copy.pages[0].layers.body[0].paintReadyFloatingTables; }, /paint-ready floating-table ownership/);
+    mutate((copy) => { delete copy.pages[0].layers.body[0].paintReadyFloatingTables.coordinateSpace; }, /coordinate space/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.physicalPageIndex = 2; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.displayPageNumber = 6; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].child.flowDomainId = 'other'; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].occurrenceId = 'other'; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].bounds.xPt = 100; }, /destination ownership|destination domain/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].exclusionBounds.xPt = 100; }, /destination domain/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.hostCellId = 'missing'; }, /destination ownership/);
+    mutate((copy) => {
+      copy.pages[0].layers.paintOrder[0].coordinateSpace = 'logical-body-points';
+    }, /mismatched floating-table coordinate space/);
   });
 });
 

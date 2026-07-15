@@ -17,6 +17,8 @@ import type {
   LayoutRect,
   ParagraphLayout,
   PageLayerId,
+  PagePaintNode,
+  PaintReadyTableLayout,
   SourceRef,
   TableLayout,
   TextBoxLayout,
@@ -144,11 +146,12 @@ function bookmarkTable(
   flowDomainId: string,
   blocks: readonly (ParagraphLayout | TableLayout)[],
   bounds: LayoutRect,
-): TableLayout {
+): PaintReadyTableLayout {
   return {
     kind: 'table', id, source: source([5]), flowDomainId,
     flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt, ordinaryFlow: true,
     columnWidthsPt: [bounds.widthPt], borders: [],
+    paintReadyFloatingTables: { kind: 'none' },
     rows: [{
       kind: 'table-row', id: `${id}:row`, source: source([5, 0]), flowDomainId,
       flowBounds: bounds, inkBounds: bounds, advancePt: bounds.heightPt, ordinaryFlow: true,
@@ -163,7 +166,7 @@ function bookmarkTable(
   };
 }
 
-function paintEntry(layer: PageLayerId, node: DrawingLayout | ParagraphLayout | TableLayout | TextBoxLayout) {
+function paintEntry(layer: PageLayerId, node: PagePaintNode) {
   return {
     layer,
     node,

@@ -339,6 +339,7 @@ describe('layoutParagraph', () => {
       }],
       anchorLayer: {
         occurrenceId: 'anchor:page', behindDoc: false, relativeHeight: 1,
+        coordinateSpace: 'physical-page-points' as const,
         sourceOrder: 1, horizontalOwnership: 'page' as const, verticalOwnership: 'page' as const,
       },
     } as const;
@@ -374,6 +375,7 @@ describe('layoutParagraph', () => {
       }],
       anchorLayer: {
         occurrenceId: 'anchor:host', behindDoc: false, relativeHeight: 1,
+        coordinateSpace: 'physical-page-points' as const,
         sourceOrder: 1, horizontalOwnership: 'host' as const, verticalOwnership: 'host' as const,
       },
     } as const;

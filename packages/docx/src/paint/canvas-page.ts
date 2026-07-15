@@ -2,12 +2,10 @@ import type {
   DocumentLayout,
   LayoutRect,
   Matrix2DData,
-  PaintNode,
+  PagePaintNode,
   PaintResourceKind,
-  ResolvedFloatingTablePlacementLayout,
-  TableLayout,
 } from '../layout/types.js';
-import { composeAffine, inverseAffine, scaleAffine } from './affine.js';
+import { composeAffine, scaleAffine } from './affine.js';
 import { orderedPagePaintEntries } from '../layout/page-graph.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintParagraphLayout } from './canvas-text.js';
@@ -63,14 +61,20 @@ export function createCanvasPaintResourcePainter(
   });
 }
 
-function paintNode(node: PaintNode, context: CanvasPaintContext): void {
+function paintNode(node: PagePaintNode, context: CanvasPaintContext): void {
   if (node.kind === 'drawing') paintDrawingLayout(node, context);
   else if (node.kind === 'paragraph') paintParagraphLayout(node, context);
   else if (node.kind === 'table') {
-    const retained = node as TableLayout & {
-      readonly resolvedFloatingTables?: readonly ResolvedFloatingTablePlacementLayout[];
-    };
-    paintTableLayout(node, context, retained.resolvedFloatingTables ?? []);
+    if (!node.paintReadyFloatingTables) {
+      throw new Error(`Table ${node.id} has no paint-ready floating-table ownership`);
+    }
+    paintTableLayout(
+      node,
+      context,
+      node.paintReadyFloatingTables.kind === 'resolved'
+        ? node.paintReadyFloatingTables.placements
+        : [],
+    );
   }
 }
 
@@ -153,7 +157,10 @@ export async function paintLayoutPage(
           pointToCss: logicalToPhysical
             ? composeAffine(scaleAffine(options.scale), logicalToPhysical)
             : scaleAffine(options.scale),
-          ...(logicalToPhysical ? { pageToLocal: inverseAffine(logicalToPhysical) ?? undefined } : {}),
+          pageFrame: {
+            currentToPage: logicalToPhysical
+              ?? { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+          },
           textRunTransform: { translateXPt: 0, translateYPt: 0, scale: options.scale },
           ...(options.onTextRun ? {
             onTextRun: logicalRunCallback(options.onTextRun, logicalToPhysical, options.scale),

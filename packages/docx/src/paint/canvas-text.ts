@@ -13,6 +13,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { textRunPaintInfo } from './text-run-info.js';
+import { descendPageFrame, pageFrameReentry } from './page-frame.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
   if (placement.text.length !== placement.range.end - placement.range.start) {
@@ -144,28 +145,34 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
       return textBox ? [textBox] : [];
     });
   const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void => {
-    const pageOwned = drawing.anchorLayer?.horizontalOwnership === 'page'
-      && drawing.anchorLayer?.verticalOwnership === 'page';
-    if (pageOwned && context.pageToLocal) {
+    const ownership = drawing.anchorLayer ? {
+      coordinateSpace: drawing.anchorLayer.coordinateSpace,
+      horizontal: drawing.anchorLayer.horizontalOwnership,
+      vertical: drawing.anchorLayer.verticalOwnership,
+    } : undefined;
+    if (ownership && context.pageFrame) {
+      const reentry = pageFrameReentry(context.pageFrame, ownership);
       context.ctx.save();
       context.ctx.transform(
-        context.pageToLocal.a,
-        context.pageToLocal.b,
-        context.pageToLocal.c,
-        context.pageToLocal.d,
-        context.pageToLocal.e,
-        context.pageToLocal.f,
+        reentry.currentToTarget.a,
+        reentry.currentToTarget.b,
+        reentry.currentToTarget.c,
+        reentry.currentToTarget.d,
+        reentry.currentToTarget.e,
+        reentry.currentToTarget.f,
       );
       try {
-        const physicalContext = {
+        const ownedContext = {
           ...context,
-          pointToCss: scaleAffine(context.scale),
-          pageToLocal: undefined,
-          onTextRun: context.onPhysicalTextRun,
+          pointToCss: composeAffine(scaleAffine(context.scale), reentry.targetToPage),
+          pageFrame: { currentToPage: reentry.targetToPage },
+          ...(ownership.horizontal === 'page' && ownership.vertical === 'page'
+            ? { onTextRun: context.onPhysicalTextRun }
+            : {}),
         };
-        paintDrawingLayout(drawing, physicalContext);
+        paintDrawingLayout(drawing, ownedContext);
         for (const textBox of textBoxesFor(drawing)) {
-          paintTextBoxLayout(textBox, physicalContext);
+          paintTextBoxLayout(textBox, ownedContext);
         }
       } finally {
         context.ctx.restore();
@@ -394,6 +401,7 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
       context.pointToCss ?? scaleAffine(context.scale),
       composeAffine(center, turn),
     );
+    const localTransform = composeAffine(center, turn);
     context.ctx.translate(
       node.flowBounds.xPt + node.flowBounds.widthPt / 2,
       node.flowBounds.yPt + node.flowBounds.heightPt / 2,
@@ -403,6 +411,7 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
       paintParagraphLayout(paragraph, {
         ...context,
         pointToCss,
+        pageFrame: descendPageFrame(context.pageFrame, localTransform),
         textBoxVerticalMode: node.verticalMode,
       });
     }
@@ -447,6 +456,7 @@ export function paintPlacedParagraphLayout(
     paintParagraphLayout(node, {
       ...context,
       pointToCss,
+      pageFrame: descendPageFrame(context.pageFrame, translationAffine(dxPt, dyPt)),
       textRunTransform: {
         translateXPt: dxPt,
         translateYPt: dyPt,

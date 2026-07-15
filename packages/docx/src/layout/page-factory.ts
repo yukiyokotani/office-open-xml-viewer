@@ -8,6 +8,7 @@ import type {
   PageBookmarkStart,
   PageLayers,
   PageNumberMetadata,
+  PagePaintNode,
   PageSectionRegion,
   PaintNode,
   ParagraphLayout,
@@ -160,7 +161,7 @@ function buildRegions(
 }
 
 function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
-  const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PaintNode[]]));
+  const nodes = new Map(PAGE_LAYER_IDS.map((layer) => [layer, [] as PagePaintNode[]]));
   for (const entry of entries) nodes.get(entry.layer)!.push(entry.node);
   return {
     paintOrder: entries.map(({ layer, node, coordinateSpace, logicalBlock }) => ({

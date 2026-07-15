@@ -1672,6 +1672,7 @@ function drawingForShape(
     commands,
     anchorLayer: {
       occurrenceId: `public-shape:${options.id}:${runIndex}`,
+      coordinateSpace: 'physical-page-points',
       behindDoc: shape.behindDoc === true,
       relativeHeight: Number.isFinite(shape.zOrder) ? shape.zOrder : runIndex,
       sourceOrder: runIndex,
@@ -1735,6 +1736,7 @@ function publicAnchoredResourceDrawing(
     }],
     anchorLayer: {
       occurrenceId: `public-anchor:${options.id}:${runIndex}`,
+      coordinateSpace: 'physical-page-points',
       behindDoc: false,
       relativeHeight: runIndex,
       sourceOrder: runIndex,
@@ -2005,6 +2007,7 @@ function acquireAnchorOccurrence(
     commands,
     anchorLayer: {
       occurrenceId,
+      coordinateSpace: 'physical-page-points',
       behindDoc: behavior.behindDoc,
       relativeHeight: behavior.relativeHeight,
       sourceOrder: outer.runIndex,
