@@ -2,14 +2,31 @@ import {
   sectionContentStartBlockPt,
   type PageFlowSectionContext,
 } from './context.js';
+import type { PaintNode } from './types.js';
 
 export type PageAdvanceReason =
   | 'overflow'
   | 'explicit-break'
+  | 'page-break-before'
   | 'section-break'
   | 'parity';
 
-export type SectionStartType = 'continuous' | 'nextPage' | 'oddPage' | 'evenPage';
+export type SectionStartType =
+  | 'continuous'
+  | 'nextColumn'
+  | 'nextPage'
+  | 'oddPage'
+  | 'evenPage';
+
+export type AuthoredBreak =
+  | 'column'
+  | 'page'
+  | 'pageBreakBefore'
+  | 'lastRenderedPageBreak';
+
+export interface SectionBoundaryOptions {
+  readonly hasFootnoteReferenceOnCurrentPage?: boolean;
+}
 
 export interface PageFlowState {
   readonly pageIndex: number;
@@ -26,6 +43,12 @@ export interface PageFlowState {
 }
 
 export type PageFlowEvent =
+  | Readonly<{
+      type: 'place';
+      node: PaintNode;
+      blockStartPt: number;
+      blockEndPt: number;
+    }>
   | Readonly<{ type: 'next-column' }>
   | Readonly<{
       type: 'next-page';
@@ -64,7 +87,31 @@ function transition(
   state: PageFlowState,
   events: readonly PageFlowEvent[],
 ): PageFlowTransition {
-  return Object.freeze({ state, events: Object.freeze([...events]) });
+  return Object.freeze({
+    state,
+    events: Object.freeze(events.map((event) => Object.freeze({ ...event }))),
+  });
+}
+
+export function placeFlowNode(
+  state: PageFlowState,
+  node: PaintNode,
+): PageFlowTransition {
+  if (!Number.isFinite(node.advancePt) || node.advancePt < 0) {
+    throw new RangeError('A flow node block advance must be a finite non-negative value');
+  }
+  const blockStartPt = state.cursorBlockPt;
+  const blockEndPt = blockStartPt + node.advancePt;
+  return transition(Object.freeze({
+    ...state,
+    cursorBlockPt: blockEndPt,
+    deepestColumnBlockPt: Math.max(state.deepestColumnBlockPt, blockEndPt),
+  }), [{
+    type: 'place',
+    node,
+    blockStartPt,
+    blockEndPt,
+  }]);
 }
 
 export function advanceColumnOrPage(
@@ -94,6 +141,40 @@ export function advanceColumnOrPage(
   }]);
 }
 
+function advanceToPage(
+  state: PageFlowState,
+  section: PageFlowSectionContext,
+  reason: Extract<PageAdvanceReason, 'explicit-break' | 'page-break-before' | 'section-break'>,
+): PageFlowTransition {
+  const pageIndex = state.pageIndex + 1;
+  return transition(createPageFlowState(section, { pageIndex }), [{
+    type: 'next-page',
+    reason,
+    pageIndex,
+    sectionOccurrenceId: section.sectionOccurrenceId,
+    parityBlank: false,
+  }]);
+}
+
+export function applyAuthoredBreak(
+  state: PageFlowState,
+  authoredBreak: AuthoredBreak,
+): PageFlowTransition {
+  if (authoredBreak === 'lastRenderedPageBreak') {
+    // lastRenderedPageBreak is a cached result from a previous layout producer,
+    // not document intent. Mixing it with fresh pagination double-applies breaks.
+    return transition(state, []);
+  }
+  if (authoredBreak === 'column') {
+    return advanceColumnOrPage(state, 'explicit-break');
+  }
+  return advanceToPage(
+    state,
+    state.section,
+    authoredBreak === 'pageBreakBefore' ? 'page-break-before' : 'explicit-break',
+  );
+}
+
 function matchesParity(pageIndex: number, startType: 'oddPage' | 'evenPage'): boolean {
   const isOddPhysicalPage = pageIndex % 2 === 0;
   return startType === 'oddPage' ? isOddPhysicalPage : !isOddPhysicalPage;
@@ -103,8 +184,9 @@ export function beginSection(
   state: PageFlowState,
   section: PageFlowSectionContext,
   startType: SectionStartType,
+  options: SectionBoundaryOptions = {},
 ): PageFlowTransition {
-  if (startType === 'continuous') {
+  if (startType === 'continuous' && !options.hasFootnoteReferenceOnCurrentPage) {
     // §17.6.4: a section following newspaper columns begins below the deepest
     // column, not merely below the last column visited by source order.
     const regionTop = Math.max(state.cursorBlockPt, state.deepestColumnBlockPt);
@@ -115,6 +197,48 @@ export function beginSection(
       regionStartBlockPt: regionTop,
       deepestColumnBlockPt: regionTop,
     }), [{ type: 'begin-section', section }]);
+  }
+
+  if (startType === 'nextColumn') {
+    const followingColumnIndex = state.columnIndex + 1;
+    if (
+      followingColumnIndex < state.section.columns.length
+      && followingColumnIndex < section.columns.length
+    ) {
+      return transition(Object.freeze({
+        ...state,
+        columnIndex: followingColumnIndex,
+        cursorBlockPt: state.pageContentStartBlockPt,
+        regionStartBlockPt: state.pageContentStartBlockPt,
+        deepestColumnBlockPt: Math.max(
+          state.deepestColumnBlockPt,
+          state.cursorBlockPt,
+        ),
+        section,
+      }), [
+        { type: 'next-column' },
+        { type: 'begin-section', section },
+      ]);
+    }
+
+    // ST_SectionMark defines nextColumn but not the no-following-column case.
+    // Opening the next page preserves forward flow as an explicit compatibility
+    // fallback; it is not presented as normative behavior from §17.18.77.
+    const nextPage = advanceToPage(state, section, 'section-break');
+    return transition(nextPage.state, [
+      ...nextPage.events,
+      { type: 'begin-section', section },
+    ]);
+  }
+
+  if (startType === 'continuous') {
+    // §17.18.77 requires the continuous section to begin on the following page
+    // when a footnote reference on this page would otherwise cross the boundary.
+    const nextPage = advanceToPage(state, section, 'section-break');
+    return transition(nextPage.state, [
+      ...nextPage.events,
+      { type: 'begin-section', section },
+    ]);
   }
 
   let pageIndex = state.pageIndex + 1;
