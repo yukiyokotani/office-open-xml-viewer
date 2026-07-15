@@ -7,6 +7,10 @@ import type {
   TblpPr,
 } from '../types.js';
 import {
+  effectiveTablePositioning,
+  tableParticipatesInOrdinaryFlow,
+} from '../parser-model.js';
+import {
   acquireTableCellBlocks,
   isStructuralTrailingParagraph,
 } from './table-cell-blocks.js';
@@ -243,9 +247,10 @@ export function acquireRetainedTable<State>(
                 dependencies,
               );
               nestedById[nested.layout.id] = nested;
-              if (nestedTable.tblpPr != null) {
+              const effectivePositioning = effectiveTablePositioning(nestedTable);
+              if (effectivePositioning) {
                 const sourceBlockIndex = nestedPath[nestedPath.length - 1]!;
-                const positioning = floatingPositionInput(nestedTable.tblpPr);
+                const positioning = floatingPositionInput(effectivePositioning);
                 const overlap = nestedTable.overlap === 'never' ? 'never' : 'overlap';
                 const acquiredTextOffsetPt = dependencies.registerFloatingTable(cellState, {
                   child: nested.layout,
@@ -294,7 +299,10 @@ export function acquireRetainedTable<State>(
           const sourceElement = cell.content[sourceBlockIndex];
           // ECMA-376 §17.4.57 keeps tblpPr tables at their logical source
           // position only for anchoring; they do not participate in cell flow.
-          if (sourceElement?.type === 'table' && sourceElement.tblpPr != null) return [];
+          if (
+            sourceElement?.type === 'table'
+            && !tableParticipatesInOrdinaryFlow(sourceElement)
+          ) return [];
           return [{
             layout,
             sourceBlockIndex,
@@ -331,7 +339,7 @@ export function acquireRetainedTable<State>(
     id: flowDomainId,
     source: { story: 'body', storyInstance: 'body', path: [...sourcePath] },
     flowDomainId,
-    ordinaryFlow: table.tblpPr == null,
+    ordinaryFlow: tableParticipatesInOrdinaryFlow(table),
     alignment: physicalAlignment(table.jc, bidiVisual),
     indentPt: tableIndentPt,
     bidiVisual,

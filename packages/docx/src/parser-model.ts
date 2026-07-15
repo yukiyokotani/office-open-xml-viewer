@@ -14,6 +14,7 @@ import type {
   DocTable,
   TableBorders,
   TextPath,
+  TblpPr,
 } from './types.js';
 import type {
   NumberingMarkerShapeInput,
@@ -250,6 +251,17 @@ export function tableAcquisitionInput(table: Readonly<DocTable>): TableAcquisiti
   }, 'DOCX table acquisition input') as TableAcquisitionInput;
   tableAcquisitionInputs.set(table, input);
   return input;
+}
+
+/** Word-effective flow classification acquired before tblpPr defaults erase the
+ * distinction between authored positioning and an ignored positioning payload. */
+export function tableParticipatesInOrdinaryFlow(table: Readonly<DocTable>): boolean {
+  return tableAcquisitionInput(table).table?.ordinaryFlow ?? table.tblpPr == null;
+}
+
+/** Positioning payload only when Word treats the authored tblpPr as effective. */
+export function effectiveTablePositioning(table: Readonly<DocTable>): TblpPr | null {
+  return tableParticipatesInOrdinaryFlow(table) ? null : (table.tblpPr ?? null);
 }
 
 type TableLexicalWidth = Readonly<{

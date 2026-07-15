@@ -210,10 +210,12 @@ import {
 } from './layout/text.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts.js';
 import {
+  effectiveTablePositioning,
   internalDocumentModel,
   numberingMarkerShapeInput,
   paragraphAcquisitionInput,
   paragraphMarkShapeInput,
+  tableParticipatesInOrdinaryFlow,
   textBoxAcquisitionInput,
 } from './parser-model.js';
 import {
@@ -2216,7 +2218,7 @@ async function renderDocumentToCanvasLeased(
       paintParagraph: (paragraph, state, suppressBefore, borderMerge) =>
         renderParagraph(paragraph, state, suppressBefore, undefined, false, borderMerge),
       paintTable: renderTable,
-      tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+      tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
     });
 
   // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
@@ -3307,7 +3309,7 @@ export function computePages(
         prevP = p;
       } else if (e.type === 'table') {
         const t = e as unknown as DocTable;
-        if (t.tblpPr) continue; // floating table: out of flow
+        if (!tableParticipatesInOrdinaryFlow(t)) continue;
         total += computeTableRowHeights(ms, t, colWPt, j).reduce((s, x) => s + x, 0);
         prevAfter = 0;
         prevP = null;
@@ -4143,7 +4145,8 @@ export function computePages(
       // vertAnchor↔§17.3.1.11 vAnchor, tblpY↔y). Was PR #691's whole-table
       // relocation, replaced here after the Word-PDF ground truth showed row
       // splitting (issue #674).
-      if (tbl.tblpPr) {
+      const tp = effectiveTablePositioning(tbl);
+      if (tp) {
         // #513: re-point measureState.contentX/contentW at the CURRENT newspaper
         // column for the duration of the placement so the paginator estimates the
         // wrap band against the SAME column band the paint pass paints into
@@ -4163,7 +4166,6 @@ export function computePages(
         // fit, paint-reuse stamp, and FloatRect; cell content is never re-measured). `tp` is
         // the tblpPr under which the FIRST slice is placed (at the in-flow anchor);
         // continuation slices clone it with tblpY=0 so their box sits at body top.
-        const tp = tbl.tblpPr;
         const measureFloat = () =>
           withColumnBand(() => {
             const cW = colW() * measureState.scale;
@@ -6109,7 +6111,7 @@ function prepareFittingOuterFragment(
       const physicalPageIndex = finalState.pageIndex;
       const displayPageNumber = finalState.displayPageNumber ?? physicalPageIndex + 1;
       const occurrenceId = `${retained.acquisition.input.id}:fitting-outer:${physicalPageIndex}`;
-      const anchoredToPhysicalPage = table.tblpPr?.vertAnchor === 'page';
+      const anchoredToPhysicalPage = effectiveTablePositioning(table)?.vertAnchor === 'page';
       const containerBottomPt = anchoredToPhysicalPage
         ? pageHeightPt
         : pageHeightPt - finalState.marginBottom;
@@ -7040,7 +7042,9 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
         },
       });
     },
-    table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt,
+    tableParticipatesInOrdinaryFlow(table)
+      ? contentWPt
+      : Math.max(contentWPt, state.pageWidth),
   ))];
 }
 
@@ -7143,11 +7147,12 @@ function stampTableLayout(
   }>,
 ): void {
   const table = el as unknown as DocTable;
+  const effectivePositioning = effectiveTablePositioning(table);
   let layout: TableLayout | TableFragmentLayout = retained.acquisition.layout;
   const tableWidthPt = layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-  const box = preparedOuter?.box ?? (table.tblpPr
+  const box = preparedOuter?.box ?? (effectivePositioning
     ? computeFloatTableBox(
-      table.tblpPr,
+      effectivePositioning,
       retainedState,
       retained.anchorYPt,
       tableWidthPt,
@@ -7161,9 +7166,9 @@ function stampTableLayout(
     ? retained.anchorYPt / retainedState.scale
     : box.y / retainedState.scale;
   const placementState = finalState ?? retainedState;
-  const physical = table.tblpPr ? undefined : placementState.verticalPhys;
+  const physical = effectivePositioning ? undefined : placementState.verticalPhys;
   const services = placementState.layoutServices;
-  if (table.tblpPr) {
+  if (effectivePositioning) {
     if (!preparedOuter) {
       throw new Error('Fitting outer table acceptance requires a pure prepared fragment');
     }
@@ -7264,7 +7269,7 @@ function stampTableLayout(
     xPt,
     yPt,
     widthPt: tableWidthPt,
-    heightPt: table.tblpPr ? layout.advancePt : tableWidthPt,
+    heightPt: effectivePositioning ? layout.advancePt : tableWidthPt,
   }));
   bodyFlowFragments.sourceIndices.set(el, sourceIndex);
 }
@@ -8609,7 +8614,7 @@ function measureHeaderFooterHeight(hf: HeaderFooter, base: RenderState): number 
     paintParagraph: (paragraph, storyState, suppressBefore, borderMerge) =>
       renderParagraph(paragraph, storyState, suppressBefore, undefined, false, borderMerge),
     paintTable: renderTable,
-    tableResetsParagraphFlow: (table: DocTable) => !table.tblpPr,
+    tableResetsParagraphFlow: tableParticipatesInOrdinaryFlow,
   })(hf, 0, state);
 }
 
@@ -9037,7 +9042,7 @@ function renderBodyElements(
       }
       // §17.4.57 floating tables consume the same retained physical geometry,
       // but their absolute placement does not advance the surrounding body flow.
-      if (tbl.tblpPr) {
+      if (!tableParticipatesInOrdinaryFlow(tbl)) {
         const resources = state.retainedResourcePainter;
         if (!resources) throw new Error('Floating table paint requires a retained resource painter');
         const inFlowY = state.y;
@@ -13356,7 +13361,8 @@ function resolveSharedEdge(
  * the float is still registered so wrap estimates see the band.
  */
 function renderFloatTable(table: DocTable, state: RenderState): void {
-  const tp = table.tblpPr!;
+  const tp = effectiveTablePositioning(table);
+  if (!tp) throw new Error('Floating table paint requires effective positioning');
   const inFlowY = state.y;
   const savedX = state.contentX;
   const savedW = state.contentW;
@@ -13391,7 +13397,7 @@ function renderFloatTable(table: DocTable, state: RenderState): void {
 function renderTable(table: DocTable, state: RenderState): void {
   // ECMA-376 §17.4.57: a `<w:tblpPr>` table floats — divert to the out-of-flow
   // path before the normal block layout (which would advance state.y).
-  if (table.tblpPr) {
+  if (!tableParticipatesInOrdinaryFlow(table)) {
     renderFloatTable(table, state);
     return;
   }

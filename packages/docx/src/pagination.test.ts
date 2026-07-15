@@ -178,6 +178,27 @@ function fixedTable(rowHeightsPt: number[]): BodyElement {
   return { type: 'table', ...t } as BodyElement;
 }
 
+function wordIgnoredPositionedTable(rowHeightsPt: number[]): BodyElement {
+  const table = fixedTable(rowHeightsPt) as BodyElement & {
+    tblpPr: NonNullable<DocTable['tblpPr']>;
+    __tableLayout: unknown;
+  };
+  table.tblpPr = {
+    leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+    horzAnchor: 'text', horzSpecified: true, vertAnchor: 'margin',
+    tblpX: 0, tblpY: 0,
+  };
+  table.__tableLayout = {
+    effectiveStyleId: 'TableNormal',
+    ordinaryFlow: true,
+    grid: { authored: true, columns: [{ width: '1400' }], requiredColumnCount: 1 },
+    preferredWidth: null,
+    layout: null,
+    cellSpacing: null,
+  };
+  return table;
+}
+
 function autoTableWithTallRow(blockCount: number, rowOverrides: Partial<DocTableRow> = {}): BodyElement {
   const content = Array.from({ length: blockCount }, (_, i) =>
     para({ text: `row ${i}`, fontSize: 20 }) as CellElement,
@@ -796,6 +817,24 @@ describe('computePages — tall header/footer reserve indexing (§17.6.11)', () 
     // the body genuinely spans several pages where the clamp matters.
     expect(short[0].length).toBe(4);
     expect(short.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('computePages — Word-effective table flow ([MS-OI29500] 2.1.162(b-c))', () => {
+  it('charges an authored but ignored tblpPr as ordinary block-table flow', () => {
+    const pages = computePages([
+      wordIgnoredPositionedTable([40]),
+      para({ text: 'after', fontSize: 20 }),
+    ], section(), makeCtx());
+    const tableOccurrence = pages[0]?.find((element) => element.type === 'table');
+    const paragraphOccurrence = pages[0]?.find((element) => element.type === 'paragraph');
+    const tablePlacement = tableOccurrence ? bodyFragmentFor(tableOccurrence) : undefined;
+    const paragraphPlacement = paragraphOccurrence ? bodyFragmentFor(paragraphOccurrence) : undefined;
+
+    expect(tablePlacement).toBeDefined();
+    expect(paragraphPlacement?.yPt).toBeGreaterThanOrEqual(
+      (tablePlacement?.yPt ?? 0) + (tablePlacement?.heightPt ?? 0),
+    );
   });
 });
 

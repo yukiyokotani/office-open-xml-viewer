@@ -93,6 +93,47 @@ describe('retained table acquisition', () => {
     expect(Object.isFrozen(acquisition.nestedById)).toBe(true);
   });
 
+  it('keeps an authored but Word-ignored tblpPr in ordinary table flow', () => {
+    const table = {
+      type: 'table', rows: [], colWidths: [], borders: noBorders,
+      cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0,
+      jc: 'left', bidiVisual: false,
+      tblpPr: {
+        leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+        horzAnchor: 'text', horzSpecified: true, vertAnchor: 'margin',
+        tblpX: 0, tblpY: 0,
+      },
+      __tableLayout: {
+        effectiveStyleId: 'TableNormal',
+        ordinaryFlow: true,
+        grid: { authored: false, columns: [], requiredColumnCount: 0 },
+        preferredWidth: null,
+        layout: null,
+        cellSpacing: null,
+      },
+    } as unknown as DocTable;
+
+    const acquisition = acquireRetainedTable(
+      table,
+      [],
+      100,
+      { yPt: 0 },
+      [],
+      {
+        layoutServices: () => ({}) as LayoutServices,
+        tableFormat: () => ({ firstRowException: null, rows: [] }),
+        resolveColumns: () => [],
+        createCellState: (state) => state,
+        acquireParagraph: () => retainedParagraph(100),
+        registerFloatingTable: () => null,
+        advanceState: () => {},
+      },
+    );
+
+    expect(acquisition.input.ordinaryFlow).toBe(true);
+    expect(acquisition.floatingTables).toEqual([]);
+  });
+
   it('owns a nested floating table outside cell flow and anchors it to the next regular paragraph', () => {
     // ECMA-376 §17.4.57 makes tblpPr tables out-of-flow while retaining their
     // logical position for anchoring to the next regular paragraph. Keeping the

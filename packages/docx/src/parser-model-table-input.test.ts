@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { tableAcquisitionInput } from './parser-model.js';
+import {
+  effectiveTablePositioning,
+  tableAcquisitionInput,
+  tableParticipatesInOrdinaryFlow,
+} from './parser-model.js';
 import type { DocTable } from './types.js';
 
 function tableWithPrivateLayoutWire(): DocTable {
@@ -123,5 +127,40 @@ describe('parser-private table acquisition projection', () => {
       table: null,
       rows: [{ row: null, cells: [null] }],
     });
+  });
+
+  it('uses retained effective flow status before the lexical tblpPr compatibility field', () => {
+    const ignoredPositioning = tableWithPrivateLayoutWire() as DocTable & {
+      tblpPr: NonNullable<DocTable['tblpPr']>;
+    };
+    ignoredPositioning.tblpPr = {
+      leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'text', horzSpecified: true, vertAnchor: 'margin',
+      tblpX: 0, tblpY: 0,
+    };
+    const effectiveFloating = structuredClone(ignoredPositioning) as typeof ignoredPositioning & {
+      __tableLayout: { ordinaryFlow: boolean };
+    };
+    effectiveFloating.__tableLayout.ordinaryFlow = false;
+
+    expect(tableParticipatesInOrdinaryFlow(ignoredPositioning)).toBe(true);
+    expect(tableParticipatesInOrdinaryFlow(effectiveFloating)).toBe(false);
+    expect(effectiveTablePositioning(ignoredPositioning)).toBeNull();
+    expect(effectiveTablePositioning(effectiveFloating)).toBe(effectiveFloating.tblpPr);
+  });
+
+  it('keeps the stable public table fallback deterministic when acquisition facts are absent', () => {
+    const ordinary = tableWithPrivateLayoutWire() as DocTable & Record<string, unknown>;
+    const floating = structuredClone(ordinary) as DocTable & Record<string, unknown>;
+    delete ordinary.__tableLayout;
+    delete floating.__tableLayout;
+    floating.tblpPr = {
+      leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'page', horzSpecified: true, vertAnchor: 'page',
+      tblpX: 1, tblpY: 1,
+    };
+
+    expect(tableParticipatesInOrdinaryFlow(ordinary)).toBe(true);
+    expect(tableParticipatesInOrdinaryFlow(floating)).toBe(false);
   });
 });

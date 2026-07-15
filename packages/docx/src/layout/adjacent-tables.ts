@@ -1,4 +1,7 @@
-import { tableAcquisitionInput } from '../parser-model.js';
+import {
+  tableAcquisitionInput,
+  tableParticipatesInOrdinaryFlow,
+} from '../parser-model.js';
 import type { BodyElement } from '../types.js';
 
 export type TableBodyElement = Extract<BodyElement, { type: 'table' }>;
@@ -14,8 +17,8 @@ export type NormalizedBodySequenceEntry =
 function groupingIdentity(element: BodyElement): string | null {
   if (element.type !== 'table') return null;
   const facts = tableAcquisitionInput(element);
-  if (facts.table?.ordinaryFlow !== true) return null;
-  return facts.table.effectiveStyleId;
+  if (!tableParticipatesInOrdinaryFlow(element)) return null;
+  return facts.table?.effectiveStyleId ?? null;
 }
 
 /**
