@@ -75,7 +75,7 @@ export function translateDrawing(
   };
 }
 
-function translateBorder(border: BorderSegment, delta: LayoutTranslation): BorderSegment {
+export function translateBorder(border: BorderSegment, delta: LayoutTranslation): BorderSegment {
   return {
     ...border,
     from: translatePoint(border.from, delta),
@@ -184,6 +184,14 @@ export function translateParagraphLayout(
   paragraph: ParagraphLayout,
   delta: LayoutTranslation,
 ): ParagraphLayout {
+  return translateParagraphLayoutInternal(paragraph, delta, false);
+}
+
+function translateParagraphLayoutInternal(
+  paragraph: ParagraphLayout,
+  delta: LayoutTranslation,
+  complete: boolean,
+): ParagraphLayout {
   const anchorOwnership = new Map(paragraph.drawings.flatMap((drawing) => (
     drawing.anchorLayer ? [[drawing.anchorLayer.occurrenceId, drawing.anchorLayer] as const] : []
   )));
@@ -197,7 +205,7 @@ export function translateParagraphLayout(
     drawingTranslations.set(drawing.id, drawingDelta);
     drawing.textBoxIds?.forEach((id) => textBoxTranslations.set(id, drawingDelta));
   });
-  return {
+  const translated: ParagraphLayout = {
     ...paragraph,
     flowBounds: translateRect(paragraph.flowBounds, delta),
     inkBounds: translateRect(paragraph.inkBounds, delta),
@@ -208,7 +216,11 @@ export function translateParagraphLayout(
       translateDrawing(drawing, drawingTranslations.get(drawing.id) ?? delta)
     )),
     textBoxes: paragraph.textBoxes.map((textBox) => (
-      translateTextBox(textBox, textBoxTranslations.get(textBox.id) ?? delta)
+      translateTextBoxInternal(
+        textBox,
+        textBoxTranslations.get(textBox.id) ?? delta,
+        complete,
+      )
     )),
     exclusions: paragraph.exclusions.map((exclusion) => {
       const owner = exclusion.anchorOccurrenceId
@@ -232,11 +244,42 @@ export function translateParagraphLayout(
       },
     } : {}),
   };
+  if (!complete) return translated;
+  return {
+    ...translated,
+    ...(paragraph.lineNumbers ? {
+      lineNumbers: paragraph.lineNumbers.map((line) => ({
+        ...line,
+        bounds: translateRect(line.bounds, delta),
+        paintOps: line.paintOps.map((operation) => ({
+          ...operation,
+          origin: translatePoint(operation.origin, delta),
+        })),
+      })),
+    } : {}),
+    ...(paragraph.anchorFrames ? {
+      anchorFrames: paragraph.anchorFrames.map((frame) => {
+        const owner = anchorOwnership.get(frame.occurrenceId);
+        return translateAnchorFrame(frame, {
+          xPt: owner?.horizontalOwnership === 'page' ? 0 : delta.xPt,
+          yPt: owner?.verticalOwnership === 'page' ? 0 : delta.yPt,
+        });
+      }),
+    } : {}),
+  };
 }
 
 export function translateTextBox(
   textBox: TextBoxLayout,
   delta: LayoutTranslation,
+): TextBoxLayout {
+  return translateTextBoxInternal(textBox, delta, false);
+}
+
+function translateTextBoxInternal(
+  textBox: TextBoxLayout,
+  delta: LayoutTranslation,
+  complete: boolean,
 ): TextBoxLayout {
   const pageRelativeContent = textBox.verticalMode === undefined;
   return {
@@ -250,7 +293,9 @@ export function translateTextBox(
         : textBox.contentBounds,
     } : {}),
     paragraphs: pageRelativeContent
-      ? textBox.paragraphs.map((paragraph) => translateParagraphLayout(paragraph, delta))
+      ? textBox.paragraphs.map((paragraph) => (
+          translateParagraphLayoutInternal(paragraph, delta, complete)
+        ))
       : textBox.paragraphs,
   };
 }
@@ -295,36 +340,11 @@ function translateAnchorFrame(
   };
 }
 
-/** Complete final-occurrence translation; line numbers and anchor diagnostics are
- * omitted by the compatibility helper because its legacy callers own them separately. */
+/** Complete final-occurrence translation. Page-relative text-box descendants
+ * recurse through this mode; vertical text-box children retain local geometry. */
 export function translateCompleteParagraphLayout(
   paragraph: ParagraphLayout,
   delta: LayoutTranslation,
 ): ParagraphLayout {
-  const translated = translateParagraphLayout(paragraph, delta);
-  const ownership = new Map(paragraph.drawings.flatMap((drawing) => (
-    drawing.anchorLayer ? [[drawing.anchorLayer.occurrenceId, drawing.anchorLayer] as const] : []
-  )));
-  return {
-    ...translated,
-    ...(paragraph.lineNumbers ? {
-      lineNumbers: paragraph.lineNumbers.map((line) => ({
-        ...line,
-        bounds: translateRect(line.bounds, delta),
-        paintOps: line.paintOps.map((operation) => ({
-          ...operation,
-          origin: translatePoint(operation.origin, delta),
-        })),
-      })),
-    } : {}),
-    ...(paragraph.anchorFrames ? {
-      anchorFrames: paragraph.anchorFrames.map((frame) => {
-        const owner = ownership.get(frame.occurrenceId);
-        return translateAnchorFrame(frame, {
-          xPt: owner?.horizontalOwnership === 'page' ? 0 : delta.xPt,
-          yPt: owner?.verticalOwnership === 'page' ? 0 : delta.yPt,
-        });
-      }),
-    } : {}),
-  };
+  return translateParagraphLayoutInternal(paragraph, delta, true);
 }

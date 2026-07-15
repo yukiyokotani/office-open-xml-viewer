@@ -18,6 +18,10 @@ const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
 const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
+const OCCURRENCE_PROJECTION_RUNTIME_ENTRIES = [
+  `${LAYOUT_SOURCE}/occurrence-projection.ts`,
+  `${LAYOUT_SOURCE}/retained-geometry-translation.ts`,
+];
 
 const FINAL_RENDERER_EXPORTS = new Set([
   'DocxTextRunInfo',
@@ -935,6 +939,67 @@ function assertLayoutParserModelBoundaries(root) {
       'LAYOUT_PARSER_MODEL_DEPENDENCY',
       violations.map((chain) => chain.join(' -> ')).join('\n'),
     );
+  }
+}
+
+function isForbiddenOccurrenceProjectionRuntimePath(path) {
+  return path === `${DOCX_SOURCE}/renderer.ts`
+    || path === PARSER_MODEL
+    || path.startsWith(`${PAINT_SOURCE}/`)
+    || path.split('/').some((segment) => (
+      /(?:^|[-_.])(?:canvas|dom|worker)(?=$|[-_.])/i.test(segment)
+    ))
+    || /(?:^|\/)[^/]*(?:paragraph|table)[^/]*(?:acquisition|measure)[^/]*\.tsx?$/i.test(path)
+    || path === `${LAYOUT_SOURCE}/paragraph.ts`
+    || path === `${LAYOUT_SOURCE}/table.ts`
+    || path === `${LAYOUT_SOURCE}/table-acquisition.ts`
+    || path === `${LAYOUT_SOURCE}/text.ts`
+    || path === `${DOCX_SOURCE}/paragraph-measure.ts`
+    || path === `${DOCX_SOURCE}/line-layout.ts`;
+}
+
+function assertOccurrenceProjectionRuntimeBoundaries(root) {
+  const graph = dependencyGraph(root);
+  for (const entryRelative of OCCURRENCE_PROJECTION_RUNTIME_ENTRIES) {
+    const entry = resolve(root, entryRelative);
+    if (!graph.has(entry)) continue;
+    const pending = [{ path: entry, chain: [entry] }];
+    const visited = new Set([entry]);
+    while (pending.length > 0) {
+      const current = pending.pop();
+      for (const edge of graph.get(current.path) ?? []) {
+        if (edge.typeOnly) continue;
+        if (!edge.literal) {
+          fail(
+            'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
+            `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> <dynamic>`,
+          );
+        }
+        if (!edge.specifier.startsWith('.')) {
+          if (/(?:^|[/@-])(?:canvas|dom|worker)(?:$|[/@-])/i.test(edge.specifier)) {
+            fail(
+              'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
+              `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> ${edge.specifier}`,
+            );
+          }
+          continue;
+        }
+        const dependency = resolveLocalImport(current.path, edge.specifier);
+        if (!dependency) continue;
+        const chain = [...current.chain, dependency];
+        const dependencyRelative = posixPath(relative(root, dependency));
+        if (isForbiddenOccurrenceProjectionRuntimePath(dependencyRelative)) {
+          fail(
+            'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
+            chain.map((path) => posixPath(relative(root, path))).join(' -> '),
+          );
+        }
+        if (graph.has(dependency) && !visited.has(dependency)) {
+          visited.add(dependency);
+          pending.push({ path: dependency, chain });
+        }
+      }
+    }
   }
 }
 
@@ -2545,6 +2610,7 @@ export function checkDocxLayoutBoundaries(options) {
   assertCapabilityBoundaries(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
+  assertOccurrenceProjectionRuntimeBoundaries(root);
 
   if (options.write) {
     const baseBaseline = mergeBaseBaseline(root, options.baseRef);

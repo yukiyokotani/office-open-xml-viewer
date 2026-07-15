@@ -1,5 +1,9 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { AnchorFrameResult } from './anchor-frame.js';
+import {
+  beginFloatingTablePlacementTransaction,
+  resolveFloatingTablePlacementInTransaction,
+} from './floating-table-transaction.js';
 import {
   projectBodyOccurrence,
   type BodyOccurrenceProjectionOptions,
@@ -162,7 +166,21 @@ function anchorFrame(occurrenceId: string): AnchorFrameResult {
 
 function complexParagraph(): ParagraphLayout {
   const base = simpleParagraph('paragraph:source', [0]);
-  const child = simpleParagraph('textbox-paragraph:source', [0, 0]);
+  const childBase = simpleParagraph('textbox-paragraph:source', [0, 0]);
+  const childDrawing: DrawingLayout = {
+    kind: 'drawing', id: 'textbox-drawing:source', source: source([0, 0, 1]),
+    flowDomainId: 'acquired:body:textbox', flowBounds: rect(7, 8), inkBounds: rect(7, 8),
+    advancePt: 0, ordinaryFlow: false, commands: [],
+    anchorLayer: {
+      occurrenceId: 'textbox-anchor:source', behindDoc: false, relativeHeight: 1,
+      sourceOrder: 0, horizontalOwnership: 'host', verticalOwnership: 'host',
+    },
+  };
+  const child: ParagraphLayout = {
+    ...childBase,
+    drawings: [childDrawing],
+    anchorFrames: [anchorFrame('textbox-anchor:source')],
+  };
   const textBox: TextBoxLayout = {
     kind: 'textbox',
     id: 'textbox:source',
@@ -250,10 +268,11 @@ function table(id: string, path: readonly number[], nested = false): TableLayout
   };
 }
 
-function fragment(): TableFragmentLayout {
-  const base = table('table:source', [1], true);
+function fragment(state: 'unresolved' | 'resolved' = 'unresolved'): TableFragmentLayout {
+  const base = table('table:source', [1], false);
   const host = base.rows[0]!.cells[0]!;
-  const child = host.blocks[1]!.layout as TableLayout;
+  // Production acquisition keeps a floating nested table out of ordinary cell flow.
+  const child = table('table:source:floating-child', [1, 0, 1], false);
   const placement = {
     kind: 'floating-table-placement' as const,
     occurrenceId: 'float:source',
@@ -267,11 +286,19 @@ function fragment(): TableFragmentLayout {
     overlap: 'overlap' as const,
     positioning: {
       leftFromTextPt: 0, rightFromTextPt: 0, topFromTextPt: 0, bottomFromTextPt: 0,
-      horzAnchor: 'text', horzSpecified: true, vertAnchor: 'text', xPt: 0, yPt: 0,
+      horzAnchor: state === 'resolved' ? 'page' : 'text', horzSpecified: true,
+      vertAnchor: state === 'resolved' ? 'margin' : 'text',
+      xPt: state === 'resolved' ? 12 : 0, yPt: state === 'resolved' ? 14 : 0,
     },
-    anchorBounds: rect(12, 24, 30, 10),
+    // Resolved selections have already accepted final page placement translation.
+    anchorBounds: state === 'resolved' ? rect(12, 50, 30, 10) : rect(12, 24, 30, 10),
     child,
   };
+  const resolved = resolveFloatingTablePlacementInTransaction(
+    placement,
+    { page: rect(0, 0, 600, 800), margin: rect(36, 36, 528, 728), text: rect(12, 24, 500, 700) },
+    beginFloatingTablePlacementTransaction([], 0),
+  ).placement;
   return {
     ...base,
     rows: base.rows.map((row, rowIndex) => ({
@@ -287,18 +314,8 @@ function fragment(): TableFragmentLayout {
         contentRanges: [{ kind: 'whole', blockIndex: 0 }],
       })),
     })),
-    floatingTables: [placement],
-    resolvedFloatingTables: [{
-      kind: 'resolved-floating-table-placement',
-      occurrenceId: placement.occurrenceId,
-      xPt: 40,
-      yPt: 50,
-      bounds: rect(40, 50, 30, 20),
-      exclusionBounds: rect(38, 48, 34, 24),
-      overlap: 'overlap',
-      child,
-      source: placement,
-    }],
+    floatingTables: state === 'unresolved' ? [placement] : [],
+    resolvedFloatingTables: state === 'resolved' ? [resolved] : [],
     floatingTableCoordinateSpace: 'logical-page-points',
   };
 }
@@ -316,39 +333,77 @@ const options = (
   },
 });
 
-function graphIds(node: PaintNode): string[] {
-  const ids: string[] = [node.id];
-  if (node.kind === 'paragraph') {
-    ids.push(...node.drawings.flatMap(graphIds), ...node.textBoxes.flatMap(graphIds));
-    ids.push(...node.exclusions.map((exclusion) => exclusion.id));
-    ids.push(...node.drawings.flatMap((drawing) => (
-      drawing.anchorLayer ? [drawing.anchorLayer.occurrenceId] : []
-    )));
-    ids.push(...(node.anchorFrames?.map((frame) => frame.occurrenceId) ?? []));
-  } else if (node.kind === 'textbox') {
-    ids.push(...node.paragraphs.flatMap(graphIds));
-  } else if (node.kind === 'table') {
-    for (const row of node.rows) {
-      ids.push(row.id);
-      if ('occurrenceId' in row && typeof row.occurrenceId === 'string') ids.push(row.occurrenceId);
-      for (const cell of row.cells) {
-        ids.push(cell.id);
-        ids.push(...cell.blocks.flatMap((block) => graphIds(block.layout)));
+function validateGraph(node: PaintNode): Set<string> {
+  const ids = new Map<string, object>();
+  const references: Array<readonly [string, string]> = [];
+  const anchorTargets = new Set<string>();
+  const anchorReferences = new Set<string>();
+  const visited = new Set<object>();
+  const visit = (current: PaintNode): void => {
+    if (visited.has(current)) return;
+    visited.add(current);
+    const prior = ids.get(current.id);
+    expect(prior === undefined || prior === current, `layout ID ${current.id} has one object`).toBe(true);
+    ids.set(current.id, current);
+    if (current.kind === 'paragraph') {
+      for (const placement of current.lines.flatMap((line) => line.placements)) {
+        if (placement.kind === 'drawing') references.push(['drawing', placement.drawingId]);
+      }
+      current.drawings.forEach(visit);
+      current.textBoxes.forEach(visit);
+      for (const drawing of current.drawings) {
+        if (drawing.anchorLayer) anchorTargets.add(drawing.anchorLayer.occurrenceId);
+      }
+      for (const exclusion of current.exclusions) {
+        const priorExclusion = ids.get(exclusion.id);
+        expect(priorExclusion === undefined || priorExclusion === exclusion).toBe(true);
+        ids.set(exclusion.id, exclusion);
+        if (exclusion.anchorOccurrenceId) anchorReferences.add(exclusion.anchorOccurrenceId);
+      }
+      for (const frame of current.anchorFrames ?? []) anchorReferences.add(frame.occurrenceId);
+    } else if (current.kind === 'textbox') {
+      current.paragraphs.forEach(visit);
+    } else if (current.kind === 'table') {
+      for (const row of current.rows) {
+        const priorRow = ids.get(row.id);
+        expect(priorRow === undefined || priorRow === row, `row ID ${row.id} has one object`).toBe(true);
+        ids.set(row.id, row);
+        for (const cell of row.cells) {
+          const priorCell = ids.get(cell.id);
+          expect(priorCell === undefined || priorCell === cell, `cell ID ${cell.id} has one object`).toBe(true);
+          ids.set(cell.id, cell);
+          cell.blocks.forEach((block) => visit(block.layout));
+        }
+      }
+      if ('floatingTables' in current
+        && Array.isArray(current.floatingTables)
+        && 'resolvedFloatingTables' in current
+        && Array.isArray(current.resolvedFloatingTables)) {
+        const fragment = current as TableFragmentLayout;
+        for (const floating of fragment.floatingTables) {
+          references.push(['host', floating.hostCellId], ['table', floating.tableId]);
+          visit(floating.child);
+        }
+        for (const resolved of fragment.resolvedFloatingTables) {
+          references.push(['host', resolved.source.hostCellId], ['table', resolved.source.tableId]);
+          visit(resolved.child);
+          visit(resolved.source.child);
+        }
       }
     }
-    if ('floatingTables' in node && Array.isArray(node.floatingTables)) {
-      ids.push(...node.floatingTables.map((placement) => placement.occurrenceId));
-    }
-    if ('resolvedFloatingTables' in node && Array.isArray(node.resolvedFloatingTables)) {
-      ids.push(...node.resolvedFloatingTables.map((placement) => placement.occurrenceId));
-    }
+  };
+  visit(node);
+  for (const [kind, id] of references) {
+    expect(ids.has(id), `${kind} reference ${id} has a target`).toBe(true);
   }
-  return ids;
+  for (const id of anchorReferences) expect(anchorTargets.has(id), `anchor ${id} has a target`).toBe(true);
+  return new Set([...ids.keys(), ...anchorTargets]);
 }
 
 function sharedIds(left: PaintNode, right: PaintNode): string[] {
-  const rightIds = new Set(graphIds(right));
-  return graphIds(left).filter((id) => rightIds.has(id));
+  const leftIds = validateGraph(left);
+  const rightIds = validateGraph(right);
+  return [...leftIds].filter((id) => rightIds.has(id));
 }
 
 describe('projectBodyOccurrence', () => {
@@ -369,6 +424,18 @@ describe('projectBodyOccurrence', () => {
       geometry: {
         objectFrame: rect(14, 26, 20, 10),
         wrap: { polygon: { points: [{ xPt: 14, yPt: 26 }, { xPt: 34, yPt: 36 }] } },
+      },
+    });
+    const child = projected.textBoxes[0]!.paragraphs[0]!;
+    expect(child.lineNumbers?.[0]).toMatchObject({
+      bounds: rect(2, 22, 6, 10),
+      paintOps: [{ origin: { xPt: 7, yPt: 29 } }],
+    });
+    expect(child.anchorFrames?.[0]).toMatchObject({
+      geometry: { objectFrame: rect(14, 26, 20, 10) },
+      axes: {
+        horizontal: { baseStartPt: 14, baseEndPt: 114, resolvedOriginPt: 14 },
+        vertical: { baseStartPt: 26, baseEndPt: 126, resolvedOriginPt: 26 },
       },
     });
   });
@@ -413,7 +480,6 @@ describe('projectBodyOccurrence', () => {
     const row = projected.rows[0]!;
     const cell = row.cells[0]!;
     const paragraph = cell.blocks[0]!.layout;
-    const nested = cell.blocks[1]!.layout;
 
     expect(projected.flowBounds).toEqual(rect(20, 40, 100, 30));
     expect(row.flowBounds).toEqual(rect(20, 40, 100, 30));
@@ -422,9 +488,9 @@ describe('projectBodyOccurrence', () => {
     // places them from contentBounds/offsetPt; adding the outer delta here would
     // apply it twice for nested tables whose local alignment is in flowBounds.
     expect(paragraph.flowBounds).toEqual(rect(1, 2));
-    expect(nested.flowBounds).toEqual(rect(10, 20, 100, 30));
-    expect(new Set([projected.id, row.id, cell.id, paragraph.id, nested.id]).size).toBe(5);
-    expect([projected.id, row.id, cell.id, paragraph.id, nested.id])
+    expect(cell.blocks).toHaveLength(1);
+    expect(new Set([projected.id, row.id, cell.id, paragraph.id]).size).toBe(4);
+    expect([projected.id, row.id, cell.id, paragraph.id])
       .not.toContain('table:source');
   });
 
@@ -437,26 +503,56 @@ describe('projectBodyOccurrence', () => {
     expect(header.source).toEqual(split.source);
   });
 
-  it('rewrites floating-table host/table/child and resolved source references', () => {
-    const projected = projectBodyOccurrence(fragment(), options('table:first')) as TableFragmentLayout;
+  it('rewrites an unresolved-only floating-table graph without putting the child in cell flow', () => {
+    const projected = projectBodyOccurrence(fragment('unresolved'), options('table:first')) as TableFragmentLayout;
     const cell = projected.rows[0]!.cells[0]!;
-    const nested = cell.blocks[1]!.layout as TableLayout;
     const floating = projected.floatingTables[0]!;
+
+    expect(projected.resolvedFloatingTables).toEqual([]);
+    expect(cell.blocks).toHaveLength(1);
+    expect(floating.hostCellId).toBe(cell.id);
+    expect(floating.tableId).toBe(floating.child.id);
+    expect(floating.anchorBounds).toEqual(rect(22, 44, 30, 10));
+    validateGraph(projected);
+  });
+
+  it('preserves production resolved child aliasing and final page-local geometry', () => {
+    const projected = projectBodyOccurrence(fragment('resolved'), options('table:first')) as TableFragmentLayout;
     const resolved = projected.resolvedFloatingTables[0]!;
 
-    expect(floating.hostCellId).toBe(cell.id);
-    expect(floating.tableId).toBe(nested.id);
-    expect(floating.child.id).toBe(nested.id);
-    expect(resolved.occurrenceId).toBe(floating.occurrenceId);
-    expect(resolved.source.occurrenceId).toBe(floating.occurrenceId);
-    expect(resolved.source.hostCellId).toBe(cell.id);
-    expect(resolved.source.tableId).toBe(nested.id);
-    expect(resolved.child.id).toBe(nested.id);
-    expect(floating.anchorBounds).toEqual(rect(22, 44, 30, 10));
-    // A resolved placement is already page-local; only its graph identity is
-    // projected. Its child remains anchor-local for paintPlacedChild.
-    expect(resolved.bounds).toEqual(rect(40, 50, 30, 20));
-    expect(resolved.exclusionBounds).toEqual(rect(38, 48, 34, 24));
+    expect(projected.floatingTables).toEqual([]);
+    expect(resolved.child).toBe(resolved.source.child);
+    expect(resolved.source.tableId).toBe(resolved.child.id);
+    expect(resolved.bounds).toEqual(rect(12, 50, 100, 30));
+    expect(resolved.source.anchorBounds).toEqual(rect(12, 50, 30, 10));
+    validateGraph(projected);
+    const cloned = structuredClone(projected);
+    expect(cloned.resolvedFloatingTables[0]!.child)
+      .toBe(cloned.resolvedFloatingTables[0]!.source.child);
+    expect(Object.isFrozen(resolved.child)).toBe(true);
+  });
+
+  it('rejects one retained table object reused under incompatible geometry ownership', () => {
+    const invalid = fragment('unresolved');
+    const shared = invalid.floatingTables[0]!.child;
+    const cell = invalid.rows[0]!.cells[0]!;
+    const hybrid: TableFragmentLayout = {
+      ...invalid,
+      floatingTables: invalid.floatingTables.map((floating) => ({
+        ...floating,
+        hostCellId: `${cell.id}:incompatible-owner`,
+      })),
+      rows: [{
+        ...invalid.rows[0]!,
+        cells: [{
+          ...cell,
+          blocks: [...cell.blocks, { layout: shared, offsetPt: 12, advancePt: shared.advancePt }],
+        }],
+      }],
+    };
+
+    expect(() => projectBodyOccurrence(hybrid, options('table:invalid')))
+      .toThrow(/incompatible projection ownership/);
   });
 
   it('assigns deterministic occurrence-local domains to nested cell and text-box content', () => {
@@ -486,14 +582,6 @@ describe('projectBodyOccurrence', () => {
     expect(projected).not.toBe(acquired);
     expect(Object.isFrozen(projected)).toBe(true);
     expect(Object.isFrozen(projected.rows)).toBe(true);
-  });
-
-  it('has no measurement-service seam that projection can reach', () => {
-    expectTypeOf<keyof BodyOccurrenceProjectionOptions>().not.toEqualTypeOf<'services'>();
-    const throwing = { text: { measure: () => { throw new Error('must not measure'); } } };
-    const unsafeOptions = ({ ...options('paragraph:first'), services: throwing }) as unknown as BodyOccurrenceProjectionOptions;
-
-    expect(() => projectBodyOccurrence(simpleParagraph('p', [0]), unsafeOptions)).not.toThrow();
   });
 
   it('applies one logical translation to horizontal and vertical-logical geometry', () => {
@@ -540,5 +628,50 @@ describe('projectBodyOccurrence', () => {
     expect(projected.anchorFrames?.[0]).toMatchObject({
       geometry: { objectFrame: rect(4, 6, 20, 10) },
     });
+  });
+
+  it('preserves page-owned nested anchors and vertical text-box child coordinates', () => {
+    const acquired = complexParagraph();
+    const textBox = acquired.textBoxes[0]!;
+    const nested = textBox.paragraphs[0]!;
+    const pageOwnedNested: ParagraphLayout = {
+      ...nested,
+      drawings: nested.drawings.map((drawing) => ({
+        ...drawing,
+        anchorLayer: {
+          ...drawing.anchorLayer!,
+          horizontalOwnership: 'page',
+          verticalOwnership: 'page',
+        },
+      })),
+    };
+    const pageRelative = projectBodyOccurrence({
+      ...acquired,
+      textBoxes: [{ ...textBox, paragraphs: [pageOwnedNested] }],
+    }, options('paragraph:page-owned')) as ParagraphLayout;
+    const projectedNested = pageRelative.textBoxes[0]!.paragraphs[0]!;
+    expect(projectedNested.flowBounds).toEqual(rect(11, 22));
+    expect(projectedNested.lineNumbers?.[0]?.bounds).toEqual(rect(2, 22, 6, 10));
+    const pageOwnedFrame = projectedNested.anchorFrames?.[0];
+    expect(pageOwnedFrame?.status).toBe('resolved');
+    if (pageOwnedFrame?.status !== 'resolved') throw new Error('expected resolved anchor frame');
+    expect(pageOwnedFrame.geometry.objectFrame).toEqual(rect(4, 6, 20, 10));
+
+    const vertical = projectBodyOccurrence({
+      ...acquired,
+      textBoxes: [{ ...textBox, verticalMode: 'vert', paragraphs: [nested] }],
+    }, options('paragraph:vertical-textbox')) as ParagraphLayout;
+    const local = vertical.textBoxes[0]!.paragraphs[0]!;
+    expect(local.flowBounds).toEqual(nested.flowBounds);
+    expect(local.lineNumbers).toEqual(nested.lineNumbers);
+    const localFrame = local.anchorFrames?.[0];
+    const nestedFrame = nested.anchorFrames?.[0];
+    expect(localFrame?.status).toBe('resolved');
+    expect(nestedFrame?.status).toBe('resolved');
+    if (localFrame?.status !== 'resolved' || nestedFrame?.status !== 'resolved') {
+      throw new Error('expected resolved anchor frames');
+    }
+    expect(localFrame.geometry).toEqual(nestedFrame.geometry);
+    expect(localFrame.axes).toEqual(nestedFrame.axes);
   });
 });

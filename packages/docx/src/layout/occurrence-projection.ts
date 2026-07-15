@@ -1,7 +1,7 @@
 import { snapshotPlainData } from './plain-data.js';
 import {
+  translateBorder,
   translateCompleteParagraphLayout,
-  translatePoint,
   translateRect,
 } from './retained-geometry-translation.js';
 import type {
@@ -10,7 +10,6 @@ import type {
   TableRowFragmentLayout,
 } from './table-pagination.js';
 import type {
-  BorderSegment,
   DrawingLayout,
   FloatingTablePlacementLayout,
   LayoutRect,
@@ -40,18 +39,12 @@ interface ProjectionContext {
   readonly anchorIds: Map<string, string>;
   readonly occurrenceIds: Map<string, string>;
   readonly cellDomains: Map<string, string>;
+  readonly projectedTables: WeakMap<TableLayout, Map<string, TableLayout>>;
+  readonly tableOwnership: WeakMap<TableLayout, string>;
 }
 
 type Translation = LogicalBodyOccurrenceDestination['translation'];
 const NO_TRANSLATION: Translation = Object.freeze({ xPt: 0, yPt: 0 });
-
-function translatedBorder(border: BorderSegment, delta: Translation): BorderSegment {
-  return {
-    ...border,
-    from: translatePoint(border.from, delta),
-    to: translatePoint(border.to, delta),
-  };
-}
 
 function encoded(value: string): string {
   return encodeURIComponent(value);
@@ -312,18 +305,33 @@ function projectTable(
   delta: Translation,
   context: ProjectionContext,
 ): TableLayout {
+  const ownershipKey = `${encoded(flowDomainId)}:${delta.xPt}:${delta.yPt}`;
+  const priorOwnership = context.tableOwnership.get(table);
+  if (priorOwnership !== undefined && priorOwnership !== ownershipKey) {
+    // Layout IDs are occurrence-scoped rather than edge-scoped. Reusing one
+    // retained table under divergent geometry would make the same ID describe
+    // two nodes, so reject that invalid graph instead of silently cloning it.
+    throw new Error('Retained table is shared across incompatible projection ownership');
+  }
+  context.tableOwnership.set(table, ownershipKey);
+  const memo = context.projectedTables.get(table) ?? new Map<string, TableLayout>();
+  context.projectedTables.set(table, memo);
+  const retainedProjection = memo.get(ownershipKey);
+  if (retainedProjection) return retainedProjection;
+
   const projected: TableLayout = {
     ...translatedBase(table, delta),
     id: nodeId(context, table.id),
     flowDomainId,
-    borders: table.borders.map((border) => translatedBorder(border, delta)),
+    borders: table.borders.map((border) => translateBorder(border, delta)),
     rows: table.rows.map((row) => projectRow(row, flowDomainId, delta, context)),
   };
   if (!('floatingTables' in table) || !('resolvedFloatingTables' in table)) {
+    memo.set(ownershipKey, projected);
     return projected;
   }
   const fragment = table as TableFragmentLayout;
-  return {
+  const projectedFragment = {
     ...projected,
     rows: projected.rows as readonly TableRowFragmentLayout[],
     floatingTables: fragment.floatingTables.map((placement) => (
@@ -336,6 +344,8 @@ function projectTable(
       floatingTableCoordinateSpace: fragment.floatingTableCoordinateSpace,
     } : {}),
   } as TableFragmentLayout;
+  memo.set(ownershipKey, projectedFragment);
+  return projectedFragment;
 }
 
 /** SourceRef remains authored identity while every layout ID is occurrence-local.
@@ -358,6 +368,8 @@ export function projectBodyOccurrence<T extends ParagraphLayout | TableLayout>(
     anchorIds: new Map(),
     occurrenceIds: new Map(),
     cellDomains: new Map(),
+    projectedTables: new WeakMap(),
+    tableOwnership: new WeakMap(),
   };
   const projected = retained.kind === 'paragraph'
     ? projectParagraph(

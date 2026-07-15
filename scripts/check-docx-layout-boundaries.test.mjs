@@ -919,6 +919,77 @@ test('rejects transitive layout-to-parser-model bridge modules', () => {
   );
 });
 
+test('rejects runtime impurity reachable from retained occurrence projection', () => {
+  const root = initializeRepository();
+  write(
+    root,
+    'packages/docx/src/paragraph-measure.ts',
+    'export const measureParagraph = () => 1;\n',
+  );
+  establishA1Baseline(root);
+  write(
+    root,
+    'packages/docx/src/layout/retained-geometry-translation.ts',
+    "import { measureParagraph } from '../paragraph-measure.js';\nexport const translate = measureParagraph;\n",
+  );
+  write(
+    root,
+    'packages/docx/src/layout/occurrence-projection.ts',
+    "import { translate } from './retained-geometry-translation.js';\nexport const project = translate;\n",
+  );
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/);
+  assert.match(
+    result.output,
+    /occurrence-projection\.ts.*retained-geometry-translation\.ts.*paragraph-measure\.ts/s,
+  );
+});
+
+test('allows ordinary modules whose names merely contain a forbidden token substring', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  write(
+    root,
+    'packages/docx/src/layout/random.ts',
+    'export const randomValue = 1;\n',
+  );
+  write(
+    root,
+    'packages/docx/src/layout/occurrence-projection.ts',
+    "import { randomValue } from './random.js';\nexport const project = randomValue;\n",
+  );
+
+  const result = runChecker(root, '--base-ref', 'main');
+
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects Canvas, DOM, and worker module tokens at file or directory boundaries', () => {
+  const root = initializeRepository();
+  establishA1Baseline(root);
+  const cases = [
+    ['packages/docx/src/canvas-page.ts', '../canvas-page.js'],
+    ['packages/docx/src/render-worker.ts', '../render-worker.js'],
+    ['packages/docx/src/dom-adapter.ts', '../dom-adapter.js'],
+    ['packages/docx/src/layout/dom/adapter.ts', './dom/adapter.js'],
+  ];
+  for (const [path, specifier] of cases) {
+    write(root, path, 'export const forbiddenRuntime = 1;\n');
+    write(
+      root,
+      'packages/docx/src/layout/occurrence-projection.ts',
+      `import { forbiddenRuntime } from '${specifier}';\nexport const project = forbiddenRuntime;\n`,
+    );
+
+    const result = runChecker(root, '--base-ref', 'main');
+    assert.notEqual(result.status, 0, path);
+    assert.match(result.output, /OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY/, path);
+  }
+});
+
 test('allows retained and legacy layout to share parser-independent primitives', () => {
   const root = initializeLayoutParserBoundaryRepository();
   write(
