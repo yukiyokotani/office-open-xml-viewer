@@ -966,6 +966,15 @@ function assertOccurrenceProjectionRuntimeBoundaries(root) {
             `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> <dynamic>`,
           );
         }
+        if (edge.specifier.includes('?') || edge.specifier.includes('#')) {
+          // Vite resource queries change module semantics (for example to a
+          // worker constructor), so an allowlisted file is safe only through
+          // its ordinary undecorated module specifier.
+          fail(
+            'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',
+            `${current.chain.map((path) => posixPath(relative(root, path))).join(' -> ')} -> ${edge.specifier}`,
+          );
+        }
         if (!edge.specifier.startsWith('.')) {
           fail(
             'OCCURRENCE_PROJECTION_RUNTIME_DEPENDENCY',

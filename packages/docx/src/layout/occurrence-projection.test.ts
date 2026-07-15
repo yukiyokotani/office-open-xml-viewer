@@ -345,14 +345,24 @@ function validateGraph(
 ): GraphNamespaces {
   const nodes = new Map<string, Readonly<{ object: object; kind: string }>>();
   const nodeReferences: Array<Readonly<{ kind: string; id: string }>> = [];
-  const anchorTargets = new Set<string>();
+  const anchorOwners = new Map<string, DrawingLayout>();
   const anchorReferences = new Set<string>();
-  const graphOccurrenceIds = new Set<string>();
+  const graphOccurrenceOwners = new Map<string, object>();
   const visited = new Set<object>();
   const registerNode = (id: string, object: object, kind: string): void => {
     const prior = nodes.get(id);
     expect(prior === undefined || prior.object === object, `${kind} ID ${id} has one object`).toBe(true);
     nodes.set(id, { object, kind });
+  };
+  const registerAnchorOccurrence = (id: string, owner: DrawingLayout): void => {
+    const prior = anchorOwners.get(id);
+    expect(prior === undefined || prior === owner, `anchor occurrence ${id} has one owner`).toBe(true);
+    anchorOwners.set(id, owner);
+  };
+  const registerGraphOccurrence = (id: string, owner: object): void => {
+    const prior = graphOccurrenceOwners.get(id);
+    expect(prior === undefined || prior === owner, `graph occurrence ${id} has one owner`).toBe(true);
+    graphOccurrenceOwners.set(id, owner);
   };
   const visit = (current: PaintNode): void => {
     if (visited.has(current)) return;
@@ -369,7 +379,9 @@ function validateGraph(
       current.drawings.forEach(visit);
       current.textBoxes.forEach(visit);
       for (const drawing of current.drawings) {
-        if (drawing.anchorLayer) anchorTargets.add(drawing.anchorLayer.occurrenceId);
+        if (drawing.anchorLayer) {
+          registerAnchorOccurrence(drawing.anchorLayer.occurrenceId, drawing);
+        }
         for (const textBoxId of drawing.textBoxIds ?? []) {
           nodeReferences.push({ kind: 'textbox', id: textBoxId });
         }
@@ -385,7 +397,7 @@ function validateGraph(
       for (const row of current.rows) {
         registerNode(row.id, row, 'table-row');
         if ('occurrenceId' in row && typeof row.occurrenceId === 'string') {
-          graphOccurrenceIds.add(row.occurrenceId);
+          registerGraphOccurrence(row.occurrenceId, row);
         }
         for (const cell of row.cells) {
           registerNode(cell.id, cell, 'table-cell');
@@ -398,7 +410,7 @@ function validateGraph(
         && Array.isArray(current.resolvedFloatingTables)) {
         const fragment = current as TableFragmentLayout;
         for (const floating of fragment.floatingTables) {
-          graphOccurrenceIds.add(floating.occurrenceId);
+          registerGraphOccurrence(floating.occurrenceId, floating);
           nodeReferences.push(
             { kind: 'table-cell', id: floating.hostCellId },
             { kind: 'table', id: floating.tableId },
@@ -407,8 +419,10 @@ function validateGraph(
         }
         for (const resolved of fragment.resolvedFloatingTables) {
           expect(resolved.occurrenceId).toBe(resolved.source.occurrenceId);
-          graphOccurrenceIds.add(resolved.occurrenceId);
-          graphOccurrenceIds.add(resolved.source.occurrenceId);
+          // The source edge and resolved edge are two views of one logical
+          // occurrence; all other duplicate IDs must retain the same owner.
+          registerGraphOccurrence(resolved.occurrenceId, resolved.source);
+          registerGraphOccurrence(resolved.source.occurrenceId, resolved.source);
           nodeReferences.push(
             { kind: 'table-cell', id: resolved.source.hostCellId },
             { kind: 'table', id: resolved.source.tableId },
@@ -424,14 +438,14 @@ function validateGraph(
     expect(nodes.get(reference.id)?.kind, `${reference.kind} reference ${reference.id} has a target`)
       .toBe(reference.kind);
   }
-  for (const id of anchorReferences) expect(anchorTargets.has(id), `anchor ${id} has a target`).toBe(true);
-  for (const id of graphOccurrenceIds) {
+  for (const id of anchorReferences) expect(anchorOwners.has(id), `anchor ${id} has a target`).toBe(true);
+  for (const id of graphOccurrenceOwners.keys()) {
     expect(sourceGraphOccurrenceIds.has(id), `graph occurrence ${id} was rekeyed`).toBe(false);
   }
   return {
     nodeIds: new Set(nodes.keys()),
-    anchorOccurrenceIds: anchorTargets,
-    graphOccurrenceIds,
+    anchorOccurrenceIds: new Set(anchorOwners.keys()),
+    graphOccurrenceIds: new Set(graphOccurrenceOwners.keys()),
   };
 }
 
@@ -625,6 +639,49 @@ describe('projectBodyOccurrence', () => {
     (danglingTextBox.drawings[0] as { textBoxIds?: readonly string[] }).textBoxIds
       = ['textbox:dangling'];
     expect(() => validateGraph(danglingTextBox)).toThrow(/textbox:dangling has a target/);
+  });
+
+  it('rejects occurrence IDs claimed by distinct anchor, row, or float owners', () => {
+    const paragraph = structuredClone(projectBodyOccurrence(
+      complexParagraph(),
+      options('paragraph:duplicate-owner'),
+    )) as ParagraphLayout;
+    const firstDrawing = paragraph.drawings[0]!;
+    const duplicateAnchor: ParagraphLayout = {
+      ...paragraph,
+      drawings: [
+        ...paragraph.drawings,
+        { ...firstDrawing, id: `${firstDrawing.id}:duplicate-owner` },
+      ],
+    };
+    expect(() => validateGraph(duplicateAnchor)).toThrow(/anchor occurrence/);
+
+    const projected = structuredClone(projectBodyOccurrence(
+      fragment('unresolved'),
+      options('table:duplicate-owner'),
+    )) as TableFragmentLayout;
+    const row = projected.rows[0]!;
+    const duplicateRow: TableFragmentLayout = {
+      ...projected,
+      rows: [...projected.rows, { ...row, id: `${row.id}:duplicate-owner` }],
+    };
+    expect(() => validateGraph(duplicateRow)).toThrow(/graph occurrence/);
+
+    const rowFloatCollision: TableFragmentLayout = {
+      ...projected,
+      floatingTables: projected.floatingTables.map((floating) => ({
+        ...floating,
+        occurrenceId: row.occurrenceId,
+      })),
+    };
+    expect(() => validateGraph(rowFloatCollision)).toThrow(/graph occurrence/);
+
+    const floating = projected.floatingTables[0]!;
+    const duplicateFloat: TableFragmentLayout = {
+      ...projected,
+      floatingTables: [floating, { ...floating }],
+    };
+    expect(() => validateGraph(duplicateFloat)).toThrow(/graph occurrence/);
   });
 
   it('rejects one retained table object reused under incompatible geometry ownership', () => {

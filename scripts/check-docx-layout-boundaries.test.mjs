@@ -974,6 +974,7 @@ test('allows the reviewed occurrence projection runtime helper graph', () => {
 
 for (const [path, specifier] of [
   ['packages/docx/src/layout/text-measure.ts', './text-measure.js'],
+  ['packages/docx/src/layout/plain-data.ts', './plain-data.js?worker&inline'],
   [null, 'node:worker_threads'],
   [null, 'jsdom'],
 ]) {
