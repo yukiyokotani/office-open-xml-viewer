@@ -82,8 +82,6 @@ export interface CanvasPaintContext {
   /** Plain-data ownership of the live retained coordinate frame. */
   readonly pageFrame?: PageFrameAdapter;
   readonly onTextRun?: (run: TextRunPaintInfo) => void;
-  /** Callback in the physical page frame for a nested page-owned occurrence. */
-  readonly onPhysicalTextRun?: (run: TextRunPaintInfo) => void;
   readonly textRunTransform?: Readonly<{
     translateXPt: number;
     translateYPt: number;

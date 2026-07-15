@@ -213,6 +213,12 @@ function projectCell(
     id: nodeId(context, cell.id),
     flowDomainId,
     contentBounds: translateRect(cell.contentBounds, delta),
+    ...(cell.floatingSourceBlocks ? {
+      floatingSourceBlocks: cell.floatingSourceBlocks.map((proof) => ({
+        ...proof,
+        tableId: nodeId(context, proof.tableId),
+      })),
+    } : {}),
     blocks: cell.blocks.map((block) => ({
       ...block,
       // Cell blocks remain in their cell-local coordinates. Canvas table paint

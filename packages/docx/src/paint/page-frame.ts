@@ -5,10 +5,8 @@ export interface PageFrameAdapter {
   readonly currentToPage: Matrix2DData;
 }
 
-export type PageAxisOwnership = Readonly<{
+export type PhysicalPageCoordinateDeclaration = Readonly<{
   coordinateSpace: 'physical-page-points';
-  horizontal: 'page' | 'host';
-  vertical: 'page' | 'host';
 }>;
 
 export function descendPageFrame(
@@ -20,15 +18,14 @@ export function descendPageFrame(
 
 export function pageFrameReentry(
   frame: PageFrameAdapter,
-  ownership: PageAxisOwnership,
+  declaration: PhysicalPageCoordinateDeclaration,
 ): Readonly<{ currentToTarget: Matrix2DData; targetToPage: Matrix2DData }> {
-  if (ownership.coordinateSpace !== 'physical-page-points') {
+  if (declaration.coordinateSpace !== 'physical-page-points') {
     throw new Error('Anchored retained geometry must declare physical page coordinates');
   }
   const current = frame.currentToPage;
-  // Anchor acquisition has already applied page/host reference-frame offsets
-  // independently per axis. The ownership flags govern later relocation only;
-  // the retained box itself remains one non-singular physical page frame.
+  // Page admission has already replayed every authored reference frame in
+  // physical x/y. Ownership is deliberately absent from this paint contract.
   const targetToPage = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
   const pageToCurrent = inverseAffine(current);
   if (!pageToCurrent) throw new Error('Current retained coordinate frame is not invertible');

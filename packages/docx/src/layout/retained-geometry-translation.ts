@@ -75,6 +75,29 @@ export function translateDrawing(
   };
 }
 
+function translateAcquiredAnchorHostFrames(
+  drawing: DrawingLayout,
+  delta: LayoutTranslation,
+): DrawingLayout {
+  const anchor = drawing.anchorLayer;
+  if (!anchor || anchor.coordinateSpace !== 'acquired-anchor-points') return drawing;
+  const frames = anchor.normalization.logicalHostFrames;
+  return {
+    ...drawing,
+    anchorLayer: {
+      ...anchor,
+      normalization: {
+        ...anchor.normalization,
+        logicalHostFrames: {
+          paragraph: translateRect(frames.paragraph, delta),
+          line: translateRect(frames.line, delta),
+          character: translateRect(frames.character, delta),
+        },
+      },
+    },
+  };
+}
+
 export function translateBorder(border: BorderSegment, delta: LayoutTranslation): BorderSegment {
   return {
     ...border,
@@ -212,8 +235,9 @@ function translateParagraphLayoutInternal(
     ...(paragraph.clipBounds ? { clipBounds: translateRect(paragraph.clipBounds, delta) } : {}),
     lines: paragraph.lines.map((line) => translateLine(line, delta, drawingTranslations)),
     borders: paragraph.borders.map((border) => translateBorder(border, delta)),
-    drawings: paragraph.drawings.map((drawing) => (
-      translateDrawing(drawing, drawingTranslations.get(drawing.id) ?? delta)
+    drawings: paragraph.drawings.map((drawing) => translateAcquiredAnchorHostFrames(
+      translateDrawing(drawing, drawingTranslations.get(drawing.id) ?? delta),
+      delta,
     )),
     textBoxes: paragraph.textBoxes.map((textBox) => (
       translateTextBoxInternal(

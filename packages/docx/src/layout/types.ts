@@ -5,7 +5,8 @@ import type {
   TextLayoutService,
 } from './text.js';
 import type { ImageMetadataService, MathMetadataService } from './resources.js';
-import type { AnchorFrameResult } from './anchor-frame.js';
+import type { AnchorFrameResult, AnchorFrameRect } from './anchor-frame.js';
+import type { AnchorAcquisitionInput } from './anchor-input.js';
 import type {
   CanvasFontRoute,
   ChartModel,
@@ -157,12 +158,38 @@ export interface DrawingLayout extends LayoutNodeBase {
     behindDoc: boolean;
     relativeHeight: number;
     sourceOrder: number;
-    /** Anchor-frame acquisition resolves both retained axes in page points;
-     * axis ownership below controls relocation, not the geometry basis. */
-    coordinateSpace: 'physical-page-points';
     horizontalOwnership: 'page' | 'host';
     verticalOwnership: 'page' | 'host';
-  }>;
+  } & (
+    | {
+        /** Acquisition may combine physical page frames with logical host
+         * frames. Page admission must replay these facts in one physical frame. */
+        coordinateSpace: 'acquired-anchor-points';
+        normalization: Readonly<{
+          acquisition: Readonly<AnchorAcquisitionInput>;
+          pageParity: 'odd' | 'even' | null;
+          physicalFrames: Readonly<{
+            page: Readonly<AnchorFrameRect> | null;
+            margin: Readonly<AnchorFrameRect> | null;
+            column: Readonly<AnchorFrameRect> | null;
+          }>;
+          logicalHostFrames: Readonly<{
+            paragraph: Readonly<AnchorFrameRect>;
+            line: Readonly<AnchorFrameRect>;
+            character: Readonly<AnchorFrameRect>;
+          }>;
+        }>;
+      }
+    | {
+        /** Page-graph admission has resolved every axis into physical x/y. */
+        coordinateSpace: 'physical-page-points';
+        normalizedFor?: Readonly<{
+          physicalPageIndex: number;
+          flowDomainId: string;
+          regionId: string;
+        }>;
+      }
+  )>;
   readonly textBoxIds?: readonly LayoutNodeId[];
 }
 
@@ -574,6 +601,12 @@ export interface TableCellLayout extends LayoutNodeBase {
   readonly vAlign: 'top' | 'center' | 'bottom';
   readonly background?: FillPaint;
   readonly blocks: readonly TableCellBlockLayout[];
+  /** Authored out-of-flow table blocks are absent from `blocks`; this retained
+   * identity map proves floating source references without array-index guesses. */
+  readonly floatingSourceBlocks?: readonly Readonly<{
+    sourceBlockIndex: number;
+    tableId: LayoutNodeId;
+  }>[];
 }
 
 export interface TableRowLayout extends LayoutNodeBase {

@@ -15,10 +15,7 @@ describe('page-frame adapter', () => {
       { currentToPage: region },
       translationAffine(41, 57),
     )!;
-    const reentry = pageFrameReentry(descended, {
-      coordinateSpace: 'physical-page-points',
-      ...axes,
-    });
+    const reentry = pageFrameReentry(descended, { coordinateSpace: 'physical-page-points' });
     const final = composeAffine(descended.currentToPage, reentry.currentToTarget);
 
     expect(final).toEqual({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });

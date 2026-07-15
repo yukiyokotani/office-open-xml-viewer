@@ -314,6 +314,7 @@ function fragment(state: 'unresolved' | 'resolved' = 'unresolved'): TableFragmen
       cells: row.cells.map((cell) => ({
         ...cell,
         contentRanges: [{ kind: 'whole', blockIndex: 0 }],
+        floatingSourceBlocks: [{ sourceBlockIndex: 1, tableId: child.id }],
       })),
     })),
     floatingTables: state === 'unresolved' ? [placement] : [],
@@ -587,6 +588,9 @@ describe('projectBodyOccurrence', () => {
     expect(cell.blocks).toHaveLength(1);
     expect(floating.hostCellId).toBe(cell.id);
     expect(floating.tableId).toBe(floating.child.id);
+    expect(projected.rows[0]?.cells[0]?.floatingSourceBlocks).toEqual([
+      { sourceBlockIndex: 1, tableId: floating.child.id },
+    ]);
     expect(floating.anchorBounds).toEqual(rect(22, 44, 30, 10));
     const graph = validateGraph(projected, sourceGraphOccurrenceIds(retained));
     expect(graph.graphOccurrenceIds).toEqual(new Set([
@@ -753,6 +757,55 @@ describe('projectBodyOccurrence', () => {
     expect(vertical.flowBounds).toEqual(rect(14, 19));
     expect(vertical.lines[0]?.placements[0]).toMatchObject({
       writingMode: 'vertical-rl', origin: { xPt: 15, yPt: 26 },
+    });
+  });
+
+  it('projects acquired anchor host frames in logical points without moving physical frames', () => {
+    const acquired = complexParagraph();
+    const drawing = acquired.drawings[0]!;
+    const withAcquisitionFacts: ParagraphLayout = {
+      ...acquired,
+      drawings: [{
+        ...drawing,
+        anchorLayer: {
+          ...drawing.anchorLayer!,
+          coordinateSpace: 'acquired-anchor-points',
+          normalization: {
+            acquisition: {} as never,
+            pageParity: 'odd',
+            physicalFrames: {
+              page: rect(0, 0, 200, 300),
+              margin: rect(10, 20, 180, 260),
+              column: rect(10, 20, 90, 260),
+            },
+            logicalHostFrames: {
+              paragraph: rect(1, 2, 100, 30),
+              line: rect(3, 4, 80, 12),
+              character: rect(5, 6, 7, 8),
+            },
+          },
+        },
+      }],
+    };
+
+    const projected = projectBodyOccurrence(
+      withAcquisitionFacts,
+      options('anchor:projected', 10, 20),
+    ) as ParagraphLayout;
+    const normalization = projected.drawings[0]?.anchorLayer?.coordinateSpace
+      === 'acquired-anchor-points'
+      ? projected.drawings[0].anchorLayer.normalization
+      : null;
+
+    expect(normalization?.physicalFrames).toEqual(
+      withAcquisitionFacts.drawings[0]?.anchorLayer?.coordinateSpace === 'acquired-anchor-points'
+        ? withAcquisitionFacts.drawings[0].anchorLayer.normalization.physicalFrames
+        : null,
+    );
+    expect(normalization?.logicalHostFrames).toEqual({
+      paragraph: rect(11, 22, 100, 30),
+      line: rect(13, 24, 80, 12),
+      character: rect(15, 26, 7, 8),
     });
   });
 

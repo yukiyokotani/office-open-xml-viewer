@@ -1,5 +1,6 @@
 import { LayoutInvariantError } from './diagnostics.js';
 import { canonicalLogicalToPhysical, mapAffineRect, sameAffine } from './affine.js';
+import { translateRect } from './retained-geometry-translation.js';
 import { orderedPagePaintEntries, pageLayerNodes, PageGraphError } from './page-graph.js';
 import type {
   DeepReadonly,
@@ -151,6 +152,91 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
+function sameRect(left: LayoutRect, right: LayoutRect): boolean {
+  return left.xPt === right.xPt && left.yPt === right.yPt
+    && left.widthPt === right.widthPt && left.heightPt === right.heightPt;
+}
+
+function borderBounds(border: import('./types.js').BorderSegment): LayoutRect {
+  const half = border.widthPt / 2;
+  const left = Math.min(border.from.xPt, border.to.xPt) - half;
+  const top = Math.min(border.from.yPt, border.to.yPt) - half;
+  return {
+    xPt: left,
+    yPt: top,
+    widthPt: Math.max(border.from.xPt, border.to.xPt) + half - left,
+    heightPt: Math.max(border.from.yPt, border.to.yPt) + half - top,
+  };
+}
+
+function drawingCommandBounds(command: DrawingPaintCommand): LayoutRect | null {
+  if (command.kind === 'noop') return null;
+  if (command.kind === 'drawingml-shape') {
+    return {
+      xPt: command.plan.rect.x,
+      yPt: command.plan.rect.y,
+      widthPt: command.plan.rect.w,
+      heightPt: command.plan.rect.h,
+    };
+  }
+  return command.rect;
+}
+
+function retainedPaintBounds(node: PaintNode): readonly LayoutRect[] {
+  if (node.kind === 'drawing') {
+    return [node.inkBounds, ...node.commands.flatMap((command) => {
+      const bounds = drawingCommandBounds(command);
+      return bounds ? [bounds] : [];
+    })];
+  }
+  if (node.kind === 'paragraph') {
+    return [
+      node.inkBounds,
+      ...node.borders.map(borderBounds),
+      ...node.drawings.flatMap(retainedPaintBounds),
+      ...node.textBoxes.flatMap(retainedPaintBounds),
+    ];
+  }
+  if (node.kind === 'textbox') {
+    return [node.inkBounds, ...node.paragraphs.flatMap(retainedPaintBounds)];
+  }
+  if (node.kind === 'table') {
+    const bounds: LayoutRect[] = [node.inkBounds, ...node.borders.map(borderBounds)];
+    for (const row of node.rows) for (const cell of row.cells) {
+      if (cell.background) bounds.push(cell.flowBounds);
+      for (const block of cell.blocks) {
+        const target = {
+          xPt: cell.contentBounds.xPt
+            + (block.layout.kind === 'table' ? block.layout.flowBounds.xPt : 0),
+          yPt: cell.flowBounds.yPt + block.offsetPt
+            + (block.layout.kind === 'table' ? block.layout.flowBounds.yPt : 0),
+        };
+        const delta = {
+          xPt: target.xPt - block.layout.flowBounds.xPt,
+          yPt: target.yPt - block.layout.flowBounds.yPt,
+        };
+        bounds.push(...retainedPaintBounds(block.layout).map((item) => translateRect(item, delta)));
+      }
+    }
+    return bounds;
+  }
+  return [node.inkBounds];
+}
+
+function ownsAnchorStart(cell: unknown, anchorBlockIndex: number): boolean {
+  const ranges = (cell as { contentRanges?: ReadonlyArray<{
+    kind: string;
+    blockIndex: number;
+    lineStart?: number;
+    childFragmentIndex?: number;
+  }> }).contentRanges;
+  return ranges?.some((range) => range.blockIndex === anchorBlockIndex && (
+    range.kind === 'whole'
+    || (range.kind === 'paragraph' && range.lineStart === 0)
+    || (range.kind === 'nested-table' && range.childFragmentIndex === 0)
+  )) ?? false;
+}
+
 function retainUniqueNodeId(
   id: string,
   pageIds: Set<string>,
@@ -193,12 +279,34 @@ function collectRetainedNodeIds(
   }
 }
 
-function requireDrawingGeometry(node: DrawingLayout, path: string): void {
-  if (node.anchorLayer && node.anchorLayer.coordinateSpace !== 'physical-page-points') {
-    throw new LayoutInvariantError(
-      'INVALID_REFERENCE',
-      `${path}.anchorLayer has invalid coordinate space`,
-    );
+interface AnchorOccurrenceOwner {
+  readonly physicalPageIndex: number;
+  readonly flowDomainId: string;
+  readonly regionId: string;
+}
+
+function requireDrawingGeometry(
+  node: DrawingLayout,
+  path: string,
+  owner: AnchorOccurrenceOwner,
+): void {
+  if (node.anchorLayer) {
+    if (node.anchorLayer.coordinateSpace !== 'physical-page-points') {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `${path}.anchorLayer is not a normalized physical anchor`,
+      );
+    }
+    const normalizedFor = node.anchorLayer.normalizedFor;
+    if (!normalizedFor
+      || normalizedFor.physicalPageIndex !== owner.physicalPageIndex
+      || normalizedFor.flowDomainId !== owner.flowDomainId
+      || normalizedFor.regionId !== owner.regionId) {
+      throw new LayoutInvariantError(
+        'INVALID_REFERENCE',
+        `${path}.anchorLayer has invalid normalized anchor occurrence ownership`,
+      );
+    }
   }
   if (node.transform) {
     for (const key of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
@@ -246,6 +354,38 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
       });
     }
   });
+}
+
+function requirePaintNodeDrawingGeometry(
+  node: PaintNode,
+  path: string,
+  owner: AnchorOccurrenceOwner,
+): void {
+  if (node.kind === 'drawing') {
+    requireDrawingGeometry(node, path, owner);
+    return;
+  }
+  if (node.kind === 'paragraph') {
+    node.drawings.forEach((drawing, index) =>
+      requireDrawingGeometry(drawing, `${path}.drawings[${index}]`, owner));
+    node.textBoxes.forEach((textBox, index) =>
+      requirePaintNodeDrawingGeometry(textBox, `${path}.textBoxes[${index}]`, owner));
+    return;
+  }
+  if (node.kind === 'table') {
+    node.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => (
+      cell.blocks.forEach((block, blockIndex) => requirePaintNodeDrawingGeometry(
+        block.layout,
+        `${path}.rows[${rowIndex}].cells[${cellIndex}].blocks[${blockIndex}]`,
+        owner,
+      ))
+    )));
+    return;
+  }
+  if (node.kind === 'textbox') {
+    node.paragraphs.forEach((paragraph, index) =>
+      requirePaintNodeDrawingGeometry(paragraph, `${path}.paragraphs[${index}]`, owner));
+  }
 }
 
 export function assertDocumentLayout(layout: DocumentLayout): void {
@@ -396,22 +536,37 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
         );
       }
       collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
-      if (node.kind === 'table' && node.paintReadyFloatingTables.kind === 'resolved') {
-        node.paintReadyFloatingTables.unresolved.forEach((placement) =>
-          collectRetainedNodeIds(placement.child, retainedNodeIds, documentRetainedNodeIds));
-        node.paintReadyFloatingTables.placements.forEach((placement) =>
-          collectRetainedNodeIds(placement.child, retainedNodeIds, documentRetainedNodeIds));
+      if (node.kind === 'table') {
+        switch (node.paintReadyFloatingTables.kind) {
+          case 'none':
+            break;
+          case 'resolved':
+            node.paintReadyFloatingTables.unresolved.forEach((placement) =>
+              collectRetainedNodeIds(placement.child, retainedNodeIds, documentRetainedNodeIds));
+            node.paintReadyFloatingTables.placements.forEach((placement) =>
+              collectRetainedNodeIds(placement.child, retainedNodeIds, documentRetainedNodeIds));
+            break;
+          default:
+            throw new LayoutInvariantError(
+              'INVALID_REFERENCE',
+              `${node.id} has unknown paint-ready floating-table kind`,
+            );
+        }
       }
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);
       requireFinite(node.advancePt, `${path}.advancePt`);
-      if (node.kind === 'drawing') requireDrawingGeometry(node, path);
       const domain = domains.get(node.flowDomainId);
       if (!domain) {
         throw new LayoutInvariantError('INVALID_REFERENCE', `${node.id} references missing flow domain ${node.flowDomainId}`);
       }
       const region = regionByDomain.get(node.flowDomainId);
+      requirePaintNodeDrawingGeometry(node, path, {
+        physicalPageIndex: page.pageIndex,
+        flowDomainId: node.flowDomainId,
+        regionId: region?.id ?? `page-layer:${entry.layer}`,
+      });
       let physicalBounds = node.flowBounds;
       if (entry.coordinateSpace === 'logical-body-points') {
         if (!region) {
@@ -458,21 +613,81 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
             `${node.id} floating tables have no owning section region`,
           );
         }
-        const cellIds = new Set(node.rows.flatMap((row) => row.cells.map((cell) => cell.id)));
+        const cells = new Map(node.rows.flatMap((row) => row.cells.map((cell) => [cell.id, cell] as const)));
         const occurrences = new Set<string>();
+        const physicalFloatRect = (bounds: LayoutRect): LayoutRect => (
+          floating.coordinateSpace === 'logical-page-points'
+            ? mapAffineRect(region.coordinateSpace.logicalToPhysical, bounds)
+            : bounds
+        );
+        const validateSource = (
+          source: typeof floating.unresolved[number],
+          sourcePath: string,
+        ): void => {
+          const host = cells.get(source.hostCellId);
+          if (source.physicalPageIndex !== page.pageIndex
+            || source.displayPageNumber !== page.pageNumber.displayNumber
+            || source.tableId !== source.child.id
+            || source.child.flowDomainId !== node.flowDomainId
+            || !host
+            || !Number.isInteger(source.sourceBlockIndex)
+            || source.sourceBlockIndex < 0
+            || !Number.isInteger(source.anchorBlockIndex)
+            || source.anchorBlockIndex < 0
+            || source.anchorBlockIndex <= source.sourceBlockIndex) {
+            throw new LayoutInvariantError(
+              'INVALID_REFERENCE',
+              `${sourcePath} has invalid unresolved floating-table ownership`,
+            );
+          }
+          const sourceProof = host.floatingSourceBlocks?.some((proof) => (
+            proof.sourceBlockIndex === source.sourceBlockIndex
+            && proof.tableId === source.tableId
+          )) ?? false;
+          if (!sourceProof) {
+            throw new LayoutInvariantError(
+              'INVALID_REFERENCE',
+              `${sourcePath} has no floating source reference`,
+            );
+          }
+          if (!ownsAnchorStart(host, source.anchorBlockIndex)) {
+            throw new LayoutInvariantError(
+              'INVALID_REFERENCE',
+              `${sourcePath} has no floating anchor reference`,
+            );
+          }
+          requireRect(source.anchorBounds, `${sourcePath}.anchorBounds`);
+          if (source.columnBounds) requireRect(source.columnBounds, `${sourcePath}.columnBounds`);
+          if (!contains(domain.bounds, physicalFloatRect(source.anchorBounds))
+            || (source.columnBounds
+              && !contains(domain.bounds, physicalFloatRect(source.columnBounds)))) {
+            throw new LayoutInvariantError(
+              'FLOW_DOMAIN_INVASION',
+              `${sourcePath} crosses floating-table destination domain`,
+            );
+          }
+        };
         for (const placement of floating.placements) {
           const source = placement.source;
+          validateSource(source, `${placement.occurrenceId}.source`);
+          requirePaintNodeDrawingGeometry(
+            placement.child,
+            `${placement.occurrenceId}.child`,
+            {
+              physicalPageIndex: page.pageIndex,
+              flowDomainId: node.flowDomainId,
+              regionId: region.id,
+            },
+          );
           if (occurrences.has(placement.occurrenceId)
             || placement.occurrenceId !== source.occurrenceId
-            || source.physicalPageIndex !== page.pageIndex
-            || source.displayPageNumber !== page.pageNumber.displayNumber
             || source.tableId !== placement.child.id
             || source.child !== placement.child
             || placement.child.flowDomainId !== node.flowDomainId
             || source.child.flowDomainId !== node.flowDomainId
-            || !cellIds.has(source.hostCellId)
             || placement.xPt !== placement.bounds.xPt
-            || placement.yPt !== placement.bounds.yPt) {
+            || placement.yPt !== placement.bounds.yPt
+            || placement.overlap !== source.overlap) {
             throw new LayoutInvariantError(
               'INVALID_REFERENCE',
               `${placement.occurrenceId} has invalid floating-table destination ownership`,
@@ -481,19 +696,29 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           occurrences.add(placement.occurrenceId);
           requireRect(placement.bounds, `${placement.occurrenceId}.bounds`);
           requireRect(placement.exclusionBounds, `${placement.occurrenceId}.exclusionBounds`);
-          requireRect(source.anchorBounds, `${placement.occurrenceId}.source.anchorBounds`);
-          const physicalPlacement = floating.coordinateSpace === 'logical-page-points'
-            ? mapAffineRect(region.coordinateSpace.logicalToPhysical, placement.bounds)
-            : placement.bounds;
-          const physicalExclusion = floating.coordinateSpace === 'logical-page-points'
-            ? mapAffineRect(region.coordinateSpace.logicalToPhysical, placement.exclusionBounds)
-            : placement.exclusionBounds;
-          const physicalAnchor = floating.coordinateSpace === 'logical-page-points'
-            ? mapAffineRect(region.coordinateSpace.logicalToPhysical, source.anchorBounds)
-            : source.anchorBounds;
+          const placementDelta = {
+            xPt: placement.xPt - placement.child.flowBounds.xPt,
+            yPt: placement.yPt - placement.child.flowBounds.yPt,
+          };
+          const paintedFlow = translateRect(placement.child.flowBounds, placementDelta);
+          const paintedInk = translateRect(placement.child.inkBounds, placementDelta);
+          if (!sameRect(placement.bounds, paintedFlow)) {
+            throw new LayoutInvariantError(
+              'INVALID_GEOMETRY',
+              `${placement.occurrenceId} declared bounds do not match its paint extent`,
+            );
+          }
+          const physicalPlacement = physicalFloatRect(paintedFlow);
+          const physicalInk = physicalFloatRect(paintedInk);
+          const physicalExclusion = physicalFloatRect(placement.exclusionBounds);
+          const physicalPaint = retainedPaintBounds(placement.child).map((bounds) => (
+            physicalFloatRect(translateRect(bounds, placementDelta))
+          ));
           if (!contains(domain.bounds, physicalPlacement)
+            || !contains(domain.bounds, physicalInk)
             || !contains(domain.bounds, physicalExclusion)
-            || !contains(domain.bounds, physicalAnchor)) {
+            || physicalPaint.some((bounds) => !contains(domain.bounds, bounds))
+          ) {
             throw new LayoutInvariantError(
               'FLOW_DOMAIN_INVASION',
               `${placement.occurrenceId} crosses floating-table destination domain`,
@@ -501,11 +726,8 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
           }
         }
         for (const unresolved of floating.unresolved) {
-          if (occurrences.has(unresolved.occurrenceId)
-            || unresolved.physicalPageIndex !== page.pageIndex
-            || unresolved.displayPageNumber !== page.pageNumber.displayNumber
-            || unresolved.child.flowDomainId !== node.flowDomainId
-            || !cellIds.has(unresolved.hostCellId)) {
+          validateSource(unresolved, unresolved.occurrenceId);
+          if (occurrences.has(unresolved.occurrenceId)) {
             throw new LayoutInvariantError(
               'INVALID_REFERENCE',
               `${unresolved.occurrenceId} has invalid unresolved floating-table ownership`,

@@ -8833,19 +8833,10 @@ function renderBodyElements(
     const paragraph = placed.fragment;
     const resources = state.retainedResourcePainter;
     if (!resources) throw new Error('Body paragraph paint requires a retained resource painter');
-    const retainedOnTextRun = state.onTextRun && state.verticalPhys
-      ? (run: DocxTextRunInfo) => {
-          const physical = verticalTextLayerPlacement(
-            run.x, run.y, state.verticalPhys!.cssWidthPx, true,
-          );
-          state.onTextRun!({
-            ...run,
-            x: physical!.left,
-            y: physical!.top,
-            transform: physical!.transform,
-          });
-        }
-      : state.onTextRun;
+    // Retained paint now projects callback geometry through pointToCss, the
+    // same affine used by Canvas. Reapplying the legacy vertical overlay map
+    // here would rotate/translate the callback a second time.
+    const retainedOnTextRun = state.onTextRun;
     paintPlacedParagraphLayout(paragraph, { xPt: placed.xPt, yPt: placed.yPt }, {
       ctx: state.ctx,
       scale: state.scale,

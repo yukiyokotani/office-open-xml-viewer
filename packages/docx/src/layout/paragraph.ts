@@ -43,7 +43,7 @@ import {
   resolveNumberingMarkerGeometry,
   shapeNumberingMarkerText,
 } from './numbering-marker.js';
-import { deepFreezePlainData } from './plain-data.js';
+import { deepFreezePlainData, snapshotPlainData } from './plain-data.js';
 import { retainedBorderTreatment } from './border-treatment.js';
 import {
   translateDrawing,
@@ -67,6 +67,8 @@ import {
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
 import { resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import type { AnchorAcquisitionInput, AnchorAxisChoiceInput, AnchorEdgesInput } from './anchor-input.js';
+import { resizeResolvedAnchorGeometry } from './anchor-derived-geometry.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
 import { paginationFieldDependency } from './pagination-fields.js';
 import {
@@ -1652,11 +1654,177 @@ function resolvedShapeLayoutRect(
   return { xPt, yPt, widthPt: shape.widthPt, heightPt: shape.heightPt };
 }
 
+interface PublicAnchorFacts {
+  readonly widthPt: number;
+  readonly heightPt: number;
+  readonly anchorXPt?: number;
+  readonly anchorYPt?: number;
+  readonly anchorXFromMargin?: boolean;
+  readonly anchorYFromPara?: boolean;
+  readonly anchorXAlign?: string | null;
+  readonly anchorYAlign?: string | null;
+  readonly anchorXRelativeFrom?: string | null;
+  readonly anchorYRelativeFrom?: string | null;
+  readonly pctPosH?: number | null;
+  readonly pctPosV?: number | null;
+  readonly widthPct?: number | null;
+  readonly heightPct?: number | null;
+  readonly widthRelativeFrom?: string | null;
+  readonly heightRelativeFrom?: string | null;
+  readonly distTop?: number;
+  readonly distRight?: number;
+  readonly distBottom?: number;
+  readonly distLeft?: number;
+  readonly wrapMode?: string | null;
+  readonly wrapSide?: string | null;
+  readonly behindDoc?: boolean;
+  readonly allowOverlap?: boolean;
+}
+
+const missingAnchorEdges = (): AnchorEdgesInput => ({
+  topPt: null, topStatus: 'missing', rightPt: null, rightStatus: 'missing',
+  bottomPt: null, bottomStatus: 'missing', leftPt: null, leftStatus: 'missing',
+});
+
+function publicAnchorEdges(run: PublicAnchorFacts): AnchorEdgesInput {
+  const edge = (value: number | undefined) => Number.isFinite(value)
+    ? { value: value as number, status: 'valid' as const }
+    : { value: null, status: 'missing' as const };
+  const top = edge(run.distTop);
+  const right = edge(run.distRight);
+  const bottom = edge(run.distBottom);
+  const left = edge(run.distLeft);
+  return {
+    topPt: top.value, topStatus: top.status,
+    rightPt: right.value, rightStatus: right.status,
+    bottomPt: bottom.value, bottomStatus: bottom.status,
+    leftPt: left.value, leftStatus: left.status,
+  };
+}
+
+function publicAnchorChoice(
+  align: string | null | undefined,
+  percent: number | null | undefined,
+  offset: number | undefined,
+): AnchorAxisChoiceInput {
+  if (align !== undefined && align !== null) return { kind: 'align', value: align };
+  if (percent !== undefined && percent !== null) return { kind: 'percent', fraction: percent };
+  return { kind: 'offset', valuePt: offset ?? 0 };
+}
+
+/** Hand-built public runs do not carry the parser-private wire record. Preserve
+ * their authored positioning choices here so the page adapter can resolve them
+ * against the final occurrence instead of blessing the provisional box. */
+function publicAnchorAcquisition(
+  run: PublicAnchorFacts,
+  occurrenceId: string,
+  relativeHeight: number,
+): AnchorAcquisitionInput {
+  const horizontalFrom = run.anchorXRelativeFrom
+    ?? (run.anchorXFromMargin ? 'margin' : 'page');
+  const verticalFrom = run.anchorYRelativeFrom
+    ?? (run.anchorYFromPara ? 'paragraph' : 'page');
+  const wrapKind = run.wrapMode == null || run.wrapMode === 'none'
+    ? 'none'
+    : run.wrapMode === 'square' || run.wrapMode === 'tight'
+      || run.wrapMode === 'through' || run.wrapMode === 'topAndBottom'
+      ? run.wrapMode
+      : 'invalid';
+  const relativeSize = (
+    fraction: number | null | undefined,
+    relativeFrom: string | null | undefined,
+  ) => fraction === undefined || fraction === null ? null : {
+    relativeFrom: relativeFrom ?? null,
+    relativeFromStatus: relativeFrom == null ? 'missing' as const : 'valid' as const,
+    fraction,
+    fractionStatus: Number.isFinite(fraction) ? 'valid' as const : 'invalid' as const,
+  };
+  return {
+    occurrenceId,
+    simplePosition: {
+      enabled: false, status: 'valid',
+      xPt: null, xStatus: 'missing', yPt: null, yStatus: 'missing',
+    },
+    horizontal: {
+      relativeFrom: horizontalFrom, relativeFromStatus: 'valid',
+      choice: publicAnchorChoice(run.anchorXAlign, run.pctPosH, run.anchorXPt),
+    },
+    vertical: {
+      relativeFrom: verticalFrom, relativeFromStatus: 'valid',
+      choice: publicAnchorChoice(run.anchorYAlign, run.pctPosV, run.anchorYPt),
+    },
+    extent: {
+      widthPt: run.widthPt, heightPt: run.heightPt,
+      widthStatus: Number.isFinite(run.widthPt) ? 'valid' : 'invalid',
+      heightStatus: Number.isFinite(run.heightPt) ? 'valid' : 'invalid',
+    },
+    parentEffectExtent: missingAnchorEdges(),
+    anchorDistances: publicAnchorEdges(run),
+    relativeSize: {
+      horizontal: relativeSize(run.widthPct, run.widthRelativeFrom),
+      vertical: relativeSize(run.heightPct, run.heightRelativeFrom),
+    },
+    wrap: {
+      kind: wrapKind,
+      authoredKinds: run.wrapMode == null ? [] : [run.wrapMode],
+      side: run.wrapSide ?? null,
+      distances: missingAnchorEdges(), effectExtent: null, polygon: null,
+    },
+    behavior: {
+      behindDoc: run.behindDoc ?? false, behindDocStatus: 'valid',
+      relativeHeight, relativeHeightStatus: 'valid',
+      locked: false, lockedStatus: 'valid',
+      allowOverlap: run.allowOverlap ?? true, allowOverlapStatus: 'valid',
+      layoutInCell: true, layoutInCellStatus: 'valid',
+    },
+    group: null,
+  };
+}
+
+function publicAnchorReferenceFrames(
+  lines: readonly LineLayout[],
+  options: ParagraphAcquisitionOptions,
+  paragraphHeightPt: number,
+): AnchorReferenceFramesInput {
+  const paragraph = {
+    xPt: options.placement.paragraphXPt,
+    yPt: options.placement.startYPt,
+    widthPt: options.placement.availableWidthPt,
+    heightPt: Math.max(0, paragraphHeightPt),
+  };
+  const line = lines[0]?.bounds ?? paragraph;
+  const character = lines[0]?.placements[0]?.bounds ?? line;
+  return {
+    page: options.anchorFrames?.page ?? null,
+    margin: options.anchorFrames?.margin ?? null,
+    column: options.anchorFrames?.column ?? null,
+    paragraph, line, character,
+    pageParity: options.anchorFrames?.pageParity ?? null,
+  };
+}
+
+function acquiredAnchorNormalization(
+  acquisition: AnchorAcquisitionInput,
+  frames: AnchorReferenceFramesInput,
+) {
+  return snapshotPlainData({
+    acquisition,
+    pageParity: frames.pageParity,
+    physicalFrames: { page: frames.page, margin: frames.margin, column: frames.column },
+    logicalHostFrames: {
+      paragraph: frames.paragraph as NonNullable<typeof frames.paragraph>,
+      line: frames.line as NonNullable<typeof frames.line>,
+      character: frames.character as NonNullable<typeof frames.character>,
+    },
+  }, 'Anchor normalization facts');
+}
+
 function drawingForShape(
   shape: Extract<ParagraphAcquisitionInput['runs'][number], { type: 'shape' }>,
   rect: LayoutRect,
   options: ParagraphAcquisitionOptions,
   runIndex: number,
+  frames: AnchorReferenceFramesInput,
 ): DrawingLayout {
   const plan = planShapeDrawing(
     shape,
@@ -1672,7 +1840,12 @@ function drawingForShape(
     commands,
     anchorLayer: {
       occurrenceId: `public-shape:${options.id}:${runIndex}`,
-      coordinateSpace: 'physical-page-points',
+      coordinateSpace: 'acquired-anchor-points',
+      normalization: acquiredAnchorNormalization(publicAnchorAcquisition(
+        shape,
+        `public-shape:${options.id}:${runIndex}`,
+        Number.isFinite(shape.zOrder) ? shape.zOrder : runIndex,
+      ), frames),
       behindDoc: shape.behindDoc === true,
       relativeHeight: Number.isFinite(shape.zOrder) ? shape.zOrder : runIndex,
       sourceOrder: runIndex,
@@ -1690,6 +1863,7 @@ function publicAnchoredResourceDrawing(
   run: Extract<ParagraphAcquisitionInput['runs'][number], { type: 'image' | 'chart' }>,
   options: ParagraphAcquisitionOptions,
   runIndex: number,
+  normalizationFrames: AnchorReferenceFramesInput,
 ): DrawingLayout | null {
   if (!run.anchor || run.anchorAcquisitionInput) return null;
   const frames = options.anchorFrames;
@@ -1736,7 +1910,12 @@ function publicAnchoredResourceDrawing(
     }],
     anchorLayer: {
       occurrenceId: `public-anchor:${options.id}:${runIndex}`,
-      coordinateSpace: 'physical-page-points',
+      coordinateSpace: 'acquired-anchor-points',
+      normalization: acquiredAnchorNormalization(publicAnchorAcquisition(
+        run,
+        `public-anchor:${options.id}:${runIndex}`,
+        runIndex,
+      ), normalizationFrames),
       behindDoc: false,
       relativeHeight: runIndex,
       sourceOrder: runIndex,
@@ -1765,60 +1944,6 @@ function rectanglePolygon(rect: LayoutRect): readonly PointPt[] {
     { xPt: rect.xPt + rect.widthPt, yPt: rect.yPt + rect.heightPt },
     { xPt: rect.xPt, yPt: rect.yPt + rect.heightPt },
   ];
-}
-
-function resizeDerivedAnchorRect(
-  derived: LayoutRect,
-  authored: LayoutRect,
-  effective: LayoutRect,
-): LayoutRect {
-  const leftPt = authored.xPt - derived.xPt;
-  const topPt = authored.yPt - derived.yPt;
-  const rightPt = derived.xPt + derived.widthPt - authored.xPt - authored.widthPt;
-  const bottomPt = derived.yPt + derived.heightPt - authored.yPt - authored.heightPt;
-  return {
-    xPt: effective.xPt - leftPt,
-    yPt: effective.yPt - topPt,
-    widthPt: Math.max(0, effective.widthPt + leftPt + rightPt),
-    heightPt: Math.max(0, effective.heightPt + topPt + bottomPt),
-  };
-}
-
-function resizeResolvedAnchorGeometry(
-  result: Extract<AnchorFrameResult, { status: 'resolved' }>,
-  effectiveObjectFrame: LayoutRect,
-): Extract<AnchorFrameResult, { status: 'resolved' }> {
-  const authored = result.geometry.objectFrame;
-  if (
-    authored.xPt === effectiveObjectFrame.xPt
-    && authored.yPt === effectiveObjectFrame.yPt
-    && authored.widthPt === effectiveObjectFrame.widthPt
-    && authored.heightPt === effectiveObjectFrame.heightPt
-  ) return result;
-  const scaleX = authored.widthPt === 0 ? 1 : effectiveObjectFrame.widthPt / authored.widthPt;
-  const scaleY = authored.heightPt === 0 ? 1 : effectiveObjectFrame.heightPt / authored.heightPt;
-  const polygon = result.geometry.wrap.polygon;
-  return {
-    ...result,
-    geometry: {
-      ...result.geometry,
-      objectFrame: effectiveObjectFrame,
-      inkBounds: resizeDerivedAnchorRect(result.geometry.inkBounds, authored, effectiveObjectFrame),
-      wrapBounds: result.geometry.wrapBounds
-        ? resizeDerivedAnchorRect(result.geometry.wrapBounds, authored, effectiveObjectFrame)
-        : null,
-      wrap: {
-        ...result.geometry.wrap,
-        polygon: polygon ? {
-          ...polygon,
-          points: polygon.points.map((point) => ({
-            xPt: effectiveObjectFrame.xPt + (point.xPt - authored.xPt) * scaleX,
-            yPt: effectiveObjectFrame.yPt + (point.yPt - authored.yPt) * scaleY,
-          })),
-        } : null,
-      },
-    },
-  };
 }
 
 function retainedAnchorChildFrame(
@@ -1899,22 +2024,23 @@ function acquireAnchorOccurrence(
   if (!outer?.run.anchorAcquisitionInput) return null;
   const line = lines[hostLineIndex]!;
   const baseFrames = options.anchorFrames;
+  const referenceFrames: AnchorReferenceFramesInput = {
+    page: baseFrames?.page ?? null,
+    margin: baseFrames?.margin ?? null,
+    column: baseFrames?.column ?? null,
+    paragraph: {
+      xPt: options.placement.paragraphXPt,
+      yPt: options.placement.startYPt,
+      widthPt: options.placement.availableWidthPt,
+      heightPt: Math.max(0, paragraphHeightPt),
+    },
+    line: line.bounds,
+    character: host.bounds,
+    pageParity: baseFrames?.pageParity ?? null,
+  };
   const result = resolveAnchorFrame({
     acquisition: outer.run.anchorAcquisitionInput,
-    frames: {
-      page: baseFrames?.page ?? null,
-      margin: baseFrames?.margin ?? null,
-      column: baseFrames?.column ?? null,
-      paragraph: {
-        xPt: options.placement.paragraphXPt,
-        yPt: options.placement.startYPt,
-        widthPt: options.placement.availableWidthPt,
-        heightPt: Math.max(0, paragraphHeightPt),
-      },
-      line: line.bounds,
-      character: host.bounds,
-      pageParity: baseFrames?.pageParity ?? null,
-    },
+    frames: referenceFrames,
   });
   if (result.status !== 'resolved') {
     return { result, textBoxes: [], hostLineIndex, hostRange: host.range };
@@ -2007,7 +2133,11 @@ function acquireAnchorOccurrence(
     commands,
     anchorLayer: {
       occurrenceId,
-      coordinateSpace: 'physical-page-points',
+      coordinateSpace: 'acquired-anchor-points',
+      normalization: acquiredAnchorNormalization(
+        outer.run.anchorAcquisitionInput,
+        referenceFrames,
+      ),
       behindDoc: behavior.behindDoc,
       relativeHeight: behavior.relativeHeight,
       sourceOrder: outer.runIndex,
@@ -2630,7 +2760,16 @@ export function paragraphLayoutFromMeasurement(
       },
     });
     if ((run.type === 'image' || run.type === 'chart') && !options.continuesFromPrevious) {
-      const drawing = publicAnchoredResourceDrawing(run, options, runIndex);
+      const drawing = publicAnchoredResourceDrawing(
+        run,
+        options,
+        runIndex,
+        publicAnchorReferenceFrames(
+          lines,
+          options,
+          measured.contentEndYPt - options.placement.startYPt,
+        ),
+      );
       if (drawing) {
         drawings.push(drawing);
         const firstLine = lines[0];
@@ -2662,7 +2801,17 @@ export function paragraphLayoutFromMeasurement(
         input: run.textBoxInput,
       });
       const shapeRect = textBox?.flowBounds ?? authoredShapeRect;
-      let drawing = drawingForShape(run, shapeRect, options, runIndex);
+      let drawing = drawingForShape(
+        run,
+        shapeRect,
+        options,
+        runIndex,
+        publicAnchorReferenceFrames(
+          lines,
+          options,
+          measured.contentEndYPt - options.placement.startYPt,
+        ),
+      );
       if (textBox) {
         textBoxes.push(textBox);
         drawing = { ...drawing, textBoxIds: [textBoxId] };

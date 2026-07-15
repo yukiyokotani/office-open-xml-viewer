@@ -820,6 +820,12 @@ function materializeFragment(
         return Object.freeze({
           ...cell,
           contentRanges: Object.freeze([...(selection.ranges[cellIndex] ?? [])]),
+          floatingSourceBlocks: Object.freeze(source.floatingTables
+            .filter((occurrence) => occurrence.hostCellId === cell.id)
+            .map((occurrence) => Object.freeze({
+              sourceBlockIndex: occurrence.sourceBlockIndex,
+              tableId: occurrence.tableId,
+            }))),
           ...(verticalMerge === 'continue' && !ownsRestartInFragment
             ? { visualMergeOwnership: 'continuation' as const }
             : {}),

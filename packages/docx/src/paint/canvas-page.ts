@@ -1,7 +1,6 @@
 import type {
   DocumentLayout,
   LayoutRect,
-  Matrix2DData,
   PagePaintNode,
   PaintResourceKind,
 } from '../layout/types.js';
@@ -68,34 +67,19 @@ function paintNode(node: PagePaintNode, context: CanvasPaintContext): void {
     if (!node.paintReadyFloatingTables) {
       throw new Error(`Table ${node.id} has no paint-ready floating-table ownership`);
     }
-    paintTableLayout(
-      node,
-      context,
-      node.paintReadyFloatingTables.kind === 'resolved'
-        ? node.paintReadyFloatingTables.placements
-        : [],
-    );
+    switch (node.paintReadyFloatingTables.kind) {
+      case 'none':
+        paintTableLayout(node, context, []);
+        return;
+      case 'resolved':
+        paintTableLayout(node, context, node.paintReadyFloatingTables.placements);
+        return;
+      default:
+        throw new Error(
+          `Table ${node.id} has unknown paint-ready floating-table kind: ${String((node.paintReadyFloatingTables as { kind?: unknown }).kind)}`,
+        );
+    }
   }
-}
-
-function logicalRunCallback(
-  callback: ((run: TextRunPaintInfo) => void) | undefined,
-  matrix: Matrix2DData | undefined,
-  scale: number,
-): ((run: TextRunPaintInfo) => void) | undefined {
-  if (!callback || !matrix) return callback;
-  if (matrix.a === 1 && matrix.b === 0 && matrix.c === 0
-    && matrix.d === 1 && matrix.e === 0 && matrix.f === 0) return callback;
-  const orientation = matrix.a === 0 && matrix.b === 1
-    && matrix.c === -1 && matrix.d === 0
-    ? 'rotate(90deg)'
-    : `matrix(${matrix.a}, ${matrix.b}, ${matrix.c}, ${matrix.d}, 0, 0)`;
-  return (run) => callback({
-    ...run,
-    x: matrix.a * run.x + matrix.c * run.y + matrix.e * scale,
-    y: matrix.b * run.x + matrix.d * run.y + matrix.f * scale,
-    transform: run.transform ? `${orientation} ${run.transform}` : orientation,
-  });
 }
 
 export async function paintLayoutPage(
@@ -163,8 +147,7 @@ export async function paintLayoutPage(
           },
           textRunTransform: { translateXPt: 0, translateYPt: 0, scale: options.scale },
           ...(options.onTextRun ? {
-            onTextRun: logicalRunCallback(options.onTextRun, logicalToPhysical, options.scale),
-            onPhysicalTextRun: options.onTextRun,
+            onTextRun: options.onTextRun,
           } : {}),
         });
       } finally {

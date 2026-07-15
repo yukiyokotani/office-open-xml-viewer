@@ -528,23 +528,30 @@ describe('assertDocumentLayout', () => {
     const childBounds = rect(340, 120, 40, 30);
     const child = {
       kind: 'table' as const, id: 'nested-table', source: source(11), flowDomainId: 'body',
-      flowBounds: childBounds, inkBounds: childBounds, advancePt: 30, ordinaryFlow: false,
+      flowBounds: { ...childBounds }, inkBounds: { ...childBounds }, advancePt: 30, ordinaryFlow: false,
       columnWidthsPt: [40], rows: [], borders: [],
     };
     const sourcePlacement = {
       kind: 'floating-table-placement' as const,
       occurrenceId: 'float:11', ownership: 'source' as const,
       physicalPageIndex: 0, displayPageNumber: 7,
-      hostCellId: 'root:cell', sourceBlockIndex: 0, anchorBlockIndex: 0,
+      hostCellId: 'root:cell', sourceBlockIndex: 0, anchorBlockIndex: 1,
       tableId: child.id, overlap: 'never' as const, positioning: {} as never,
-      anchorBounds: childBounds, child,
+      anchorBounds: { ...childBounds }, child,
     };
     const placement = {
       kind: 'resolved-floating-table-placement' as const,
       occurrenceId: sourcePlacement.occurrenceId,
       xPt: childBounds.xPt, yPt: childBounds.yPt,
-      bounds: childBounds, exclusionBounds: rect(338, 118, 44, 34),
+      bounds: { ...childBounds }, exclusionBounds: rect(338, 118, 44, 34),
       overlap: 'never' as const, child, source: sourcePlacement,
+    };
+    const anchorParagraph = {
+      kind: 'paragraph' as const, id: 'root:anchor', source: source(12), flowDomainId: 'body',
+      flowBounds: rect(322, 92, 40, 20), inkBounds: rect(322, 92, 40, 20),
+      advancePt: 20, ordinaryFlow: true, spacing: { beforePt: 0, afterPt: 0 },
+      contextualSpacing: false, lines: [], borders: [], resources: [], drawings: [],
+      textBoxes: [], events: [], exclusions: [],
     };
     const root = {
       kind: 'table' as const, id: 'root-table', source: source(10), flowDomainId: 'body',
@@ -558,7 +565,10 @@ describe('assertDocumentLayout', () => {
           kind: 'table-cell' as const, id: 'root:cell', source: source(10), flowDomainId: 'body',
           flowBounds: rect(320, 90, 100, 80), inkBounds: rect(320, 90, 100, 80),
           contentBounds: rect(322, 92, 96, 76), advancePt: 80, ordinaryFlow: true,
-          verticalMerge: 'none' as const, vAlign: 'top' as const, blocks: [],
+          verticalMerge: 'none' as const, vAlign: 'top' as const,
+          blocks: [{ layout: anchorParagraph, offsetPt: 0, advancePt: 20 }],
+          contentRanges: [{ kind: 'whole' as const, blockIndex: 1 }],
+          floatingSourceBlocks: [{ sourceBlockIndex: 0, tableId: child.id }],
         }],
       }],
       paintReadyFloatingTables: {
@@ -596,6 +606,14 @@ describe('assertDocumentLayout', () => {
       }],
     };
     expect(() => assertDocumentLayout(layout)).not.toThrow();
+    const unresolvedLayout = structuredClone(layout) as any;
+    {
+      const floating = unresolvedLayout.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:valid';
+    }
+    expect(() => assertDocumentLayout(unresolvedLayout)).not.toThrow();
 
     const mutate = (change: (copy: any) => void, error: RegExp): void => {
       const copy = structuredClone(layout);
@@ -604,16 +622,98 @@ describe('assertDocumentLayout', () => {
     };
     mutate((copy) => { delete copy.pages[0].layers.body[0].paintReadyFloatingTables; }, /paint-ready floating-table ownership/);
     mutate((copy) => { delete copy.pages[0].layers.body[0].paintReadyFloatingTables.coordinateSpace; }, /coordinate space/);
-    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.physicalPageIndex = 2; }, /destination ownership/);
-    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.displayPageNumber = 6; }, /destination ownership/);
-    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].child.flowDomainId = 'other'; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.physicalPageIndex = 2; }, /destination ownership|invalid unresolved/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.displayPageNumber = 6; }, /destination ownership|invalid unresolved/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].child.flowDomainId = 'other'; }, /destination ownership|invalid unresolved/);
     mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].occurrenceId = 'other'; }, /destination ownership/);
     mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].bounds.xPt = 100; }, /destination ownership|destination domain/);
     mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].exclusionBounds.xPt = 100; }, /destination domain/);
-    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.hostCellId = 'missing'; }, /destination ownership/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.hostCellId = 'missing'; }, /destination ownership|invalid unresolved/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.kind = 'future'; }, /unknown paint-ready floating-table kind/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].bounds.widthPt = 39; }, /paint extent/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].bounds.heightPt = 29; }, /paint extent/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].child.inkBounds.widthPt = 400; }, /paint extent|destination domain/);
+    mutate((copy) => {
+      copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].child.borders = [{
+        edge: 'top', from: { xPt: 10, yPt: 10 }, to: { xPt: 20, yPt: 10 },
+        color: '#000000', widthPt: 1, authoredStyle: 'single', style: 'solid',
+      }];
+    }, /destination domain/);
+    mutate((copy) => { copy.pages[0].layers.body[0].rows[0].cells[0].floatingSourceBlocks = []; }, /floating source reference/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].tableId = 'wrong';
+    }, /invalid unresolved/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].anchorBlockIndex = 2;
+    }, /floating anchor reference/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].anchorBounds.widthPt = -1;
+    }, /negative extent/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].anchorBounds.xPt = 100;
+    }, /destination domain/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].sourceBlockIndex = 0.5;
+    }, /invalid unresolved/);
+    mutate((copy) => {
+      const floating = copy.pages[0].layers.body[0].paintReadyFloatingTables;
+      floating.unresolved = [structuredClone(floating.placements[0].source)];
+      floating.placements = [];
+      floating.unresolved[0].occurrenceId = 'unresolved:0';
+      floating.unresolved[0].columnBounds = rect(0, 0, 20, 20);
+    }, /destination domain/);
+    mutate((copy) => {
+      copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].source.anchorBlockIndex = 2;
+    }, /floating anchor reference/);
+    mutate((copy) => { copy.pages[0].layers.body[0].paintReadyFloatingTables.placements[0].overlap = 'overlap'; }, /destination ownership/);
     mutate((copy) => {
       copy.pages[0].layers.paintOrder[0].coordinateSpace = 'logical-body-points';
     }, /mismatched floating-table coordinate space/);
+  });
+
+  it('admits only anchors normalized for the containing page occurrence', () => {
+    const anchored: DrawingLayout = {
+      ...drawing('anchor-physical', rect(100, 120, 20, 10), { ordinaryFlow: false }),
+      anchorLayer: {
+        occurrenceId: 'anchor:physical', behindDoc: false, relativeHeight: 1, sourceOrder: 0,
+        horizontalOwnership: 'host', verticalOwnership: 'host',
+        coordinateSpace: 'physical-page-points',
+        normalizedFor: { physicalPageIndex: 0, flowDomainId: 'body', regionId: 'region:0' },
+      },
+    };
+    expect(() => assertDocumentLayout(documentWith([anchored]))).not.toThrow();
+
+    const missing = structuredClone(documentWith([anchored])) as any;
+    delete missing.pages[0].layers.body[0].anchorLayer.normalizedFor;
+    expect(() => assertDocumentLayout(missing)).toThrow(/normalized anchor occurrence/);
+
+    const wrongPage = structuredClone(documentWith([anchored])) as any;
+    wrongPage.pages[0].layers.body[0].anchorLayer.normalizedFor.physicalPageIndex = 2;
+    expect(() => assertDocumentLayout(wrongPage)).toThrow(/normalized anchor occurrence/);
+
+    const acquired = structuredClone(documentWith([anchored])) as any;
+    acquired.pages[0].layers.body[0].anchorLayer.coordinateSpace = 'acquired-anchor-points';
+    expect(() => assertDocumentLayout(acquired)).toThrow(/normalized physical anchor/);
   });
 });
 

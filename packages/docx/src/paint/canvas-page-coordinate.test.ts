@@ -386,6 +386,141 @@ describe('canonical page coordinate paint', () => {
     expect(partialFills.every((fill) => fill.widthPt > 0 && fill.heightPt > 0)).toBe(true);
   });
 
+  it('projects normalized anchored text callbacks from the same physical affine as Canvas', async () => {
+    const ownershipPairs = [
+      ['page-page', 'page', 'page', rect(250, 30, 18, 8)],
+      ['page-host', 'page', 'host', rect(250, 50, 18, 8)],
+      ['host-page', 'host', 'page', rect(250, 70, 18, 8)],
+      ['host-host', 'host', 'host', rect(250, 90, 18, 8)],
+    ] as const;
+    const drawings: DrawingLayout[] = [];
+    const textBoxes: TextBoxLayout[] = [];
+    for (const [id, horizontalOwnership, verticalOwnership, bounds] of ownershipPairs) {
+      const textBoxId = `box:${id}`;
+      drawings.push({
+        kind: 'drawing', id: `drawing:${id}`, source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+        flowDomainId: 'body', ordinaryFlow: false, flowBounds: bounds, inkBounds: bounds,
+        advancePt: 0, commands: [{ kind: 'fill-rect', rect: bounds, fill: `#${id.length}00000` }],
+        textBoxIds: [textBoxId],
+        anchorLayer: {
+          occurrenceId: `anchor:${id}`, behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+          coordinateSpace: 'physical-page-points', horizontalOwnership, verticalOwnership,
+        },
+      });
+      textBoxes.push({
+        kind: 'textbox', id: textBoxId, source: { story: 'textbox', storyInstance: textBoxId, path: [0] },
+        flowDomainId: `textbox:${id}`, ordinaryFlow: false, flowBounds: bounds, inkBounds: bounds,
+        advancePt: 0, paragraphs: [paragraph(id, `textbox:${id}`, bounds)],
+        writingMode: 'horizontal-tb', insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      });
+    }
+    const host = {
+      ...paragraph('callback-host', 'body', rect(11, 17, 23, 7), { drawings }),
+      textBoxes,
+    };
+    const runs: Array<{ text: string; x: number; y: number }> = [];
+    await paintLayoutPage(
+      documentFor([{ id: 'region', domain: 'body', mode: 'vertical-rl', node: host }]),
+      0,
+      canvasTarget().target,
+      { scale: 2, dpr: 3, onTextRun: (run) => runs.push(run) },
+    );
+
+    expect(runs.filter((run) => ownershipPairs.some(([id]) => id === run.text))).toEqual(
+      ownershipPairs.map(([text, , , bounds]) => ({
+        text, x: bounds.xPt * 2, y: bounds.yPt * 2,
+        w: bounds.widthPt * 2, h: bounds.heightPt * 2,
+        fontSize: 20, font: expect.any(String),
+      })),
+    );
+  });
+
+  it('cancels ancestor table translation for normalized physical anchor callbacks', async () => {
+    const physical = rect(250, 30, 18, 8);
+    const textBoxId = 'translated-anchor-box';
+    const drawing: DrawingLayout = {
+      kind: 'drawing', id: 'translated-anchor', source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+      flowDomainId: 'body', ordinaryFlow: false, flowBounds: physical, inkBounds: physical,
+      advancePt: 0, commands: [], textBoxIds: [textBoxId],
+      anchorLayer: {
+        occurrenceId: 'anchor:translated', behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+        coordinateSpace: 'physical-page-points', horizontalOwnership: 'host', verticalOwnership: 'host',
+      },
+    };
+    const child = {
+      ...paragraph('table-child', 'body', rect(5, 7, 20, 8), { drawings: [drawing] }),
+      textBoxes: [{
+        kind: 'textbox' as const, id: textBoxId, source: drawing.source,
+        flowDomainId: 'textbox:translated', ordinaryFlow: false,
+        flowBounds: physical, inkBounds: physical, advancePt: 0,
+        paragraphs: [paragraph('physical-run', 'textbox:translated', physical)],
+        writingMode: 'horizontal-tb' as const,
+        insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      }],
+    };
+    const node = table('translated-callback-table', 'body', rect(50, 70, 80, 30), child);
+    const runs: unknown[] = [];
+    await paintLayoutPage(
+      documentFor([{ id: 'region', domain: 'body', mode: 'vertical-rl', node }]),
+      0,
+      canvasTarget().target,
+      { scale: 2, dpr: 3, onTextRun: (run) => runs.push(run) },
+    );
+
+    expect(runs).toContainEqual(expect.objectContaining({
+      text: 'physical-run', x: 500, y: 60, w: 36, h: 16, fontSize: 20,
+    }));
+  });
+
+  it('composes a later vertical text-box turn into a normalized physical anchor callback', async () => {
+    const physical = rect(250, 30, 18, 8);
+    const local = rect(-4, -9, 8, 18);
+    const textBoxId = 'turned-anchor-box';
+    const drawing: DrawingLayout = {
+      kind: 'drawing', id: 'turned-anchor', source: { story: 'body', storyInstance: 'body', path: [0, 1] },
+      flowDomainId: 'outer-textbox', ordinaryFlow: false, flowBounds: physical, inkBounds: physical,
+      advancePt: 0, commands: [], textBoxIds: [textBoxId],
+      anchorLayer: {
+        occurrenceId: 'anchor:turned', behindDoc: true, relativeHeight: 1, sourceOrder: 0,
+        coordinateSpace: 'physical-page-points', horizontalOwnership: 'host', verticalOwnership: 'host',
+      },
+    };
+    const anchoredParagraph = {
+      ...paragraph('outer-child', 'outer-textbox', rect(0, 0, 20, 8), { drawings: [drawing] }),
+      textBoxes: [{
+        kind: 'textbox' as const, id: textBoxId, source: drawing.source,
+        flowDomainId: 'inner-textbox', ordinaryFlow: false,
+        flowBounds: physical, inkBounds: physical, advancePt: 0,
+        paragraphs: [paragraph('turned-run', 'inner-textbox', local)],
+        writingMode: 'vertical-rl' as const, verticalMode: 'vert' as const,
+        insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      }],
+    };
+    const outerTextBox: TextBoxLayout = {
+      kind: 'textbox', id: 'outer-turned', source: drawing.source,
+      flowDomainId: 'outer-textbox', ordinaryFlow: false,
+      flowBounds: rect(70, 90, 40, 20), inkBounds: rect(70, 90, 40, 20), advancePt: 0,
+      paragraphs: [anchoredParagraph], writingMode: 'vertical-rl', verticalMode: 'vert',
+      insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+    };
+    const host = {
+      ...paragraph('turned-host', 'body', rect(20, 40, 30, 10)),
+      textBoxes: [outerTextBox],
+    };
+    const runs: unknown[] = [];
+    await paintLayoutPage(
+      documentFor([{ id: 'region', domain: 'body', mode: 'vertical-rl', node: host }]),
+      0,
+      canvasTarget().target,
+      { scale: 2, dpr: 3, onTextRun: (run) => runs.push(run) },
+    );
+
+    expect(runs).toContainEqual(expect.objectContaining({
+      text: 'turned-run', x: 536, y: 60, w: 16, h: 36,
+      fontSize: 20, transform: 'rotate(90deg)',
+    }));
+  });
+
   it('re-enters the physical page below translated table and vertical text-box frames', async () => {
     const physical = rect(250, 30, 9, 5);
     const pageDrawing = (id: string, fill: string): DrawingLayout => ({
@@ -441,7 +576,7 @@ describe('canonical page coordinate paint', () => {
       const source = {
         kind: 'floating-table-placement' as const, occurrenceId, ownership: 'source' as const,
         physicalPageIndex: 1, displayPageNumber: 7, hostCellId: 'outer:cell',
-        sourceBlockIndex, anchorBlockIndex: sourceBlockIndex, tableId: child.id, overlap: 'never' as const,
+        sourceBlockIndex, anchorBlockIndex: sourceBlockIndex + 1, tableId: child.id, overlap: 'never' as const,
         positioning: {} as never, anchorBounds: child.flowBounds, child,
       };
       return {
@@ -454,6 +589,20 @@ describe('canonical page coordinate paint', () => {
     const resolvedSecond = placement('float:1', second, rect(243, 62, 29, 16), 1);
     const fragment = {
       ...outer,
+      rows: outer.rows.map((row) => ({
+        ...row,
+        cells: row.cells.map((cell) => ({
+          ...cell,
+          contentRanges: [
+            { kind: 'whole' as const, blockIndex: 1 },
+            { kind: 'whole' as const, blockIndex: 2 },
+          ],
+          floatingSourceBlocks: [
+            { sourceBlockIndex: 0, tableId: nested.id },
+            { sourceBlockIndex: 1, tableId: second.id },
+          ],
+        })),
+      })),
       paintReadyFloatingTables: {
         kind: 'resolved' as const,
         coordinateSpace: 'upright-physical-page-points' as const,
@@ -501,5 +650,16 @@ describe('canonical page coordinate paint', () => {
     });
     expect(resolved.child.flowDomainId).toBe(domain);
     expect(resolvedSecond.source.sourceBlockIndex).toBe(1);
+  });
+
+  it('rejects an unknown paint-ready floating-table discriminant before direct paint', async () => {
+    const node = table('unknown-float-state', 'body', rect(100, 40, 80, 30));
+    (node as any).paintReadyFloatingTables = { kind: 'future' };
+    await expect(paintLayoutPage(
+      documentFor([{ id: 'region', domain: 'body', mode: 'horizontal-tb', node }]),
+      0,
+      canvasTarget().target,
+      { scale: 1, dpr: 1 },
+    )).rejects.toThrow(/unknown paint-ready floating-table kind/);
   });
 });

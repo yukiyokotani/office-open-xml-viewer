@@ -1,9 +1,11 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import { canonicalLogicalToPhysical, mapAffineRect } from './affine.js';
+import { normalizePagePaintNodeAnchors } from './anchor-page-normalization.js';
 import { PAGE_LAYER_IDS, type PageLayerNode } from './page-graph.js';
 import type {
   DeepReadonly,
   FlowDomain,
+  LayoutRect,
   LayoutPage,
   PageBookmarkStart,
   PageLayers,
@@ -180,6 +182,59 @@ function buildLayers(entries: readonly PageLayerNode[]): PageLayers {
   };
 }
 
+function marginFrame(
+  page: PhysicalPageInput,
+  section: DeepReadonly<SectionLayoutContext>,
+): LayoutRect {
+  const geometry = section.geometry;
+  return {
+    xPt: geometry.marginLeft,
+    yPt: geometry.marginTop,
+    widthPt: Math.max(0, page.widthPt - geometry.marginLeft - geometry.marginRight),
+    heightPt: Math.max(0, page.heightPt - geometry.marginTop - geometry.marginBottom),
+  };
+}
+
+function normalizePaintAnchors(
+  input: LayoutPageFactoryInput,
+  regions: readonly PageSectionRegion[],
+  domains: readonly FlowDomain[],
+): readonly PageLayerNode[] {
+  const regionByDomain = new Map(regions.flatMap((region) => (
+    region.flowDomainIds.map((domainId) => [domainId, region] as const)
+  )));
+  const domainById = new Map(domains.map((domain) => [domain.id, domain] as const));
+  const pageFrame = {
+    xPt: 0, yPt: 0,
+    widthPt: input.physicalPage.widthPt,
+    heightPt: input.physicalPage.heightPt,
+  };
+  return input.paint.map((entry) => {
+    const region = regionByDomain.get(entry.node.flowDomainId);
+    const section = region?.section ?? input.section;
+    return {
+      ...entry,
+      node: normalizePagePaintNodeAnchors(entry.node, {
+        currentToPage: entry.coordinateSpace === 'logical-body-points'
+          ? region?.coordinateSpace.logicalToPhysical
+            ?? canonicalLogicalToPhysical('horizontal-tb', input.physicalPage.widthPt)
+          : canonicalLogicalToPhysical('horizontal-tb', input.physicalPage.widthPt),
+        normalizedFor: {
+          physicalPageIndex: input.pageIndex,
+          flowDomainId: entry.node.flowDomainId,
+          regionId: region?.id ?? `page-layer:${entry.layer}`,
+        },
+        destinationFrames: {
+          page: pageFrame,
+          margin: marginFrame(input.physicalPage, section),
+          column: domainById.get(entry.node.flowDomainId)?.bounds ?? null,
+          pageParity: (input.pageIndex + 1) % 2 === 0 ? 'even' : 'odd',
+        },
+      }) as PagePaintNode,
+    };
+  });
+}
+
 function visitBookmarkParagraphs(
   node: PaintNode,
   visit: (paragraph: ParagraphLayout) => void,
@@ -253,6 +308,7 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     input.physicalPage,
     input.sectionRegions,
   );
+  const paint = normalizePaintAnchors(input, regions, domains);
   return {
     pageIndex: input.pageIndex,
     geometry: pageGeometry(input.physicalPage),
@@ -261,13 +317,13 @@ export function createLayoutPage(input: LayoutPageFactoryInput): LayoutPage {
     sectionOccurrenceId: input.sectionOccurrenceId,
     parityBlank: false,
     bookmarkStarts: bookmarkStarts(
-      input.paint,
+      paint,
       input.sectionOccurrenceId,
       sectionByDomain,
     ),
     pageNumber: input.pageNumber,
     sectionRegions: regions,
-    layers: buildLayers(input.paint),
+    layers: buildLayers(paint),
     readingOrder: input.readingOrder.map((node) => node.id),
   };
 }

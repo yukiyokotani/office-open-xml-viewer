@@ -7,15 +7,25 @@ import {
   sliceParagraphLayout,
   translateParagraphLayout,
 } from './paragraph.js';
-import type { AcquiredParagraphLayoutInput, TextPlacement } from './types.js';
+import type {
+  AcquiredParagraphLayoutInput,
+  ParagraphLayout,
+  TextBoxLayout,
+  TextPlacement,
+} from './types.js';
 import { stableFingerprint } from './fingerprint.js';
-import type { ParagraphLayoutContext } from '../layout-context.js';
+import type { ParagraphLayoutContext, SectionLayoutContext } from '../layout-context.js';
 import type { LayoutImageSeg, LayoutMathSeg, LayoutTabSeg, LayoutTextSeg } from '../line-layout.js';
 import type { MeasuredParagraph } from '../paragraph-measure.js';
 import { measureParagraph } from '../paragraph-measure.js';
 import { createLayoutServices } from '../renderer.js';
 import type { DocParagraph } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
+import { projectBodyOccurrence } from './occurrence-projection.js';
+import { normalizePagePaintNodeAnchors } from './anchor-page-normalization.js';
+import { canonicalLogicalToPhysical } from './affine.js';
+import { bodyFlowDomainId, createLayoutPage } from './page-factory.js';
+import { resolveAnchorFrame } from './anchor-frame.js';
 
 const fontRoute = {
   familyList: '"Test Sans"', scope: 'native', fingerprint: 'test-font-route',
@@ -669,12 +679,212 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.drawings[0]).toMatchObject({
       flowBounds: { xPt: 12, yPt: 13, widthPt: 20, heightPt: 10 },
       commands: [{ kind: 'resource', resourceKind: 'image' }],
-      anchorLayer: { behindDoc: false, relativeHeight: 7, sourceOrder: 1 },
+      anchorLayer: {
+        behindDoc: false, relativeHeight: 7, sourceOrder: 1,
+        coordinateSpace: 'acquired-anchor-points',
+        normalization: {
+          physicalFrames: {
+            page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+            margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+            column: { xPt: 10, yPt: 20, widthPt: 90, heightPt: 260 },
+          },
+          logicalHostFrames: {
+            paragraph: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 12 },
+            line: { xPt: 10, yPt: 10, widthPt: 0, heightPt: 12 },
+            character: { xPt: 10, yPt: 10, widthPt: 0, heightPt: 12 },
+          },
+        },
+      },
     });
     expect(node.exclusions[0]).toMatchObject({
       wrap: 'square', bounds: { xPt: 12, yPt: 13, widthPt: 20, heightPt: 10 },
     });
   });
+
+  it('keeps public fallback anchors acquired until destination-page normalization', () => {
+    const publicParagraph = {
+      ...paragraph,
+      runs: [{
+        type: 'shape', widthPt: 20, heightPt: 10,
+        anchorXPt: 4, anchorYPt: 5, anchorXFromMargin: false, anchorYFromPara: true,
+        anchorXRelativeFrom: 'page', anchorYRelativeFrom: 'paragraph',
+        anchorXAlign: 'center', pctPosV: 0.25,
+        zOrder: 9, presetGeometry: 'rect', subpaths: [], fill: null, stroke: null,
+      }, {
+        type: 'image', imagePath: 'word/media/public.png', mimeType: 'image/png',
+        widthPt: 12, heightPt: 8, anchor: true,
+        anchorXPt: 3, anchorYPt: 7, anchorXFromMargin: true, anchorYFromPara: false,
+        anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'page',
+      }],
+    } as unknown as DocParagraph;
+    const line = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+    const node = projectMeasuredSegment(publicParagraph, line, acquisitionContext, undefined, {
+      page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+      margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+      column: { xPt: 10, yPt: 20, widthPt: 90, heightPt: 260 },
+      pageParity: 'odd',
+    });
+
+    expect(node.drawings).toHaveLength(2);
+    expect(node.drawings[0]?.anchorLayer).toMatchObject({
+      coordinateSpace: 'acquired-anchor-points',
+      normalization: {
+        acquisition: {
+          horizontal: { relativeFrom: 'page', choice: { kind: 'align', value: 'center' } },
+          vertical: { relativeFrom: 'paragraph', choice: { kind: 'percent', fraction: 0.25 } },
+        },
+      },
+    });
+    expect(node.drawings[1]?.anchorLayer).toMatchObject({
+      coordinateSpace: 'acquired-anchor-points',
+      normalization: {
+        acquisition: {
+          horizontal: { relativeFrom: 'margin', choice: { kind: 'offset', valuePt: 3 } },
+          vertical: { relativeFrom: 'page', choice: { kind: 'offset', valuePt: 7 } },
+        },
+      },
+    });
+  });
+
+  it.each([
+    ['page/page', 'page', 'page', 12, 13],
+    ['page/host', 'page', 'line', 12, 23],
+    ['host/page', 'character', 'page', 160, 13],
+    ['host/host', 'character', 'line', 160, 23],
+  ] as const)(
+    'normalizes projected vertical %s anchor acquisition into physical page points',
+    (_name, horizontalFrame, verticalFrame, expectedX, expectedY) => {
+      const occurrenceId = `anchor:${horizontalFrame}:${verticalFrame}`;
+      const base = retainedAnchor(occurrenceId);
+      const anchored = retainedAnchor(occurrenceId, {
+        horizontal: horizontalFrame === 'page'
+          ? { relativeFrom: 'page', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 12 } }
+          : { relativeFrom: 'character', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 2 } },
+        vertical: verticalFrame === 'page'
+          ? { relativeFrom: 'page', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 13 } }
+          : { relativeFrom: 'line', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 3 } },
+        behavior: base.behavior,
+      });
+      const anchorParagraph = {
+        ...paragraph,
+        runs: [
+          { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+          {
+            type: 'image', imagePath: 'word/media/anchor.png', mimeType: 'image/png',
+            widthPt: 20, heightPt: 10, anchor: true, anchorAcquisitionInput: anchored,
+          },
+        ],
+      } as unknown as DocParagraph;
+      const host = {
+        text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+        fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+      } as unknown as LayoutTextSeg;
+      const acquired = projectMeasuredSegment(anchorParagraph, host, acquisitionContext, undefined, {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+        margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+        column: { xPt: 10, yPt: 20, widthPt: 90, heightPt: 260 },
+        pageParity: 'odd',
+      });
+      const acquiredDrawing = acquired.drawings[0]!;
+      const attachedTextBox: TextBoxLayout = {
+        kind: 'textbox', id: `textbox:${occurrenceId}`, source: acquiredDrawing.source,
+        flowDomainId: acquired.flowDomainId, ordinaryFlow: false,
+        flowBounds: acquiredDrawing.flowBounds, inkBounds: acquiredDrawing.inkBounds,
+        advancePt: 0, paragraphs: [], writingMode: 'horizontal-tb',
+        insets: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      };
+      const acquiredWithTextBox: ParagraphLayout = {
+        ...acquired,
+        drawings: [{ ...acquiredDrawing, textBoxIds: [attachedTextBox.id] }],
+        textBoxes: [attachedTextBox],
+      };
+      const projected = projectBodyOccurrence(acquiredWithTextBox, {
+        occurrenceId: `destination:${occurrenceId}`,
+        destination: {
+          coordinateSpace: 'logical-body-points',
+          flowDomainId: bodyFlowDomainId(1, 'vertical', 0),
+          translation: { xPt: 10, yPt: 20 },
+        },
+      });
+      const normalized = normalizePagePaintNodeAnchors(projected, {
+        currentToPage: canonicalLogicalToPhysical('vertical-rl', 200),
+        normalizedFor: {
+          physicalPageIndex: 1,
+          flowDomainId: bodyFlowDomainId(1, 'vertical', 0),
+          regionId: 'vertical',
+        },
+        destinationFrames: {
+          page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+          margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+          column: { xPt: 100, yPt: 0, widthPt: 100, heightPt: 300 },
+          pageParity: 'even',
+        },
+      });
+      const drawing = normalized.kind === 'paragraph' ? normalized.drawings[0] : undefined;
+
+      expect(drawing?.anchorLayer?.coordinateSpace).toBe('physical-page-points');
+      expect(drawing?.flowBounds).toEqual({
+        xPt: expectedX, yPt: expectedY, widthPt: 20, heightPt: 10,
+      });
+      expect(drawing?.commands[0]).toMatchObject({
+        rect: { xPt: expectedX, yPt: expectedY, widthPt: 20, heightPt: 10 },
+      });
+      if (normalized.kind !== 'paragraph') throw new Error('expected paragraph');
+      expect(normalized.textBoxes[0]?.flowBounds).toEqual({
+        xPt: expectedX, yPt: expectedY, widthPt: 20, heightPt: 10,
+      });
+      expect(normalized.exclusions[0]?.bounds).toEqual({
+        xPt: expectedX, yPt: expectedY, widthPt: 20, heightPt: 10,
+      });
+      expect(normalized.exclusions[0]?.polygon).toEqual([
+        { xPt: expectedX, yPt: expectedY },
+        { xPt: expectedX + 20, yPt: expectedY },
+        { xPt: expectedX + 20, yPt: expectedY + 10 },
+        { xPt: expectedX, yPt: expectedY + 10 },
+      ]);
+      expect(normalized.anchorFrames?.[0]).toMatchObject({
+        status: 'resolved',
+        geometry: { objectFrame: { xPt: expectedX, yPt: expectedY, widthPt: 20, heightPt: 10 } },
+      });
+
+      const section = {
+        geometry: {
+          pageWidth: 200, pageHeight: 300,
+          marginTop: 20, marginRight: 10, marginBottom: 20, marginLeft: 10,
+          headerDistance: 10, footerDistance: 10,
+        },
+        columns: [{ xPt: 0, wPt: 300 }],
+        grid: { kind: 'none', linePitchPt: null, charSpacePt: null },
+        textDirection: 'tbRl', verticalAlignment: 'top',
+      } as SectionLayoutContext;
+      const page = createLayoutPage({
+        pageIndex: 1,
+        physicalPage: { widthPt: 200, heightPt: 300, contentTopPt: 0, contentBottomPt: 300 },
+        sectionOccurrenceId: 'section:vertical', section,
+        sectionRegions: [{
+          id: 'vertical', sectionOccurrenceId: 'section:vertical', section,
+          writingMode: 'vertical-rl', blockStartPt: 0, blockEndPt: 200,
+          columns: [{ inlineStartPt: 0, inlineExtentPt: 300 }],
+        }],
+        paint: [{
+          layer: 'body', node: projected, coordinateSpace: 'logical-body-points',
+          logicalBlock: {
+            blockStartPt: projected.flowBounds.yPt,
+            blockExtentPt: projected.flowBounds.heightPt,
+          },
+        }],
+        readingOrder: [projected],
+        pageNumber: { displayNumber: 2, format: 'decimal', sectionOccurrenceId: 'section:vertical' },
+      });
+      const admitted = page.layers.body[0];
+      const admittedDrawing = admitted?.kind === 'paragraph' ? admitted.drawings[0] : undefined;
+      expect(admittedDrawing?.anchorLayer?.coordinateSpace).toBe('physical-page-points');
+      expect(admittedDrawing?.flowBounds).toEqual(drawing?.flowBounds);
+    },
+  );
 
   it.each([
     ['missing behindDoc', { behindDoc: null, behindDocStatus: 'missing' }, 'behavior.behindDoc'],
@@ -801,6 +1011,159 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.exclusions[0]).toMatchObject({
       bounds: { xPt: 12, yPt: 13, widthPt: 40, heightPt: 30 },
     });
+  });
+
+  it('rebuilds a complete relative-size anchor transaction for destination extents', () => {
+    const occurrenceId = 'anchor:relative-size-transaction';
+    const validEdges = {
+      topPt: 1, topStatus: 'valid', rightPt: 2, rightStatus: 'valid',
+      bottomPt: 3, bottomStatus: 'valid', leftPt: 4, leftStatus: 'valid',
+    } as const;
+    const relativeSize = {
+      horizontal: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        fraction: 0.2, fractionStatus: 'valid',
+      },
+      vertical: {
+        relativeFrom: 'page', relativeFromStatus: 'valid',
+        fraction: 0.1, fractionStatus: 'valid',
+      },
+    } as const;
+    const group = {
+      childSourceId: 'child-0', sourceIndex: 0, sourceCount: 2,
+      transformChain: [], childTransform: null,
+      resolvedChildFrame: {
+        offsetXPt: 2, offsetYPt: 1, widthPt: 5, heightPt: 2,
+        rotationDeg: 15, flipH: true, flipV: false,
+      },
+    } as const;
+    const wrap = {
+      kind: 'tight', authoredKinds: ['wrapTight'], side: 'bothSides',
+      distances: validEdges, effectExtent: validEdges,
+      polygon: {
+        edited: true,
+        coordinateSpace: { width: 21600, height: 21600 } as const,
+        points: [
+          { x: 0, y: 0, rawX: '0', rawY: '0' },
+          { x: 21600, y: 0, rawX: '21600', rawY: '0' },
+          { x: 10800, y: 21600, rawX: '10800', rawY: '21600' },
+        ],
+        invalidPointCount: 0,
+      },
+    } as const;
+    const first = retainedAnchor(occurrenceId, {
+      group, relativeSize, parentEffectExtent: validEdges, wrap,
+    });
+    const second = retainedAnchor(occurrenceId, {
+      group: {
+        ...group,
+        childSourceId: 'child-1', sourceIndex: 1,
+        resolvedChildFrame: {
+          offsetXPt: 10, offsetYPt: 4, widthPt: 4, heightPt: 3,
+          rotationDeg: 75, flipH: false, flipV: true,
+        },
+      },
+      relativeSize,
+    });
+    const groupedParagraph = {
+      ...paragraph,
+      runs: [
+        { type: 'anchorHost', fontSize: 10, anchorOccurrenceId: occurrenceId },
+        { type: 'shape', widthPt: 5, heightPt: 2, anchorXPt: 2, anchorYPt: 1, anchorXFromMargin: false, anchorYFromPara: false, anchorAcquisitionInput: first, presetGeometry: 'rect', subpaths: [], fill: null, stroke: null, rotation: 15, flipH: true, flipV: false },
+        { type: 'image', imagePath: 'word/media/group.png', mimeType: 'image/png', widthPt: 4, heightPt: 3, anchor: true, anchorAcquisitionInput: second, rotation: 75, flipH: false, flipV: true },
+      ],
+    } as unknown as DocParagraph;
+    const host = {
+      text: '', metricOnly: true, sourceRunIndex: 0, measuredWidth: 0,
+      fontSize: 10, fontFamily: 'Test Sans', fontRoute,
+    } as unknown as LayoutTextSeg;
+    const acquired = projectMeasuredSegment(groupedParagraph, host, acquisitionContext, {
+      text: { shape: () => ({ advancePt: 0, ascentPt: 0, descentPt: 0, spans: [], diagnostics: [], graphemeBoundaries: [0] }) },
+    }, {
+      page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 300 },
+      margin: { xPt: 10, yPt: 20, widthPt: 180, heightPt: 260 },
+      column: { xPt: 10, yPt: 20, widthPt: 90, heightPt: 260 },
+      pageParity: 'odd',
+    });
+    const sourceDrawing = acquired.drawings[0]!;
+    const textBoxParagraph: ParagraphLayout = {
+      kind: 'paragraph', id: 'relative-size-textbox-paragraph', source: sourceDrawing.source,
+      flowDomainId: `${acquired.flowDomainId}:textbox`, ordinaryFlow: true,
+      flowBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
+      inkBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
+      advancePt: 8, spacing: { beforePt: 0, afterPt: 0 }, contextualSpacing: false,
+      lines: [], borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
+    };
+    const textBox: TextBoxLayout = {
+      kind: 'textbox', id: 'relative-size-textbox', source: sourceDrawing.source,
+      flowDomainId: acquired.flowDomainId, ordinaryFlow: false,
+      flowBounds: sourceDrawing.flowBounds, inkBounds: sourceDrawing.flowBounds,
+      clipBounds: { xPt: 14, yPt: 15, widthPt: 20, heightPt: 12 },
+      contentBounds: { xPt: 16, yPt: 17, widthPt: 16, heightPt: 8 },
+      advancePt: 0, paragraphs: [textBoxParagraph], writingMode: 'horizontal-tb',
+      insets: { topPt: 1, rightPt: 1, bottomPt: 1, leftPt: 1 },
+    };
+    const acquiredTransaction: ParagraphLayout = {
+      ...acquired,
+      drawings: [{
+        ...sourceDrawing,
+        clipBounds: { xPt: 13, yPt: 14, widthPt: 30, heightPt: 20 },
+        clip: {
+          kind: 'polygon',
+          points: [{ xPt: 12, yPt: 13 }, { xPt: 52, yPt: 43 }],
+        },
+        textBoxIds: [textBox.id],
+      }],
+      textBoxes: [textBox],
+    };
+    const destinationFrames = {
+      page: { xPt: 0, yPt: 0, widthPt: 300, heightPt: 400 },
+      margin: { xPt: 10, yPt: 20, widthPt: 280, heightPt: 360 },
+      column: { xPt: 10, yPt: 20, widthPt: 140, heightPt: 360 },
+      paragraph: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 12 },
+      line: { xPt: 10, yPt: 10, widthPt: 0, heightPt: 12 },
+      character: { xPt: 10, yPt: 10, widthPt: 0, heightPt: 12 },
+      pageParity: 'even' as const,
+    };
+    const expected = resolveAnchorFrame({ acquisition: first, frames: destinationFrames });
+    if (expected.status !== 'resolved') throw new Error('expected resolved destination anchor');
+
+    const normalized = normalizePagePaintNodeAnchors(acquiredTransaction, {
+      currentToPage: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+      normalizedFor: { physicalPageIndex: 1, flowDomainId: 'body', regionId: 'body' },
+      destinationFrames,
+    });
+    if (normalized.kind !== 'paragraph') throw new Error('expected paragraph');
+    const drawing = normalized.drawings[0]!;
+
+    expect(drawing.flowBounds).toEqual(expected.geometry.objectFrame);
+    expect(drawing.inkBounds).toEqual(expected.geometry.inkBounds);
+    expect(normalized.lines.flatMap((line) => line.placements).find((placement) => (
+      placement.kind === 'drawing' && placement.drawingId === drawing.id
+    ))).toMatchObject({ bounds: expected.geometry.inkBounds });
+    expect(drawing.commands).toMatchObject([
+      { kind: 'drawingml-shape', plan: { rect: { x: 18, y: 17, w: 15, h: 8 } } },
+      { kind: 'resource', rect: { xPt: 42, yPt: 29, widthPt: 12, heightPt: 12 } },
+    ]);
+    expect(drawing.clipBounds).toEqual({ xPt: 13.5, yPt: 14.333333333333334, widthPt: 45, heightPt: 26.666666666666664 });
+    expect(drawing.clip).toEqual({
+      kind: 'polygon', points: [{ xPt: 12, yPt: 13 }, { xPt: 72, yPt: 53 }],
+    });
+    expect(normalized.textBoxes[0]).toMatchObject({
+      flowBounds: expected.geometry.objectFrame,
+      inkBounds: expected.geometry.objectFrame,
+      clipBounds: { xPt: 15, yPt: 15.666666666666666, widthPt: 30, heightPt: 16 },
+      contentBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
+      paragraphs: [{
+        flowBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
+        inkBounds: { xPt: 18, yPt: 18.333333333333332, widthPt: 24, heightPt: 10.666666666666666 },
+      }],
+    });
+    expect(normalized.exclusions[0]).toEqual(expect.objectContaining({
+      bounds: expected.geometry.wrapBounds,
+      polygon: expected.geometry.wrap.polygon?.points,
+    }));
+    expect(normalized.anchorFrames?.[0]).toEqual(expected);
   });
 
   const paragraph = {

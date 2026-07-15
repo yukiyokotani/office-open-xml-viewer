@@ -8,6 +8,7 @@ import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintStrokeSegment } from './canvas-border.js';
 import {
   composeAffine,
+  mapAffinePoint,
   quarterTurnAffine,
   scaleAffine,
   translationAffine,
@@ -73,6 +74,19 @@ function textColor(
   context: CanvasPaintContext,
 ): string {
   return resolvedTextColor(placement.color, context);
+}
+
+function affineCallbackTransform(matrix: import('../layout/types.js').Matrix2DData): string | undefined {
+  const scaleX = Math.hypot(matrix.a, matrix.b);
+  const scaleY = Math.hypot(matrix.c, matrix.d);
+  if (scaleX === 0 || scaleY === 0) return undefined;
+  const a = matrix.a / scaleX;
+  const b = matrix.b / scaleX;
+  const c = matrix.c / scaleY;
+  const d = matrix.d / scaleY;
+  if (a === 1 && b === 0 && c === 0 && d === 1) return undefined;
+  if (a === 0 && b === 1 && c === -1 && d === 0) return 'rotate(90deg)';
+  return `matrix(${a}, ${b}, ${c}, ${d}, 0, 0)`;
 }
 
 function paintRetainedGlyph(
@@ -145,13 +159,12 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
       return textBox ? [textBox] : [];
     });
   const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void => {
-    const ownership = drawing.anchorLayer ? {
-      coordinateSpace: drawing.anchorLayer.coordinateSpace,
-      horizontal: drawing.anchorLayer.horizontalOwnership,
-      vertical: drawing.anchorLayer.verticalOwnership,
-    } : undefined;
-    if (ownership && context.pageFrame) {
-      const reentry = pageFrameReentry(context.pageFrame, ownership);
+    const anchor = drawing.anchorLayer;
+    if (anchor?.coordinateSpace === 'acquired-anchor-points') {
+      throw new Error('Acquired anchor geometry cannot be painted before page normalization');
+    }
+    if (anchor && context.pageFrame) {
+      const reentry = pageFrameReentry(context.pageFrame, anchor);
       context.ctx.save();
       context.ctx.transform(
         reentry.currentToTarget.a,
@@ -166,9 +179,6 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
           ...context,
           pointToCss: composeAffine(scaleAffine(context.scale), reentry.targetToPage),
           pageFrame: { currentToPage: reentry.targetToPage },
-          ...(ownership.horizontal === 'page' && ownership.vertical === 'page'
-            ? { onTextRun: context.onPhysicalTextRun }
-            : {}),
         };
         paintDrawingLayout(drawing, ownedContext);
         for (const textBox of textBoxesFor(drawing)) {
@@ -179,21 +189,8 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
       }
       return;
     }
-    const translation = context.layoutTranslationPt;
-    const undoX = drawing.anchorLayer?.horizontalOwnership === 'page'
-      ? -(translation?.xPt ?? 0) : 0;
-    const undoY = drawing.anchorLayer?.verticalOwnership === 'page'
-      ? -(translation?.yPt ?? 0) : 0;
-    if (undoX !== 0 || undoY !== 0) {
-      context.ctx.save();
-      context.ctx.translate(undoX, undoY);
-    }
-    try {
-      paintDrawingLayout(drawing, context);
-      for (const textBox of textBoxesFor(drawing)) paintTextBoxLayout(textBox, context);
-    } finally {
-      if (undoX !== 0 || undoY !== 0) context.ctx.restore();
-    }
+    paintDrawingLayout(drawing, context);
+    for (const textBox of textBoxesFor(drawing)) paintTextBoxLayout(textBox, context);
   };
   const behind = node.drawings
     .filter((drawing) => drawing.anchorLayer?.behindDoc === true)
@@ -336,22 +333,34 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
           translateYPt: 0,
           scale: 1,
         };
-        const scale = transform.scale;
+        const pointToCss = context.pointToCss;
+        const origin = pointToCss
+          ? mapAffinePoint(pointToCss, placement.bounds)
+          : {
+              xPt: (transform.translateXPt + placement.bounds.xPt) * transform.scale,
+              yPt: (transform.translateYPt + placement.bounds.yPt) * transform.scale,
+            };
+        const scaleX = pointToCss ? Math.hypot(pointToCss.a, pointToCss.b) : transform.scale;
+        const scaleY = pointToCss ? Math.hypot(pointToCss.c, pointToCss.d) : transform.scale;
+        const fontScale = context.scale;
         const letterSpacingPt = placement.paintOps[0]?.letterSpacingPt ?? 0;
         context.onTextRun(textRunPaintInfo({
           text: placement.text,
-          x: (transform.translateXPt + placement.bounds.xPt) * scale,
-          y: (transform.translateYPt + placement.bounds.yPt) * scale,
-          w: placement.bounds.widthPt * scale,
-          h: placement.bounds.heightPt * scale,
-          fontSize: placement.fontSizePt * scale,
+          x: origin.xPt,
+          y: origin.yPt,
+          w: placement.bounds.widthPt * scaleX,
+          h: placement.bounds.heightPt * scaleY,
+          fontSize: placement.fontSizePt * fontScale,
           font: canvasFontString(
             placement.fontRoute,
-            placement.fontSizePt * scale,
+            placement.fontSizePt * fontScale,
             placement.fontWeight,
             placement.fontStyle,
           ),
-          ...(letterSpacingPt !== 0 ? { letterSpacingPx: letterSpacingPt * scale } : {}),
+          ...(letterSpacingPt !== 0 ? { letterSpacingPx: letterSpacingPt * fontScale } : {}),
+          ...(pointToCss && affineCallbackTransform(pointToCss)
+            ? { transform: affineCallbackTransform(pointToCss) }
+            : {}),
           ...(placement.hyperlink ? {
             hyperlink: { kind: 'external' as const, url: placement.hyperlink },
           } : {}),

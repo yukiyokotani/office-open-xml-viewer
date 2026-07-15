@@ -306,6 +306,10 @@ describe('retained table pagination', () => {
     expect(accepted.fragment?.resolvedFloatingTables[0]).toBe(
       accepted.floatingTablePlacements?.[0],
     );
+    expect(accepted.fragment?.rows[0]?.cells[0]?.floatingSourceBlocks).toEqual([{
+      sourceBlockIndex: pageRelative.floatingTables[0]!.sourceBlockIndex,
+      tableId: pageRelative.floatingTables[0]!.tableId,
+    }]);
     expect(Object.isFrozen(accepted.floatingTablePlacements?.[0]?.bounds)).toBe(true);
     expect(JSON.parse(JSON.stringify(accepted.fragment))).toEqual(accepted.fragment);
     },
