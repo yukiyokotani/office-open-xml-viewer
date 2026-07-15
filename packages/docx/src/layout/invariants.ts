@@ -214,6 +214,37 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
       domains.set(domain.id, domain);
     });
 
+    if (page.sectionRegions) {
+      const regionIds = new Set<string>();
+      const bodyOwnership = new Map<string, number>();
+      page.sectionRegions.forEach((region, regionIndex) => {
+        const path = `pages[${pageIndex}].sectionRegions[${regionIndex}]`;
+        if (region.id.length === 0 || regionIds.has(region.id)) {
+          throw new LayoutInvariantError('INVALID_REFERENCE', `${path} has an invalid region id`);
+        }
+        regionIds.add(region.id);
+        requireFinite(region.blockStartPt, `${path}.blockStartPt`);
+        requireFinite(region.blockEndPt, `${path}.blockEndPt`);
+        if (region.blockEndPt < region.blockStartPt) {
+          throw new LayoutInvariantError('INVALID_GEOMETRY', `${path} has a negative block extent`);
+        }
+        region.flowDomainIds.forEach((domainId) => {
+          if (!domains.has(domainId)) {
+            throw new LayoutInvariantError('INVALID_REFERENCE', `${path} references missing flow domain ${domainId}`);
+          }
+          bodyOwnership.set(domainId, (bodyOwnership.get(domainId) ?? 0) + 1);
+        });
+      });
+      page.flowDomains.filter((domain) => domain.kind === 'body').forEach((domain) => {
+        if (bodyOwnership.get(domain.id) !== 1) {
+          throw new LayoutInvariantError(
+            'INVALID_REFERENCE',
+            `${domain.id} has invalid section region ownership`,
+          );
+        }
+      });
+    }
+
     const ordinary: PaintNode[] = [];
     try {
       orderedPagePaintNodes(page);

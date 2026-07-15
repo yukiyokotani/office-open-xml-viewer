@@ -249,6 +249,26 @@ describe('assertDocumentLayout', () => {
 
     expect(() => assertDocumentLayout(layout)).toThrow(/INVALID_GEOMETRY/);
   });
+
+  it('requires every body flow domain to belong to exactly one page-local section region', () => {
+    const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
+    const layout = {
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        sectionRegions: [{
+          id: 'section-region:0',
+          sectionOccurrenceId: 'section:0',
+          blockStartPt: 72,
+          blockEndPt: 720,
+          flowDomainIds: [],
+          section: base.pages[0]!.section,
+        }],
+      }],
+    } as DocumentLayout;
+
+    expect(() => assertDocumentLayout(layout)).toThrow(/section region ownership/);
+  });
 });
 
 describe('layoutFingerprint', () => {

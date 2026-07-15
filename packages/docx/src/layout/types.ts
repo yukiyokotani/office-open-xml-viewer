@@ -702,11 +702,24 @@ export interface PageLayers {
   readonly footer: readonly PaintNode[];
 }
 
+/** One section-owned body-flow region on a physical page. A continuous section
+ * may add another region below existing content without creating a new page. */
+export interface PageSectionRegion {
+  readonly id: string;
+  readonly sectionOccurrenceId: string;
+  readonly blockStartPt: number;
+  readonly blockEndPt: number;
+  readonly flowDomainIds: readonly string[];
+  readonly section: DeepReadonly<SectionLayoutContext>;
+}
+
 export interface LayoutPage {
   readonly pageIndex: number;
   readonly geometry: PageGeometry;
   readonly flowDomains: readonly FlowDomain[];
   readonly section: DeepReadonly<SectionLayoutContext>;
+  /** Transitional until A6's canonical page producer is the only producer. */
+  readonly sectionRegions?: readonly PageSectionRegion[];
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
 }
