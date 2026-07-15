@@ -7,6 +7,7 @@ import type {
 import { orderedPagePaintNodes } from '../layout/page-graph.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintParagraphLayout } from './canvas-text.js';
+import { paintTableLayout } from './canvas-table.js';
 import type { PaintResourceSession } from './resource-session.js';
 import type {
   CanvasPaintContext,
@@ -59,7 +60,8 @@ export function createCanvasPaintResourcePainter(
 
 function paintNode(node: PaintNode, context: CanvasPaintContext): void {
   if (node.kind === 'drawing') paintDrawingLayout(node, context);
-  if (node.kind === 'paragraph') paintParagraphLayout(node, context);
+  else if (node.kind === 'paragraph') paintParagraphLayout(node, context);
+  else if (node.kind === 'table') paintTableLayout(node, context);
 }
 
 export async function paintLayoutPage(
