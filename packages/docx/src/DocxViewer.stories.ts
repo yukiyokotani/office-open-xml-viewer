@@ -1,6 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
+// Published-package equivalent:
+// import { getDocxTextRunAtNode, sliceTextSourceRefs } from '@silurus/ooxml/docx';
+import { getDocxTextRunAtNode, sliceTextSourceRefs } from './index';
 import init, { parse_docx } from './wasm/docx_parser.js';
 import wasmUrl from './wasm/docx_parser_bg.wasm?url';
 // Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
@@ -25,6 +28,49 @@ const meta: Meta<Args> = {
 };
 export default meta;
 type Story = StoryObj<Args>;
+
+let removeSelectionSourceDebug: (() => void) | null = null;
+
+/** Log a same-segment selection and its OOXML source ranges in the browser console. */
+function installSelectionSourceDebug(root: HTMLElement): void {
+  // Storybook can re-render a story after args changes or HMR. Keep exactly one
+  // document-level listener so each selection produces one console entry.
+  removeSelectionSourceDebug?.();
+
+  const onSelectionChange = () => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+
+    const range = selection.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) return;
+
+    const startRun = getDocxTextRunAtNode(range.startContainer);
+    const endRun = getDocxTextRunAtNode(range.endContainer);
+
+    if (startRun && startRun === endRun) {
+      console.log('[docx source selection]', {
+        text: range.toString(),
+        visual: startRun,
+        sourceRefs: sliceTextSourceRefs(
+          startRun.sourceRefs,
+          range.startOffset,
+          range.endOffset,
+        ),
+      });
+    } else {
+      console.log('[docx source selection] multiple rendered segments', {
+        text: range.toString(),
+        startRun,
+        endRun,
+      });
+    }
+  };
+
+  document.addEventListener('selectionchange', onSelectionChange);
+  removeSelectionSourceDebug = () => {
+    document.removeEventListener('selectionchange', onSelectionChange);
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build nav bar + viewer (exported for use in local-only sample stories)
@@ -103,6 +149,8 @@ export function buildViewerUI(
   } else {
     spinner.remove();
   }
+
+  installSelectionSourceDebug(root);
 
   return { root, doc: null };
 }
