@@ -49,7 +49,40 @@ export function createPageFlowSectionContext(input: Readonly<{
 /** §17.6.11 permits signed top/bottom margins, but body flow uses their distance
  * from the page edge; the sign controls header/footer overlap separately. */
 export function sectionContentStartBlockPt(section: PageFlowSectionContext): number {
-  return Math.abs(section.geometry.marginTop);
+  return sectionBodyInsetPt(section.geometry.marginTop);
+}
+
+/** Signed top/bottom margins retain overlap policy; body placement uses distance. */
+export function sectionBodyInsetPt(marginPt: number): number {
+  return Math.abs(marginPt);
+}
+
+/** Physical-to-logical quarter turn for vertical section body layout. */
+export function logicalSectionGeometry(physical: SectionGeom): SectionGeom {
+  return {
+    pageWidth: physical.pageHeight,
+    pageHeight: physical.pageWidth,
+    marginLeft: physical.marginTop,
+    marginTop: physical.marginRight,
+    marginRight: physical.marginBottom,
+    marginBottom: physical.marginLeft,
+    headerDistance: physical.headerDistance,
+    footerDistance: physical.footerDistance,
+  };
+}
+
+/** Inverse logical-to-physical quarter turn for a vertical section page box. */
+export function physicalSectionGeometry(logical: SectionGeom): SectionGeom {
+  return {
+    pageWidth: logical.pageHeight,
+    pageHeight: logical.pageWidth,
+    marginTop: logical.marginLeft,
+    marginRight: logical.marginTop,
+    marginBottom: logical.marginRight,
+    marginLeft: logical.marginBottom,
+    headerDistance: logical.headerDistance,
+    footerDistance: logical.footerDistance,
+  };
 }
 
 type SectionBreak = Extract<BodyElement, { type: 'sectionBreak' }>;
@@ -96,7 +129,7 @@ export interface BodySectionIndex {
   sectionAtBodyIndex(bodyIndex: number): BodySectionOccurrence;
 }
 
-function sectionGeometry(section: SectionProps): SectionGeom {
+export function sectionGeometry(section: SectionProps): SectionGeom {
   return {
     pageWidth: section.pageWidth,
     pageHeight: section.pageHeight,

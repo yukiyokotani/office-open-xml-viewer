@@ -222,7 +222,14 @@ import {
   normalizeInternalDocumentModel,
   sectionPlacementInputFromBody,
 } from './parser-model.js';
-import { createBodySectionIndex, type BodySectionOccurrence } from './layout/context.js';
+import {
+  createBodySectionIndex,
+  logicalSectionGeometry as logicalGeomOf,
+  physicalSectionGeometry as physicalGeomOf,
+  sectionBodyInsetPt as bodyMarginInsetPt,
+  sectionGeometry as sectionGeomOf,
+  type BodySectionOccurrence,
+} from './layout/context.js';
 import {
   applyNumberingBodyOffset,
   resolveNumberingMarkerGeometry,
@@ -1637,40 +1644,6 @@ function physicalLayoutSection(logical: SectionProps): SectionProps {
     marginRight: logical.marginTop,
     marginBottom: logical.marginRight,
     marginLeft: logical.marginBottom,
-  };
-}
-
-/** The geometry projection of {@link verticalLayoutSection} on a bare
- *  {@link SectionGeom}: physical → SWAPPED LOGICAL (quarter-turn; margins rotate
- *  L←T, T←R, R←B, B←L; header/footer distances preserved). Used by the paginator
- *  to lay a vertical MID-BODY section out in its own logical frame (issue #1000)
- *  — the body-level section keeps going through `verticalLayoutDoc`. */
-function logicalGeomOf(phys: SectionGeom): SectionGeom {
-  return {
-    pageWidth: phys.pageHeight,
-    pageHeight: phys.pageWidth,
-    marginLeft: phys.marginTop,
-    marginTop: phys.marginRight,
-    marginRight: phys.marginBottom,
-    marginBottom: phys.marginLeft,
-    headerDistance: phys.headerDistance,
-    footerDistance: phys.footerDistance,
-  };
-}
-
-/** Inverse of {@link logicalGeomOf} — the geometry projection of
- *  {@link physicalLayoutSection}: SWAPPED LOGICAL → physical (margins rotate
- *  T←L, R←T, B←R, L←B). `physicalGeomOf(logicalGeomOf(g)) === g`. */
-function physicalGeomOf(logical: SectionGeom): SectionGeom {
-  return {
-    pageWidth: logical.pageHeight,
-    pageHeight: logical.pageWidth,
-    marginTop: logical.marginLeft,
-    marginRight: logical.marginTop,
-    marginBottom: logical.marginRight,
-    marginLeft: logical.marginBottom,
-    headerDistance: logical.headerDistance,
-    footerDistance: logical.footerDistance,
   };
 }
 
@@ -4714,29 +4687,6 @@ function headerOverflowPt(headerH: number, marginTop: number, headerDistance: nu
  *  the page edge while overlapping the running head/foot (those functions then reserve
  *  0). Either way the body's inset from the page edge is |margin|. Math.abs is identity
  *  for the non-negative common case, so this only changes negative-margin documents. */
-function bodyMarginInsetPt(margin: number): number {
-  return Math.abs(margin);
-}
-
-/** ECMA-376 §17.6.13 (pgSz) + §17.6.11 (pgMar) — project a {@link SectionProps}
- *  onto the smaller {@link SectionGeom} view (page size + margins + header/footer
- *  distances, dropping the section's title-page/columns/etc.). Used to seed the
- *  body-level fallback geometry in `computePages` (bodySectionGeom); a private
- *  module helper so the boundary-promotion path can reuse the SAME 8-field
- *  projection when comparing an incoming section's geometry to the ending one. */
-function sectionGeomOf(s: SectionProps): SectionGeom {
-  return {
-    pageWidth: s.pageWidth,
-    pageHeight: s.pageHeight,
-    marginTop: s.marginTop,
-    marginRight: s.marginRight,
-    marginBottom: s.marginBottom,
-    marginLeft: s.marginLeft,
-    headerDistance: s.headerDistance,
-    footerDistance: s.footerDistance,
-  };
-}
-
 /** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
  *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
  *  none. One selection shared by the reserve pass, the footer paint, and the footnote

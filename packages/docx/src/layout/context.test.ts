@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   createBodySectionIndex,
+  logicalSectionGeometry,
+  physicalSectionGeometry,
+  sectionBodyInsetPt,
+  sectionGeometry,
   type BodySectionOccurrence,
 } from './context.js';
 import type {
@@ -253,5 +257,28 @@ describe('pre-indexed body section ownership', () => {
     expect(index.sectionAtBodyIndex(2)).toBe(final);
     expect(() => index.sectionAtBodyIndex(-1)).toThrow(RangeError);
     expect(() => index.sectionAtBodyIndex(4)).toThrow(RangeError);
+  });
+});
+
+describe('section geometry coordinate boundary', () => {
+  it('round-trips a physical page box through the vertical logical frame', () => {
+    const physical = geometry({
+      pageWidth: 612,
+      pageHeight: 792,
+      marginTop: 36,
+      marginRight: 54,
+      marginBottom: 72,
+      marginLeft: 90,
+    });
+
+    expect(physicalSectionGeometry(logicalSectionGeometry(physical))).toEqual(physical);
+  });
+
+  it('projects only page-box facts and preserves signed-margin body distance', () => {
+    const props = document([], { marginTop: -36, marginBottom: -54 }).section;
+
+    expect(sectionGeometry(props)).toEqual(geometry({ marginTop: -36, marginBottom: -54 }));
+    expect(sectionBodyInsetPt(props.marginTop)).toBe(36);
+    expect(sectionBodyInsetPt(props.marginBottom)).toBe(54);
   });
 });
