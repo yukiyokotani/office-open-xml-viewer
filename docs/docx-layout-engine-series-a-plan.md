@@ -808,7 +808,7 @@ pnpm typecheck
 
 Expected: all tests pass and `rg` has no production matches.
 
-- [ ] **Step 5: Commit, independently review, fix, and merge PR A5**
+- [x] **Step 5: Commit, independently review, fix, and merge PR A5**
 
 Commit subject: `refactor(docx): unify floating and split table layout`.
 Use the roadmap review gate.
@@ -836,14 +836,28 @@ Use the roadmap review gate.
 - Consumes: paragraph/table layout functions, A1 fingerprints, and A2 keyed options/convergence.
 - Produces: `PageFlowState`, `PageFlowEvent`, final `layoutDocument(document, services, options)`, and worker-retained keyed `DocumentLayout` variants.
 
-**Specification evidence:** ECMA-376 §17.6.4 (`w:cols`), §17.6.11
-(`w:pgMar`), §17.6.13 (`w:pgSz`), §17.6.17 (`w:sectPr`), §17.6.22
-(`w:type`), §17.6.12 (`w:pgNumType`), §17.3.1.15 (`w:keepNext`),
-§17.3.1.14 (`w:keepLines`), §17.3.1.44 (`w:widowControl`), and explicit
-run/paragraph break elements define page and column transitions.
+**Specification evidence:** ECMA-376 §17.6.1 (section direction), §17.6.4
+(`w:cols`), §17.6.11 (`w:pgMar`), §17.6.13 (`w:pgSz`), §17.6.17
+(final `w:sectPr`), §17.6.18 (paragraph-owned non-final `w:sectPr`), §17.6.20
+(`w:textDirection`), §17.6.22 (`w:type`), §17.6.12 (`w:pgNumType`),
+§17.3.1.15 (`w:keepNext`), §17.3.1.14 (`w:keepLines`), §17.3.1.23
+(`w:pageBreakBefore`), §17.3.1.44 (`w:widowControl`), §17.3.3.1 / §17.18.4
+(`w:br` / `ST_BrType`), and §17.4.37 / §17.4.62 (adjacent tables and table
+style identity) define page, column, section-region, and logical-table
+transitions. `[MS-OI29500]` §2.1.149(a) supplies Word's effective absolute-table
+exception; §2.1.162(b–e) means lexical `tblpPr` presence alone is not a valid
+floating test.
 
 ```ts
-export interface PageFlowState { readonly pageIndex: number; readonly columnIndex: number; readonly cursorYPt: number; readonly section: SectionLayoutContext }
+export interface PageFlowState {
+  readonly pageIndex: number;
+  readonly columnIndex: number;
+  readonly cursorBlockPt: number;
+  readonly pageContentStartBlockPt: number;
+  readonly regionStartBlockPt: number;
+  readonly sectionOccurrenceId: string;
+  readonly section: SectionLayoutContext;
+}
 export type PageFlowEvent =
   | Readonly<{ type: 'place'; node: PaintNode }>
   | Readonly<{ type: 'next-column' }>
@@ -854,13 +868,15 @@ export function paginateBody(input: BodyLayoutInput, services: LayoutServices, o
 
 - [ ] **Step 1: Add failing state-machine and parity tests**
 
-Cover explicit page/column breaks, continuous and next-page sections, even/odd
+Cover explicit page/column breaks (and prove cached `lastRenderedPageBreak` is
+not an authored break), continuous and next-page sections, even/odd
 parity pages, mixed page sizes, per-section vertical direction, multi-column
 regions starting mid-page, keep-next, widow/orphan control, hidden paragraphs,
 bottom-margin overflow, and consecutive in-flow `w:tbl` elements with the same
-effective style (including a different-style, intervening-paragraph, and floating
-table non-merge case) per §17.4.37 and the corresponding Microsoft floating-table
-compatibility note. Include DATE/TIME and NUMPAGES cases whose text changes
+effective style ID (including a different-style with identical computed
+properties, intervening visible or hidden paragraph, effective floating table,
+and ignored lexical `tblpPr` cases) per §17.4.37 and `[MS-OI29500]` §2.1.149(a)
+and §2.1.162(b–e). Include DATE/TIME and NUMPAGES cases whose text changes
 wrapping. Serialize the same synthetic document plus identical
 `LayoutOptions`/font inventory through direct layout and the render-worker layout
 handler and assert identical fingerprints and page sizes. Assert different
@@ -880,11 +896,15 @@ are recovered from element stamps rather than `LayoutPage`.
 
 - [ ] **Step 3: Implement explicit transitions and page ownership**
 
-Normalize consecutive same-style in-flow tables into one logical table before
-page transitions, without merging across paragraphs or floating tables. Make
-each transition return a new `PageFlowState`; store section, geometry,
-columns, content origin, page numbering, direction, header/footer references,
-and parity-page metadata on `LayoutPage`. Replace `computePages` closure state
+Normalize consecutive same-effective-style-ID in-flow tables into one logical
+table before page transitions, without merging across paragraphs or effective
+floating tables. Make each transition return a new `PageFlowState` over the
+logical block axis. A physical `LayoutPage` owns its page box and page-start
+header/footer geometry, while clone-safe page-local section regions own their
+section occurrence, columns, block origin, direction, page numbering, and flow
+domains; nodes reference the owning region/domain. This permits multiple
+continuous sections on one physical page and avoids treating one singular
+`LayoutPage.section` as ownership for the whole page. Replace `computePages` closure state
 with `paginateBody`. The render worker retains `Map<string, DocumentLayout>` keyed
 only by `layoutOptionsKey(options, services)`, where `services` is the actual
 worker-owned instance; page metadata and bookmarks derive from the load-time default
