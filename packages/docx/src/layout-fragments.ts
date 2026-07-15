@@ -34,15 +34,15 @@ export interface PlacedFragment {
   readonly heightPt: number;
 }
 
-export interface LayoutPage {
+export interface BodyFragmentLayoutPage {
   readonly pageIndex: number;
   readonly section: SectionLayoutContext;
   readonly geometry: SectionGeom;
   readonly fragments: readonly PlacedFragment[];
 }
 
-export interface DocumentLayout {
-  readonly pages: readonly LayoutPage[];
+export interface BodyFragmentDocumentLayout {
+  readonly pages: readonly BodyFragmentLayoutPage[];
 }
 
 /**

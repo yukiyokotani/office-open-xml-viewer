@@ -13,8 +13,8 @@
  */
 export { layoutDocument } from './renderer.js';
 export type {
-  DocumentLayout,
-  LayoutPage,
+  BodyFragmentDocumentLayout,
+  BodyFragmentLayoutPage,
   PlacedFragment,
   FlowFragment,
 } from './layout-fragments.js';

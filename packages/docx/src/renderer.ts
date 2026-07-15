@@ -289,8 +289,8 @@ import {
 } from './paragraph-measure.js';
 import {
   paragraphFragmentAdvancePt,
-  type DocumentLayout,
-  type LayoutPage,
+  type BodyFragmentDocumentLayout,
+  type BodyFragmentLayoutPage,
   type PlacedFragment,
   type FlowFragment,
 } from './layout-fragments.js';
@@ -5472,7 +5472,7 @@ export function layoutDocument(
   doc: DocxDocumentModel,
   services: LayoutServices = createLayoutServices(doc),
   options: LayoutOptions = normalizeLayoutOptions(undefined, Date.now()),
-): DocumentLayout {
+): BodyFragmentDocumentLayout {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return Object.freeze({ pages: Object.freeze([]) });
   const normalizedDoc = normalizeInternalDocumentModel(doc).document;
@@ -5489,7 +5489,7 @@ export function layoutDocument(
     services,
     options,
   );
-  const layoutPages: LayoutPage[] = pages.map((elements, pageIndex) => {
+  const layoutPages: BodyFragmentLayoutPage[] = pages.map((elements, pageIndex) => {
     const firstEl = elements[0] as PaginatedBodyElement | undefined;
     // Issue #1000 — merge the page's OWN frame: geometry + text direction
     // (stamped in lockstep on the first element; an EMPTY parity page resolves
@@ -5540,7 +5540,7 @@ export function layoutDocument(
       fragments: Object.freeze(fragments) as readonly PlacedFragment[],
     });
   });
-  return Object.freeze({ pages: Object.freeze(layoutPages) as readonly LayoutPage[] });
+  return Object.freeze({ pages: Object.freeze(layoutPages) as readonly BodyFragmentLayoutPage[] });
 }
 
 function buildMeasureState(
