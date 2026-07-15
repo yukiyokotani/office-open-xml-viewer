@@ -795,7 +795,7 @@ fn parse_notes(
             continue;
         }
         // Footnote/endnote bodies carry no nested sections; pass an empty map.
-        let content = parse_body_elements(
+        let content = parse_body_elements_in_story(
             n,
             style_map,
             num_map,
@@ -804,6 +804,7 @@ fn parse_notes(
             &local_rel_map,
             theme,
             &HashMap::new(),
+            TablePositioningContext::IgnoredStory,
         );
         out.push(crate::types::DocxNote { id, content });
     }
@@ -1472,6 +1473,31 @@ fn parse_body_elements(
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
 ) -> Vec<BodyElement> {
+    parse_body_elements_in_story(
+        body_node,
+        style_map,
+        num_map,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        section_hf,
+        TablePositioningContext::Normal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_body_elements_in_story(
+    body_node: roxmltree::Node,
+    style_map: &StyleMap,
+    num_map: &mut NumberingMap,
+    media_map: &HashMap<String, String>,
+    chart_map: &HashMap<String, ooxml_common::chart::ChartModel>,
+    rel_map: &HashMap<String, String>,
+    theme: &ThemeColors,
+    section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
+    table_positioning_context: TablePositioningContext,
+) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
     let mut section_ordinal = 0usize;
     // The body-level sectPr (the last element) defines the final section and
@@ -1576,6 +1602,7 @@ fn parse_body_elements(
                     rel_map,
                     theme,
                     DepthGuard::root(),
+                    table_positioning_context,
                 );
                 body.push(BodyElement::Table(Box::new(tbl)));
             }
@@ -8712,6 +8739,60 @@ fn table_property_exception_acquisition(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TablePositioningContext {
+    Normal,
+    /// [MS-OI29500] 2.1.162(b): Word ignores tblpPr for tables contained in a
+    /// textbox, footnote, endnote, or comment. Current block-table parsing uses
+    /// this for note stories; the context also keeps that rule explicit when
+    /// richer textbox/comment block models are introduced.
+    IgnoredStory,
+}
+
+impl TablePositioningContext {
+    fn ignores_table_positioning(self) -> bool {
+        self == Self::IgnoredStory
+    }
+}
+
+/// Resolve whether an authored tblpPr participates in layout as floating table
+/// positioning in Word. ECMA-376 Part 1 §17.4.57 makes tblpPr the positioning
+/// payload, but Word ignores the cases in [MS-OI29500] 2.1.162(b), using the
+/// Word-specific anchor defaults from (c). Clause (d) constrains Word-authored
+/// integer ranges but adds no ignore case. Clause (e) means the ignore predicate
+/// must inspect the saved lexical offset: a saved value of 1 remains effective
+/// positioning even though Word displays that coordinate as zero after its
+/// one-twip open-time adjustment. Keep this semantic result apart from the
+/// payload so downstream layout never reconstructs the decision from already-
+/// defaulted numeric fields.
+fn table_is_ordinary_flow(
+    tblp_pr: Option<roxmltree::Node>,
+    context: TablePositioningContext,
+) -> bool {
+    let Some(positioning) = tblp_pr else {
+        return true;
+    };
+    if context.ignores_table_positioning() || positioning.attributes().len() == 0 {
+        return true;
+    }
+
+    // Word's defaults differ from the ISO defaults: horizontal=text and
+    // vertical=margin. Missing offsets take their schema default zero. An
+    // invalid lexical integer does not satisfy the explicitly-zero exception.
+    let offset_is_zero = |name: &str| match attr_w(positioning, name) {
+        None => true,
+        Some(value) => value.parse::<i64>().ok() == Some(0),
+    };
+    let horizontal = attr_w(positioning, "horzAnchor").unwrap_or_else(|| "text".to_string());
+    let vertical = attr_w(positioning, "vertAnchor").unwrap_or_else(|| "margin".to_string());
+    let ignored_zero_position = offset_is_zero("tblpX")
+        && offset_is_zero("tblpY")
+        && horizontal == "text"
+        && vertical != "text";
+
+    ignored_zero_position
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_table(
     node: roxmltree::Node,
@@ -8722,6 +8803,7 @@ fn parse_table(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
 ) -> DocTable {
     let tbl_pr = child_w(node, "tblPr");
     let tbl_grid = child_w(node, "tblGrid");
@@ -9130,6 +9212,7 @@ fn parse_table(
             style_tbl_header,
             style_cant_split,
             depth,
+            table_positioning_context,
         );
         rows.push(row);
         all_cell_conds.push(cell_conds);
@@ -9300,6 +9383,10 @@ fn parse_table(
         .max(grid_columns.len() as u32);
     let table_layout = TableLayoutAcquisitionWire {
         effective_style_id: effective_table_style_id.map(str::to_string),
+        ordinary_flow: table_is_ordinary_flow(
+            tbl_pr.and_then(|p| child_w(p, "tblpPr")),
+            table_positioning_context,
+        ),
         grid: TableGridAcquisitionWire {
             authored: tbl_grid.is_some(),
             columns: grid_columns,
@@ -9351,6 +9438,7 @@ fn parse_table_row(
     style_cant_split: Option<bool>,
     // Recursion-depth guard threaded from the owning table (see `parse_table`).
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
 ) -> DocTableRow {
     let tr_pr = child_w(node, "trPr");
     let tr_height_node = tr_pr.and_then(|p| child_w(p, "trHeight"));
@@ -9418,6 +9506,7 @@ fn parse_table_row(
             table_style_id,
             cond,
             depth,
+            table_positioning_context,
         );
         cells.push(cell);
     }
@@ -9448,6 +9537,7 @@ fn parse_table_cell(
     cond: Option<&CondFmt>,
     // Recursion-depth guard threaded from the owning row (see `parse_table`).
     depth: DepthGuard,
+    table_positioning_context: TablePositioningContext,
 ) -> DocTableCell {
     let tc_pr = child_w(node, "tcPr");
 
@@ -9566,6 +9656,7 @@ fn parse_table_cell(
                         rel_map,
                         theme,
                         child_depth,
+                        table_positioning_context,
                     ))));
                 }
             }
@@ -9911,6 +10002,13 @@ mod tests {
     use crate::xml_util::W_NS;
 
     fn parse_tbl(body: &str) -> DocTable {
+        parse_tbl_in_story(body, TablePositioningContext::Normal)
+    }
+
+    fn parse_tbl_in_story(
+        body: &str,
+        table_positioning_context: TablePositioningContext,
+    ) -> DocTable {
         let xml = format!(r#"<w:tbl xmlns:w="{ns}">{body}</w:tbl>"#, ns = W_NS);
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let style_map = StyleMap::parse("");
@@ -9927,6 +10025,7 @@ mod tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            table_positioning_context,
         )
     }
 
@@ -10003,6 +10102,7 @@ mod tests {
             wire["__tableLayout"]["effectiveStyleId"],
             "SyntheticTableStyle"
         );
+        assert_eq!(wire["__tableLayout"]["ordinaryFlow"], true);
         assert_eq!(wire["__tableLayout"]["grid"]["authored"], true);
         assert_eq!(wire["__tableLayout"]["grid"]["columns"][0]["width"], "720");
         assert_eq!(
@@ -10098,6 +10198,54 @@ mod tests {
                 "kind": "pct", "value": "500"
             })
         );
+    }
+
+    #[test]
+    fn table_layout_wire_retains_word_effective_floating_status() {
+        let ordinary = [
+            r#"<w:tblPr/><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            // A distance-from-text attribute prevents the "all omitted" arm,
+            // but the (c) anchor defaults plus zero offset defaults still meet
+            // every condition of the ignored-zero arm in (b).
+            r#"<w:tblPr><w:tblpPr w:leftFromText="20"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpX="0" w:tblpY="0" w:horzAnchor="text" w:vertAnchor="margin"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            // The literal (b) predicate does not exempt relative-position
+            // attributes: default tblpX/tblpY remain zero in both cases.
+            r#"<w:tblPr><w:tblpPr w:tblpXSpec="center"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpYSpec="center"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        ];
+        for body in ordinary {
+            assert!(
+                parse_tbl(body).table_layout.ordinary_flow,
+                "[MS-OI29500] 2.1.162(b-c) ignored tblpPr must remain in ordinary flow"
+            );
+        }
+
+        let floating = [
+            // (e): the saved one-twip nudge avoids the lexical zero predicate;
+            // Word subtracts it only when resolving the display coordinate.
+            r#"<w:tblPr><w:tblpPr w:tblpX="1"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:tblpY="1"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:horzAnchor="page"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            r#"<w:tblPr><w:tblpPr w:vertAnchor="text"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        ];
+        for body in floating {
+            assert!(
+                !parse_tbl(body).table_layout.ordinary_flow,
+                "a non-ignored tblpPr must be retained as effective floating placement"
+            );
+        }
+    }
+
+    #[test]
+    fn note_story_always_ignores_table_positioning() {
+        let table = parse_tbl_in_story(
+            r#"<w:tblPr><w:tblpPr w:tblpX="720" w:tblpY="720" w:horzAnchor="page" w:vertAnchor="page"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+            TablePositioningContext::IgnoredStory,
+        );
+
+        assert!(table.table_layout.ordinary_flow);
     }
 
     #[test]
@@ -10862,6 +11010,7 @@ mod tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            TablePositioningContext::Normal,
         )
     }
 
@@ -19161,6 +19310,7 @@ mod numbering_marker_font_tests {
             &rels,
             &theme,
             DepthGuard::root(),
+            TablePositioningContext::Normal,
         )
     }
 

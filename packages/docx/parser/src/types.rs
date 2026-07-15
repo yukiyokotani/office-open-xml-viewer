@@ -2682,6 +2682,12 @@ pub struct TableMarginAcquisitionWire {
 #[serde(rename_all = "camelCase")]
 pub struct TableLayoutAcquisitionWire {
     pub effective_style_id: Option<String>,
+    /// Whether Word treats this table as part of ordinary body flow after its
+    /// tblpPr compatibility exceptions have been applied. This is retained
+    /// separately from `DocTable::tblp_pr`: that public field preserves the
+    /// authored positioning payload, whose mere presence is not an effective
+    /// floating-status test ([MS-OI29500] 2.1.162(b-c)).
+    pub ordinary_flow: bool,
     pub grid: TableGridAcquisitionWire,
     pub preferred_width: Option<TableWidthAcquisitionWire>,
     pub layout: Option<TableLayoutKindAcquisitionWire>,

@@ -33,6 +33,7 @@ function tableWithPrivateLayoutWire(): DocTable {
     jc: 'left',
     __tableLayout: {
       effectiveStyleId: 'SyntheticTableStyle',
+      ordinaryFlow: true,
       grid: {
         authored: true,
         columns: [{ width: '720' }, { width: null }],
@@ -53,6 +54,7 @@ describe('parser-private table acquisition projection', () => {
     expect(input).toEqual({
       table: {
         effectiveStyleId: 'SyntheticTableStyle',
+        ordinaryFlow: true,
         grid: {
           authored: true,
           columns: [{ width: '720' }, { width: null }],

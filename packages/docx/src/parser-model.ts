@@ -160,6 +160,9 @@ export interface TableMarginAcquisitionWire {
 
 export interface TableLayoutAcquisitionWire {
   readonly effectiveStyleId: string | null;
+  /** Word-effective flow participation after [MS-OI29500] 2.1.162(b-c), not
+   * the lexical presence/absence of the public `tblpPr` compatibility field. */
+  readonly ordinaryFlow: boolean;
   readonly grid: {
     readonly authored: boolean;
     readonly columns: readonly { readonly width: string | null }[];
