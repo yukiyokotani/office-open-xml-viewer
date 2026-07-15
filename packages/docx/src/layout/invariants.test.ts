@@ -270,6 +270,23 @@ describe('assertDocumentLayout', () => {
     expect(() => assertDocumentLayout(duplicate)).toThrow(/page index/);
   });
 
+  it('requires ordered effective page edges within the physical page and permits equality', () => {
+    const base = documentWith([]);
+    const withEdges = (contentTopPt: number, contentBottomPt: number): DocumentLayout => ({
+      ...base,
+      pages: [{
+        ...base.pages[0]!,
+        geometry: { ...base.pages[0]!.geometry, contentTopPt, contentBottomPt },
+      }],
+    });
+
+    expect(() => assertDocumentLayout(withEdges(-1, 720))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(72, 793))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(721, 720))).toThrow(/effective page edges/);
+    expect(() => assertDocumentLayout(withEdges(0, 0))).not.toThrow();
+    expect(() => assertDocumentLayout(withEdges(792, 792))).not.toThrow();
+  });
+
   it('requires every body flow domain to belong to exactly one page-local section region', () => {
     const base = documentWith([drawing('n1', rect(72, 100, 200, 30))]);
     const layout = {

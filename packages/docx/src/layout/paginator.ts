@@ -24,6 +24,23 @@ export type AuthoredBreak =
   | 'pageBreakBefore'
   | 'lastRenderedPageBreak';
 
+export class UnsupportedPageFlowTransitionError extends Error {
+  readonly code = 'NEXT_COLUMN_DESTINATION_UNAVAILABLE' as const;
+
+  constructor(
+    readonly outgoingColumnIndex: number,
+    readonly outgoingColumnCount: number,
+    readonly incomingColumnCount: number,
+  ) {
+    super(
+      'nextColumn requires a following column on the current page, '
+      + `but column ${outgoingColumnIndex + 1} is unavailable `
+      + `(outgoing columns: ${outgoingColumnCount}, incoming columns: ${incomingColumnCount})`,
+    );
+    this.name = 'UnsupportedPageFlowTransitionError';
+  }
+}
+
 export interface SectionBoundaryOptions {
   readonly hasFootnoteReferenceOnCurrentPage?: boolean;
 }
@@ -258,15 +275,14 @@ export function beginSection(
       ]);
     }
 
-    // §17.18.77 starts the new section in the following column on the page.
-    // §17.6.4 defines each section's finite ordered column set; when either the
-    // outgoing page or incoming section has no column at that next index, the
-    // total page-flow successor is column zero of the next physical page.
-    const nextPage = advanceToPage(state, section, 'section-break');
-    return transition(nextPage.state, [
-      ...nextPage.events,
-      { type: 'begin-section', section },
-    ]);
+    // §17.18.77 only defines nextColumn when a following column exists on this
+    // page. No normative rule selects another page when that destination is
+    // absent, so the caller must surface the unsupported transition explicitly.
+    throw new UnsupportedPageFlowTransitionError(
+      state.columnIndex,
+      state.section.columns.length,
+      section.columns.length,
+    );
   }
 
   if (startType === 'continuous') {

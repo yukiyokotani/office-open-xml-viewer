@@ -9,6 +9,7 @@ import {
   beginSection,
   createPageFlowState,
   placeFlowNode,
+  UnsupportedPageFlowTransitionError,
 } from './paginator.js';
 import type { DrawingLayout } from './types.js';
 
@@ -393,7 +394,7 @@ describe('immutable DOCX page-flow transitions', () => {
     ]);
   });
 
-  it('opens a page for a next-column section when the outgoing column is last', () => {
+  it('rejects nextColumn when the outgoing column has no same-page successor', () => {
     const outgoing = section('section-0', {
       columns: [{ xPt: 72, wPt: 224 }, { xPt: 316, wPt: 224 }],
     });
@@ -407,27 +408,21 @@ describe('immutable DOCX page-flow transitions', () => {
       deepestColumnBlockPt: 400,
     });
 
-    const transition = beginSection(initial, incoming, 'nextColumn');
-
-    expect(transition.state).toMatchObject({
-      pageIndex: 3,
-      columnIndex: 0,
-      cursorBlockPt: 72,
-      section: { sectionOccurrenceId: 'section-1' },
-    });
-    expect(transition.events).toEqual([
-      {
-        type: 'next-page',
-        reason: 'section-break',
-        pageIndex: 3,
-        sectionOccurrenceId: 'section-1',
-        parityBlank: false,
-      },
-      { type: 'begin-section', section: incoming },
-    ]);
+    expect(() => beginSection(initial, incoming, 'nextColumn'))
+      .toThrowError(UnsupportedPageFlowTransitionError);
+    try {
+      beginSection(initial, incoming, 'nextColumn');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+        outgoingColumnIndex: 1,
+        outgoingColumnCount: 2,
+        incomingColumnCount: 2,
+      });
+    }
   });
 
-  it('opens the next page when the incoming section has no same-page following column', () => {
+  it('rejects nextColumn when the incoming section lacks the same-page successor index', () => {
     const outgoing = section('section-0', {
       columns: [
         { xPt: 72, wPt: 142 },
@@ -443,23 +438,18 @@ describe('immutable DOCX page-flow transitions', () => {
       deepestColumnBlockPt: 400,
     });
 
-    const transition = beginSection(initial, incoming, 'nextColumn');
-
-    expect(transition.state).toMatchObject({
-      pageIndex: 3,
-      columnIndex: 0,
-      section: { sectionOccurrenceId: 'section-1' },
-    });
-    expect(transition.events).toEqual([
-      {
-        type: 'next-page',
-        reason: 'section-break',
-        pageIndex: 3,
-        sectionOccurrenceId: 'section-1',
-        parityBlank: false,
-      },
-      { type: 'begin-section', section: incoming },
-    ]);
+    expect(() => beginSection(initial, incoming, 'nextColumn'))
+      .toThrowError(UnsupportedPageFlowTransitionError);
+    try {
+      beginSection(initial, incoming, 'nextColumn');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'NEXT_COLUMN_DESTINATION_UNAVAILABLE',
+        outgoingColumnIndex: 0,
+        outgoingColumnCount: 3,
+        incomingColumnCount: 1,
+      });
+    }
   });
 
   it('rejects invalid page, column, and cursor state at construction', () => {

@@ -149,25 +149,45 @@ function contains(outer: LayoutRect, inner: LayoutRect): boolean {
     && inner.yPt + inner.heightPt <= outer.yPt + outer.heightPt;
 }
 
-function collectRetainedNodeIds(node: PaintNode, ids: Set<string>): void {
-  ids.add(node.id);
+function retainUniqueNodeId(
+  id: string,
+  pageIds: Set<string>,
+  documentIds: Set<string>,
+): void {
+  if (documentIds.has(id)) {
+    throw new LayoutInvariantError('INVALID_REFERENCE', `duplicate retained node id ${id}`);
+  }
+  documentIds.add(id);
+  pageIds.add(id);
+}
+
+function collectRetainedNodeIds(
+  node: PaintNode,
+  pageIds: Set<string>,
+  documentIds: Set<string>,
+): void {
+  retainUniqueNodeId(node.id, pageIds, documentIds);
   if (node.kind === 'paragraph') {
-    node.drawings.forEach((drawing) => collectRetainedNodeIds(drawing, ids));
-    node.textBoxes.forEach((textBox) => collectRetainedNodeIds(textBox, ids));
+    node.drawings.forEach((drawing) =>
+      collectRetainedNodeIds(drawing, pageIds, documentIds));
+    node.textBoxes.forEach((textBox) =>
+      collectRetainedNodeIds(textBox, pageIds, documentIds));
     return;
   }
   if (node.kind === 'table') {
     node.rows.forEach((row) => {
-      ids.add(row.id);
+      retainUniqueNodeId(row.id, pageIds, documentIds);
       row.cells.forEach((cell) => {
-        ids.add(cell.id);
-        cell.blocks.forEach((block) => collectRetainedNodeIds(block.layout, ids));
+        retainUniqueNodeId(cell.id, pageIds, documentIds);
+        cell.blocks.forEach((block) =>
+          collectRetainedNodeIds(block.layout, pageIds, documentIds));
       });
     });
     return;
   }
   if (node.kind === 'textbox') {
-    node.paragraphs.forEach((paragraph) => collectRetainedNodeIds(paragraph, ids));
+    node.paragraphs.forEach((paragraph) =>
+      collectRetainedNodeIds(paragraph, pageIds, documentIds));
   }
 }
 
@@ -222,6 +242,7 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
 
 export function assertDocumentLayout(layout: DocumentLayout): void {
   assertPlainData(layout, 'layout');
+  const documentRetainedNodeIds = new Set<string>();
   layout.pages.forEach((page, pageIndex) => {
     if (!Number.isInteger(page.pageIndex) || page.pageIndex !== pageIndex) {
       throw new LayoutInvariantError(
@@ -232,6 +253,16 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     requireRect(page.geometry, `pages[${pageIndex}].geometry`);
     requireFinite(page.geometry.contentTopPt, `pages[${pageIndex}].geometry.contentTopPt`);
     requireFinite(page.geometry.contentBottomPt, `pages[${pageIndex}].geometry.contentBottomPt`);
+    if (
+      page.geometry.contentTopPt < 0
+      || page.geometry.contentTopPt > page.geometry.contentBottomPt
+      || page.geometry.contentBottomPt > page.geometry.heightPt
+    ) {
+      throw new LayoutInvariantError(
+        'INVALID_GEOMETRY',
+        `pages[${pageIndex}] has invalid effective page edges`,
+      );
+    }
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {
@@ -338,7 +369,7 @@ export function assertDocumentLayout(layout: DocumentLayout): void {
     pageLayerNodes(page).forEach(({ node }, nodeIndex) => {
       const path = `pages[${pageIndex}].nodes[${nodeIndex}]`;
       nodes.set(node.id, node);
-      collectRetainedNodeIds(node, retainedNodeIds);
+      collectRetainedNodeIds(node, retainedNodeIds, documentRetainedNodeIds);
       requireRect(node.flowBounds, `${path}.flowBounds`);
       requireRect(node.inkBounds, `${path}.inkBounds`);
       if (node.clipBounds) requireRect(node.clipBounds, `${path}.clipBounds`);

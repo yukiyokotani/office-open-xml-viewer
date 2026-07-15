@@ -129,6 +129,7 @@ function physicalBounds(
 }
 
 function pageGeometry(page: PhysicalPageInput): LayoutPage['geometry'] {
+  requireEffectivePageEdges(page);
   return {
     xPt: 0,
     yPt: 0,
@@ -140,6 +141,22 @@ function pageGeometry(page: PhysicalPageInput): LayoutPage['geometry'] {
     contentTopPt: page.contentTopPt,
     contentBottomPt: page.contentBottomPt,
   };
+}
+
+function requireEffectivePageEdges(page: PhysicalPageInput): void {
+  if (
+    !Number.isFinite(page.heightPt)
+    || !Number.isFinite(page.contentTopPt)
+    || !Number.isFinite(page.contentBottomPt)
+    || page.contentTopPt < 0
+    || page.contentTopPt > page.contentBottomPt
+    || page.contentBottomPt > page.heightPt
+  ) {
+    throw new RangeError(
+      'Effective page edges must satisfy 0 <= contentTopPt <= contentBottomPt <= heightPt',
+    );
+  }
+  // Equal edges are valid and represent an empty main-story interval.
 }
 
 function requirePageIndex(pageIndex: number): void {
@@ -304,6 +321,7 @@ export function createLayoutPageAccumulator(
   input: LayoutPageAccumulatorInput,
 ): LayoutPageAccumulator {
   requirePageIndex(input.pageIndex);
+  requireEffectivePageEdges(input.physicalPage);
   return Object.freeze({
     ...input,
     sectionRegions: Object.freeze([]),

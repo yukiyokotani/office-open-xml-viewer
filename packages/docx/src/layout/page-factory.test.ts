@@ -477,6 +477,59 @@ describe('createLayoutPage', () => {
     expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] })).not.toThrow();
   });
 
+  it('rejects a duplicate ID inside a nested table graph', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
+    const duplicate = bookmarkParagraph(
+      'table:nested', domainId, 'nested', rect(80, 110, 100, 12),
+    );
+    const nested = bookmarkTable(
+      'table:nested', domainId, [duplicate], rect(78, 105, 120, 20),
+    );
+    const outer = bookmarkTable('table:outer', domainId, [nested], rect(72, 100, 150, 30));
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: { widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720 },
+      sectionOccurrenceId: 'section:body', section: bodySection,
+      sectionRegions: [{
+        id: 'region:body', sectionOccurrenceId: 'section:body', section: bodySection,
+        writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+      }],
+      paint: [{ layer: 'body', node: outer }], readingOrder: [outer],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
+    });
+
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] }))
+      .toThrow(/duplicate retained node id table:nested/);
+  });
+
+  it('rejects a duplicate ID inside a text box graph', () => {
+    const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const domainId = bodyFlowDomainId(0, 'region:body', 0);
+    const duplicate = bookmarkParagraph(
+      'textbox:outer', domainId, 'textbox', rect(250, 150, 100, 12),
+    );
+    const textBox = bookmarkTextBox(
+      'textbox:outer', domainId, duplicate, rect(240, 140, 120, 30),
+    );
+    const page = createLayoutPage({
+      pageIndex: 0,
+      physicalPage: { widthPt: 612, heightPt: 792, contentTopPt: 72, contentBottomPt: 720 },
+      sectionOccurrenceId: 'section:body', section: bodySection,
+      sectionRegions: [{
+        id: 'region:body', sectionOccurrenceId: 'section:body', section: bodySection,
+        writingMode: 'horizontal-tb', blockStartPt: 72, blockEndPt: 720,
+        columns: [{ inlineStartPt: 72, inlineExtentPt: 468 }],
+      }],
+      paint: [{ layer: 'front', node: textBox }], readingOrder: [textBox],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:body' },
+    });
+
+    expect(() => assertDocumentLayout({ pages: [page], diagnostics: [] }))
+      .toThrow(/duplicate retained node id textbox:outer/);
+  });
+
   it('lets invariants reject unknown retained section and bookmark ownership', () => {
     const bodySection = section('lrTb', [{ xPt: 72, wPt: 468 }]);
     const domainId = bodyFlowDomainId(0, 'region:body', 0);
@@ -543,6 +596,23 @@ describe('createParityBlankLayoutPage', () => {
       sectionOccurrenceId: 'section:outgoing', section: outgoing,
       pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:outgoing' },
     })).toThrow(RangeError);
+  });
+
+  it('requires ordered effective page edges within the physical page and permits equality', () => {
+    const outgoing = section('lrTb', [{ xPt: 72, wPt: 468 }]);
+    const createWithEdges = (contentTopPt: number, contentBottomPt: number) =>
+      createParityBlankLayoutPage({
+        pageIndex: 0,
+        physicalPage: { widthPt: 612, heightPt: 792, contentTopPt, contentBottomPt },
+        sectionOccurrenceId: 'section:outgoing', section: outgoing,
+        pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:outgoing' },
+      });
+
+    expect(() => createWithEdges(-1, 720)).toThrow(RangeError);
+    expect(() => createWithEdges(72, 793)).toThrow(RangeError);
+    expect(() => createWithEdges(721, 720)).toThrow(RangeError);
+    expect(() => createWithEdges(0, 0)).not.toThrow();
+    expect(() => createWithEdges(792, 792)).not.toThrow();
   });
 
   it('owns the blank page with the outgoing section and emits no flow or paint', () => {
