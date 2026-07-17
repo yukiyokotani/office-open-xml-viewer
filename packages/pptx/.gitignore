@@ -1,5 +1,5 @@
 # Local-only sample fixtures and adjudication documents (never committed)
-public/private/
-tests/visual/references/private/
+public/private
+tests/visual/references/private
 # Local-only Storybook stories that load sample PPTX files
 src/*.privateDemo.stories.ts
