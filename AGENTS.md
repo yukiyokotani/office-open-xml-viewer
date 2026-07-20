@@ -161,6 +161,15 @@ text runs, paragraph properties, themes, fills, effects, and shape presets.
 
 ## Private Samples and Storybook
 
+Office fixtures follow the directory and naming policy in
+`docs/sample-files.md`:
+
+- `packages/*/public/demo/sample-N.*` — redistributable official site demos.
+- `packages/*/public/demo/test-N.*` — redistributable public regression tests.
+- `packages/*/public/private/sample-N.*` — non-redistributable local samples.
+- Reference PDFs use the same basename as their Office source and live beside
+  it. Files under `demo/` are public; files under `private/` remain local.
+
 Private Office samples and local-only sample stories are gitignored and must not
 be committed.
 

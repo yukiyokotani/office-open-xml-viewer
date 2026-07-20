@@ -1,33 +1,21 @@
-.DS_Store
-**/.DS_Store
-# Office files are not redistributable
+# Office fixture policy: see docs/sample-files.md.
+# Office files and adjacent PDF references are ignored by default.
 *.pptx
 *.xlsx
 *.docx
-# Reference PDFs (Word-exported, kept locally for layout diffing)
 *.pdf
-# Committable demo samples (free-license files provided by maintainer)
-!packages/pptx/public/demo/
-!packages/pptx/public/demo/*.pptx
-!packages/xlsx/public/demo/
-!packages/xlsx/public/demo/*.xlsx
-!packages/docx/public/demo/
-!packages/docx/public/demo/*.docx
-# Redistributable synthetic edge-case corpus (kept separate from public demos).
-!testdata/
-!testdata/docx/
-!testdata/docx/edge-cases.docx
-!testdata/docx/reference/
-!testdata/docx/reference/edge-cases.pdf
-!testdata/pptx/
-!testdata/pptx/edge-cases.pptx
-!testdata/pptx/reference/
-!testdata/pptx/reference/edge-cases.pdf
-!testdata/xlsx/
-!testdata/xlsx/edge-cases.xlsx
-# Local authoring and inspection helpers are not part of the public corpus.
-testdata/generators/
-testdata/**/*.inspect.ndjson
+
+# Redistributable website demos (`sample-N`) and public tests (`test-N`).
+# The directory exception covers Office files, adjacent PDFs, and documentation.
+!packages/*/public/demo/
+!packages/*/public/demo/**
+
+# Non-redistributable fixtures and their PDFs stay local.
+packages/*/public/private/
+
+# OS metadata stays ignored even inside public fixture directories.
+.DS_Store
+**/.DS_Store
 # Office Open XML spec documents
 /spec
 spec/
