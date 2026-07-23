@@ -35,7 +35,7 @@ jobs:
 
       # ── Node / pnpm ─────────────────────────────────────────────────────────
       - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         # version is read from packageManager field in package.json
 
       - name: Setup Node.js
