@@ -32,6 +32,8 @@ const SLIDE_H_EMU = 9525 * 120; // natural 120px tall
 
 function linkRun(hyperlink: HyperlinkTarget): PptxTextRunInfo {
   return {
+    paragraphIndex: 0,
+    runIndex: 0,
     text: 'go',
     inShapeX: 1,
     inShapeY: 2,

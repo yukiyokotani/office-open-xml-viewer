@@ -46,6 +46,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 function run(p: Partial<PptxTextRunInfo>): PptxTextRunInfo {
   return {
+    paragraphIndex: 0,
+    runIndex: 0,
     text: 'X',
     inShapeX: 0,
     inShapeY: 0,

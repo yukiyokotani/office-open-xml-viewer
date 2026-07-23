@@ -1,171 +1,221 @@
-import type { ShapeElement } from './types';
+import type {
+  Paragraph,
+  ShapeElement,
+  TextBody,
+  TextRun,
+  TextRunData,
+} from './types';
 
-/** One segment in a path rooted at a slide-owned {@link ShapeElement}. */
-export type PptxShapeChangePathSegment = string | number;
+type DefinedPartial<T> = Partial<{
+  [Key in keyof T]-?: Exclude<T[Key], undefined>;
+}>;
+
+type OptionalKey<T> = {
+  [Key in keyof T]-?: {} extends Pick<T, Key> ? Key : never;
+}[keyof T];
+
+type EditableShape = Omit<ShapeElement, 'type' | 'id' | 'textBody'>;
+type EditableTextBody = Omit<TextBody, 'paragraphs'>;
+type EditableParagraph = Omit<Paragraph, 'runs'>;
+type EditableTextRun = Omit<TextRunData, 'type'>;
+
+export type PptxShapeProperties = DefinedPartial<EditableShape>;
+export type PptxTextBodyProperties = DefinedPartial<EditableTextBody>;
+export type PptxParagraphProperties = DefinedPartial<EditableParagraph>;
+export type PptxTextRunProperties = DefinedPartial<EditableTextRun>;
+export type PptxOptionalShapeProperty = OptionalKey<EditableShape>;
+export type PptxOptionalTextBodyProperty = OptionalKey<EditableTextBody>;
+export type PptxOptionalParagraphProperty = OptionalKey<EditableParagraph>;
+export type PptxOptionalTextRunProperty = OptionalKey<EditableTextRun>;
+
+export interface PptxApplyShapeChangesRequest {
+  /** Zero-based slide index. */
+  slideIndex: number;
+  /** Slide-local DrawingML `cNvPr@id`. */
+  shapeId: string;
+  /** Ordered atomic batch. */
+  changes: readonly PptxShapeChange[];
+}
 
 /**
- * Serializable JSON-Patch-style change rooted at a slide-owned
- * {@link ShapeElement}. Object properties use string segments and array items
- * use zero-based numeric segments.
+ * Serializable, model-aware edit operations for one slide-owned shape.
+ *
+ * Each variant exposes the target model and its legal property names directly
+ * to TypeScript/IntelliSense. Callers never construct paths into the private
+ * presentation model.
  */
 export type PptxShapeChange =
   | {
-      op: 'add' | 'replace';
-      path: readonly PptxShapeChangePathSegment[];
-      /** Must be JSON-serializable. This is validated before the batch commits. */
-      value: unknown;
+      type: 'shape.update';
+      patch: PptxShapeProperties;
+      unset?: readonly PptxOptionalShapeProperty[];
     }
   | {
-      op: 'remove';
-      path: readonly PptxShapeChangePathSegment[];
+      type: 'textBody.replace';
+      textBody: TextBody | null;
+    }
+  | {
+      type: 'textBody.update';
+      patch: PptxTextBodyProperties;
+      unset?: readonly PptxOptionalTextBodyProperty[];
+    }
+  | {
+      type: 'paragraph.update';
+      paragraphIndex: number;
+      patch: PptxParagraphProperties;
+      unset?: readonly PptxOptionalParagraphProperty[];
+    }
+  | {
+      type: 'paragraph.insert';
+      paragraphIndex: number;
+      paragraph: Paragraph;
+    }
+  | {
+      type: 'paragraph.remove';
+      paragraphIndex: number;
+    }
+  | {
+      type: 'textRun.update';
+      paragraphIndex: number;
+      runIndex: number;
+      patch: PptxTextRunProperties;
+      unset?: readonly PptxOptionalTextRunProperty[];
+    }
+  | {
+      type: 'run.insert' | 'run.replace';
+      paragraphIndex: number;
+      runIndex: number;
+      run: TextRun;
+    }
+  | {
+      type: 'run.remove';
+      paragraphIndex: number;
+      runIndex: number;
     };
 
 export interface AppliedPptxShapeChanges {
-  /** Detached, normalized copies of the changes that were applied. */
+  /** Detached copies of the semantic changes that were applied. */
   applied: PptxShapeChange[];
   /**
-   * Detached changes that restore the previous shape. They are already in the
-   * reverse order required for an undo call.
+   * Detached semantic changes that restore the previous shape. They are
+   * already in the reverse order required for an undo call.
    */
   inverse: PptxShapeChange[];
 }
 
-type ChangeContainer = Record<string, unknown> | unknown[];
-
-const forbiddenPathSegments = new Set(['__proto__', 'prototype', 'constructor']);
+const forbiddenPropertyNames = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+  'type',
+  'id',
+  'textBody',
+  'paragraphs',
+  'runs',
+]);
 
 function fail(changeIndex: number, message: string): never {
   throw new Error(`Invalid shape change at index ${changeIndex}: ${message}`);
 }
 
-function validatePath(
-  path: readonly PptxShapeChangePathSegment[],
+function assertIndex(
+  index: number,
+  length: number,
   changeIndex: number,
+  label: string,
+  allowEnd = false,
 ): void {
-  if (path.length === 0) fail(changeIndex, 'path must not be empty');
-  if (path[0] === 'type' || path[0] === 'id') {
-    fail(changeIndex, 'shape identity fields "type" and "id" are immutable');
-  }
-  for (const segment of path) {
-    if (typeof segment === 'number') {
-      if (!Number.isSafeInteger(segment) || segment < 0) {
-        fail(changeIndex, `array index must be a non-negative safe integer: ${segment}`);
-      }
-      continue;
-    }
-    if (forbiddenPathSegments.has(segment)) {
-      fail(changeIndex, `unsafe path segment: ${segment}`);
-    }
+  const upperBound = allowEnd ? length : length - 1;
+  if (!Number.isSafeInteger(index) || index < 0 || index > upperBound) {
+    fail(changeIndex, `${label} ${index} is out of range`);
   }
 }
 
 function assertJsonValue(value: unknown, changeIndex: number, ancestors = new Set<object>()): void {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return;
-  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) fail(changeIndex, 'value contains a non-finite number');
+    if (!Number.isFinite(value)) fail(changeIndex, 'change contains a non-finite number');
     return;
   }
   if (typeof value !== 'object') {
-    fail(changeIndex, `value contains unsupported type "${typeof value}"`);
+    fail(changeIndex, `change contains unsupported type "${typeof value}"`);
   }
-  if (ancestors.has(value)) fail(changeIndex, 'value contains a cycle');
-
+  if (ancestors.has(value)) fail(changeIndex, 'change contains a cycle');
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
-    fail(changeIndex, 'value must contain only JSON objects and arrays');
+    fail(changeIndex, 'change must contain only JSON objects and arrays');
   }
-
   ancestors.add(value);
   const entries = Array.isArray(value) ? value.entries() : Object.entries(value);
   for (const [, child] of entries) assertJsonValue(child, changeIndex, ancestors);
   ancestors.delete(value);
 }
 
-function cloneChangeValue(value: unknown, changeIndex: number): unknown {
-  assertJsonValue(value, changeIndex);
-  return structuredClone(value);
-}
-
-function clonePath(
-  path: readonly PptxShapeChangePathSegment[],
-): PptxShapeChangePathSegment[] {
-  return [...path];
-}
-
-function isContainer(value: unknown): value is ChangeContainer {
-  return typeof value === 'object' && value !== null;
-}
-
-function resolveParent(
-  root: ShapeElement,
-  path: readonly PptxShapeChangePathSegment[],
+function applyProperties<T extends object>(
+  target: T,
+  patch: DefinedPartial<T>,
+  unset: readonly OptionalKey<T>[] | undefined,
   changeIndex: number,
-): { parent: ChangeContainer; key: PptxShapeChangePathSegment } {
-  let current: unknown = root;
-  for (let depth = 0; depth < path.length - 1; depth += 1) {
-    if (!isContainer(current)) {
-      fail(changeIndex, `path does not resolve to a container at segment ${depth}`);
-    }
-    const segment = path[depth]!;
-    if (Array.isArray(current)) {
-      if (typeof segment !== 'number' || segment >= current.length) {
-        fail(changeIndex, `array index ${String(segment)} is out of range at segment ${depth}`);
-      }
-      current = current[segment];
+): { patch: DefinedPartial<T>; unset?: OptionalKey<T>[] } {
+  const targetRecord = target as Record<string, unknown>;
+  const patchRecord = patch as Record<string, unknown>;
+  const inversePatch: Record<string, unknown> = {};
+  const inverseUnset: string[] = [];
+  const setKeys = new Set(Object.keys(patchRecord));
+
+  for (const key of setKeys) {
+    if (forbiddenPropertyNames.has(key)) fail(changeIndex, `property "${key}" is immutable`);
+    if (Object.hasOwn(targetRecord, key)) {
+      inversePatch[key] = structuredClone(targetRecord[key]);
     } else {
-      if (typeof segment !== 'string' || !Object.hasOwn(current, segment)) {
-        fail(changeIndex, `object property "${String(segment)}" does not exist at segment ${depth}`);
-      }
-      current = current[segment];
+      inverseUnset.push(key);
     }
+    targetRecord[key] = structuredClone(patchRecord[key]);
   }
-  if (!isContainer(current)) {
-    fail(changeIndex, 'path parent is not an object or array');
-  }
-  return { parent: current, key: path[path.length - 1]! };
-}
 
-function readObjectProperty(
-  parent: Record<string, unknown>,
-  key: PptxShapeChangePathSegment,
-  changeIndex: number,
-): { exists: boolean; value: unknown; key: string } {
-  if (typeof key !== 'string') {
-    fail(changeIndex, `object property segment must be a string: ${String(key)}`);
+  for (const key of unset ?? []) {
+    if (typeof key !== 'string') fail(changeIndex, 'unset property names must be strings');
+    if (forbiddenPropertyNames.has(key)) fail(changeIndex, `property "${key}" is immutable`);
+    if (setKeys.has(key)) fail(changeIndex, `property "${key}" cannot be set and unset together`);
+    if (!Object.hasOwn(targetRecord, key)) continue;
+    inversePatch[key] = structuredClone(targetRecord[key]);
+    delete targetRecord[key];
   }
+
   return {
-    exists: Object.hasOwn(parent, key),
-    value: parent[key],
-    key,
+    patch: inversePatch as DefinedPartial<T>,
+    ...(inverseUnset.length > 0 ? { unset: inverseUnset as OptionalKey<T>[] } : {}),
   };
 }
 
-function readArrayItem(
-  parent: unknown[],
-  key: PptxShapeChangePathSegment,
+function requireTextBody(
+  shape: ShapeElement,
   changeIndex: number,
-  allowEnd: boolean,
-): { exists: boolean; value: unknown; index: number } {
-  if (typeof key !== 'number') {
-    fail(changeIndex, `array item segment must be a number: ${String(key)}`);
-  }
-  const upperBound = allowEnd ? parent.length : parent.length - 1;
-  if (key > upperBound) {
-    fail(changeIndex, `array index ${key} is out of range`);
-  }
-  return { exists: key < parent.length, value: parent[key], index: key };
+): TextBody {
+  if (!shape.textBody) fail(changeIndex, 'shape has no text body');
+  return shape.textBody;
 }
 
-/**
- * Apply a batch to an isolated shape draft. The caller owns committing the
- * draft after any additional shape-level invariants have been checked.
- */
+function requireParagraph(
+  shape: ShapeElement,
+  paragraphIndex: number,
+  changeIndex: number,
+): Paragraph {
+  const textBody = requireTextBody(shape, changeIndex);
+  assertIndex(paragraphIndex, textBody.paragraphs.length, changeIndex, 'paragraph index');
+  return textBody.paragraphs[paragraphIndex]!;
+}
+
+function requireRun(
+  paragraph: Paragraph,
+  runIndex: number,
+  changeIndex: number,
+): TextRun {
+  assertIndex(runIndex, paragraph.runs.length, changeIndex, 'run index');
+  return paragraph.runs[runIndex]!;
+}
+
+/** Apply semantic changes to an isolated shape draft. */
 export function applyPptxShapeChanges(
   draft: ShapeElement,
   changes: readonly PptxShapeChange[],
@@ -173,73 +223,147 @@ export function applyPptxShapeChanges(
   const applied: PptxShapeChange[] = [];
   const inverse: PptxShapeChange[] = [];
 
-  changes.forEach((change, changeIndex) => {
-    validatePath(change.path, changeIndex);
-    const path = clonePath(change.path);
-    const { parent, key } = resolveParent(draft, path, changeIndex);
+  changes.forEach((input, changeIndex) => {
+    assertJsonValue(input, changeIndex);
+    const change = structuredClone(input);
 
-    if (change.op === 'add') {
-      const value = cloneChangeValue(change.value, changeIndex);
-      if (Array.isArray(parent)) {
-        const current = readArrayItem(parent, key, changeIndex, true);
-        parent.splice(current.index, 0, value);
-        inverse.unshift({ op: 'remove', path: clonePath(path) });
-      } else {
-        const current = readObjectProperty(parent, key, changeIndex);
-        parent[current.key] = value;
-        inverse.unshift(
-          current.exists
-            ? { op: 'replace', path: clonePath(path), value: structuredClone(current.value) }
-            : { op: 'remove', path: clonePath(path) },
+    switch (change.type) {
+      case 'shape.update': {
+        const undo = applyProperties<EditableShape>(
+          draft,
+          change.patch,
+          change.unset,
+          changeIndex,
         );
+        inverse.unshift({ type: 'shape.update', ...undo });
+        break;
       }
-      applied.push({ op: 'add', path, value: structuredClone(value) });
-      return;
+      case 'textBody.replace': {
+        inverse.unshift({
+          type: 'textBody.replace',
+          textBody: structuredClone(draft.textBody),
+        });
+        draft.textBody = structuredClone(change.textBody);
+        break;
+      }
+      case 'textBody.update': {
+        const textBody = requireTextBody(draft, changeIndex);
+        const undo = applyProperties<EditableTextBody>(
+          textBody,
+          change.patch,
+          change.unset,
+          changeIndex,
+        );
+        inverse.unshift({ type: 'textBody.update', ...undo });
+        break;
+      }
+      case 'paragraph.update': {
+        const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
+        const undo = applyProperties<EditableParagraph>(
+          paragraph,
+          change.patch,
+          change.unset,
+          changeIndex,
+        );
+        inverse.unshift({
+          type: 'paragraph.update',
+          paragraphIndex: change.paragraphIndex,
+          ...undo,
+        });
+        break;
+      }
+      case 'paragraph.insert': {
+        const textBody = requireTextBody(draft, changeIndex);
+        assertIndex(
+          change.paragraphIndex,
+          textBody.paragraphs.length,
+          changeIndex,
+          'paragraph index',
+          true,
+        );
+        textBody.paragraphs.splice(
+          change.paragraphIndex,
+          0,
+          structuredClone(change.paragraph),
+        );
+        inverse.unshift({
+          type: 'paragraph.remove',
+          paragraphIndex: change.paragraphIndex,
+        });
+        break;
+      }
+      case 'paragraph.remove': {
+        const textBody = requireTextBody(draft, changeIndex);
+        assertIndex(
+          change.paragraphIndex,
+          textBody.paragraphs.length,
+          changeIndex,
+          'paragraph index',
+        );
+        const [paragraph] = textBody.paragraphs.splice(change.paragraphIndex, 1);
+        inverse.unshift({
+          type: 'paragraph.insert',
+          paragraphIndex: change.paragraphIndex,
+          paragraph: structuredClone(paragraph!),
+        });
+        break;
+      }
+      case 'textRun.update': {
+        const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
+        const run = requireRun(paragraph, change.runIndex, changeIndex);
+        if (run.type !== 'text') fail(changeIndex, 'target run is not a text run');
+        const undo = applyProperties<EditableTextRun>(
+          run,
+          change.patch,
+          change.unset,
+          changeIndex,
+        );
+        inverse.unshift({
+          type: 'textRun.update',
+          paragraphIndex: change.paragraphIndex,
+          runIndex: change.runIndex,
+          ...undo,
+        });
+        break;
+      }
+      case 'run.insert': {
+        const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
+        assertIndex(change.runIndex, paragraph.runs.length, changeIndex, 'run index', true);
+        paragraph.runs.splice(change.runIndex, 0, structuredClone(change.run));
+        inverse.unshift({
+          type: 'run.remove',
+          paragraphIndex: change.paragraphIndex,
+          runIndex: change.runIndex,
+        });
+        break;
+      }
+      case 'run.replace': {
+        const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
+        const previous = requireRun(paragraph, change.runIndex, changeIndex);
+        paragraph.runs[change.runIndex] = structuredClone(change.run);
+        inverse.unshift({
+          type: 'run.replace',
+          paragraphIndex: change.paragraphIndex,
+          runIndex: change.runIndex,
+          run: structuredClone(previous),
+        });
+        break;
+      }
+      case 'run.remove': {
+        const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
+        const previous = requireRun(paragraph, change.runIndex, changeIndex);
+        paragraph.runs.splice(change.runIndex, 1);
+        inverse.unshift({
+          type: 'run.insert',
+          paragraphIndex: change.paragraphIndex,
+          runIndex: change.runIndex,
+          run: structuredClone(previous),
+        });
+        break;
+      }
     }
 
-    if (change.op === 'replace') {
-      const value = cloneChangeValue(change.value, changeIndex);
-      if (Array.isArray(parent)) {
-        const current = readArrayItem(parent, key, changeIndex, false);
-        parent[current.index] = value;
-        inverse.unshift({
-          op: 'replace',
-          path: clonePath(path),
-          value: structuredClone(current.value),
-        });
-      } else {
-        const current = readObjectProperty(parent, key, changeIndex);
-        if (!current.exists) fail(changeIndex, `object property "${current.key}" does not exist`);
-        parent[current.key] = value;
-        inverse.unshift({
-          op: 'replace',
-          path: clonePath(path),
-          value: structuredClone(current.value),
-        });
-      }
-      applied.push({ op: 'replace', path, value: structuredClone(value) });
-      return;
-    }
-
-    if (Array.isArray(parent)) {
-      const current = readArrayItem(parent, key, changeIndex, false);
-      parent.splice(current.index, 1);
-      inverse.unshift({
-        op: 'add',
-        path: clonePath(path),
-        value: structuredClone(current.value),
-      });
-    } else {
-      const current = readObjectProperty(parent, key, changeIndex);
-      if (!current.exists) fail(changeIndex, `object property "${current.key}" does not exist`);
-      delete parent[current.key];
-      inverse.unshift({
-        op: 'add',
-        path: clonePath(path),
-        value: structuredClone(current.value),
-      });
-    }
-    applied.push({ op: 'remove', path });
+    applied.push(change);
   });
 
   return { applied, inverse };

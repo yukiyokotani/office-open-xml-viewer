@@ -31,6 +31,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 import {
   applyPptxShapeChanges,
+  type PptxApplyShapeChangesRequest,
   type PptxShapeChange,
 } from './shape-changes';
 
@@ -263,23 +264,18 @@ export class PptxPresentation {
   }
 
   /**
-   * Atomically apply serializable JSON-Patch-style changes to one slide-owned
-   * shape and return the inverse batch needed for undo.
+   * Atomically apply a serializable, model-aware change request to one
+   * slide-owned shape and return the inverse batch needed for undo.
    *
-   * Object properties use string path segments; array items use zero-based
-   * numeric segments. `add`, `replace`, and `remove` follow JSON Patch
-   * semantics. The whole batch is applied to an isolated draft, so an invalid
-   * path or value leaves the live model unchanged. Values must contain only
-   * JSON-compatible primitives, objects, and arrays.
+   * Each discriminated change exposes typed shape, text-body, paragraph, or run
+   * properties. Structural edits use explicit insert/replace/remove variants;
+   * callers never construct paths into the private presentation model.
    *
    * Main mode only: in worker mode the parsed presentation lives inside the
    * render worker and is not synchronously mutable from this instance.
    */
-  applyShapeChanges(
-    slideIndex: number,
-    shapeId: string,
-    changes: readonly PptxShapeChange[],
-  ): PptxShapeChangesResult {
+  applyShapeChanges(request: PptxApplyShapeChangesRequest): PptxShapeChangesResult {
+    const { slideIndex, shapeId, changes } = request;
     if (this._mode !== 'main') {
       throw new Error('PptxPresentation.applyShapeChanges requires mode: "main"');
     }

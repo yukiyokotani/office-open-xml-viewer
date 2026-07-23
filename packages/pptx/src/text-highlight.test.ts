@@ -94,7 +94,7 @@ describe('layoutParagraph — highlight is part of segment identity (sameMeta)',
     expect(segs[1].highlight).toBe('rgba(0,255,0,1)');
   });
 
-  it('coalesces adjacent runs that share the same highlight', () => {
+  it('keeps adjacent source runs distinct even when their highlight matches', () => {
     const { ctx } = mockCtx();
     const lines = layoutParagraph(
       ctx,
@@ -106,9 +106,10 @@ describe('layoutParagraph — highlight is part of segment identity (sameMeta)',
       0,
     );
     const segs = lines[0].segments;
-    expect(segs).toHaveLength(1);
-    expect(segs[0].text).toBe('AAABBB');
+    expect(segs.map((segment) => segment.text)).toEqual(['AAA', 'BBB']);
+    expect(segs.map((segment) => segment.runIndex)).toEqual([0, 1]);
     expect(segs[0].highlight).toBe('rgba(255,255,0,1)');
+    expect(segs[1].highlight).toBe('rgba(255,255,0,1)');
   });
 
   it('splits a highlighted run from an unhighlighted neighbour', () => {

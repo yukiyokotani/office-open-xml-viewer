@@ -9,7 +9,15 @@ export {
 } from './presentation';
 export {
   type PptxShapeChange,
-  type PptxShapeChangePathSegment,
+  type PptxShapeProperties,
+  type PptxTextBodyProperties,
+  type PptxParagraphProperties,
+  type PptxTextRunProperties,
+  type PptxOptionalShapeProperty,
+  type PptxOptionalTextBodyProperty,
+  type PptxOptionalParagraphProperty,
+  type PptxOptionalTextRunProperty,
+  type PptxApplyShapeChangesRequest,
 } from './shape-changes';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export { buildPptxTextLayer } from './text-layer';

@@ -141,6 +141,10 @@ export interface PptxTextRunInfo {
    * within its slide. Absent for parser-synthesized shapes that have no cNvPr.
    */
   shapeId?: string;
+  /** Zero-based paragraph index inside the source shape's text body. */
+  paragraphIndex: number;
+  /** Zero-based run index inside the source paragraph. */
+  runIndex: number;
   text: string;
   /** X position in CSS px, relative to the shape's top-left corner. */
   inShapeX: number;
@@ -366,6 +370,8 @@ export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promis
 }
 
 type LayoutSegment = {
+  paragraphIndex: number;
+  runIndex: number;
   text: string;
   font: string;
   /** Inline DrawingML TAB, classified UAX#9 S during visual ordering (#916). */
@@ -705,6 +711,7 @@ export function layoutParagraph(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   firstLineIndentPx: number = 0,
+  paragraphIndex: number = 0,
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   // The first line's wrap budget is narrower by a POSITIVE first-line indent
@@ -720,6 +727,7 @@ export function layoutParagraph(
   // shape (PowerPoint's actual behavior, e.g. "YoY+11.9%" mixed-size runs in
   // sample-2 slide-7 stay on one line even though the bbox is tight).
   let hasWhitespaceOnLine = false;
+  let activeRunIndex = 0;
 
   // ── Wrap-aware tab context (issue #1006) ──────────────────────────────────
   // A tab is a horizontal pen JUMP to its stop within the visual line where it
@@ -827,6 +835,8 @@ export function layoutParagraph(
       fontFamily?: string;
       /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
       hyperlink?: HyperlinkTarget;
+      /** Preserve the source when a segment is moved during line wrapping. */
+      sourceRunIndex?: number;
     },
   ) => {
     if (!text) return;
@@ -846,12 +856,15 @@ export function layoutParagraph(
     const highlight = extras?.highlight;
     const fontFamily = extras?.fontFamily;
     const hyperlink = extras?.hyperlink;
+    const sourceRunIndex = extras?.sourceRunIndex ?? activeRunIndex;
     // Shadow / outline use object identity for merging — adjacent runs share
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
     const sameMeta = (a: LayoutSegment) =>
       !a.math &&
       !a.isTab &&
+      a.paragraphIndex === paragraphIndex &&
+      a.runIndex === sourceRunIndex &&
       a.font === font &&
       a.color === color &&
       a.underline === underline &&
@@ -875,7 +888,7 @@ export function layoutParagraph(
     if (last && sameMeta(last)) {
       last.text += text;
     } else {
-      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
+      currentLine.segments.push({ paragraphIndex, runIndex: sourceRunIndex, text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, baseline, shadow, outline, highlight, hyperlink });
     }
   };
 
@@ -917,11 +930,14 @@ export function layoutParagraph(
       outline: seg.outline,
       highlight: seg.highlight,
       fontFamily: seg.fontFamily,
+      sourceRunIndex: seg.runIndex,
     });
     return true;
   };
 
-  for (const run of para.runs) {
+  for (let runIndex = 0; runIndex < para.runs.length; runIndex++) {
+    activeRunIndex = runIndex;
+    const run = para.runs[runIndex]!;
     if (run.type === 'break') {
       // The line being closed ends at a MANUAL break (§21.1.2.2.1) — mark it so
       // a `just` paragraph left-aligns it like its last line (§20.1.10.59).
@@ -944,6 +960,8 @@ export function layoutParagraph(
       else if (!fitsW(width) && lineW > 0) newLine();
       lineItems.push({ isTab: false, width });
       currentLine.segments.push({
+        paragraphIndex,
+        runIndex,
         text: '',
         font: `${emPx}px sans-serif`,
         sizePx: emPx,
@@ -1054,6 +1072,8 @@ export function layoutParagraph(
         }
         for (const _ of token) {
           currentLine.segments.push({
+            paragraphIndex,
+            runIndex,
             text: '',
             isTab: true,
             font,
@@ -3172,7 +3192,7 @@ export function renderTextBody(
     // naturalWidthExceedsBbox measurement; a bullet's gutter / a negative
     // (hanging) indent contribute 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
+    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx, paraIdx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px
     const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
@@ -3812,6 +3832,8 @@ export function renderTextBody(
 
       if (onTextRun && seg.text) {
         onTextRun({
+          paragraphIndex: seg.paragraphIndex,
+          runIndex: seg.runIndex,
           text: seg.text,
           inShapeX: penX - bx,
           inShapeY: cursorY - by,
