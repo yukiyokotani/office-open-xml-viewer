@@ -127,87 +127,6 @@ function firstTextRun(shapeElement: ShapeElement): TextRunData {
   return run;
 }
 
-describe('PptxPresentation.updateShape', () => {
-  it('atomically updates arbitrary top-level and nested shape properties', () => {
-    const { pres, model } = makePresentation();
-    const original = model.slides[1].elements[0] as ShapeElement;
-
-    const result = pres.updateShape(1, '7', (draft) => {
-      draft.x = 914400;
-      draft.rotation = 15;
-      draft.fill = { fillType: 'solid', color: '4472C4' };
-      draft.textBody!.verticalAnchor = 'ctr';
-      const run = firstTextRun(draft);
-      run.text = 'Updated';
-      run.fontFamily = 'Aptos';
-      run.fontSize = 24;
-      run.color = 'FF0000';
-      run.bold = true;
-    });
-
-    const updated = model.slides[1].elements[0] as ShapeElement;
-    expect(result).toMatchObject({ slideIndex: 1, shapeId: '7' });
-    expect(result.shape).not.toBe(updated);
-    expect(updated).not.toBe(original);
-    expect(updated).toMatchObject({
-      id: '7',
-      x: 914400,
-      rotation: 15,
-      fill: { fillType: 'solid', color: '4472C4' },
-      textBody: { verticalAnchor: 'ctr' },
-    });
-    expect(firstTextRun(updated)).toMatchObject({
-      text: 'Updated',
-      fontFamily: 'Aptos',
-      fontSize: 24,
-      color: 'FF0000',
-      bold: true,
-    });
-    expect(firstTextRun(original).text).toBe('Slide two');
-    result.shape.x = 456;
-    expect((model.slides[1].elements[0] as ShapeElement).x).toBe(914400);
-  });
-
-  it('scopes an id to the requested slide', () => {
-    const { pres, model } = makePresentation();
-
-    pres.updateShape(1, '7', (draft) => {
-      firstTextRun(draft).text = 'Only slide two';
-    });
-
-    expect(firstTextRun(model.slides[0].elements[0] as ShapeElement).text).toBe('Slide one');
-    expect(firstTextRun(model.slides[1].elements[0] as ShapeElement).text).toBe('Only slide two');
-  });
-
-  it('rejects identity changes without committing a partial update', () => {
-    const { pres, model } = makePresentation();
-    const before = model.slides[0].elements[0];
-
-    expect(() =>
-      pres.updateShape(0, '7', (draft) => {
-        draft.x = 123;
-        draft.id = '8';
-      }),
-    ).toThrow(/identity/i);
-
-    expect(model.slides[0].elements[0]).toBe(before);
-    expect((model.slides[0].elements[0] as ShapeElement).x).toBe(0);
-  });
-
-  it('rejects missing and parser-synthesized targets without a stable id', () => {
-    const { pres, model } = makePresentation();
-    (model.slides[0].elements[0] as ShapeElement).id = undefined;
-
-    expect(() => pres.updateShape(0, '7', () => {})).toThrow(/shape.*7.*not found/i);
-    expect(() => pres.updateShape(3, '7', () => {})).toThrow(/slide.*3.*out of range/i);
-  });
-
-  it('requires main mode because the editable model lives in the render worker otherwise', () => {
-    const { pres } = makePresentation('worker');
-    expect(() => pres.updateShape(0, '7', () => {})).toThrow(/mode.*main/i);
-  });
-});
-
 describe('PptxPresentation.applyShapeChanges', () => {
   it('applies a serializable batch and returns a directly applicable inverse batch', () => {
     const { pres, model } = makePresentation();
@@ -271,6 +190,29 @@ describe('PptxPresentation.applyShapeChanges', () => {
     pres.applyShapeChanges(0, '7', result.inverse);
     expect(firstTextRun(model.slides[0].elements[0] as ShapeElement).text).toBe('Slide one');
     expect((model.slides[0].elements[0] as ShapeElement).name).toBe('Shape 7');
+  });
+
+  it('scopes a shape id to the requested slide', () => {
+    const { pres, model } = makePresentation();
+
+    pres.applyShapeChanges(1, '7', [
+      {
+        op: 'replace',
+        path: ['textBody', 'paragraphs', 0, 'runs', 0, 'text'],
+        value: 'Only slide two',
+      },
+    ]);
+
+    expect(firstTextRun(model.slides[0].elements[0] as ShapeElement).text).toBe('Slide one');
+    expect(firstTextRun(model.slides[1].elements[0] as ShapeElement).text).toBe('Only slide two');
+  });
+
+  it('rejects missing and parser-synthesized targets without a stable id', () => {
+    const { pres, model } = makePresentation();
+    (model.slides[0].elements[0] as ShapeElement).id = undefined;
+
+    expect(() => pres.applyShapeChanges(0, '7', [])).toThrow(/shape.*7.*not found/i);
+    expect(() => pres.applyShapeChanges(3, '7', [])).toThrow(/slide.*3.*out of range/i);
   });
 
   it('rejects an invalid change without committing earlier changes in the batch', () => {

@@ -87,30 +87,17 @@ export interface RenderSlideOptions {
   dim?: DimOptions;
 }
 
-/**
- * Mutates an isolated draft of a slide-owned {@link ShapeElement}. The draft
- * exposes the complete parsed shape model, including nested text bodies,
- * paragraphs, and runs, so one update can change geometry, fills, effects,
- * text, fonts, colours, and future model fields without a parallel patch
- * schema. `type` and `id` are immutable identity fields.
- */
-export type PptxShapeUpdater = (draft: ShapeElement) => void;
-
-/** Result of a successful {@link PptxPresentation.updateShape} call. */
-export interface PptxShapeUpdateResult {
+/** Result of a successful {@link PptxPresentation.applyShapeChanges} call. */
+export interface PptxShapeChangesResult {
   /** Zero-based index of the only slide whose model changed. */
   slideIndex: number;
   /** Slide-local DrawingML `cNvPr@id` of the updated shape. */
   shapeId: string;
   /**
    * Detached snapshot of the committed shape. Mutating this object does not
-   * mutate the presentation; call `updateShape` again for another change.
+   * mutate the presentation; call `applyShapeChanges` for another change.
    */
   shape: ShapeElement;
-}
-
-/** Result of a successful {@link PptxPresentation.applyShapeChanges} call. */
-export interface PptxShapeChangesResult extends PptxShapeUpdateResult {
   /** Detached, normalized copies of the changes that were applied. */
   applied: PptxShapeChange[];
   /**
@@ -273,52 +260,6 @@ export class PptxPresentation {
    *  probing (design §11: no silent mis-pathing). */
   get mode(): 'main' | 'worker' {
     return this._mode;
-  }
-
-  /**
-   * Atomically update any renderable property of a slide-owned shape.
-   *
-   * The updater receives a structured clone, not the live parsed model. If it
-   * throws, or attempts to change the shape's `type` / `id`, nothing is
-   * committed. After a successful update, call {@link renderSlide} for the
-   * returned `slideIndex` to redraw only that slide.
-   *
-   * Main mode only: in worker mode the parsed presentation lives inside the
-   * render worker and is not synchronously mutable from this instance.
-   */
-  updateShape(
-    slideIndex: number,
-    shapeId: string,
-    updater: PptxShapeUpdater,
-  ): PptxShapeUpdateResult {
-    if (this._mode !== 'main') {
-      throw new Error('PptxPresentation.updateShape requires mode: "main"');
-    }
-    if (!this._presentation) throw new Error('Presentation not loaded');
-    const slide = this._presentation.slides[slideIndex];
-    if (!slide) {
-      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
-    }
-    const elementIndex = slide.elements.findIndex(
-      (element) => element.type === 'shape' && element.id === shapeId,
-    );
-    if (elementIndex < 0) {
-      throw new Error(`Shape ${shapeId} not found on slide ${slideIndex}`);
-    }
-
-    const current = slide.elements[elementIndex] as ShapeElement;
-    const draft = structuredClone(current);
-    updater(draft);
-    if (draft.type !== 'shape' || draft.id !== current.id) {
-      throw new Error('PptxPresentation.updateShape cannot change shape identity (type or id)');
-    }
-
-    slide.elements[elementIndex] = draft;
-    return {
-      slideIndex,
-      shapeId,
-      shape: structuredClone(draft),
-    };
   }
 
   /**

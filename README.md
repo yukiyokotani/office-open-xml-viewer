@@ -216,11 +216,6 @@ primitives, objects, and arrays. The returned `applied`, `inverse`, and `shape`
 values are detached from the live model and safe to retain in an undo/redo
 stack.
 
-`updateShape(slideIndex, shapeId, updater)` remains available as a convenient
-local-only API when serialization and undo history are not needed. Its updater
-receives an isolated `ShapeElement` draft and may modify the complete nested
-shape model.
-
 The method accepts ordinary shapes, text boxes/placeholders, connectors, and
 file-authored SmartArt shapes that the parser represents as `ShapeElement` and
 that carry an id. Pictures, tables, charts, and media use their own element

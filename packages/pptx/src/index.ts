@@ -4,8 +4,6 @@ export {
   PptxPresentation,
   type LoadOptions,
   type PptxShapeChangesResult,
-  type PptxShapeUpdater,
-  type PptxShapeUpdateResult,
   type RenderSlideOptions,
   type RenderSlideToBitmapOptions,
 } from './presentation';
