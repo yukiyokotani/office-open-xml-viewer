@@ -329,7 +329,6 @@ describe('renderSlide text-run shape identity', () => {
 
     expect(runs).not.toHaveLength(0);
     expect(runs.every((run) => run.shapeId === '42')).toBe(true);
-    expect(runs.every((run) => run.paragraphIndex === 0 && run.runIndex === 0)).toBe(true);
   });
 
   it('leaves identity absent for parser-synthesized SmartArt fallback shapes', async () => {

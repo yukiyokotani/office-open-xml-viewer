@@ -9,8 +9,6 @@ import type { PptxTextRunInfo } from './renderer';
  */
 function run(text: string): PptxTextRunInfo {
   return {
-    paragraphIndex: 0,
-    runIndex: 0,
     text,
     inShapeX: 0,
     inShapeY: 0,

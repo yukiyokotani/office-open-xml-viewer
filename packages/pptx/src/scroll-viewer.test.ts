@@ -986,8 +986,6 @@ describe('PptxScrollViewer — text selection (T5)', () => {
   // frame geometry (shapeX/Y/W/H, rotation) so buildPptxTextLayer can group runs
   // into a positioned shape <div> and nest the run <span> inside it.
   const RUN = {
-    paragraphIndex: 0,
-    runIndex: 0,
     text: 'Hi',
     inShapeX: 1,
     inShapeY: 2,
@@ -1820,8 +1818,6 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     const { v, scrollHost, engine } = setup(20, { enableTextSelection: true });
     engine.feedTextRuns = [
       {
-        paragraphIndex: 0,
-        runIndex: 0,
         text: 'Hi',
         inShapeX: 1,
         inShapeY: 2,
@@ -2004,8 +2000,6 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     const { v, scrollHost, engine } = setup(20, { enableTextSelection: true }, 'main', true);
     engine.feedTextRuns = [
       {
-        paragraphIndex: 0,
-        runIndex: 0,
         text: 'Hi',
         inShapeX: 1,
         inShapeY: 2,

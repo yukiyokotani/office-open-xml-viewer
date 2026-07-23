@@ -264,12 +264,11 @@ export class PptxPresentation {
   }
 
   /**
-   * Atomically apply a serializable, model-aware change request to one
-   * slide-owned shape and return the inverse batch needed for undo.
+   * Atomically apply serializable top-level deltas to one slide-owned shape and
+   * return the inverse batch needed for undo.
    *
-   * Each discriminated change exposes typed shape, text-body, paragraph, or run
-   * properties. Structural edits use explicit insert/replace/remove variants;
-   * callers never construct paths into the private presentation model.
+   * Nested properties such as `textBody` are replaced as complete values. Shape
+   * identity (`type` and `id`) is immutable.
    *
    * Main mode only: in worker mode the parsed presentation lives inside the
    * render worker and is not synchronously mutable from this instance.

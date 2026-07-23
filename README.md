@@ -168,10 +168,10 @@ Notes:
 ### In-memory PPTX shape updates
 
 In `mode: 'main'`, `PptxPresentation.applyShapeChanges()` atomically applies a
-serializable batch to one slide-owned shape. Its discriminated change types
-name the target model directly (`shape.update`, `textRun.update`, `run.insert`,
-etc.) and expose typed patches without paths into the private presentation
-model. The DrawingML `cNvPr@id` is slide-local and immutable.
+serializable batch of top-level deltas to one slide-owned shape. The single
+`PptxShapeChangeType.Update` operation exposes every mutable `ShapeElement`
+property without paths into the private presentation model. The DrawingML
+`cNvPr@id` is slide-local and immutable.
 
 ```typescript
 import { PptxShapeChangeType } from '@silurus/ooxml/pptx';
@@ -181,19 +181,12 @@ const result = pres.applyShapeChanges({
   shapeId: '7',
   changes: [
     {
-      type: PptxShapeChangeType.ShapeUpdate,
+      type: PptxShapeChangeType.Update,
       patch: {
         x: 914400, // 1 inch in EMU
         fill: { fillType: 'solid', color: '4472C4' },
-      },
-    },
-    {
-      type: PptxShapeChangeType.TextRunUpdate,
-      paragraphIndex: 0,
-      runIndex: 0,
-      patch: {
-        fontSize: 24,
-        color: 'FFFFFF',
+        // Nested values are complete replacements, not deep patches.
+        textBody: updatedTextBody,
       },
     },
   ],
@@ -215,11 +208,12 @@ await pres.renderSlide(canvas, undoResult.slideIndex, { width: 960 });
 ```
 
 The whole batch runs against an isolated draft. An invalid target, unsupported
-value, or attempted identity/structural patch rejects the batch without
-changing the live model. Use the explicit paragraph/run insert, replace, and
-remove variants for structural edits. The returned `applied`, `inverse`, and
-`shape` values are detached from the live model and safe to retain in an
-undo/redo stack.
+value, or attempted `type` / `id` change rejects the batch without changing the
+live model. Each `patch` is shallow: omitted top-level properties are preserved,
+while supplied objects and arrays (including `textBody`) replace their previous
+value in full. Use `unset` to remove an optional property. The returned
+`applied`, `inverse`, and `shape` values are detached from the live model and
+safe to retain in an undo/redo stack.
 
 The method accepts ordinary shapes, text boxes/placeholders, connectors, and
 file-authored SmartArt shapes that the parser represents as `ShapeElement` and
