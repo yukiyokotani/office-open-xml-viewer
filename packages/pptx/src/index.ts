@@ -1,4 +1,9 @@
-export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
+export {
+  PptxViewer,
+  type PptxViewerOptions,
+  type PptxShapeClickEvent,
+  type HiddenSlideMode,
+} from './viewer';
 export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
 export {
   PptxPresentation,
@@ -14,6 +19,11 @@ export {
   type PptxOptionalShapeProperty,
   type PptxApplyShapeChangesRequest,
 } from './shape-changes';
+export {
+  type PptxSlidePoint,
+  type PptxShapeHit,
+  type PptxShapeHitTestOptions,
+} from './shape-hit-test';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export { buildPptxTextLayer } from './text-layer';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location

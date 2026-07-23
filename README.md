@@ -222,6 +222,40 @@ types; parser-synthesized SmartArt fallback shapes have no stable id and cannot
 be targeted. Worker-mode mutation is not exposed because that mode owns its
 parsed model inside the render worker.
 
+### PPTX shape click and hit testing
+
+In `mode: 'main'`, `PptxViewer` can report the topmost identified shape under a
+click. The event includes the slide-local DrawingML id and a detached
+`ShapeElement` snapshot, so it can be used to construct an
+`applyShapeChanges()` request without exposing the presentation's private model.
+
+```typescript
+const viewer = new PptxViewer(canvas, {
+  onShapeClick({ slideIndex, shapeId, shape, nativeEvent }) {
+    console.log(slideIndex, shapeId, shape, nativeEvent);
+  },
+});
+```
+
+Headless integrations can call the same model-backed hit test directly. Points
+and tolerance use slide EMU coordinates:
+
+```typescript
+const rect = canvas.getBoundingClientRect();
+const point = {
+  x: ((event.clientX - rect.left) / rect.width) * pres.slideWidth,
+  y: ((event.clientY - rect.top) / rect.height) * pres.slideHeight,
+};
+const hit = pres.hitTestShape(slideIndex, point, {
+  tolerance: (6 / rect.width) * pres.slideWidth,
+});
+```
+
+Hit testing walks shapes in reverse paint order, uses each shape's transformed
+frame, and applies the optional tolerance to straight lines and connectors.
+Shapes without a file-authored id are ignored. Both `onShapeClick` and
+`hitTestShape()` require `mode: 'main'`.
+
 ### Continuous scroll viewers
 
 `DocxScrollViewer` and `PptxScrollViewer` render the whole document as one
