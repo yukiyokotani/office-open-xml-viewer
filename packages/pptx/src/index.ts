@@ -8,6 +8,7 @@ export {
   type RenderSlideToBitmapOptions,
 } from './presentation';
 export {
+  PptxShapeChangeType,
   type PptxShapeChange,
   type PptxShapeProperties,
   type PptxTextBodyProperties,

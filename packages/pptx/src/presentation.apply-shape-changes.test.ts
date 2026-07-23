@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PptxPresentation } from './presentation';
-import type { PptxShapeChange } from './shape-changes';
+import { PptxShapeChangeType, type PptxShapeChange } from './shape-changes';
 import type {
   Paragraph,
   Presentation,
@@ -133,7 +133,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
     const original = structuredClone(model.slides[0].elements[0]) as ShapeElement;
     const changes = [
       {
-        type: 'shape.update',
+        type: PptxShapeChangeType.ShapeUpdate,
         patch: {
           x: 914400,
           fill: { fillType: 'solid', color: '4472C4' },
@@ -142,16 +142,16 @@ describe('PptxPresentation.applyShapeChanges', () => {
         unset: ['name'],
       },
       {
-        type: 'textBody.update',
+        type: PptxShapeChangeType.TextBodyUpdate,
         patch: { verticalAnchor: 'ctr' },
       },
       {
-        type: 'paragraph.update',
+        type: PptxShapeChangeType.ParagraphUpdate,
         paragraphIndex: 0,
         patch: { alignment: 'ctr' },
       },
       {
-        type: 'textRun.update',
+        type: PptxShapeChangeType.TextRunUpdate,
         paragraphIndex: 0,
         runIndex: 0,
         patch: {
@@ -163,7 +163,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
         },
       },
       {
-        type: 'run.insert',
+        type: PptxShapeChangeType.RunInsert,
         paragraphIndex: 0,
         runIndex: 1,
         run: textRun('Second run'),
@@ -193,11 +193,11 @@ describe('PptxPresentation.applyShapeChanges', () => {
     });
     expect(result.applied).toEqual(changes);
     expect(result.inverse.map((change) => change.type)).toEqual([
-      'run.remove',
-      'textRun.update',
-      'paragraph.update',
-      'textBody.update',
-      'shape.update',
+      PptxShapeChangeType.RunRemove,
+      PptxShapeChangeType.TextRunUpdate,
+      PptxShapeChangeType.ParagraphUpdate,
+      PptxShapeChangeType.TextBodyUpdate,
+      PptxShapeChangeType.ShapeUpdate,
     ]);
 
     pres.applyShapeChanges({
@@ -216,9 +216,9 @@ describe('PptxPresentation.applyShapeChanges', () => {
       slideIndex: 0,
       shapeId: '7',
       changes: [
-        { type: 'paragraph.insert', paragraphIndex: 1, paragraph: paragraph('New paragraph') },
-        { type: 'run.replace', paragraphIndex: 0, runIndex: 0, run: textRun('Replacement') },
-        { type: 'run.remove', paragraphIndex: 1, runIndex: 0 },
+        { type: PptxShapeChangeType.ParagraphInsert, paragraphIndex: 1, paragraph: paragraph('New paragraph') },
+        { type: PptxShapeChangeType.RunReplace, paragraphIndex: 0, runIndex: 0, run: textRun('Replacement') },
+        { type: PptxShapeChangeType.RunRemove, paragraphIndex: 1, runIndex: 0 },
       ],
     });
 
@@ -241,7 +241,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
     const result = pres.applyShapeChanges({
       slideIndex: 0,
       shapeId: '7',
-      changes: [{ type: 'textBody.replace', textBody: null }],
+      changes: [{ type: PptxShapeChangeType.TextBodyReplace, textBody: null }],
     });
     expect((model.slides[0].elements[0] as ShapeElement).textBody).toBeNull();
 
@@ -260,7 +260,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
       slideIndex: 1,
       shapeId: '7',
       changes: [{
-        type: 'textRun.update',
+        type: PptxShapeChangeType.TextRunUpdate,
         paragraphIndex: 0,
         runIndex: 0,
         patch: { text: 'Only slide two' },
@@ -280,9 +280,9 @@ describe('PptxPresentation.applyShapeChanges', () => {
         slideIndex: 0,
         shapeId: '7',
         changes: [
-          { type: 'shape.update', patch: { x: 123 } },
+          { type: PptxShapeChangeType.ShapeUpdate, patch: { x: 123 } },
           {
-            type: 'textRun.update',
+            type: PptxShapeChangeType.TextRunUpdate,
             paragraphIndex: 99,
             runIndex: 0,
             patch: { text: 'Missing' },
@@ -312,7 +312,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
         slideIndex: 0,
         shapeId: '7',
         changes: [{
-          type: 'shape.update',
+          type: PptxShapeChangeType.ShapeUpdate,
           patch: { id: '8' },
         } as unknown as PptxShapeChange],
       }),
@@ -322,7 +322,7 @@ describe('PptxPresentation.applyShapeChanges', () => {
         slideIndex: 0,
         shapeId: '7',
         changes: [{
-          type: 'shape.update',
+          type: PptxShapeChangeType.ShapeUpdate,
           patch: { fill: cyclic },
         } as unknown as PptxShapeChange],
       }),
@@ -336,13 +336,15 @@ describe('PptxPresentation.applyShapeChanges', () => {
     const request = {
       slideIndex: 0,
       shapeId: '7',
-      changes: [{ type: 'shape.update', patch: { fill } }],
+      changes: [{ type: PptxShapeChangeType.ShapeUpdate, patch: { fill } }],
     } satisfies Parameters<PptxPresentation['applyShapeChanges']>[0];
 
     const result = pres.applyShapeChanges(request);
     fill.color = 'FFFFFF';
     const applied = result.applied[0]!;
-    if (applied.type !== 'shape.update') throw new Error('Expected a shape update');
+    if (applied.type !== PptxShapeChangeType.ShapeUpdate) {
+      throw new Error('Expected a shape update');
+    }
     applied.patch.fill = null;
     result.shape.fill = null;
 

@@ -174,19 +174,21 @@ etc.) and expose typed patches without paths into the private presentation
 model. The DrawingML `cNvPr@id` is slide-local and immutable.
 
 ```typescript
+import { PptxShapeChangeType } from '@silurus/ooxml/pptx';
+
 const result = pres.applyShapeChanges({
   slideIndex: 0,
   shapeId: '7',
   changes: [
     {
-      type: 'shape.update',
+      type: PptxShapeChangeType.ShapeUpdate,
       patch: {
         x: 914400, // 1 inch in EMU
         fill: { fillType: 'solid', color: '4472C4' },
       },
     },
     {
-      type: 'textRun.update',
+      type: PptxShapeChangeType.TextRunUpdate,
       paragraphIndex: 0,
       runIndex: 0,
       patch: {

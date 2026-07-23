@@ -28,6 +28,20 @@ export type PptxOptionalTextBodyProperty = OptionalKey<EditableTextBody>;
 export type PptxOptionalParagraphProperty = OptionalKey<EditableParagraph>;
 export type PptxOptionalTextRunProperty = OptionalKey<EditableTextRun>;
 
+/** Public operation names accepted by {@link PptxShapeChange}. */
+export enum PptxShapeChangeType {
+  ShapeUpdate = 'shape.update',
+  TextBodyReplace = 'textBody.replace',
+  TextBodyUpdate = 'textBody.update',
+  ParagraphUpdate = 'paragraph.update',
+  ParagraphInsert = 'paragraph.insert',
+  ParagraphRemove = 'paragraph.remove',
+  TextRunUpdate = 'textRun.update',
+  RunInsert = 'run.insert',
+  RunReplace = 'run.replace',
+  RunRemove = 'run.remove',
+}
+
 export interface PptxApplyShapeChangesRequest {
   /** Zero-based slide index. */
   slideIndex: number;
@@ -46,49 +60,49 @@ export interface PptxApplyShapeChangesRequest {
  */
 export type PptxShapeChange =
   | {
-      type: 'shape.update';
+      type: PptxShapeChangeType.ShapeUpdate;
       patch: PptxShapeProperties;
       unset?: readonly PptxOptionalShapeProperty[];
     }
   | {
-      type: 'textBody.replace';
+      type: PptxShapeChangeType.TextBodyReplace;
       textBody: TextBody | null;
     }
   | {
-      type: 'textBody.update';
+      type: PptxShapeChangeType.TextBodyUpdate;
       patch: PptxTextBodyProperties;
       unset?: readonly PptxOptionalTextBodyProperty[];
     }
   | {
-      type: 'paragraph.update';
+      type: PptxShapeChangeType.ParagraphUpdate;
       paragraphIndex: number;
       patch: PptxParagraphProperties;
       unset?: readonly PptxOptionalParagraphProperty[];
     }
   | {
-      type: 'paragraph.insert';
+      type: PptxShapeChangeType.ParagraphInsert;
       paragraphIndex: number;
       paragraph: Paragraph;
     }
   | {
-      type: 'paragraph.remove';
+      type: PptxShapeChangeType.ParagraphRemove;
       paragraphIndex: number;
     }
   | {
-      type: 'textRun.update';
+      type: PptxShapeChangeType.TextRunUpdate;
       paragraphIndex: number;
       runIndex: number;
       patch: PptxTextRunProperties;
       unset?: readonly PptxOptionalTextRunProperty[];
     }
   | {
-      type: 'run.insert' | 'run.replace';
+      type: PptxShapeChangeType.RunInsert | PptxShapeChangeType.RunReplace;
       paragraphIndex: number;
       runIndex: number;
       run: TextRun;
     }
   | {
-      type: 'run.remove';
+      type: PptxShapeChangeType.RunRemove;
       paragraphIndex: number;
       runIndex: number;
     };
@@ -228,25 +242,25 @@ export function applyPptxShapeChanges(
     const change = structuredClone(input);
 
     switch (change.type) {
-      case 'shape.update': {
+      case PptxShapeChangeType.ShapeUpdate: {
         const undo = applyProperties<EditableShape>(
           draft,
           change.patch,
           change.unset,
           changeIndex,
         );
-        inverse.unshift({ type: 'shape.update', ...undo });
+        inverse.unshift({ type: PptxShapeChangeType.ShapeUpdate, ...undo });
         break;
       }
-      case 'textBody.replace': {
+      case PptxShapeChangeType.TextBodyReplace: {
         inverse.unshift({
-          type: 'textBody.replace',
+          type: PptxShapeChangeType.TextBodyReplace,
           textBody: structuredClone(draft.textBody),
         });
         draft.textBody = structuredClone(change.textBody);
         break;
       }
-      case 'textBody.update': {
+      case PptxShapeChangeType.TextBodyUpdate: {
         const textBody = requireTextBody(draft, changeIndex);
         const undo = applyProperties<EditableTextBody>(
           textBody,
@@ -254,10 +268,10 @@ export function applyPptxShapeChanges(
           change.unset,
           changeIndex,
         );
-        inverse.unshift({ type: 'textBody.update', ...undo });
+        inverse.unshift({ type: PptxShapeChangeType.TextBodyUpdate, ...undo });
         break;
       }
-      case 'paragraph.update': {
+      case PptxShapeChangeType.ParagraphUpdate: {
         const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
         const undo = applyProperties<EditableParagraph>(
           paragraph,
@@ -266,13 +280,13 @@ export function applyPptxShapeChanges(
           changeIndex,
         );
         inverse.unshift({
-          type: 'paragraph.update',
+          type: PptxShapeChangeType.ParagraphUpdate,
           paragraphIndex: change.paragraphIndex,
           ...undo,
         });
         break;
       }
-      case 'paragraph.insert': {
+      case PptxShapeChangeType.ParagraphInsert: {
         const textBody = requireTextBody(draft, changeIndex);
         assertIndex(
           change.paragraphIndex,
@@ -287,12 +301,12 @@ export function applyPptxShapeChanges(
           structuredClone(change.paragraph),
         );
         inverse.unshift({
-          type: 'paragraph.remove',
+          type: PptxShapeChangeType.ParagraphRemove,
           paragraphIndex: change.paragraphIndex,
         });
         break;
       }
-      case 'paragraph.remove': {
+      case PptxShapeChangeType.ParagraphRemove: {
         const textBody = requireTextBody(draft, changeIndex);
         assertIndex(
           change.paragraphIndex,
@@ -302,13 +316,13 @@ export function applyPptxShapeChanges(
         );
         const [paragraph] = textBody.paragraphs.splice(change.paragraphIndex, 1);
         inverse.unshift({
-          type: 'paragraph.insert',
+          type: PptxShapeChangeType.ParagraphInsert,
           paragraphIndex: change.paragraphIndex,
           paragraph: structuredClone(paragraph!),
         });
         break;
       }
-      case 'textRun.update': {
+      case PptxShapeChangeType.TextRunUpdate: {
         const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
         const run = requireRun(paragraph, change.runIndex, changeIndex);
         if (run.type !== 'text') fail(changeIndex, 'target run is not a text run');
@@ -319,42 +333,42 @@ export function applyPptxShapeChanges(
           changeIndex,
         );
         inverse.unshift({
-          type: 'textRun.update',
+          type: PptxShapeChangeType.TextRunUpdate,
           paragraphIndex: change.paragraphIndex,
           runIndex: change.runIndex,
           ...undo,
         });
         break;
       }
-      case 'run.insert': {
+      case PptxShapeChangeType.RunInsert: {
         const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
         assertIndex(change.runIndex, paragraph.runs.length, changeIndex, 'run index', true);
         paragraph.runs.splice(change.runIndex, 0, structuredClone(change.run));
         inverse.unshift({
-          type: 'run.remove',
+          type: PptxShapeChangeType.RunRemove,
           paragraphIndex: change.paragraphIndex,
           runIndex: change.runIndex,
         });
         break;
       }
-      case 'run.replace': {
+      case PptxShapeChangeType.RunReplace: {
         const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
         const previous = requireRun(paragraph, change.runIndex, changeIndex);
         paragraph.runs[change.runIndex] = structuredClone(change.run);
         inverse.unshift({
-          type: 'run.replace',
+          type: PptxShapeChangeType.RunReplace,
           paragraphIndex: change.paragraphIndex,
           runIndex: change.runIndex,
           run: structuredClone(previous),
         });
         break;
       }
-      case 'run.remove': {
+      case PptxShapeChangeType.RunRemove: {
         const paragraph = requireParagraph(draft, change.paragraphIndex, changeIndex);
         const previous = requireRun(paragraph, change.runIndex, changeIndex);
         paragraph.runs.splice(change.runIndex, 1);
         inverse.unshift({
-          type: 'run.insert',
+          type: PptxShapeChangeType.RunInsert,
           paragraphIndex: change.paragraphIndex,
           runIndex: change.runIndex,
           run: structuredClone(previous),
