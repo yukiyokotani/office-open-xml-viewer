@@ -29,6 +29,10 @@ import type {
 } from './worker-protocol';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
+import {
+  applyPptxShapeChanges,
+  type PptxShapeChange,
+} from './shape-changes';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
@@ -103,6 +107,17 @@ export interface PptxShapeUpdateResult {
    * mutate the presentation; call `updateShape` again for another change.
    */
   shape: ShapeElement;
+}
+
+/** Result of a successful {@link PptxPresentation.applyShapeChanges} call. */
+export interface PptxShapeChangesResult extends PptxShapeUpdateResult {
+  /** Detached, normalized copies of the changes that were applied. */
+  applied: PptxShapeChange[];
+  /**
+   * Detached changes that restore the previous shape. Pass this array directly
+   * to `applyShapeChanges` to undo the batch.
+   */
+  inverse: PptxShapeChange[];
 }
 
 /**
@@ -303,6 +318,58 @@ export class PptxPresentation {
       slideIndex,
       shapeId,
       shape: structuredClone(draft),
+    };
+  }
+
+  /**
+   * Atomically apply serializable JSON-Patch-style changes to one slide-owned
+   * shape and return the inverse batch needed for undo.
+   *
+   * Object properties use string path segments; array items use zero-based
+   * numeric segments. `add`, `replace`, and `remove` follow JSON Patch
+   * semantics. The whole batch is applied to an isolated draft, so an invalid
+   * path or value leaves the live model unchanged. Values must contain only
+   * JSON-compatible primitives, objects, and arrays.
+   *
+   * Main mode only: in worker mode the parsed presentation lives inside the
+   * render worker and is not synchronously mutable from this instance.
+   */
+  applyShapeChanges(
+    slideIndex: number,
+    shapeId: string,
+    changes: readonly PptxShapeChange[],
+  ): PptxShapeChangesResult {
+    if (this._mode !== 'main') {
+      throw new Error('PptxPresentation.applyShapeChanges requires mode: "main"');
+    }
+    if (!this._presentation) throw new Error('Presentation not loaded');
+    const slide = this._presentation.slides[slideIndex];
+    if (!slide) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
+    const elementIndex = slide.elements.findIndex(
+      (element) => element.type === 'shape' && element.id === shapeId,
+    );
+    if (elementIndex < 0) {
+      throw new Error(`Shape ${shapeId} not found on slide ${slideIndex}`);
+    }
+
+    const current = slide.elements[elementIndex] as ShapeElement;
+    const draft = structuredClone(current);
+    const { applied, inverse } = applyPptxShapeChanges(draft, changes);
+    if (draft.type !== 'shape' || draft.id !== current.id) {
+      throw new Error(
+        'PptxPresentation.applyShapeChanges cannot change shape identity (type or id)',
+      );
+    }
+
+    if (applied.length > 0) slide.elements[elementIndex] = draft;
+    return {
+      slideIndex,
+      shapeId,
+      shape: structuredClone(applied.length > 0 ? draft : current),
+      applied: structuredClone(applied),
+      inverse: structuredClone(inverse),
     };
   }
 

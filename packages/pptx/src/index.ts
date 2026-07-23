@@ -3,11 +3,16 @@ export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer'
 export {
   PptxPresentation,
   type LoadOptions,
+  type PptxShapeChangesResult,
   type PptxShapeUpdater,
   type PptxShapeUpdateResult,
   type RenderSlideOptions,
   type RenderSlideToBitmapOptions,
 } from './presentation';
+export {
+  type PptxShapeChange,
+  type PptxShapeChangePathSegment,
+} from './shape-changes';
 export { renderSlide, type RenderOptions, type PptxTextRunInfo, type TextRunCallback } from './renderer';
 export { buildPptxTextLayer } from './text-layer';
 // IX2 find-in-document: the highlight overlay builder + the pptx match-location

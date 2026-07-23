@@ -167,34 +167,59 @@ Notes:
 
 ### In-memory PPTX shape updates
 
-In `mode: 'main'`, `PptxPresentation.updateShape()` atomically updates the
-parsed model for one slide-owned shape. The updater receives an isolated
-`ShapeElement` draft, so it can change geometry, fills, effects, text-body
-layout, paragraphs, and text runs without exposing the live model. The
-DrawingML `cNvPr@id` is slide-local and immutable.
+In `mode: 'main'`, `PptxPresentation.applyShapeChanges()` atomically applies a
+serializable batch to one slide-owned shape. Changes use a JSON-Patch-style
+`add` / `replace` / `remove` operation plus a path array: object properties use
+string segments and array items use zero-based numeric segments. The DrawingML
+`cNvPr@id` is slide-local and immutable.
 
 ```typescript
 const slideIndex = 0;
 const shapeId = '7';
 
-const result = pres.updateShape(slideIndex, shapeId, (shape) => {
-  shape.x = 914400; // 1 inch in EMU
-  shape.fill = { fillType: 'solid', color: '4472C4' };
+const changes = [
+  { op: 'replace', path: ['x'], value: 914400 }, // 1 inch in EMU
+  {
+    op: 'replace',
+    path: ['fill'],
+    value: { fillType: 'solid', color: '4472C4' },
+  },
+  {
+    op: 'replace',
+    path: ['textBody', 'paragraphs', 0, 'runs', 0, 'fontSize'],
+    value: 24,
+  },
+  {
+    op: 'replace',
+    path: ['textBody', 'paragraphs', 0, 'runs', 0, 'color'],
+    value: 'FFFFFF',
+  },
+] as const;
 
-  for (const paragraph of shape.textBody?.paragraphs ?? []) {
-    for (const run of paragraph.runs) {
-      if (run.type !== 'text') continue;
-      run.fontFamily = 'Aptos';
-      run.fontSize = 24;
-      run.color = 'FFFFFF';
-      run.bold = true;
-    }
-  }
-});
+const result = pres.applyShapeChanges(slideIndex, shapeId, changes);
 
 // Only the affected slide needs to be redrawn.
 await pres.renderSlide(canvas, result.slideIndex, { width: 960 });
+
+// The same serializable changes can be recorded or adapted to a server command.
+JSON.stringify(result.applied);
+
+// The inverse batch is already ordered for undo.
+const undoResult = pres.applyShapeChanges(slideIndex, shapeId, result.inverse);
+await pres.renderSlide(canvas, undoResult.slideIndex, { width: 960 });
 ```
+
+The whole batch runs against an isolated draft. An invalid path, unsupported
+value, or attempted `type` / `id` change rejects the batch without changing the
+live model. Mutation values are runtime-checked to contain only JSON-compatible
+primitives, objects, and arrays. The returned `applied`, `inverse`, and `shape`
+values are detached from the live model and safe to retain in an undo/redo
+stack.
+
+`updateShape(slideIndex, shapeId, updater)` remains available as a convenient
+local-only API when serialization and undo history are not needed. Its updater
+receives an isolated `ShapeElement` draft and may modify the complete nested
+shape model.
 
 The method accepts ordinary shapes, text boxes/placeholders, connectors, and
 file-authored SmartArt shapes that the parser represents as `ShapeElement` and

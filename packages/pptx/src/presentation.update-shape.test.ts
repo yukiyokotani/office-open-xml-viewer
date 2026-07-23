@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PptxPresentation } from './presentation';
+import type { PptxShapeChange } from './shape-changes';
 import type {
   Paragraph,
   Presentation,
@@ -204,5 +205,144 @@ describe('PptxPresentation.updateShape', () => {
   it('requires main mode because the editable model lives in the render worker otherwise', () => {
     const { pres } = makePresentation('worker');
     expect(() => pres.updateShape(0, '7', () => {})).toThrow(/mode.*main/i);
+  });
+});
+
+describe('PptxPresentation.applyShapeChanges', () => {
+  it('applies a serializable batch and returns a directly applicable inverse batch', () => {
+    const { pres, model } = makePresentation();
+    const original = structuredClone(model.slides[0].elements[0]) as ShapeElement;
+    const insertedRun = textRun('Second run');
+    const changes = [
+      { op: 'replace', path: ['x'], value: 914400 },
+      {
+        op: 'replace',
+        path: ['textBody', 'paragraphs', 0, 'runs', 0, 'text'],
+        value: 'Updated',
+      },
+      {
+        op: 'add',
+        path: ['textBody', 'paragraphs', 0, 'runs', 1],
+        value: insertedRun,
+      },
+      { op: 'add', path: ['hyperlink'], value: 'https://example.com' },
+      { op: 'remove', path: ['name'] },
+    ] satisfies PptxShapeChange[];
+
+    const result = pres.applyShapeChanges(0, '7', changes);
+    const updated = model.slides[0].elements[0] as ShapeElement;
+
+    expect(updated.x).toBe(914400);
+    expect(updated.name).toBeUndefined();
+    expect(updated.hyperlink).toBe('https://example.com');
+    expect(updated.textBody?.paragraphs[0]?.runs).toHaveLength(2);
+    expect(firstTextRun(updated).text).toBe('Updated');
+    expect(result).toMatchObject({ slideIndex: 0, shapeId: '7', applied: changes });
+    expect(result.inverse.map((change) => change.op)).toEqual([
+      'add',
+      'remove',
+      'remove',
+      'replace',
+      'replace',
+    ]);
+
+    pres.applyShapeChanges(0, '7', result.inverse);
+    expect(model.slides[0].elements[0]).toEqual(original);
+  });
+
+  it('uses JSON Patch add semantics for arrays and replacement semantics for object properties', () => {
+    const { pres, model } = makePresentation();
+    const replacement = textRun('Replacement');
+
+    const result = pres.applyShapeChanges(0, '7', [
+      {
+        op: 'add',
+        path: ['textBody', 'paragraphs', 0, 'runs', 0],
+        value: replacement,
+      },
+      { op: 'add', path: ['name'], value: 'Renamed' },
+    ]);
+
+    const updated = model.slides[0].elements[0] as ShapeElement;
+    expect(updated.textBody?.paragraphs[0]?.runs).toHaveLength(2);
+    expect(firstTextRun(updated).text).toBe('Replacement');
+    expect(updated.name).toBe('Renamed');
+
+    pres.applyShapeChanges(0, '7', result.inverse);
+    expect(firstTextRun(model.slides[0].elements[0] as ShapeElement).text).toBe('Slide one');
+    expect((model.slides[0].elements[0] as ShapeElement).name).toBe('Shape 7');
+  });
+
+  it('rejects an invalid change without committing earlier changes in the batch', () => {
+    const { pres, model } = makePresentation();
+    const before = model.slides[0].elements[0];
+
+    expect(() =>
+      pres.applyShapeChanges(0, '7', [
+        { op: 'replace', path: ['x'], value: 123 },
+        { op: 'replace', path: ['missing', 'value'], value: true },
+      ]),
+    ).toThrow(/index 1/i);
+
+    expect(model.slides[0].elements[0]).toBe(before);
+    expect((model.slides[0].elements[0] as ShapeElement).x).toBe(0);
+  });
+
+  it('rejects identity, unsafe paths, and non-JSON values atomically', () => {
+    const { pres, model } = makePresentation();
+    const before = structuredClone(model.slides[0].elements[0]);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    expect(() =>
+      pres.applyShapeChanges(0, '7', [{ op: 'replace', path: ['id'], value: '8' }]),
+    ).toThrow(/identity/i);
+    expect(() =>
+      pres.applyShapeChanges(0, '7', [
+        { op: 'add', path: ['__proto__', 'polluted'], value: true },
+      ]),
+    ).toThrow(/unsafe/i);
+    expect(() =>
+      pres.applyShapeChanges(0, '7', [{ op: 'replace', path: ['fill'], value: cyclic }]),
+    ).toThrow(/cycle/i);
+
+    expect(model.slides[0].elements[0]).toEqual(before);
+  });
+
+  it('detaches input changes and returned snapshots from the committed model', () => {
+    const { pres, model } = makePresentation();
+    const path: Array<string | number> = ['fill'];
+    const value = { fillType: 'solid', color: '4472C4' };
+    const result = pres.applyShapeChanges(0, '7', [{ op: 'replace', path, value }]);
+
+    path[0] = 'stroke';
+    value.color = 'FFFFFF';
+    const applied = result.applied[0]!;
+    if (applied.op === 'remove') throw new Error('Expected a value-bearing change');
+    applied.value = null;
+    result.shape.fill = null;
+
+    expect((model.slides[0].elements[0] as ShapeElement).fill).toEqual({
+      fillType: 'solid',
+      color: '4472C4',
+    });
+  });
+
+  it('treats an empty batch as a no-op', () => {
+    const { pres, model } = makePresentation();
+    const before = model.slides[0].elements[0];
+
+    const result = pres.applyShapeChanges(0, '7', []);
+
+    expect(model.slides[0].elements[0]).toBe(before);
+    expect(result.applied).toEqual([]);
+    expect(result.inverse).toEqual([]);
+    expect(result.shape).toEqual(before);
+    expect(result.shape).not.toBe(before);
+  });
+
+  it('requires main mode because the editable model lives in the render worker otherwise', () => {
+    const { pres } = makePresentation('worker');
+    expect(() => pres.applyShapeChanges(0, '7', [])).toThrow(/mode.*main/i);
   });
 });
