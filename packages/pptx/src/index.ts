@@ -3,6 +3,8 @@ export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer'
 export {
   PptxPresentation,
   type LoadOptions,
+  type PptxShapeUpdater,
+  type PptxShapeUpdateResult,
   type RenderSlideOptions,
   type RenderSlideToBitmapOptions,
 } from './presentation';

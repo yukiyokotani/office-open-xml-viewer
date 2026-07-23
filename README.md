@@ -165,6 +165,44 @@ Notes:
   transferred back as an `ImageBitmap`, so a single render can be marginally
   slower than `mode: 'main'`. Choose it for non-blocking UI, not raw speed.
 
+### In-memory PPTX shape updates
+
+In `mode: 'main'`, `PptxPresentation.updateShape()` atomically updates the
+parsed model for one slide-owned shape. The updater receives an isolated
+`ShapeElement` draft, so it can change geometry, fills, effects, text-body
+layout, paragraphs, and text runs without exposing the live model. The
+DrawingML `cNvPr@id` is slide-local and immutable.
+
+```typescript
+const slideIndex = 0;
+const shapeId = '7';
+
+const result = pres.updateShape(slideIndex, shapeId, (shape) => {
+  shape.x = 914400; // 1 inch in EMU
+  shape.fill = { fillType: 'solid', color: '4472C4' };
+
+  for (const paragraph of shape.textBody?.paragraphs ?? []) {
+    for (const run of paragraph.runs) {
+      if (run.type !== 'text') continue;
+      run.fontFamily = 'Aptos';
+      run.fontSize = 24;
+      run.color = 'FFFFFF';
+      run.bold = true;
+    }
+  }
+});
+
+// Only the affected slide needs to be redrawn.
+await pres.renderSlide(canvas, result.slideIndex, { width: 960 });
+```
+
+The method accepts ordinary shapes, text boxes/placeholders, connectors, and
+file-authored SmartArt shapes that the parser represents as `ShapeElement` and
+that carry an id. Pictures, tables, charts, and media use their own element
+types; parser-synthesized SmartArt fallback shapes have no stable id and cannot
+be targeted. Worker-mode mutation is not exposed because that mode owns its
+parsed model inside the render worker.
+
 ### Continuous scroll viewers
 
 `DocxScrollViewer` and `PptxScrollViewer` render the whole document as one
