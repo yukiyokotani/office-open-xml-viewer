@@ -4,7 +4,6 @@ import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlig
 import { PptxFindController, type PptxMatchLocation } from './find';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
-import type { PptxShapeHit } from './shape-hit-test';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible } from './hidden';
 import type { DimOptions } from './types';
 import {
@@ -22,11 +21,6 @@ import {
 
 /** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
 export type HiddenSlideMode = 'show' | 'skip' | 'dim';
-
-/** Shape click emitted by {@link PptxViewerOptions.onShapeClick}. */
-export interface PptxShapeClickEvent extends PptxShapeHit {
-  nativeEvent: MouseEvent;
-}
 
 /** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
@@ -89,12 +83,6 @@ export interface PptxViewerOptions extends RenderOptions, LoadOptions {
    * viewer calls this instead and takes NO default action.
    */
   onHyperlinkClick?: (target: HyperlinkTarget) => void;
-  /**
-   * Fires when the topmost identified ShapeElement is clicked. The callback
-   * receives a detached shape snapshot and slide-local `shapeId`, suitable for
-   * constructing an `applyShapeChanges` request. Main mode only.
-   */
-  onShapeClick?: (event: PptxShapeClickEvent) => void;
   /** IX1 — master switch for hyperlink interactivity. Default `true`. When
    *  `false`, the hyperlink machinery is not wired at all: the overlay's link
    *  spans are non-interactive, so there is no pointer cursor, no title tooltip,
@@ -159,10 +147,6 @@ export class PptxViewer implements ZoomableViewer {
    *  to an `onError` / `console.error` on a dead viewer — parity with the scroll
    *  viewers' `_destroyed` flag. */
   private _destroyed = false;
-  /** Stable listener identity so destroy() can remove it from the wrapper. */
-  private readonly _shapeClickListener = (event: Event): void => {
-    this._onShapeClick(event as MouseEvent);
-  };
   /**
    * Concurrent-load latch (generation token). Every {@link load} increments this
    * and captures the value; after its engine finishes loading it re-checks the
@@ -184,9 +168,6 @@ export class PptxViewer implements ZoomableViewer {
     this.canvas = canvas;
     this._mode = opts.mode ?? 'main';
     this._hiddenMode = opts.hiddenSlideMode ?? 'show';
-    if (opts.onShapeClick && this._mode !== 'main') {
-      throw new Error('PptxViewer.onShapeClick requires mode: "main"');
-    }
 
     const parent = canvas.parentElement;
     // Capture the canvas's DOM position and inline display BEFORE reparenting so
@@ -206,12 +187,6 @@ export class PptxViewer implements ZoomableViewer {
     if (!canvas.style.display) canvas.style.display = 'block';
     if (parent) parent.insertBefore(this.wrapper, canvas);
     this.wrapper.appendChild(canvas);
-    if (opts.onShapeClick) {
-      // Listen on the wrapper rather than only the canvas: selectable text spans
-      // live in an overlay above the canvas and bubble their ordinary clicks
-      // here. Hyperlink spans call preventDefault(), so they are ignored below.
-      this.wrapper.addEventListener('click', this._shapeClickListener);
-    }
 
     // Static worker-mode rendering paints worker-produced bitmaps via a
     // bitmaprenderer context (grabbed once — a canvas holds one context type for
@@ -684,36 +659,6 @@ export class PptxViewer implements ZoomableViewer {
     if (enriched.slideIndex !== undefined) void this.goToSlide(enriched.slideIndex);
   }
 
-  /** Convert a wrapper click to slide EMU and dispatch the topmost shape hit. */
-  private _onShapeClick(event: MouseEvent): void {
-    if (
-      this._destroyed ||
-      event.defaultPrevented ||
-      !this.engine ||
-      !this.opts.onShapeClick
-    ) {
-      return;
-    }
-    const rect = this.canvas.getBoundingClientRect();
-    if (
-      !(rect.width > 0) ||
-      !(rect.height > 0) ||
-      !Number.isFinite(event.clientX) ||
-      !Number.isFinite(event.clientY)
-    ) {
-      return;
-    }
-    const point = {
-      x: ((event.clientX - rect.left) / rect.width) * this.engine.slideWidth,
-      y: ((event.clientY - rect.top) / rect.height) * this.engine.slideHeight,
-    };
-    const hit = this.engine.hitTestShape(this.currentSlide, point, {
-      // Six CSS pixels keeps thin connectors selectable at every zoom level.
-      tolerance: (6 / rect.width) * this.engine.slideWidth,
-    });
-    if (hit) this.opts.onShapeClick({ ...hit, nativeEvent: event });
-  }
-
   /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`
    *  (a `ppaction://hlinkshowjump?jump=…` verb resolved relative to the current
    *  slide, or a `../slides/slideN.xml` part target resolved through the stamped
@@ -753,7 +698,6 @@ export class PptxViewer implements ZoomableViewer {
     // cleaned up rather than installed onto a torn-down viewer.
     this._destroyed = true;
     this._loadGen++;
-    this.wrapper.removeEventListener('click', this._shapeClickListener);
     this.handle?.destroy();
     this.handle = null;
     this.engine?.destroy();
