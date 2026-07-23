@@ -72,6 +72,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
+        { name: 'onShapeClick', type: '(event: PptxShapeClickEvent) => void', desc: 'Called with the topmost identified shape under a click. Includes the slide-local shapeId, a detached ShapeElement snapshot, slide coordinates, and the native MouseEvent. Requires `mode: "main"`.' },
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -100,6 +101,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
+        { sig: 'hitTestShape(slideIndex, point, opts?): PptxShapeHit | null', desc: 'Return the topmost identified ShapeElement at a slide-EMU point in `mode: "main"`. The result contains the slide-local shapeId and a detached shape snapshot; opts.tolerance expands straight-line and connector hits.' },
         { sig: 'renderSlide(canvas, index, opts?: { width?, dpr?, onTextRun?, dim? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. `onTextRun` is called per rendered text segment so a caller can build a transparent selection overlay; `dim` (a DimOptions) paints a translucent wash over the finished slide (hidden-slide dimming). Equations render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderSlideToBitmap.' },
         { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr?, dim? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `dim` paints a translucent overlay over the slide (hidden-slide dimming). Equations are skipped in `mode: "worker"` (they require `mode: "main"`). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'presentSlide(canvas, index, opts?: { width?, dpr?, onTextRun? }): Promise<PresentationHandle>', desc: 'Render a slide and attach canvas-native audio/video playback, returning a handle with play() / pause() / destroy(). Works in both modes — in `mode: "worker"` the base slide is rendered off the main thread and the video overlay is composited on the main thread; `onTextRun` is unavailable there (it cannot cross the worker boundary).' },

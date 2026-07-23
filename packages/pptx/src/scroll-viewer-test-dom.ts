@@ -1,6 +1,11 @@
 import { vi } from 'vitest';
 import type { PptxPresentation, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PptxTextRunInfo } from './renderer';
+import type {
+  PptxShapeHit,
+  PptxShapeHitTestOptions,
+  PptxSlidePoint,
+} from './shape-hit-test';
 
 /** A recording fake DOM element. Extends the `FakeEl` pattern from
  *  text-layer.test.ts with the surface PptxScrollViewer touches: scrollTop,
@@ -295,6 +300,12 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
+  shapeHit: PptxShapeHit | null = null;
+  hitTestCalls: Array<{
+    slide: number;
+    point: PptxSlidePoint;
+    opts: PptxShapeHitTestOptions;
+  }> = [];
   constructor(
     private _slideCount: number,
     public readonly slideWidth: number, // EMU, deck-wide (uniform)
@@ -372,6 +383,14 @@ export class FakePptxEngine {
    *  `PptxPresentation.collectSlideRuns`). Returns the fed runs regardless of mode. */
   collectSlideRuns(_slide: number, _width?: number): Promise<PptxTextRunInfo[]> {
     return Promise.resolve([...(this.feedTextRuns ?? [])]);
+  }
+  hitTestShape(
+    slide: number,
+    point: PptxSlidePoint,
+    opts: PptxShapeHitTestOptions = {},
+  ): PptxShapeHit | null {
+    this.hitTestCalls.push({ slide, point, opts });
+    return this.shapeHit ? structuredClone(this.shapeHit) : null;
   }
   /** The per-call `width` (px) recorded for every renderSlide call, in call order.
    *  T3 asserts each mounted slide received its OWN px width. */

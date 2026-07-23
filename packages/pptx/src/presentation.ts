@@ -29,6 +29,12 @@ import type {
 } from './worker-protocol';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
+import {
+  hitTestSlideShape,
+  type PptxShapeHit,
+  type PptxShapeHitTestOptions,
+  type PptxSlidePoint,
+} from './shape-hit-test';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
@@ -236,6 +242,28 @@ export class PptxPresentation {
    *  probing (design §11: no silent mis-pathing). */
   get mode(): 'main' | 'worker' {
     return this._mode;
+  }
+
+  /**
+   * Return the topmost file-authored shape at a point in slide EMU coordinates.
+   *
+   * Main mode only: worker mode does not retain the parsed shape model on this
+   * instance. The returned shape is detached from the live presentation model.
+   */
+  hitTestShape(
+    slideIndex: number,
+    point: PptxSlidePoint,
+    opts: PptxShapeHitTestOptions = {},
+  ): PptxShapeHit | null {
+    if (this._mode !== 'main') {
+      throw new Error('PptxPresentation.hitTestShape requires mode: "main"');
+    }
+    if (!this._presentation) throw new Error('Presentation not loaded');
+    const slide = this._presentation.slides[slideIndex];
+    if (!slide) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
+    return hitTestSlideShape(slideIndex, slide, point, opts);
   }
 
   /**
