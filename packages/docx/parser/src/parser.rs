@@ -14,7 +14,9 @@ use roxmltree::Document as XmlDoc;
 use std::collections::{BTreeMap, HashMap};
 use zip::ZipArchive;
 
-use crate::drawing_compatibility::apply_word_direct_group_rect;
+use crate::drawing_compatibility::{
+    apply_word_direct_group_rect, word_group_requires_hierarchy_compatibility,
+};
 use crate::numbering::{LevelDef, NumberingMap};
 use crate::styles::{
     apply_para, apply_run, merge_cond_layers, merge_tab_stops, merge_table_margin_layer,
@@ -5816,6 +5818,7 @@ fn parse_inline_drawing(
     let runs = parse_inline_drawing_impl(
         style_map, num_map, node, media_map, chart_map, rel_map, theme, depth,
     );
+    collect_group_transform_compatibility_diagnostic(node, diagnostics);
     collect_drawing_extent_diagnostic(node, media_map, chart_map, &runs, diagnostics);
     runs
 }
@@ -7262,11 +7265,11 @@ fn parse_group_pic(
         .attribute("cy")
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let leaf_rotation = xfrm
+    let leaf_rotation_60000 = xfrm
         .attribute("rot")
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0)
-        / 60000.0;
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let leaf_rotation = leaf_rotation_60000 as f64 / 60000.0;
     let leaf_flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let leaf_flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
     let mapped = apply_word_direct_group_rect(
@@ -7280,6 +7283,7 @@ fn parse_group_pic(
             flip_h: leaf_flip_h,
             flip_v: leaf_flip_v,
         },
+        leaf_rotation_60000,
     );
 
     if cx <= 0.0 || cy <= 0.0 {
@@ -7425,6 +7429,67 @@ fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<
             gsp.children()
                 .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
         })
+}
+
+fn collect_group_transform_compatibility_diagnostic(
+    drawing: roxmltree::Node,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    fn leaf_rotation_60000(leaf: roxmltree::Node) -> i64 {
+        leaf.children()
+            .find(|node| matches!(node.tag_name().name(), "spPr"))
+            .and_then(|sp_pr| {
+                sp_pr
+                    .children()
+                    .find(|node| node.tag_name().name() == "xfrm")
+            })
+            .and_then(|xfrm| xfrm.attribute("rot"))
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+    }
+
+    fn contains_unresolved_leaf(group: roxmltree::Node, transform: GroupTransform) -> bool {
+        group
+            .children()
+            .filter(|node| node.is_element())
+            .any(|child| {
+                if matches!(child.tag_name().name(), "pic" | "wsp" | "grpSp")
+                    && group_member_hidden(child)
+                {
+                    return false;
+                }
+                match child.tag_name().name() {
+                    "pic" | "wsp" => word_group_requires_hierarchy_compatibility(
+                        transform,
+                        leaf_rotation_60000(child),
+                    ),
+                    "grpSp" => {
+                        let nested = group_xfrm(child)
+                            .map(|xfrm| compose_group_xfrm(transform, xfrm))
+                            .unwrap_or(transform);
+                        contains_unresolved_leaf(child, nested)
+                    }
+                    _ => false,
+                }
+            })
+    }
+
+    let Some(group) = drawing
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "wgp")
+    else {
+        return;
+    };
+    let transform = group_xfrm(group)
+        .map(|xfrm| compose_group_xfrm(GroupTransform::IDENTITY, xfrm))
+        .unwrap_or(GroupTransform::IDENTITY);
+    if contains_unresolved_leaf(group, transform) {
+        push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+            PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+        );
+    }
 }
 
 /// Expand the wps:wsp shapes of a `wpg:wgp` into ShapeRun entries, composing
@@ -7707,11 +7772,11 @@ fn parse_wsp_shape(
     if !is_line_geom && (cx == 0.0 || cy == 0.0) {
         return None;
     }
-    let rotation = xfrm
+    let rotation_60000 = xfrm
         .attribute("rot")
-        .and_then(|v| v.parse::<f64>().ok())
-        .map(|r| r / 60000.0) // OOXML rotation: 60000ths of a degree
-        .unwrap_or(0.0);
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let rotation = rotation_60000 as f64 / 60000.0;
     // §20.1.7.6 a:xfrm flipH/flipV — "1"/"true" mirror the shape.
     let flip_h = matches!(xfrm.attribute("flipH"), Some("1") | Some("true"));
     let flip_v = matches!(xfrm.attribute("flipV"), Some("1") | Some("true"));
@@ -7732,6 +7797,7 @@ fn parse_wsp_shape(
                     flip_h,
                     flip_v,
                 },
+                rotation_60000,
             );
             (
                 mapped.width / 12700.0,
@@ -24067,6 +24133,137 @@ mod vml_pict_tests {
 #[cfg(test)]
 mod wgp_shape_transform_tests {
     use super::*;
+
+    #[test]
+    fn diagnoses_unresolved_nested_non_uniform_quarter_turn_transform() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm>
+              <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wpg:grpSp>
+              <wpg:grpSpPr><a:xfrm>
+                <a:off x="0" y="0"/><a:ext cx="381000" cy="127000"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+              </a:xfrm></wpg:grpSpPr>
+              <wps:wsp><wps:spPr><a:xfrm rot="5400000">
+                <a:off x="0" y="0"/><a:ext cx="127000" cy="25400"/>
+              </a:xfrm></wps:spPr></wps:wsp>
+            </wpg:grpSp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut diagnostics = Vec::new();
+        collect_group_transform_compatibility_diagnostic(doc.root_element(), &mut diagnostics);
+        assert_eq!(
+            diagnostics,
+            [PendingParseDiagnostic {
+                code: PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+                severity: PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+            }]
+        );
+    }
+
+    #[test]
+    fn neutral_wrapper_does_not_emit_group_transform_diagnostic() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm>
+              <a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wpg:grpSp>
+              <wpg:grpSpPr><a:xfrm>
+                <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+              </a:xfrm></wpg:grpSpPr>
+              <wps:wsp><wps:spPr><a:xfrm rot="5400000">
+                <a:off x="0" y="0"/><a:ext cx="127000" cy="25400"/>
+              </a:xfrm></wps:spPr></wps:wsp>
+            </wpg:grpSp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut diagnostics = Vec::new();
+        collect_group_transform_compatibility_diagnostic(doc.root_element(), &mut diagnostics);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn nested_non_neutral_groups_with_uniform_accumulated_scale_do_not_emit_diagnostic() {
+        let xml = r#"
+          <wpg:wgp xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wpg:grpSpPr><a:xfrm>
+              <a:off x="0" y="0"/><a:ext cx="254000" cy="127000"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+            </a:xfrm></wpg:grpSpPr>
+            <wpg:grpSp>
+              <wpg:grpSpPr><a:xfrm>
+                <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+                <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+              </a:xfrm></wpg:grpSpPr>
+              <wps:wsp><wps:spPr><a:xfrm rot="5400000">
+                <a:off x="0" y="0"/><a:ext cx="127000" cy="25400"/>
+              </a:xfrm></wps:spPr></wps:wsp>
+            </wpg:grpSp>
+          </wpg:wgp>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut diagnostics = Vec::new();
+        collect_group_transform_compatibility_diagnostic(doc.root_element(), &mut diagnostics);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn inline_drawing_path_surfaces_nested_group_transform_diagnostic() {
+        let xml = r#"
+          <w:drawing xmlns:w="urn:w" xmlns:wp="urn:wp"
+              xmlns:wpg="urn:wpg" xmlns:wps="urn:wps" xmlns:a="urn:a">
+            <wp:inline>
+              <wp:extent cx="127000" cy="127000"/>
+              <a:graphic><a:graphicData>
+                <wpg:wgp>
+                  <wpg:grpSpPr><a:xfrm>
+                    <a:off x="0" y="0"/><a:ext cx="127000" cy="254000"/>
+                    <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+                  </a:xfrm></wpg:grpSpPr>
+                  <wpg:grpSp>
+                    <wpg:grpSpPr><a:xfrm>
+                      <a:off x="0" y="0"/><a:ext cx="381000" cy="127000"/>
+                      <a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/>
+                    </a:xfrm></wpg:grpSpPr>
+                    <wps:wsp><wps:spPr><a:xfrm rot="5400000">
+                      <a:off x="0" y="0"/><a:ext cx="127000" cy="25400"/>
+                    </a:xfrm></wps:spPr></wps:wsp>
+                  </wpg:grpSp>
+                </wpg:wgp>
+              </a:graphicData></a:graphic>
+            </wp:inline>
+          </w:drawing>
+        "#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut num_map = NumberingMap::default();
+        let mut diagnostics = Vec::new();
+        let _runs = super::parse_inline_drawing(
+            &StyleMap::default(),
+            &mut num_map,
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            DepthGuard::root(),
+            &mut diagnostics,
+        );
+        assert_eq!(
+            diagnostics,
+            [PendingParseDiagnostic {
+                code: PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+                severity: PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM,
+            }]
+        );
+    }
 
     /// Word applies a non-uniform group scale after an exact child quarter turn,
     /// so the parent scale axes exchange against the child's unrotated frame.

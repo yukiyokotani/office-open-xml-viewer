@@ -802,6 +802,7 @@ describe('retained table pagination', () => {
 
     expect(reacquired).toContain(3);
     expect(reacquired.slice(-2)).toEqual([1, 1]);
+    expect(result.fragment?.advancePt).toBeLessThanOrEqual(40);
     expect(result.floatingTablePlacements).toHaveLength(1);
     expect(result.floatingTablePlacements?.[0]?.source.anchorBlockIndex).toBe(1);
     expect(result.floatingTableRegistryDelta).toMatchObject({
@@ -1133,6 +1134,65 @@ describe('retained table pagination', () => {
     expect(result.fragment?.advancePt).toBeCloseTo(source.layout.advancePt, 6);
     expect(result.fragment?.rows).toHaveLength(source.input.rows.length);
     expect(result.nextCursor).toBeNull();
+  });
+
+  it('uses retained vMerge tracks when page-dependent cells are reacquired', () => {
+    const owner = row(0, 20, {
+      verticalMerge: 'restart',
+      paragraph: paragraph('page-dependent-owner', [20, 20, 20, 20]),
+    });
+    const pageDependentOwner = {
+      ...owner,
+      cells: owner.cells.map((cell) => ({
+        ...cell,
+        blocks: cell.blocks.map((block) => ({ ...block, pageDependent: true })),
+      })),
+    };
+    const source = acquisition([
+      pageDependentOwner,
+      row(1, 20, { verticalMerge: 'continue' }),
+      row(2, 20, { verticalMerge: 'continue' }),
+      row(3, 20, { verticalMerge: 'continue' }),
+      row(4, 20),
+    ]);
+
+    const result = take(
+      source,
+      source.layout.advancePt,
+      startTableFragmentCursor(),
+      {
+        freshPageHeightPt: source.layout.advancePt,
+        reacquirePageDependentBlock: (request) => request.acquired,
+      },
+    );
+
+    expect(result.fragment?.advancePt).toBeCloseTo(source.layout.advancePt, 6);
+    expect(result.fragment?.rows).toHaveLength(source.input.rows.length);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it('keeps auto-height vMerge source roles immutable across a partial owner boundary', () => {
+    const source = acquisition([
+      row(0, 60, {
+        verticalMerge: 'restart',
+        paragraph: paragraph('auto-merge-owner', [20, 20, 20, 20]),
+      }),
+      row(1, 60, { verticalMerge: 'continue' }),
+    ]);
+
+    const first = take(
+      source,
+      60,
+      startTableFragmentCursor(),
+      { freshPageHeightPt: 60 },
+    );
+    const second = take(source, 60, first.nextCursor!);
+
+    expect(first.fragment?.rows[0]?.cells[0]?.verticalMerge).toBe('restart');
+    expect(second.fragment?.rows[0]?.cells[0]?.verticalMerge).toBe('restart');
+    expect(second.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 0 });
+    expect(source.input.rows[0]?.cells[0]?.verticalMerge).toBe('restart');
+    expect(source.input.rows[1]?.cells[0]?.verticalMerge).toBe('continue');
   });
 
   it('does not treat exact height or repeated-header as implicit cantSplit', () => {

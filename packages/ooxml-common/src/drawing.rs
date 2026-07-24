@@ -66,7 +66,7 @@ pub struct DrawingGroupTransform {
     m22: f64,
     tx: f64,
     ty: f64,
-    group_depth: u32,
+    non_neutral_group_levels: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +93,7 @@ impl DrawingGroupTransform {
         m22: 1.0,
         tx: 0.0,
         ty: 0.0,
-        group_depth: 0,
+        non_neutral_group_levels: 0,
     };
 
     pub fn from_group(spec: DrawingGroupSpec) -> Self {
@@ -136,7 +136,7 @@ impl DrawingGroupTransform {
             m22,
             tx,
             ty,
-            group_depth: 1,
+            non_neutral_group_levels: u32::from(!group_transform_is_neutral(spec)),
         }
     }
 
@@ -154,12 +154,17 @@ impl DrawingGroupTransform {
             m22: self.m21 * child.m12 + self.m22 * child.m22,
             tx: self.m11 * child.tx + self.m12 * child.ty + self.tx,
             ty: self.m21 * child.tx + self.m22 * child.ty + self.ty,
-            group_depth: self.group_depth + 1,
+            non_neutral_group_levels: self.non_neutral_group_levels
+                + child.non_neutral_group_levels,
         }
     }
 
-    pub fn group_depth(self) -> u32 {
-        self.group_depth
+    /// Count group levels that alter scale, rotation, or reflection. Pure
+    /// translation wrappers are neutral because they do not affect a leaf's
+    /// scale/rotation ordering. OOXML transform inputs are authored integers
+    /// below f64's exact-integer range, so exact neutral comparisons are stable.
+    pub fn non_neutral_group_levels(self) -> u32 {
+        self.non_neutral_group_levels
     }
 
     pub fn map_point(self, x: f64, y: f64) -> (f64, f64) {
@@ -186,6 +191,24 @@ impl DrawingGroupTransform {
             flip_v: self.flip_v ^ rect.flip_v,
         }
     }
+}
+
+fn group_transform_is_neutral(spec: DrawingGroupSpec) -> bool {
+    let scale_x = if spec.child_ext_x != 0.0 {
+        spec.ext_x / spec.child_ext_x
+    } else {
+        1.0
+    };
+    let scale_y = if spec.child_ext_y != 0.0 {
+        spec.ext_y / spec.child_ext_y
+    } else {
+        1.0
+    };
+    !spec.flip_h
+        && !spec.flip_v
+        && spec.rotation_degrees.rem_euclid(360.0) == 0.0
+        && scale_x == 1.0
+        && scale_y == 1.0
 }
 
 #[cfg(test)]

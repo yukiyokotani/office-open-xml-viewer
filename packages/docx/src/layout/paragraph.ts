@@ -46,6 +46,7 @@ import {
   type TextBoxAcquisitionInput,
 } from './textbox-input.js';
 import {
+  numberingMarkerLogicalInterval,
   numberingMarkerPhysicalLeft,
   resolveNumberingMarkerGeometry,
   shapeNumberingMarkerText,
@@ -95,7 +96,10 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
 } from './anchor-compatibility.js';
-import { wordRunVerticalAlignRaisePt } from './line-compatibility.js';
+import {
+  wordNumberingCompositeCenterDeltaPt,
+  wordRunVerticalAlignRaisePt,
+} from './line-compatibility.js';
 import {
   resolveFloatPlacement,
   type FloatPlacementParticipant,
@@ -285,6 +289,12 @@ export interface PlanLineInput {
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
     bodyOffsetPt: number;
+    /** Retained visible-marker interval relative to the paragraph's logical
+     * leading edge. Absent when the numbering level paints no marker. */
+    markerInterval?: Readonly<{
+      startPt: number;
+      endPt: number;
+    }>;
   }>;
   /** Decimal stop relative to paragraphXPt for Word's numeric no-tab alignment. */
   readonly decimalAutoTabPt?: number;
@@ -733,10 +743,21 @@ export function planLine(input: PlanLineInput): LineLayout {
 
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt;
+  const numberingCenterDeltaPt = input.numbering
+      ? wordNumberingCompositeCenterDeltaPt({
+        baseRtl: input.baseRtl,
+        bodyOffsetPt: input.numbering.bodyOffsetPt,
+        bodyWidthPt: drawnWidthPt,
+        markerInterval: input.numbering.markerInterval,
+      })
+    : 0;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
     : edge === 'center'
-      ? alignmentSlackPt / 2
+      // The allowlisted retained numbering compatibility rule translates only
+      // the centered result; lineSlackPt remains the body-only authority for
+      // compression and justification.
+      ? alignmentSlackPt / 2 + numberingCenterDeltaPt
       : edge === 'justify' && input.baseRtl && !applyJustify
         ? alignmentSlackPt
         : 0;
@@ -1373,19 +1394,30 @@ function retainedNumberingPlan(
   }, service);
 }
 
+function retainedVisibleNumberingMarkerInterval(
+  plan: RetainedNumberingPlan,
+  paragraph: ParagraphAcquisitionInput,
+): Readonly<{ startPt: number; endPt: number }> | undefined {
+  const pictureBulletWidthPt = paragraph.numbering?.picBulletImagePath
+    ? paragraph.numbering.picBulletWidthPt ?? plan.markerWidthPt
+    : undefined;
+  if (pictureBulletWidthPt === undefined && (!plan.shape || plan.markerText === '')) {
+    return undefined;
+  }
+  const marker = numberingMarkerLogicalInterval({
+    leadingIndentPt: 0,
+    authoredFirstIndentPt: paragraph.indentFirst,
+    markerShiftPt: plan.markerShiftPt,
+    markerWidthPt: pictureBulletWidthPt ?? plan.markerWidthPt,
+  });
+  return { startPt: marker.startPt, endPt: marker.endPt };
+}
+
 function numberingAlignedLeadingEdgePt(
   plan: RetainedNumberingPlan,
   context: ParagraphLayoutContext,
-  paragraphXPt: number,
-  availableWidthPt: number,
   line: LineLayout,
 ): number {
-  // Non-empty lines retain their aligned body bounds. A numbering-only line has
-  // zero width and therefore retains the paragraph frame origin instead of a
-  // body origin with the resolved marker suffix offset applied.
-  if (line.bounds.widthPt <= 0) {
-    return context.baseRtl ? paragraphXPt + availableWidthPt : paragraphXPt;
-  }
   return context.baseRtl
     ? line.bounds.xPt + line.bounds.widthPt + plan.bodyOffsetPt
     : line.bounds.xPt - plan.bodyOffsetPt;
@@ -1395,8 +1427,6 @@ function numberingMarkerPlacements(
   plan: RetainedNumberingPlan,
   paragraph: ParagraphAcquisitionInput,
   context: ParagraphLayoutContext,
-  paragraphXPt: number,
-  availableWidthPt: number,
   line: LineLayout,
 ): readonly TextPlacement[] {
   if (!plan.shape || plan.markerText === '') return [];
@@ -1406,8 +1436,6 @@ function numberingMarkerPlacements(
     alignedLeadingEdgePt: numberingAlignedLeadingEdgePt(
       plan,
       context,
-      paragraphXPt,
-      availableWidthPt,
       line,
     ),
     authoredFirstIndentPt: paragraph.indentFirst,
@@ -2089,9 +2117,12 @@ function planMeasuredLines(
       isLastLine: lineIndex === measured.lines.length - 1,
       stretchLastLine: context.stretchLastLine,
       firstLineIndentPt: context.firstIndentPt,
-      ...(lineIndex === 0 && numberingPlan
-        ? { numbering: { bodyOffsetPt: numberingPlan.bodyOffsetPt } }
-        : {}),
+      ...(lineIndex === 0 && numberingPlan ? {
+        numbering: {
+          bodyOffsetPt: numberingPlan.bodyOffsetPt,
+          markerInterval: retainedVisibleNumberingMarkerInterval(numberingPlan, paragraph),
+        },
+      } : {}),
       ...(decimalAutoTabPt === undefined ? {} : { decimalAutoTabPt }),
       ...(onlyMath?.display ? {
         displayMathJustification: onlyMath.jc ?? context.mathDefJc ?? 'centerGroup',
@@ -2159,8 +2190,13 @@ function numberingMarkerHostLine(
   paragraphXPt: number,
   availableWidthPt: number,
   context: ParagraphLayoutContext,
+  numberingPlan: RetainedNumberingPlan,
 ): LineLayout {
   const advancePt = measured.contentEndYPt - measured.contentStartYPt;
+  const markerInterval = retainedVisibleNumberingMarkerInterval(numberingPlan, paragraph);
+  if (!markerInterval) {
+    throw new Error('Numbering marker host requires visible marker geometry');
+  }
   return planLine({
     paragraphXPt,
     availableWidthPt,
@@ -2169,6 +2205,10 @@ function numberingMarkerHostLine(
     isFirstLine: true,
     isLastLine: true,
     stretchLastLine: context.stretchLastLine,
+    numbering: {
+      bodyOffsetPt: numberingPlan.bodyOffsetPt,
+      markerInterval,
+    },
     line: {
       range: { start: 0, end: 0 },
       topPt: measured.contentStartYPt,
@@ -4215,7 +4255,7 @@ export function paragraphLayoutFromMeasurement(
     numberingPlan
     && measured.markOnly
     && lines.length === 0
-    && (numberingPlan.markerText !== '' || paragraph.numbering?.picBulletImagePath)
+    && retainedVisibleNumberingMarkerInterval(numberingPlan, paragraph)
   ) {
     lines = [numberingMarkerHostLine(
       measured,
@@ -4223,6 +4263,7 @@ export function paragraphLayoutFromMeasurement(
       paragraphXPt,
       availableWidthPt,
       planningContext,
+      numberingPlan,
     )];
   }
   const resources: InlineResourceLayout[] = [];
@@ -4285,7 +4326,7 @@ export function paragraphLayoutFromMeasurement(
   }
   if (numberingPlan && lines[0]) {
     const markerPlacements = numberingMarkerPlacements(
-      numberingPlan, paragraph, options.context, paragraphXPt, availableWidthPt, lines[0],
+      numberingPlan, paragraph, options.context, lines[0],
     );
     if (markerPlacements.length > 0) {
       lines = [{ ...lines[0], placements: [...markerPlacements, ...lines[0].placements] }, ...lines.slice(1)];
@@ -4413,8 +4454,6 @@ export function paragraphLayoutFromMeasurement(
       alignedLeadingEdgePt: numberingAlignedLeadingEdgePt(
         numberingPlan,
         options.context,
-        paragraphXPt,
-        availableWidthPt,
         lines[0],
       ),
       authoredFirstIndentPt: paragraph.indentFirst,

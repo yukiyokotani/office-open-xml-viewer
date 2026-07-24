@@ -80,6 +80,7 @@ describe('private parser diagnostic mapping', () => {
       wire('MISSING_DRAWING_EXTENT', 'error', [0]),
       wire('INVALID_DRAWING_EXTENT', 'error', [0]),
       wire('DEGENERATE_DRAWING_EXTENT', 'warning', [0]),
+      wire('UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM', 'warning', [0]),
     ], 1)).toEqual([
       {
         code: 'UNSUPPORTED_FEATURE',
@@ -110,6 +111,12 @@ describe('private parser diagnostic mapping', () => {
         severity: 'warning',
         source: { story: 'body', storyInstance: 'body', path: [0] },
         message: 'A drawing has a schema-valid zero-area extent',
+      },
+      {
+        code: 'UNSUPPORTED_FEATURE',
+        severity: 'warning',
+        source: { story: 'body', storyInstance: 'body', path: [0] },
+        message: 'A nested non-uniform group transform uses the standard DrawingML fallback',
       },
     ]);
   });

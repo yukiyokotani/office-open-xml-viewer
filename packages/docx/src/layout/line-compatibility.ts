@@ -267,6 +267,38 @@ export const WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB = defineCompatibilityRule
   description: 'For the tab synthesized by a numbering suffix, accept an authored numeric list tab coincident with the shaped marker end instead of advancing to the next automatic tab stop.',
 });
 
+export const WORD_NUMBERING_MARKER_ALIGNED_FIRST_LINE = defineCompatibilityRule({
+  id: 'word-numbering-marker-aligned-first-line',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'numbering-marker-aligned-first-line',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'A numbering marker follows the retained first-line alignment. For centered paragraphs Word centers the union of marker, suffix gap, and body; physical end alignment keeps the same composite beside the aligned body in both LTR and RTL paragraphs.',
+});
+
+/** Center-only translation governed by
+ * {@link WORD_NUMBERING_MARKER_ALIGNED_FIRST_LINE}. The body-only slack remains
+ * unchanged because it also owns line breaking, compression, and justification. */
+export function wordNumberingCompositeCenterDeltaPt(input: Readonly<{
+  baseRtl: boolean;
+  bodyOffsetPt: number;
+  bodyWidthPt: number;
+  markerInterval?: Readonly<{
+    startPt: number;
+    endPt: number;
+  }>;
+}>): number {
+  if (!input.markerInterval) return 0;
+  const bodyEndPt = input.bodyOffsetPt + input.bodyWidthPt;
+  const compositeStartPt = Math.min(input.bodyOffsetPt, input.markerInterval.startPt);
+  const compositeEndPt = Math.max(bodyEndPt, input.markerInterval.endPt);
+  const logicalDeltaPt = (bodyEndPt - compositeStartPt - compositeEndPt) / 2;
+  return input.baseRtl ? -logicalDeltaPt : logicalDeltaPt;
+}
+
 /** Compatibility projection governed by {@link WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB}. */
 export function wordNumberingSuffixAcceptsCoincidentListTab(
   markerEndPt: number,

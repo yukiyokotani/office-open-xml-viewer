@@ -2061,12 +2061,12 @@ describe('planLine visual geometry', () => {
     ['positive RTL', true, 15, undefined, 172],
     ['hanging LTR', false, -10, undefined, 97],
     ['hanging RTL', true, -10, undefined, 197],
-    ['number tab LTR', false, -10, { bodyOffsetPt: 12 }, 119],
-    ['number space LTR', false, -10, { bodyOffsetPt: 12 }, 119],
-    ['number nothing LTR', false, -10, { bodyOffsetPt: 12 }, 119],
-    ['number tab RTL', true, -10, { bodyOffsetPt: 12 }, 175],
-    ['number space RTL', true, -10, { bodyOffsetPt: 12 }, 175],
-    ['number nothing RTL', true, -10, { bodyOffsetPt: 12 }, 175],
+    ['number tab LTR', false, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 119],
+    ['number space LTR', false, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 119],
+    ['number nothing LTR', false, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 119],
+    ['number tab RTL', true, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 175],
+    ['number space RTL', true, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 175],
+    ['number nothing RTL', true, -10, { bodyOffsetPt: 12, markerInterval: { startPt: 0, endPt: 0 } }, 175],
   ] as const)('owns first-line region geometry for %s with float x-offset', (
     _name, baseRtl, firstLineIndentPt, numbering, expectedX,
   ) => {

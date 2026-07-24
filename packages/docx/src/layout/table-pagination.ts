@@ -217,6 +217,22 @@ function paginationRowTrackHeightForOccurrence(
   return paginationRowHeightForOccurrence(source, row, rowIndex, context);
 }
 
+function canonicalPaginationRowTrackHeight(
+  source: RetainedTableAcquisition,
+  rowIndex: number,
+): number {
+  return Math.max(0, source.layout.rows[rowIndex]?.heightPt ?? 0);
+}
+
+function sourceRowUsesVerticalMerge(
+  source: RetainedTableAcquisition,
+  rowIndex: number,
+): boolean {
+  return source.input.rows[rowIndex]?.cells.some(
+    (cell) => cell.verticalMerge !== 'none',
+  ) ?? false;
+}
+
 function completedPartialRowTrackHeight(
   source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
@@ -1037,7 +1053,9 @@ export function takeTableFragment(
     && cursor.cells.length === 0
     && source.layout.rows
       .slice(cursor.rowIndex)
-      .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0)
+      .reduce((heightPt, _row, offset) => (
+        heightPt + canonicalPaginationRowTrackHeight(source, cursor.rowIndex + offset)
+      ), 0)
       <= availablePt + EPSILON_PT;
   let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {
@@ -1086,9 +1104,19 @@ export function takeTableFragment(
     // must not be charged again. When the remainder does cross the boundary,
     // keep the conservative content-aware height so partial rows and page-local
     // merge continuation ownership are derived before materialization.
-    const wholeHeightPt = retainedRemainderFits || followsCompletedPartialRow
-      ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
-      : paginationRowHeightForOccurrence(source, row, rowIndex, context);
+    const wholeHeightPt = retainedRemainderFits
+      && sourceRowUsesVerticalMerge(source, rowIndex)
+      // The guard admitted the complete canonical remainder by these exact
+      // retained tracks. Reacquisition may replace row objects, but must not
+      // make a vMerge owner pay its spanning content deficit a second time.
+      // This is deliberately row-scoped: a mixed row containing both merged
+      // and page-dependent cells is admitted canonically, then the whole-row
+      // trim loop below remains responsible for rejecting any real overflow.
+      // Materialization and its whole-row trim loop remain the final fit authority.
+      ? canonicalPaginationRowTrackHeight(source, rowIndex)
+      : retainedRemainderFits || followsCompletedPartialRow
+        ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
+        : paginationRowHeightForOccurrence(source, row, rowIndex, context);
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));

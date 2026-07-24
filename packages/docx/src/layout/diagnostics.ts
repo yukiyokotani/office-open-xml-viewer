@@ -46,6 +46,11 @@ export const PARSER_DIAGNOSTIC_CONTRACT = Object.freeze({
     layoutCode: 'INVALID_GEOMETRY',
     message: 'A drawing has a schema-valid zero-area extent',
   }),
+  UNSUPPORTED_NESTED_QUARTER_TURN_GROUP_TRANSFORM: Object.freeze({
+    severity: 'warning',
+    layoutCode: 'UNSUPPORTED_FEATURE',
+    message: 'A nested non-uniform group transform uses the standard DrawingML fallback',
+  }),
 } satisfies Readonly<Record<string, ParseDiagnosticContractEntry>>);
 
 type KnownParseDiagnosticCode = keyof typeof PARSER_DIAGNOSTIC_CONTRACT;

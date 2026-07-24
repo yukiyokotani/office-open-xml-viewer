@@ -72,6 +72,20 @@ function rtlItem(markerText: string, body: string): DocParagraph {
   } as unknown as DocParagraph;
 }
 
+function centeredItem(markerText: string, body: string, jc = 'right'): DocParagraph {
+  return {
+    ...romanItem(markerText, body, jc),
+    alignment: 'center',
+  } as unknown as DocParagraph;
+}
+
+function rtlCenteredItem(markerText: string, body: string): DocParagraph {
+  return {
+    ...rtlItem(markerText, body),
+    alignment: 'center',
+  } as unknown as DocParagraph;
+}
+
 function doc(paras: DocParagraph[]): DocxDocumentModel {
   return {
     section: {
@@ -133,5 +147,72 @@ describe('list marker lvlJc (§17.9.8)', () => {
     expect(marker!.x).toBeCloseTo(94, 3);
     expect(marker!.x).toBeGreaterThan(body!.x + 4 * 10);
     expect(marker!.x).toBeLessThan(100);
+  });
+
+  it('centres the marker and body as one retained first-line interval', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([centeredItem('1.', 'Body')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400 },
+    );
+
+    const marker = fills.find((fill) => fill.text === '1.');
+    const body = fills.find((fill) => fill.text === 'Body');
+    expect(marker, 'centred marker drawn').toBeDefined();
+    expect(body, 'centred body drawn').toBeDefined();
+    const compositeLeft = Math.min(marker!.x, body!.x);
+    const compositeRight = Math.max(marker!.x + 2 * 10, body!.x + 4 * 10);
+    const paragraphFrameCenter = (57.6 + 400) / 2;
+    expect((compositeLeft + compositeRight) / 2).toBeCloseTo(paragraphFrameCenter, 3);
+  });
+
+  it('centres a left-justified marker and body as one interval', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([centeredItem('1.', 'Body', 'left')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400 },
+    );
+
+    const marker = fills.find((fill) => fill.text === '1.');
+    const body = fills.find((fill) => fill.text === 'Body');
+    expect(marker, 'left-justified marker drawn').toBeDefined();
+    expect(body, 'centred body drawn').toBeDefined();
+    expect((marker!.x + body!.x + 4 * 10) / 2).toBeCloseTo((57.6 + 400) / 2, 3);
+  });
+
+  it('centres only the body when the numbering level draws no marker', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([centeredItem('', 'Body')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400 },
+    );
+
+    const body = fills.find((fill) => fill.text === 'Body');
+    expect(body, 'centred body drawn').toBeDefined();
+    expect(body!.x + 2 * 10).toBeCloseTo((57.6 + 400) / 2, 3);
+  });
+
+  it('mirrors composite marker centring for an RTL paragraph', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(
+      doc([rtlCenteredItem('1.', 'Body')]),
+      canvas,
+      0,
+      { dpr: 1, width: 400 },
+    );
+
+    const marker = fills.find((fill) => fill.text === '1.');
+    const body = fills.find((fill) => fill.text === 'Body');
+    expect(marker, 'centred RTL marker drawn').toBeDefined();
+    expect(body, 'centred RTL body drawn').toBeDefined();
+    const compositeLeft = Math.min(marker!.x, body!.x);
+    const compositeRight = Math.max(marker!.x + 2 * 10, body!.x + 4 * 10);
+    expect((compositeLeft + compositeRight) / 2).toBeCloseTo(218, 3);
   });
 });
