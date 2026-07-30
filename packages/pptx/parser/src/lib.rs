@@ -1407,6 +1407,7 @@ fn parse_presentation(zip: &mut PptxZip) -> Result<Presentation, Box<dyn std::er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use crate::chart::{parse_chartex, parse_legacy_chart};
     use ooxml_common::math::nodes_to_text;
 
