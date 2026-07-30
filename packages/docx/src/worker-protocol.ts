@@ -31,7 +31,7 @@ export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun'>;
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean; defaultCurrentDateMs: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; maxZipTotalBytes?: number; maxZipEntries?: number; useGoogleFonts?: boolean; defaultCurrentDateMs: number }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be

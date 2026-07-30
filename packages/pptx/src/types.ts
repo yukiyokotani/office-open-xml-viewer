@@ -607,7 +607,7 @@ export interface PictureElement {
 
 export type WorkerRequest =
   | { kind: 'init'; wasmUrl: string }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; maxZipTotalBytes?: number; maxZipEntries?: number }
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`PptxArchive.to_markdown`,

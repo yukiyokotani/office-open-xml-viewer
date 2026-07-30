@@ -245,6 +245,8 @@ export class PptxViewer implements ZoomableViewer {
       const engine = await PptxPresentation.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        maxZipTotalBytes: this.opts.maxZipTotalBytes,
+        maxZipEntries: this.opts.maxZipEntries,
         workerTimeoutMs: this.opts.workerTimeoutMs,
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,

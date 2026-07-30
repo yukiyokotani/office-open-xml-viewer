@@ -1499,7 +1499,7 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; maxZipTotalBytes?: number; maxZipEntries?: number }
   | { type: 'extractImage'; id: number; path: string }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
   // the handle already opened at `parse` — no re-copy of the file). Twin of

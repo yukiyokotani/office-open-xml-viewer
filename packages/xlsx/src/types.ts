@@ -1064,7 +1064,7 @@ export interface RenderViewportOptions {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number; maxZipTotalBytes?: number; maxZipEntries?: number }
   /** Parse one sheet lazily. Deliberately carries NO `data`: the worker already
    *  retained the whole-workbook buffer on the preceding `parse`, so re-sending
    *  it here would structured-clone the entire file per sheet switch for no
@@ -1076,6 +1076,8 @@ export type WorkerRequest =
       sheetIndex: number;
       sheetName: string;
       maxZipEntryBytes?: number;
+      maxZipTotalBytes?: number;
+      maxZipEntries?: number;
     }
   /** Pull one embedded image's raw bytes by zip path from the buffer the worker
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the

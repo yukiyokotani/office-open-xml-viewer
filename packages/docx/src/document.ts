@@ -41,6 +41,10 @@ import { textRunsForSelectedPage } from './text-run-projection.js';
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
  *  opt-in math engine. */
 export interface LoadOptions extends CoreLoadOptions {
+  /** Maximum decompressed bytes across distinct ZIP entries (default: 512 MiB). */
+  maxZipTotalBytes?: number;
+  /** Maximum ZIP central-directory entries (default: 20,000). */
+  maxZipEntries?: number;
   /**
    * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
    * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
@@ -169,6 +173,8 @@ export class DocxDocument {
       await doc._parse(
         buffer,
         opts.maxZipEntryBytes,
+        opts.maxZipTotalBytes,
+        opts.maxZipEntries,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
         opts.workerTimeoutMs,
       );
@@ -238,14 +244,16 @@ export class DocxDocument {
   private async _parse(
     buffer: ArrayBuffer,
     maxZipEntryBytes?: number,
+    maxZipTotalBytes?: number,
+    maxZipEntries?: number,
     useGoogleFonts = false,
     timeoutMs?: number,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
-          : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
+          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, maxZipTotalBytes, maxZipEntries, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, maxZipEntryBytes, maxZipTotalBytes, maxZipEntries } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );

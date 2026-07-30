@@ -41,6 +41,14 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         typeof req.maxZipEntryBytes === 'number' && req.maxZipEntryBytes > 0
           ? BigInt(req.maxZipEntryBytes)
           : undefined;
+      const maxTotal =
+        typeof req.maxZipTotalBytes === 'number' && req.maxZipTotalBytes > 0
+          ? BigInt(req.maxZipTotalBytes)
+          : undefined;
+      const maxEntries =
+        typeof req.maxZipEntries === 'number' && req.maxZipEntries > 0
+          ? BigInt(req.maxZipEntries)
+          : undefined;
       const bytes = new Uint8Array(req.data);
       // Both the construction and `parse()` run under `host.run` so a trap in
       // EITHER poisons + recycles the instance (and frees the archive). Adopting
@@ -52,7 +60,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // forward it to the main thread as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens once, on the main thread.
       const json = host.run(() => {
-        const archive = new DocxArchive(bytes, max);
+        const archive = new DocxArchive(bytes, max, maxTotal, maxEntries);
         host.setArchive(archive);
         return archive.parse();
       });

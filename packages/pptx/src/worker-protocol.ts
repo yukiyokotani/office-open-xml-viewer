@@ -33,7 +33,7 @@ export type RenderWorkerRequest =
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'toMarkdown'; id: number }
-  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; useGoogleFonts?: boolean }
+  | { kind: 'parse'; id: number; buffer: ArrayBuffer; maxZipEntryBytes?: number; maxZipTotalBytes?: number; maxZipEntries?: number; useGoogleFonts?: boolean }
   | { kind: 'renderSlide'; id: number; slideIndex: number; width: number; dpr: number; skipMediaControls?: boolean; dim?: DimOptions }
   // IX6 — collect a slide's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every slide for its runs; a bitmap per slide would be

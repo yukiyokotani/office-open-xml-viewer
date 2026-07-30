@@ -63,7 +63,19 @@ const CONTAINER_PART: &str = "(zip container)";
 /// by writing the literal `"(zip container)"` directly instead of a
 /// pre-parenthesized constant).
 pub(crate) fn open_zip(data: Vec<u8>) -> Result<XlsxZip, String> {
-    zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("{CONTAINER_PART}: {e}"))
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("{CONTAINER_PART}: {e}"))?;
+    ooxml_common::zip::validate_archive_limits(&mut archive)?;
+    Ok(archive)
+}
+
+fn validate_zip_budget(data: &[u8]) -> Result<(), String> {
+    // Malformed containers keep the existing degraded-placeholder behavior;
+    // only a readable central directory can prove a budget violation.
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(data)) else {
+        return Ok(());
+    };
+    ooxml_common::zip::validate_archive_limits(&mut archive)
 }
 
 /// A placeholder [`ParsedWorkbook`] for a xlsx whose ZIP CONTAINER could not be
@@ -128,9 +140,16 @@ const INDEXED_COLORS: &[&str] = &[
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
 #[wasm_bindgen]
-pub fn parse_xlsx(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<Vec<u8>, JsValue> {
+pub fn parse_xlsx(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
+    let _guard =
+        ooxml_common::zip::scoped_limits(max_zip_entry_bytes, max_zip_total_bytes, max_zip_entries);
+    validate_zip_budget(data).map_err(|e| JsValue::from_str(&e))?;
     let wb = parse_xlsx_inner(data).map_err(|e| JsValue::from_str(&e))?;
     serde_json::to_vec(&wb).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
@@ -322,9 +341,13 @@ pub fn parse_sheet(
     sheet_index: u32,
     name: &str,
     max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
+    let _guard =
+        ooxml_common::zip::scoped_limits(max_zip_entry_bytes, max_zip_total_bytes, max_zip_entries);
+    validate_zip_budget(data).map_err(|e| JsValue::from_str(&e))?;
     // #774: mirror `parse_xlsx_inner` — a corrupt CONTAINER degrades the sheet to
     // the container-tagged placeholder so the viewer paints its overlay instead of
     // the constructor / read throwing an opaque error.
@@ -402,14 +425,7 @@ fn read_zip_entry_head(
     name: &str,
     max_bytes: u64,
 ) -> Result<String, String> {
-    let mut file = archive
-        .by_name(name)
-        .map_err(|e| format!("entry '{}' not found: {}", name, e))?;
-    let mut buf = Vec::new();
-    file.by_ref()
-        .take(max_bytes)
-        .read_to_end(&mut buf)
-        .map_err(|e| e.to_string())?;
+    let buf = ooxml_common::zip::read_zip_prefix_bytes(archive, name, max_bytes)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -2460,6 +2476,8 @@ pub(crate) fn resolve_implicit_ordinal(explicit: Option<u32>, prev: &mut u32) ->
 /// Returns workbook overview (sheet names and metadata) as JSON.
 /// Native equivalent of `parse_xlsx` for use from the MCP server.
 pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
+    let _guard = ooxml_common::zip::scoped_limits(None, None, None);
+    validate_zip_budget(data)?;
     parse_xlsx_inner(data)
         .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
 }
@@ -2469,9 +2487,16 @@ pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
 /// continuation cells are rendered as empty; the display value comes from the
 /// WASM-callable markdown projection (mirrors `to_markdown_native`).
 #[wasm_bindgen]
-pub fn xlsx_to_markdown(data: &[u8], max_zip_entry_bytes: Option<u64>) -> Result<String, JsValue> {
+pub fn xlsx_to_markdown(
+    data: &[u8],
+    max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
+) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let _guard = ooxml_common::zip::scoped_max(max_zip_entry_bytes);
+    let _guard =
+        ooxml_common::zip::scoped_limits(max_zip_entry_bytes, max_zip_total_bytes, max_zip_entries);
+    validate_zip_budget(data).map_err(|e| JsValue::from_str(&e))?;
     to_markdown_impl(data).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -2484,9 +2509,17 @@ pub fn extract_image(
     data: &[u8],
     path: &str,
     max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
 ) -> Result<Vec<u8>, JsValue> {
-    ooxml_common::zip::extract_zip_entry(data, path, max_zip_entry_bytes)
-        .map_err(|e| JsValue::from_str(&e))
+    ooxml_common::zip::extract_zip_entry_with_limits(
+        data,
+        path,
+        max_zip_entry_bytes,
+        max_zip_total_bytes,
+        max_zip_entries,
+    )
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// A stateful handle over an opened xlsx archive.
@@ -2516,7 +2549,7 @@ pub struct XlsxArchive {
     /// constructor throwing an opaque error the viewer can't turn into a
     /// placeholder tab.
     archive: Result<XlsxZip, String>,
-    max: Option<u64>,
+    budget: ooxml_common::zip::ZipBudget,
     /// Workbook-level parts parsed once and reused across sheet switches. Loaded
     /// lazily on the first `parse` / `parse_sheet` (see [`XlsxArchive::shared`]).
     shared: Option<WorkbookShared>,
@@ -2536,14 +2569,32 @@ impl XlsxArchive {
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: Vec<u8>, max_zip_entry_bytes: Option<u64>) -> Result<XlsxArchive, JsValue> {
+    pub fn new(
+        data: Vec<u8>,
+        max_zip_entry_bytes: Option<u64>,
+        max_zip_total_bytes: Option<u64>,
+        max_zip_entries: Option<u64>,
+    ) -> Result<XlsxArchive, JsValue> {
         console_error_panic_hook::set_once();
         // #774 (RB7 MAJOR): a truncated / corrupt CONTAINER is deferred, not
         // thrown, so `parse()` / `parse_sheet()` can degrade it to a placeholder
         // instead of the constructor failing with an opaque error.
+        let budget = ooxml_common::zip::ZipBudget::new(
+            max_zip_entry_bytes,
+            max_zip_total_bytes,
+            max_zip_entries,
+        );
+        let _guard = ooxml_common::zip::scoped_budget(&budget);
+        let archive = match open_zip(data) {
+            Ok(archive) => Ok(archive),
+            Err(error) if error.starts_with("ZIP archive exceeds") => {
+                return Err(JsValue::from_str(&error));
+            }
+            Err(error) => Err(error),
+        };
         Ok(XlsxArchive {
-            archive: open_zip(data),
-            max: max_zip_entry_bytes,
+            archive,
+            budget,
             shared: None,
         })
     }
@@ -2569,7 +2620,7 @@ impl XlsxArchive {
     /// CONTAINER failed to open (#774) the model is a degraded placeholder
     /// workbook tagged with the container.
     pub fn parse(&mut self) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_budget(&self.budget);
         if let Err(e) = &self.archive {
             let wb = degraded_container_workbook(e.clone());
             return serde_json::to_vec(&wb)
@@ -2588,7 +2639,7 @@ impl XlsxArchive {
     /// When the CONTAINER failed to open (#774) the sheet is the container-tagged
     /// placeholder.
     pub fn parse_sheet(&mut self, sheet_index: u32, name: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_budget(&self.budget);
         if let Err(e) = &self.archive {
             let ws = degraded_container_sheet(e.clone());
             return serde_json::to_vec(&ws).map_err(|e| JsValue::from_str(&e.to_string()));
@@ -2604,7 +2655,7 @@ impl XlsxArchive {
     /// `extract_image`, but reads through the already-open archive. A corrupt
     /// container has no entries, so this surfaces the container-open error.
     pub fn extract_image(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_budget(&self.budget);
         let zip = self
             .archive
             .as_mut()
@@ -2615,7 +2666,7 @@ impl XlsxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `xlsx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let _guard = ooxml_common::zip::scoped_max(self.max);
+        let _guard = ooxml_common::zip::scoped_budget(&self.budget);
         let zip = self
             .archive
             .as_mut()
@@ -2628,6 +2679,8 @@ impl XlsxArchive {
 /// Designed for AI agents that need to read the spreadsheet content
 /// efficiently — drops styling, formatting, charts, sparklines, drawings.
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
+    let _guard = ooxml_common::zip::scoped_limits(None, None, None);
+    validate_zip_budget(data)?;
     to_markdown_impl(data)
 }
 
@@ -2674,6 +2727,8 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
 /// the WASM `parse_sheet`, then decodes the JSON bytes to a `String` — so the
 /// native and WASM paths can never drift.
 pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<String, String> {
+    let _guard = ooxml_common::zip::scoped_limits(None, None, None);
+    validate_zip_budget(data)?;
     // #774: mirror the WASM `parse_sheet` — a corrupt CONTAINER degrades to the
     // container-tagged placeholder sheet rather than erroring.
     let mut archive = match open_zip(data.to_vec()) {
@@ -3331,7 +3386,10 @@ mod extract_image_tests {
             w.write_all(b"X").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(extract_image(&buf, "xl/media/i.png", None).unwrap(), b"X");
+        assert_eq!(
+            extract_image(&buf, "xl/media/i.png", None, None, None).unwrap(),
+            b"X"
+        );
     }
 }
 

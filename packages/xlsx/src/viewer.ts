@@ -1,6 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
 import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { HyperlinkTarget, LoadOptions, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import type { HyperlinkTarget, FindMatch, FindMatchesOptions, ZoomableViewer } from '@silurus/ooxml-core';
+import type { LoadOptions } from './workbook.js';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
@@ -833,6 +834,8 @@ export class XlsxViewer implements ZoomableViewer {
       const wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
+        maxZipTotalBytes: this.opts.maxZipTotalBytes,
+        maxZipEntries: this.opts.maxZipEntries,
         workerTimeoutMs: this.opts.workerTimeoutMs,
         wasmUrl: this.opts.wasmUrl,
         math: this.opts.math,

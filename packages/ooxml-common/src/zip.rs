@@ -13,12 +13,24 @@
 //! its scope and the cap is restored on drop, so concurrent JS callers never
 //! interfere (WASM is single-threaded; each invocation runs to completion).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// 512 MiB. OOXML legitimately reaches tens of MB (embedded video, 4K
 /// images) but not hundreds, so this cap blocks zip-bomb DoS without
 /// rejecting real files.
 pub const DEFAULT_MAX_ZIP_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 512 MiB across all distinct entries actually inflated from one archive.
+/// This bounds archives made from many individually-valid entries while keeping
+/// ordinary OOXML packages (whose XML and media total far below this) compatible.
+pub const DEFAULT_MAX_ZIP_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// A conservative ceiling for central-directory entries. OOXML packages normally
+/// contain hundreds or a few thousand parts; 20,000 leaves ample headroom while
+/// bounding metadata scans and pathological part explosions.
+pub const DEFAULT_MAX_ZIP_ENTRIES: u64 = 20_000;
 
 /// Upper bound on the buffer we pre-reserve from an entry's DECLARED size.
 ///
@@ -47,6 +59,47 @@ fn initial_reserve(declared_size: u64) -> usize {
 
 thread_local! {
     static MAX_ZIP_ENTRY_BYTES: Cell<u64> = const { Cell::new(DEFAULT_MAX_ZIP_ENTRY_BYTES) };
+    static ACTIVE_BUDGET: RefCell<Option<ZipBudget>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+pub struct ZipBudget(Rc<RefCell<BudgetState>>);
+
+struct BudgetState {
+    max_entry_bytes: u64,
+    max_total_bytes: u64,
+    max_entries: u64,
+    /// The greatest number of bytes observed for each entry. Re-reading an entry
+    /// through a retained archive replaces this value instead of double-counting.
+    entry_bytes: HashMap<String, u64>,
+    actual_total_bytes: u64,
+    /// A retained archive fails closed after a proven limit breach. Without this,
+    /// callers could catch one error and repeatedly inflate more distinct forged
+    /// entries through the same handle.
+    poisoned: bool,
+}
+
+impl ZipBudget {
+    pub fn new(
+        max_zip_entry_bytes: Option<u64>,
+        max_zip_total_bytes: Option<u64>,
+        max_zip_entries: Option<u64>,
+    ) -> Self {
+        Self(Rc::new(RefCell::new(BudgetState {
+            max_entry_bytes: max_zip_entry_bytes
+                .filter(|&n| n > 0)
+                .unwrap_or(DEFAULT_MAX_ZIP_ENTRY_BYTES),
+            max_total_bytes: max_zip_total_bytes
+                .filter(|&n| n > 0)
+                .unwrap_or(DEFAULT_MAX_ZIP_TOTAL_BYTES),
+            max_entries: max_zip_entries
+                .filter(|&n| n > 0)
+                .unwrap_or(DEFAULT_MAX_ZIP_ENTRIES),
+            entry_bytes: HashMap::new(),
+            actual_total_bytes: 0,
+            poisoned: false,
+        })))
+    }
 }
 
 /// RAII guard that restores the previous cap when dropped. Created by
@@ -55,11 +108,13 @@ thread_local! {
 #[must_use = "binding the guard keeps the cap installed for this scope"]
 pub struct Guard {
     previous: u64,
+    previous_budget: Option<ZipBudget>,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
         MAX_ZIP_ENTRY_BYTES.with(|c| c.set(self.previous));
+        ACTIVE_BUDGET.with(|budget| *budget.borrow_mut() = self.previous_budget.take());
     }
 }
 
@@ -67,17 +122,184 @@ impl Drop for Guard {
 /// guard. `None`, zero, or any non-positive value falls back to
 /// [`DEFAULT_MAX_ZIP_ENTRY_BYTES`].
 pub fn scoped_max(value: Option<u64>) -> Guard {
-    let resolved = value
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_MAX_ZIP_ENTRY_BYTES);
+    scoped_limits(value, None, None)
+}
+
+/// Create and install a ZIP budget for one non-retained parse or extraction.
+pub fn scoped_limits(
+    max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
+) -> Guard {
+    let budget = ZipBudget::new(max_zip_entry_bytes, max_zip_total_bytes, max_zip_entries);
+    scoped_budget(&budget)
+}
+
+/// Install a retained archive's budget for the duration of one method call.
+/// The handle owns this budget, so actual bytes remain accounted across calls.
+pub fn scoped_budget(budget: &ZipBudget) -> Guard {
+    let resolved = budget.0.borrow().max_entry_bytes;
     let previous = MAX_ZIP_ENTRY_BYTES.with(|c| c.replace(resolved));
-    Guard { previous }
+    let previous_budget = ACTIVE_BUDGET.with(|active| active.borrow_mut().replace(budget.clone()));
+    Guard {
+        previous,
+        previous_budget,
+    }
 }
 
 /// Current cap in effect on this thread. Parsers consult this from their
 /// `read_zip_*` helpers when validating entry sizes.
 pub fn current_max() -> u64 {
     MAX_ZIP_ENTRY_BYTES.with(Cell::get)
+}
+
+fn current_limits() -> (u64, u64, u64) {
+    ACTIVE_BUDGET.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|budget| {
+                let state = budget.0.borrow();
+                (
+                    state.max_entry_bytes,
+                    state.max_total_bytes,
+                    state.max_entries,
+                )
+            })
+            .unwrap_or((
+                DEFAULT_MAX_ZIP_ENTRY_BYTES,
+                DEFAULT_MAX_ZIP_TOTAL_BYTES,
+                DEFAULT_MAX_ZIP_ENTRIES,
+            ))
+    })
+}
+
+fn ensure_budget_is_healthy() -> Result<(), String> {
+    ACTIVE_BUDGET.with(|active| {
+        let Some(budget) = active.borrow().clone() else {
+            return Ok(());
+        };
+        if budget.0.borrow().poisoned {
+            return Err("ZIP archive budget already exceeded".to_string());
+        }
+        Ok(())
+    })
+}
+
+fn poison_budget(message: &'static str) -> String {
+    ACTIVE_BUDGET.with(|active| {
+        if let Some(budget) = active.borrow().clone() {
+            budget.0.borrow_mut().poisoned = true;
+        }
+    });
+    message.to_string()
+}
+
+/// Reject an archive whose central directory already proves it exceeds a limit.
+/// The declared sizes are not trusted as actual bytes, but they are a safe early
+/// rejection signal that avoids inflating or allocating for a known-over-budget
+/// archive. Actual decompressed bytes are checked separately while reading.
+pub fn validate_archive_limits<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<(), String> {
+    ensure_budget_is_healthy()?;
+    let (_, max_total, max_entries) = current_limits();
+    if (archive.len() as u64) > max_entries {
+        return Err(poison_budget("ZIP archive exceeds entry count limit"));
+    }
+    let mut declared_total = 0u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|_| "ZIP archive entry metadata error".to_string())?;
+        declared_total = declared_total
+            .checked_add(entry.size())
+            .ok_or_else(|| poison_budget("ZIP archive exceeds total size limit"))?;
+        if declared_total > max_total {
+            return Err(poison_budget("ZIP archive exceeds total size limit"));
+        }
+    }
+    Ok(())
+}
+
+fn observe_actual_bytes(path: &str, observed_for_entry: u64) -> Result<(), String> {
+    ensure_budget_is_healthy()?;
+    ACTIVE_BUDGET.with(|active| {
+        let Some(budget) = active.borrow().clone() else {
+            return Ok(());
+        };
+        let mut state = budget.0.borrow_mut();
+        let old = state.entry_bytes.get(path).copied().unwrap_or(0);
+        if observed_for_entry <= old {
+            return Ok(());
+        }
+        let next_total = state
+            .actual_total_bytes
+            .checked_add(observed_for_entry - old)
+            .ok_or_else(|| {
+                state.poisoned = true;
+                "ZIP archive exceeds total size limit".to_string()
+            })?;
+        if next_total > state.max_total_bytes {
+            state.poisoned = true;
+            return Err("ZIP archive exceeds total size limit".to_string());
+        }
+        state
+            .entry_bytes
+            .insert(path.to_owned(), observed_for_entry);
+        state.actual_total_bytes = next_total;
+        Ok(())
+    })
+}
+
+fn read_limited_bytes(
+    reader: &mut impl std::io::Read,
+    path: &str,
+    declared_size: u64,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    ensure_budget_is_healthy()?;
+    let (max_entry, _, _) = current_limits();
+    if declared_size > max_entry {
+        return Err(poison_budget("ZIP entry exceeds size limit"));
+    }
+    let limit = max_bytes.unwrap_or(max_entry).min(max_entry);
+    let mut buf = Vec::with_capacity(initial_reserve(declared_size.min(limit)));
+    let mut chunk = [0u8; 32 * 1024];
+    let mut read = 0u64;
+    loop {
+        if read == limit {
+            // Prefix probes intentionally stop here. Full reads consume one more
+            // byte so an entry whose actual inflate output exceeds its cap cannot
+            // masquerade as an exact-limit entry behind forged metadata.
+            if max_bytes.is_some() {
+                break;
+            }
+            let count = reader
+                .read(&mut chunk[..1])
+                .map_err(|_| "ZIP entry read error".to_string())?;
+            if count != 0 {
+                return Err(poison_budget("ZIP entry exceeds size limit"));
+            }
+            break;
+        }
+        let remaining = (limit - read).min(chunk.len() as u64) as usize;
+        let count = reader
+            .read(&mut chunk[..remaining])
+            .map_err(|_| "ZIP entry read error".to_string())?;
+        if count == 0 {
+            break;
+        }
+        read = read
+            .checked_add(count as u64)
+            .ok_or_else(|| poison_budget("ZIP entry exceeds size limit"))?;
+        if read > limit {
+            return Err(poison_budget("ZIP entry exceeds size limit"));
+        }
+        observe_actual_bytes(path, read)?;
+        buf.extend_from_slice(&chunk[..count]);
+    }
+    Ok(buf)
 }
 
 /// Read one zip entry's bytes by path. Honors the scoped max-entry guard:
@@ -89,26 +311,27 @@ pub fn extract_zip_entry(
     path: &str,
     max_zip_entry_bytes: Option<u64>,
 ) -> Result<Vec<u8>, String> {
-    use std::io::{Cursor, Read};
-    let _guard = scoped_max(max_zip_entry_bytes);
-    let max = current_max();
+    extract_zip_entry_with_limits(data, path, max_zip_entry_bytes, None, None)
+}
+
+/// Limit-aware counterpart of [`extract_zip_entry`]. Browser entry points use
+/// this to apply entry, aggregate-byte, and central-directory-count limits.
+pub fn extract_zip_entry_with_limits(
+    data: &[u8],
+    path: &str,
+    max_zip_entry_bytes: Option<u64>,
+    max_zip_total_bytes: Option<u64>,
+    max_zip_entries: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    let _guard = scoped_limits(max_zip_entry_bytes, max_zip_total_bytes, max_zip_entries);
     let cursor = Cursor::new(data);
     let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("zip open error: {e}"))?;
+    validate_archive_limits(&mut zip)?;
     let mut entry = zip
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}"));
-    }
-    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
-    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
-    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    read_limited_bytes(&mut entry, path, entry.size(), None)
 }
 
 /// Read one entry's bytes from an **already-opened** [`ZipArchive`]. Twin of
@@ -122,23 +345,11 @@ pub fn read_zip_bytes<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let max = current_max();
+    ensure_budget_is_healthy()?;
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}"));
-    }
-    // Pre-reserve a capped amount, not the (attacker-controlled) declared size —
-    // `read_to_end` grows the buffer for genuinely large parts. See INITIAL_RESERVE_CAP.
-    let mut buf = Vec::with_capacity(initial_reserve(entry.size()));
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    read_limited_bytes(&mut entry, path, entry.size(), None)
 }
 
 /// UTF-8 string counterpart of [`read_zip_bytes`] for XML parts. Same cap
@@ -149,26 +360,142 @@ pub fn read_zip_string<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     path: &str,
 ) -> Result<String, String> {
-    use std::io::Read;
-    let max = current_max();
+    let bytes = read_zip_bytes(archive, path)?;
+    String::from_utf8(bytes).map_err(|_| "ZIP entry is not valid UTF-8".to_string())
+}
+
+/// Read a bounded prefix of an entry while accounting actual bytes in the same
+/// retained-archive budget. A later full read of the same entry raises its
+/// observed total to the full size rather than charging the prefix twice.
+pub fn read_zip_prefix_bytes<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    path: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    ensure_budget_is_healthy()?;
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    if entry.size() > max {
-        return Err(format!("ZIP entry exceeds size limit: {path}"));
-    }
-    let mut buf = String::new();
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("read error: {e}"))?;
-    Ok(buf)
+    read_limited_bytes(&mut entry, path, entry.size(), Some(max_bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_budget_rejects_actual_bytes_across_distinct_entries() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("one.bin", opts).unwrap();
+            w.write_all(b"1234").unwrap();
+            w.start_file("two.bin", opts).unwrap();
+            w.write_all(b"5678").unwrap();
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        let _guard = scoped_limits(Some(16), Some(6), Some(2));
+        assert_eq!(read_zip_bytes(&mut archive, "one.bin").unwrap(), b"1234");
+        let err = read_zip_bytes(&mut archive, "two.bin").unwrap_err();
+        assert!(err.contains("total size limit"), "got: {err}");
+    }
+
+    #[test]
+    fn retained_budget_does_not_double_charge_an_entry_read_again() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("one.bin", opts).unwrap();
+            w.write_all(b"1234").unwrap();
+            w.start_file("two.bin", opts).unwrap();
+            w.write_all(b"5678").unwrap();
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        let budget = ZipBudget::new(Some(16), Some(8), Some(2));
+        {
+            let _guard = scoped_budget(&budget);
+            assert_eq!(read_zip_bytes(&mut archive, "one.bin").unwrap(), b"1234");
+        }
+        {
+            let _guard = scoped_budget(&budget);
+            assert_eq!(read_zip_bytes(&mut archive, "one.bin").unwrap(), b"1234");
+            assert_eq!(read_zip_bytes(&mut archive, "two.bin").unwrap(), b"5678");
+        }
+    }
+
+    #[test]
+    fn retained_budget_stays_rejected_after_aggregate_crossing() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("one.bin", opts).unwrap();
+            w.write_all(b"1234").unwrap();
+            w.start_file("two.bin", opts).unwrap();
+            w.write_all(b"5678").unwrap();
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        let budget = ZipBudget::new(Some(16), Some(6), Some(2));
+        {
+            let _guard = scoped_budget(&budget);
+            assert_eq!(read_zip_bytes(&mut archive, "one.bin").unwrap(), b"1234");
+            let err = read_zip_bytes(&mut archive, "two.bin").unwrap_err();
+            assert!(err.contains("total size limit"), "got: {err}");
+        }
+        {
+            let _guard = scoped_budget(&budget);
+            let err = read_zip_bytes(&mut archive, "one.bin").unwrap_err();
+            assert!(err.contains("budget already exceeded"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn retained_budget_stays_rejected_after_actual_entry_overflow() {
+        use std::io::Cursor;
+        // A forged stream can emit more bytes than its claimed uncompressed
+        // size. Exercise the shared reader directly so the test does not rely on
+        // a ZIP implementation accepting malformed central-directory metadata.
+        let budget = ZipBudget::new(Some(4), Some(16), Some(2));
+        {
+            let _guard = scoped_budget(&budget);
+            let mut forged = Cursor::new(b"12345");
+            let err = read_limited_bytes(&mut forged, "forged.bin", 4, None).unwrap_err();
+            assert!(err.contains("entry exceeds size limit"), "got: {err}");
+        }
+        {
+            let _guard = scoped_budget(&budget);
+            let mut harmless = Cursor::new(b"1");
+            let err = read_limited_bytes(&mut harmless, "later.bin", 1, None).unwrap_err();
+            assert!(err.contains("budget already exceeded"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn central_directory_entry_count_is_rejected_before_reads() {
+        use std::io::{Cursor, Write};
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("one.xml", opts).unwrap();
+            w.write_all(b"1").unwrap();
+            w.start_file("two.xml", opts).unwrap();
+            w.write_all(b"2").unwrap();
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        let _guard = scoped_limits(Some(16), Some(16), Some(1));
+        let err = validate_archive_limits(&mut archive).unwrap_err();
+        assert!(err.contains("entry count limit"), "got: {err}");
+    }
 
     #[test]
     fn extract_zip_entry_reads_by_path() {

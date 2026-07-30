@@ -34,6 +34,10 @@ import type {
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`, `math`)
  *  with the worker-rendering mode. */
 export interface LoadOptions extends CoreLoadOptions {
+  /** Maximum decompressed bytes across distinct ZIP entries (default: 512 MiB). */
+  maxZipTotalBytes?: number;
+  /** Maximum ZIP central-directory entries (default: 20,000). */
+  maxZipEntries?: number;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse AND render inside the worker; use
@@ -65,6 +69,8 @@ export class XlsxWorkbook {
     this.getImage(path, mime);
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
+  private maxZipTotalBytes: number | undefined;
+  private maxZipEntries: number | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
@@ -131,6 +137,8 @@ export class XlsxWorkbook {
   private async _load(data: ArrayBuffer, opts: LoadOptions = {}): Promise<void> {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
+    this.maxZipTotalBytes = opts.maxZipTotalBytes;
+    this.maxZipEntries = opts.maxZipEntries;
     this.math = opts.math;
     if (opts.math && this._mode === 'worker') {
       console.warn(
@@ -148,6 +156,8 @@ export class XlsxWorkbook {
               id,
               data: data.slice(0),
               maxZipEntryBytes: this.maxZipEntryBytes,
+              maxZipTotalBytes: this.maxZipTotalBytes,
+              maxZipEntries: this.maxZipEntries,
               useGoogleFonts: !!opts.useGoogleFonts,
             } satisfies RenderWorkerRequest)
           : ({
@@ -155,6 +165,8 @@ export class XlsxWorkbook {
               id,
               data: data.slice(0),
               maxZipEntryBytes: this.maxZipEntryBytes,
+              maxZipTotalBytes: this.maxZipTotalBytes,
+              maxZipEntries: this.maxZipEntries,
             } satisfies WorkerRequest),
       undefined,
       { timeoutMs: opts.workerTimeoutMs },
@@ -243,6 +255,8 @@ export class XlsxWorkbook {
       sheetIndex,
       sheetName: sheetMeta.name,
       maxZipEntryBytes: this.maxZipEntryBytes,
+      maxZipTotalBytes: this.maxZipTotalBytes,
+      maxZipEntries: this.maxZipEntries,
     }));
     // Parse mode: the worker forwards the sheet as transferred UTF-8 JSON bytes
     // — decode + parse once here. Worker (render) mode: the worker already

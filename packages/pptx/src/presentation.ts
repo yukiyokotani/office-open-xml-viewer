@@ -32,6 +32,10 @@ import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
 /** Options for {@link PptxPresentation.load}. */
 export type LoadOptions = CoreLoadOptions & {
+  /** Maximum decompressed bytes across distinct ZIP entries (default: 512 MiB). */
+  maxZipTotalBytes?: number;
+  /** Maximum ZIP central-directory entries (default: 20,000). */
+  maxZipEntries?: number;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse AND render inside the worker; use
@@ -183,6 +187,8 @@ export class PptxPresentation {
     await pres._parse(
       buffer,
       opts.maxZipEntryBytes,
+      opts.maxZipTotalBytes,
+      opts.maxZipEntries,
       mode === 'worker' ? !!opts.useGoogleFonts : false,
       opts.workerTimeoutMs,
     );
@@ -198,14 +204,16 @@ export class PptxPresentation {
   private async _parse(
     buffer: ArrayBuffer,
     maxZipEntryBytes?: number,
+    maxZipTotalBytes?: number,
+    maxZipEntries?: number,
     useGoogleFonts = false,
     timeoutMs?: number,
   ): Promise<void> {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, maxZipEntryBytes } satisfies WorkerRequest),
+          ? ({ kind: 'parse', id, buffer, maxZipEntryBytes, maxZipTotalBytes, maxZipEntries, useGoogleFonts } satisfies RenderWorkerRequest)
+          : ({ kind: 'parse', id, buffer, maxZipEntryBytes, maxZipTotalBytes, maxZipEntries } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );
