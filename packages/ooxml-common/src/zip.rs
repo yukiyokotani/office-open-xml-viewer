@@ -331,7 +331,8 @@ pub fn extract_zip_entry_with_limits(
     let mut entry = zip
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    read_limited_bytes(&mut entry, path, entry.size(), None)
+    let declared_size = entry.size();
+    read_limited_bytes(&mut entry, path, declared_size, None)
 }
 
 /// Read one entry's bytes from an **already-opened** [`ZipArchive`]. Twin of
@@ -349,7 +350,8 @@ pub fn read_zip_bytes<R: std::io::Read + std::io::Seek>(
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    read_limited_bytes(&mut entry, path, entry.size(), None)
+    let declared_size = entry.size();
+    read_limited_bytes(&mut entry, path, declared_size, None)
 }
 
 /// UTF-8 string counterpart of [`read_zip_bytes`] for XML parts. Same cap
@@ -376,7 +378,8 @@ pub fn read_zip_prefix_bytes<R: std::io::Read + std::io::Seek>(
     let mut entry = archive
         .by_name(path)
         .map_err(|e| format!("entry not found: {path}: {e}"))?;
-    read_limited_bytes(&mut entry, path, entry.size(), Some(max_bytes))
+    let declared_size = entry.size();
+    read_limited_bytes(&mut entry, path, declared_size, Some(max_bytes))
 }
 
 #[cfg(test)]
@@ -720,7 +723,10 @@ mod tests {
             let be = read_zip_bytes(&mut ar, "ppt/media/big.bin").unwrap_err();
             assert!(be.contains("exceeds size limit"), "got: {be}");
             let se = read_zip_string(&mut ar, "ppt/media/big.bin").unwrap_err();
-            assert!(se.contains("exceeds size limit"), "got: {se}");
+            assert!(
+                se.contains("budget already exceeded"),
+                "a proven breach must poison the retained scoped budget, got: {se}"
+            );
         }
         // Cap restored on guard drop → the same entry now reads in full.
         assert_eq!(

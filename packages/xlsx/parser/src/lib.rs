@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 use ooxml_common::depth::parse_guarded;

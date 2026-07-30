@@ -1,7 +1,7 @@
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::is_r_ns;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 mod table_style_presets;
