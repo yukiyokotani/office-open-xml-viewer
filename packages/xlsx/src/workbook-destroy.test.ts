@@ -39,12 +39,21 @@ interface DestroyProbe {
 
 // ── Fake FontFaceSet so destroy()'s Google-Fonts release is observable ───────
 const G = globalThis as Record<string, unknown>;
-const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+const ORIG_FONTS = {
+  document: G.document,
+  self: G.self,
+  fetch: G.fetch,
+  FontFace: G.FontFace,
+  Worker: G.Worker,
+  location: G.location,
+};
 afterEach(() => {
   G.document = ORIG_FONTS.document;
   G.self = ORIG_FONTS.self;
   G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
+  G.Worker = ORIG_FONTS.Worker;
+  G.location = ORIG_FONTS.location;
 });
 
 const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
@@ -100,6 +109,27 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     const { wb } = makeWorkbook();
     wb.destroy();
     expect(() => wb.destroy()).not.toThrow();
+  });
+
+  it('destroys a partially initialized workbook when load rejects', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    const load = vi
+      .spyOn(
+        XlsxWorkbook.prototype as unknown as {
+          _load(buffer: ArrayBuffer, opts: object): Promise<void>;
+        },
+        '_load',
+      )
+      .mockRejectedValueOnce(failure);
+    const destroy = vi.spyOn(XlsxWorkbook.prototype, 'destroy');
+
+    await expect(XlsxWorkbook.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(destroy).toHaveBeenCalledTimes(1);
+
+    load.mockRestore();
+    destroy.mockRestore();
   });
 
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes

@@ -119,9 +119,16 @@ export class XlsxWorkbook {
       mode === 'worker'
         ? (await import('./render-worker-host')).createRenderWorker()
         : new InlineWorker();
-    const wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
-    await wb._load(buffer, opts);
-    return wb;
+    let wb: XlsxWorkbook | undefined;
+    try {
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      await wb._load(buffer, opts);
+      return wb;
+    } catch (error) {
+      if (wb) wb.destroy();
+      else worker.terminate();
+      throw error;
+    }
   }
 
   // `load()` always resolves a URL/string source to an ArrayBuffer (via

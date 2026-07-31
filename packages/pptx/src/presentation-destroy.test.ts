@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
 import { PptxPresentation } from './presentation';
 
@@ -28,12 +28,21 @@ interface DestroyProbe {
 
 // ── Fake FontFaceSet so destroy()'s Google-Fonts release is observable ───────
 const G = globalThis as Record<string, unknown>;
-const ORIG_FONTS = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
+const ORIG_FONTS = {
+  document: G.document,
+  self: G.self,
+  fetch: G.fetch,
+  FontFace: G.FontFace,
+  Worker: G.Worker,
+  location: G.location,
+};
 afterEach(() => {
   G.document = ORIG_FONTS.document;
   G.self = ORIG_FONTS.self;
   G.fetch = ORIG_FONTS.fetch;
   G.FontFace = ORIG_FONTS.FontFace;
+  G.Worker = ORIG_FONTS.Worker;
+  G.location = ORIG_FONTS.location;
 });
 
 const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
@@ -88,6 +97,32 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     const { pres } = makePresentation();
     pres.destroy();
     expect(() => pres.destroy()).not.toThrow();
+  });
+
+  it('destroys a partially initialized presentation when load rejects', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const failure = new Error('injected load failure');
+    const parse = vi
+      .spyOn(
+        PptxPresentation.prototype as unknown as {
+          _parse(
+            buffer: ArrayBuffer,
+            maxZipEntryBytes?: number,
+            useGoogleFonts?: boolean,
+            timeoutMs?: number,
+          ): Promise<void>;
+        },
+        '_parse',
+      )
+      .mockRejectedValueOnce(failure);
+    const destroy = vi.spyOn(PptxPresentation.prototype, 'destroy');
+
+    await expect(PptxPresentation.load(new ArrayBuffer(0))).rejects.toBe(failure);
+    expect(destroy).toHaveBeenCalledTimes(1);
+
+    parse.mockRestore();
+    destroy.mockRestore();
   });
 
   // Wiring guard: destroy() must actually release the Google-Fonts substitutes
