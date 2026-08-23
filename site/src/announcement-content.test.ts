@@ -7,6 +7,8 @@ const bundleSizePage = readFileSync(new URL('./pages/bundle-size.astro', import.
 const apiReference = readFileSync(new URL('./components/ApiReference.astro', import.meta.url), 'utf8');
 const apiReferenceData = readFileSync(new URL('./lib/api-reference.ts', import.meta.url), 'utf8');
 const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.meta.url), 'utf8');
+const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
+const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
 describe('v0.81 ChartEx migration guide', () => {
   const announcement = announcements.find((item) => item.slug === 'v081-chartex-opt-in');
@@ -15,6 +17,7 @@ describe('v0.81 ChartEx migration guide', () => {
     expect(announcement).toMatchObject({
       label: 'Upcoming release',
       version: 'v0.81.0',
+      title: 'Migrating to v0.81.0',
     });
     expect(announcement?.sections.map(({ title }) => title)).toEqual(['ChartEx support', 'Migration']);
     expect(announcement?.sections[0]).toMatchObject({ kind: 'summary' });
@@ -31,6 +34,8 @@ describe('v0.81 ChartEx migration guide', () => {
     expect(text).toContain("@silurus/ooxml/chart-ex");
     expect(text).toContain('chartEx');
     expect(text).toContain('waterfall');
+    expect(announcement?.summary).toContain('expands Microsoft ChartEx rendering');
+    expect(announcement?.summary).not.toContain('adds Microsoft ChartEx rendering');
   });
 
   it('keeps volatile measurements and implementation detail out of the announcement', () => {
@@ -49,11 +54,18 @@ describe('v0.81 ChartEx migration guide', () => {
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
     expect(bundleSizePage).toContain('Updated for the upcoming v0.81.0 release');
-    expect(bundleSizePage).toContain('+116 KiB');
-    expect(bundleSizePage).toContain('+31 KiB');
-    expect(bundleSizePage).toContain('+38 KB');
+    expect(bundleSizePage).toContain('+118 KiB');
+    expect(bundleSizePage).toContain('+32 KiB');
+    expect(bundleSizePage).toContain('+42 KB');
     expect(bundleSizePage).toContain('+12 KB');
+    expect(bundleSizePage).toContain('static JavaScript import closure');
     expect(siteFooter).toContain('href="/bundle-size"');
+    expect(readme).toContain('https://ooxml.silurus.dev/bundle-size/');
+    expect(readme).not.toContain('For v0.79.0, the complete npm package');
+  });
+
+  it('describes ChartEx as opt-in for every document host', () => {
+    expect(capabilities.match(/optional ChartEx/g)).toHaveLength(3);
   });
 
   it('does not link API details directly to release notes', () => {

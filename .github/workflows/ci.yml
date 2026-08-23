@@ -172,6 +172,7 @@ jobs:
         run: |
           pnpm build
           pnpm check:production-render-workers
+          pnpm check:optional-chart-ex
           pnpm check:public-type-exports
           pnpm check:public-api:built
 

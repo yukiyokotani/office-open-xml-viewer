@@ -5,8 +5,7 @@ use crate::worksheet_reference::{
     split_sheet_ref, ReferencedCellValue, ResolvedWorksheetReference, WorksheetReferenceSession,
 };
 use crate::{
-    find_rel_target_by_type, parse_rels_map, resolve_fill_color, resolve_sheet_path,
-    resolve_zip_path,
+    parse_rels_map, resolve_fill_color, resolve_sheet_path, resolve_zip_path,
 };
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{is_c_ns, is_r_ns, is_x_ns, is_xdr_ns};
@@ -375,66 +374,58 @@ impl ooxml_common::chart::ChartReferenceResolver for XlsxChartReferenceResolver<
 /// `.../2011/relationships/chartStyle` target. Returns `None` when the chart
 /// has no chartStyle relationship or the part cannot be read (the chartEx
 /// title then falls back to its inline size, or the renderer's default).
-fn load_chart_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Option<String> {
-    load_chart_sidecar_xml(
-        archive,
-        chart_path,
-        ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX,
-    )
+struct ChartRelatedParts {
+    style_xml: Option<String>,
+    color_style_xml: Option<String>,
+    image_relationships: ooxml_common::chart::ChartImageRelationships,
 }
 
-fn load_chart_color_style_xml(archive: &mut crate::XlsxZip, chart_path: &str) -> Option<String> {
-    load_chart_sidecar_xml(
-        archive,
-        chart_path,
-        ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX,
-    )
-}
-
-fn load_chart_image_relationships(
+fn load_chart_related_parts(
     archive: &mut crate::XlsxZip,
     chart_path: &str,
-) -> ooxml_common::chart::ChartImageRelationships {
-    let mut images = ooxml_common::chart::ChartImageRelationships::default();
-    let Some((dir, file)) = chart_path.rsplit_once('/') else {
-        return images;
+) -> ChartRelatedParts {
+    let mut result = ChartRelatedParts {
+        style_xml: None,
+        color_style_xml: None,
+        image_relationships: Default::default(),
     };
-    let rels_path = format!("{dir}/_rels/{file}.rels");
+    let rels_path = ooxml_common::rels::relationship_part_path(chart_path);
     let Ok(rels_xml) = read_zip_string(archive, &rels_path) else {
-        return images;
+        return result;
     };
-    images.insert_part_relationships(
+    let relationships = ooxml_common::rels::parse_rels(&rels_xml);
+    result.image_relationships.insert_parsed_relationships(
         ooxml_common::chart::ChartImageSource::Chart,
         chart_path,
-        &rels_xml,
+        &relationships,
     );
-    if let Some(target) =
-        find_rel_target_by_type(&rels_xml, ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
+    let base_dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let internal_target = |suffix: &str| relationships.values().find(|relationship| {
+        relationship.mode == ooxml_common::rels::TargetMode::Internal
+            && relationship.relationship_type.as_deref().is_some_and(|kind| kind.ends_with(suffix))
+    });
+    if let Some(style_relationship) =
+        internal_target(ooxml_common::chart::CHART_STYLE_REL_TYPE_SUFFIX)
     {
-        let style_path = resolve_zip_path(dir, &target);
+        let style_path = ooxml_common::rels::resolve_target(base_dir, &style_relationship.target);
+        result.style_xml = read_zip_string(archive, &style_path).ok();
         let style_rels_path = ooxml_common::rels::relationship_part_path(&style_path);
         if let Ok(style_rels_xml) = read_zip_string(archive, &style_rels_path) {
-            images.insert_part_relationships(
+            let style_relationships = ooxml_common::rels::parse_rels(&style_rels_xml);
+            result.image_relationships.insert_parsed_relationships(
                 ooxml_common::chart::ChartImageSource::Style,
                 &style_path,
-                &style_rels_xml,
+                &style_relationships,
             );
         }
     }
-    images
-}
-
-fn load_chart_sidecar_xml(
-    archive: &mut crate::XlsxZip,
-    chart_path: &str,
-    relationship_suffix: &str,
-) -> Option<String> {
-    let (dir, file) = chart_path.rsplit_once('/')?;
-    let rels_path = format!("{}/_rels/{}.rels", dir, file);
-    let rels_xml = read_zip_string(archive, &rels_path).ok()?;
-    let target = find_rel_target_by_type(&rels_xml, relationship_suffix)?;
-    let style_path = resolve_zip_path(dir, &target);
-    read_zip_string(archive, &style_path).ok()
+    if let Some(color_relationship) =
+        internal_target(ooxml_common::chart::CHART_COLOR_STYLE_REL_TYPE_SUFFIX)
+    {
+        let color_path = ooxml_common::rels::resolve_target(base_dir, &color_relationship.target);
+        result.color_style_xml = read_zip_string(archive, &color_path).ok();
+    }
+    result
 }
 
 /// Follow the owning legacy chart's `<c:userShapes r:id>` relationship to its
@@ -453,8 +444,8 @@ fn load_chart_user_shapes_xml(
         .find(|attribute| attribute.name() == "id" && is_r_ns(attribute.namespace()))?
         .value()
         .to_string();
-    let (dir, file) = chart_path.rsplit_once('/')?;
-    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+    let dir = chart_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let rels_path = ooxml_common::rels::relationship_part_path(chart_path);
     let rels_xml = read_zip_string(archive, &rels_path).ok()?;
     let target = parse_rels_map(&rels_xml).remove(&rid)?;
     let user_shapes_path = resolve_zip_path(dir, &target);
@@ -709,11 +700,9 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                 // `.../2011/relationships/chartStyle`). Read it best-effort now
                 // (before the chart doc is parsed, since both borrow `archive`);
                 // legacy `<c:>` charts ignore it (their title size is inline).
-                let style_xml = load_chart_style_xml(archive, &chart_path);
-                let color_style_xml = load_chart_color_style_xml(archive, &chart_path);
-                let image_relationships = load_chart_image_relationships(archive, &chart_path);
+                let related_parts = load_chart_related_parts(archive, &chart_path);
                 let image_resolver = ooxml_common::chart::ChartImageResolverChain::new(
-                    &image_relationships,
+                    &related_parts.image_relationships,
                     theme_images,
                 );
                 let user_shapes_xml = if is_chartex {
@@ -758,8 +747,8 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                         ooxml_common::chart::parse_chartex_part_with_references_style_parts_and_images(
                             chart_doc.root_element(),
                             &resolver,
-                            style_xml.as_deref(),
-                            color_style_xml.as_deref(),
+                            related_parts.style_xml.as_deref(),
+                            related_parts.color_style_xml.as_deref(),
                             &mut references,
                             &image_resolver,
                         )
@@ -767,8 +756,8 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                         ooxml_common::chart::parse_chart_part_with_references_style_parts_and_images(
                             chart_doc.root_element(),
                             &resolver,
-                            style_xml.as_deref(),
-                            color_style_xml.as_deref(),
+                            related_parts.style_xml.as_deref(),
+                            related_parts.color_style_xml.as_deref(),
                             &mut references,
                             &image_resolver,
                         )
@@ -777,16 +766,16 @@ pub(crate) fn load_sheet_charts_with_theme_images(
                     ooxml_common::chart::parse_chartex_part_with_style_parts_and_images(
                         chart_doc.root_element(),
                         &resolver,
-                        style_xml.as_deref(),
-                        color_style_xml.as_deref(),
+                        related_parts.style_xml.as_deref(),
+                        related_parts.color_style_xml.as_deref(),
                         &image_resolver,
                     )
                 } else {
                     ooxml_common::chart::parse_chart_part_with_style_parts_and_images(
                         chart_doc.root_element(),
                         &resolver,
-                        style_xml.as_deref(),
-                        color_style_xml.as_deref(),
+                        related_parts.style_xml.as_deref(),
+                        related_parts.color_style_xml.as_deref(),
                         &image_resolver,
                     )
                 };
@@ -1110,9 +1099,9 @@ mod solid_fill_color_tests {
         let series = &chart.series[0];
         assert_eq!(series.invert_if_negative, None);
         assert_eq!(series.automatic_negative_style, Some(true));
-        assert_eq!(series.inverted_fill_hidden, Some(true));
-        assert_eq!(series.inverted_line_color.as_deref(), Some("000000"));
-        assert_eq!(series.inverted_line_width_emu, Some(9_525));
+        assert_eq!(series.inverted_fill_hidden, None);
+        assert_eq!(series.inverted_line_color, None);
+        assert_eq!(series.inverted_line_width_emu, None);
     }
 }
 
@@ -1968,5 +1957,58 @@ mod chartex_tests {
                 .and_then(Option::as_deref),
             Some("336699"),
         );
+    }
+
+    #[test]
+    fn chart_related_parts_support_root_nested_and_root_absolute_targets() {
+        for (chart_path, style_target, expected_style_path, expected_image_path) in [
+            ("chart1.xml", "style1.xml", "style1.xml", "media/marker.png"),
+            ("chart2.xml", "/style2.xml", "style2.xml", "media/marker.png"),
+            (
+                "xl/charts/chart3.xml",
+                "style3.xml",
+                "xl/charts/style3.xml",
+                "xl/media/marker.png",
+            ),
+        ] {
+            let style_rels_path =
+                ooxml_common::rels::relationship_part_path(expected_style_path);
+            let chart_rels_path = ooxml_common::rels::relationship_part_path(chart_path);
+            let image_target = if chart_path.contains('/') {
+                "../media/marker.png"
+            } else {
+                "media/marker.png"
+            };
+            let mut bytes = Vec::new();
+            {
+                let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+                let options = SimpleFileOptions::default();
+                writer.start_file(&chart_rels_path, options).unwrap();
+                writer.write_all(format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="aExternal" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="https://example.invalid/style.xml" TargetMode="External"/><Relationship Id="rStyle" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="{style_target}"/></Relationships>"#,
+                ).as_bytes()).unwrap();
+                writer.start_file(expected_style_path, options).unwrap();
+                writer.write_all(b"<style/>").unwrap();
+                writer.start_file(&style_rels_path, options).unwrap();
+                writer.write_all(format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{image_target}"/></Relationships>"#,
+                ).as_bytes()).unwrap();
+                writer.start_file(expected_image_path, options).unwrap();
+                writer.write_all(b"png").unwrap();
+                writer.finish().unwrap();
+            }
+            let mut archive = crate::XlsxZip::new(Cursor::new(bytes)).unwrap();
+            let related = load_chart_related_parts(&mut archive, chart_path);
+            assert_eq!(related.style_xml.as_deref(), Some("<style/>"));
+            assert_eq!(related.color_style_xml, None);
+            assert_eq!(
+                ooxml_common::chart::ChartImageResolver::resolve_image(
+                    &related.image_relationships,
+                    ooxml_common::chart::ChartImageSource::Style,
+                    "rImage",
+                ),
+                Some((expected_image_path.to_string(), "image/png".to_string())),
+            );
+        }
     }
 }

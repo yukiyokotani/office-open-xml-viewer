@@ -1425,11 +1425,15 @@ pub struct ChartSeries {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverted_fill_hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverted_fill_authored: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverted_line_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverted_line_width_emu: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inverted_line_hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverted_line_authored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chartex_style: Option<ChartExElementStyle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2615,11 +2619,11 @@ pub struct ChartImageRelationships {
 }
 
 impl ChartImageRelationships {
-    pub fn insert_part_relationships(
+    pub fn insert_parsed_relationships(
         &mut self,
         source: ChartImageSource,
         source_part_path: &str,
-        relationships_xml: &str,
+        relationships: &BTreeMap<String, crate::rels::RelTarget>,
     ) {
         let base_dir = source_part_path
             .rsplit_once('/')
@@ -2629,7 +2633,7 @@ impl ChartImageRelationships {
             ChartImageSource::Style => &mut self.style,
             ChartImageSource::Theme => &mut self.theme,
         };
-        for (relationship_id, relationship) in crate::rels::parse_rels(relationships_xml) {
+        for (relationship_id, relationship) in relationships {
             if relationship.mode != crate::rels::TargetMode::Internal
                 || !relationship
                     .relationship_type
@@ -2645,8 +2649,18 @@ impl ChartImageRelationships {
             }
             let path = crate::rels::resolve_target(base_dir, &relationship.target);
             let mime = crate::blip::mime_from_ext(&path).to_owned();
-            target.insert(relationship_id, (path, mime));
+            target.insert(relationship_id.clone(), (path, mime));
         }
+    }
+
+    pub fn insert_part_relationships(
+        &mut self,
+        source: ChartImageSource,
+        source_part_path: &str,
+        relationships_xml: &str,
+    ) {
+        let relationships = crate::rels::parse_rels(relationships_xml);
+        self.insert_parsed_relationships(source, source_part_path, &relationships);
     }
 }
 
@@ -7081,9 +7095,11 @@ pub fn parse_chartex_part_with_references_style_parts_and_images(
         automatic_negative_style: None,
         inverted_fill: None,
         inverted_fill_hidden: None,
+        inverted_fill_authored: None,
         inverted_line_color: None,
         inverted_line_width_emu: None,
         inverted_line_hidden: None,
+        inverted_line_authored: None,
         chartex_style,
         line_color,
         line_width_emu,
@@ -12088,33 +12104,24 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
             });
             let inverted_fill_authored =
                 matches!(inverted_paint.as_ref(), Some(ChartStylePaint::Fill(_)));
-            let (mut inverted_fill, mut inverted_fill_hidden) = match inverted_paint {
+            let (inverted_fill, inverted_fill_hidden) = match inverted_paint {
                 Some(ChartStylePaint::NoFill) => (None, Some(true)),
                 Some(ChartStylePaint::Fill(fill)) => (Some(*fill), None),
                 Some(ChartStylePaint::Unresolved) => (None, None),
                 None => (None, None),
             };
-            let (mut inverted_line_color, mut inverted_line_width_emu, inverted_line_no_fill) =
+            let (inverted_line_color, inverted_line_width_emu, inverted_line_no_fill) =
                 inverted_format
                     .map(|format| extract_sp_pr_ln_style(format, color_resolver))
                     .unwrap_or((None, None, false));
-            // Excel retains a visible 0.75pt black boundary when the Office
-            // 2010 negative-bar extension authors an alternate fill but omits
-            // `<a:ln>`. Without that effective outline a white inverted fill
-            // disappears against the common white plot-area background.
-            if inverted_fill_authored
-                && inverted_shape
-                    .and_then(|shape| child(shape, "ln"))
-                    .is_none()
-            {
-                inverted_line_color = Some("000000".to_string());
-                inverted_line_width_emu = Some(9_525);
-            }
+            let inverted_line_authored = inverted_format.map(|_| {
+                inverted_shape.and_then(|shape| child(shape, "ln")).is_some()
+            });
 
             // Excel's implicit classic-chart style gives an entirely-negative,
             // otherwise unformatted bar/column series an outline-only marker.
-            // The A1/A4 sign-mirror boundary isolates this application default:
-            // the positive mirror takes accent1, while the negative mirror has
+            // A positive/all-negative mirror pair isolates this application
+            // default: the positive chart takes accent1, while the negative chart has
             // no fill and a 0.75pt black outline.  OOXML does not encode that
             // application-generated paint, so keep the compatibility rule at
             // the narrow observed boundary.  Any authored chart style, series
@@ -12143,10 +12150,6 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
                 && values.iter().flatten().all(|value| *value < 0.0);
             if implicit_outline_only_negative_series {
                 automatic_negative_style = Some(true);
-                inverted_fill = None;
-                inverted_fill_hidden = Some(true);
-                inverted_line_color = Some("000000".to_string());
-                inverted_line_width_emu = Some(9_525);
             }
 
             let chartex_style = if is_classic_three_d_series {
@@ -12181,9 +12184,11 @@ pub fn parse_chart_part_with_references_style_parts_and_images(
                 automatic_negative_style,
                 inverted_fill,
                 inverted_fill_hidden,
+                inverted_fill_authored: inverted_format.map(|_| inverted_fill_authored),
                 inverted_line_color,
                 inverted_line_width_emu,
                 inverted_line_hidden: inverted_line_no_fill.then_some(true),
+                inverted_line_authored,
                 // DrawingML line properties share the same local `spPr`
                 // grammar as ChartEx. Reuse the bounded element-style carrier
                 // so classic 3-D line/area rendering does not discard authored
@@ -13284,9 +13289,11 @@ mod tests {
                 automatic_negative_style: None,
                 inverted_fill: None,
                 inverted_fill_hidden: None,
+                inverted_fill_authored: None,
                 inverted_line_color: None,
                 inverted_line_width_emu: None,
                 inverted_line_hidden: None,
+                inverted_line_authored: None,
                 chartex_style: None,
                 line_color: None,
                 line_width_emu: None,
@@ -16833,14 +16840,16 @@ Subtitle</a:t></a:r></a:p>
             })
         );
         assert_eq!(series.inverted_fill_hidden, None);
-        assert_eq!(series.inverted_line_color.as_deref(), Some("000000"));
-        assert_eq!(series.inverted_line_width_emu, Some(9_525));
+        assert_eq!(series.inverted_fill_authored, Some(true));
+        assert_eq!(series.inverted_line_color, None);
+        assert_eq!(series.inverted_line_width_emu, None);
         assert_eq!(series.inverted_line_hidden, None);
+        assert_eq!(series.inverted_line_authored, Some(false));
     }
 
     /// Excel's implicit classic style is not serialized when a bare chart has
-    /// no `<c:style>` or series/point formatting.  The A1/A4 Office boundary
-    /// pair shows that the all-negative mirror becomes outline-only, while the
+    /// no `<c:style>` or series/point formatting.  The Office-observed sign
+    /// mirror pair shows that the all-negative chart becomes outline-only, while the
     /// positive mirror remains an ordinary accent-filled column.  Preserve the
     /// observed effective paint without extending it to mixed-sign or authored
     /// series, whose Office defaults were not part of that boundary set.
@@ -16876,9 +16885,9 @@ Subtitle</a:t></a:r></a:p>
         let negative = parsed_series(-24_000, false);
         assert_eq!(negative.invert_if_negative, None);
         assert_eq!(negative.automatic_negative_style, Some(true));
-        assert_eq!(negative.inverted_fill_hidden, Some(true));
-        assert_eq!(negative.inverted_line_color.as_deref(), Some("000000"));
-        assert_eq!(negative.inverted_line_width_emu, Some(9_525));
+        assert_eq!(negative.inverted_fill_hidden, None);
+        assert_eq!(negative.inverted_line_color, None);
+        assert_eq!(negative.inverted_line_width_emu, None);
 
         let positive = parsed_series(24_000, false);
         assert_eq!(positive.invert_if_negative, None);
@@ -16937,7 +16946,7 @@ Subtitle</a:t></a:r></a:p>
             ),
             vec![None]
         );
-        // Every authored/structural gate outside the A1/A4 boundary remains
+        // Every authored/structural gate outside the observed sign-mirror boundary remains
         // unset until a corresponding Office boundary is available.
         assert_eq!(
             automatic_styles(

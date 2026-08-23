@@ -31,13 +31,24 @@ import {
   computeBoxWhiskerStats,
 } from './box-whisker.js';
 import { planParetoLayout } from './pareto-layout.js';
-import { MAX_CANVAS_CHART_POINTS } from './resource-limits.js';
+import { markerPaintComponents } from './marker-style.js';
+import {
+  MAX_CANVAS_CHART_POINTS,
+  MAX_CHART_PAINT_COMPONENTS,
+  MAX_CHART_PAINT_RECIPE_COMPONENTS,
+} from './resource-limits.js';
+import {
+  buildSunburstTree,
+  hierarchyInputTooLarge,
+  layoutSunburstAngles,
+  sunburstMaxDepth,
+  type SunburstNode,
+} from './chart-ex-hierarchy.js';
 import { paintPlotAreaFrame } from './plot-area-frame.js';
 import {
   applyChartExSeriesLineStyle,
   applyResolvedChartExLineStyle,
   axisLabelPx,
-  buildSunburstTree,
   chartColor,
   chartExDataPointFill,
   chartExDataPointPaint,
@@ -57,9 +68,7 @@ import {
   drawMarker,
   drawValMajorGridlines,
   formatPrimaryValueAxisTick,
-  hierarchyInputTooLarge,
   indexPointOverrides,
-  layoutSunburstAngles,
   measuredCartesianTitleBand,
   measuredLegendReserve,
   planValueAxis,
@@ -71,12 +80,10 @@ import {
   richDataLabelOptions,
   strokeAxisSegment,
   strokeValueGridlineH,
-  sunburstMaxDepth,
   valGridStroke,
   valMinorGridStroke,
   wrapMeasuredText,
   type ChartExStyle,
-  type SunburstNode,
 } from './renderer.js';
 
 function chartExStyleAuthorsFill(style: ChartExStyle | null | undefined): boolean {
@@ -139,6 +146,69 @@ function waterfallPointAuthorsLine(point: ChartDataPointOverride | undefined): b
     || style?.lineCustomDash != null
     || style?.lineCap != null
     || style?.lineJoin != null;
+}
+
+/** Bound structured label-shape work owned by ChartEx hierarchy painters. */
+/** @internal Exported for resource-boundary regression tests. */
+export function chartExHierarchyLabelPaintWorkCount(chart: ChartModel): number | null {
+  const hierarchy = chart.chartexSunburst
+    ? { rows: chart.chartexSunburst.rows, kind: 'sunburst' as const }
+    : chart.chartexTreemap
+      ? { rows: chart.chartexTreemap.rows, kind: 'treemap' as const }
+      : undefined;
+  if (!hierarchy) return null;
+  if (hierarchy.rows.length === 0) return 0;
+  if (hierarchyInputTooLarge(hierarchy.rows)) return MAX_CHART_PAINT_COMPONENTS + 1;
+
+  const root = buildSunburstTree(hierarchy.rows, hierarchy.kind === 'treemap');
+  if (root.layoutWeight <= 0 || root.children.length === 0) return 0;
+  if (hierarchy.kind === 'sunburst') {
+    root.a0 = -Math.PI / 2;
+    root.a1 = root.a0 + Math.PI * 2;
+    layoutSunburstAngles(root);
+  }
+  const series = chart.series[0];
+  const overrides = indexPointOverrides(series?.dataLabelOverrides);
+  const parentMode = chart.chartexTreemap?.parentLabelLayout ?? 'overlapping';
+  let total = 0;
+  const pending = [...root.children];
+  while (pending.length > 0) {
+    const node = pending.pop() as SunburstNode;
+    for (const child of node.children) pending.push(child);
+    if (node.layoutWeight <= 0
+      || (hierarchy.kind === 'sunburst' && node.a1 - node.a0 <= 1e-4)) continue;
+    let label;
+    if (hierarchy.kind === 'sunburst') {
+      label = resolveChartExLabel(
+        chart, series, node.labelIndex, node.label, node.value,
+        { visible: false, showVal: false, showCatName: false },
+        overrides,
+      );
+    } else if (node.children.length > 0) {
+      label = resolveChartExLabel(
+        chart, series, node.labelIndex, node.label, node.value,
+        { visible: parentMode !== 'none', showVal: false, showCatName: true },
+        overrides,
+      );
+      if (parentMode === 'overlapping' && node.depth !== 0) label = null;
+    } else {
+      label = resolveChartExLabel(
+        chart, series, node.labelIndex, node.label, node.value,
+        { visible: false, showVal: false, showCatName: false },
+        overrides,
+      );
+    }
+    for (const paint of [label?.labelBox?.fillPaint, label?.labelBox?.borderFill]) {
+      if (!paint) continue;
+      const components = markerPaintComponents(paint);
+      if ((paint.fillType === 'gradient' && components > MAX_CHART_PAINT_RECIPE_COMPONENTS)
+        || components > MAX_CHART_PAINT_COMPONENTS - total) {
+        return MAX_CHART_PAINT_COMPONENTS + 1;
+      }
+      total += components;
+    }
+  }
+  return total;
 }
 
 function renderHistogramChart(
@@ -2175,6 +2245,11 @@ export function renderChartExChart(
   ptToPx: number,
   shapeRotationDeg = 0,
 ): boolean {
+  const hierarchyLabelWork = chartExHierarchyLabelPaintWorkCount(chart);
+  if (hierarchyLabelWork != null && hierarchyLabelWork > MAX_CHART_PAINT_COMPONENTS) {
+    rejectOversizedCanvasChart(ctx, rect, MAX_CANVAS_CHART_POINTS + 1);
+    return true;
+  }
   switch (chart.chartType) {
     case 'waterfall':
       renderWaterfallChart(ctx, chart, rect, ptToPx, shapeRotationDeg);

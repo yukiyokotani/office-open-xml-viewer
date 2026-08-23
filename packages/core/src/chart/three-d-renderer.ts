@@ -2116,26 +2116,7 @@ function axisPlan(
     reversed: chart.valAxisOrientation === 'maxMin',
     needMinor: chart.valAxisMinorGridlines === true || minorTickMark !== 'none',
   } as const;
-  const automaticPlan = planNumericValueAxis(options);
-
-  // In the measured compact classic 3-D column charts, Excel applies its
-  // explicit-bounds vertical density rule when only one value-axis bound is
-  // authored. Keep that application-defined behavior local to the observed
-  // family instead of changing the shared 2-D automatic-axis policy.
-  const compactThreeDColumnWithOneBound = !percent
-    && orientation === 'vertical'
-    && (chart.chartType === 'clusteredBar' || chart.chartType === 'stackedBar')
-    && chart.valAxisMajorUnit == null
-    && chart.valAxisLogBase == null
-    && chart.valAxisDisplayUnits == null
-    && ((chart.valMin == null) !== (chart.valMax == null));
-  if (!compactThreeDColumnWithOneBound) return automaticPlan;
-
-  return planNumericValueAxis({
-    ...options,
-    explicitMin: automaticPlan.min,
-    explicitMax: automaticPlan.max,
-  });
+  return planNumericValueAxis(options);
 }
 
 interface ThreeDStroke {
@@ -2273,10 +2254,10 @@ function threeDAxisTickStroke(
   dash: string | null | undefined,
   ptToPx: number,
 ): ThreeDStroke {
-  // Tick rules use the same authored DrawingML point scale as the coordinate
-  // axes; they are kept separate here because their projected geometry and
-  // default visibility are resolved independently.
-  return threeDStroke(color, widthEmu, dash, ptToPx, '898989', 1);
+  // Tick rules use exactly the same authored DrawingML point scale as their
+  // coordinate axis. A separate device-pixel floor would make ticks thicker
+  // than the owning rule at low zoom.
+  return threeDAxisStroke(color, widthEmu, dash, ptToPx);
 }
 
 function applyThreeDStroke(ctx: CanvasRenderingContext2D, stroke: ThreeDStroke): void {

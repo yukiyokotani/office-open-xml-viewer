@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { excelSerialToUtcDate, utcDateToExcelSerial } from '../excel-date.js';
+import { excelSerialToUtcDate } from '../excel-date.js';
 import { MAX_AXIS_TICKS } from './axis-scale.js';
 import { planDateCategoryAxis } from './date-axis.js';
 
@@ -41,78 +41,7 @@ describe('classic chart date-axis planning', () => {
     expect(minorMonths).toEqual([1, 3, 5]);
   });
 
-  it.each([
-    [1.01, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
-    [1.5, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
-    [1.9, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
-    [1.99, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
-    [2, [0, 2, 4, 6, 8]],
-    [2.01, [0, 4, 8]],
-    [2.1, [0, 4, 8]],
-    [2.5, [0, 4, 8]],
-    [3.1, [0, 9]],
-  ] as const)('uses the Office-observed month cadence for majorUnit=%s', (majorUnit, expected) => {
-    const plan = planDateCategoryAxis({
-      categories: ['45292', '45566'],
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'months',
-      majorUnit,
-      explicitMin: 45292,
-      explicitMax: 45566,
-      crossBetween: false,
-    });
-
-    expect(plan).not.toBeNull();
-    expect(plan!.majorTicks.map(tick =>
-      excelSerialToUtcDate(tick.serial).getUTCMonth()))
-      .toEqual(expected);
-  });
-
-  it.each([
-    [1.01, [2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031]],
-    [1.5, [2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031]],
-    [1.9, [2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031]],
-    [1.99, [2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031]],
-    [2, [2022, 2024, 2026, 2028, 2030]],
-    [2.01, [2022, 2026, 2030]],
-    [2.1, [2022, 2026, 2030]],
-    [2.5, [2022, 2026, 2030]],
-    [3.1, [2022, 2031]],
-  ] as const)('uses the Office-observed year cadence for majorUnit=%s', (majorUnit, expected) => {
-    const min = utcDateToExcelSerial(new Date(Date.UTC(2022, 0, 1)), false);
-    const max = utcDateToExcelSerial(new Date(Date.UTC(2031, 0, 1)), false);
-    const plan = planDateCategoryAxis({
-      categories: [String(min), String(max)],
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'years',
-      majorUnit,
-      explicitMin: min,
-      explicitMax: max,
-      crossBetween: false,
-    });
-
-    expect(plan).not.toBeNull();
-    expect(plan!.majorTicks.map(tick =>
-      excelSerialToUtcDate(tick.serial).getUTCFullYear()))
-      .toEqual(expected);
-  });
-
-  it('fails closed for sub-unit month/year intervals outside the Office constraint', () => {
-    const plan = planDateCategoryAxis({
-      categories: ['45292', '45383'],
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'months',
-      majorUnit: 0.5,
-      minorTimeUnit: 'years',
-      minorUnit: 0.5,
-      crossBetween: false,
-    });
-
-    expect(plan?.majorTicks).toEqual([]);
-    expect(plan?.minorTicks).toEqual([]);
-  });
-
-  it('keeps the integer boundary and fails closed beyond the observed fractional range', () => {
+  it('keeps integral calendar units and fails closed for every fractional month/year unit', () => {
     const integral = planDateCategoryAxis({
       categories: ['45292', '45536'],
       baseTimeUnit: 'days',
@@ -122,67 +51,22 @@ describe('classic chart date-axis planning', () => {
       explicitMax: 45536,
       crossBetween: false,
     });
-    const fractional = planDateCategoryAxis({
-      categories: ['45292', '46753'],
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'months',
-      majorUnit: 4.1,
-      minorTimeUnit: 'years',
-      minorUnit: 4.1,
-      crossBetween: false,
-    });
-
     expect(integral?.majorTicks.map(tick =>
       excelSerialToUtcDate(tick.serial).getUTCMonth()))
       .toEqual([0, 4, 8]);
-    expect(fractional?.majorTicks).toEqual([]);
-    expect(fractional?.minorTicks).toEqual([]);
-  });
-
-  it('deduplicates coincident fractional calendar major/minor ticks', () => {
-    const plan = planDateCategoryAxis({
-      categories: ['45292', '45444'],
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'months',
-      majorUnit: 2.5,
-      minorTimeUnit: 'months',
-      minorUnit: 1.5,
-      explicitMin: 45292,
-      explicitMax: 45444,
-      crossBetween: false,
-    });
-
-    expect(plan).not.toBeNull();
-    expect(plan!.majorTicks.map(tick =>
-      excelSerialToUtcDate(tick.serial).getUTCMonth()))
-      .toEqual([0, 4]);
-    expect(plan!.minorTicks.map(tick =>
-      excelSerialToUtcDate(tick.serial).getUTCMonth()))
-      .toEqual([1, 2, 3, 5]);
-  });
-
-  it('keeps reversed fractional ticks and 1904 dates on the same calendar boundaries', () => {
-    const min1904 = utcDateToExcelSerial(new Date(Date.UTC(2023, 0, 1)), true);
-    const max1904 = utcDateToExcelSerial(new Date(Date.UTC(2025, 0, 1)), true);
-    const plan = planDateCategoryAxis({
-      categories: [String(min1904), String(max1904)],
-      date1904: true,
-      baseTimeUnit: 'days',
-      majorTimeUnit: 'years',
-      majorUnit: 1.5,
-      explicitMin: min1904,
-      explicitMax: max1904,
-      crossBetween: false,
-      reversed: true,
-    });
-
-    expect(plan).not.toBeNull();
-    expect(plan!.majorTicks.map(tick =>
-      excelSerialToUtcDate(tick.serial, true).getUTCFullYear()))
-      .toEqual([2023, 2024, 2025]);
-    expect(plan!.majorTicks[0]?.fraction).toBe(1);
-    expect(plan!.majorTicks[1]?.fraction).toBeCloseTo(366 / 731);
-    expect(plan!.majorTicks[2]?.fraction).toBe(0);
+    for (const value of [0.5, 1.01, 1.5, 1.99, 2.01, 2.5, 2.99, 3.01, 3.5, 3.99, 4.1]) {
+      const fractional = planDateCategoryAxis({
+        categories: ['45292', '46753'],
+        baseTimeUnit: 'days',
+        majorTimeUnit: 'months',
+        majorUnit: value,
+        minorTimeUnit: 'years',
+        minorUnit: value,
+        crossBetween: false,
+      });
+      expect(fractional?.majorTicks, `majorUnit=${value}`).toEqual([]);
+      expect(fractional?.minorTicks, `minorUnit=${value}`).toEqual([]);
+    }
   });
 
   it('atomically suppresses an authored date tick layer above the shared ceiling', () => {

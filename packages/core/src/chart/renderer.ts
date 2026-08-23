@@ -138,7 +138,7 @@ import {
 } from './style-paint.js';
 import {
   applyPlotVisibleOnly,
-  EXCEL_AUTOMATIC_SCATTER_MARKERS,
+  hasFilteredScatterAutomaticPointStyle,
 } from './source-visibility.js';
 import {
   boundDataLabelText,
@@ -4464,7 +4464,7 @@ export function renderBarChart(
         ? `#${pointColor}`
         : varyByPoint ? pieSliceColor(ci, s) : chartColor(si, s);
       const invertedPaint = useNegativeStyle
-        ? s.invertedFillHidden === true
+        ? s.automaticNegativeStyle === true || s.invertedFillHidden === true
           ? null
           : s.invertedFill
         : undefined;
@@ -4512,6 +4512,39 @@ export function renderBarChart(
           if (s.invertedLineHidden) return false;
           ctx.strokeStyle = `#${s.invertedLineColor ?? '000000'}`;
           ctx.lineWidth = axisLineWidthPx(s.invertedLineWidthEmu, ptToPx);
+          ctx.setLineDash([]);
+          return true;
+        }
+        if (s.automaticNegativeStyle === true) {
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 0.75 * ptToPx;
+          ctx.setLineDash([]);
+          return true;
+        }
+        const omittedAlternateLineFallback = useNegativeStyle
+          && chart.chartType === 'clusteredBar'
+          && chart.legacyChartStyle === 2
+          && s.invertedFillAuthored === true
+          && s.invertedFill != null
+          && s.invertedLineAuthored === false;
+        const seriesOwnsOutline = s.lineHidden === true
+          || s.lineColor != null
+          || s.lineWidthEmu != null;
+        if (omittedAlternateLineFallback && seriesOwnsOutline) {
+          if (s.lineHidden || !s.lineColor) return false;
+          ctx.strokeStyle = `#${s.lineColor}`;
+          ctx.lineWidth = axisLineWidthPx(s.lineWidthEmu, ptToPx);
+          ctx.setLineDash([]);
+          return true;
+        }
+        // Office 2010's alternate negative-fill extension records no line
+        // provenance when `<a:ln>` is omitted. The observed Style 2 clustered
+        // column boundary supplies a black 0.75pt outline; keep that
+        // application default here, after direct point/series line ownership,
+        // instead of forging an authored line in the shared parser model.
+        if (omittedAlternateLineFallback) {
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 0.75 * ptToPx;
           ctx.setLineDash([]);
           return true;
         }
@@ -12143,31 +12176,6 @@ function makeScatterSeriesLayer(
   };
 }
 
-function isFilteredScatterAutomaticPointStyle(
-  chart: ChartModel,
-  series: ChartSeries,
-): boolean {
-  const accents = chart.themeAccentColors;
-  const hidden = series.sourceHidden;
-  const colors = series.dataPointColors;
-  const points = series.dataPointOverrides;
-  if (chart.chartType !== 'scatter'
-    || chart.plotVisibleOnly !== true
-    || chart.scatterStyle !== 'marker'
-    || hidden?.length !== series.values.length
-    || colors?.length !== series.values.length
-    || points?.length !== series.values.length
-    || !accents?.length) return false;
-  return hidden.every(isHidden => !isHidden)
-    && colors.every((color, index) => color === accents[index % accents.length])
-    && points.every((point, index) =>
-      point.idx === index
-      && point.markerSymbol === EXCEL_AUTOMATIC_SCATTER_MARKERS[
-        index % EXCEL_AUTOMATIC_SCATTER_MARKERS.length
-      ]
-    );
-}
-
 /** One `<c:bubbleChart>` group has one size scale: every series must therefore
  * be normalized against the same maximum bubble magnitude. */
 function bubbleSizeToDiameterScale(
@@ -12228,13 +12236,10 @@ function drawScatterSeriesLayer(
   shapeRotationDeg = 0,
   bubbleSettings?: BubbleGroupSettings,
 ): void {
-  const markerStyleHasAutomaticPointColors = style === 'marker'
-    && entries.some(({ series }) => isFilteredScatterAutomaticPointStyle(chart, series));
-  const drawLines = markerStyleHasAutomaticPointColors
-    || style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
-  const drawSmooth = ((style === 'marker' && !markerStyleHasAutomaticPointColors)
-    && !isBubble)
-    || style === 'smooth' || style === 'smoothMarker' || style === 'smoothNoMarker';
+  const groupDrawsLines = style === 'line' || style === 'lineMarker' || style === 'lineNoMarker';
+  const groupDrawsSmooth = style === 'smooth'
+    || style === 'smoothMarker'
+    || style === 'smoothNoMarker';
   const hideMarkersByStyle = markersSuppressedByChartStyle(
     'scatter', chart.chartType, style, chart.radarStyle,
   );
@@ -12260,6 +12265,11 @@ function drawScatterSeriesLayer(
   }
 
   for (const { series: s, fallbackColor, cats } of layers) {
+    const automaticPointStyle = style === 'marker'
+      && hasFilteredScatterAutomaticPointStyle(s);
+    const drawLines = automaticPointStyle || groupDrawsLines;
+    const drawSmooth = (!automaticPointStyle && style === 'marker' && !isBubble)
+      || groupDrawsSmooth;
     if ((drawLines || drawSmooth) && s.lineHidden !== true) {
       const pts: Array<{ x: number; y: number }> = [];
       for (let ci = 0; ci < s.values.length; ci++) {
@@ -12271,7 +12281,7 @@ function drawScatterSeriesLayer(
       }
       if (pts.length >= 2) {
         ctx.save();
-        if (markerStyleHasAutomaticPointColors && s.dataPointColors?.some(Boolean)) {
+        if (automaticPointStyle && s.dataPointColors?.some(Boolean)) {
           ctx.lineWidth = 1.5;
           for (let i = 1; i < pts.length; i++) {
             ctx.strokeStyle = `#${s.dataPointColors[i] ?? s.color ?? fallbackColor.replace(/^#/, '')}`;
@@ -14492,9 +14502,6 @@ const MAX_CANVAS_MARKER_GRADIENT_STOPS = MAX_CHART_PAINT_RECIPE_COMPONENTS;
 const MAX_CANVAS_MARKER_PAINT_COMPONENTS = MAX_CHART_PAINT_COMPONENTS;
 const MAX_CANVAS_LABEL_GRADIENT_STOPS = MAX_CANVAS_MARKER_GRADIENT_STOPS;
 const MAX_CANVAS_LABEL_PAINT_COMPONENTS = MAX_CANVAS_MARKER_PAINT_COMPONENTS;
-// The package parser already applies its XML-depth ceiling. Keep the same kind
-// of stack-safety boundary for caller-constructed public ChartModel objects.
-export const MAX_CANVAS_HIERARCHY_DEPTH = 512;
 
 const CLASSIC_THREE_D_FAMILIES = new Set([
   'pie',
@@ -14781,158 +14788,6 @@ export function classicMarkerPaintWorkCount(
   return total;
 }
 
-// ─── chartEx hierarchy preflight shared with the optional renderer ──────────
-
-/** A node in the shared hierarchy tree. `layoutWeight` is the overflow-safe
- *  aggregate used for treemap areas and sunburst angles; `value` is the finite,
- *  saturating aggregate exposed to data-label formatting. `a0`/`a1` are the
- *  sunburst span (radians, canvas convention) once laid out; `depth` is its
- *  ring index (0 = innermost / root). */
-export interface SunburstNode {
-  label: string;
-  /** Finite, overflow-safe relative weight used only for geometry. */
-  layoutWeight: number;
-  /** Sanitized display value. Sums saturate when JavaScript cannot represent them. */
-  value: number;
-  depth: number;
-  children: SunburstNode[];
-  /** Root-branch index (which top-level branch this node descends from) — used
-   *  to color the whole sub-tree in one accent. */
-  branchIndex: number;
-  /** ChartEx data-label index. Office numbers hierarchy nodes in pre-order,
-   * excluding the synthetic root, rather than by source leaf row. */
-  labelIndex: number;
-  a0: number;
-  a1: number;
-}
-
-/** Preflight flat hierarchy input before allocating the interned tree. Both
- * rows and path nodes become paint primitives, so either can exhaust the same
- * synchronous Canvas budget. */
-export function hierarchyInputTooLarge(rows: readonly { path: readonly string[] }[]): boolean {
-  if (rows.length > MAX_CANVAS_CHART_POINTS) return true;
-  let segments = 0;
-  for (const row of rows) {
-    if (row.path.length > MAX_CANVAS_HIERARCHY_DEPTH) return true;
-    if (segments > MAX_CANVAS_CHART_POINTS - row.path.length) return true;
-    segments += row.path.length;
-  }
-  return false;
-}
-
-/**
- * Fold the flat `path`/`size` rows into a ring tree. Each row is a root→leaf
- * label chain; walking the chain interns each label under its parent. The size
- * is added at the DEEPEST node of the row (a node's `value` is the sum of the
- * sizes beneath it). Children keep first-seen (source) order so the ring sweep
- * order matches PowerPoint.
- */
-export function buildSunburstTree(
-  rows: { path: string[]; size: number }[],
-  preserveTerminalDuplicates = false,
-): SunburstNode {
-  const root: SunburstNode = {
-    label: '', layoutWeight: 0, value: 0, depth: -1, children: [], branchIndex: -1, labelIndex: -1, a0: 0, a1: 0,
-  };
-  const maxRowValue = rows.reduce((max, row) => (
-    Number.isFinite(row.size) && row.size > max ? row.size : max
-  ), 0);
-  const safeSum = (left: number, right: number): number => (
-    left > Number.MAX_VALUE - right ? Number.MAX_VALUE : left + right
-  );
-  // Construction-only indexes keep sibling interning O(1) per path segment;
-  // the WeakMap dies with this function and does not pollute the paint model.
-  const childIndexes = new WeakMap<SunburstNode, Map<string, SunburstNode>>();
-  for (const row of rows) {
-    // ChartEx leaves without a finite positive size remain part of the authored
-    // hierarchy/order, but they do not contribute layout weight. Normalizing at
-    // the shared tree boundary keeps treemap parent areas and sunburst parent
-    // spans consistent; filtering only at either painter would leave ancestors
-    // with contaminated aggregate values.
-    const rowValue = Number.isFinite(row.size) && row.size > 0 ? row.size : 0;
-    // Dividing every positive row by the same maximum preserves all layout
-    // ratios while bounding every later ancestor sum by the source row count.
-    const rowWeight = maxRowValue > 0 ? rowValue / maxRowValue : 0;
-    let node = root;
-    for (let d = 0; d < row.path.length; d++) {
-      const label = row.path[d];
-      let index = childIndexes.get(node);
-      if (!index) {
-        index = new Map();
-        childIndexes.set(node, index);
-      }
-      const preserveNode = preserveTerminalDuplicates && d === row.path.length - 1;
-      let child = preserveNode ? undefined : index.get(label);
-      if (!child) {
-        child = {
-          label,
-          layoutWeight: 0,
-          value: 0,
-          depth: d,
-          children: [],
-          // Top-level nodes (d === 0) define the branch index; deeper nodes
-          // inherit their ancestor's.
-          branchIndex: d === 0 ? node.children.length : node.branchIndex,
-          labelIndex: -1,
-          a0: 0, a1: 0,
-        };
-        node.children.push(child);
-        if (!preserveNode) index.set(label, child);
-      }
-      child.layoutWeight += rowWeight;
-      child.value = safeSum(child.value, rowValue);
-      node = child;
-    }
-  }
-  root.layoutWeight = root.children.reduce((sum, child) => sum + child.layoutWeight, 0);
-  root.value = root.children.reduce((sum, child) => safeSum(sum, child.value), 0);
-  let nextLabelIndex = 0;
-  const pending = [...root.children].reverse();
-  while (pending.length > 0) {
-    const node = pending.pop() as SunburstNode;
-    node.labelIndex = nextLabelIndex++;
-    for (let index = node.children.length - 1; index >= 0; index--) {
-      pending.push(node.children[index]);
-    }
-  }
-  return root;
-}
-
-/** Assign angular spans top-down: each node partitions its `[a0, a1)` range
- *  across its children proportional to their layout weight, in child (source)
- *  order. */
-export function layoutSunburstAngles(root: SunburstNode): void {
-  const pending = [root];
-  while (pending.length > 0) {
-    const node = pending.pop() as SunburstNode;
-    let total = 0;
-    for (const child of node.children) total += child.layoutWeight;
-    if (total <= 0) continue;
-    let a = node.a0;
-    for (const child of node.children) {
-      const sweep = ((node.a1 - node.a0) * child.layoutWeight) / total;
-      child.a0 = a;
-      child.a1 = a + sweep;
-      a = child.a1;
-      pending.push(child);
-    }
-  }
-}
-
-/** Maximum ring depth (number of levels below the root). */
-export function sunburstMaxDepth(root: SunburstNode): number {
-  let maxDepth = root.depth;
-  const pending = [root];
-  while (pending.length > 0) {
-    const node = pending.pop() as SunburstNode;
-    maxDepth = Math.max(maxDepth, node.depth);
-    for (let index = node.children.length - 1; index >= 0; index--) {
-      pending.push(node.children[index]);
-    }
-  }
-  return maxDepth;
-}
-
 function chartLabelBoxPaintComponents(box: ChartLabelBox | null | undefined): number | null {
   let total = 0;
   for (const paint of [box?.fillPaint, box?.borderFill]) {
@@ -14973,6 +14828,9 @@ export function chartLabelPaintWorkCount(
   chart: ChartModel,
   threeD: ChartThreeDRenderer | undefined,
 ): number | null {
+  // ChartEx hierarchy labels are expanded only by the optional ChartEx
+  // renderer, which owns their resource preflight with the hierarchy model.
+  if (chart.chartexSunburst || chart.chartexTreemap) return null;
   let total = 0;
   const charge = (box: ChartLabelBox | null | undefined): boolean => {
     const components = chartLabelBoxPaintComponents(box);
@@ -14990,16 +14848,7 @@ export function chartLabelPaintWorkCount(
       Number.isFinite(Number.parseFloat(category))
     );
   });
-  const hierarchy = chart.chartexSunburst
-    ? { rows: chart.chartexSunburst.rows, kind: 'sunburst' as const }
-    : chart.chartexTreemap
-      ? { rows: chart.chartexTreemap.rows, kind: 'treemap' as const }
-      : undefined;
-  // Hierarchy ChartEx families do not paint the compatibility series' flat
-  // point labels. Their label indices belong to the interned hierarchy nodes,
-  // handled below. Keeping the paths disjoint also avoids charging one box
-  // twice for shallow hierarchies.
-  if (!hierarchy) for (const series of chart.series) {
+  for (const series of chart.series) {
     const overrides = indexPointOverrides(series.dataLabelOverrides);
     const family = series.seriesType ?? chart.chartType;
     const pointCount = Math.max(
@@ -15033,62 +14882,6 @@ export function chartLabelPaintWorkCount(
     }
   }
 
-  // Hierarchy ChartEx families address labels by interned pre-order node index,
-  // not by source row. A single deep row can therefore paint many label boxes,
-  // while repeated parent paths can collapse many rows into one node. Build the
-  // same bounded tree and apply the same semantic visibility resolver as the
-  // painters before charging structured paint work.
-  if (hierarchy && hierarchy.rows.length > 0) {
-    if (hierarchyInputTooLarge(hierarchy.rows)) {
-      return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
-    }
-    const root = buildSunburstTree(hierarchy.rows, hierarchy.kind === 'treemap');
-    if (root.layoutWeight <= 0 || root.children.length === 0) return total;
-    if (hierarchy.kind === 'sunburst') {
-      root.a0 = -Math.PI / 2;
-      root.a1 = root.a0 + Math.PI * 2;
-      layoutSunburstAngles(root);
-    }
-    const series = chart.series[0];
-    const overrides = indexPointOverrides(series?.dataLabelOverrides);
-    const parentMode = chart.chartexTreemap?.parentLabelLayout ?? 'overlapping';
-    const pending = [...root.children];
-    while (pending.length > 0) {
-      const node = pending.pop() as SunburstNode;
-      for (const child of node.children) pending.push(child);
-      // Match the hierarchy painters' first geometry gate. Zero-area treemap
-      // nodes and vanishing sunburst wedges never reach label-box painting, so
-      // charging their structured paint would reject a valid sparse hierarchy.
-      if (node.layoutWeight <= 0
-        || (hierarchy.kind === 'sunburst' && node.a1 - node.a0 <= 1e-4)) continue;
-      let label: ResolvedChartExLabel | null;
-      if (hierarchy.kind === 'sunburst') {
-        label = resolveChartExLabel(
-          chart, series, node.labelIndex, node.label, node.value,
-          { visible: false, showVal: false, showCatName: false },
-          overrides,
-        );
-      } else if (node.children.length > 0) {
-        label = resolveChartExLabel(
-          chart, series, node.labelIndex, node.label, node.value,
-          { visible: parentMode !== 'none', showVal: false, showCatName: true },
-          overrides,
-        );
-        // In overlapping mode only the top-level parent caption reaches the
-        // painter; intermediate parents still partition descendant tiles.
-        if (parentMode === 'overlapping' && node.depth !== 0) label = null;
-      } else {
-        label = resolveChartExLabel(
-          chart, series, node.labelIndex, node.label, node.value,
-          { visible: false, showVal: false, showCatName: false },
-          overrides,
-        );
-      }
-      if (label?.labelBox && !charge(label.labelBox)) {
-        return MAX_CANVAS_LABEL_PAINT_COMPONENTS + 1;
-      }
-    }
-  }
   return total;
 }
 

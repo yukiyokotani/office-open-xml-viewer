@@ -2021,6 +2021,7 @@ function textPlanSegment(
     characterGrid?.type === 'snapToChars'
     && segment.underline
     && !segment.verticalRun
+    && paragraph.bidi !== true
     && basePaintOps.length === 1
     && segment.selectedFaceInkBounds
       ? basePaintOps[0]!.offset.xPt

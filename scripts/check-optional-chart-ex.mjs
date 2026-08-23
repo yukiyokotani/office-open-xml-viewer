@@ -41,4 +41,31 @@ for (const entry of ['index.mjs', 'docx.mjs', 'xlsx.mjs', 'pptx.mjs']) {
   assertAbsent(files, implementationMarker, entry);
 }
 
+// Rolldown may inline a small source module without retaining its source path
+// in emitted JavaScript. Verify that boundary at source level instead: the
+// optional renderer must own the hierarchy dependency, while the default
+// renderer must not regain the hierarchy implementation itself.
+const chartExRendererSource = await readFile(
+  resolve('packages/core/src/chart/chart-ex-renderer.ts'),
+  'utf8',
+);
+if (!chartExRendererSource.includes("from './chart-ex-hierarchy.js'")) {
+  throw new Error('ChartEx renderer does not own the hierarchy module');
+}
+const defaultRendererSource = await readFile(
+  resolve('packages/core/src/chart/renderer.ts'),
+  'utf8',
+);
+for (const symbol of [
+  'interface SunburstNode',
+  'function hierarchyInputTooLarge',
+  'function buildSunburstTree',
+  'function layoutSunburstAngles',
+  'function sunburstMaxDepth',
+]) {
+  if (defaultRendererSource.includes(symbol)) {
+    throw new Error(`default renderer unexpectedly owns ${symbol}`);
+  }
+}
+
 console.log('optional ChartEx bundle boundary verified');
