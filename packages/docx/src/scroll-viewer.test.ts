@@ -4,6 +4,8 @@ import { DocxDocument } from './document.js';
 import { installDom, makeContainer, makeEl, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as docxIndex from './index.js';
 import type { DocxElementContext } from './selection-context.js';
+import type { DocxCommentCardRenderContext } from './comment-margin.js';
+import type { CommentAnchorRange } from './comments.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -150,6 +152,71 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
     const scrollHost = container.children[0].children[0];
     expect(scrollHost.style.background).toBe('');
     v.destroy();
+  });
+});
+
+describe('DocxScrollViewer — opt-in comment cards', () => {
+  it('does not collect comment geometry or add comment DOM by default', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    engine.comments = [{ id: '1', text: 'Present but not requested' }];
+    const container = makeContainer();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+    await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
+    expect(engine.renderCalls[0]?.hasTextRunCallback).toBe(false);
+    const scrollHost = container.children[0]!.children[0]!;
+    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    expect(page.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    viewer.destroy();
+  });
+
+  it('renders transparent margin cards and cleans up a consumer card renderer', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
+    engine.comments = [{ id: '7', author: 'Ada', text: 'Review this' }];
+    engine.commentAnchors = [{
+      commentId: '7',
+      source,
+      startRunIndex: 0,
+      endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' },
+    }] as CommentAnchorRange[];
+    engine.feedTextRuns = [{
+      text: 'anchored', source, sourceRunIndex: 0,
+      x: 20, y: 30, w: 80, h: 14, fontSize: 12, font: '12px sans-serif',
+    }];
+    const cleanups: string[] = [];
+    let lastContext: DocxCommentCardRenderContext | undefined;
+    const container = makeContainer();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      engine.asDoc(),
+      {
+        showComments: true,
+        renderCommentCard(host, context) {
+          lastContext = context;
+          host.textContent = context.comment.text;
+          return () => cleanups.push(context.comment.id);
+        },
+      },
+    );
+    await vi.waitFor(() => expect(lastContext?.comment.id).toBe('7'));
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = page.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(margin.style.background).toBe('');
+    expect(lastContext?.replies).toEqual([]);
+
+    lastContext?.activate();
+    expect(cleanups).toEqual(['7']);
+    expect(lastContext?.active).toBe(true);
+    viewer.destroy();
+    expect(cleanups).toEqual(['7', '7']);
   });
 });
 
@@ -1941,44 +2008,6 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
     expect(s0).toBeDefined();
     expect(parseFloat(s0!.style.left)).toBeCloseTo(150, 3);
     expect(parseFloat(s0!.style.left)).toBeGreaterThan(16);
-    v.destroy();
-  });
-
-  it('showComments centres page + comment gutter as ONE unit (the page shifts left, §17.13.4)', () => {
-    // Page px 100 (explicit width) in a 500 viewport with a 200px comment
-    // gutter. Page-only centring would put left at (500 − 100)/2 = 200 and run
-    // the gutter to the viewport edge; the unit centre is
-    // (500 − 100 − 200)/2 = 100, so the page shifts 100px left and the whole
-    // gutter [200, 400] stays inside the viewport.
-    const { v, scrollHost } = setup(500, {
-      width: 100,
-      paddingLeft: 16,
-      paddingRight: 16,
-      showComments: true,
-      commentsGutterWidth: 200,
-    });
-    const s0 = slot(scrollHost, '16px'); // default vertical pad = gap 16
-    expect(s0).toBeDefined();
-    expect(parseFloat(s0!.style.left)).toBeCloseTo(100, 3);
-    v.destroy();
-  });
-
-  it('showComments never pushes the page across the left gutter (floor stays paddingLeft)', () => {
-    // Page px 300 + gutter 200 exceed the 400 viewport: the unit centre would
-    // go negative, so left pins at padL and the overflow scrolls right (the
-    // spacer already includes the gutter via the widened right padding).
-    const { v, scrollHost } = setup(400, {
-      width: 300,
-      paddingLeft: 16,
-      paddingRight: 16,
-      showComments: true,
-      commentsGutterWidth: 200,
-    });
-    const s0 = slot(scrollHost, '16px');
-    expect(s0).toBeDefined();
-    expect(s0!.style.left).toBe('16px');
-    const spacer = scrollHost.children[0] as FakeEl;
-    expect(parseFloat(spacer.style.width)).toBeCloseTo(300 + 16 + 16 + 200, 3);
     v.destroy();
   });
 

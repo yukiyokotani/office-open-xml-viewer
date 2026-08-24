@@ -6,6 +6,7 @@ export {
 } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
+export type { DocxCommentCardRenderContext, DocxCommentCardRenderer } from './comment-margin';
 export { buildDocxTextLayer } from './text-layer';
 export {
   readDocxTextSelectionContext,
@@ -113,24 +114,19 @@ export {
   type DocxHighlightMatch,
   type DocxHighlightColors,
 } from './find-highlight-layer';
-// ECMA-376 §17.13.4 comment margin: the pure threading / anchor-range /
-// balloon-placement model (viewer-independent) and the DOM layer builder the
-// viewers drive. Enabled per viewer via `showComments`.
+// ECMA-376 §17.13.4 comment data projections. UI is intentionally consumer-owned.
 export {
-  buildCommentThreads,
-  collectDocumentCommentRanges,
-  computeCommentBalloonLayout,
-  type CommentThread,
+  resolveCommentAnchorRuns,
+  type CommentAnchorPoint,
+  type CommentAnchorGeometryFallback,
   type CommentAnchorRange,
-  type CommentBalloonRequest,
-  type CommentBalloonPlacement,
-  type CommentBalloonLayoutInput,
-} from './comment-margin-layout';
+} from './comments';
 export {
-  buildDocxCommentLayer,
-  type DocxCommentLayerModel,
-  type DocxCommentLayerGeometry,
-} from './comment-layer';
+  resolveRevisionAnchorRuns,
+  type RevisionAnchorGeometryFallback,
+  type RevisionAnchorRange,
+} from './revisions';
+export type { DocxStorySource } from './types';
 export type { DocxMatchLocation } from './find';
 export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';

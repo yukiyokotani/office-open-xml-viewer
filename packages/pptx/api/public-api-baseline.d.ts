@@ -126,15 +126,9 @@ export interface ChartDataTable {
     fontColor?: string | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
-    /** Resolved solid compatibility projection of `<c:dTable><c:spPr>`. */
     fillColor?: string | null;
-    /** Direct DrawingML fill recipe. Preserved even where Office's application-
-     * defined data-table paint extent has not been established for that recipe. */
     fill?: SolidFill | GradientFill | PatternFill | null;
-    /** Explicit `<a:noFill>` on the data-table shape properties. */
     fillHidden?: boolean | null;
-    /** True when `spPr` authored any DrawingML fill child, including one whose
-     * paint recipe this implementation cannot resolve. */
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -282,6 +276,9 @@ export interface ChartexRegionMapRow {
     label: string;
     entityId?: string | null;
     value?: number | null;
+}
+export interface ChartExRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
@@ -478,12 +475,10 @@ export interface ChartModel {
     catAxisLineColor?: string | null;
     catAxisLineWidthEmu?: number | null;
     catAxisLineDash?: string | null;
-    /** A direct `<c:catAx><c:spPr><a:ln>` paint was authored. */
     catAxisLinePaintAuthored?: boolean | null;
     valAxisLineColor?: string | null;
     valAxisLineWidthEmu?: number | null;
     valAxisLineDash?: string | null;
-    /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
     catAxisMin?: number | null;
@@ -591,14 +586,31 @@ export interface ChartOfPie {
     gapWidthPercent: number;
     seriesLines: boolean;
 }
+export interface ChartPlotGroup {
+    kind: ChartPlotGroupKind;
+    seriesStart: number;
+    seriesCount: number;
+    categoryAxis: ChartPlotGroupAxisSlot;
+    valueAxis: ChartPlotGroupAxisSlot;
+    seriesAxis: ChartPlotGroupAxisSlot;
+    axisIds?: string[] | null;
+    grouping?: string | null;
+    barDirection?: string | null;
+    scatterStyle?: string | null;
+    radarStyle?: string | null;
+    gapWidth?: number | null;
+    overlap?: number | null;
+    bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
+}
+export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
+export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
 export interface ChartRect {
     x: number;
     y: number;
     w: number;
     h: number;
-}
-export interface ChartExRenderer {
-    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
@@ -637,9 +649,6 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
-    /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
-     * exposes such a lone bubble series as one legend entry per point while a
-     * numeric X source keeps the ordinary one-entry-per-series legend. */
     bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
@@ -647,7 +656,6 @@ export interface ChartSeries {
     catFormatBuiltinId?: number | null;
     catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
-    /** Host-resolved automatic scatter marker when no `<c:marker>` symbol is authored. */
     automaticMarkerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
@@ -789,10 +797,8 @@ export interface ChartThreeDPictureOptions {
     applyToSides?: boolean | null;
     applyToEnd?: boolean | null;
     pictureFormat?: 'stretch' | 'stack' | 'stackScale' | string | null;
-    /** Whether `<c:pictureFormat>` was authored, including an unsupported value. */
     pictureFormatAuthored?: boolean | null;
     pictureStackUnit?: number | null;
-    /** Whether `<c:pictureStackUnit>` was authored, including an invalid value. */
     pictureStackUnitAuthored?: boolean | null;
 }
 export interface ChartThreeDRenderer {
@@ -806,7 +812,6 @@ export interface ChartThreeDSeriesAxis {
     tickLabelSkip?: number | null;
     tickMarkSkip?: number | null;
     majorTickMark: string;
-    /** `<c:serAx><c:minorTickMark>`; omission means no minor tick marks. */
     minorTickMark?: string | null;
     fontColor?: string | null;
     fontSizeHpt?: number | null;
@@ -816,7 +821,6 @@ export interface ChartThreeDSeriesAxis {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
-    /** A direct `<c:serAx><c:spPr><a:ln>` paint was authored. */
     linePaintAuthored?: boolean | null;
     lineHidden: boolean;
     titleFontSizeHpt?: number | null;
@@ -880,26 +884,6 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
-export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
-export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
-export interface ChartPlotGroup {
-    kind: ChartPlotGroupKind;
-    seriesStart: number;
-    seriesCount: number;
-    categoryAxis: ChartPlotGroupAxisSlot;
-    valueAxis: ChartPlotGroupAxisSlot;
-    seriesAxis: ChartPlotGroupAxisSlot;
-    axisIds?: string[] | null;
-    grouping?: string | null;
-    barDirection?: string | null;
-    scatterStyle?: string | null;
-    radarStyle?: string | null;
-    gapWidth?: number | null;
-    overlap?: number | null;
-    bubbleScale?: number | null;
-    bubbleSizeRepresents?: 'area' | 'w' | null;
-    showNegativeBubbles?: boolean | null;
-}
 export interface DimOptions {
     color: string;
     opacity: number;
@@ -1333,8 +1317,31 @@ export interface PictureElement {
     sp3d?: Sp3d;
 }
 export interface PptxComment {
+    authorId?: number;
+    modernAuthorId?: string;
+    id?: string;
+    index?: number;
     author?: string;
     date?: string;
+    x?: number;
+    y?: number;
+    status?: 'active' | 'resolved' | 'closed';
+    text: string;
+    replies?: readonly Readonly<PptxCommentReply>[];
+}
+export interface PptxCommentCardRenderContext {
+    readonly comment: Readonly<PptxComment>;
+    readonly replies: readonly Readonly<PptxCommentReply>[];
+    readonly active: boolean;
+    readonly activate: () => void;
+}
+export type PptxCommentCardRenderer = (host: HTMLElement, context: PptxCommentCardRenderContext) => void | (() => void);
+export interface PptxCommentReply {
+    id?: string;
+    authorId?: string;
+    author?: string;
+    date?: string;
+    status?: 'active' | 'resolved' | 'closed';
     text: string;
 }
 export interface PptxElementContext {
@@ -1387,6 +1394,7 @@ export class PptxPresentation {
     get slideHeight(): number;
     get mode(): 'main' | 'worker';
     getNotes(slideIndex: number): string | null;
+    getComments(slideIndex: number): readonly Readonly<PptxComment>[];
     isHidden(slideIndex: number): boolean;
     getSlideIndexByPartName(partName: string): number | undefined;
     resolveInternalTarget(ref: string, currentIndex?: number): number | undefined;
@@ -1437,6 +1445,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
     paddingRight?: number;
     overscan?: number;
     enableTextSelection?: boolean;
+    showComments?: boolean;
+    renderCommentCard?: PptxCommentCardRenderer;
     enableElementSelection?: boolean;
     elementHitTolerance?: number;
     onSelectionContextChange?: (context: PptxSelectionContext | null) => void;

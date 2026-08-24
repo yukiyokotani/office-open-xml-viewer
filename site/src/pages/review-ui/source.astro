@@ -1,0 +1,45 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import SiteFooter from '../../components/SiteFooter.astro';
+import CodeTabs from '../../components/CodeTabs.astro';
+import core from '../../examples/review-margin/core.ts?raw';
+import controller from '../../examples/review-margin/index.ts?raw';
+import markup from '../../examples/review-margin/index.html?raw';
+import styles from '../../examples/review-margin/styles.css?raw';
+
+const tabs = [
+  { id: 'core', label: 'core.ts', lang: 'ts', code: core.trim() },
+  { id: 'controller', label: 'index.ts', lang: 'ts', code: controller.trim() },
+  { id: 'html', label: 'index.html', lang: 'html', code: markup.trim() },
+  { id: 'css', label: 'styles.css', lang: 'css', code: styles.trim() },
+];
+---
+
+<Base
+  title="DOCX review UI example source | @silurus/ooxml"
+  description="Source files for the DOCX review UI example."
+  canonicalPath="/review-ui/source/"
+>
+  <Nav active="docx" />
+  <header class="source-hero">
+    <div class="wrap">
+      <a href="/review-ui">← DOCX review UI</a>
+      <h1>DOCX review UI example source</h1>
+      <p>These are the files used by the live example: API flow, application controller, markup, and styles.</p>
+    </div>
+  </header>
+  <main class="wrap source-main">
+    <CodeTabs id="review-example-complete-source" tabs={tabs} />
+  </main>
+  <SiteFooter />
+</Base>
+
+<style>
+  .source-hero { padding: 46px 0 34px; border-bottom: 1px solid var(--border); }
+  .source-hero a { color: var(--text-faint); font: 12px var(--mono); }
+  .source-hero h1 { margin: 18px 0 12px; font-size: clamp(34px, 5vw, 54px); }
+  .source-hero p { max-width: 760px; color: var(--text-dim); }
+  .source-main { padding-top: 36px; padding-bottom: 64px; }
+  .source-main :global(.ct-panel) { max-height: 72vh; overflow: auto; }
+</style>

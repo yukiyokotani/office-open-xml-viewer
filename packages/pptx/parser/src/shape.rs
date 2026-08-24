@@ -1115,7 +1115,7 @@ pub(crate) fn parse_shape(
         Default::default()
     };
 
-    // ECMA-376 §19.3.1.21 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
+    // ECMA-376 §19.3.1.13 / §20.1.4.2: a slide-level `<p:cNvSpPr txBox="1"/>`
     // marks the shape as a true text box, which means the theme's
     // `<a:txDef>` (rather than `<a:spDef>`) provides the fallback bodyPr.
     let is_text_box = child(sp_node, "nvSpPr")

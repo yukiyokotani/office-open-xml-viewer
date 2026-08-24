@@ -146,6 +146,7 @@ export interface InternalDocParagraph extends DocParagraph {
   numbering: InternalNumberingInfo | null;
   paragraphMarkFontFacts?: InternalRunFontFacts;
   readonly __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
+  __runRevisions?: readonly (DocRun['revision'] | null)[];
 }
 
 type UnavailableDrawingRunWire = Omit<
@@ -1372,10 +1373,12 @@ export function paragraphAcquisitionInput(
     paragraphMarkFontFacts: _privateParagraphMarkFontFacts,
     __paragraphTypographyAcquisition: _privateParagraphTypography,
     __complexFieldBoundaries: _privateComplexFieldBoundaries,
+    __runRevisions: _privateRunRevisions,
     ...semanticParagraph
   } = paragraph as DocParagraph & Record<string, unknown> & {
     __paragraphTypographyAcquisition?: InternalParagraphTypographyWire;
     __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
+    __runRevisions?: readonly (DocRun['revision'] | null)[];
   };
   const typographyInput = paragraphTypographyAcquisitionInput(parserParagraph);
   const complexFieldBoundaries = (
@@ -1581,13 +1584,21 @@ function normalizeInternalDocumentModelWithOwnership(
     path: number[],
   ): BodyElement => {
     if (element.type === 'paragraph') {
-      let runsChanged = false;
+      const internalParagraph = element as InternalDocParagraph;
+      const runRevisions = internalParagraph.__runRevisions ?? [];
+      let runsChanged = internalParagraph.__runRevisions !== undefined;
       const runs: DocRun[] = [];
       const unavailableDrawings: UnavailableDrawingSidecarEntry[] = [];
       const hasEmbeddedUnavailableDrawing = (
         element.runs as unknown as readonly Readonly<{ type: string }>[]
       ).some((run) => run.type === 'unavailableDrawing');
-      paragraphRunsWithUnavailableDrawings(element).forEach((run, runIndex) => {
+      paragraphRunsWithUnavailableDrawings(element).forEach((rawRun, runIndex) => {
+        const revision = runRevisions[runIndex] ?? undefined;
+        const rawRevision = (rawRun as Readonly<{ revision?: DocRun['revision'] }>).revision;
+        const run = revision === undefined || rawRevision !== undefined
+          ? rawRun
+          : { ...rawRun, revision };
+        if (run !== rawRun) runsChanged = true;
         if (run.type === 'unavailableDrawing') {
           unavailableDrawings.push(Object.freeze({
             publicRunIndex: runs.length,
@@ -1660,11 +1671,17 @@ function normalizeInternalDocumentModelWithOwnership(
           runs.push({ ...run, textBoxContent } as DocRun);
         }
       });
-      const paragraph = runsChanged
-        ? (consumeOwned
-            ? Object.assign(element, { runs })
-            : { ...element, runs })
-        : element;
+      let paragraph: Extract<BodyElement, { type: 'paragraph' }>;
+      if (consumeOwned) {
+        if (runsChanged) Object.assign(element, { runs });
+        delete (element as InternalDocParagraph).__runRevisions;
+        paragraph = element;
+      } else if (runsChanged) {
+        const { __runRevisions: _privateRunRevisions, ...publicParagraph } = internalParagraph;
+        paragraph = { ...publicParagraph, runs } as Extract<BodyElement, { type: 'paragraph' }>;
+      } else {
+        paragraph = element;
+      }
       if (unavailableDrawings.length > 0) {
         unavailableDrawingSidecars.set(
           paragraph,

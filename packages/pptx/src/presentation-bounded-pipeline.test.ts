@@ -80,7 +80,14 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
     const compact = {
       ...bootstrap,
       slides: [
-        { index: 0, partName: bootstrap.slides[0].partName, notes: 'speaker note', hidden: false, mediaElements: [] },
+        {
+          index: 0,
+          partName: bootstrap.slides[0].partName,
+          notes: 'speaker note',
+          hidden: false,
+          mediaElements: [],
+          comments: [{ id: '{ROOT}', modernAuthorId: '{ADA}', author: 'Ada', x: 1, y: 2, status: 'active', text: 'Review' }],
+        },
         { index: 1, partName: bootstrap.slides[1].partName, notes: null, hidden: true, mediaElements: [] },
       ],
       fontPreloadNames: ['Aptos Display', 'Aptos'],
@@ -124,6 +131,8 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
 
     expect(presentation.slideCount).toBe(2);
     expect(presentation.getNotes(0)).toBe('speaker note');
+    expect(presentation.getComments(0)).toEqual(compact.slides[0].comments);
+    expect(presentation.getComments(1)).toEqual([]);
     expect(presentation.isHidden(1)).toBe(true);
     expect(presentation.getSlideIndexByPartName('ppt/slides/slide2.xml')).toBe(1);
     expect(ordinary.filter((request) => request.kind === 'openSlideSession')).toHaveLength(2);

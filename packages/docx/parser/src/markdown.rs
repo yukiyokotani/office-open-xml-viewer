@@ -62,7 +62,7 @@ fn render_body(body: &[BodyElement], out: &mut String) {
 }
 
 fn render_paragraph(p: &DocParagraph, out: &mut String) {
-    let text = render_runs(&p.runs);
+    let text = render_runs(&p.runs, &p.run_revisions);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         out.push('\n');
@@ -99,7 +99,7 @@ fn note_inline_text(content: &[BodyElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for el in content {
         if let BodyElement::Paragraph(p) = el {
-            let t = render_runs(&p.runs);
+            let t = render_runs(&p.runs, &p.run_revisions);
             let t = t.trim();
             if !t.is_empty() {
                 parts.push(t.to_string());
@@ -109,9 +109,22 @@ fn note_inline_text(content: &[BodyElement]) -> String {
     parts.join(" ")
 }
 
-fn render_runs(runs: &[DocRun]) -> String {
+fn render_runs(runs: &[DocRun], revisions: &[Option<crate::types::RunRevision>]) -> String {
     let mut out = String::new();
-    for run in runs {
+    for (run_index, run) in runs.iter().enumerate() {
+        // §17.13.5 revision containers apply to every inline occurrence. Keep
+        // Markdown on the same accepted-final projection as layout, including
+        // fields, math, breaks, tabs, and drawings rather than only text.
+        let revision = revisions
+            .get(run_index)
+            .and_then(Option::as_ref)
+            .or_else(|| match run {
+                DocRun::Text(text) => text.revision.as_ref(),
+                _ => None,
+            });
+        if revision.is_some_and(|value| value.kind == "deletion" || value.kind == "moveFrom") {
+            continue;
+        }
         match run {
             DocRun::Text(t) => out.push_str(&format_text_run(t)),
             DocRun::Field(f) => {
@@ -161,15 +174,6 @@ fn format_text_run(t: &crate::types::TextRun) -> String {
     // from the inline text projection.
     if t.note_ref.is_some() {
         return String::new();
-    }
-    // Move-revision runs (`w:moveFrom` / `w:moveTo`, ECMA-376 §17.13.5.22 /
-    // §17.13.5.25) joined the model for the tracked-changes render. This
-    // projection predates them and stays byte-stable: moved text was never
-    // emitted here (both ends were unparsed), so both ends stay dropped.
-    if let Some(rev) = &t.revision {
-        if rev.kind == "moveFrom" || rev.kind == "moveTo" {
-            return String::new();
-        }
     }
     let raw = &t.text;
     if raw.is_empty() {
@@ -248,7 +252,7 @@ fn render_table_cell(cell: &DocTableCell) -> String {
         }
         match el {
             CellElement::Paragraph(p) => {
-                let text = render_runs(&p.runs);
+                let text = render_runs(&p.runs, &p.run_revisions);
                 buf.push_str(text.trim());
             }
             CellElement::Table(_) => {

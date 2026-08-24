@@ -1,0 +1,225 @@
+---
+import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
+
+const reviewSnippet = `import {
+  DocxDocument,
+  resolveCommentAnchorRuns,
+  resolveRevisionAnchorRuns,
+} from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load('/sample.docx');
+const runs = await doc.collectPageRuns(pageIndex, { width: 760 });
+
+const comments = doc.commentAnchorRanges().map((anchor) => ({
+  comment: doc.comments.find((item) => item.id === anchor.commentId),
+  runs: resolveCommentAnchorRuns(anchor, runs),
+}));
+
+const revisions = doc.revisionAnchorRanges().map((anchor) => ({
+  revision: doc.revisions[anchor.revisionIndex],
+  runs: resolveRevisionAnchorRuns(anchor, runs),
+}));
+
+renderReviewMargin({ comments, revisions });`;
+---
+
+<section class="review-demo" data-review-demo data-reveal>
+  <div class="review-demo-head">
+    <p class="demo-badge">Live · Consumer-owned review UI</p>
+    <h3>Comments in context, composed by your app.</h3>
+    <p>
+      Parsed comments and page geometry become a review margin beside the document. Threads stay
+      close to their anchors without covering the page, while the presentation remains entirely
+      consumer-owned.
+    </p>
+  </div>
+
+  <div class="review-shell">
+    <div class="review-toolbar">
+      <div class="review-file">
+        <span><strong>sample-1.docx</strong><small data-review-page-label>Locating review threads…</small></span>
+      </div>
+      <div class="review-metrics" aria-label="Review summary">
+        <span data-review-count>Loading threads…</span>
+        <span data-review-change-count>Loading changes…</span>
+      </div>
+    </div>
+
+    <div class="review-workspace">
+      <div class="review-scrollport">
+        <div class="review-layout" data-review-layout>
+          <div class="review-document-stage">
+            <div class="review-page">
+              <canvas data-review-canvas aria-label="Rendered review sample page"></canvas>
+              <svg data-review-highlights class="review-highlights" aria-hidden="true"></svg>
+            </div>
+          </div>
+          <svg data-review-connectors class="review-connectors" aria-hidden="true"></svg>
+          <aside class="review-margin" aria-label="Comments beside the document">
+            <div data-review-threads class="review-thread-list"></div>
+          </aside>
+        </div>
+      </div>
+      <div data-review-status class="review-status">Loading review data…</div>
+    </div>
+  </div>
+
+  <div class="review-code">
+    <div class="review-code-head">
+      <div>
+        <p class="demo-badge">Core wiring</p>
+        <h4>Join review metadata to rendered page geometry.</h4>
+      </div>
+      <a href="/review-ui">Full integration guide →</a>
+    </div>
+    <Code code={reviewSnippet} lang="ts" themes={codeThemes} defaultColor={false} />
+  </div>
+</section>
+
+<script>
+  import { mountReviewDemo } from '../lib/review-demo';
+  const base = import.meta.env.BASE_URL;
+  const url = `${base}samples/sample-1.docx`.replace(/([^:])\/\/+/g, '$1/');
+  for (const root of document.querySelectorAll<HTMLElement>('[data-review-demo]')) {
+    mountReviewDemo(root, url);
+  }
+</script>
+
+<style>
+  .review-demo { padding: 40px 0; border-top: 1px solid var(--border); }
+  .review-demo-head { max-width: 70ch; margin-bottom: 22px; }
+  .demo-badge { margin: 0; color: var(--accent); font: 600 12px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+  .review-demo h3 { margin: 8px 0; font-size: 24px; font-weight: 700; }
+  .review-demo-head > h3 + p { margin: 0; color: var(--text-dim); font-size: 16px; }
+
+  .review-shell {
+    position: relative; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 14px;
+    background: var(--panel); box-shadow: var(--glow);
+  }
+  .review-toolbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 18px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elev);
+  }
+  .review-file { min-width: 0; }
+  .review-file strong, .review-file small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .review-file strong { color: var(--text-dim); font: 500 13px/1.45 var(--mono); }
+  .review-file small { color: var(--text-faint); font: 500 11px/1.45 var(--mono); }
+  .review-metrics { display: flex; gap: 8px; }
+  .review-metrics span {
+    padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--border-bright) 45%, transparent);
+    border-radius: 999px; color: var(--text-dim); background: color-mix(in srgb, var(--panel) 55%, transparent);
+    font: 500 10px/1.2 var(--mono); white-space: nowrap;
+  }
+
+  .review-workspace { position: relative; min-height: 560px; }
+  .review-scrollport {
+    max-height: 620px; overflow: auto; padding: 22px clamp(12px, 3%, 28px);
+    scrollbar-width: thin; scrollbar-color: var(--border-bright) transparent;
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+  }
+  .review-layout {
+    position: relative; display: grid; grid-template-columns: minmax(330px, 760px) minmax(190px, 260px);
+    align-items: stretch; gap: 0; width: 100%; max-width: 1020px; min-height: 540px; margin: 0 auto;
+  }
+  .review-document-stage { position: relative; z-index: 1; min-width: 0; }
+  .review-page { position: relative; width: 100%; }
+  .review-page canvas {
+    display: block; width: 100%; height: auto; border-radius: 4px; background: #fff;
+    box-shadow: 0 26px 70px -34px rgba(0,0,0,.72);
+  }
+  .review-highlights { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .review-highlights :global(rect) {
+    fill: rgba(43, 124, 255, .12); stroke: none;
+    opacity: 1; transition: fill .18s;
+  }
+  .review-highlights :global(rect.is-selected) {
+    fill: rgba(43, 124, 255, .3);
+  }
+  .review-highlights :global(rect.is-revision) { fill: rgba(43, 124, 255, .2); }
+  .review-highlights :global(rect.is-revision.is-selected) { fill: rgba(43, 124, 255, .38); }
+  .review-connectors {
+    position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; overflow: visible; pointer-events: none;
+  }
+  .review-connectors :global(path) {
+    fill: none; stroke: rgba(43, 124, 255, .34); stroke-width: 1.25; stroke-dasharray: 3 4;
+    vector-effect: non-scaling-stroke; transition: stroke .18s, stroke-width .18s, opacity .18s;
+  }
+  .review-connectors :global(path.is-selected) { stroke: rgba(43, 124, 255, .9); stroke-width: 1.7; }
+
+  .review-margin {
+    position: relative; z-index: 3; min-width: 0; min-height: 100%; padding: 0 14px;
+    background: transparent;
+  }
+  .review-thread-list { position: relative; min-height: 100%; }
+  .review-thread-list :global(.review-comment-card) {
+    position: absolute; left: 0; right: 0; padding: 10px; border: 0; border-radius: 10px;
+    background: color-mix(in srgb, var(--panel) 96%, var(--text) 4%);
+    cursor: pointer; color: var(--text);
+  }
+  .review-thread-list :global(.review-comment-card:hover),
+  .review-thread-list :global(.review-comment-card:focus-visible),
+  .review-thread-list :global(.review-comment-card.is-selected) {
+    background: color-mix(in srgb, var(--panel) 90%, var(--text) 10%);
+  }
+  .review-thread-list :global(.review-comment-card:focus-visible) { outline: none; }
+  .review-thread-list :global(.review-comment-card:focus-visible .review-comment-identity strong) {
+    color: var(--docx); text-decoration: underline; text-underline-offset: 2px;
+  }
+  :global(.review-comment-heading) { display: flex; align-items: center; gap: 9px; }
+  :global(.review-avatar) {
+    width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 auto;
+    border-radius: 9px; background: linear-gradient(145deg, var(--docx), var(--accent-2)); color: #fff;
+    font: 700 10px/1 var(--mono); box-shadow: 0 8px 18px -11px rgba(0,0,0,.8);
+  }
+  :global(.review-avatar-small) { width: 23px; height: 23px; border-radius: 7px; font-size: 8px; }
+  :global(.review-comment-identity) { min-width: 0; flex: 1; }
+  :global(.review-comment-identity strong), :global(.review-comment-identity span) { display: block; }
+  :global(.review-comment-identity strong) { overflow: hidden; text-overflow: ellipsis; font-size: 12px; white-space: nowrap; }
+  :global(.review-comment-identity span) { color: var(--text-faint); font: 500 9px/1.4 var(--mono); }
+  :global(.review-resolved) { padding: 3px 6px; border-radius: 999px; color: #26764a; background: rgba(43, 190, 106, .13); font: 600 8px/1.2 var(--mono); }
+  :root[data-theme='dark'] :global(.review-resolved) { color: #7fe2aa; }
+  :global(.review-comment-body) { margin: 10px 0 0; color: var(--text-dim); font-size: 11px; line-height: 1.55; }
+  :global(.review-change-body) { display: flex; align-items: baseline; gap: 6px; }
+  :global(.review-change-label) { color: var(--text-faint); font: 600 9px/1.4 var(--mono); text-transform: uppercase; }
+  :global(.review-change-body del) { text-decoration-thickness: 1px; text-decoration-color: var(--docx); }
+  :global(.review-reply) { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  :global(.review-reply p) { margin: 0; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+
+  .review-status {
+    position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); background: var(--panel); font: 500 12px/1 var(--mono);
+  }
+  .review-status[hidden] { display: none; }
+  .review-status[data-error='1'] { color: var(--danger, #c43d3d); }
+
+  .review-code { margin-top: 18px; }
+  .review-code-head {
+    display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 12px;
+  }
+  .review-code-head h4 { margin: 5px 0 0; font-size: 16px; }
+  .review-code-head a { color: var(--accent); font: 600 11px/1.4 var(--mono); text-decoration: none; white-space: nowrap; }
+  .review-code-head a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .review-code :global(pre) {
+    margin: 0; padding: 22px; overflow-x: auto; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--code-bg); font-size: 12px; line-height: 1.7;
+  }
+  .review-code :global(code) { font-family: var(--mono); }
+
+  @media (max-width: 520px) {
+    .review-toolbar { align-items: flex-start; }
+    .review-metrics { display: none; }
+    .review-scrollport { max-height: 650px; padding: 18px 10px; }
+    .review-layout { display: block; min-height: 0; }
+    .review-connectors { display: none; }
+    .review-margin { margin-top: 14px; }
+    .review-thread-list { display: grid; gap: 9px; min-height: 0; padding-top: 10px; }
+    .review-thread-list :global(.review-comment-card) { position: relative; inset: auto; }
+    .review-code-head { align-items: flex-start; flex-direction: column; gap: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .review-highlights :global(rect), .review-connectors :global(path),
+    .review-thread-list :global(.review-comment-card) { transition: none; }
+  }
+</style>

@@ -57,10 +57,6 @@ export interface RenderDocumentOptions {
    *  render). Provide a fixed value to make DATE/TIME field output deterministic
    *  (e.g. in tests / reproducible exports). */
   currentDate?: Date | number;
-  /** ECMA-376 §17.13.5 tracked-change view: `true` = markup view (revision
-   *  decoration + change bars), absent/false = final view (deletions hidden).
-   *  Selects the cached layout variant — see RenderPageOptions. */
-  showTrackedChanges?: boolean;
   /** Internal per-document service snapshot. Public render options never expose it. */
   layoutServices?: LayoutServices;
   /** Internal load-time default captured once and mirrored into worker mode. */
@@ -107,7 +103,6 @@ function normalizeRenderOptions(
   const selection = selectDocumentLayoutPage(services, {
     currentDate: options.currentDate,
     defaultCurrentDateMs,
-    showTrackedChanges: options.showTrackedChanges,
   }, pageIndex);
   const scale = canvasPageScale(selection.page, options.width);
   return {

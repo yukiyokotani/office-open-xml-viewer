@@ -1,4 +1,4 @@
-import type { DimOptions } from './types';
+import type { DimOptions, PptxComment } from './types';
 import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import {
@@ -442,6 +442,17 @@ export class PptxPresentation {
     return Number.isInteger(slideIndex)
       ? (this._preflight?.slides[slideIndex]?.notes ?? null)
       : null;
+  }
+
+  /** Read-only slide comments in authored order. Classic and modern comments
+   * share this compact mode-independent projection; modern replies remain
+   * nested under their root. Use it for fully custom UI, or opt into the
+   * ScrollViewer's marker-and-card view. Returns `[]` for an invalid or
+   * comment-free slide. */
+  getComments(slideIndex: number): readonly Readonly<PptxComment>[] {
+    return Number.isInteger(slideIndex)
+      ? (this._preflight?.slides[slideIndex]?.comments ?? [])
+      : [];
   }
 
   /**

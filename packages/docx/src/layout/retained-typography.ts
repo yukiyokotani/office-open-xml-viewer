@@ -134,14 +134,7 @@ export function retainedTextDecorations(input: Readonly<{
   base: RetainedInkMetric;
   color: string;
   underline?: Readonly<{ authoredStyle?: string; color: string; probe: RetainedInkMetric }>;
-  strike?: Readonly<{
-    double: boolean;
-    probe: RetainedInkMetric;
-    doubleProbe?: RetainedInkMetric;
-    /** Stroke colour override (markup-view revision strikes use the stable
-     *  author colour); absent = the run text colour. */
-    color?: string;
-  }>;
+  strike?: Readonly<{ double: boolean; probe: RetainedInkMetric; doubleProbe?: RetainedInkMetric }>;
 }>): readonly TextDecorationLayout[] {
   const decorations: TextDecorationLayout[] = [];
   const rightPt = input.origin.xPt + input.advancePt;
@@ -181,19 +174,18 @@ export function retainedTextDecorations(input: Readonly<{
   }
   if (input.strike) {
     const strokeWidthPt = inkStrokeWidth(input.strike.probe);
-    const strikeColor = input.strike.color ?? input.color;
     if (input.strike.double && input.strike.doubleProbe) {
       const topPt = input.origin.yPt + inkTop(input.strike.doubleProbe) + strokeWidthPt / 2;
       const bottomPt = input.origin.yPt + inkBottom(input.strike.doubleProbe) - strokeWidthPt / 2;
       for (const yPt of [topPt, bottomPt]) decorations.push({
-        kind: 'strikethrough', color: strikeColor, widthPt: strokeWidthPt, style: 'solid',
+        kind: 'strikethrough', color: input.color, widthPt: strokeWidthPt, style: 'solid',
         from: { xPt: input.origin.xPt, yPt }, to: { xPt: rightPt, yPt },
       });
     } else {
       const yPt = input.origin.yPt
         + (inkTop(input.strike.probe) + inkBottom(input.strike.probe)) / 2;
       decorations.push({
-        kind: 'strikethrough', color: strikeColor, widthPt: strokeWidthPt, style: 'solid',
+        kind: 'strikethrough', color: input.color, widthPt: strokeWidthPt, style: 'solid',
         from: { xPt: input.origin.xPt, yPt }, to: { xPt: rightPt, yPt },
       });
     }

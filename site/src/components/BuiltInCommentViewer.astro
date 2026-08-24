@@ -1,0 +1,55 @@
+<div class="built-in-comment-demo">
+  <p class="built-in-comment-demo__status" data-built-in-comment-status>Loading sample-1.docx…</p>
+  <div
+    class="built-in-comment-demo__viewer"
+    data-built-in-comment-viewer
+    aria-label="DOCX with the built-in read-only comment margin"
+  ></div>
+</div>
+
+<script>
+  import { DocxScrollViewer } from '@silurus/ooxml-docx';
+
+  const base = import.meta.env.BASE_URL;
+  const source = `${base}samples/sample-1.docx`.replace(/([^:])\/\/+/g, '$1/');
+
+  for (const host of document.querySelectorAll<HTMLElement>('[data-built-in-comment-viewer]')) {
+    if (host.dataset.mounted === '1') continue;
+    host.dataset.mounted = '1';
+    const status = host.parentElement?.querySelector<HTMLElement>('[data-built-in-comment-status]');
+    const viewer = new DocxScrollViewer(host, {
+      showComments: true,
+      useGoogleFonts: true,
+    });
+    void viewer.load(source).then(() => {
+      status?.remove();
+      viewer.scrollToPage(1);
+    }).catch((error: unknown) => {
+      if (status) status.textContent = error instanceof Error ? error.message : 'Unable to load the sample.';
+    });
+    window.addEventListener('pagehide', () => viewer.destroy(), { once: true });
+  }
+</script>
+
+<style>
+  .built-in-comment-demo {
+    position: relative;
+    min-height: 640px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--preview-bottom);
+  }
+  .built-in-comment-demo__viewer { height: min(76vh, 720px); }
+  .built-in-comment-demo__status {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    color: var(--text-dim);
+    background: var(--preview-bottom);
+    font: 500 12px/1.5 var(--mono);
+  }
+</style>

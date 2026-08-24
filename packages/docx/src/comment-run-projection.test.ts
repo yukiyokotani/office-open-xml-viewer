@@ -6,9 +6,9 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { textRunsForPage } from './text-run-projection.js';
 
-// ECMA-376 §17.13.4 comment overlays join projected run geometry back to
+// ECMA-376 §17.13.4 consumer UIs join projected run geometry back to
 // model runs via (source.path, sourceRunIndex). Pin that both survive the
-// projection for every text run, so `collectDocumentCommentRanges` intervals
+// projection for every text run, so `commentAnchorRanges()` intervals
 // can be mapped onto `DocxTextRunInfo` geometry without layout threading.
 
 function makeCtx(): CanvasRenderingContext2D {

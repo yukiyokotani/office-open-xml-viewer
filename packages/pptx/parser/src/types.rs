@@ -105,6 +105,22 @@ pub(crate) struct SlideElementSource {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PptxComment {
+    /// `<cm @authorId>` — author-list identifier. Required by ECMA-376
+    /// §19.4.1, but optional here so a malformed comment can still degrade to
+    /// its text instead of poisoning the slide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_id: Option<u32>,
+    /// Modern `p188:cm@authorId` ([MS-PPTX] §2.16). Kept separate from the
+    /// classic decimal `authorId` so adding modern comments does not change the
+    /// existing public field's type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) modern_author_id: Option<String>,
+    /// Modern `p188:cm@id`. Classic identity remains `(authorId, idx)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    /// `<cm @idx>` — identifier unique among this author's comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index: Option<u32>,
     /// Resolved author name from `ppt/commentAuthors.xml` (`<cmAuthor @id>`
     /// matches `<cm @authorId>`). `None` when authors file is missing or
     /// authorId is out of range.
@@ -113,7 +129,37 @@ pub(crate) struct PptxComment {
     /// `<cm @dt>` — ISO-8601 date string when the comment was authored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) date: Option<String>,
-    /// Plain-text body from `<p:text>`.
+    /// `<p:pos @x/@y>` comment anchor on the slide surface, in EMU
+    /// (ECMA-376 §19.4.5). Each coordinate remains independently optional for
+    /// malformed input; the standard requires both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) x: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) y: Option<i64>,
+    /// Modern `p188:cm@status`; omitted for classic comments. The schema
+    /// defaults a missing value to `active`, so the parser resolves that value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
+    /// Plain-text body from classic `<p:text>` or modern `<p188:txBody>`.
+    pub(crate) text: String,
+    /// Modern threaded replies in authored order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) replies: Vec<PptxCommentReply>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PptxCommentReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
     pub(crate) text: String,
 }
 
@@ -376,7 +422,7 @@ pub(crate) struct ShapeElement {
     pub(crate) fill: Option<Fill>,
     pub(crate) stroke: Option<Stroke>,
     pub(crate) text_body: Option<TextBody>,
-    /// ECMA-376 §19.3.1.21 `p:cNvSpPr/@txBox`. True means this shape is
+    /// ECMA-376 §19.3.1.13 `p:cNvSpPr/@txBox`. True means this shape is
     /// specifically a text box; regular shapes may still carry `text_body`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) is_text_box: bool,

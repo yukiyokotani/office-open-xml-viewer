@@ -32,6 +32,7 @@
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
     "./internal/resource-measurement": "./src/internal/resource-measurement.ts",
+    "./internal/read-only-comment-margin": "./src/internal/read-only-comment-margin.ts",
     "./internal/runtime-generation": "./src/internal/runtime-generation.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",

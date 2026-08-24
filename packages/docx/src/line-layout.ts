@@ -227,12 +227,6 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
-  /** Markup-view revision decoration facts (set only when the layout variant
-   *  has `showTrackedChanges`): the revision kind plus the resolved stable
-   *  author colour. Read by the retained decoration planner to synthesize the
-   *  author-coloured underline (insertion/moveTo) or strikethrough
-   *  (deletion/moveFrom), per the `word-track-change-decoration` rule. */
-  trackChangesMarkup?: Readonly<{ kind: string; authorColor: string }>;
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — run carries right-to-left characteristics.
    *  When true the segment's text is treated as a strong-RTL embedding in the
    *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
@@ -663,15 +657,6 @@ export interface LineLayoutEnvironment {
   readonly displayPageNumber?: number;
   readonly pageNumberFormat?: NumberFormat;
   readonly currentDateMs?: number;
-  /** ECMA-376 §17.13.5 tracked-change view. `true` = markup view: revision
-   * content stays visible for author-coloured decoration. Absent/false =
-   * final view: deleted (`w:del`) and moved-away (`w:moveFrom`) runs produce
-   * no segments, so line breaking sees the accepted document state. */
-  readonly showTrackedChanges?: boolean;
-  /** Markup-view author → stable palette colour (layout/track-changes.ts
-   * first-appearance policy over the compatibility palette). Present only
-   * when the markup variant is being built. */
-  readonly revisionAuthorColor?: (author?: string) => string;
   readonly noteNumbers?: ReadonlyMap<string, number>;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
@@ -2731,6 +2716,7 @@ export function buildSegments(
     vertAlign: 'super' | 'sub' | null,
     sourceRunIndex: number,
     sourceFragmentIndex?: number,
+    joinPreviousRun = false,
   ) => {
     const r: ParagraphTextBearingRun = base;
     const acquiredTypography = (r as ParagraphTextBearingRun & Readonly<{
@@ -3129,7 +3115,14 @@ export function buildSegments(
         textShapeRequest,
         breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,
         smallCaps: reduced,
-        joinPrev: gluePending || authoritativeSpan?.breakBefore === false ? true : undefined,
+        joinPrev: (
+          (firstSeg && (
+            (r as DocxTextRun & { __noBreakBefore?: boolean }).__noBreakBefore === true
+            || joinPreviousRun
+          ))
+          || gluePending
+          || authoritativeSpan?.breakBefore === false
+        ) ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
         // §17.3.2.12 w:em — carried on both DocxTextRun and FieldRun (a field's
@@ -3140,12 +3133,6 @@ export function buildSegments(
         border: r.border ?? null,
         ruby: firstSeg ? ruby : undefined,
         revision,
-        ...(revision && environment.showTrackedChanges === true ? {
-          trackChangesMarkup: {
-            kind: revision.kind,
-            authorColor: environment.revisionAuthorColor?.(revision.author) ?? '#C00000',
-          },
-        } : {}),
         rtl,
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — used by text-box line floors and
@@ -3288,20 +3275,22 @@ export function buildSegments(
     }
   };
 
+  let joinNextVisibleText = false;
   for (const [runIndex, run] of runs.entries()) {
-    // ECMA-376 §17.13.5 final view (the default): deleted (`w:del`,
+    // ECMA-376 §17.13.5 final content projection: deleted (`w:del`,
     // §17.13.5.14) and moved-away (`w:moveFrom`, §17.13.5.22) content is not
     // part of the document's final state, so no segment is produced and line
-    // breaking/pagination see the text as an accepted document. The markup
-    // view (`showTrackedChanges`) keeps every revision run visible so it can
-    // be decorated. Insertions/moveTo render in both views.
+    // breaking/pagination see the accepted document state. Revision metadata
+    // remains available through the parsed model for consumer-owned review UI.
     const runRevisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
     if (
-      environment.showTrackedChanges !== true
-      && (runRevisionKind === 'deletion' || runRevisionKind === 'moveFrom')
+      runRevisionKind === 'deletion' || runRevisionKind === 'moveFrom'
     ) {
       continue;
     }
+    const joinFromPreviousNoBreakHyphen = joinNextVisibleText;
+    joinNextVisibleText = run.type === 'text'
+      && (run as DocxTextRun & { __noBreakAfter?: boolean }).__noBreakAfter === true;
     const emittedStart = segs.length;
     if (run.type === 'text') {
       const t = run as unknown as DocxTextRun & { type: 'text' };
@@ -3318,7 +3307,14 @@ export function buildSegments(
       if (t.noteRef) {
         const label = noteText != null ? String(noteText) : (t.text || '');
         if (label.length > 0) {
-          pushTextPiece(label, t, t.vertAlign ?? 'super', runIndex, 0);
+          pushTextPiece(
+            label,
+            t,
+            t.vertAlign ?? 'super',
+            runIndex,
+            0,
+            joinFromPreviousNoBreakHyphen,
+          );
         }
         for (let index = emittedStart; index < segs.length; index += 1) {
           segs[index].sourceRunIndex = runIndex;
@@ -3329,7 +3325,14 @@ export function buildSegments(
       const parts = t.text.split('\t');
       for (let i = 0; i < parts.length; i++) {
         if (parts[i].length > 0) {
-          pushTextPiece(parts[i], t, t.vertAlign, runIndex, i);
+          pushTextPiece(
+            parts[i],
+            t,
+            t.vertAlign,
+            runIndex,
+            i,
+            i === 0 && joinFromPreviousNoBreakHyphen,
+          );
         }
         if (i < parts.length - 1) {
           segs.push({
@@ -3430,7 +3433,16 @@ export function buildSegments(
     } else if (run.type === 'field') {
       const f = run as unknown as FieldRun & { type: 'field' };
       const text = resolveFieldText(f, environment);
-      if (text) pushTextPiece(text, f, f.vertAlign, runIndex);
+      if (text) {
+        pushTextPiece(
+          text,
+          f,
+          f.vertAlign,
+          runIndex,
+          undefined,
+          joinFromPreviousNoBreakHyphen,
+        );
+      }
     } else if (run.type === 'math') {
       // The parser resolves the paragraph font size; fall back to a nearby run only
       // if it is somehow absent.

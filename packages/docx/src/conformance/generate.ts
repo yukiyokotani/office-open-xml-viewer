@@ -435,6 +435,10 @@ const REL_COMMENTS =
   'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments';
 const REL_COMMENTS_EXTENDED =
   'http://schemas.microsoft.com/office/2011/relationships/commentsExtended';
+const REL_FOOTNOTES =
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes';
+const REL_ENDNOTES =
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes';
 const W14_NS = 'http://schemas.microsoft.com/office/word/2010/wordml';
 const W15_NS = 'http://schemas.microsoft.com/office/word/2012/wordml';
 
@@ -452,17 +456,32 @@ const FIXTURE_STYLES = `<w:styles xmlns:w="${WORD_NS}">
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
 </w:styles>`;
 
-function fixtureContentTypes(withComments: boolean): Uint8Array {
-  const commentOverrides = withComments
-    ? `<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
-       <Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>`
-    : '';
+function fixtureContentTypes(extra: ReadonlyMap<string, Uint8Array>): Uint8Array {
+  const commentOverrides = `${extra.has('word/comments.xml')
+    ? '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+    : ''}${extra.has('word/commentsExtended.xml')
+    ? '<Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>'
+    : ''}`;
+  const storyOverrides = [
+    extra.has('word/header1.xml')
+      ? '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+      : '',
+    extra.has('word/footer1.xml')
+      ? '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
+      : '',
+    extra.has('word/footnotes.xml')
+      ? '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+      : '',
+    extra.has('word/endnotes.xml')
+      ? '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>'
+      : '',
+  ].join('');
   return xml(`<Types xmlns="${CONTENT_TYPES_NS}">
     <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
     <Default Extension="xml" ContentType="application/xml"/>
     <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
     <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-    ${commentOverrides}
+    ${commentOverrides}${storyOverrides}
   </Types>`);
 }
 
@@ -470,9 +489,10 @@ function fixtureParts(
   documentBody: string,
   extra: ReadonlyMap<string, Uint8Array> = new Map(),
   extraRelationships = '',
+  section = FIXTURE_SECTION,
 ): ReadonlyMap<string, Uint8Array> {
   const parts = new Map<string, Uint8Array>([
-    ['[Content_Types].xml', fixtureContentTypes(extra.has('word/comments.xml'))],
+    ['[Content_Types].xml', fixtureContentTypes(extra)],
     ['_rels/.rels', xml(`<Relationships xmlns="${PACKAGE_REL_NS}">
       <Relationship Id="rId1" Type="${REL_OFFICE_DOCUMENT}" Target="word/document.xml"/>
     </Relationships>`)],
@@ -480,8 +500,9 @@ function fixtureParts(
       <Relationship Id="rIdStyles" Type="${REL_STYLES}" Target="styles.xml"/>
       ${extraRelationships}
     </Relationships>`)],
-    ['word/document.xml', xml(`<w:document xmlns:w="${WORD_NS}" xmlns:w14="${W14_NS}">
-      <w:body>${documentBody}${FIXTURE_SECTION}</w:body>
+    ['word/document.xml', xml(`<w:document xmlns:w="${WORD_NS}" xmlns:w14="${W14_NS}"
+      xmlns:r="${OFFICE_REL_NS}" xmlns:v="urn:schemas-microsoft-com:vml">
+      <w:body>${documentBody}${section}</w:body>
     </w:document>`)],
     ['word/styles.xml', xml(FIXTURE_STYLES)],
     ...extra,
@@ -492,9 +513,9 @@ function fixtureParts(
 
 /**
  * A document exercising every §17.13.5 run-revision kind: an insertion and a
- * deletion by Alice, and a Bob move rendered as its moveFrom/moveTo pair. The
- * final view shows "Kept inserted moved-in tail"; the markup view additionally
- * shows " deleted" (struck) and "moved-in " at its source (struck).
+ * deletion by Alice, and a Bob move represented by its moveFrom/moveTo pair.
+ * The rendered final state is "Kept inserted moved-in tail"; all four revision
+ * kinds remain available in the parsed model for consumer-owned review UI.
  */
 export function generateTrackedChangesDocx(): Uint8Array {
   const body = `
@@ -505,12 +526,16 @@ export function generateTrackedChangesDocx(): Uint8Array {
       <w:del w:id="2" w:author="Alice" w:date="2024-01-02T00:00:00Z">
         <w:r><w:delText xml:space="preserve">deleted </w:delText></w:r>
       </w:del>
+      <w:moveFromRangeStart w:id="30" w:name="move1" w:author="Bob" w:date="2024-01-03T00:00:00Z"/>
       <w:moveFrom w:id="3" w:author="Bob" w:date="2024-01-03T00:00:00Z">
         <w:r><w:t xml:space="preserve">moved-in </w:t></w:r>
       </w:moveFrom>
+      <w:moveFromRangeEnd w:id="30"/>
+      <w:moveToRangeStart w:id="40" w:name="move1" w:author="Bob" w:date="2024-01-03T00:00:00Z"/>
       <w:moveTo w:id="4" w:author="Bob" w:date="2024-01-03T00:00:00Z">
         <w:r><w:t xml:space="preserve">moved-in </w:t></w:r>
       </w:moveTo>
+      <w:moveToRangeEnd w:id="40"/>
       <w:r><w:t>tail</w:t></w:r>
     </w:p>
     <w:p><w:r><w:t>Unrevised second paragraph.</w:t></w:r></w:p>`;
@@ -520,7 +545,7 @@ export function generateTrackedChangesDocx(): Uint8Array {
 /**
  * A document exercising §17.13.4 comment anchors with commentsExtended
  * threading: comment 1 (Alice) with a reply (Bob) anchored on a mid-paragraph
- * range, and a RESOLVED comment 3 (Carol) whose thread the margin hides.
+ * range, and a resolved comment 3 (Carol).
  */
 export function generateCommentedDocx(): Uint8Array {
   const body = `
@@ -563,4 +588,57 @@ export function generateCommentedDocx(): Uint8Array {
     `<Relationship Id="rIdComments" Type="${REL_COMMENTS}" Target="comments.xml"/>
      <Relationship Id="rIdCommentsExtended" Type="${REL_COMMENTS_EXTENDED}" Target="commentsExtended.xml"/>`,
   ));
+}
+
+/** A real-parser fixture with one valid comment anchor in every retained DOCX
+ * story: body, header, footer, footnote, endnote, and a VML text box. */
+export function generateAllStoryCommentsDocx(): Uint8Array {
+  const anchored = (id: number, text: string): string => `<w:p>
+    <w:commentRangeStart w:id="${id}"/>
+    <w:r><w:t>${text}</w:t></w:r>
+    <w:commentRangeEnd w:id="${id}"/>
+    <w:r><w:commentReference w:id="${id}"/></w:r>
+  </w:p>`;
+  const body = `${anchored(1, 'Body anchor')}
+    <w:p>
+      <w:r><w:footnoteReference w:id="1"/></w:r>
+      <w:r><w:t xml:space="preserve"> </w:t></w:r>
+      <w:r><w:endnoteReference w:id="1"/></w:r>
+    </w:p>
+    <w:p><w:r><w:pict>
+      <v:shape id="review-textbox" type="#_x0000_t202"
+        style="position:relative;width:180pt;height:36pt" filled="f" stroked="f">
+        <v:textbox><w:txbxContent>${anchored(6, 'Text box anchor')}</w:txbxContent></v:textbox>
+      </v:shape>
+    </w:pict></w:r></w:p>`;
+  const comments = xml(`<w:comments xmlns:w="${WORD_NS}">
+    ${[1, 2, 3, 4, 5, 6].map((id) => `<w:comment w:id="${id}" w:author="Reviewer">
+      <w:p><w:r><w:t>Comment ${id}</w:t></w:r></w:p>
+    </w:comment>`).join('')}
+  </w:comments>`);
+  const extra = new Map<string, Uint8Array>([
+    ['word/comments.xml', comments],
+    ['word/header1.xml', xml(`<w:hdr xmlns:w="${WORD_NS}">${anchored(2, 'Header anchor')}</w:hdr>`)],
+    ['word/footer1.xml', xml(`<w:ftr xmlns:w="${WORD_NS}">${anchored(3, 'Footer anchor')}</w:ftr>`)],
+    ['word/footnotes.xml', xml(`<w:footnotes xmlns:w="${WORD_NS}">
+      <w:footnote w:id="1">${anchored(4, 'Footnote anchor')}</w:footnote>
+    </w:footnotes>`)],
+    ['word/endnotes.xml', xml(`<w:endnotes xmlns:w="${WORD_NS}">
+      <w:endnote w:id="1">${anchored(5, 'Endnote anchor')}</w:endnote>
+    </w:endnotes>`)],
+  ]);
+  const relationships = `
+    <Relationship Id="rIdComments" Type="${REL_COMMENTS}" Target="comments.xml"/>
+    <Relationship Id="rIdHeader" Type="${REL_HEADER}" Target="header1.xml"/>
+    <Relationship Id="rIdFooter" Type="${REL_FOOTER}" Target="footer1.xml"/>
+    <Relationship Id="rIdFootnotes" Type="${REL_FOOTNOTES}" Target="footnotes.xml"/>
+    <Relationship Id="rIdEndnotes" Type="${REL_ENDNOTES}" Target="endnotes.xml"/>`;
+  const section = `<w:sectPr>
+    <w:headerReference w:type="default" r:id="rIdHeader"/>
+    <w:footerReference w:type="default" r:id="rIdFooter"/>
+    <w:pgSz w:w="12240" w:h="15840"/>
+    <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+      w:header="720" w:footer="720" w:gutter="0"/>
+  </w:sectPr>`;
+  return storeZip(fixtureParts(body, extra, relationships, section));
 }

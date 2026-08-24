@@ -81,6 +81,36 @@ describe('PresentationPreflightBuilder', () => {
     expect(facts.slides[0].mediaElements[0].mediaPath).toBe('ppt/media/movie.mp4');
   });
 
+  it('retains detached classic and modern comments only on commented slides', () => {
+    const first = slide(0, 'commented', {
+      comments: [{
+        id: '{ROOT}',
+        modernAuthorId: '{ADA}',
+        author: 'Ada',
+        date: '2026-08-24T12:00:00Z',
+        x: 6096000,
+        y: 3429000,
+        status: 'active',
+        text: 'Root',
+        replies: [{
+          id: '{REPLY}', authorId: '{BOB}', author: 'Bob', status: 'active', text: 'Reply',
+        }],
+      }],
+    });
+    const builder = new PresentationPreflightBuilder(bootstrap);
+    builder.addSlide(first);
+    builder.addSlide(slide(1, 'plain'));
+    const facts = builder.finish();
+
+    expect(facts.slides[0].comments).toEqual(first.comments);
+    expect(facts.slides[1]).not.toHaveProperty('comments');
+    expect(Object.isFrozen(facts.slides[0].comments)).toBe(true);
+    expect(Object.isFrozen(facts.slides[0].comments?.[0])).toBe(true);
+    expect(Object.isFrozen(facts.slides[0].comments?.[0]?.replies?.[0])).toBe(true);
+    first.comments![0]!.text = 'mutated';
+    expect(facts.slides[0].comments?.[0]?.text).toBe('Root');
+  });
+
   it('aggregates exactly the same Google-font names as the full Presentation', () => {
     const slides = [slide(0, '漢字 العربية'), slide(1, '한국어 Привет')];
     const builder = new PresentationPreflightBuilder(bootstrap);

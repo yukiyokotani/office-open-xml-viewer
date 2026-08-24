@@ -479,7 +479,7 @@ describe('page-size fact (§17.6.13/§17.6.11) — canonical page geometry', () 
     };
 
     // Worker branch: reads _meta.pageSizes with clamp; returns a COPY.
-    const meta = { pageCount: 2, comments: [], footnotes: [], endnotes: [],
+    const meta = { pageCount: 2, revisions: [], comments: [], footnotes: [], endnotes: [],
       pageSizes: [{ widthPt: 200, heightPt: 140 }, { widthPt: 140, heightPt: 200 }] };
     const w = make({ _meta: meta });
     expect(w.pageSize(0)).toEqual({ widthPt: 200, heightPt: 140 });

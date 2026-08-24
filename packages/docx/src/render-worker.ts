@@ -32,7 +32,8 @@ import {
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { collectDocumentCommentRanges } from './comment-margin-layout.js';
+import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
+import { collectLayoutSourceRevisionRangesIfPresent } from './revisions.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
@@ -48,6 +49,7 @@ import {
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
+import { textRunSourceIndexForDocument } from './layout/text-index.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
@@ -249,16 +251,27 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         widthPt: page.geometry.widthPt,
         heightPt: page.geometry.heightPt,
       }));
+      const renderedRunIndex = textRunSourceIndexForDocument(layout);
       const meta: DocumentMeta = {
         pageCount: layout.pages.length,
+        revisions: model.revisions ?? [],
         comments: model.comments ?? [],
         footnotes: model.footnotes ?? [],
         endnotes: model.endnotes ?? [],
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(layout)],
-        // §17.13.4 — anchor ranges from the same pure walker main mode uses,
-        // so the comment margin overlay is mode-agnostic.
-        commentAnchorRanges: collectDocumentCommentRanges(model.body ?? []),
+        // §17.13.4 — story-aware anchor ranges use the exact retained source
+        // identities shipped by projected text runs in both modes.
+        commentAnchorRanges: collectLayoutSourceCommentRangesIfPresent(
+          model.comments,
+          source,
+          renderedRunIndex,
+        ),
+        revisionAnchorRanges: collectLayoutSourceRevisionRangesIfPresent(
+          model.revisions,
+          source,
+          renderedRunIndex,
+        ),
       };
       const loadedArchive = host.archive;
       if (!loadedArchive) throw new Error('No docx loaded');

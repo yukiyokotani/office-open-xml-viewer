@@ -1,0 +1,43 @@
+---
+import Base from '../../layouts/Base.astro';
+import Nav from '../../components/Nav.astro';
+import BuiltInCommentViewer from '../../components/BuiltInCommentViewer.astro';
+---
+
+<Base
+  title="Built-in DOCX comment margin | @silurus/ooxml"
+  description="Preview the default read-only comment cards in DocxScrollViewer."
+  canonicalPath="/review-ui/default/"
+>
+  <Nav active="docx" />
+  <main class="default-comment-preview">
+    <header>
+      <div>
+        <a href="/review-ui">← Review UI guide</a>
+        <h1>Built-in comment margin</h1>
+      </div>
+      <p>Default <code>DocxScrollViewer</code> UI · <code>showComments: true</code></p>
+    </header>
+    <BuiltInCommentViewer />
+  </main>
+</Base>
+
+<style>
+  .default-comment-preview { padding: 18px 24px 24px; }
+  header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 20px;
+    max-width: 1120px;
+    margin: 0 auto 14px;
+  }
+  header a { color: var(--text-faint); font: 12px var(--mono); }
+  h1 { margin: 5px 0 0; font-size: clamp(24px, 4vw, 36px); }
+  header p { margin: 0; color: var(--text-dim); font-size: 13px; }
+  :global(.built-in-comment-demo) { max-width: 1120px; min-height: 0; margin: 0 auto; }
+  :global(.built-in-comment-demo__viewer) { height: calc(100vh - 190px); min-height: 520px; }
+  @media (max-width: 720px) {
+    header { align-items: flex-start; flex-direction: column; gap: 8px; }
+  }
+</style>

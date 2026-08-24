@@ -27,8 +27,6 @@ import {
   limitDocxElementContext,
   MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
 } from './element-context';
-import { buildCommentThreads, type CommentThread } from './comment-margin-layout';
-import { buildDocxCommentLayer } from './comment-layer';
 
 const borrowedDocumentOption = Symbol('DocxViewer.borrowedDocument');
 type InternalDocxViewerOptions = DocxViewerOptions & {
@@ -85,20 +83,6 @@ export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>,
    *  text. Set it to disable clickable links entirely — e.g. in a preview where
    *  navigation must not leave the current view. */
   enableHyperlinks?: boolean;
-  /**
-   * ECMA-376 §17.13.4 — draw comment threads as balloons in a margin gutter
-   * to the RIGHT of the page, with the commented ranges tinted and connector
-   * lines from each anchor. Default `false`: no gutter is reserved and no
-   * comment DOM is built (comments stay reachable as data via
-   * `DocxDocument.comments`). Resolved threads (`w15:done`) are hidden.
-   * Clicking a balloon selects its thread (stronger tint + full balloon
-   * height); clicking again deselects. Toggle at runtime with
-   * {@link DocxViewer.setShowComments}.
-   */
-  showComments?: boolean;
-  /** Width (CSS px) of the comment margin gutter reserved beside the page
-   *  when {@link showComments} is on. Default 260. */
-  commentsGutterWidth?: number;
   /**
    * Receives asynchronous Viewer-managed failures that cannot be observed by
    * awaiting the method that started them. Failures from `load()`, including
@@ -157,13 +141,6 @@ export class DocxViewer implements ZoomableViewer {
   private _elementHitGeneration = 0;
   private _elementClickListener: ((event: MouseEvent) => void) | null = null;
   private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
-  /** §17.13.4 comment margin overlays (present only while `showComments`). */
-  private _commentTintLayer: HTMLDivElement | null = null;
-  private _commentGutterLayer: HTMLDivElement | null = null;
-  /** Selected comment thread (root id), or null. */
-  private _selectedCommentId: string | null = null;
-  /** Per-document thread cache (built from `doc.comments` on first use). */
-  private _commentThreads: readonly CommentThread[] | null = null;
   /**
    * Create a Viewer that borrows an already-loaded document.
    *
@@ -227,7 +204,6 @@ export class DocxViewer implements ZoomableViewer {
       this._contextMenuListener = (event) => this._onContextMenu(event);
       this._wrapper.addEventListener('contextmenu', this._contextMenuListener);
     }
-    if (opts.showComments === true) this._installCommentLayers();
 
     this._find = new DocxFindController(
       () => this.pageCount,
@@ -284,11 +260,8 @@ export class DocxViewer implements ZoomableViewer {
       if (!doc) return;
       if (this._destroyed) throw new Error('DocxViewer is destroyed');
       this._currentPage = 0;
-      // A new document invalidates any prior find state (cached runs / matches)
-      // and the per-document comment threads/selection.
+      // A new document invalidates any prior find state (cached runs / matches).
       this._find.invalidate();
-      this._commentThreads = null;
-      this._selectedCommentId = null;
       await this._render();
     } catch (err) {
       if (this._destroyed) throw new Error('DocxViewer is destroyed');
@@ -606,7 +579,6 @@ export class DocxViewer implements ZoomableViewer {
         yPt: localY / rect.height * pageSize.heightPt,
       }, {
         currentDate: this._opts.currentDate,
-        showTrackedChanges: this._opts.showTrackedChanges,
         maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
       });
     } catch (error) {
@@ -706,7 +678,6 @@ export class DocxViewer implements ZoomableViewer {
         dpr: this._opts.dpr,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._opts.currentDate,
-        showTrackedChanges: this._opts.showTrackedChanges,
         onTextRun,
       });
       // The bitmap is sized in device px; mirror the main renderer by setting
@@ -728,102 +699,7 @@ export class DocxViewer implements ZoomableViewer {
     // geometry matches exactly what was drawn, then (re)draw the highlights.
     this._find.setPageRuns(this._currentPage, runs);
     this._buildHighlightLayer(runs);
-    this._buildCommentLayer(runs);
     this._opts.onPageChange?.(this._currentPage, this.pageCount);
-  }
-
-  // ─── §17.13.4 comment margin ──────────────────────────────────────────────
-
-  private _commentsGutterWidth(): number {
-    return this._opts.commentsGutterWidth ?? 260;
-  }
-
-  /** Mount the tint + gutter layers and reserve the gutter beside the page.
-   *  The gutter is a MARGIN on the wrapper (not padding): the existing overlay
-   *  layers resolve `width:100%` against the wrapper's content box, so padding
-   *  would desync their percent geometry from the canvas. */
-  private _installCommentLayers(): void {
-    if (this._commentGutterLayer) return;
-    const doc = this._wrapper.ownerDocument ?? document;
-    const tint = doc.createElement('div');
-    tint.style.cssText =
-      'position:absolute;top:0;left:0;width:100%;height:100%;'
-      + 'overflow:hidden;pointer-events:none;';
-    this._wrapper.appendChild(tint);
-    const gutter = doc.createElement('div');
-    gutter.style.cssText =
-      `position:absolute;top:0;left:100%;width:${this._commentsGutterWidth()}px;height:100%;`
-      + 'overflow:visible;pointer-events:none;';
-    this._wrapper.appendChild(gutter);
-    this._commentTintLayer = tint;
-    this._commentGutterLayer = gutter;
-    this._wrapper.style.marginRight = `${this._commentsGutterWidth()}px`;
-  }
-
-  private _removeCommentLayers(): void {
-    this._commentTintLayer?.remove();
-    this._commentGutterLayer?.remove();
-    this._commentTintLayer = null;
-    this._commentGutterLayer = null;
-    this._wrapper.style.marginRight = '';
-    this._selectedCommentId = null;
-  }
-
-  /** (Re)build the comment margin for the current page from its projected
-   *  runs. No-op (cleared layers) while the option is off. */
-  private _buildCommentLayer(runs: DocxTextRunInfo[]): void {
-    const tint = this._commentTintLayer;
-    const gutter = this._commentGutterLayer;
-    if (!tint || !gutter) return;
-    const doc = this._doc;
-    if (!doc) {
-      tint.innerHTML = '';
-      gutter.innerHTML = '';
-      return;
-    }
-    this._commentThreads ??= buildCommentThreads(doc.comments);
-    const { width, height } = this._canvasCssPx();
-    buildDocxCommentLayer(
-      tint,
-      gutter,
-      runs,
-      { threads: this._commentThreads, ranges: doc.commentAnchorRanges() },
-      { cssWidth: width, cssHeight: height, gutterWidthPx: this._commentsGutterWidth() },
-      this._selectedCommentId,
-      (commentId) => {
-        this._selectedCommentId = commentId;
-        const cached = this._find.pageRuns(this._currentPage);
-        this._buildCommentLayer(cached ? [...cached] : runs);
-      },
-    );
-  }
-
-  /**
-   * ECMA-376 §17.13.5 — switch between the final view (`false`, the default:
-   * deletions hidden) and the markup view (`true`: author-coloured revision
-   * decoration + margin change bars) at runtime, re-rendering the current
-   * page against the selected layout variant. Find results are invalidated:
-   * the visible text differs between the views.
-   */
-  async setShowTrackedChanges(value: boolean): Promise<void> {
-    if ((this._opts.showTrackedChanges === true) === value) return;
-    this._opts = { ...this._opts, showTrackedChanges: value };
-    this._find.invalidate();
-    await this._render();
-  }
-
-  /** §17.13.4 — toggle the comment margin at runtime. Turning it on reserves
-   *  the gutter and builds the balloons for the current page; turning it off
-   *  removes the gutter and every comment overlay. */
-  async setShowComments(value: boolean): Promise<void> {
-    if ((this._opts.showComments === true) === value) return;
-    this._opts = { ...this._opts, showComments: value };
-    if (!value) {
-      this._removeCommentLayers();
-      return;
-    }
-    this._installCommentLayers();
-    await this._render();
   }
 
   /** Draw the find-highlight boxes for the current page from its runs. Clears
@@ -883,7 +759,6 @@ export class DocxViewer implements ZoomableViewer {
     return this._doc.collectPageRuns(page, {
       width: this._renderWidth(),
       currentDate: this._opts.currentDate,
-      showTrackedChanges: this._opts.showTrackedChanges,
     });
   }
 

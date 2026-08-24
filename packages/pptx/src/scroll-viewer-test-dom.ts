@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import type { PptxPresentation, PresentSlideOptions, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
+import type { PptxComment } from './types';
 import type {
   PptxElementContextOptions,
   PptxElementContext,
@@ -67,6 +68,9 @@ export interface FakeEl {
    *  freshly-created spare canvas from the on-screen one it replaces. */
   _uid: number;
   appendChild(c: FakeEl): FakeEl;
+  append(...children: FakeEl[]): void;
+  replaceChildren(...children: FakeEl[]): void;
+  setAttribute(name: string, value: string): void;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
   contains(other: FakeEl | null): boolean;
@@ -131,6 +135,20 @@ export function makeEl(tag: string): FakeEl {
       c.parentElement = this;
       this.children.push(c);
       return c;
+    },
+    append(...children: FakeEl[]) {
+      for (const child of children) this.appendChild(child);
+    },
+    replaceChildren(...children: FakeEl[]) {
+      for (const child of this.children) child.parentElement = null;
+      this.children.length = 0;
+      for (const child of children) this.appendChild(child);
+    },
+    setAttribute(name: string, value: string) {
+      if (name.startsWith('data-')) {
+        const key = name.slice(5).replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+        this.dataset[key] = value;
+      }
     },
     removeChild(c: FakeEl) {
       const i = this.children.indexOf(c);
@@ -360,6 +378,7 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
+  commentsBySlide: readonly (readonly Readonly<PptxComment>[])[] = [];
   elementContext: PptxElementContext | null = null;
   elementContextCalls: Array<{
     slideIndex: number;
@@ -382,6 +401,9 @@ export class FakePptxEngine {
    *  silent mis-pathing. */
   get mode(): 'main' | 'worker' {
     return this._mode;
+  }
+  getComments(slideIndex: number): readonly Readonly<PptxComment>[] {
+    return this.commentsBySlide[slideIndex] ?? [];
   }
   renderSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<void> {
     const canvas = _canvas as FakeEl | undefined;

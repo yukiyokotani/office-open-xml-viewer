@@ -1,0 +1,20 @@
+<div class="review-example" data-review-example data-src="/samples/sample-1.docx" data-page="1">
+  <p class="review-example__status" data-review-status role="status">Loading review data…</p>
+  <div class="review-example__content" data-review-content hidden>
+    <div class="review-example__toolbar" aria-label="Document page">
+      <button type="button" data-review-previous>Previous</button>
+      <span data-review-page-status></span>
+      <button type="button" data-review-next>Next</button>
+    </div>
+    <div class="review-example__layout">
+      <div class="review-example__page">
+        <canvas data-review-canvas aria-label="Rendered DOCX page"></canvas>
+        <svg data-review-highlights role="group" aria-label="Review anchors on this page"></svg>
+      </div>
+      <aside class="review-example__margin" aria-label="Review transcript">
+        <p class="review-example__empty" data-review-empty hidden>No review items on this page.</p>
+        <ol data-review-items></ol>
+      </aside>
+    </div>
+  </div>
+</div>

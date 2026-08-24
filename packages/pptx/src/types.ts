@@ -178,11 +178,8 @@ export interface Slide {
    * read it via {@link PptxPresentation.getNotes}.
    */
   notes?: string;
-  /**
-   * Legacy slide comments (`ppt/comments/commentN.xml`, ECMA-376 §13.3.4).
-   * Modern Office 365 threaded comments are not parsed. Omitted from the JSON
-   * when the slide has no comments.
-   */
+  /** Classic (`ppt/comments/commentN.xml`, ECMA-376 §13.3.4) or modern
+   * threaded slide comments. Omitted when the slide has no comments. */
   comments?: PptxComment[];
   /**
    * `<p:sld show="0">` — the slide is marked hidden in the slide show
@@ -221,14 +218,40 @@ export interface DimOptions {
   opacity: number;
 }
 
-/** A single legacy slide comment (`<p:cm>` in `ppt/comments/commentN.xml`). */
+/** A slide comment. Supports classic PresentationML comments and modern
+ * Microsoft PowerPoint comments (`p188:cm`, [MS-PPTX] §2.16). */
 export interface PptxComment {
+  /** `<p:cm @authorId>` author-list identifier (ECMA-376 §19.4.1). */
+  authorId?: number;
+  /** Modern `p188:cm@authorId`. Kept separate so the classic numeric field
+   * remains source-compatible. */
+  modernAuthorId?: string;
+  /** Modern `p188:cm@id`. Classic identity is `(authorId, index)`. */
+  id?: string;
+  /** `<p:cm @idx>` identifier unique among this author's comments. */
+  index?: number;
   /** Resolved author name from `ppt/commentAuthors.xml`. Absent when the
    *  authors file is missing or the `authorId` is out of range. */
   author?: string;
   /** `<p:cm @dt>` — ISO-8601 timestamp the comment was authored. */
   date?: string;
-  /** Plain-text comment body (`<p:text>`). */
+  /** `<p:pos>` anchor on the slide surface, in EMU (ECMA-376 §19.4.5). */
+  x?: number;
+  y?: number;
+  /** Modern comment state. Absent for classic comments. */
+  status?: 'active' | 'resolved' | 'closed';
+  /** Plain-text comment body (`<p:text>` or modern `<p188:txBody>`). */
+  text: string;
+  /** Modern replies in authored order. */
+  replies?: readonly Readonly<PptxCommentReply>[];
+}
+
+export interface PptxCommentReply {
+  id?: string;
+  authorId?: string;
+  author?: string;
+  date?: string;
+  status?: 'active' | 'resolved' | 'closed';
   text: string;
 }
 

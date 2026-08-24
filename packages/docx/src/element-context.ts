@@ -30,10 +30,6 @@ export interface DocxElementContextOptions {
   readonly maxTextCharacters?: number;
   /** Select the same DATE/TIME layout variant used for rendering. */
   readonly currentDate?: Date | number;
-  /** Select the same ECMA-376 §17.13.5 tracked-change layout variant used for
-   *  rendering (see RenderPageOptions.showTrackedChanges), so hit-testing
-   *  matches the visible geometry. */
-  readonly showTrackedChanges?: boolean;
 }
 
 export interface SelectedDocxElementContextOptions extends DocxElementContextOptions {
@@ -294,7 +290,6 @@ export function hitTestSelectedDocxElementContext(
   const selected = selectDocumentLayoutPage(services, {
     currentDate: options.currentDate,
     defaultCurrentDateMs: options.defaultCurrentDateMs,
-    showTrackedChanges: options.showTrackedChanges,
   }, pageIndex);
   return hitTestDocxElementContext(
     selected.layout,

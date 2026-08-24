@@ -8,13 +8,24 @@ import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
 import type { DeepReadonly, DocumentLayout, TextPlacement } from '../layout/types.js';
-import { collectDocumentCommentRanges, buildCommentThreads } from '../comment-margin-layout.js';
-import { generateCommentedDocx, generateTrackedChangesDocx } from './generate.js';
+import { collectLayoutSourceCommentRanges, resolveCommentAnchorRuns } from '../comments.js';
+import {
+  collectLayoutSourceRevisionRanges,
+  resolveRevisionAnchorRuns,
+} from '../revisions.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
+import { attachDocumentLayoutVariants } from '../layout/document-layout-variants.js';
+import { textRunsForSelectedPage } from '../text-run-projection.js';
+import { textRunSourceIndexForDocument } from '../layout/text-index.js';
+import {
+  generateAllStoryCommentsDocx,
+  generateCommentedDocx,
+  generateTrackedChangesDocx,
+} from './generate.js';
 
 // End-to-end over the REAL parser: the redistributable §17.13.5 / §17.13.4
-// fixtures round-trip XML → WASM parse → layout, pinning the final-view
-// default, the markup variant's decorations, and the comment threading +
-// anchor-range projection the margin overlay consumes.
+// fixtures round-trip XML → WASM parse → layout, pinning final-state rendering,
+// revision metadata, comment threading, and consumer-owned anchor projection.
 
 function measureContext(): CanvasRenderingContext2D {
   return {
@@ -44,12 +55,12 @@ function parseRaw(bytes: Uint8Array): DocxDocumentModel {
   }
 }
 
-function layoutOf(model: DocxDocumentModel, showTrackedChanges?: boolean): DeepReadonly<DocumentLayout> {
+function layoutOf(model: DocxDocumentModel): DeepReadonly<DocumentLayout> {
   const normalized = normalizeInternalDocumentModel(model).document;
   return layoutDocument(
     normalized,
     createLayoutServices(normalized, { measureContext: measureContext() }),
-    { currentDateMs: 0, ...(showTrackedChanges === undefined ? {} : { showTrackedChanges }) },
+    { currentDateMs: 0 },
   ) as DeepReadonly<DocumentLayout>;
 }
 
@@ -71,25 +82,18 @@ beforeAll(async () => {
 });
 
 describe('tracked-changes fixture (§17.13.5, real parser)', () => {
-  it('lays out the final state by default and the full markup on demand', () => {
+  it('lays out the accepted final state while retaining revision metadata', () => {
     const model = parseRaw(generateTrackedChangesDocx());
     const finalView = layoutOf(model);
     const finalText = fullText(finalView);
     expect(finalText).toContain('Kept inserted moved-in tail');
     expect(finalText).not.toContain('deleted');
-    // Markup: the deletion and the move's source come back, decorated.
-    const markupView = layoutOf(model, true);
-    const markupText = fullText(markupView);
-    expect(markupText).toContain('deleted');
-    expect(markupText.split('moved-in').length - 1).toBe(2);
-    const decorated = textPlacements(markupView);
-    const inserted = decorated.find((placement) => placement.text.includes('inserted'))!;
-    expect(inserted.decorations.some((d) => d.kind === 'underline')).toBe(true);
-    const deleted = decorated.find((placement) => placement.text.includes('deleted'))!;
-    expect(deleted.decorations.some((d) => d.kind === 'strikethrough')).toBe(true);
-    // Change bars: at least the revision line carries a margin bar.
-    expect((markupView.pages[0]!.changeBars ?? []).length).toBeGreaterThan(0);
-    expect(finalView.pages[0]!.changeBars).toBeUndefined();
+    const revisions = model.body.flatMap((element) => element.type === 'paragraph'
+      ? element.runs.flatMap((run) => run.type === 'text' && run.revision
+          ? [run.revision.kind]
+          : [])
+      : []);
+    expect(revisions).toEqual(['insertion', 'deletion', 'moveFrom', 'moveTo']);
   });
 });
 
@@ -100,16 +104,18 @@ describe('commented fixture (§17.13.4 + commentsExtended, real parser)', () => 
     expect(comments.map((comment) => comment.id)).toEqual(['1', '2', '3']);
     expect(comments[1]!.parentId).toBe('1');
     expect(comments[2]!.resolved).toBe(true);
-    const threads = buildCommentThreads(comments);
-    expect(threads.map((thread) => thread.root.id)).toEqual(['1']);
-    expect(threads[0]!.replies.map((reply) => reply.id)).toEqual(['2']);
-    const ranges = collectDocumentCommentRanges(model.body);
+    const ranges = collectLayoutSourceCommentRanges(comments, layoutSourceStore(model));
     expect(ranges).toContainEqual(
       expect.objectContaining({
         commentId: '1',
-        paragraphPath: [0],
+        source: { story: 'body', storyInstance: 'body', path: [0] },
         startRunIndex: 1,
         endRunIndex: 2,
+        reference: {
+          source: { story: 'body', storyInstance: 'body', path: [0] },
+          runIndex: 2,
+          affinity: 'following',
+        },
       }),
     );
     // The commented run is unchanged text — geometry is identical whether or
@@ -117,5 +123,93 @@ describe('commented fixture (§17.13.4 + commentsExtended, real parser)', () => 
     // full text survives layout untouched.
     const layout = layoutOf(model);
     expect(fullText(layout)).toContain('Before annotated text after.');
+  });
+
+  it('projects anchors and run geometry for all six retained stories', () => {
+    const raw = parseRaw(generateAllStoryCommentsDocx());
+    const normalized = normalizeInternalDocumentModel(raw).document;
+    const source = layoutSourceStore(normalized);
+    const ranges = collectLayoutSourceCommentRanges(normalized.comments ?? [], source);
+    expect(new Set(ranges.map((range) => range.source.story))).toEqual(new Set([
+      'body', 'header', 'footer', 'footnote', 'endnote', 'textbox',
+    ]));
+
+    const services = createLayoutServices(normalized, { measureContext: measureContext() });
+    const variants = attachDocumentLayoutVariants({
+      source,
+      services,
+      defaultCurrentDateMs: 0,
+      buildLayout: (options) => layoutDocument(normalized, services, options),
+    });
+    const pageCount = variants.store.defaultLayout.pages.length;
+    const runs = Array.from({ length: pageCount }, (_, pageIndex) =>
+      textRunsForSelectedPage(services, pageIndex, {
+        currentDate: 0,
+        defaultCurrentDateMs: 0,
+      })).flat();
+    const geometricStories = new Set(runs.flatMap((run) => run.source ? [run.source.story] : []));
+    expect(geometricStories).toEqual(new Set([
+      'body', 'header', 'footer', 'footnote', 'endnote', 'textbox',
+    ]));
+
+    for (const anchor of ranges) {
+      const hasCoveredRun = runs.some((run) => run.source
+        && run.sourceRunIndex !== undefined
+        && run.source.story === anchor.source.story
+        && run.source.storyInstance === anchor.source.storyInstance
+        && run.source.path.join('.') === anchor.source.path.join('.')
+        && run.sourceRunIndex >= anchor.startRunIndex
+        && run.sourceRunIndex < anchor.endRunIndex);
+      expect(hasCoveredRun, `${anchor.source.story}:${anchor.commentId}`).toBe(true);
+    }
+  });
+
+  it('keeps the public review UI sample backed by real threads, changes, and geometry', async () => {
+    const bytes = await readFile(new URL('../../public/demo/sample-1.docx', import.meta.url));
+    const raw = parseRaw(bytes);
+    const normalized = normalizeInternalDocumentModel(raw).document;
+    expect(normalized.comments).toHaveLength(4);
+    expect(normalized.comments?.filter((comment) => comment.parentId)).toHaveLength(1);
+    expect(normalized.comments?.filter((comment) => comment.resolved)).toHaveLength(1);
+    expect(normalized.revisions).toHaveLength(4);
+    expect(normalized.revisions?.map((revision) => revision.id)).toEqual(['102', '103', '100', '101']);
+
+    const source = layoutSourceStore(normalized);
+    const anchors = collectLayoutSourceCommentRanges(normalized.comments ?? [], source);
+    expect(anchors).toHaveLength(3);
+    const services = createLayoutServices(normalized, { measureContext: measureContext() });
+    const variants = attachDocumentLayoutVariants({
+      source,
+      services,
+      defaultCurrentDateMs: 0,
+      buildLayout: (options) => layoutDocument(normalized, services, options),
+    });
+    const pageRuns = Array.from({ length: variants.store.defaultLayout.pages.length }, (_, pageIndex) =>
+      textRunsForSelectedPage(services, pageIndex, {
+        currentDate: 0,
+        defaultCurrentDateMs: 0,
+      }));
+    const revisionAnchors = collectLayoutSourceRevisionRanges(
+      normalized.revisions ?? [],
+      source,
+      textRunSourceIndexForDocument(variants.store.defaultLayout),
+    );
+    expect(revisionAnchors).toHaveLength(4);
+    for (const anchor of anchors) {
+      expect(pageRuns.some((runs) => resolveCommentAnchorRuns(anchor, runs).length > 0)).toBe(true);
+    }
+    const deletionTargets = revisionAnchors.flatMap((anchor) => {
+      const revision = normalized.revisions?.[anchor.revisionIndex];
+      if (revision?.kind !== 'deletion') return [];
+      const target = pageRuns
+        .flatMap((runs) => resolveRevisionAnchorRuns(anchor, runs))
+        .map((run) => run.text)
+        .join('');
+      return [{ deleted: revision.text, target }];
+    });
+    expect(deletionTargets).toEqual([
+      { deleted: 'road-noise', target: 'road noise' },
+      { deleted: 'city pace', target: 'hurried pace' },
+    ]);
   });
 });

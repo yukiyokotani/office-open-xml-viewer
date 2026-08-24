@@ -3,6 +3,7 @@ import { PptxScrollViewer } from './scroll-viewer.js';
 import { PptxPresentation } from './presentation.js';
 import { installDom, makeContainer, makeEl, makeBorrowedPptxScrollViewer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as pptxIndex from './index.js';
+import type { PptxCommentCardRenderContext } from './comment-margin.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -149,6 +150,44 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     const scrollHost = container.children[0].children[0];
     expect(scrollHost.style.background).toBe('');
     v.destroy();
+  });
+});
+
+describe('PptxScrollViewer — opt-in comment cards', () => {
+  it('keeps the margin transparent and lets consumers replace card contents', () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'modern-1', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+      replies: [{ id: 'reply-1', author: 'Linus', text: 'Done' }],
+    }]];
+    const cleanups: string[] = [];
+    let lastContext: PptxCommentCardRenderContext | undefined;
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      {
+        showComments: true,
+        renderCommentCard(host, context) {
+          lastContext = context;
+          host.textContent = context.comment.text;
+          return () => cleanups.push(context.comment.id ?? 'classic');
+        },
+      },
+    );
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(margin.style.background).toBe('');
+    expect(lastContext?.replies.map((reply) => reply.text)).toEqual(['Done']);
+    lastContext?.activate();
+    expect(cleanups).toEqual(['modern-1']);
+    expect(lastContext?.active).toBe(true);
+    viewer.destroy();
+    expect(cleanups).toEqual(['modern-1', 'modern-1']);
   });
 });
 

@@ -27,7 +27,6 @@ import {
   widthBalanceSpaceAdjustmentForTextPt,
 } from '../line-layout.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, shapeRunToDocRun } from './text.js';
-import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocParagraph, DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
@@ -206,9 +205,6 @@ interface RetainedTextGeometryPlan {
     double: boolean;
     probe: RetainedInkMetric;
     doubleProbe?: RetainedInkMetric;
-    /** Stroke colour override (markup-view revision strikes are painted in
-     *  the stable author colour, not the run text colour). */
-    color?: string;
   }>;
   readonly emphasis?: Readonly<{
     authored: string;
@@ -1671,15 +1667,8 @@ function retainedGeometryPlan(
   sourceOffset: number,
   color: TextPlacement['color'],
 ): RetainedTextGeometryPlan | undefined {
-  // ECMA-376 §17.13.5 markup view (`word-track-change-decoration`): an
-  // insertion/moveTo segment gains an author-coloured underline, a
-  // deletion/moveFrom segment an author-coloured strikethrough. Authored
-  // run decoration wins over the synthesized revision decoration on its axis.
-  const markup = segment.trackChangesMarkup;
-  const markupDecoration = wordTrackChangeDecoration(markup?.kind);
   if (!(segment.highlight || segment.underline || segment.strikethrough
-    || segment.doubleStrikethrough || segment.emphasisMark
-    || markupDecoration.underline || markupDecoration.strike)) return undefined;
+    || segment.doubleStrikethrough || segment.emphasisMark)) return undefined;
   const service = segment.textLayoutService;
   const request = segment.textShapeRequest;
   if (!service || !request) {
@@ -1713,18 +1702,11 @@ function retainedGeometryPlan(
     color: segment.underlineColor && segment.underlineColor !== 'auto'
       ? `#${segment.underlineColor}` : textColor,
     probe: glyphProbe('_'),
-  } : markup && markupDecoration.underline ? {
-    color: markup.authorColor,
-    probe: glyphProbe('_'),
   } : undefined;
   const strike = segment.strikethrough || segment.doubleStrikethrough ? {
     double: segment.doubleStrikethrough === true,
     probe: glyphProbe('-'),
     ...(segment.doubleStrikethrough ? { doubleProbe: glyphProbe('=') } : {}),
-  } : markup && markupDecoration.strike ? {
-    double: false,
-    probe: glyphProbe('-'),
-    color: markup.authorColor,
   } : undefined;
   const emphasis = segment.emphasisMark ? (() => {
     const glyph = emphasisGlyph(segment.emphasisMark);

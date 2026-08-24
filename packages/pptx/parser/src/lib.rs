@@ -303,6 +303,7 @@ struct SlideCacheJournal {
     inserted_layout_keys: Vec<String>,
     inserted_layout_source_keys: Vec<String>,
     had_comment_authors: bool,
+    had_modern_comment_authors: bool,
     had_no_master_bundle: bool,
     projected_entries: u64,
     projected_bytes: u64,
@@ -312,6 +313,7 @@ impl SlideCacheJournal {
     fn begin(shared: &PresentationShared) -> Self {
         Self {
             had_comment_authors: shared.comment_authors.is_some(),
+            had_modern_comment_authors: shared.modern_comment_authors.is_some(),
             had_no_master_bundle: shared.no_master_bundle.is_some(),
             ..Self::default()
         }
@@ -329,6 +331,9 @@ impl SlideCacheJournal {
         }
         if !self.had_comment_authors {
             shared.comment_authors = None;
+        }
+        if !self.had_modern_comment_authors {
+            shared.modern_comment_authors = None;
         }
         if !self.had_no_master_bundle {
             shared.no_master_bundle = None;
@@ -1520,6 +1525,8 @@ fn parse_slide(
     rels: &HashMap<String, String>,
     smartart_drawings: &HashMap<String, String>,
     comment_authors: &mut Option<HashMap<String, String>>,
+    modern_comment_authors: &mut Option<HashMap<String, String>>,
+    modern_comment_authors_path: Option<&str>,
     zip: &mut PptxZip,
 ) -> Result<Slide, Box<dyn std::error::Error>> {
     // Destructure the per-slide master bundle into the local names the rest of
@@ -1756,7 +1763,14 @@ fn parse_slide(
 
     // ── Notes slide & comments (Phase 2 surfacing only — no rendering) ────
     let notes = load_notes_slide(zip, slide_dir, rels);
-    let comments = load_pptx_comments(zip, slide_dir, rels, comment_authors);
+    let comments = load_pptx_comments(
+        zip,
+        slide_dir,
+        rels,
+        comment_authors,
+        modern_comment_authors,
+        modern_comment_authors_path,
+    );
 
     Ok(Slide {
         index,
@@ -1839,14 +1853,47 @@ fn load_notes_slide(
     }
 }
 
-/// Resolve and parse the slide's `comments` relationship (legacy
-/// `<p:cmLst>` format). Modern threaded comments live in a different
-/// namespace and are not yet supported.
+const MODERN_POWERPOINT_NS: &str = "http://schemas.microsoft.com/office/powerpoint/2018/8/main";
+
+fn comment_text_body(node: roxmltree::Node<'_, '_>) -> String {
+    let Some(body) = node
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "txBody")
+    else {
+        return String::new();
+    };
+    let mut paragraphs = Vec::new();
+    for paragraph in body
+        .children()
+        .filter(|child| child.is_element() && child.tag_name().name() == "p")
+    {
+        let text = paragraph
+            .descendants()
+            .filter(|child| child.is_element() && child.tag_name().name() == "t")
+            .filter_map(|child| child.text())
+            .collect::<String>();
+        paragraphs.push(text);
+    }
+    paragraphs.join("\n")
+}
+
+fn modern_comment_status(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    match node.attribute("status").unwrap_or("active") {
+        status @ ("active" | "resolved" | "closed") => Some(status.to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve and parse the slide's classic or modern comments relationship.
+/// Classic comments are ECMA-376 §19.4 `<p:cmLst>` parts. Modern comments use
+/// the 2018 PowerPoint namespace and relationship defined by [MS-PPTX] §2.1.5.
 fn load_pptx_comments(
     zip: &mut PptxZip,
     slide_dir: &str,
     rels: &HashMap<String, String>,
-    authors: &mut Option<HashMap<String, String>>,
+    legacy_authors: &mut Option<HashMap<String, String>>,
+    modern_authors: &mut Option<HashMap<String, String>>,
+    modern_authors_path: Option<&str>,
 ) -> Vec<PptxComment> {
     let Some(target) = rels.values().find(|t| t.contains("comments/")) else {
         return Vec::new();
@@ -1863,17 +1910,79 @@ fn load_pptx_comments(
         return Vec::new();
     };
 
+    let is_modern = doc.root_element().tag_name().namespace() == Some(MODERN_POWERPOINT_NS);
+
+    if is_modern {
+        if modern_authors.is_none() {
+            note_comment_authors_load();
+            let author_xml = modern_authors_path.and_then(|path| read_zip_str(zip, path).ok());
+            *modern_authors = Some(parse_comment_authors(author_xml.as_deref()));
+        }
+        let empty_authors = HashMap::new();
+        let authors = modern_authors.as_ref().unwrap_or(&empty_authors);
+        return doc
+            .root_element()
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "cm")
+            .map(|cm| {
+                let author_id = cm.attribute("authorId").map(String::from);
+                let author = author_id.as_ref().and_then(|id| authors.get(id)).cloned();
+                let position = cm
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "pos");
+                let replies = cm
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "replyLst")
+                    .into_iter()
+                    .flat_map(|list| list.children())
+                    .filter(|node| node.is_element() && node.tag_name().name() == "reply")
+                    .map(|reply| {
+                        let reply_author_id = reply.attribute("authorId").map(String::from);
+                        PptxCommentReply {
+                            id: reply.attribute("id").map(String::from),
+                            author: reply_author_id
+                                .as_ref()
+                                .and_then(|id| authors.get(id))
+                                .cloned(),
+                            author_id: reply_author_id,
+                            date: reply.attribute("created").map(String::from),
+                            status: modern_comment_status(reply),
+                            text: comment_text_body(reply),
+                        }
+                    })
+                    .collect();
+                PptxComment {
+                    author_id: None,
+                    modern_author_id: author_id,
+                    id: cm.attribute("id").map(String::from),
+                    index: None,
+                    author,
+                    date: cm.attribute("created").map(String::from),
+                    x: position
+                        .and_then(|node| node.attribute("x"))
+                        .and_then(|value| value.parse::<i64>().ok()),
+                    y: position
+                        .and_then(|node| node.attribute("y"))
+                        .and_then(|value| value.parse::<i64>().ok()),
+                    status: modern_comment_status(cm),
+                    text: comment_text_body(cm),
+                    replies,
+                }
+            })
+            .collect();
+    }
+
     // Preserve the legacy observation point: commentAuthors.xml is irrelevant
     // until a referenced comments part has itself been read and parsed. Cache
     // the owned id → name map after that point so later commented slides reuse
     // it without retaining a roxmltree Document.
-    if authors.is_none() {
+    if legacy_authors.is_none() {
         note_comment_authors_load();
         let author_xml = read_zip_str(zip, "ppt/commentAuthors.xml").ok();
-        *authors = Some(parse_comment_authors(author_xml.as_deref()));
+        *legacy_authors = Some(parse_comment_authors(author_xml.as_deref()));
     }
     let empty_authors = HashMap::new();
-    let authors = authors.as_ref().unwrap_or(&empty_authors);
+    let authors = legacy_authors.as_ref().unwrap_or(&empty_authors);
 
     let mut out = Vec::new();
     for cm in doc
@@ -1882,16 +1991,41 @@ fn load_pptx_comments(
     {
         let author_id = cm.attribute("authorId").unwrap_or("");
         let author = authors.get(author_id).cloned();
+        let parsed_author_id = author_id.parse::<u32>().ok();
+        let index = cm
+            .attribute("idx")
+            .and_then(|value| value.parse::<u32>().ok());
         let date = cm
             .attribute("dt")
             .map(String::from)
             .filter(|s| !s.is_empty());
+        let position = cm
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "pos");
+        let x = position
+            .and_then(|node| node.attribute("x"))
+            .and_then(|value| value.parse::<i64>().ok());
+        let y = position
+            .and_then(|node| node.attribute("y"))
+            .and_then(|value| value.parse::<i64>().ok());
         let text = cm
             .children()
             .find(|n| n.is_element() && n.tag_name().name() == "text")
             .and_then(|n| n.text().map(String::from))
             .unwrap_or_default();
-        out.push(PptxComment { author, date, text });
+        out.push(PptxComment {
+            author_id: parsed_author_id,
+            modern_author_id: None,
+            id: None,
+            index,
+            author,
+            date,
+            x,
+            y,
+            status: None,
+            text,
+            replies: Vec::new(),
+        });
     }
     out
 }
@@ -1902,7 +2036,7 @@ fn parse_comment_authors(author_xml: Option<&str>) -> HashMap<String, String> {
         if let Ok(adoc) = parse_preflighted_pptx_xml(ax) {
             for a in adoc
                 .descendants()
-                .filter(|n| n.is_element() && n.tag_name().name() == "cmAuthor")
+                .filter(|n| n.is_element() && matches!(n.tag_name().name(), "cmAuthor" | "author"))
             {
                 let id = a.attribute("id").unwrap_or("").to_string();
                 let name = a.attribute("name").unwrap_or("").to_string();
@@ -2176,6 +2310,8 @@ struct PresentationShared {
     pres_rels: HashMap<String, String>,
     theme: PptxTheme,
     comment_authors: Option<HashMap<String, String>>,
+    modern_comment_authors: Option<HashMap<String, String>>,
+    modern_comment_authors_path: Option<String>,
     pres_master_path: Option<String>,
     master_cache: HashMap<String, ParsedMaster>,
     no_master_bundle: Option<ParsedMaster>,
@@ -2266,6 +2402,8 @@ fn bootstrap_presentation(
     // their behavior is unchanged from before per-slide resolution existed.
     let pres_master_path: Option<String> =
         find_rel_target_by_type(&pres_rels_xml, "/slideMaster").map(|t| resolve_path("ppt", &t));
+    let modern_comment_authors_path = find_rel_target_by_type(&pres_rels_xml, "/authors")
+        .map(|target| resolve_path("ppt", &target));
 
     // This is a serialization-shaped projection of retained bootstrap state,
     // measured by a streaming writer without allocating a JSON buffer. It is a
@@ -2277,6 +2415,7 @@ fn bootstrap_presentation(
         &pres_rels,
         &theme,
         &pres_master_path,
+        &modern_comment_authors_path,
     ))?
     .json_bytes;
     reporter.observe_hard_limit(
@@ -2316,6 +2455,8 @@ fn bootstrap_presentation(
         pres_rels,
         theme,
         comment_authors: None,
+        modern_comment_authors: None,
+        modern_comment_authors_path,
         pres_master_path,
         master_cache,
         no_master_bundle,
@@ -2384,6 +2525,8 @@ fn produce_slide_unit_with_journal(
         pres_rels,
         theme,
         comment_authors,
+        modern_comment_authors,
+        modern_comment_authors_path,
         pres_master_path,
         master_cache,
         no_master_bundle,
@@ -2732,6 +2875,7 @@ fn produce_slide_unit_with_journal(
         // carrying the part-tagged error, so one broken slide never takes the
         // whole presentation down. Healthy slides are byte-for-byte unchanged.
         let had_comment_authors = comment_authors.is_some();
+        let had_modern_comment_authors = modern_comment_authors.is_some();
         let slide = match parse_slide(
             slide_xml,
             &raw.slide_dir,
@@ -2745,6 +2889,8 @@ fn produce_slide_unit_with_journal(
             &raw.slide_rels,
             &raw.smartart_drawings,
             comment_authors,
+            modern_comment_authors,
+            modern_comment_authors_path.as_deref(),
             zip,
         ) {
             Ok(slide) => slide,
@@ -2759,7 +2905,19 @@ fn produce_slide_unit_with_journal(
                     Some("ppt/commentAuthors.xml"),
                     authors,
                     cache_usage,
-                    journal,
+                    journal.as_deref_mut(),
+                )?;
+            }
+        }
+        if !had_modern_comment_authors {
+            if let Some(authors) = modern_comment_authors.as_ref() {
+                let reporter = zip.operation()?.limit_reporter()?;
+                observe_shared_cache_candidate(
+                    &reporter,
+                    modern_comment_authors_path.as_deref(),
+                    authors,
+                    cache_usage,
+                    journal.as_deref_mut(),
                 )?;
             }
         }
@@ -10635,6 +10793,54 @@ mod tests {
         output
     }
 
+    fn build_modern_comment_deck(comment_xml: &str, author_xml: &str) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let base = build_comment_deck(
+            [false, false],
+            [None, None],
+            r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+        );
+        let mut source = zip::ZipArchive::new(Cursor::new(base)).expect("base deck opens");
+        let mut output = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut output));
+            let options = zip::write::SimpleFileOptions::default();
+            for index in 0..source.len() {
+                let mut entry = source.by_index(index).unwrap();
+                let name = entry.name().to_owned();
+                let mut body = Vec::new();
+                entry.read_to_end(&mut body).unwrap();
+                if name == "ppt/slides/_rels/slide1.xml.rels" {
+                    body = String::from_utf8(body)
+                        .unwrap()
+                        .replace(
+                            "</Relationships>",
+                            r#"<Relationship Id="rModernComments" Type="http://schemas.microsoft.com/office/2018/10/relationships/comments" Target="../comments/modernComment1.xml"/></Relationships>"#,
+                        )
+                        .into_bytes();
+                } else if name == "ppt/_rels/presentation.xml.rels" {
+                    body = String::from_utf8(body)
+                        .unwrap()
+                        .replace(
+                            "</Relationships>",
+                            r#"<Relationship Id="rModernAuthors" Type="http://schemas.microsoft.com/office/2018/10/relationships/authors" Target="authors.xml"/></Relationships>"#,
+                        )
+                        .into_bytes();
+                }
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&body).unwrap();
+            }
+            writer
+                .start_file("ppt/comments/modernComment1.xml", options)
+                .unwrap();
+            writer.write_all(comment_xml.as_bytes()).unwrap();
+            writer.start_file("ppt/authors.xml", options).unwrap();
+            writer.write_all(author_xml.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        output
+    }
+
     fn build_deck_missing_second_slide_relationship() -> Vec<u8> {
         rewrite_deck_xml(
             build_three_slide_deck(9, "<unused/>"),
@@ -10719,8 +10925,45 @@ mod tests {
 
     fn valid_comment_xml(text: &str) -> String {
         format!(
-            r#"<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cm authorId="0" dt="2026-01-01T00:00:00Z"><p:pos x="0" y="0"/><p:text>{text}</p:text></p:cm></p:cmLst>"#
+            r#"<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cm authorId="0" idx="1" dt="2026-01-01T00:00:00Z"><p:pos x="0" y="0"/><p:text>{text}</p:text></p:cm></p:cmLst>"#
         )
+    }
+
+    #[test]
+    fn legacy_comment_preserves_authored_identity_and_slide_position() {
+        let comments = r#"<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cm authorId="7" idx="42" dt="2026-01-01T00:00:00Z"><p:pos x="914400" y="1828800"/><p:text>Positioned</p:text></p:cm></p:cmLst>"#;
+        let authors = r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="7" name="Ada" initials="AL" lastIdx="42" clrIdx="3"/></p:cmAuthorLst>"#;
+        let data = build_comment_deck([true, false], [Some(comments), None], authors);
+        let presentation = parse_presentation_from_bytes(&data).expect("commented deck parses");
+        let comment = &presentation.slides[0].comments[0];
+
+        assert_eq!(comment.author_id, Some(7));
+        assert_eq!(comment.index, Some(42));
+        assert_eq!(comment.x, Some(914400));
+        assert_eq!(comment.y, Some(1828800));
+        assert_eq!(comment.author.as_deref(), Some("Ada"));
+        assert_eq!(comment.text, "Positioned");
+    }
+
+    #[test]
+    fn modern_comment_preserves_thread_author_status_text_and_position() {
+        let comments = r#"<p188:cmLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p188:cm id="{ROOT}" authorId="{ADA}" status="active" created="2026-08-24T12:00:00Z"><p188:pos x="6096000" y="3429000"/><p188:replyLst><p188:reply id="{REPLY}" authorId="{BOB}" status="resolved" created="2026-08-24T12:01:00Z"><p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Reply</a:t></a:r></a:p></p188:txBody></p188:reply></p188:replyLst><p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>First line</a:t></a:r></a:p><a:p><a:r><a:t>Second line</a:t></a:r></a:p></p188:txBody></p188:cm></p188:cmLst>"#;
+        let authors = r#"<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main"><p188:author id="{ADA}" name="Ada" initials="AL"/><p188:author id="{BOB}" name="Bob" initials="B"/></p188:authorLst>"#;
+        let data = build_modern_comment_deck(comments, authors);
+        let presentation = parse_presentation_from_bytes(&data).expect("modern comments parse");
+        let comment = &presentation.slides[0].comments[0];
+
+        assert_eq!(comment.id.as_deref(), Some("{ROOT}"));
+        assert_eq!(comment.modern_author_id.as_deref(), Some("{ADA}"));
+        assert_eq!(comment.author.as_deref(), Some("Ada"));
+        assert_eq!(comment.status.as_deref(), Some("active"));
+        assert_eq!(comment.date.as_deref(), Some("2026-08-24T12:00:00Z"));
+        assert_eq!((comment.x, comment.y), (Some(6096000), Some(3429000)));
+        assert_eq!(comment.text, "First line\nSecond line");
+        assert_eq!(comment.replies.len(), 1);
+        assert_eq!(comment.replies[0].author.as_deref(), Some("Bob"));
+        assert_eq!(comment.replies[0].status.as_deref(), Some("resolved"));
+        assert_eq!(comment.replies[0].text, "Reply");
     }
 
     fn oversized_comment_authors_xml() -> String {

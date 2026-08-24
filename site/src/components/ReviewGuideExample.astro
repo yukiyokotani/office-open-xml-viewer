@@ -1,0 +1,20 @@
+---
+import markup from '../examples/review-margin/index.html?raw';
+import '../examples/review-margin/styles.css';
+---
+
+<div class="guide-example">
+  <div class="example-frame" set:html={markup}></div>
+  <p class="complete-source"><a href="/review-ui/source">Open complete example source →</a></p>
+</div>
+
+<script>
+  import '../examples/review-margin/index';
+</script>
+
+<style>
+  .guide-example { margin-top: 24px; }
+  .example-frame { max-height: min(76vh, 720px); overflow: auto; }
+  .complete-source { margin: 14px 0 0; font-size: 14px; }
+  .complete-source a { color: var(--accent); font-weight: 700; }
+</style>

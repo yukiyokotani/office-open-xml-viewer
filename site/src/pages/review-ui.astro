@@ -1,0 +1,265 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import BuiltInCommentViewer from '../components/BuiltInCommentViewer.astro';
+import ReviewGuideExample from '../components/ReviewGuideExample.astro';
+import { codeThemes } from '../lib/code-theme';
+
+const transcriptExample = `import { DocxDocument } from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load(source);
+
+showTranscript({
+  comments: doc.comments,
+  revisions: doc.revisions,
+});
+
+// Keep the document only while you still need to render pages.
+doc.destroy();`;
+
+const scrollViewerExample = `import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const viewer = new DocxScrollViewer(container, {
+  showComments: true,
+});
+
+await viewer.load(source);`;
+
+const customCardExample = `const viewer = new DocxScrollViewer(container, {
+  showComments: true,
+  renderCommentCard(host, { comment, active, activate }) {
+    host.className = active ? 'comment is-active' : 'comment';
+    host.textContent = comment.text;
+    host.addEventListener('click', activate);
+    return () => host.removeEventListener('click', activate);
+  },
+});`;
+
+const anchoredExample = `import {
+  DocxDocument,
+  resolveCommentAnchorRuns,
+  type DocxTextRunInfo,
+} from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load(source);
+const runs: DocxTextRunInfo[] = [];
+
+await doc.renderPage(canvas, pageIndex, {
+  width: 760,
+  onTextRun: (run) => runs.push(run),
+});
+
+const commentsById = new Map(doc.comments.map((comment) => [comment.id, comment]));
+const anchoredComments = doc.commentAnchorRanges().flatMap((anchor) => {
+  const comment = commentsById.get(anchor.commentId);
+  const geometry = resolveCommentAnchorRuns(anchor, runs);
+  return comment && geometry.length ? [{ comment, geometry }] : [];
+});
+
+showReviewMargin({ canvas, anchoredComments });
+// Destroy doc when the owning UI unmounts.`;
+---
+
+<Base
+  title="DOCX comments and tracked changes | @silurus/ooxml"
+  description="Use DOCX comments, tracked changes, anchors, and rendered geometry in an application-owned review UI."
+  canonicalPath="/review-ui/"
+>
+  <Nav active="docx" />
+
+  <header class="review-hero">
+    <div class="wrap">
+      <a class="back" href="/docx">← DOCX examples</a>
+      <h1>DOCX comments and tracked changes</h1>
+      <p class="lead">
+        <code>@silurus/ooxml</code> reads review data already stored in a DOCX file and can relate it
+        to rendered page text. <code>DocxScrollViewer</code> includes an optional read-only comment
+        margin; the lower-level APIs remain available when an application needs a different layout.
+      </p>
+      <nav class="hero-actions" aria-label="Review UI resources">
+        <a class="primary" href="#live-example">See the live example</a>
+        <a href="/review-ui/source">Open complete example source</a>
+        <a href="/api/docx#docx-document">DOCX API reference</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap review-main">
+    <section class="review-section" aria-labelledby="built-in-margin">
+      <div class="section-heading">
+        <h2 id="built-in-margin">Start with the built-in margin</h2>
+        <p>Enable the default cards with one option. There is no comment UI or geometry work to manage.</p>
+      </div>
+      <div class="implementation-grid">
+        <article>
+          <h3>Default cards</h3>
+          <p class="code-intro">Use the neutral read-only cards as they are.</p>
+          <Code code={scrollViewerExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+        <article>
+          <h3>Replace a card</h3>
+          <p class="code-intro">Change card contents while the Viewer retains placement and virtualization.</p>
+          <Code code={customCardExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+      </div>
+      <div class="built-in-preview">
+        <h3>Default appearance</h3>
+        <p>The document keeps its page surface; the right margin contains only neutral cards, without a background band.</p>
+        <BuiltInCommentViewer />
+        <p><a href="/review-ui/default">Open the default UI in a full-height preview →</a></p>
+      </div>
+    </section>
+
+    <section class="review-section" aria-labelledby="concepts">
+      <div class="section-heading">
+        <h2 id="concepts">Review UI concepts</h2>
+        <p>A review UI combines four concepts. Only the last two are needed when marks must follow text on a rendered page.</p>
+      </div>
+      <div class="concept-grid">
+        <article><h3>Comments and threads</h3><p>Reviewer notes, replies, authors, dates, and resolved state.</p></article>
+        <article><h3>Tracked changes</h3><p>Insertions, deletions, and moves recorded in the document.</p></article>
+        <article><h3>Anchors</h3><p>Logical positions or ranges that connect a review record to document content.</p></article>
+        <article><h3>Rendered geometry</h3><p>Text rectangles from one rendered page, used to place highlights or markers.</p></article>
+      </div>
+      <div class="table-wrap" role="region" aria-label="Review concepts and APIs" tabindex="0">
+        <table>
+          <thead><tr><th>Concept</th><th>Public API</th><th>Use</th></tr></thead>
+          <tbody>
+            <tr><th>Comments and threads</th><td><code>doc.comments</code></td><td>Build a thread list, transcript, search, or export.</td></tr>
+            <tr><th>Tracked changes</th><td><code>doc.revisions</code></td><td>Label and filter recorded changes.</td></tr>
+            <tr><th>Logical anchors</th><td><code>commentAnchorRanges()</code><br /><code>revisionAnchorRanges()</code></td><td>Connect records to document content.</td></tr>
+            <tr><th>Visible page location</th><td><code>onTextRun</code><br /><code>resolveCommentAnchorRuns()</code><br /><code>resolveRevisionAnchorRuns()</code></td><td>Place markers or coordinate a margin with the current page.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="review-section" aria-labelledby="choose-ui">
+      <div class="section-heading">
+        <h2 id="choose-ui">Integration options</h2>
+        <p>Use these lower-level paths only when the built-in margin does not fit the product UI.</p>
+      </div>
+      <div class="choice-grid">
+        <article>
+          <p class="choice-label">No page geometry</p>
+          <h3>List, search, or export</h3>
+          <p>Read <code>doc.comments</code> and <code>doc.revisions</code>, then render application-owned rows or serialized data.</p>
+        </article>
+        <article>
+          <p class="choice-label">Page geometry required</p>
+          <h3>Margin or separate pane</h3>
+          <p>Resolve anchors for the current page so selecting a row can identify the related rendered text.</p>
+        </article>
+        <article>
+          <p class="choice-label">Page geometry required</p>
+          <h3>Highlights or markers</h3>
+          <p>Draw application-owned SVG or DOM marks over the page using resolved text-run rectangles.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="review-section" aria-labelledby="minimum-flow">
+      <div class="section-heading">
+        <h2 id="minimum-flow">Minimum implementation</h2>
+        <p>Start with the transcript path. Use the anchored path only if the UI needs a visible connection to page content.</p>
+      </div>
+      <div class="implementation-grid">
+        <article>
+          <h3>Transcript path</h3>
+          <ol><li>Load the document.</li><li>Read comments and revisions.</li><li>Render your list, search results, or export.</li></ol>
+          <Code code={transcriptExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+        <article>
+          <h3>Anchored page path</h3>
+          <ol><li>Render the current page and collect text runs.</li><li>Read logical anchors.</li><li>Resolve anchors against those runs.</li><li>Render your margin or markers.</li></ol>
+          <Code code={anchoredExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+      </div>
+    </section>
+
+    <section class="review-section final-state" aria-labelledby="final-state">
+      <div class="section-heading">
+        <h2 id="final-state">Accepted-final rendering</h2>
+        <p>DOCX pages use the accepted-final document. Recorded changes do not all have visible text in that result.</p>
+      </div>
+      <div class="final-state-grid">
+        <article><h3>Visible in the page</h3><p>Insertions and move destinations can be highlighted using their resolved text geometry.</p></article>
+        <article><h3>Absent from the page</h3><p>Deletions and move sources have no old text rectangle. Show their text in the transcript; a nearby final-state position may be used only as a marker.</p></article>
+      </div>
+    </section>
+
+    <section id="live-example" class="review-section live-example" aria-labelledby="live-example-title">
+      <div class="section-heading">
+        <h2 id="live-example-title">Live example</h2>
+        <p>The page, highlights, and right-hand review cards are application UI built from the APIs above.</p>
+      </div>
+      <ReviewGuideExample />
+    </section>
+
+    <section class="review-section next-steps" aria-labelledby="next-steps">
+      <div class="section-heading">
+        <h2 id="next-steps">Reference and production details</h2>
+        <p>Canvas content needs an accessible transcript or text layer. Destroy an owned <code>DocxDocument</code> when its UI is finished.</p>
+      </div>
+      <nav class="detail-links" aria-label="Review UI details">
+        <a href="/review-ui/source"><strong>Complete example source →</strong><span>See the controller, HTML, and CSS used by the live example.</span></a>
+        <a href="/api/docx#docx-document"><strong>DOCX API reference →</strong><span>Look up review records, anchor ranges, text runs, and method signatures.</span></a>
+        <a href="/production#rendering-mode"><strong>Rendering modes →</strong><span>Choose main-thread or Worker rendering for your application.</span></a>
+      </nav>
+    </section>
+  </main>
+
+  <SiteFooter />
+</Base>
+
+<style>
+  .review-hero { padding: 50px 0 44px; border-bottom: 1px solid var(--border); }
+  .back { color: var(--text-faint); font: 12px var(--mono); }
+  .review-hero h1 { max-width: 920px; margin: 20px 0 16px; font-size: clamp(38px, 6vw, 66px); line-height: 1; letter-spacing: -.045em; }
+  .lead { max-width: 78ch; color: var(--text-dim); font-size: 18px; line-height: 1.7; }
+  code { font-family: var(--mono); font-size: .9em; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; margin-top: 24px; }
+  .hero-actions a { color: var(--accent); font-weight: 700; }
+  .hero-actions .primary { padding: 10px 14px; border: 1px solid var(--accent); }
+  .review-main { padding-bottom: 32px; }
+  .review-section { padding: 46px 0; border-bottom: 1px solid var(--border); }
+  .section-heading { max-width: 820px; margin-bottom: 24px; }
+  .section-heading h2 { margin: 0; font-size: clamp(28px, 4vw, 42px); line-height: 1.08; letter-spacing: -.03em; }
+  .section-heading p { margin: 12px 0 0; color: var(--text-dim); }
+  .concept-grid, .choice-grid, .final-state-grid { display: grid; gap: 14px; }
+  .concept-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .choice-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .final-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  article { padding: 20px; border: 1px solid var(--border); background: var(--panel); }
+  article h3 { margin: 0; font-size: 18px; }
+  article p { margin: 9px 0 0; color: var(--text-dim); }
+  .choice-label { margin: 0 0 9px; color: var(--accent); font: 600 11px var(--mono); text-transform: uppercase; }
+  .table-wrap { margin-top: 20px; overflow-x: auto; border: 1px solid var(--border); }
+  table { width: 100%; min-width: 740px; border-collapse: collapse; }
+  th, td { padding: 14px 16px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  thead th { color: var(--text-faint); background: var(--bg-elev); font: 600 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+  tbody th { width: 21%; }
+  tbody td { color: var(--text-dim); }
+  .implementation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+  .implementation-grid article { min-width: 0; padding: 0; overflow: hidden; }
+  .implementation-grid h3 { padding: 20px 20px 0; }
+  .code-intro { padding: 0 20px; }
+  .implementation-grid ol { min-height: 116px; margin: 14px 20px 20px; padding-left: 20px; color: var(--text-dim); }
+  .implementation-grid li + li { margin-top: 6px; }
+  .implementation-grid :global(pre) { margin: 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.6; }
+  .detail-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .detail-links a { padding: 17px 18px; border: 1px solid var(--border); background: var(--panel); }
+  .detail-links strong { display: block; color: var(--accent); }
+  .detail-links span { display: block; margin-top: 6px; color: var(--text-dim); font-size: 14px; line-height: 1.5; }
+  @media (max-width: 900px) {
+    .concept-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .choice-grid, .implementation-grid { grid-template-columns: 1fr; }
+    .implementation-grid ol { min-height: 0; }
+  }
+  @media (max-width: 620px) {
+    .concept-grid, .final-state-grid, .detail-links { grid-template-columns: 1fr; }
+  }
+</style>

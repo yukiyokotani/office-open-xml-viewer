@@ -24,7 +24,6 @@ import {
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
 import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
-import { createRevisionAuthorColorResolver } from './track-changes.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { measureTableIntrinsicWidths, resolveTableColumnWidths } from './table-columns.js';
@@ -307,7 +306,6 @@ function buildMeasureState(
     },
     retainedTablesBySourceIndex: new Map<number, RetainedTableRecord>(),
     currentDateMs: layoutOptions?.currentDateMs,
-    showTrackedChanges: layoutOptions?.showTrackedChanges,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
     // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
@@ -479,13 +477,6 @@ function buildConcreteBodyLayoutKernel(
         services,
         options,
       );
-      // Markup view only: resolve tracked-change author colours once per
-      // session from the main story's document run order (first-appearance
-      // policy, layout/track-changes.ts). The default final-view variant
-      // never builds or carries this.
-      if (options.showTrackedChanges === true) {
-        state.revisionAuthorColor = createRevisionAuthorColorResolver(source.blocks.body);
-      }
       const sourceFootnotes = source.blocks.footnotes;
       const sourceEndnotes = source.blocks.endnotes;
       const footnotesById = indexNotes(sourceFootnotes);

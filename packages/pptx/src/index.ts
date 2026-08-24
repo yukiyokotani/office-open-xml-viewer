@@ -1,5 +1,6 @@
 export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
 export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
+export type { PptxCommentCardRenderContext, PptxCommentCardRenderer } from './comment-margin';
 export {
   PptxPresentation,
   type LoadOptions,
@@ -155,6 +156,7 @@ export type {
   // Reachable via Slide.comments — exported so consumers reading legacy slide
   // comments have a name for the element type.
   PptxComment,
+  PptxCommentReply,
   SlideElement,
   ShapeElement,
   PictureElement,
