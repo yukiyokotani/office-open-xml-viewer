@@ -613,14 +613,37 @@ export class PptxScrollViewer implements ZoomableViewer {
     const cw = this._scrollHost.clientWidth || this._container.clientWidth;
     if (cw <= 0) return 0; // 0 ⇒ defer (design §11 zero-width deferral)
     const { left, right } = this._padH();
-    const fit = cw - left - right - this._commentMarginExtent();
+    const available = cw - left - right;
+    if (available <= 0) return 0;
+    // Cards, authored markers, and the slide share one absolute zoom. Compute
+    // the composite fit in one pass so a resize never feeds the old card scale
+    // back into the next base-scale calculation.
+    const naturalSlideWidth = this._pres ? this._pres.slideWidth / EMU_PER_PX : 0;
+    const fit = this._opts.showComments && this._hasComments && naturalSlideWidth > 0
+      ? available * naturalSlideWidth /
+        (naturalSlideWidth + COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX)
+      : available;
     return fit > 0 ? fit : 0; // gutters ≥ container ⇒ defer (same as zero-width)
   }
 
   private _commentMarginExtent(): number {
     return this._opts.showComments && this._hasComments
-      ? COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX
+      ? (COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX) * this._commentUiZoom()
       : 0;
+  }
+
+  /** Comment chrome uses the same absolute zoom as the rendered presentation. */
+  private _commentUiZoom(): number {
+    return this._scaleEstablished ? this._scale : 1;
+  }
+
+  private _syncCommentMarginGeometry(margin: HTMLDivElement | null): void {
+    if (!margin) return;
+    const zoom = this._commentUiZoom();
+    margin.style.left = `calc(100% + ${COMMENT_MARGIN_GAP_PX * zoom}px)`;
+    margin.style.width = `${READ_ONLY_COMMENT_MARGIN_WIDTH_PX * zoom}px`;
+    margin.style.fontSize = `${13 * zoom}px`;
+    margin.dataset.ooxmlCommentZoom = String(zoom);
   }
 
   private _presentationHasComments(presentation: PptxPresentation): boolean {
@@ -903,9 +926,9 @@ export class PptxScrollViewer implements ZoomableViewer {
       wrapper.appendChild(commentMarkerLayer);
       commentMargin = document.createElement('div');
       commentMargin.style.cssText =
-        `position:absolute;top:0;left:calc(100% + ${COMMENT_MARGIN_GAP_PX}px);` +
-        `width:${READ_ONLY_COMMENT_MARGIN_WIDTH_PX}px;height:100%;box-sizing:border-box;` +
+        'position:absolute;top:0;height:100%;box-sizing:border-box;' +
         'overflow-x:hidden;overflow-y:auto;pointer-events:auto;';
+      this._syncCommentMarginGeometry(commentMargin);
       wrapper.appendChild(commentMargin);
     }
     const elementLayer = createCanvasElementOutlineLayer(
@@ -981,6 +1004,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     const wpx = this._slideWidthPx();
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${this._slideHeightPx()}px`;
+    this._syncCommentMarginGeometry(slot.commentMargin);
     this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the slide in the
@@ -1665,6 +1689,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       slot.textLayer.style.transformOrigin = '0 0';
       slot.textLayer.style.transform = `scale(${ratio})`;
     }
+    this._redrawSlotComments(i, slot);
   }
 
   /** (Re)schedule the debounced settle re-render (design §7 mechanism 2). Resets
@@ -1992,6 +2017,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           this._redrawSlotComments(mountedSlide, mountedSlot);
         }
       },
+      this._commentUiZoom(),
       this._opts.renderCommentCard,
     );
   }

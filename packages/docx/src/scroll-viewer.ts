@@ -568,14 +568,44 @@ export class DocxScrollViewer implements ZoomableViewer {
     const cw = this._scrollHost.clientWidth || this._container.clientWidth;
     if (cw <= 0) return 0; // 0 ⇒ defer (design §11 zero-width deferral)
     const { left, right } = this._padH();
-    const fit = cw - left - right - this._commentMarginExtent();
+    const available = cw - left - right;
+    if (available <= 0) return 0;
+    // Cards and the page share the same absolute zoom. Fit the composite
+    // analytically instead of subtracting a margin measured at the previous
+    // scale; the latter creates a ResizeObserver feedback loop and can inflate
+    // the cards after successive re-fits.
+    const naturalPageWidth = this._doc?.pageSize(0).widthPt
+      ? this._doc.pageSize(0).widthPt * PT_TO_PX
+      : 0;
+    const fit = this._hasCommentMargin() && naturalPageWidth > 0
+      ? available * naturalPageWidth /
+        (naturalPageWidth + COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX)
+      : available;
     return fit > 0 ? fit : 0; // gutters ≥ container ⇒ defer (same as zero-width)
   }
 
+  private _hasCommentMargin(): boolean {
+    return this._opts.showComments === true && (this._doc?.comments.length ?? 0) > 0;
+  }
+
   private _commentMarginExtent(): number {
-    return this._opts.showComments && (this._doc?.comments.length ?? 0) > 0
-      ? COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX
+    return this._hasCommentMargin()
+      ? (COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX) * this._commentUiZoom()
       : 0;
+  }
+
+  /** Comment chrome uses the same absolute zoom as the rendered document. */
+  private _commentUiZoom(): number {
+    return this._scaleEstablished ? this._scale : 1;
+  }
+
+  private _syncCommentMarginGeometry(margin: HTMLDivElement | null): void {
+    if (!margin) return;
+    const zoom = this._commentUiZoom();
+    margin.style.left = `calc(100% + ${COMMENT_MARGIN_GAP_PX * zoom}px)`;
+    margin.style.width = `${READ_ONLY_COMMENT_MARGIN_WIDTH_PX * zoom}px`;
+    margin.style.fontSize = `${13 * zoom}px`;
+    margin.dataset.ooxmlCommentZoom = String(zoom);
   }
 
   /** Base scale: first page's width fit to the fit-width. Returns 0 when the
@@ -826,9 +856,9 @@ export class DocxScrollViewer implements ZoomableViewer {
       wrapper.appendChild(commentTintLayer);
       commentMargin = document.createElement('div');
       commentMargin.style.cssText =
-        `position:absolute;top:0;left:calc(100% + ${COMMENT_MARGIN_GAP_PX}px);` +
-        `width:${READ_ONLY_COMMENT_MARGIN_WIDTH_PX}px;height:100%;box-sizing:border-box;` +
+        'position:absolute;top:0;height:100%;box-sizing:border-box;' +
         'overflow-x:hidden;overflow-y:auto;pointer-events:auto;';
+      this._syncCommentMarginGeometry(commentMargin);
       wrapper.appendChild(commentMargin);
     }
     const elementLayer = createCanvasElementOutlineLayer(
@@ -876,6 +906,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       slot.commentTintLayer.replaceChildren();
       slot.commentTintLayer.style.transform = '';
       slot.commentTintLayer.style.transformOrigin = '';
+      slot.commentTintLayer.style.visibility = '';
     }
     if (slot.commentMargin) disposeReadOnlyCommentMargin(slot.commentMargin);
     slot.commentRuns = Object.freeze([]);
@@ -892,6 +923,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     const hpx = this._pageHeightPx(i);
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${hpx}px`;
+    this._syncCommentMarginGeometry(slot.commentMargin);
     this._redrawElementOutlineForSlot(i, slot);
     // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
     // auto-centering, which cannot honour a left gutter). Centre the page in the
@@ -1512,10 +1544,13 @@ export class DocxScrollViewer implements ZoomableViewer {
         slot.textLayer.style.transform = `scale(${ratio})`;
       }
       if (slot.commentTintLayer) {
-        slot.commentTintLayer.style.transformOrigin = '0 0';
-        slot.commentTintLayer.style.transform = `scale(${ratio})`;
+        // The bitmap preview stretches immediately while fresh text geometry is
+        // still in flight. Hiding this document-coordinate layer avoids showing
+        // a visibly displaced range during the transient zoom frame.
+        slot.commentTintLayer.style.visibility = 'hidden';
       }
     }
+    if (this._opts.renderCommentCard) this._redrawSlotComments(i, slot);
   }
 
   /** (Re)schedule the debounced settle re-render (design §7 mechanism 2). Resets
@@ -1760,6 +1795,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     slot.commentRuns = Object.freeze([...runs]);
     slot.commentTintLayer.style.transform = '';
     slot.commentTintLayer.style.transformOrigin = '';
+    slot.commentTintLayer.style.visibility = '';
     this._redrawSlotComments(page, slot);
   }
 
@@ -1779,6 +1815,7 @@ export class DocxScrollViewer implements ZoomableViewer {
           this._redrawSlotComments(mountedPage, mountedSlot);
         }
       },
+      this._commentUiZoom(),
       this._opts.renderCommentCard,
     );
   }

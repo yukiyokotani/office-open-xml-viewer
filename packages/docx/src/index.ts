@@ -7,6 +7,11 @@ export {
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export type { DocxCommentCardRenderContext, DocxCommentCardRenderer } from './comment-margin';
+export type {
+  ViewerCommentCard,
+  ViewerCommentCardRenderContext,
+  ViewerCommentCardRenderer,
+} from '@silurus/ooxml-core';
 export { buildDocxTextLayer } from './text-layer';
 export {
   readDocxTextSelectionContext,

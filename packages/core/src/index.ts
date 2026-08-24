@@ -89,6 +89,11 @@ export type {
   OoxmlResourcePolicySnapshot,
 } from './types/resource-metrics';
 export type { TextSelectionContextOptions, ViewerContextMenuEvent } from './selection-context';
+export type {
+  ViewerCommentCard,
+  ViewerCommentCardRenderContext,
+  ViewerCommentCardRenderer,
+} from './comment-card';
 // Typed load-time error (PD4 seed): the `load()` factories throw this with a
 // stable `code` for container-level failures detected on the main thread.
 export {

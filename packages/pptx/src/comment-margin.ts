@@ -1,4 +1,4 @@
-import { overlayPercent } from '@silurus/ooxml-core';
+import { overlayPercent, type ViewerCommentCardRenderContext } from '@silurus/ooxml-core';
 import {
   buildReadOnlyCommentMargin,
   type ReadOnlyCommentCard,
@@ -6,11 +6,9 @@ import {
 } from '@silurus/ooxml-core/internal/read-only-comment-margin';
 import type { PptxComment, PptxCommentReply } from './types.js';
 
-export interface PptxCommentCardRenderContext {
+export interface PptxCommentCardRenderContext extends ViewerCommentCardRenderContext {
   readonly comment: Readonly<PptxComment>;
   readonly replies: readonly Readonly<PptxCommentReply>[];
-  readonly active: boolean;
-  readonly activate: () => void;
 }
 
 export type PptxCommentCardRenderer = (
@@ -39,8 +37,10 @@ export function buildPptxCommentMargin(
   slideHeightEmu: number,
   activeId: string | null,
   onActivate: (id: string | null) => void,
+  zoom: number,
   renderCard?: PptxCommentCardRenderer,
 ): void {
+  margin.dataset.ooxmlCommentZoom = String(zoom);
   markerLayer.replaceChildren();
   const visible = comments
     .map((comment, index) => ({ comment, index, id: commentId(comment, index) }))
@@ -57,12 +57,12 @@ export function buildPptxCommentMargin(
     const left = Math.max(0, Math.min(comment.x as number, slideWidthEmu));
     const top = Math.max(0, Math.min(comment.y as number, slideHeightEmu));
     marker.style.cssText =
-      'position:absolute;transform:translate(-50%,-50%);width:22px;height:22px;' +
-      'padding:0;border:2px solid #fff;border-radius:999px;cursor:pointer;pointer-events:auto;' +
-      'font:600 11px/18px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+      `position:absolute;transform:translate(-50%,-50%);width:${22 * zoom}px;height:${22 * zoom}px;` +
+      `padding:0;border:${2 * zoom}px solid #fff;border-radius:999px;cursor:pointer;pointer-events:auto;` +
+      `font:600 ${11 * zoom}px/${18 * zoom}px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;` +
       'color:#fff;background:var(--ooxml-comment-marker-background,#2563eb);' +
       `left:${overlayPercent(left, slideWidthEmu)};top:${overlayPercent(top, slideHeightEmu)};` +
-      `box-shadow:${activeId === id ? '0 0 0 3px rgba(37,99,235,.35)' : '0 1px 3px rgba(15,23,42,.28)'};`;
+      `box-shadow:${activeId === id ? `0 0 0 ${3 * zoom}px rgba(37,99,235,.35)` : `0 ${zoom}px ${3 * zoom}px rgba(15,23,42,.28)`};`;
     marker.textContent = String(visibleIndex + 1);
     marker.addEventListener('click', () => onActivate(activeId === id ? null : id));
     markerLayer.appendChild(marker);
@@ -78,12 +78,14 @@ export function buildPptxCommentMargin(
   const byId = new Map(visible.map((entry) => [entry.id, entry.comment]));
   const sharedRenderer: ReadOnlyCommentCardRenderer | undefined = renderCard
     ? (host, context) => {
-        const comment = byId.get(context.comment.id);
+        const comment = byId.get(context.view.id);
         if (!comment) return;
         return renderCard(host, {
+          view: context.view,
           comment,
           replies: comment.replies ?? [],
           active: context.active,
+          zoom: context.zoom,
           activate: context.activate,
         });
       }

@@ -29,11 +29,13 @@ await viewer.load(source);`;
 
 const customCardExample = `const viewer = new DocxScrollViewer(container, {
   showComments: true,
-  renderCommentCard(host, { comment, active, activate }) {
-    host.className = active ? 'comment is-active' : 'comment';
-    host.textContent = comment.text;
-    host.addEventListener('click', activate);
-    return () => host.removeEventListener('click', activate);
+  renderCommentCard(host, { view, active, activate }) {
+    const card = document.createElement('button');
+    card.className = active ? 'comment is-active' : 'comment';
+    card.textContent = (view.author ?? 'Comment') + ': ' + view.text;
+    card.addEventListener('click', activate);
+    host.append(card);
+    return () => card.removeEventListener('click', activate);
   },
 });`;
 

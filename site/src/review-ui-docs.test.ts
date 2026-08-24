@@ -17,7 +17,7 @@ describe('DOCX review UI integration guide', () => {
     expect(page).toContain('Margin or separate pane');
     expect(page).toContain('Highlights or markers');
     expect(page).toContain('showComments: true');
-    expect(page).toContain('renderCommentCard(host, { comment, active, activate })');
+    expect(page).toContain('renderCommentCard(host, { view, active, activate })');
     expect(page).not.toContain('commentRenderer');
   });
 

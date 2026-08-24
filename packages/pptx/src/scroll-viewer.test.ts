@@ -183,11 +183,41 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
     const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
     expect(margin.style.background).toBe('');
     expect(lastContext?.replies.map((reply) => reply.text)).toEqual(['Done']);
+    expect(lastContext?.view.text).toBe('Review this');
+    expect(lastContext?.zoom).toBeCloseTo(viewer.getScale());
     lastContext?.activate();
     expect(cleanups).toEqual(['modern-1']);
     expect(lastContext?.active).toBe(true);
     viewer.destroy();
     expect(cleanups).toEqual(['modern-1', 'modern-1']);
+  });
+
+  it('scales default cards and authored markers with viewer zoom', () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'modern-2', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { showComments: true },
+    );
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    const baseScale = viewer.getScale();
+    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale);
+    expect(parseFloat(markerLayer.children[0]?.style.width ?? '0')).toBeCloseTo(22 * baseScale);
+
+    viewer.setScale(baseScale * 1.5);
+    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale * 1.5);
+    expect(parseFloat(margin.style.fontSize)).toBeCloseTo(13 * baseScale * 1.5);
+    expect(parseFloat(markerLayer.children[0]?.style.width ?? '0')).toBeCloseTo(22 * baseScale * 1.5);
+    viewer.destroy();
   });
 });
 

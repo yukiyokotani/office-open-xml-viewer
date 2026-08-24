@@ -1,4 +1,4 @@
-import { overlayPercent } from '@silurus/ooxml-core';
+import { overlayPercent, type ViewerCommentCardRenderContext } from '@silurus/ooxml-core';
 import {
   buildReadOnlyCommentMargin,
   type ReadOnlyCommentCard,
@@ -23,11 +23,9 @@ export interface DocxCommentMarginModel {
 
 /** Context supplied when a consumer replaces the built-in comment card.
  * ScrollViewer still owns placement, virtualization, activation, and cleanup. */
-export interface DocxCommentCardRenderContext {
+export interface DocxCommentCardRenderContext extends ViewerCommentCardRenderContext {
   readonly comment: Readonly<DocComment>;
   readonly replies: readonly Readonly<DocComment>[];
-  readonly active: boolean;
-  readonly activate: () => void;
 }
 
 export type DocxCommentCardRenderer = (
@@ -103,8 +101,10 @@ export function buildDocxCommentMargin(
   cssHeight: number,
   activeId: string | null,
   onActivate: (id: string | null) => void,
+  zoom: number,
   renderCard?: DocxCommentCardRenderer,
 ): void {
+  margin.dataset.ooxmlCommentZoom = String(zoom);
   tintLayer.innerHTML = '';
   const threads = commentThreads(model.comments);
   const firstAnchor = new Map<string, CommentAnchorRange>();
@@ -127,12 +127,14 @@ export function buildDocxCommentMargin(
   });
   const sharedRenderer: ReadOnlyCommentCardRenderer | undefined = renderCard
     ? (host, context) => {
-        const thread = visibleThreads.get(context.comment.id);
+        const thread = visibleThreads.get(context.view.id);
         if (!thread) return;
         return renderCard(host, {
+          view: context.view,
           comment: thread.root,
           replies: thread.replies,
           active: context.active,
+          zoom: context.zoom,
           activate: context.activate,
         });
       }
