@@ -130,10 +130,18 @@ export function buildReadOnlyCommentMargin(
     card.setAttribute('aria-pressed', String(active));
     card.style.cssText =
       'display:block;width:100%;box-sizing:border-box;margin:0 0 .62em;padding:.78em .92em;' +
-      'border:0;border-radius:.62em;text-align:left;cursor:pointer;font:inherit;' +
-      `background:${active ? 'var(--ooxml-comment-card-active-background,#dbeafe)' : 'var(--ooxml-comment-card-background,#f1f5f9)'};` +
-      `box-shadow:${active ? '0 0 0 .15em rgba(37,99,235,.38)' : '0 .08em .16em rgba(15,23,42,.12)'};`;
+      'border:0;border-radius:.62em;text-align:left;cursor:pointer;font:inherit;outline:none;' +
+      `background:${active ? 'var(--ooxml-comment-card-active-background,#dbeafe)' : 'var(--ooxml-comment-card-background,#fff)'};` +
+      `box-shadow:${active ? 'inset 0 0 0 .12em rgba(37,99,235,.42)' : '0 .08em .16em rgba(15,23,42,.12)'};`;
     card.addEventListener('click', () => onActivate(active ? null : comment.id));
+    card.addEventListener('focus', () => {
+      card.style.boxShadow = 'inset 0 0 0 .12em rgba(37,99,235,.42)';
+    });
+    card.addEventListener('blur', () => {
+      card.style.boxShadow = active
+        ? 'inset 0 0 0 .12em rgba(37,99,235,.42)'
+        : '0 .08em .16em rgba(15,23,42,.12)';
+    });
     appendCommentBody(card, comment, false);
     for (const reply of comment.replies ?? []) appendCommentBody(card, reply, true);
     item.appendChild(card);

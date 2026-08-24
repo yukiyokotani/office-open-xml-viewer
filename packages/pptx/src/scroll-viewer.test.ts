@@ -155,7 +155,7 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
 
 describe('PptxScrollViewer — opt-in comment cards', () => {
   it('keeps the margin transparent and lets consumers replace card contents', () => {
-    installDom();
+    const dom = installDom();
     const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
     engine.commentsBySlide = [[{
       id: 'modern-1', author: 'Grace', text: 'Review this',
@@ -188,8 +188,14 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
     lastContext?.activate();
     expect(cleanups).toEqual(['modern-1']);
     expect(lastContext?.active).toBe(true);
-    viewer.destroy();
+    const customHost = margin.children[0]!.children[0]!;
+    dom.dispatchDocument('pointerdown', { target: customHost });
+    expect(lastContext?.active).toBe(true);
+    dom.dispatchDocument('pointerdown', { target: container });
+    expect(lastContext?.active).toBe(false);
     expect(cleanups).toEqual(['modern-1', 'modern-1']);
+    viewer.destroy();
+    expect(cleanups).toEqual(['modern-1', 'modern-1', 'modern-1']);
   });
 
   it('scales default cards and authored markers with viewer zoom', () => {
@@ -210,11 +216,11 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
     const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
     const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
     const baseScale = viewer.getScale();
-    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale);
+    expect(margin.style.width).toBe(`${280 / 13}em`);
     expect(parseFloat(markerLayer.children[0]?.style.width ?? '0')).toBeCloseTo(22 * baseScale);
 
     viewer.setScale(baseScale * 1.5);
-    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale * 1.5);
+    expect(margin.style.width).toBe(`${280 / 13}em`);
     expect(parseFloat(margin.style.fontSize)).toBeCloseTo(13 * baseScale * 1.5);
     expect(parseFloat(markerLayer.children[0]?.style.width ?? '0')).toBeCloseTo(22 * baseScale * 1.5);
     viewer.destroy();

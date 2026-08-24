@@ -174,7 +174,7 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
   });
 
   it('renders transparent margin cards and cleans up a consumer card renderer', async () => {
-    installDom();
+    const dom = installDom();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
     const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
     engine.comments = [{ id: '7', author: 'Ada', text: 'Review this' }];
@@ -217,8 +217,14 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
     lastContext?.activate();
     expect(cleanups).toEqual(['7']);
     expect(lastContext?.active).toBe(true);
-    viewer.destroy();
+    const customHost = margin.children[0]!.children[0]!;
+    dom.dispatchDocument('pointerdown', { target: customHost });
+    expect(lastContext?.active).toBe(true);
+    dom.dispatchDocument('pointerdown', { target: container });
+    expect(lastContext?.active).toBe(false);
     expect(cleanups).toEqual(['7', '7']);
+    viewer.destroy();
+    expect(cleanups).toEqual(['7', '7', '7']);
   });
 
   it('scales default cards with viewer zoom and hides stale anchor geometry during preview', async () => {
@@ -254,17 +260,53 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
     const content = comment.children[1]!;
     const identity = content.children[0]!;
     const baseScale = viewer.getScale();
-    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale);
+    expect(margin.style.width).toBe(`${280 / 13}em`);
     expect(parseFloat(margin.style.fontSize)).toBeCloseTo(13 * baseScale);
+    expect(card.style.background).toBe('var(--ooxml-comment-card-background,#fff)');
+    card.dispatch('focus');
+    expect(card.style.boxShadow).toContain('inset');
     expect(avatar.dataset.ooxmlCommentPart).toBe('avatar');
     expect(identity.children[0]?.dataset.ooxmlCommentPart).toBe('author');
     expect(identity.children[1]?.dataset.ooxmlCommentPart).toBe('date');
     expect(content.children[1]?.dataset.ooxmlCommentPart).toBe('body');
 
     viewer.setScale(baseScale * 1.5);
-    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * baseScale * 1.5);
+    expect(margin.style.width).toBe(`${280 / 13}em`);
     expect(parseFloat(margin.style.fontSize)).toBeCloseTo(13 * baseScale * 1.5);
     expect(tint.style.visibility).toBe('hidden');
+    viewer.destroy();
+  });
+
+  it('joins consecutive comment highlights on one line without crossing a line break', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
+    engine.comments = [{ id: '10', author: 'Ada', text: 'One line' }];
+    engine.commentAnchors = [{
+      commentId: '10', source, startRunIndex: 0, endRunIndex: 4,
+      reference: { source, runIndex: 4, affinity: 'preceding' },
+    }] as CommentAnchorRange[];
+    engine.feedTextRuns = [
+      { text: 'among', source, sourceRunIndex: 0, x: 20, y: 30, w: 35, h: 14, fontSize: 12, font: '12px sans-serif' },
+      { text: 'older', source, sourceRunIndex: 1, x: 60, y: 30, w: 30, h: 14, fontSize: 12, font: '12px sans-serif' },
+      { text: 'things', source, sourceRunIndex: 2, x: 96, y: 30, w: 36, h: 14, fontSize: 12, font: '12px sans-serif' },
+      { text: 'below', source, sourceRunIndex: 3, x: 20, y: 50, w: 34, h: 14, fontSize: 12, font: '12px sans-serif' },
+    ];
+    const container = makeContainer();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      engine.asDoc(),
+      { showComments: true },
+    );
+    await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const tint = page.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    expect(tint.children).toHaveLength(2);
+    const pageWidth = parseFloat(page.style.width);
+    expect(tint.children[0]?.style.left).toBe(`${20 / pageWidth * 100}%`);
+    expect(tint.children[0]?.style.width).toBe(`${112 / pageWidth * 100}%`);
     viewer.destroy();
   });
 

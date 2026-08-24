@@ -302,20 +302,20 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
 export function installDom(): {
   resizeCb: () => (() => void) | undefined;
-  dispatchDocument(type: string): void;
+  dispatchDocument(type: string, event?: unknown): void;
   listenerCount(type: string): number;
   setSelection(selection: Selection | null): void;
 } {
   let lastResizeCb: (() => void) | undefined;
   let currentSelection: Selection | null = null;
-  const listeners = new Map<string, Array<() => void>>();
+  const listeners = new Map<string, Array<(event: unknown) => void>>();
   vi.stubGlobal('document', {
     createElement: (t: string) => makeEl(t),
     getSelection: () => currentSelection,
-    addEventListener: (type: string, listener: () => void) => {
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
       listeners.set(type, [...(listeners.get(type) ?? []), listener]);
     },
-    removeEventListener: (type: string, listener: () => void) => {
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
       listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
     },
   });
@@ -332,8 +332,8 @@ export function installDom(): {
   );
   return {
     resizeCb: () => lastResizeCb,
-    dispatchDocument: (type) => {
-      for (const listener of listeners.get(type) ?? []) listener();
+    dispatchDocument: (type, event = {}) => {
+      for (const listener of listeners.get(type) ?? []) listener(event);
     },
     listenerCount: (type) => listeners.get(type)?.length ?? 0,
     setSelection: (selection) => { currentSelection = selection; },

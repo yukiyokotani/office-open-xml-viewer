@@ -292,9 +292,21 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
 /** Install a recording document + window + ResizeObserver into globals.
  *  Returns the last-constructed ResizeObserver callback so a test can fire a
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
-export function installDom(): { resizeCb: () => (() => void) | undefined } {
+export function installDom(): {
+  resizeCb: () => (() => void) | undefined;
+  dispatchDocument(type: string, event?: unknown): void;
+} {
   let lastResizeCb: (() => void) | undefined;
-  vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+  const listeners = new Map<string, Array<(event: unknown) => void>>();
+  vi.stubGlobal('document', {
+    createElement: (t: string) => makeEl(t),
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    },
+  });
   vi.stubGlobal('window', { devicePixelRatio: 1 });
   vi.stubGlobal(
     'ResizeObserver',
@@ -306,7 +318,12 @@ export function installDom(): { resizeCb: () => (() => void) | undefined } {
       disconnect(): void {}
     },
   );
-  return { resizeCb: () => lastResizeCb };
+  return {
+    resizeCb: () => lastResizeCb,
+    dispatchDocument: (type, event = {}) => {
+      for (const listener of listeners.get(type) ?? []) listener(event);
+    },
+  };
 }
 
 export interface RenderCall {

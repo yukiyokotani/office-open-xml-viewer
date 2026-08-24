@@ -89,6 +89,31 @@ function createTint(
   layer.appendChild(tint);
 }
 
+/** Fill the whitespace between consecutive anchor runs on one rendered line.
+ * Exact line geometry and transform equality are the boundary: this never uses
+ * a proximity threshold and never joins different baselines or transforms. */
+function mergeSameLineRuns(
+  runs: readonly Readonly<DocxTextRunInfo>[],
+): Readonly<DocxTextRunInfo>[] {
+  const merged: DocxTextRunInfo[] = [];
+  for (const run of runs) {
+    const previous = merged.at(-1);
+    if (
+      previous &&
+      previous.y === run.y &&
+      previous.h === run.h &&
+      previous.transform === run.transform
+    ) {
+      const left = Math.min(previous.x, run.x);
+      const right = Math.max(previous.x + previous.w, run.x + run.w);
+      merged[merged.length - 1] = { ...previous, x: left, w: right - left };
+      continue;
+    }
+    merged.push({ ...run });
+  }
+  return merged;
+}
+
 /** Build one page's range tint and authored-order margin cards. A thread card is
  * emitted on the page containing its first structural anchor; later ranges are
  * still tinted but do not duplicate the card. */
@@ -111,7 +136,7 @@ export function buildDocxCommentMargin(
   for (const anchor of model.anchors) {
     if (!firstAnchor.has(anchor.commentId)) firstAnchor.set(anchor.commentId, anchor);
     const active = activeId === anchor.commentId;
-    for (const run of resolveCommentAnchorRuns(anchor, runs)) {
+    for (const run of mergeSameLineRuns(resolveCommentAnchorRuns(anchor, runs))) {
       createTint(tintLayer, run, cssWidth, cssHeight, active);
     }
   }

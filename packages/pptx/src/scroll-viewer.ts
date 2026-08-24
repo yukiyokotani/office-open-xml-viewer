@@ -56,6 +56,7 @@ const ZOOM_SETTLE_MS = 150;
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
 const COMMENT_MARGIN_GAP_PX = 12;
+const COMMENT_MARGIN_FONT_SIZE_PX = 13;
 const borrowedPresentationOption = Symbol('PptxScrollViewer.borrowedPresentation');
 type InternalPptxScrollViewerOptions = PptxScrollViewerOptions & {
   [borrowedPresentationOption]?: PptxPresentation;
@@ -302,6 +303,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _selectionContextKey = 'null';
   private _elementClickListener: ((event: MouseEvent) => void) | null = null;
   private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
+  private _commentOutsidePointerListener: ((event: PointerEvent) => void) | null = null;
   private _elementContext: PptxElementContext | null = null;
   private _activeCommentId: string | null = null;
   private _hasComments = false;
@@ -464,6 +466,20 @@ export class PptxScrollViewer implements ZoomableViewer {
 
     this._scrollListener = () => this._onScroll();
     this._scrollHost.addEventListener('scroll', this._scrollListener);
+
+    if (opts.showComments) {
+      this._commentOutsidePointerListener = (event) => {
+        let node = event.target as HTMLElement | null;
+        while (node) {
+          if (node.dataset?.ooxmlCommentId) return;
+          node = node.parentElement;
+        }
+        if (this._activeCommentId === null) return;
+        this._activeCommentId = null;
+        for (const [slide, slot] of this._slots) this._redrawSlotComments(slide, slot);
+      };
+      this._wrapper.ownerDocument.addEventListener('pointerdown', this._commentOutsidePointerListener);
+    }
 
     // Ctrl/Cmd+wheel zoom (design §7). Bare wheel is left untouched so the
     // scrollHost scrolls natively. `enableZoom:false` installs no handler at all.
@@ -640,9 +656,9 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _syncCommentMarginGeometry(margin: HTMLDivElement | null): void {
     if (!margin) return;
     const zoom = this._commentUiZoom();
-    margin.style.left = `calc(100% + ${COMMENT_MARGIN_GAP_PX * zoom}px)`;
-    margin.style.width = `${READ_ONLY_COMMENT_MARGIN_WIDTH_PX * zoom}px`;
-    margin.style.fontSize = `${13 * zoom}px`;
+    margin.style.left = `calc(100% + ${COMMENT_MARGIN_GAP_PX / COMMENT_MARGIN_FONT_SIZE_PX}em)`;
+    margin.style.width = `${READ_ONLY_COMMENT_MARGIN_WIDTH_PX / COMMENT_MARGIN_FONT_SIZE_PX}em`;
+    margin.style.fontSize = `${COMMENT_MARGIN_FONT_SIZE_PX * zoom}px`;
     margin.dataset.ooxmlCommentZoom = String(zoom);
   }
 
@@ -2395,6 +2411,13 @@ export class PptxScrollViewer implements ZoomableViewer {
     if (this._contextMenuListener) {
       this._scrollHost.removeEventListener('contextmenu', this._contextMenuListener);
       this._contextMenuListener = null;
+    }
+    if (this._commentOutsidePointerListener) {
+      this._wrapper.ownerDocument.removeEventListener(
+        'pointerdown',
+        this._commentOutsidePointerListener,
+      );
+      this._commentOutsidePointerListener = null;
     }
     this._elementContext = null;
     if (this._scrollListener) {
