@@ -412,6 +412,7 @@ fn text_list_shape(gf_xfrm: &Transform, body: TextBody) -> ShapeElement {
         fill: None,
         stroke: None,
         text_body: Some(body),
+        is_text_box: false,
         default_text_color: None,
         cust_geom: None,
         adj: None,

@@ -274,6 +274,9 @@ export interface ShapeElement {
   fill: Fill | null;
   stroke: Stroke | null;
   textBody: TextBody | null;
+  /** `p:cNvSpPr@txBox` — true when this shape is specifically a text box.
+   *  A regular shape can still contain text through {@link textBody}. */
+  isTextBox?: boolean;
   /** Default text color from p:style > fontRef (hex). Used when run/para has no explicit color. */
   defaultTextColor: string | null;
   /** Custom geometry sub-paths (set only when geometry === "custGeom").

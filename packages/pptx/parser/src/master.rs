@@ -2136,6 +2136,30 @@ mod placeholder_geometry_tests {
     }
 
     #[test]
+    fn slide_shape_preserves_text_box_marker() {
+        let text_box = parse_slide_shape(
+            r#"<p:nvSpPr><p:cNvPr id="2" name="Text Box"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+               <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+               <p:txBody><a:bodyPr/><a:p/></p:txBody>"#,
+            &LayoutPlaceholders::default(),
+        );
+        let regular_shape = parse_slide_shape(
+            r#"<p:nvSpPr><p:cNvPr id="3" name="Rectangle"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+               <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+               <p:txBody><a:bodyPr/><a:p/></p:txBody>"#,
+            &LayoutPlaceholders::default(),
+        );
+
+        assert!(text_box.is_text_box);
+        assert!(!regular_shape.is_text_box);
+        assert_eq!(serde_json::to_value(&text_box).unwrap()["isTextBox"], true);
+        assert!(serde_json::to_value(&regular_shape)
+            .unwrap()
+            .get("isTextBox")
+            .is_none());
+    }
+
+    #[test]
     fn layout_retains_picture_effect_components_for_placeholder_inheritance() {
         let placeholders = parse_layout_geometry(
             r#"<p:sp>

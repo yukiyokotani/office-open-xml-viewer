@@ -376,6 +376,10 @@ pub(crate) struct ShapeElement {
     pub(crate) fill: Option<Fill>,
     pub(crate) stroke: Option<Stroke>,
     pub(crate) text_body: Option<TextBody>,
+    /// ECMA-376 §19.3.1.21 `p:cNvSpPr/@txBox`. True means this shape is
+    /// specifically a text box; regular shapes may still carry `text_body`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) is_text_box: bool,
     /// Default text color from p:style > fontRef (hex). Overrides renderer default
     /// when present; individual run colors still take precedence.
     pub(crate) default_text_color: Option<String>,
