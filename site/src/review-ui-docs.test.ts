@@ -78,6 +78,10 @@ describe('DOCX review UI integration guide', () => {
     expect(controller).toContain('previous.transform === run.transform');
     expect(controller).toContain('gap <= Math.max(2, run.h * .4)');
     expect(styles).toContain('.review-example__margin');
+    expect(markup).toContain('data-review-previous><span aria-hidden="true">←</span> Previous');
+    expect(markup).toContain('data-review-next>Next <span aria-hidden="true">→</span>');
+    expect(styles).toContain('grid-template-columns: 104px minmax(96px, auto) 104px');
+    expect(styles).toContain('width: 100%');
     expect(styles).toContain('@container (max-width: 720px)');
     expect(styles).not.toContain('@media (max-width: 720px)');
     expect(component).not.toContain('<CodeTabs');
