@@ -292,6 +292,9 @@ export interface RenderCall {
    *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
   width?: number;
   currentDate?: Date | number;
+  /** §17.13.5 — the tracked-change view flag the viewer passed (absent =
+   *  final view), so the option tests can pin the render-path threading. */
+  showTrackedChanges?: boolean;
   /** The canvas element the viewer handed to `renderPage` (main mode). The
    *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
    *  a test confirm the on-screen canvas was NOT the render target until swap. */
@@ -379,6 +382,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        showTrackedChanges: opts?.showTrackedChanges,
         canvas,
         resolve: () => resolve(),
         reject,
@@ -403,6 +407,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        showTrackedChanges: opts?.showTrackedChanges,
         resolve: () => resolve(bmp as unknown as ImageBitmap),
         reject,
       };
@@ -439,6 +444,14 @@ export class FakeDocxEngine {
   getBookmarkPage(name: string): number | undefined {
     this.bookmarkCalls.push(name);
     return this.bookmarkPages.get(name);
+  }
+  /** §17.13.4 — comment data the test seeds so the viewers' comment margin can
+   *  be driven without a real parse (mirrors `DocxDocument.comments` and
+   *  `DocxDocument.commentAnchorRanges`). Empty by default. */
+  comments: import('./types').DocComment[] = [];
+  feedCommentAnchorRanges: import('./comment-margin-layout').CommentAnchorRange[] = [];
+  commentAnchorRanges(): import('./comment-margin-layout').CommentAnchorRange[] {
+    return this.feedCommentAnchorRanges;
   }
   asDoc(): DocxDocument {
     return this as unknown as DocxDocument;

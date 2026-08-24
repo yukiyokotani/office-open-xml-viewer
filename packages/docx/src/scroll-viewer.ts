@@ -24,6 +24,8 @@ import {
   limitDocxElementContext,
   MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
 } from './element-context';
+import { buildCommentThreads, type CommentThread } from './comment-margin-layout';
+import { buildDocxCommentLayer } from './comment-layer';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -170,6 +172,19 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    *  `onHyperlinkClick` is never called. Links still render exactly as authored
    *  but are inert, like plain text. */
   enableHyperlinks?: boolean;
+  /**
+   * ECMA-376 §17.13.4 — draw comment threads as balloons in a margin gutter
+   * to the RIGHT of each page, with the commented ranges tinted and connector
+   * lines from each anchor. Default `false`: no gutter is reserved and no
+   * comment DOM is built (comments stay reachable as data via
+   * `DocxDocument.comments`). Resolved threads (`w15:done`) are hidden.
+   * Clicking a balloon selects its thread; clicking again deselects. Toggle
+   * at runtime with {@link DocxScrollViewer.setShowComments}.
+   */
+  showComments?: boolean;
+  /** Width (CSS px) of the comment margin gutter reserved beside each page
+   *  when {@link showComments} is on. Default 260. */
+  commentsGutterWidth?: number;
   /** Receives asynchronous Viewer-managed failures that cannot be observed by
    *  awaiting the method that started them. `load()` failures always reject and
    *  are not also delivered here. Virtualized per-slot render failures (both
@@ -194,6 +209,12 @@ interface PageSlot {
   textLayer: HTMLDivElement | null;
   highlightLayer: HTMLDivElement;
   elementLayer: HTMLDivElement | null;
+  /** §17.13.4 comment margin overlays (created only while `showComments`). */
+  commentTintLayer: HTMLDivElement | null;
+  commentGutterLayer: HTMLDivElement | null;
+  /** The last rendered runs this slot built its comment layer from, so a
+   *  selection change can rebuild balloons without re-rendering the page. */
+  commentRuns: DocxTextRunInfo[] | null;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
   /** The `_scale` at which this slot's on-screen canvas bitmap (and text overlay)
@@ -326,6 +347,15 @@ export class DocxScrollViewer implements ZoomableViewer {
     (page) => this._collectPageRuns(page),
   );
   private _findActive = false;
+  /** §17.13.5 tracked-change view state (seeded from opts; runtime-togglable —
+   *  `_opts` is readonly, so the live value is a field). */
+  private _showTrackedChanges: boolean;
+  /** §17.13.4 comment margin state (seeded from opts; runtime-togglable). */
+  private _showComments: boolean;
+  /** Selected comment thread (root id), or null. Shared across pages. */
+  private _selectedCommentId: string | null = null;
+  /** Per-document thread cache (built from `doc.comments` on first use). */
+  private _commentThreads: readonly CommentThread[] | null = null;
 
   /**
    * Create a Scroll Viewer that borrows an already-loaded document.
@@ -359,6 +389,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     this._container = container;
     this._opts = opts;
+    this._showTrackedChanges = opts.showTrackedChanges === true;
+    this._showComments = opts.showComments === true;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
@@ -503,6 +535,9 @@ export class DocxScrollViewer implements ZoomableViewer {
       if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
       this._find.invalidate();
       this._findActive = false;
+      // A new document invalidates the per-document comment threads/selection.
+      this._commentThreads = null;
+      this._selectedCommentId = null;
       // Lay out + mount the first window now that the engine exists (mirrors the
       // borrowed-engine path in the constructor). relayout() is idempotent and
       // defers under a zero-width container — `_onResize` re-runs it once width
@@ -651,7 +686,17 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  width). Resolved here (not stored) to mirror `_gap()`/`_pad()`. */
   private _padH(): { left: number; right: number } {
     const gap = this._gap();
-    return { left: this._opts.paddingLeft ?? gap, right: this._opts.paddingRight ?? gap };
+    // §17.13.4 — the comment gutter widens the effective right padding, so the
+    // fit width shrinks and the spacer's scroll extent covers the balloons.
+    const gutter = this._showComments ? this._commentsGutterWidth() : 0;
+    return {
+      left: this._opts.paddingLeft ?? gap,
+      right: (this._opts.paddingRight ?? gap) + gutter,
+    };
+  }
+
+  private _commentsGutterWidth(): number {
+    return this._opts.commentsGutterWidth ?? 260;
   }
 
   /** Index of the page whose slot spans content-offset `y` (largest `i` with
@@ -767,6 +812,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (reused) {
       // _recycleSlot already reset renderedPage to -1 before pooling this slot.
       this._scrollHost.appendChild(reused.wrapper);
+      this._ensureSlotCommentLayers(reused);
       return reused;
     }
     // `left` is set explicitly per mount by `_positionSlot` (JS centering with a
@@ -802,11 +848,72 @@ export class DocxScrollViewer implements ZoomableViewer {
       textLayer,
       highlightLayer,
       elementLayer,
+      commentTintLayer: null,
+      commentGutterLayer: null,
+      commentRuns: null,
       renderedPage: -1,
       renderedScale: -1,
       dispatcher: new StaticCanvasRenderDispatcher(canvas, this._mode === 'worker'),
     };
+    this._ensureSlotCommentLayers(slot);
     return slot;
+  }
+
+  /** §17.13.4 — mount (or tear down) a slot's comment layers to match the live
+   *  `showComments` state. Pooled slots created before a runtime toggle pass
+   *  through here on every acquire, so they converge. */
+  private _ensureSlotCommentLayers(slot: PageSlot): void {
+    if (this._showComments && !slot.commentGutterLayer) {
+      const tint = document.createElement('div');
+      tint.style.cssText =
+        'position:absolute;top:0;left:0;width:100%;height:100%;'
+        + 'overflow:hidden;pointer-events:none;';
+      slot.wrapper.appendChild(tint);
+      const gutter = document.createElement('div');
+      gutter.style.cssText =
+        `position:absolute;top:0;left:100%;width:${this._commentsGutterWidth()}px;height:100%;`
+        + 'overflow:visible;pointer-events:none;';
+      slot.wrapper.appendChild(gutter);
+      slot.commentTintLayer = tint;
+      slot.commentGutterLayer = gutter;
+    } else if (!this._showComments && slot.commentGutterLayer) {
+      slot.commentTintLayer?.remove();
+      slot.commentGutterLayer.remove();
+      slot.commentTintLayer = null;
+      slot.commentGutterLayer = null;
+      slot.commentRuns = null;
+    }
+  }
+
+  /** (Re)build one slot's comment margin from the given projected runs. */
+  private _buildSlotCommentLayer(page: number, slot: PageSlot, runs: DocxTextRunInfo[]): void {
+    if (!this._showComments) return;
+    this._ensureSlotCommentLayers(slot);
+    const tint = slot.commentTintLayer;
+    const gutter = slot.commentGutterLayer;
+    const doc = this._doc;
+    if (!tint || !gutter || !doc) return;
+    slot.commentRuns = runs;
+    this._commentThreads ??= buildCommentThreads(doc.comments);
+    const { width, height } = this._canvasCssPx(slot.canvas);
+    buildDocxCommentLayer(
+      tint,
+      gutter,
+      runs,
+      { threads: this._commentThreads, ranges: doc.commentAnchorRanges() },
+      { cssWidth: width, cssHeight: height, gutterWidthPx: this._commentsGutterWidth() },
+      this._selectedCommentId,
+      (commentId) => {
+        this._selectedCommentId = commentId;
+        // Rebuild every mounted slot's balloons so selection emphasis and the
+        // selected balloon's expansion stay consistent across visible pages.
+        for (const [otherPage, otherSlot] of this._slots) {
+          if (otherSlot.commentRuns) {
+            this._buildSlotCommentLayer(otherPage, otherSlot, otherSlot.commentRuns);
+          }
+        }
+      },
+    );
   }
 
   private _recycleSlot(idx: number, slot: PageSlot): void {
@@ -829,6 +936,9 @@ export class DocxScrollViewer implements ZoomableViewer {
     slot.highlightLayer.innerHTML = '';
     slot.highlightLayer.style.transform = '';
     slot.highlightLayer.style.transformOrigin = '';
+    if (slot.commentTintLayer) slot.commentTintLayer.innerHTML = '';
+    if (slot.commentGutterLayer) slot.commentGutterLayer.innerHTML = '';
+    slot.commentRuns = null;
     renderCanvasElementOutline(slot.elementLayer, null);
     slot.renderedPage = -1;
     slot.renderedScale = -1;
@@ -850,9 +960,14 @@ export class DocxScrollViewer implements ZoomableViewer {
     // zoomed wider than the viewport the centre would go negative, so the floor
     // pins it at `padL` and the overflow scrolls right. Formula deliberately
     // duplicated per viewer (one line; not hoisted to core).
+    // §17.13.4 — the comment gutter hangs off the page's RIGHT edge, so it is
+    // part of the centred unit: centre page + gutter together (the page shifts
+    // left, the balloons stay inside the viewport). Centring the page alone
+    // would leave dead space on the left and clip the gutter on the right.
     const { left: padL } = this._padH();
     const cw = this._scrollHost.clientWidth;
-    slot.wrapper.style.left = `${Math.max(padL, (cw - wpx) / 2)}px`;
+    const gutterW = this._showComments ? this._commentsGutterWidth() : 0;
+    slot.wrapper.style.left = `${Math.max(padL, (cw - wpx - gutterW) / 2)}px`;
   }
 
   /** Device-pixel ratio for a render (opts override → window → 1). */
@@ -911,7 +1026,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     // Main mode: render straight onto the slot's canvas.
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const wantRuns = wantOverlay || this._findActive;
+    const wantRuns = wantOverlay || this._findActive || this._showComments;
     const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
     let render: Promise<void>;
     try {
@@ -920,6 +1035,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._opts.currentDate,
+        ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun,
       });
     } catch (error) {
@@ -958,6 +1074,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
+        this._buildSlotCommentLayer(i, slot, runs);
       })
       .catch((err: unknown) => {
         const isCurrent =
@@ -1083,7 +1200,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     // The runs ride back beside the bitmap (one round-trip), collected only when
     // an overlay is actually wanted.
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const wantRuns = wantOverlay || this._findActive;
+    const wantRuns = wantOverlay || this._findActive || this._showComments;
     const runs: DocxTextRunInfo[] = [];
     try {
       const bmp = await this._doc!.renderPageToBitmap(i, {
@@ -1091,6 +1208,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._opts.currentDate,
+        ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
       // Stale if EITHER (a) the epoch moved (a setScale rescaled mid-flight, so
@@ -1139,6 +1257,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       }
       if (wantRuns) this._refreshFindRuns(i, runs);
       this._redrawSlotHighlights(i, slot);
+      this._buildSlotCommentLayer(i, slot, runs);
       painted = true;
     } catch (err) {
       const isCurrent =
@@ -1527,7 +1646,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     const generation = spareDispatcher.begin();
     const runs: DocxTextRunInfo[] = [];
     const wantOverlay = !!this._opts.enableTextSelection && !!slot.textLayer;
-    const wantRuns = wantOverlay || this._findActive;
+    const wantRuns = wantOverlay || this._findActive || this._showComments;
     const onTextRun = wantRuns ? (r: DocxTextRunInfo) => runs.push(r) : undefined;
     this._doc
       .renderPage(spare, i, {
@@ -1535,6 +1654,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._opts.currentDate,
+        ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun,
       })
       .then(() => {
@@ -1580,6 +1700,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         }
         if (wantRuns) this._refreshFindRuns(i, runs);
         this._redrawSlotHighlights(i, slot);
+        this._buildSlotCommentLayer(i, slot, runs);
       })
       .catch((err: unknown) => {
         if (
@@ -1590,6 +1711,51 @@ export class DocxScrollViewer implements ZoomableViewer {
         ) this._reportRenderError(err);
         spareDispatcher.destroy();
       });
+  }
+
+  // ─── §17.13.5 / §17.13.4 runtime view toggles ─────────────────────────────
+
+  /**
+   * ECMA-376 §17.13.5 — switch between the final view (`false`, the default:
+   * deletions hidden) and the markup view (`true`: author-coloured revision
+   * decoration + margin change bars) at runtime. Every mounted page
+   * re-renders against the selected layout variant; find results are
+   * invalidated because the visible text differs between the views.
+   */
+  setShowTrackedChanges(value: boolean): void {
+    if (this._showTrackedChanges === value) return;
+    this._showTrackedChanges = value;
+    this._find.invalidate();
+    // Force a fresh render of every mounted slot at the new variant: bump the
+    // epoch so in-flight resolutions go stale, reset each slot's page identity
+    // so _renderSlot re-dispatches, and remount the window.
+    this._renderEpoch++;
+    for (const slot of this._slots.values()) slot.renderedPage = -1;
+    const remount = [...this._slots.entries()];
+    for (const [page, slot] of remount) this._renderSlot(page, slot);
+  }
+
+  /** §17.13.4 — toggle the comment margin at runtime. The gutter participates
+   *  in the fit width, so the layout refits and every mounted page rebuilds
+   *  (turning it off simply removes the comment DOM and returns the space). */
+  setShowComments(value: boolean): void {
+    if (this._showComments === value) return;
+    this._showComments = value;
+    if (!value) this._selectedCommentId = null;
+    for (const slot of [...this._slots.values(), ...this._free]) {
+      this._ensureSlotCommentLayers(slot);
+    }
+    // The gutter changes _padH → the fit width and spacer extent; a full
+    // relayout re-fits and re-mounts the visible window.
+    this.relayout();
+    if (value) {
+      // Slots mounted before the toggle rendered without collecting run
+      // geometry, so force a fresh render of every mounted page — the comment
+      // layers are rebuilt from the runs those renders ship.
+      this._renderEpoch++;
+      for (const slot of this._slots.values()) slot.renderedPage = -1;
+      for (const [page, slot] of [...this._slots.entries()]) this._renderSlot(page, slot);
+    }
   }
 
   /**
@@ -1680,6 +1846,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     return this._doc.collectPageRuns(page, {
       width: this._pageWidthPx(page),
       currentDate: this._opts.currentDate,
+      ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
     });
   }
 
@@ -1964,6 +2131,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         yPt: localY / rect.height * pageSize.heightPt,
       }, {
         currentDate: this._opts.currentDate,
+        ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
       });
     } catch (error) {

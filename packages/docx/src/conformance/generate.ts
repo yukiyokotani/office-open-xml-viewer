@@ -423,3 +423,144 @@ export function storeZip(parts: ReadonlyMap<string, Uint8Array>): Uint8Array {
 export function generateConformanceDocx(testCase: ConformanceCase): Uint8Array {
   return storeZip(generateConformanceParts(testCase));
 }
+
+// ── Redistributable tracked-changes / comments fixtures ─────────────────────
+//
+// Deterministic synthetic documents for the ECMA-376 §17.13.5 (revisions) and
+// §17.13.4 (comments) features: no real-document content, fixed authors and
+// dates, stored-zip bytes stable across runs. Used by the WASM-backed layout
+// tests and the Storybook demo; nothing binary is committed.
+
+const REL_COMMENTS =
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments';
+const REL_COMMENTS_EXTENDED =
+  'http://schemas.microsoft.com/office/2011/relationships/commentsExtended';
+const W14_NS = 'http://schemas.microsoft.com/office/word/2010/wordml';
+const W15_NS = 'http://schemas.microsoft.com/office/word/2012/wordml';
+
+const FIXTURE_SECTION = `<w:sectPr>
+  <w:pgSz w:w="12240" w:h="15840"/>
+  <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+    w:header="720" w:footer="720" w:gutter="0"/>
+</w:sectPr>`;
+
+const FIXTURE_STYLES = `<w:styles xmlns:w="${WORD_NS}">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr><w:rFonts w:ascii="Ahem" w:hAnsi="Ahem"/><w:sz w:val="20"/></w:rPr></w:rPrDefault>
+    <w:pPrDefault><w:pPr/></w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>`;
+
+function fixtureContentTypes(withComments: boolean): Uint8Array {
+  const commentOverrides = withComments
+    ? `<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>
+       <Override PartName="/word/commentsExtended.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"/>`
+    : '';
+  return xml(`<Types xmlns="${CONTENT_TYPES_NS}">
+    <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+    <Default Extension="xml" ContentType="application/xml"/>
+    <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+    <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+    ${commentOverrides}
+  </Types>`);
+}
+
+function fixtureParts(
+  documentBody: string,
+  extra: ReadonlyMap<string, Uint8Array> = new Map(),
+  extraRelationships = '',
+): ReadonlyMap<string, Uint8Array> {
+  const parts = new Map<string, Uint8Array>([
+    ['[Content_Types].xml', fixtureContentTypes(extra.has('word/comments.xml'))],
+    ['_rels/.rels', xml(`<Relationships xmlns="${PACKAGE_REL_NS}">
+      <Relationship Id="rId1" Type="${REL_OFFICE_DOCUMENT}" Target="word/document.xml"/>
+    </Relationships>`)],
+    ['word/_rels/document.xml.rels', xml(`<Relationships xmlns="${PACKAGE_REL_NS}">
+      <Relationship Id="rIdStyles" Type="${REL_STYLES}" Target="styles.xml"/>
+      ${extraRelationships}
+    </Relationships>`)],
+    ['word/document.xml', xml(`<w:document xmlns:w="${WORD_NS}" xmlns:w14="${W14_NS}">
+      <w:body>${documentBody}${FIXTURE_SECTION}</w:body>
+    </w:document>`)],
+    ['word/styles.xml', xml(FIXTURE_STYLES)],
+    ...extra,
+  ]);
+  return new Map([...parts].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0));
+}
+
+/**
+ * A document exercising every §17.13.5 run-revision kind: an insertion and a
+ * deletion by Alice, and a Bob move rendered as its moveFrom/moveTo pair. The
+ * final view shows "Kept inserted moved-in tail"; the markup view additionally
+ * shows " deleted" (struck) and "moved-in " at its source (struck).
+ */
+export function generateTrackedChangesDocx(): Uint8Array {
+  const body = `
+    <w:p><w:r><w:t xml:space="preserve">Kept </w:t></w:r>
+      <w:ins w:id="1" w:author="Alice" w:date="2024-01-01T00:00:00Z">
+        <w:r><w:t xml:space="preserve">inserted </w:t></w:r>
+      </w:ins>
+      <w:del w:id="2" w:author="Alice" w:date="2024-01-02T00:00:00Z">
+        <w:r><w:delText xml:space="preserve">deleted </w:delText></w:r>
+      </w:del>
+      <w:moveFrom w:id="3" w:author="Bob" w:date="2024-01-03T00:00:00Z">
+        <w:r><w:t xml:space="preserve">moved-in </w:t></w:r>
+      </w:moveFrom>
+      <w:moveTo w:id="4" w:author="Bob" w:date="2024-01-03T00:00:00Z">
+        <w:r><w:t xml:space="preserve">moved-in </w:t></w:r>
+      </w:moveTo>
+      <w:r><w:t>tail</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>Unrevised second paragraph.</w:t></w:r></w:p>`;
+  return storeZip(fixtureParts(body));
+}
+
+/**
+ * A document exercising §17.13.4 comment anchors with commentsExtended
+ * threading: comment 1 (Alice) with a reply (Bob) anchored on a mid-paragraph
+ * range, and a RESOLVED comment 3 (Carol) whose thread the margin hides.
+ */
+export function generateCommentedDocx(): Uint8Array {
+  const body = `
+    <w:p>
+      <w:r><w:t xml:space="preserve">Before </w:t></w:r>
+      <w:commentRangeStart w:id="1"/>
+      <w:r><w:t xml:space="preserve">annotated text</w:t></w:r>
+      <w:commentRangeEnd w:id="1"/>
+      <w:r><w:commentReference w:id="1"/></w:r>
+      <w:r><w:t xml:space="preserve"> after.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:commentRangeStart w:id="3"/>
+      <w:r><w:t>Resolved-thread anchor.</w:t></w:r>
+      <w:commentRangeEnd w:id="3"/>
+      <w:r><w:commentReference w:id="3"/></w:r>
+    </w:p>`;
+  const comments = xml(`<w:comments xmlns:w="${WORD_NS}" xmlns:w14="${W14_NS}">
+    <w:comment w:id="1" w:author="Alice" w:initials="A" w:date="2024-03-01T10:00:00Z">
+      <w:p w14:paraId="00000A01"><w:r><w:t>Please review this wording.</w:t></w:r></w:p>
+    </w:comment>
+    <w:comment w:id="2" w:author="Bob" w:initials="B" w:date="2024-03-01T11:00:00Z">
+      <w:p w14:paraId="00000B01"><w:r><w:t>Agreed, second sentence reads better.</w:t></w:r></w:p>
+    </w:comment>
+    <w:comment w:id="3" w:author="Carol" w:initials="C" w:date="2024-03-02T09:00:00Z">
+      <w:p w14:paraId="00000C01"><w:r><w:t>Old resolved note.</w:t></w:r></w:p>
+    </w:comment>
+  </w:comments>`);
+  const commentsExtended = xml(`<w15:commentsEx xmlns:w15="${W15_NS}">
+    <w15:commentEx w15:paraId="00000A01" w15:done="0"/>
+    <w15:commentEx w15:paraId="00000B01" w15:paraIdParent="00000A01" w15:done="0"/>
+    <w15:commentEx w15:paraId="00000C01" w15:done="1"/>
+  </w15:commentsEx>`);
+  return storeZip(fixtureParts(
+    body,
+    new Map([
+      ['word/comments.xml', comments],
+      ['word/commentsExtended.xml', commentsExtended],
+    ]),
+    `<Relationship Id="rIdComments" Type="${REL_COMMENTS}" Target="comments.xml"/>
+     <Relationship Id="rIdCommentsExtended" Type="${REL_COMMENTS_EXTENDED}" Target="commentsExtended.xml"/>`,
+  ));
+}

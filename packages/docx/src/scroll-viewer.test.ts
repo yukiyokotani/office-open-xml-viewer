@@ -1944,6 +1944,44 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
     v.destroy();
   });
 
+  it('showComments centres page + comment gutter as ONE unit (the page shifts left, §17.13.4)', () => {
+    // Page px 100 (explicit width) in a 500 viewport with a 200px comment
+    // gutter. Page-only centring would put left at (500 − 100)/2 = 200 and run
+    // the gutter to the viewport edge; the unit centre is
+    // (500 − 100 − 200)/2 = 100, so the page shifts 100px left and the whole
+    // gutter [200, 400] stays inside the viewport.
+    const { v, scrollHost } = setup(500, {
+      width: 100,
+      paddingLeft: 16,
+      paddingRight: 16,
+      showComments: true,
+      commentsGutterWidth: 200,
+    });
+    const s0 = slot(scrollHost, '16px'); // default vertical pad = gap 16
+    expect(s0).toBeDefined();
+    expect(parseFloat(s0!.style.left)).toBeCloseTo(100, 3);
+    v.destroy();
+  });
+
+  it('showComments never pushes the page across the left gutter (floor stays paddingLeft)', () => {
+    // Page px 300 + gutter 200 exceed the 400 viewport: the unit centre would
+    // go negative, so left pins at padL and the overflow scrolls right (the
+    // spacer already includes the gutter via the widened right padding).
+    const { v, scrollHost } = setup(400, {
+      width: 300,
+      paddingLeft: 16,
+      paddingRight: 16,
+      showComments: true,
+      commentsGutterWidth: 200,
+    });
+    const s0 = slot(scrollHost, '16px');
+    expect(s0).toBeDefined();
+    expect(s0!.style.left).toBe('16px');
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.width)).toBeCloseTo(300 + 16 + 16 + 200, 3);
+    v.destroy();
+  });
+
   it('zoomed-in (page wider than viewport): left pins to paddingLeft and the spacer width = pageW + padL + padR', () => {
     // Explicit width 400 in a 200 viewport ⇒ page px 400 > cw 200. centre =
     // (200 − 400)/2 = −100, so the floor pins left at padL 24. The horizontal scroll

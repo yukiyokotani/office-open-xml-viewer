@@ -69,6 +69,7 @@ import {
 import { exactRetainedColumnBalanceTarget } from './column-balance-frontier.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
 import type { BodyFlowAllocation } from './section-flow-composition.js';
+import { attachTrackChangeBars } from './track-changes.js';
 import {
   isFirstSectionOwnedPage,
   sectionContentFirstAppearancePageIndices,
@@ -2251,5 +2252,11 @@ export function paginateBody(
     ...withParserDiagnostics,
     pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
   });
-  return assertAndDeepFreezeDocumentLayout(finalized) as DocumentLayout;
+  // ECMA-376 §17.13.5 markup view: attach margin change bars as a pure
+  // post-composition pass (`word-track-change-bar`). The default final-view
+  // variant skips this entirely, so its layouts are untouched.
+  const withChangeBars = options.showTrackedChanges === true
+    ? attachTrackChangeBars(finalized)
+    : finalized;
+  return assertAndDeepFreezeDocumentLayout(withChangeBars) as DocumentLayout;
 }

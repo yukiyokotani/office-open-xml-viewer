@@ -1,4 +1,5 @@
 import type { DocComment, DocNote, RenderPageOptions, WorkerResponse } from './types';
+import type { CommentAnchorRange } from './comment-margin-layout';
 import type { DocxTextRunInfo } from './renderer';
 import type {
   NormalizedOoxmlResourcePolicy,
@@ -30,6 +31,12 @@ export interface DocumentMeta {
    *  link can resolve its destination page in worker mode without the full model.
    *  Serialized as `[name, pageIndex]` entries (a `Map` can't cross the wire). */
   bookmarkPages: [string, number][];
+  /** ECMA-376 §17.13.4 comment-anchor ranges resolved from the body model's
+   *  commentMarks (per-paragraph run intervals in document order). Built
+   *  worker-side by the same pure walker main mode uses, so the comment
+   *  margin overlay works without the full model. Absent for a meta produced
+   *  by an older worker build. */
+  commentAnchorRanges?: CommentAnchorRange[];
 }
 
 /** Serializable subset of RenderPageOptions (callbacks cannot cross the wire). */

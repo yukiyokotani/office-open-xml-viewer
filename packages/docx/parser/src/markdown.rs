@@ -162,6 +162,15 @@ fn format_text_run(t: &crate::types::TextRun) -> String {
     if t.note_ref.is_some() {
         return String::new();
     }
+    // Move-revision runs (`w:moveFrom` / `w:moveTo`, ECMA-376 §17.13.5.22 /
+    // §17.13.5.25) joined the model for the tracked-changes render. This
+    // projection predates them and stays byte-stable: moved text was never
+    // emitted here (both ends were unparsed), so both ends stay dropped.
+    if let Some(rev) = &t.revision {
+        if rev.kind == "moveFrom" || rev.kind == "moveTo" {
+            return String::new();
+        }
+    }
     let raw = &t.text;
     if raw.is_empty() {
         return String::new();

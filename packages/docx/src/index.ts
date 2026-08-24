@@ -113,6 +113,24 @@ export {
   type DocxHighlightMatch,
   type DocxHighlightColors,
 } from './find-highlight-layer';
+// ECMA-376 §17.13.4 comment margin: the pure threading / anchor-range /
+// balloon-placement model (viewer-independent) and the DOM layer builder the
+// viewers drive. Enabled per viewer via `showComments`.
+export {
+  buildCommentThreads,
+  collectDocumentCommentRanges,
+  computeCommentBalloonLayout,
+  type CommentThread,
+  type CommentAnchorRange,
+  type CommentBalloonRequest,
+  type CommentBalloonPlacement,
+  type CommentBalloonLayoutInput,
+} from './comment-margin-layout';
+export {
+  buildDocxCommentLayer,
+  type DocxCommentLayerModel,
+  type DocxCommentLayerGeometry,
+} from './comment-layer';
 export type { DocxMatchLocation } from './find';
 export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
@@ -192,6 +210,8 @@ export type {
   RunRevision,
   DocRevision,
   DocComment,
+  // Comment-anchor boundary (reachable via DocParagraph.commentMarks).
+  DocxCommentMark,
   DocNote,
   NoteRef,
   // Paragraph / line-spacing sub-types.

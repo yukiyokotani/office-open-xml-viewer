@@ -40,6 +40,8 @@ export interface BorderSpec {
     color: string | null;
     style: string;
 }
+export function buildCommentThreads(comments: readonly DocComment[]): CommentThread[];
+export function buildDocxCommentLayer(tintLayer: HTMLDivElement, gutterLayer: HTMLDivElement, runs: readonly DocxTextRunInfo[], model: DocxCommentLayerModel, geometry: DocxCommentLayerGeometry, selectedCommentId: string | null, onSelect: (commentId: string | null) => void): void;
 export function buildDocxHighlightLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], cssWidth: number, cssHeight: number, measureForFont: (font: string) => (s: string) => number, colors?: DocxHighlightColors): void;
 export function buildDocxTextLayer(layer: HTMLDivElement, runs: DocxTextRunInfo[], cssWidth: number, cssHeight: number, onHyperlinkClick?: (target: HyperlinkTarget) => void, measureForFont?: (font: string) => (s: string) => number, pageIndex?: number): void;
 export interface CellBorders {
@@ -272,6 +274,9 @@ export interface ChartexRegionMapRow {
     label: string;
     entityId?: string | null;
     value?: number | null;
+}
+export interface ChartExRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
@@ -581,14 +586,31 @@ export interface ChartOfPie {
     gapWidthPercent: number;
     seriesLines: boolean;
 }
+export interface ChartPlotGroup {
+    kind: ChartPlotGroupKind;
+    seriesStart: number;
+    seriesCount: number;
+    categoryAxis: ChartPlotGroupAxisSlot;
+    valueAxis: ChartPlotGroupAxisSlot;
+    seriesAxis: ChartPlotGroupAxisSlot;
+    axisIds?: string[] | null;
+    grouping?: string | null;
+    barDirection?: string | null;
+    scatterStyle?: string | null;
+    radarStyle?: string | null;
+    gapWidth?: number | null;
+    overlap?: number | null;
+    bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
+}
+export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
+export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
 export interface ChartRect {
     x: number;
     y: number;
     w: number;
     h: number;
-}
-export interface ChartExRenderer {
-    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
@@ -648,9 +670,6 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
-    /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
-     * exposes such a lone bubble series as one legend entry per point while a
-     * numeric X source keeps the ordinary one-entry-per-series legend. */
     bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
@@ -800,10 +819,8 @@ export interface ChartThreeDPictureOptions {
     applyToSides?: boolean | null;
     applyToEnd?: boolean | null;
     pictureFormat?: 'stretch' | 'stack' | 'stackScale' | string | null;
-    /** Whether `<c:pictureFormat>` was authored, including an unsupported value. */
     pictureFormatAuthored?: boolean | null;
     pictureStackUnit?: number | null;
-    /** Whether `<c:pictureStackUnit>` was authored, including an invalid value. */
     pictureStackUnitAuthored?: boolean | null;
 }
 export interface ChartThreeDRenderer {
@@ -891,27 +908,8 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
-export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
-export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
-export interface ChartPlotGroup {
-    kind: ChartPlotGroupKind;
-    seriesStart: number;
-    seriesCount: number;
-    categoryAxis: ChartPlotGroupAxisSlot;
-    valueAxis: ChartPlotGroupAxisSlot;
-    seriesAxis: ChartPlotGroupAxisSlot;
-    axisIds?: string[] | null;
-    grouping?: string | null;
-    barDirection?: string | null;
-    scatterStyle?: string | null;
-    radarStyle?: string | null;
-    gapWidth?: number | null;
-    overlap?: number | null;
-    bubbleScale?: number | null;
-    bubbleSizeRepresents?: 'area' | 'w' | null;
-    showNegativeBubbles?: boolean | null;
-}
-export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate'>;
+export function collectDocumentCommentRanges(body: readonly BodyElement[]): CommentAnchorRange[];
+export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate' | 'showTrackedChanges'>;
 export interface ColSpec {
     widthPt: number;
     spacePt: number;
@@ -923,12 +921,48 @@ export interface ColumnsSpec {
     sep: boolean;
     cols: ColSpec[];
 }
+export interface CommentAnchorRange {
+    readonly commentId: string;
+    readonly paragraphPath: readonly number[];
+    readonly startRunIndex: number;
+    readonly endRunIndex: number;
+}
+export interface CommentBalloonLayoutInput {
+    readonly balloons: readonly CommentBalloonRequest[];
+    readonly pageHeightPx: number;
+    readonly lineHeightPx: number;
+    readonly headerHeightPx: number;
+    readonly gapPx: number;
+    readonly maxLines?: number;
+}
+export interface CommentBalloonPlacement {
+    readonly commentId: string;
+    readonly yPx: number;
+    readonly heightPx: number;
+    readonly visibleLines: number;
+    readonly collapsed: boolean;
+    readonly selected: boolean;
+}
+export interface CommentBalloonRequest {
+    readonly commentId: string;
+    readonly anchorYPx: number;
+    readonly contentLines: number;
+    readonly selected?: boolean;
+}
+export interface CommentThread {
+    readonly root: DocComment;
+    readonly replies: readonly DocComment[];
+}
+export function computeCommentBalloonLayout(input: CommentBalloonLayoutInput): CommentBalloonPlacement[];
 export interface DocComment {
     id: string;
     author?: string;
     initials?: string;
     date?: string;
     text: string;
+    parentId?: string;
+    resolved?: boolean;
+    paragraphs?: string[];
 }
 export interface DocNote {
     id: string;
@@ -947,6 +981,7 @@ export interface DocParagraph {
     tabStops: TabStop[];
     runs: DocRun[];
     bookmarks?: string[];
+    commentMarks?: DocxCommentMark[];
     shading?: string | null;
     pageBreakBefore?: boolean;
     contextualSpacing?: boolean;
@@ -1047,6 +1082,21 @@ export interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
+export interface DocxCommentLayerGeometry {
+    readonly cssWidth: number;
+    readonly cssHeight: number;
+    readonly gutterWidthPx: number;
+}
+export interface DocxCommentLayerModel {
+    readonly threads: readonly CommentThread[];
+    readonly ranges: readonly CommentAnchorRange[];
+}
+export interface DocxCommentMark {
+    id: string;
+    kind: 'rangeStart' | 'rangeEnd' | 'reference' | string;
+    runIndex: number;
+    prevRunUtf16Len?: number;
+}
 export class DocxDocument {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<DocxDocument>;
     destroy(): void;
@@ -1058,6 +1108,7 @@ export class DocxDocument {
     get mode(): 'main' | 'worker';
     get document(): DocxDocumentModel;
     get comments(): DocComment[];
+    commentAnchorRanges(): readonly CommentAnchorRange[];
     get footnotes(): DocNote[];
     get endnotes(): DocNote[];
     getBookmarkPage(bookmarkName: string): number | undefined;
@@ -1112,6 +1163,7 @@ export interface DocxElementContext {
 export interface DocxElementContextOptions {
     readonly maxTextCharacters?: number;
     readonly currentDate?: Date | number;
+    readonly showTrackedChanges?: boolean;
 }
 export type DocxHighlightColors = FindHighlightColors;
 export interface DocxHighlightMatch {
@@ -1143,6 +1195,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     zoomOut(): void;
     fitWidth(): void;
     fitPage(): void;
+    setShowTrackedChanges(value: boolean): void;
+    setShowComments(value: boolean): void;
     scrollToPage(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
@@ -1179,6 +1233,8 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     onScaleChange?: (scale: number) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
+    showComments?: boolean;
+    commentsGutterWidth?: number;
     onError?: (err: Error) => void;
 }
 export type DocxSelectionContext = DocxTextSelectionContext | DocxElementContext;
@@ -1247,6 +1303,7 @@ export interface DocxTextRunInfo {
         path: readonly number[];
     }>;
     paragraphId?: string;
+    sourceRunIndex?: number;
     text: string;
     x: number;
     y: number;
@@ -1295,6 +1352,8 @@ export class DocxViewer implements ZoomableViewer {
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
     destroy(): void;
+    setShowTrackedChanges(value: boolean): Promise<void>;
+    setShowComments(value: boolean): Promise<void>;
     private __privatePresence;
 }
 export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
@@ -1310,6 +1369,8 @@ export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>,
     onScaleChange?: (scale: number) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
+    showComments?: boolean;
+    commentsGutterWidth?: number;
     onError?: (err: Error) => void;
 }
 export interface DrawingMLCustomDashSegment {
@@ -1819,6 +1880,7 @@ export interface RenderPageOptions {
     defaultTextColor?: string;
     onTextRun?: (run: DocxTextRunInfo) => void;
     currentDate?: Date | number;
+    showTrackedChanges?: boolean;
 }
 export type RenderPageToBitmapOptions = Omit<RenderPageOptions, 'onTextRun'> & {
     onTextRun?: (run: DocxTextRunInfo) => void;
@@ -1829,7 +1891,7 @@ export interface RubyAnnotation {
     hpsRaisePt?: number;
 }
 export interface RunRevision {
-    kind: 'insertion' | 'deletion' | string;
+    kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
     author?: string;
     date?: string;
 }

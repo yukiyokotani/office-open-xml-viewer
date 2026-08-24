@@ -1521,7 +1521,25 @@ fn finish_document(
             }
         })
         .and_then(|p| read_zip_string(zip, &p).ok())
-        .map(|xml| parse_comments(&xml))
+        .map(|xml| {
+            // [MS-DOCX] §2.5.3.1 — reply threading and resolved state live in
+            // the separate word/commentsExtended.xml part. Its relationship
+            // Type suffix "/commentsExtended" cannot false-match the plain
+            // "/comments" lookup above. A missing part simply leaves every
+            // comment an unresolved top-level entry.
+            let extended = find_rel_target(&environment.rels_xml, "commentsExtended")
+                .map(|target| {
+                    if target.starts_with('/') {
+                        target.trim_start_matches('/').to_string()
+                    } else {
+                        format!("word/{target}")
+                    }
+                })
+                .and_then(|p| read_zip_string(zip, &p).ok())
+                .map(|extended_xml| parse_comments_extended(&extended_xml))
+                .unwrap_or_default();
+            parse_comments_with_extended(&xml, &extended)
+        })
         .unwrap_or_default();
     let footnotes_path = find_rel_target(&environment.rels_xml, "footnotes").map(|target| {
         if target.starts_with('/') {
@@ -1645,12 +1663,72 @@ fn collect_revisions(body: roxmltree::Node) -> Vec<crate::types::DocxRevision> {
     out
 }
 
-/// Parse word/comments.xml into a flat list of `<w:comment>` entries.
-fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
+/// One `w15:commentEx` entry from word/commentsExtended.xml ([MS-DOCX]
+/// §2.5.3.1), keyed externally by its `w15:paraId`.
+#[derive(Default)]
+struct CommentExtendedInfo {
+    /// `w15:done` — the thread is marked resolved.
+    done: bool,
+    /// `w15:paraIdParent` — the parent comment's LAST body paragraph
+    /// `w14:paraId`; present on replies only.
+    parent_para_id: Option<String>,
+}
+
+/// Parse word/commentsExtended.xml into a `paraId → info` map. Attribute
+/// lookup is by local name (the part authors them in the w15 namespace).
+fn parse_comments_extended(xml: &str) -> HashMap<String, CommentExtendedInfo> {
+    let Ok(doc) = parse_guarded(xml) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for entry in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "commentEx")
+    {
+        let Some(para_id) = entry
+            .attributes()
+            .find(|a| a.name() == "paraId")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let done = entry
+            .attributes()
+            .find(|a| a.name() == "done")
+            .map(|a| matches!(a.value(), "1" | "true"))
+            .unwrap_or(false);
+        let parent_para_id = entry
+            .attributes()
+            .find(|a| a.name() == "paraIdParent")
+            .map(|a| a.value().to_string())
+            .filter(|s| !s.is_empty());
+        out.insert(
+            para_id,
+            CommentExtendedInfo {
+                done,
+                parent_para_id,
+            },
+        );
+    }
+    out
+}
+
+/// Parse word/comments.xml, joining [MS-DOCX] §2.5.3.1 commentsExtended
+/// threading facts when present. The join key is the `w14:paraId` of each
+/// comment's LAST body paragraph (that is what `w15:commentEx@paraId` and
+/// `@paraIdParent` reference). An empty `extended` map (no
+/// word/commentsExtended.xml) leaves every comment an unresolved top-level
+/// entry with `parent_id`/`resolved` absent — the pre-threading shape.
+fn parse_comments_with_extended(
+    xml: &str,
+    extended: &HashMap<String, CommentExtendedInfo>,
+) -> Vec<crate::types::DocxComment> {
     let Ok(doc) = parse_guarded(xml) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    // Pass 1: the flat entries plus each comment's last-paragraph paraId.
+    let mut entries: Vec<(crate::types::DocxComment, Option<String>)> = Vec::new();
     for c in doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "comment")
@@ -1687,15 +1765,80 @@ fn parse_comments(xml: &str) -> Vec<crate::types::DocxComment> {
                 text.push_str(s);
             }
         }
-        out.push(crate::types::DocxComment {
-            id,
-            author,
-            initials,
-            date,
-            text,
-        });
+        // Per-paragraph projection for balloon rendering (one entry per
+        // `<w:p>`, empty string for an empty paragraph) and the threading join
+        // key: the LAST paragraph's `w14:paraId`.
+        let mut paragraphs: Vec<String> = Vec::new();
+        let mut last_para_id: Option<String> = None;
+        for p in c
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "p")
+        {
+            let mut para_text = String::new();
+            for t in p
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "t")
+            {
+                if let Some(s) = t.text() {
+                    para_text.push_str(s);
+                }
+            }
+            paragraphs.push(para_text);
+            last_para_id = p
+                .attributes()
+                .find(|a| a.name() == "paraId")
+                .map(|a| a.value().to_string())
+                .filter(|s| !s.is_empty())
+                .or(last_para_id);
+        }
+        entries.push((
+            crate::types::DocxComment {
+                id,
+                author,
+                initials,
+                date,
+                text,
+                parent_id: None,
+                resolved: None,
+                paragraphs,
+            },
+            last_para_id,
+        ));
     }
-    out
+
+    // Pass 2: resolve paraIdParent → the parent comment's w:id, and surface
+    // the done flag.
+    let para_id_to_comment_id: HashMap<&str, &str> = entries
+        .iter()
+        .filter_map(|(comment, last_para_id)| {
+            last_para_id
+                .as_deref()
+                .map(|para_id| (para_id, comment.id.as_str()))
+        })
+        .collect();
+    let parents_and_resolved: Vec<(Option<String>, Option<bool>)> = entries
+        .iter()
+        .map(|(_, last_para_id)| {
+            let Some(info) = last_para_id.as_deref().and_then(|pid| extended.get(pid)) else {
+                return (None, None);
+            };
+            let parent_id = info
+                .parent_para_id
+                .as_deref()
+                .and_then(|pid| para_id_to_comment_id.get(pid))
+                .map(|id| id.to_string());
+            (parent_id, Some(info.done))
+        })
+        .collect();
+    entries
+        .into_iter()
+        .zip(parents_and_resolved)
+        .map(|((mut comment, _), (parent_id, resolved))| {
+            comment.parent_id = parent_id;
+            comment.resolved = resolved;
+            comment
+        })
+        .collect()
 }
 
 /// Parse word/footnotes.xml or word/endnotes.xml into a list of notes, each
@@ -4842,6 +4985,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     // Parse runs
     let mut runs = vec![];
     let mut complex_field_boundaries = vec![];
+    let mut comment_marks = vec![];
     parse_para_content(
         node,
         &base_run,
@@ -4853,6 +4997,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         theme,
         &mut runs,
         &mut complex_field_boundaries,
+        &mut comment_marks,
         None,
         field,
         depth,
@@ -4914,6 +5059,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         runs,
         complex_field_boundaries,
         bookmarks,
+        comment_marks,
         shading: base_para.shading.clone(),
         page_break_before: base_para.page_break_before.unwrap_or(false),
         contextual_spacing: base_para.contextual_spacing.unwrap_or(false),
@@ -5067,6 +5213,7 @@ fn parse_para_content(
     theme: &ThemeColors,
     runs: &mut Vec<DocRun>,
     complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
+    comment_marks: &mut Vec<crate::types::DocxCommentMark>,
     revision: Option<&RunRevision>,
     // Complex-field state threaded across paragraphs. A field is delimited by
     // its fldChar begin/end (§17.16.18), NOT by paragraph boundaries — a TOC
@@ -5079,6 +5226,13 @@ fn parse_para_content(
     for child in element_children_flat(node) {
         match child.tag_name().name() {
             "r" => {
+                // ECMA-376 §17.13.4.5 `<w:commentReference>` — the anchor run
+                // of a comment. It renders nothing (the annotation glyph is a
+                // Word UI affordance), so record the boundary and let the run
+                // parse as usual (its other content, if any, still counts).
+                if let Some(reference) = child_w(child, "commentReference") {
+                    push_comment_mark(comment_marks, "reference", attr_w(reference, "id"), runs);
+                }
                 handle_run_in_para(
                     child,
                     base_run,
@@ -5098,6 +5252,18 @@ fn parse_para_content(
                     diagnostics,
                 );
             }
+            "commentRangeStart" | "commentRangeEnd" => {
+                // ECMA-376 §17.13.4.4 / §17.13.4.3 — the annotated range's
+                // boundaries. Zero-width metadata: no run is produced, so run
+                // splitting/coalescing (and therefore layout geometry) is
+                // untouched whether or not a document carries comments.
+                let kind = if child.tag_name().name() == "commentRangeStart" {
+                    "rangeStart"
+                } else {
+                    "rangeEnd"
+                };
+                push_comment_mark(comment_marks, kind, attr_w(child, "id"), runs);
+            }
             "hyperlink" => {
                 // Resolve URL from r:id via relationships (§17.16.22, external).
                 let href = attr_ns(
@@ -5113,39 +5279,65 @@ fn parse_para_content(
                 // but the anchor is threaded through so an anchor-only link (no
                 // r:id) is captured as an internal target.
                 let anchor = attr_w(child, "anchor");
-                for r in child
-                    .children()
-                    .filter(|n| n.is_element() && n.tag_name().name() == "r")
-                {
-                    handle_run_in_para(
-                        r,
-                        base_run,
-                        style_map,
-                        num_map,
-                        media_map,
-                        chart_map,
-                        rel_map,
-                        theme,
-                        runs,
-                        complex_field_boundaries,
-                        field,
-                        Some(href.clone()),
-                        anchor.clone(),
-                        revision,
-                        depth,
-                        diagnostics,
-                    );
+                for inner in child.children().filter(|n| n.is_element()) {
+                    match inner.tag_name().name() {
+                        "r" => {
+                            if let Some(reference) = child_w(inner, "commentReference") {
+                                push_comment_mark(
+                                    comment_marks,
+                                    "reference",
+                                    attr_w(reference, "id"),
+                                    runs,
+                                );
+                            }
+                            handle_run_in_para(
+                                inner,
+                                base_run,
+                                style_map,
+                                num_map,
+                                media_map,
+                                chart_map,
+                                rel_map,
+                                theme,
+                                runs,
+                                complex_field_boundaries,
+                                field,
+                                Some(href.clone()),
+                                anchor.clone(),
+                                revision,
+                                depth,
+                                diagnostics,
+                            );
+                        }
+                        // §17.13.4 range boundaries are legal inside hyperlink
+                        // content (EG_PContent); record them at the same run
+                        // boundary they occupy in document order.
+                        "commentRangeStart" | "commentRangeEnd" => {
+                            let kind = if inner.tag_name().name() == "commentRangeStart" {
+                                "rangeStart"
+                            } else {
+                                "rangeEnd"
+                            };
+                            push_comment_mark(comment_marks, kind, attr_w(inner, "id"), runs);
+                        }
+                        _ => {}
+                    }
                 }
             }
-            "ins" | "del" => {
+            "ins" | "del" | "moveFrom" | "moveTo" => {
                 // ECMA-376 §17.13.5 — build a RunRevision context covering
                 // every descendant run so the renderer can paint tracked
                 // changes inline. Nested ins/del isn't legal per spec; the
-                // inner block wins if it occurs anyway.
-                let kind = if child.tag_name().name() == "ins" {
-                    "insertion"
-                } else {
-                    "deletion"
+                // inner block wins if it occurs anyway. Move revisions
+                // (`w:moveFrom` §17.13.5.22 / `w:moveTo` §17.13.5.25) carry
+                // the same id/author/date attributes and wrap runs the same
+                // way; their range markers (`w:move*RangeStart/End`) hold no
+                // content and stay unparsed.
+                let kind = match child.tag_name().name() {
+                    "ins" => "insertion",
+                    "del" => "deletion",
+                    "moveFrom" => "moveFrom",
+                    _ => "moveTo",
                 };
                 let id_raw = attr_w(child, "id");
                 let id_value = id_raw.as_deref().and_then(|value| {
@@ -5179,6 +5371,7 @@ fn parse_para_content(
                     theme,
                     runs,
                     complex_field_boundaries,
+                    comment_marks,
                     Some(&inner),
                     field,
                     depth,
@@ -5197,6 +5390,7 @@ fn parse_para_content(
                     theme,
                     runs,
                     complex_field_boundaries,
+                    comment_marks,
                     revision,
                     field,
                     depth,
@@ -5263,6 +5457,35 @@ fn parse_para_content(
             _ => {}
         }
     }
+}
+
+/// Record one ECMA-376 §17.13.4 comment-anchor boundary at the CURRENT run
+/// position. `run_index == runs.len()` means "immediately before whatever run
+/// comes next" (or the paragraph end). The previous text run's UTF-16 length is
+/// snapshotted so a later `<w:noBreakHyphen>` absorption across this boundary
+/// (§17.3.3.18, the only cross-run merge) remains detectable: if that run's
+/// final text is longer, the true boundary sits inside it at the recorded
+/// offset. An id-less mark is dropped — without `@w:id` it cannot join
+/// `word/comments.xml`.
+fn push_comment_mark(
+    comment_marks: &mut Vec<crate::types::DocxCommentMark>,
+    kind: &str,
+    id: Option<String>,
+    runs: &[DocRun],
+) {
+    let Some(id) = id.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let prev_run_utf16_len = match runs.last() {
+        Some(DocRun::Text(prev)) => prev.text.encode_utf16().count() as u32,
+        _ => 0,
+    };
+    comment_marks.push(crate::types::DocxCommentMark {
+        id,
+        kind: kind.to_string(),
+        run_index: runs.len() as u32,
+        prev_run_utf16_len,
+    });
 }
 
 // Same parse-context threading as parse_para_content, with the additional
@@ -9736,6 +9959,35 @@ fn extract_simple_paragraph_text(
                     }
                 }
             }
+            "ins" | "moveTo" => {
+                // ECMA-376 §17.13.5.18 / §17.13.5.25 — inserted or moved-in
+                // runs are part of the document's final text. ShapeText is
+                // built at parse time with no layout variant, so the shape
+                // path fixes final-view semantics: these wrappers flatten
+                // into the paragraph while `w:del` / `w:moveFrom` content
+                // (final-state-invisible, §17.13.5.14 / §17.13.5.22) is
+                // dropped by the default arm below.
+                for inner in element_children_flat(child) {
+                    match inner.tag_name().name() {
+                        "r" => {
+                            for (run_text, fmt, ruby) in collect_run_node(inner) {
+                                push_text_run(run_text, fmt, ruby);
+                            }
+                        }
+                        "hyperlink" => {
+                            for r in inner
+                                .children()
+                                .filter(|n| n.is_element() && n.tag_name().name() == "r")
+                            {
+                                for (run_text, fmt, ruby) in collect_run_node(r) {
+                                    push_text_run(run_text, fmt, ruby);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             "oMath" | "oMathPara" => {
                 let math_text = omml_plain_text(child);
                 if !math_text.is_empty() {
@@ -14108,6 +14360,7 @@ mod tests {
         let mut num_map = NumberingMap::default();
         let mut diagnostics = Vec::new();
         let mut complex_field_boundaries = Vec::new();
+        let mut comment_marks = Vec::new();
         parse_para_content(
             doc.root_element(),
             base_run,
@@ -14119,6 +14372,7 @@ mod tests {
             &theme,
             &mut runs,
             &mut complex_field_boundaries,
+            &mut comment_marks,
             None,
             &mut field,
             DepthGuard::root(),
@@ -27371,6 +27625,504 @@ mod streamed_body_equivalence_tests {
             .run_operation("streamed-malformed", parse_streamed)
             .unwrap_err();
         assert!(error.contains("word/document.xml"), "{error}");
+    }
+}
+
+// ===== ECMA-376 §17.13.5.22 / §17.13.5.25: <w:moveFrom> / <w:moveTo> move revisions =====
+//
+// End-to-end (zip → parse) tests for tracked-change moves: descendant runs are
+// tagged with a RunRevision (like w:ins/w:del), while every projection that
+// predates move support stays byte-stable — the flat doc.revisions list keeps
+// its ins/del-only shape, and the markdown projection keeps dropping both ends
+// of a move (before move parsing, both vanished at parse time).
+#[cfg(test)]
+mod tracked_change_move_tests {
+    use super::*;
+    use crate::types::{BodyElement, DocRun, Document};
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    fn build_docx(document_xml: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            archive.start_file("word/document.xml", options).unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn parse_doc(document_xml: &str) -> Document {
+        let mut zip = open_zip(build_docx(document_xml)).expect("test package opens");
+        zip.run_operation("move-tests", parse)
+            .expect("test document parses")
+    }
+
+    fn moved_doc() -> Document {
+        parse_doc(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+              <w:p>
+                <w:r><w:t xml:space="preserve">Keep </w:t></w:r>
+                <w:ins w:id="1" w:author="Alice" w:date="2024-01-01T00:00:00Z"><w:r><w:t>added</w:t></w:r></w:ins>
+                <w:moveFrom w:id="2" w:author="Bob" w:date="2024-01-02T00:00:00Z"><w:r><w:t>moved away</w:t></w:r></w:moveFrom>
+                <w:moveTo w:id="3" w:author="Bob" w:date="2024-01-02T00:00:00Z"><w:r><w:t>moved here</w:t></w:r></w:moveTo>
+                <w:del w:id="4" w:author="Alice" w:date="2024-01-03T00:00:00Z"><w:r><w:delText>removed</w:delText></w:r></w:del>
+              </w:p>
+            </w:body></w:document>"#,
+        )
+    }
+
+    fn paragraph_text_revisions(doc: &Document) -> Vec<(String, Option<String>, Option<String>)> {
+        let BodyElement::Paragraph(p) = doc
+            .body
+            .iter()
+            .find(|el| matches!(el, BodyElement::Paragraph(_)))
+            .expect("one paragraph")
+        else {
+            unreachable!()
+        };
+        p.runs
+            .iter()
+            .filter_map(|r| match r {
+                DocRun::Text(t) => Some((
+                    t.text.clone(),
+                    t.revision.as_ref().map(|rev| rev.kind.clone()),
+                    t.revision.as_ref().and_then(|rev| rev.author.clone()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn move_wrappers_tag_descendant_runs_with_kind_author_and_date() {
+        let doc = moved_doc();
+        assert_eq!(
+            paragraph_text_revisions(&doc),
+            vec![
+                ("Keep ".to_string(), None, None),
+                (
+                    "added".to_string(),
+                    Some("insertion".to_string()),
+                    Some("Alice".to_string()),
+                ),
+                (
+                    "moved away".to_string(),
+                    Some("moveFrom".to_string()),
+                    Some("Bob".to_string()),
+                ),
+                (
+                    "moved here".to_string(),
+                    Some("moveTo".to_string()),
+                    Some("Bob".to_string()),
+                ),
+                (
+                    "removed".to_string(),
+                    Some("deletion".to_string()),
+                    Some("Alice".to_string()),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn flat_revisions_list_stays_insertion_and_deletion_only() {
+        // collect_revisions is a tool-facing projection (MCP, markdown export
+        // consumers) that predates move support. Its shape is pinned: moves
+        // travel only as run-level tags.
+        let doc = moved_doc();
+        assert_eq!(
+            doc.revisions
+                .iter()
+                .map(|rev| (rev.kind.as_str(), rev.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("insertion", "added"), ("deletion", "removed")],
+        );
+    }
+
+    #[test]
+    fn markdown_projection_drops_both_ends_of_a_move() {
+        // Pre-move-parsing output for this body was "Keep addedremoved" (moves
+        // vanished at parse; deleted text was projected). Byte-stable.
+        let doc = moved_doc();
+        assert_eq!(
+            crate::markdown::render_document(&doc),
+            "Keep addedremoved\n\n",
+        );
+    }
+
+    #[test]
+    fn text_box_projections_show_final_text_and_tag_rich_runs() {
+        let xml = r#"<wps:wsp
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <wps:txbx><w:txbxContent><w:p>
+                <w:ins w:id="1" w:author="Alice"><w:r><w:t>Inserted</w:t></w:r></w:ins>
+                <w:moveTo w:id="2" w:author="Bob"><w:r><w:t> and moved in</w:t></w:r></w:moveTo>
+                <w:del w:id="3" w:author="Alice"><w:r><w:delText>gone</w:delText></w:r></w:del>
+                <w:moveFrom w:id="4" w:author="Bob"><w:r><w:t>also gone</w:t></w:r></w:moveFrom>
+              </w:p></w:txbxContent></wps:txbx>
+            </wps:wsp>"#;
+        let document = roxmltree::Document::parse(xml).expect("WPS fixture");
+        let mut num_map = NumberingMap::default();
+        let body = parse_shape_text_body(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        );
+
+        // Legacy ShapeText projection is built at parse time, so it fixes
+        // final-view semantics: w:ins / w:moveTo flatten in, w:del /
+        // w:moveFrom stay invisible (§17.13.5.14 / §17.13.5.22).
+        assert_eq!(
+            body.legacy_blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Inserted and moved in"],
+        );
+
+        // The rich wire goes through the body paragraph parser, so its runs
+        // carry the full revision tags for variant-aware layout.
+        let TextBoxBlockWire::Body(BodyElement::Paragraph(p)) = &body.content[0] else {
+            panic!("expected a paragraph block");
+        };
+        assert_eq!(
+            p.runs
+                .iter()
+                .filter_map(|r| match r {
+                    DocRun::Text(t) => Some((
+                        t.text.as_str(),
+                        t.revision.as_ref().map(|rev| rev.kind.as_str()),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("Inserted", Some("insertion")),
+                (" and moved in", Some("moveTo")),
+                ("gone", Some("deletion")),
+                ("also gone", Some("moveFrom")),
+            ],
+        );
+    }
+}
+
+// ===== ECMA-376 §17.13.4: comment anchors + [MS-DOCX] §2.5.3.1 commentsExtended threading =====
+//
+// End-to-end (zip → parse) tests: commentRangeStart/End and commentReference
+// become zero-effect paragraph-level boundary marks (no run is produced, run
+// coalescing is untouched); word/comments.xml gains a per-paragraph body
+// projection; word/commentsExtended.xml supplies reply threading (paraIdParent
+// joined via each comment's LAST body-paragraph w14:paraId) and the resolved
+// flag. A document without comments serializes byte-identically (serde-skip).
+#[cfg(test)]
+mod comment_anchor_tests {
+    use super::*;
+    use crate::types::{BodyElement, DocRun, Document};
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    fn build_docx(parts: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            for (path, content) in parts {
+                archive.start_file(*path, options).unwrap();
+                archive.write_all(content.as_bytes()).unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn parse_parts(parts: &[(&str, &str)]) -> Document {
+        let mut zip = open_zip(build_docx(parts)).expect("test package opens");
+        zip.run_operation("comment-tests", parse)
+            .expect("test document parses")
+    }
+
+    fn paragraphs(doc: &Document) -> Vec<&crate::types::DocParagraph> {
+        doc.body
+            .iter()
+            .filter_map(|el| match el {
+                BodyElement::Paragraph(p) => Some(p.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn marks(p: &crate::types::DocParagraph) -> Vec<(&str, &str, u32, u32)> {
+        p.comment_marks
+            .iter()
+            .map(|m| {
+                (
+                    m.id.as_str(),
+                    m.kind.as_str(),
+                    m.run_index,
+                    m.prev_run_utf16_len,
+                )
+            })
+            .collect()
+    }
+
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    const W15: &str = "http://schemas.microsoft.com/office/word/2012/wordml";
+
+    #[test]
+    fn range_and_reference_marks_record_run_boundaries_without_producing_runs() {
+        let doc = parse_parts(&[(
+            "word/document.xml",
+            &format!(
+                r#"<w:document xmlns:w="{W}"><w:body>
+                  <w:p>
+                    <w:r><w:t>before </w:t></w:r>
+                    <w:commentRangeStart w:id="3"/>
+                    <w:r><w:rPr><w:b/></w:rPr><w:t>annotated</w:t></w:r>
+                    <w:commentRangeEnd w:id="3"/>
+                    <w:r><w:commentReference w:id="3"/></w:r>
+                    <w:r><w:t> after</w:t></w:r>
+                  </w:p>
+                </w:body></w:document>"#
+            ),
+        )]);
+        let paras = paragraphs(&doc);
+        let p = paras[0];
+        // The reference-only run produces no output run: text runs are exactly
+        // the authored visible text, so geometry is untouched.
+        assert_eq!(
+            p.runs
+                .iter()
+                .filter_map(|r| match r {
+                    DocRun::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["before ", "annotated", " after"],
+        );
+        // "before " = 7 UTF-16 units; "annotated" = 9.
+        assert_eq!(
+            marks(p),
+            vec![
+                ("3", "rangeStart", 1, 7),
+                ("3", "rangeEnd", 2, 9),
+                ("3", "reference", 2, 9),
+            ],
+        );
+    }
+
+    #[test]
+    fn cross_paragraph_range_splits_marks_across_paragraphs() {
+        let doc = parse_parts(&[(
+            "word/document.xml",
+            &format!(
+                r#"<w:document xmlns:w="{W}"><w:body>
+                  <w:p>
+                    <w:r><w:t>one </w:t></w:r>
+                    <w:commentRangeStart w:id="9"/>
+                    <w:r><w:t>two</w:t></w:r>
+                  </w:p>
+                  <w:p>
+                    <w:r><w:t>three</w:t></w:r>
+                    <w:commentRangeEnd w:id="9"/>
+                    <w:r><w:commentReference w:id="9"/></w:r>
+                  </w:p>
+                </w:body></w:document>"#
+            ),
+        )]);
+        let paras = paragraphs(&doc);
+        assert_eq!(marks(paras[0]), vec![("9", "rangeStart", 1, 4)]);
+        assert_eq!(
+            marks(paras[1]),
+            vec![("9", "rangeEnd", 1, 5), ("9", "reference", 1, 5)],
+        );
+    }
+
+    #[test]
+    fn no_break_hyphen_absorption_across_a_mark_stays_detectable() {
+        // §17.3.3.18: a run opening with <w:noBreakHyphen/> merges into a
+        // format-identical previous text run. The boundary mark recorded
+        // between them keeps the previous run's pre-merge UTF-16 length, so
+        // the true boundary (inside the merged run at offset 2) is
+        // reconstructible: final text length 5 > recorded 2.
+        let doc = parse_parts(&[(
+            "word/document.xml",
+            &format!(
+                r#"<w:document xmlns:w="{W}"><w:body>
+                  <w:p>
+                    <w:r><w:t>ab</w:t></w:r>
+                    <w:commentRangeStart w:id="7"/>
+                    <w:r><w:noBreakHyphen/><w:t>cd</w:t></w:r>
+                    <w:commentRangeEnd w:id="7"/>
+                  </w:p>
+                </w:body></w:document>"#
+            ),
+        )]);
+        let paras = paragraphs(&doc);
+        let p = paras[0];
+        assert_eq!(
+            p.runs
+                .iter()
+                .filter_map(|r| match r {
+                    DocRun::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["ab-cd"],
+            "the noBreakHyphen absorption itself must stay intact",
+        );
+        assert_eq!(
+            marks(p),
+            vec![("7", "rangeStart", 1, 2), ("7", "rangeEnd", 1, 5)],
+        );
+    }
+
+    #[test]
+    fn comment_less_paragraph_serializes_without_comment_marks_key() {
+        let doc = parse_parts(&[(
+            "word/document.xml",
+            &format!(
+                r#"<w:document xmlns:w="{W}"><w:body>
+                  <w:p><w:r><w:t>plain</w:t></w:r></w:p>
+                </w:body></w:document>"#
+            ),
+        )]);
+        let json = serde_json::to_value(paragraphs(&doc)[0]).unwrap();
+        assert!(
+            json.get("commentMarks").is_none(),
+            "empty comment_marks must be serde-skipped so existing snapshots stay byte-identical",
+        );
+    }
+
+    fn comment_parts<'a>(with_extended: bool) -> Vec<(&'a str, String)> {
+        let rels_extended = if with_extended {
+            r#"<Relationship Id="rExt" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/>"#
+        } else {
+            ""
+        };
+        let mut parts = vec![
+            (
+                "word/document.xml",
+                format!(
+                    r#"<w:document xmlns:w="{W}"><w:body>
+                      <w:p>
+                        <w:commentRangeStart w:id="1"/>
+                        <w:r><w:t>threaded</w:t></w:r>
+                        <w:commentRangeEnd w:id="1"/>
+                        <w:r><w:commentReference w:id="1"/></w:r>
+                      </w:p>
+                    </w:body></w:document>"#
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!(
+                    r#"<?xml version="1.0"?>
+                    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                      <Relationship Id="rCom" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>
+                      {rels_extended}
+                    </Relationships>"#
+                ),
+            ),
+            (
+                "word/comments.xml",
+                format!(
+                    r#"<w:comments xmlns:w="{W}" xmlns:w14="{W14}">
+                      <w:comment w:id="1" w:author="Alice" w:initials="A" w:date="2024-03-01T10:00:00Z">
+                        <w:p w14:paraId="AAAA1111"><w:r><w:t>Root first para</w:t></w:r></w:p>
+                        <w:p w14:paraId="AAAA2222"><w:r><w:t>Root last para</w:t></w:r></w:p>
+                      </w:comment>
+                      <w:comment w:id="2" w:author="Bob">
+                        <w:p w14:paraId="BBBB1111"><w:r><w:t>A reply</w:t></w:r></w:p>
+                      </w:comment>
+                      <w:comment w:id="3" w:author="Carol">
+                        <w:p w14:paraId="CCCC1111"><w:r><w:t>Resolved thread</w:t></w:r></w:p>
+                      </w:comment>
+                    </w:comments>"#
+                ),
+            ),
+        ];
+        if with_extended {
+            parts.push((
+                "word/commentsExtended.xml",
+                format!(
+                    r#"<w15:commentsEx xmlns:w15="{W15}">
+                      <w15:commentEx w15:paraId="AAAA2222" w15:done="0"/>
+                      <w15:commentEx w15:paraId="BBBB1111" w15:paraIdParent="AAAA2222" w15:done="0"/>
+                      <w15:commentEx w15:paraId="CCCC1111" w15:done="1"/>
+                    </w15:commentsEx>"#
+                ),
+            ));
+        }
+        parts
+    }
+
+    #[test]
+    fn comments_extended_joins_replies_and_resolved_state_via_last_paragraph_para_id() {
+        let parts = comment_parts(true);
+        let borrowed: Vec<(&str, &str)> = parts
+            .iter()
+            .map(|(path, content)| (*path, content.as_str()))
+            .collect();
+        let doc = parse_parts(&borrowed);
+        let by_id = |id: &str| {
+            doc.comments
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap_or_else(|| panic!("comment {id}"))
+        };
+
+        let root = by_id("1");
+        assert_eq!(
+            root.paragraphs,
+            vec!["Root first para".to_string(), "Root last para".to_string()],
+        );
+        assert_eq!(root.text, "Root first paraRoot last para", "flattened join unchanged");
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.resolved, Some(false));
+
+        let reply = by_id("2");
+        assert_eq!(
+            reply.parent_id.as_deref(),
+            Some("1"),
+            "paraIdParent AAAA2222 is comment 1's LAST paragraph",
+        );
+        assert_eq!(reply.resolved, Some(false));
+
+        let resolved = by_id("3");
+        assert_eq!(resolved.resolved, Some(true));
+        assert_eq!(resolved.parent_id, None);
+    }
+
+    #[test]
+    fn missing_comments_extended_part_leaves_flat_unresolved_comments() {
+        let parts = comment_parts(false);
+        let borrowed: Vec<(&str, &str)> = parts
+            .iter()
+            .map(|(path, content)| (*path, content.as_str()))
+            .collect();
+        let doc = parse_parts(&borrowed);
+        assert_eq!(doc.comments.len(), 3);
+        for comment in &doc.comments {
+            assert_eq!(comment.parent_id, None);
+            assert_eq!(comment.resolved, None);
+        }
+        // The additive fields are serde-skipped when absent, so the JSON shape
+        // for extended-less documents matches the pre-threading serialization
+        // apart from the new paragraphs projection.
+        let json = serde_json::to_value(&doc.comments[0]).unwrap();
+        assert!(json.get("parentId").is_none());
+        assert!(json.get("resolved").is_none());
     }
 }
 

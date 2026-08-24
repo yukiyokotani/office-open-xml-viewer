@@ -63,6 +63,10 @@ import {
 } from './element-context.js';
 import type { DocxElementContext, DocxPagePoint } from './selection-context.js';
 import {
+  collectDocumentCommentRanges,
+  type CommentAnchorRange,
+} from './comment-margin-layout.js';
+import {
   isDocumentPullResponse,
   materializeDocumentPullAdapterSession,
 } from './document-pull-client.js';
@@ -91,7 +95,10 @@ export interface LoadOptions extends CoreLoadOptions {
 }
 
 /** Options for {@link DocxDocument.collectPageRuns}. */
-export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate'>;
+export type CollectPageRunsOptions = Pick<
+  RenderPageOptions,
+  'width' | 'currentDate' | 'showTrackedChanges'
+>;
 
 /** IX6 — options for {@link DocxDocument.renderPageToBitmap}: the serializable
  *  render knobs plus an OPTIONAL `onTextRun`. The callback stays main-thread (it
@@ -112,6 +119,10 @@ export class DocxDocument {
    *  pages (main) or the worker meta's `bookmarkPages` (worker). Nulled by
    *  {@link destroy} so a reused reference never serves a stale document. */
   private _bookmarkPages: Map<string, number> | null = null;
+  /** Lazily-computed §17.13.4 comment anchor ranges (main mode; worker mode
+   *  reads them from the meta). Nulled by {@link destroy} with the other
+   *  per-document caches. */
+  private _commentAnchorRanges: readonly CommentAnchorRange[] | null = null;
   private _mode: 'main' | 'worker' = 'main';
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
@@ -393,6 +404,7 @@ export class DocxDocument {
     this._meta = null;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
+    this._commentAnchorRanges = null;
     this._rawParts.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
     // (main mode). Refcounted in core: a font also used by another open document
@@ -538,6 +550,22 @@ export class DocxDocument {
    */
   get comments(): DocComment[] {
     return this._meta?.comments ?? this._document?.comments ?? [];
+  }
+
+  /**
+   * ECMA-376 §17.13.4 — the comment anchors resolved to per-paragraph run
+   * intervals in document order (`commentRangeStart`/`End` pairs, plus
+   * zero-length boundaries for reference-only comments). Join each range to
+   * rendered geometry via `DocxTextRunInfo.source.path` + `sourceRunIndex`.
+   * Mode-agnostic: main mode walks the body model lazily (cached per
+   * document); worker mode reads the ranges the worker computed with the same
+   * pure walker. Returns `[]` when the document has no comment anchors.
+   */
+  commentAnchorRanges(): readonly CommentAnchorRange[] {
+    if (this._meta) return this._meta.commentAnchorRanges ?? [];
+    if (!this._document) return [];
+    this._commentAnchorRanges ??= collectDocumentCommentRanges(this._document.body);
+    return this._commentAnchorRanges;
   }
 
   /**
@@ -714,6 +742,7 @@ export class DocxDocument {
       currentDate: wireOpts.currentDate,
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
+      showTrackedChanges: wireOpts.showTrackedChanges,
     });
   }
 

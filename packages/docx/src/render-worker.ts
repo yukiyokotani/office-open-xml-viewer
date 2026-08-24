@@ -32,6 +32,7 @@ import {
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
+import { collectDocumentCommentRanges } from './comment-margin-layout.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
@@ -255,6 +256,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         endnotes: model.endnotes ?? [],
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(layout)],
+        // §17.13.4 — anchor ranges from the same pure walker main mode uses,
+        // so the comment margin overlay is mode-agnostic.
+        commentAnchorRanges: collectDocumentCommentRanges(model.body ?? []),
       };
       const loadedArchive = host.archive;
       if (!loadedArchive) throw new Error('No docx loaded');

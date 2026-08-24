@@ -77,6 +77,15 @@ export const WORD_TRACK_CHANGE_AUTHOR_COLORS = Object.freeze([
   '#525252',
 ] as const);
 
+export const WORD_TRACK_CHANGE_BAR = defineCompatibilityRule({
+  id: 'word-track-change-bar',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/track-changes-markup-layout.test.ts#emits one margin change bar per line containing revision text in the markup view',
+  },
+  description: 'In the markup view, draw a vertical change bar in the margin beside every line that contains tracked-change content, matching the Word reviewing-pane convention (an app convention; ECMA-376 defines no bar geometry).',
+});
+
 const NO_TRACK_CHANGE_DECORATION = Object.freeze({
   underline: false,
   strike: false,
@@ -93,7 +102,9 @@ const DELETION_TRACK_CHANGE_DECORATION = Object.freeze({
 export function wordTrackChangeDecoration(
   kind: string | null | undefined,
 ): Readonly<{ underline: boolean; strike: boolean }> {
-  if (kind === 'insertion') return INSERTION_TRACK_CHANGE_DECORATION;
-  if (kind === 'deletion') return DELETION_TRACK_CHANGE_DECORATION;
+  // ECMA-376 §17.13.5.22 / §17.13.5.25 — a move renders as a deletion at its
+  // source and an insertion at its destination.
+  if (kind === 'insertion' || kind === 'moveTo') return INSERTION_TRACK_CHANGE_DECORATION;
+  if (kind === 'deletion' || kind === 'moveFrom') return DELETION_TRACK_CHANGE_DECORATION;
   return NO_TRACK_CHANGE_DECORATION;
 }

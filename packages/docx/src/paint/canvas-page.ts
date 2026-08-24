@@ -274,6 +274,17 @@ export function paintLayoutPageContent(
   paintEntries(entries.slice(0, decorationIndex));
   paintColumnSeparators(page, context);
   paintEntries(entries.slice(decorationIndex));
+  // ECMA-376 §17.13.5 markup view (`word-track-change-bar`): margin bars are
+  // completed layout rects — paint only fills them.
+  for (const bar of page.changeBars ?? []) {
+    context.ctx.fillStyle = '#000000';
+    context.ctx.fillRect(
+      bar.bounds.xPt,
+      bar.bounds.yPt,
+      bar.bounds.widthPt,
+      bar.bounds.heightPt,
+    );
+  }
   if (page.pageBorder?.zOrder !== 'back' && page.pageBorder) {
     paintPageBorderLayout(page.pageBorder, context);
   }

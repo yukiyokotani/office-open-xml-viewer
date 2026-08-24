@@ -133,6 +133,42 @@ export interface DocComment {
   initials?: string;
   date?: string;
   text: string;
+  /** `w15:commentEx@paraIdParent` (the commentsExtended extension part)
+   *  resolved to the parent comment's `id` — present when this comment is a
+   *  reply in a thread. Absent for top-level comments and for documents
+   *  without `word/commentsExtended.xml`. */
+  parentId?: string;
+  /** `w15:commentEx@done` (the commentsExtended extension part) — `true` when
+   *  the thread is marked resolved. Absent when the document ships no
+   *  commentsExtended entry for this comment. */
+  resolved?: boolean;
+  /** Per-paragraph plain text of the comment body, in document order (one
+   *  entry per `<w:p>`, empty string for an empty paragraph). {@link text} is
+   *  the historical flattened join of the same content. */
+  paragraphs?: string[];
+}
+
+/** One comment-anchor boundary inside a paragraph (ECMA-376 §17.13.4).
+ *  `commentRangeStart` (§17.13.4.4) / `commentRangeEnd` (§17.13.4.3) delimit
+ *  the annotated text; `commentReference` (§17.13.4.5) marks the anchor run.
+ *  Marks are pure metadata — they produce no run, occupy no width, and do not
+ *  perturb run splitting/coalescing, so layout geometry is unchanged whether
+ *  or not a document carries comments. */
+export interface DocxCommentMark {
+  /** `@w:id` linking the mark to its {@link DocComment}. */
+  id: string;
+  /** "rangeStart" | "rangeEnd" | "reference" */
+  kind: 'rangeStart' | 'rangeEnd' | 'reference' | string;
+  /** Boundary position: the mark sits immediately BEFORE
+   *  `paragraph.runs[runIndex]` (equal to `runs.length` when the mark closes
+   *  the paragraph). */
+  runIndex: number;
+  /** UTF-16 length of `runs[runIndex - 1]`'s text when the mark was recorded
+   *  (absent/0 when the previous run is not a text run). If that run's final
+   *  text is LONGER, later content was absorbed into it across this boundary
+   *  (the `<w:noBreakHyphen>` merge, §17.3.3.18) and the true boundary falls
+   *  inside that run at this UTF-16 offset. */
+  prevRunUtf16Len?: number;
 }
 
 export interface DocNote {
@@ -464,6 +500,12 @@ export interface DocParagraph {
    * for the common paragraph that anchors nothing.
    */
   bookmarks?: string[];
+  /**
+   * ECMA-376 §17.13.4 comment-anchor boundaries inside this paragraph, in
+   * document order. Absent (`undefined`) for the common paragraph that
+   * anchors no comment.
+   */
+  commentMarks?: DocxCommentMark[];
   /** Paragraph background hex color (w:shd fill) */
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */
@@ -1172,10 +1214,12 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana). Renders above the
    *  base text in a smaller font; line height is expanded to fit it. */
   ruby?: RubyAnnotation;
-  /** ECMA-376 §17.13.5 — set when this run sits inside `<w:ins>` or
-   *  `<w:del>`. The renderer paints insertions with an author-coloured
-   *  underline and deletions with an author-coloured strikethrough so
-   *  tracked changes appear inline. */
+  /** ECMA-376 §17.13.5 — set when this run sits inside `<w:ins>`, `<w:del>`,
+   *  `<w:moveFrom>`, or `<w:moveTo>`. The default render is the final document
+   *  state (deletions and moved-away text hidden); the opt-in markup view
+   *  ({@link RenderPageOptions.showTrackedChanges}) paints insertions with an
+   *  author-coloured underline and deletions with an author-coloured
+   *  strikethrough so tracked changes appear inline. */
   revision?: RunRevision;
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
    *  `true` = RTL, `false` = explicitly LTR, absent = unspecified. The renderer
@@ -1265,8 +1309,10 @@ export interface NoteRef {
 }
 
 export interface RunRevision {
-  /** "insertion" or "deletion" */
-  kind: 'insertion' | 'deletion' | string;
+  /** "insertion" | "deletion" | "moveFrom" | "moveTo" (ECMA-376 §17.13.5.18 /
+   *  §17.13.5.14 / §17.13.5.22 / §17.13.5.25). Move revisions render like
+   *  deletion (source) / insertion (destination) in the markup view. */
+  kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
   /** `<w:ins w:author>` / `<w:del w:author>`. Used to colour the markup. */
   author?: string;
   /** ISO-8601 timestamp. */
@@ -1599,6 +1645,10 @@ export interface DocxTextRunInfo {
   }>;
   /** Authored `w14:paraId`, when present. */
   paragraphId?: string;
+  /** Index of the originating run within the owning paragraph's normalized
+   *  runs. With {@link source}, this joins a rendered fragment back to its
+   *  model run — e.g. to place ECMA-376 §17.13.4 comment-anchor overlays. */
+  sourceRunIndex?: number;
   text: string;
   /** Left edge in canvas CSS px. */
   x: number;
@@ -1641,4 +1691,13 @@ export interface RenderPageOptions {
    *  or epoch-ms number. Default = the real current time at render. Set a fixed
    *  value for deterministic / reproducible DATE/TIME field output. */
   currentDate?: Date | number;
+  /** ECMA-376 §17.13.5 tracked-change view. `false`/absent (the default)
+   *  renders the document's FINAL state: deleted (`w:del`) and moved-away
+   *  (`w:moveFrom`) content is hidden, insertions and moved-in (`w:moveTo`)
+   *  content renders as plain text. `true` renders the MARKUP view:
+   *  insertions/moveTo are underlined and deletions/moveFrom struck through in
+   *  a stable per-author colour, with a vertical change bar in the margin next
+   *  to changed lines. Selects layout geometry (hiding deletions changes line
+   *  breaking), so each value is a separate cached layout variant. */
+  showTrackedChanges?: boolean;
 }
