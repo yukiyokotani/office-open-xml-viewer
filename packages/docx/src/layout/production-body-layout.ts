@@ -2309,6 +2309,7 @@ function resolveColumnWidths(
             { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
             paragraphMeasurementEnvironment(state),
             numbering,
+            { preserveWhitespaceOnlyContent: true },
           );
         },
         nestedTable: (nested) => measureTableIntrinsicWidths(

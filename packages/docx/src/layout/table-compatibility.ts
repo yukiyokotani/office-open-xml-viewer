@@ -1,5 +1,24 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import type { ParagraphLayoutSource } from './text.js';
 import type { LayoutRect } from './types.js';
+
+export const WORD_AUTOFIT_EMPTY_PARAGRAPH_CONTENT_WIDTH = defineCompatibilityRule({
+  id: 'word-autofit-empty-paragraph-content-width',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'autofit-empty-paragraph-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'For table AutoFit content width, Word gives an empty unnumbered paragraph no intrinsic content width regardless of effective right, left, first-line, or hanging indentation. Cell margins still contribute, while whitespace, non-breaking space, visible text, and numbering remain content-bearing controls.',
+});
+
+export function wordAutofitEmptyParagraphHasNoIntrinsicContent(
+  paragraph: Pick<ParagraphLayoutSource, 'runs' | 'numbering'>,
+): boolean {
+  return paragraph.runs.length === 0 && paragraph.numbering == null;
+}
 
 export const WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING = defineCompatibilityRule({
   id: 'word-exact-row-height-bottom-padding',

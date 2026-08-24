@@ -3,7 +3,10 @@ import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { resolveColumnWidths } from './test-support/renderer-internals.test-support.js';
-import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
+import {
+  measureParagraphIntrinsicWidths,
+  measureTableCellIntrinsicWidths,
+} from './layout/intrinsic-width.js';
 import { bodyAcquisitionInputProjections } from './parser-model.js';
 import {
   resolveDocumentLayoutSettings,
@@ -161,6 +164,101 @@ describe('table intrinsic content widths', () => {
     kinsoku: DEFAULT_KINSOKU_RULES,
     defaultTabPt: 36,
     ...overrides,
+  });
+
+  it('ignores paragraph intrinsic width for an empty unnumbered cell paragraph', () => {
+    const source = paragraph([]);
+    const measured: DocParagraph[] = [];
+    expect(measureTableCellIntrinsicWidths(
+      cell([source as CellElement]),
+      { left: 5.4, right: 5.4 },
+      {
+        paragraph: (value) => {
+          measured.push(value as DocParagraph);
+          return { minWidthPt: 10.8, maxWidthPt: 10.8 };
+        },
+        nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
+      },
+    )).toEqual({ minWidthPt: 10.8, maxWidthPt: 10.8 });
+    expect(measured).toEqual([]);
+  });
+
+  it('retains paragraph intrinsic width when the cell has a visible run', () => {
+    const source = paragraph([textRun('X')]);
+    expect(measureTableCellIntrinsicWidths(
+      cell([source as CellElement]),
+      { left: 5.4, right: 5.4 },
+      {
+        paragraph: () => ({ minWidthPt: 15.8, maxWidthPt: 15.8 }),
+        nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
+      },
+    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6 });
+  });
+
+  it('retains numbering-marker intrinsic width on an otherwise empty cell paragraph', () => {
+    const source = paragraph([], {
+      numbering: { numId: 1, level: 0 } as DocParagraph['numbering'],
+    });
+    const measured: DocParagraph[] = [];
+    expect(measureTableCellIntrinsicWidths(
+      cell([source as CellElement]),
+      { left: 5.4, right: 5.4 },
+      {
+        paragraph: (value) => {
+          measured.push(value as DocParagraph);
+          return { minWidthPt: 15.8, maxWidthPt: 15.8 };
+        },
+        nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
+      },
+    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6 });
+    expect(measured).toEqual([source]);
+  });
+
+  it('keeps empty paragraph indents out of the AutoFit column solver', () => {
+    const withMargins = (source: DocParagraph): DocTableCell => ({
+      ...cell([source as CellElement]),
+      marginLeft: 5.4,
+      marginRight: 5.4,
+    });
+    const source = table([row([
+      withMargins(paragraph([], { indentRight: 10.8 })),
+      withMargins(paragraph([], { indentLeft: 10.8 })),
+      withMargins(paragraph([], { indentFirst: 10.8 })),
+      withMargins(paragraph([], { indentFirst: -10.8, bidi: true })),
+      withMargins(paragraph([textRun('X')], { indentRight: 10.8 })),
+    ])], [12.8, 12.8, 12.8, 12.8, 12.8]);
+
+    expect(resolveColumnWidths(source, 200, columnState(measuringContext())))
+      .toEqual([10.8, 10.8, 10.8, 10.8, 26.6]);
+  });
+
+  it('uses visible sibling paragraphs without charging an empty paragraph indent', () => {
+    const source = table([row([{
+      ...cell([
+        paragraph([], { indentLeft: 36, indentRight: 36 }) as CellElement,
+        paragraph([textRun('XX')]) as CellElement,
+      ]),
+      marginLeft: 5.4,
+      marginRight: 5.4,
+    }])], [12.8]);
+
+    expect(resolveColumnWidths(source, 200, columnState(measuringContext())))
+      .toEqual([20.8]);
+  });
+
+  it('retains whitespace and non-breaking-space controls in AutoFit width', () => {
+    const withMargins = (text: string): DocTableCell => ({
+      ...cell([paragraph([textRun(text)]) as CellElement]),
+      marginLeft: 5.4,
+      marginRight: 5.4,
+    });
+    const source = table([row([
+      withMargins(' '),
+      withMargins('\u00a0'),
+    ])], [0, 0]);
+
+    expect(resolveColumnWidths(source, 200, columnState(measuringContext())))
+      .toEqual([15.8, 15.8]);
   });
 
   it('includes the character-grid pitch in minimum content width', () => {

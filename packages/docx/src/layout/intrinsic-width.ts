@@ -31,6 +31,7 @@ import {
   numberingMarkerLogicalInterval,
   type NumberingMarkerGeometry,
 } from './numbering-marker.js';
+import { wordAutofitEmptyParagraphHasNoIntrinsicContent } from './table-compatibility.js';
 
 export interface ParagraphIntrinsicWidths {
   readonly minWidthPt: number;
@@ -47,6 +48,12 @@ export interface TableCellIntrinsicWidthDependencies {
   nestedTable(table: TableLayoutSource): TableCellIntrinsicWidths;
 }
 
+export interface ParagraphIntrinsicWidthOptions {
+  /** Word table AutoFit keeps a retained whitespace-only paragraph run as
+   * content even though ordinary line layout trims paragraph-final spaces. */
+  readonly preserveWhitespaceOnlyContent?: boolean;
+}
+
 /** Fold public cell content into one intrinsic interval. OOXML width/style
  * precedence is deliberately absent: parser/model projection and the column
  * solver own those separate responsibilities. */
@@ -58,8 +65,14 @@ export function measureTableCellIntrinsicWidths(
   let minContentWidthPt = 0;
   let maxContentWidthPt = 0;
   for (const element of cell.content) {
+    // ECMA-376 §17.18.87 defines AutoFit minima from cell contents. The
+    // registered Word observation refines the otherwise-unspecified empty-mark
+    // boundary: indentation positions no content when the cell paragraph has
+    // neither runs nor numbering. Cell margins remain applied below.
+    const emptyParagraph = element.type === 'paragraph'
+      && wordAutofitEmptyParagraphHasNoIntrinsicContent(element);
     const intrinsic = element.type === 'paragraph'
-      ? dependencies.paragraph(element)
+      ? emptyParagraph ? { minWidthPt: 0, maxWidthPt: 0 } : dependencies.paragraph(element)
       : dependencies.nestedTable(element);
     minContentWidthPt = Math.max(minContentWidthPt, intrinsic.minWidthPt);
     maxContentWidthPt = Math.max(maxContentWidthPt, intrinsic.maxWidthPt);
@@ -455,6 +468,7 @@ export function measureParagraphIntrinsicWidths(
   measurer: TextMeasurer,
   environment: ParagraphMeasurementEnvironment,
   numbering?: NumberingMarkerGeometry,
+  options: ParagraphIntrinsicWidthOptions = {},
 ): ParagraphIntrinsicWidths {
   if (!Number.isFinite(maximumWidthPt) || maximumWidthPt < 0) {
     throw new RangeError('maximumWidthPt must be finite and non-negative');
@@ -510,11 +524,6 @@ export function measureParagraphIntrinsicWidths(
     minimumLeftPt = Math.min(minimumLeftPt, markerInterval.startPt);
     maximumRightPt = Math.max(maximumRightPt, markerInterval.endPt);
   }
-  const maxWidthPt = Math.min(
-    maximumWidthPt,
-    Math.max(0, maximumRightPt - minimumLeftPt + oppositeIndentPt),
-  );
-
   let minimumAtomPt = minimumTextAtomWidthPt(segments, context, measurer);
   for (const line of lines) {
     let penPt = 0;
@@ -536,8 +545,41 @@ export function measureParagraphIntrinsicWidths(
   const leadingIndentPt = context.baseRtl
     ? context.physicalIndentRightPt
     : context.physicalIndentLeftPt;
+  const whitespaceSegments = options.preserveWhitespaceOnlyContent
+    && segments.length > 0
+    && segments.every((segment) => 'text' in segment && /^[\s\u00a0]+$/u.test(segment.text))
+      ? segments as readonly LayoutTextSeg[]
+      : null;
+  const whitespaceOnlyWidthPt = whitespaceSegments
+    ? (() => {
+        let joinedText = '';
+        const pieces = whitespaceSegments.map((segment) => {
+          const start = joinedText.length;
+          joinedText += segment.text;
+          return { segment, start, end: joinedText.length };
+        });
+        return measureTextRange(
+          pieces,
+          joinedText,
+          0,
+          joinedText.length,
+          measurer,
+          paragraphCharacterGrid(context),
+        );
+      })()
+    : 0;
+  if (whitespaceOnlyWidthPt > 0) {
+    const whitespaceStartPt = leadingIndentPt + context.firstIndentPt;
+    minimumLeftPt = Math.min(minimumLeftPt, whitespaceStartPt);
+    maximumRightPt = Math.max(maximumRightPt, whitespaceStartPt + whitespaceOnlyWidthPt);
+  }
+  const maxWidthPt = Math.min(
+    maximumWidthPt,
+    Math.max(0, maximumRightPt - minimumLeftPt + oppositeIndentPt),
+  );
   const continuationStartPt = leadingIndentPt;
   let minLeftPt = Math.min(0, continuationStartPt);
+  minimumAtomPt = Math.max(minimumAtomPt, whitespaceOnlyWidthPt);
   let minRightPt = Math.max(0, continuationStartPt + minimumAtomPt);
   const firstStartPt = leadingIndentPt + context.firstIndentPt;
   minLeftPt = Math.min(minLeftPt, firstStartPt);
