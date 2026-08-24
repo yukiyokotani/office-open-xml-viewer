@@ -3212,6 +3212,7 @@ mod tests {
     #[test]
     fn picture_element_serializes_path_not_data_url() {
         let pic = PictureElement {
+            id: None,
             x: 0,
             y: 0,
             width: 100,
@@ -7005,6 +7006,7 @@ mod tests {
 
         let media = parse_media(pic, "ppt/slides", &rels)
             .expect("p14:media-only .m4v should parse as a MediaElement");
+        assert_eq!(media.id.as_deref(), Some("5"));
         assert_eq!(media.media_kind, "video");
         assert_eq!(media.mime_type, "video/mp4");
         assert_eq!(media.media_path, "ppt/media/clip.m4v");

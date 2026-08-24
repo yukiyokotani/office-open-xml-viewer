@@ -168,6 +168,7 @@ export interface ChartDisplayUnitsLabel {
 }
 export interface ChartElement {
     type: 'chart';
+    id?: string;
     x: number;
     y: number;
     width: number;
@@ -1139,6 +1140,7 @@ export interface MathSvg {
 }
 export interface MediaElement {
     type: 'media';
+    id?: string;
     x: number;
     y: number;
     width: number;
@@ -1297,6 +1299,7 @@ export interface PatternFill {
 }
 export interface PictureElement {
     type: 'picture';
+    id?: string;
     x: number;
     y: number;
     width: number;
@@ -1793,6 +1796,7 @@ export interface TableCell {
 }
 export interface TableElement {
     type: 'table';
+    id?: string;
     x: number;
     y: number;
     width: number;
