@@ -117,6 +117,25 @@ generated WASM (`pnpm build:wasm` or the per-package command) whenever parser
 (Rust) source has changed or `packages/*/src/wasm/` may be stale — stale
 generated WASM can both hide real parser defects and fabricate failures.
 
+### Fidelity closure claims
+
+- Report an Office-fidelity bug as fixed only after rendering the exact reported
+  document and page, sheet, or slide from the candidate revision and comparing
+  it with a desktop Word/Excel/PowerPoint output or a desktop-Office-produced
+  PDF/image. Microsoft 365 web output is not a fidelity oracle.
+- A whole-page thumbnail is insufficient evidence for small geometry, color, or
+  decoration differences. Inspect a zoomed crop and, where practical, compare
+  objective bounds, endpoints, pixel colors, or other geometry.
+- A synthetic regression must cover the structural boundary that caused the
+  report. When behavior depends on collection cardinality or segmentation, test
+  the applicable zero, one, and multiple cases plus relevant run/span/cluster
+  splits. Passing a reduced one-item case does not prove a multi-item sample.
+- Compatibility-rule registration, green unit tests, and self-VRT each provide
+  supporting evidence; none substitutes for the exact reported-sample check.
+- State the verified scope precisely. If only a synthetic test passed or the
+  exact sample/reference was unavailable, report that limitation instead of
+  saying the original issue is resolved.
+
 ## OOXML Implementation Policy
 
 Be specification-first.
