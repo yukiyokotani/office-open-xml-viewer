@@ -15,7 +15,7 @@ describe('v0.81 ChartEx migration guide', () => {
 
   it('makes the required migration decision explicit', () => {
     expect(announcement).toMatchObject({
-      label: 'Upcoming release',
+      label: 'Release note',
       version: 'v0.81.0',
       title: 'Migrating to v0.81.0',
     });
@@ -53,7 +53,7 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Updated for the upcoming v0.81.0 release');
+    expect(bundleSizePage).toContain('Updated for v0.81.0');
     expect(bundleSizePage).toContain('+118 KiB');
     expect(bundleSizePage).toContain('+32 KiB');
     expect(bundleSizePage).toContain('+42 KB');

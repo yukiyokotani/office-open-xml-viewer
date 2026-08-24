@@ -5,6 +5,32 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.81.0 — 2026-08-24
+
+Minor release expanding Microsoft ChartEx support and improving chart fidelity
+across Word, Excel, and PowerPoint. Applications that display ChartEx charts
+must opt in to the new module; classic charts remain built in.
+
+- **ChartEx migration:** move waterfall, histogram, Pareto, funnel,
+  box-and-whisker, treemap, and sunburst rendering to the tree-shakeable
+  `@silurus/ooxml/chart-ex` entry. Pass `chartEx` to DOCX, XLSX, or PPTX viewers
+  that need these chart families.
+- **chart fidelity:** preserve more authored Chart Style, Chart Color, fill,
+  line, marker, axis, legend, label, data-table, visible-source, and plot-area
+  semantics through the shared classic and ChartEx pipeline.
+- **3-D charts:** improve Bubble3D material and series precedence, axis and
+  gridline ownership, Surface wireframes, and projected picture fills,
+  including crop, tile, stack, wall, and reversed-axis behavior.
+- **host integration:** apply the shared chart behavior consistently in DOCX,
+  XLSX, and PPTX main and worker rendering, while keeping ChartEx outside the
+  default main-mode import closure.
+- **document fidelity:** preserve XLSX chart caches and zoom-relative layout,
+  restore PPTX automatic table line height, trim DOCX snap-grid underline
+  overflow, and exclude empty unnumbered cell-paragraph indentation from DOCX
+  AutoFit content width.
+- **documentation:** add the ChartEx migration announcement and maintain current
+  bundle-size measurements on the independent bundle-size page.
+
 ## 0.80.2 — 2026-08-18
 
 Compatible patch release improving Office document fidelity and navigation

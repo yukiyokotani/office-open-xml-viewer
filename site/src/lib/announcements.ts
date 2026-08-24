@@ -37,8 +37,8 @@ export interface Announcement {
 export const announcements: readonly Announcement[] = [
   {
     slug: 'v081-chartex-opt-in',
-    date: '2026-08-22',
-    label: 'Upcoming release',
+    date: '2026-08-24',
+    label: 'Release note',
     version: 'v0.81.0',
     title: 'Migrating to v0.81.0',
     summary: 'v0.81.0 expands Microsoft ChartEx rendering and moves it to an opt-in module. Applications that display ChartEx charts must import and enable the renderer.',
