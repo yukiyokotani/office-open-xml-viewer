@@ -377,6 +377,33 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
     }
   });
 
+  it('keeps automatic outEnd label anchors beyond the pie rim', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Long right-side category', 'Long left-side category'],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.3, y: 0.15, w: 0.4, h: 0.7,
+      },
+      series: [series({
+        name: 'Share',
+        values: [50, 50],
+        categories: ['Long right-side category', 'Long left-side category'],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', separator: '\n', fontSizeHpt: 1200,
+        },
+      })],
+    }), RECT, 1);
+
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const categoryLabels = rec.texts.filter(t => t.text.startsWith('Long '));
+    expect(categoryLabels).toHaveLength(2);
+    for (const label of categoryLabels) {
+      expect(Math.hypot(label.x - cx, label.y - cy)).toBeGreaterThan(outerR);
+    }
+  });
+
   it('keeps the complete outEnd text boxes outside the pie, not only their centers', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -409,7 +436,59 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
     }
   });
 
-  it('draws authored leader lines when outEnd labels are displaced to avoid overlap', () => {
+  it('does not invent leader lines when ordinary outEnd labels do not collide', () => {
+    const rec = recordingCtx('#A6A6A6');
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Fares and taxes', 'Local funds', 'State funds', 'Federal funds'],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.288247, y: 0.186997, w: 0.402462, h: 0.670347,
+      },
+      series: [series({
+        name: 'Share',
+        values: [43, 27, 23, 7],
+        categories: ['Fares and taxes', 'Local funds', 'State funds', 'Federal funds'],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', separator: '\n', fontSizeHpt: 1100,
+          showLeaderLines: true, leaderLineColor: 'A6A6A6', leaderLineWidthEmu: 9525,
+        },
+      })],
+    }), { x: 0, y: 0, w: 740, h: 545 }, 4 / 3);
+
+    expect(rec.counts.polylineStrokes).toBe(0);
+  });
+
+  it('does not treat a transparent data-label spPr as a visible callout box', () => {
+    const rec = recordingCtx('#A6A6A6');
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Fares and taxes', 'Local funds', 'State funds', 'Federal funds'],
+      plotAreaManualLayout: {
+        xMode: 'edge', yMode: 'edge', x: 0.288247, y: 0.186997, w: 0.402462, h: 0.670347,
+      },
+      series: [series({
+        name: 'Share',
+        values: [43, 27, 23, 7],
+        categories: ['Fares and taxes', 'Local funds', 'State funds', 'Federal funds'],
+        seriesDataLabels: {
+          showVal: true, showCatName: true, showSerName: false, showPercent: false,
+          position: 'outEnd', separator: '\n', fontSizeHpt: 1100,
+          showLeaderLines: true, leaderLineColor: 'A6A6A6', leaderLineWidthEmu: 9525,
+          labelBox: {
+            fillHidden: true,
+            fillPaintAuthored: true,
+            borderHidden: true,
+            borderPaintAuthored: true,
+          },
+        },
+      })],
+    }), { x: 0, y: 0, w: 740, h: 545 }, 4 / 3);
+
+    expect(rec.counts.polylineStrokes).toBe(0);
+  });
+
+  it('does not synthesize leader lines by moving crowded automatic outEnd labels', () => {
     const rec = recordingCtx('#777777');
     renderChart(rec.ctx, baseModel({
       chartType: 'pie',
@@ -426,7 +505,7 @@ describe('pie / doughnut ctr data-label radius (§21.2.2.48, PowerPoint layout)'
       })],
     }), RECT, 1);
 
-    expect(rec.counts.polylineStrokes).toBeGreaterThan(0);
+    expect(rec.counts.polylineStrokes).toBe(0);
   });
 });
 

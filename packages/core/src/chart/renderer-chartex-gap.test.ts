@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
+import { renderChartExChart } from './chart-ex-renderer.js';
 import { renderChart } from './renderer.js';
+
+const testChartEx = { render: renderChartExChart };
 
 interface RectCall {
   x: number;
@@ -160,7 +163,17 @@ function familyModel(family: ChartExGapFamily, barGapWidth?: number): ChartModel
 
 function renderRects(chart: ChartModel, bounds: ChartRect): RectCall[] {
   const recording = recordingContext();
-  renderChart(recording.ctx, chart, bounds, 1);
+  renderChart(
+    recording.ctx,
+    chart,
+    bounds,
+    1,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    testChartEx,
+  );
   return recording.rects;
 }
 

@@ -73,6 +73,11 @@
       "import": "./dist/region-map.mjs",
       "default": "./dist/region-map.mjs"
     },
+    "./chart-ex": {
+      "types": "./dist/types/chart-ex.d.ts",
+      "import": "./dist/chart-ex.mjs",
+      "default": "./dist/chart-ex.mjs"
+    },
     "./node": {
       "types": "./dist/types/node.d.ts",
       "import": "./dist/node.mjs",
@@ -102,6 +107,7 @@
     "test:production-render-workers": "playwright test --config tests/worker-dist/playwright.config.ts",
     "check:optional-three-d": "node scripts/check-optional-three-d.mjs dist",
     "check:optional-region-map": "node scripts/check-optional-region-map.mjs dist",
+    "check:optional-chart-ex": "node scripts/check-optional-chart-ex.mjs dist",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",

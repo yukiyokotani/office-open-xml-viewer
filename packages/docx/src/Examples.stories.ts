@@ -5,6 +5,12 @@ import { DocxViewer } from './viewer';
 import { DocxScrollViewer } from './scroll-viewer';
 import { buildDocxTextLayer } from './text-layer';
 import type { DocxTextRunInfo } from './renderer';
+import { math } from '../../../src/math';
+import { threeD } from '../../../src/three-d';
+import { regionMap } from '../../../src/region-map';
+import { chartEx } from '../../../src/chart-ex';
+
+const fullRenderers = { math, threeD, regionMap, chartEx } as const;
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -70,7 +76,7 @@ export const ScrollView: LayoutStory = {
       'max-height:720px;overflow-y:auto;border:1px solid #ccc;background:#f5f5f5;padding:12px;';
     root.appendChild(scroller);
 
-    DocxDocument.load(SAMPLE_URL)
+    DocxDocument.load(SAMPLE_URL, fullRenderers)
       .then(async (doc) => {
         status.textContent = `Rendering ${doc.pageCount} pages…`;
         const widthPx = 700;
@@ -186,7 +192,7 @@ export const ThumbnailGrid: LayoutStory = {
       'display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px;';
     root.appendChild(grid);
 
-    DocxDocument.load(SAMPLE_URL)
+    DocxDocument.load(SAMPLE_URL, fullRenderers)
       .then(async (doc) => {
         status.textContent = `Rendering ${doc.pageCount} thumbnails…`;
         const thumbWidth = 160;
@@ -251,11 +257,12 @@ export const MasterDetail: LayoutStory = {
     const detailViewer = new DocxViewer(detailCanvas, {
       enableTextSelection: true,
       width: 600,
+      ...fullRenderers,
     });
 
     // Load thumbnails using DocxDocument; detail viewer loads independently
     Promise.all([
-      DocxDocument.load(SAMPLE_URL),
+      DocxDocument.load(SAMPLE_URL, fullRenderers),
       detailViewer.load(SAMPLE_URL),
     ])
       .then(async ([doc]) => {

@@ -12,8 +12,9 @@
     import { math } from '/dist/math.mjs';
     import { threeD } from '/dist/three-d.mjs';
     import { regionMap } from '/dist/region-map.mjs';
+    import { chartEx } from '/dist/chart-ex.mjs';
 
-    const renderers = { math, threeD, regionMap };
+    const renderers = { math, threeD, regionMap, chartEx };
     const paint = (id, bitmap) => {
       const canvas = document.getElementById(id);
       canvas.width = bitmap.width;

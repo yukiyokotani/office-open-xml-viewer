@@ -19,6 +19,7 @@ import {
   classicMarkerPaintWorkCount,
   renderChart as renderChartCore,
 } from './renderer.js';
+import { renderChartExChart } from './chart-ex-renderer.js';
 import { renderSimpleThreeDChart } from './three-d-renderer.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 import { BOX_WHISKER_SLOT_GUTTER_FRACTION } from './box-whisker.js';
@@ -31,6 +32,7 @@ import {
 import { MAX_CANVAS_CHART_POINTS, sourceChartStructureCount } from './resource-limits.js';
 
 const testThreeD = { render: renderSimpleThreeDChart };
+const testChartEx = { render: renderChartExChart };
 
 it('uses collision-free tuple keys for decoded chart image sources', () => {
   expect(chartImageFillKey({
@@ -39,6 +41,35 @@ it('uses collision-free tuple keys for decoded chart image sources', () => {
     fillType: 'image', stretch: true, imagePath: 'a', svgImagePath: 'b',
     mimeType: 'image/png',
   }));
+});
+
+it('prefetches and paints direct chart-space and plot-area picture fills', () => {
+  const chartPicture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/chart-background.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const plotPicture = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/plot-background.png',
+    mimeType: 'image/png',
+    stretch: true,
+  };
+  const model = baseModel({
+    chartFill: chartPicture,
+    chartFillPaintAuthored: true,
+    plotAreaFill: plotPicture,
+    plotAreaFillPaintAuthored: true,
+    series: [series({ values: [1] })],
+  });
+  const bitmap = { width: 8, height: 8 } as unknown as CanvasImageSource;
+
+  expect(collectChartMarkerImageFills(model)).toEqual([chartPicture, plotPicture]);
+  const rec = recordingCtx();
+  renderChartCore(rec.ctx, model, RECT, 1, 0, testThreeD, undefined, () => bitmap);
+  expect(rec.drawImages).toHaveLength(2);
+  expect(rec.drawImages.every(call => call[0] === bitmap)).toBe(true);
 });
 
 it('collects only the effective direct bubble point picture', () => {
@@ -171,15 +202,33 @@ it('prefetches and paints one bubble picture for both plot and 3-D legend key', 
   });
   const bitmap = { width: 8, height: 8 } as unknown as CanvasImageSource;
   expect(collectChartMarkerImageFills(model)).toEqual([picture]);
-  expect(classicMarkerPaintWorkCount(model, () => bitmap, 1, RECT)).toBe(12);
+  expect(classicMarkerPaintWorkCount(model, () => bitmap, 1, RECT)).toBe(32);
   const rec = recordingCtx();
   renderChartCore(rec.ctx, model, RECT, 1, 0, testThreeD, undefined, () => bitmap);
   expect(rec.drawImages).toHaveLength(2);
-  expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(2);
+  expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(6);
 });
 const renderChart: typeof renderChartCore = (
-  ctx, chart, rect, ptToPx, shapeRotationDeg, threeD = testThreeD,
-) => renderChartCore(ctx, chart, rect, ptToPx, shapeRotationDeg, threeD);
+  ctx,
+  chart,
+  rect,
+  ptToPx,
+  shapeRotationDeg,
+  threeD = testThreeD,
+  regionMap,
+  imageLookup,
+  chartEx = testChartEx,
+) => renderChartCore(
+  ctx,
+  chart,
+  rect,
+  ptToPx,
+  shapeRotationDeg,
+  threeD,
+  regionMap,
+  imageLookup,
+  chartEx,
+);
 
 interface RectCall { x: number; y: number; w: number; h: number; fs: string }
 interface StrokeRectCall {
@@ -524,6 +573,40 @@ function plotGroup(
 }
 
 const RECT: ChartRect = { x: 0, y: 0, w: 640, h: 360 };
+
+it('keeps classic 2-D charts in the default renderer and ChartEx opt-in', () => {
+  const classic = recordingCtx();
+  renderChartCore(classic.ctx, baseModel({
+    chartType: 'line',
+    categories: ['A', 'B'],
+    series: [series({ values: [1, 2] })],
+  }), RECT, 1);
+  expect(classic.texts.map(item => item.text)).not.toContain('Unsupported chart');
+
+  const omitted = recordingCtx();
+  const waterfall = baseModel({
+    chartType: 'waterfall',
+    categories: ['A', 'B'],
+    series: [series({ values: [1, 2] })],
+  });
+  renderChartCore(omitted.ctx, waterfall, RECT, 1);
+  expect(omitted.texts.map(item => item.text)).toContain('Unsupported chart');
+
+  const enabled = recordingCtx();
+  renderChartCore(
+    enabled.ctx,
+    waterfall,
+    RECT,
+    1,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    testChartEx,
+  );
+  expect(enabled.texts.map(item => item.text)).not.toContain('Unsupported chart');
+  expect(enabled.rects.length).toBeGreaterThan(0);
+});
 
 describe('ordered classic plot groups', () => {
   it.each([
@@ -982,6 +1065,33 @@ describe('chart-space background', () => {
     expect(rec.paintEvents).toContainEqual({ kind: 'stroke', strokeStyle: '#0055AA' });
   });
 
+  it('keeps the application-defined rounded radius in points and clamps tiny frames', () => {
+    for (const [w, h] of [[390, 315], [570, 240], [285, 420]]) {
+      const aspect = recordingCtx();
+      renderChart(aspect.ctx, baseModel({
+        roundedCorners: true,
+        chartBg: 'F2F2F2',
+      }), { x: 0, y: 0, w, h }, 1);
+      expect(aspect.quadratics[0]?.y).toBe(10);
+    }
+
+    const scaled = recordingCtx();
+    renderChart(scaled.ctx, baseModel({
+      roundedCorners: true,
+      chartBg: 'F2F2F2',
+    }), { x: 0, y: 0, w: 200, h: 100 }, 2);
+    // Desktop Excel vector output fixes the radius at 10pt across aspect ratios.
+    expect(scaled.quadratics[0]?.y).toBe(20);
+
+    const tiny = recordingCtx();
+    renderChart(tiny.ctx, baseModel({
+      roundedCorners: true,
+      chartBg: 'F2F2F2',
+    }), { x: 0, y: 0, w: 8, h: 6 }, 2);
+    // Geometry, not a sample-specific threshold, bounds the radius to h/2.
+    expect(tiny.quadratics[0]?.y).toBe(3);
+  });
+
   it('keeps both compound rails inside the rounded chart-space clip', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -1206,6 +1316,49 @@ describe('classic 3-D compatibility projection', () => {
     }
   });
 
+  it('uses the observed compact 3-D column tick density with only an authored maximum', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C', 'D'],
+      valMax: 8,
+      valAxisMajorGridlines: false,
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        gapDepthPercent: 150,
+      },
+      series: [series({ values: [8, 6, 4, 2] })],
+    }), { x: 0, y: 0, w: 300, h: 190 }, 1);
+
+    const labels = rec.texts.map(text => text.text);
+    expect(labels).toEqual(expect.arrayContaining(['0', '2', '4', '6', '8']));
+    expect(labels).not.toEqual(expect.arrayContaining(['1', '3', '5', '7']));
+  });
+
+  it('keeps the ordinary one-sided tick density when 3-D display units are authored', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C', 'D'],
+      valMax: 8,
+      valAxisDisplayUnits: { divisor: 100, builtInUnit: 'hundreds', label: null },
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        gapDepthPercent: 150,
+      },
+      series: [series({ values: [8, 6, 4, 2] })],
+    }), { x: 0, y: 0, w: 300, h: 190 }, 1);
+
+    const labels = rec.texts.map(text => text.text);
+    expect(labels).toEqual(expect.arrayContaining(['0', '0.01', '0.02', '0.03']));
+  });
+
   it('keeps the ordinary 2-D bar path when view3D is absent', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -1221,6 +1374,7 @@ describe('classic 3-D compatibility projection', () => {
     renderChart(rec.ctx, baseModel({
       chartType: 'clusteredBar',
       categories: ['A', 'B'],
+      valAxisMajorGridlines: true,
       threeD: { rotationX: 15, rotationY: 20, depthPercent: 100, perspective: 30 },
       series: [series({ values: [10, 20] })],
     }), RECT, 1);
@@ -1241,6 +1395,243 @@ describe('classic 3-D compatibility projection', () => {
     expect(Math.min(...slopes)).toBeGreaterThan(0.04);
     expect(Math.max(...slopes)).toBeLessThan(0.16);
     expect(Math.max(...slopes) - Math.min(...slopes)).toBeGreaterThan(0.02);
+  });
+
+  it('does not invent 3-D value gridlines when majorGridlines is omitted', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      valAxisGridlineColor: 'FF00FF',
+      valMin: 0,
+      valMax: 20,
+      valAxisMajorUnit: 5,
+      threeD: { rotationX: 15, rotationY: 20, depthPercent: 100, perspective: 30 },
+      series: [series({ values: [5, 15] })],
+    }), RECT, 1);
+
+    expect(rec.strokes.filter(stroke => stroke.ss === '#FF00FF')).toHaveLength(0);
+  });
+
+  it('does not invent 3-D category-depth gridlines when majorGridlines is omitted', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      valAxisMajorGridlines: false,
+      catAxisLineColor: '000000',
+      valAxisLineColor: '000000',
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        floor: { lineHidden: true },
+        sideWall: { lineHidden: true },
+        backWall: { lineHidden: true },
+        seriesAxis: { hidden: true, lineHidden: true, majorTickMark: 'none' },
+      },
+      series: [series({ values: [5, 15], lineHidden: true })],
+    }), RECT, 1);
+
+    expect(rec.strokes.filter(stroke => stroke.ss === '#898989')).toHaveLength(0);
+  });
+
+  it('uses the authored 0.25pt width for 3-D axis rules and ticks', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      catAxisLineColor: 'FF00FF',
+      catAxisLineWidthEmu: 3_175,
+      catAxisMajorTickMark: 'out',
+      catAxisMajorGridlines: false,
+      valAxisLineColor: '00AA00',
+      valAxisLineWidthEmu: 3_175,
+      valAxisMajorTickMark: 'out',
+      valAxisMajorGridlines: false,
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        barGrouping: 'standard',
+        floor: { lineHidden: true },
+        sideWall: { lineHidden: true },
+        backWall: { lineHidden: true },
+        seriesAxis: {
+          hidden: false,
+          lineHidden: false,
+          lineColor: '0000FF',
+          lineWidthEmu: 3_175,
+          majorTickMark: 'out',
+        },
+      },
+      series: [
+        series({ values: [5, 15], lineHidden: true }),
+        series({ values: [8, 12], lineHidden: true }),
+      ],
+    }), RECT, 1);
+
+    for (const color of ['#FF00FF', '#00AA00', '#0000FF']) {
+      const strokes = rec.strokes.filter(stroke => stroke.ss === color);
+      expect(strokes.length).toBeGreaterThan(0);
+      const length = (stroke: (typeof strokes)[number]) => Math.hypot(
+        stroke.points[1].x - stroke.points[0].x,
+        stroke.points[1].y - stroke.points[0].y,
+      );
+      const frame = strokes.reduce((longest, stroke) =>
+        length(stroke) > length(longest) ? stroke : longest);
+      const ticks = strokes.filter(stroke => stroke !== frame);
+      expect(frame.lw).toBe(0.25);
+      expect(ticks.length).toBeGreaterThan(0);
+      expect(ticks.every(stroke => stroke.lw === 0.25)).toBe(true);
+    }
+  });
+
+  it('gives visible axes ownership of coincident 3-D surface edges', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 20,
+      valAxisMajorGridlines: false,
+      catAxisLineColor: 'FF00FF',
+      catAxisLineWidthEmu: 3_175,
+      catAxisLinePaintAuthored: true,
+      valAxisLineColor: '00AA00',
+      valAxisLineWidthEmu: 3_175,
+      valAxisLinePaintAuthored: true,
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        floor: { lineColor: 'FF0000', lineWidthEmu: 12_700 },
+        sideWall: { lineColor: '0000FF', lineWidthEmu: 12_700 },
+        backWall: { lineColor: '808080', lineWidthEmu: 12_700 },
+      },
+      series: [series({ values: [5, 15], lineHidden: true })],
+    }), RECT, 1);
+
+    const samePoint = (
+      left: { x: number; y: number }, right: { x: number; y: number },
+    ) => Math.hypot(left.x - right.x, left.y - right.y) < 1e-6;
+    const ownsEdge = (
+      axis: (typeof rec.strokes)[number], surface: (typeof rec.strokes)[number],
+    ) => surface.points.some((point, index) => {
+      const next = surface.points[(index + 1) % surface.points.length];
+      return (samePoint(axis.points[0], point) && samePoint(axis.points[1], next))
+        || (samePoint(axis.points[0], next) && samePoint(axis.points[1], point));
+    });
+    const axes = rec.strokes.filter(stroke =>
+      (stroke.ss === '#FF00FF' || stroke.ss === '#00AA00')
+      && stroke.points.length === 2
+    );
+    const surfaces = rec.strokes.filter(stroke =>
+      ['#FF0000', '#0000FF', '#808080'].includes(stroke.ss)
+    );
+
+    expect(axes.length).toBeGreaterThanOrEqual(2);
+    expect(axes.every(axis => surfaces.every(surface => !ownsEdge(axis, surface)))).toBe(true);
+  });
+
+  it('places standard 3-D category and series ticks on slot boundaries', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B', 'C'],
+      catAxisCrossBetween: 'between',
+      catAxisLineColor: 'FF00FF',
+      catAxisMajorTickMark: 'out',
+      catAxisMajorGridlines: false,
+      valAxisHidden: true,
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 0,
+        rightAngleAxes: true,
+        barGrouping: 'standard',
+        floor: { lineHidden: true },
+        sideWall: { lineHidden: true },
+        backWall: { lineHidden: true },
+        seriesAxis: {
+          hidden: false,
+          lineHidden: false,
+          lineColor: '0000FF',
+          majorTickMark: 'out',
+        },
+      },
+      series: [
+        series({ name: 'North', values: [5, 10, 15], lineHidden: true }),
+        series({ name: 'South', values: [7, 12, 17], lineHidden: true }),
+      ],
+    }), RECT, 1);
+
+    const tickFractions = (color: string) => {
+      const strokes = rec.strokes.filter(stroke => stroke.ss === color && stroke.points.length === 2);
+      const length = (stroke: (typeof strokes)[number]) => Math.hypot(
+        stroke.points[1].x - stroke.points[0].x,
+        stroke.points[1].y - stroke.points[0].y,
+      );
+      const axis = strokes.reduce((longest, stroke) =>
+        length(stroke) > length(longest) ? stroke : longest);
+      const [start, end] = axis.points;
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      return strokes
+        .filter(stroke => stroke !== axis)
+        .map(stroke => {
+          const anchor = stroke.points[1];
+          return ((anchor.x - start.x) * dx + (anchor.y - start.y) * dy) / lengthSquared;
+        })
+        .sort((a, b) => a - b);
+    };
+
+    expect(tickFractions('#FF00FF')).toEqual([
+      expect.closeTo(0, 6), expect.closeTo(1 / 3, 6),
+      expect.closeTo(2 / 3, 6), expect.closeTo(1, 6),
+    ]);
+    expect(tickFractions('#0000FF')).toEqual([
+      expect.closeTo(0, 6), expect.closeTo(0.5, 6), expect.closeTo(1, 6),
+    ]);
+  });
+
+  it('does not turn a linked gridline style into unauthored 3-D grid geometry', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      chartStyleRoles: {
+        gridlineMajor: { lineColors: ['FF00FF'], lineWidthEmu: 12_700 },
+      },
+      valAxisMajorGridlines: undefined,
+      catAxisMajorGridlines: undefined,
+      catAxisLineColor: '000000',
+      valAxisLineColor: '000000',
+      threeD: {
+        rotationX: 15,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+        floor: { lineColor: '808080', lineWidthEmu: 12_700 },
+        sideWall: { lineColor: '808080', lineWidthEmu: 12_700 },
+        backWall: { lineColor: '808080', lineWidthEmu: 12_700 },
+        seriesAxis: { hidden: true, lineHidden: true, majorTickMark: 'none' },
+      },
+      series: [series({ values: [5, 15], lineHidden: true })],
+    }), RECT, 1);
+
+    expect(rec.strokes.filter(stroke => stroke.ss === '#FF00FF')).toHaveLength(0);
+    const wallStrokes = rec.strokes.filter(stroke => stroke.ss === '#808080');
+    expect(wallStrokes.length).toBeGreaterThanOrEqual(3);
+    expect(wallStrokes.every(stroke => stroke.points.length >= 2)).toBe(true);
   });
 
   it('draws 6pt major and 4pt minor value ticks as horizontal screen annotations', () => {
@@ -1378,6 +1769,28 @@ describe('classic 3-D compatibility projection', () => {
     ) > 1)).toBe(true);
   });
 
+  it('uses the projected 3-D value-axis length for an automatic explicit-span unit', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 5,
+      valAxisFormatCode: '0',
+      valAxisMajorGridlines: false,
+      catAxisMajorTickMark: 'none',
+      threeD: {
+        rotationX: 20,
+        rotationY: 20,
+        depthPercent: 100,
+        perspective: 30,
+      },
+      series: [series({ values: [2, 5], showMarker: false })],
+    }), { x: 0, y: 0, w: 738, h: 439 }, 4 / 3);
+    expect(rec.texts.map(item => item.text).filter(text => /^\d+$/.test(text)))
+      .toEqual(['0', '1', '2', '3', '4', '5']);
+  });
+
   it('keeps unfilled 3-D floor and walls transparent while honoring authored fills', () => {
     const automatic = recordingCtx();
     renderChart(automatic.ctx, baseModel({
@@ -1448,6 +1861,66 @@ describe('classic 3-D compatibility projection', () => {
     expect(Math.max(...points.map(point => point.x))).toBeLessThanOrEqual(RECT.x + RECT.w + 1e-9);
     expect(Math.min(...points.map(point => point.y))).toBeGreaterThanOrEqual(RECT.y - 1e-9);
     expect(Math.max(...points.map(point => point.y))).toBeLessThanOrEqual(RECT.y + RECT.h + 1e-9);
+  });
+
+  it('continues authored category and value gridlines across visible thick CT_Surface faces', () => {
+    const render = (thicknessPercent: number, chartType = 'line') => {
+      const rec = strokedPolylineCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        catAxisCrossBetween: 'between',
+        catAxisMajorGridlines: true,
+        catAxisGridlineColor: 'FF00FF',
+        catAxisGridlineWidthEmu: 25_400,
+        catAxisGridlineDash: 'dash',
+        catAxisMinorGridlines: true,
+        catAxisMinorGridlineColor: 'FF8000',
+        catAxisMinorGridlineWidthEmu: 25_400,
+        catAxisMinorGridlineDash: 'dot',
+        valAxisMajorGridlines: true,
+        valAxisGridlineColor: '00FFFF',
+        valAxisGridlineWidthEmu: 25_400,
+        valAxisGridlineDash: 'dot',
+        valAxisMinorGridlines: true,
+        valAxisMinorGridlineColor: '123456',
+        valAxisMinorGridlineWidthEmu: 25_400,
+        valAxisMinorGridlineDash: 'dash',
+        valAxisMinorUnit: 1,
+        valMin: 0,
+        valMax: 10,
+        valAxisMajorUnit: 2,
+        threeD: {
+          rotationX: 20, rotationY: 20, depthPercent: 100, perspective: 30,
+          floor: { fillColor: 'C00000', thicknessPercent },
+          sideWall: { fillColor: '008000', thicknessPercent },
+          backWall: { fillColor: '4472C4', thicknessPercent },
+        },
+        series: [series({ values: [2, 8, 4], showMarker: false })],
+      }), RECT, 1);
+      return rec.strokes;
+    };
+    const planar = render(0);
+    const thick = render(25);
+    for (const color of ['#FF00FF', '#FF8000', '#00FFFF', '#123456']) {
+      const planarLines = planar.filter(stroke => stroke.ss === color);
+      const thickLines = thick.filter(stroke => stroke.ss === color);
+      expect(planarLines.length).toBeGreaterThan(0);
+      expect(thickLines.length).toBeGreaterThan(0);
+      expect(thickLines.length).toBeGreaterThan(planarLines.length);
+      expect(thickLines.every(stroke => stroke.lw === 2)).toBe(true);
+      expect(thickLines.every(stroke => stroke.dash.length > 0)).toBe(true);
+    }
+    for (const chartType of ['area', 'clusteredBar', 'clusteredBarH']) {
+      const planarFamily = render(0, chartType);
+      const thickFamily = render(25, chartType);
+      for (const color of ['#FF00FF', '#FF8000', '#00FFFF', '#123456']) {
+        expect(planarFamily.filter(stroke => stroke.ss === color).length)
+          .toBeGreaterThan(0);
+        expect(thickFamily.filter(stroke => stroke.ss === color).length)
+          .toBeGreaterThan(planarFamily.filter(stroke => stroke.ss === color).length);
+      }
+    }
   });
 
   it('prefetches and projects only applicable flat CT_Surface stretch pictures', () => {
@@ -2315,17 +2788,20 @@ describe('classic 3-D compatibility projection', () => {
         series({ name: 'Three', values: [3, 3, 5, 6] }),
       ],
     }), RECT, 1);
-    const floor = rec.strokes.find(stroke => stroke.ss === '#000000' && stroke.points.length === 5);
-    const side = rec.strokes.find(stroke => stroke.ss === '#FF0000' && stroke.points.length === 5);
-    const back = rec.strokes.find(stroke => stroke.ss === '#00FF00' && stroke.points.length === 5);
-    expect(floor).toBeDefined();
-    expect(side).toBeDefined();
-    expect(back).toBeDefined();
-    expect(side?.dash.length).toBeGreaterThan(0);
+    const floor = rec.strokes.filter(stroke => stroke.ss === '#000000');
+    const side = rec.strokes.filter(stroke => stroke.ss === '#FF0000');
+    const back = rec.strokes.filter(stroke => stroke.ss === '#00FF00');
+    expect(floor.length).toBeGreaterThan(0);
+    expect(side.length).toBeGreaterThan(0);
+    expect(back.length).toBeGreaterThan(0);
+    expect(side.every(stroke => stroke.dash.length > 0)).toBe(true);
     const length = (a: { x: number; y: number }, b: { x: number; y: number }) =>
       Math.hypot(a.x - b.x, a.y - b.y);
-    const projectedDepth = length(side!.points[0], side!.points[1]);
-    const projectedHeight = length(side!.points[1], side!.points[2]);
+    const sideEdgeLengths = side.flatMap(stroke =>
+      stroke.points.slice(1).map((point, index) => length(stroke.points[index], point))
+    ).filter(edgeLength => edgeLength > 1e-6).sort((left, right) => left - right);
+    const projectedDepth = sideEdgeLengths[0];
+    const projectedHeight = sideEdgeLengths.at(-1) as number;
     // Office's measured default standard-Bar axes are 8.1:8.1:2.6. Keep the
     // final projected depth/height ratio close to 0.321 without applying this
     // compatibility calibration to clustered/stacked bars.
@@ -2514,14 +2990,36 @@ describe('classic 3-D compatibility projection', () => {
       ],
     }), RECT, 1);
     const sequence = rec.paintEvents
-      .filter(event => event.kind === 'fill'
-        && ['#FF0000', '#00FF00'].includes(String(event.fillStyle)))
-      .map(event => event.kind === 'fill' ? String(event.fillStyle) : '');
+      .filter((event): event is FillPaintEvent => event.kind === 'fill')
+      .map(event => isMaterialColor(event.fillStyle, 'FF0000')
+        ? 'red'
+        : isMaterialColor(event.fillStyle, '00FF00') ? 'green' : null)
+      .filter((color): color is 'red' | 'green' => color != null);
     expect(sequence.length).toBeGreaterThanOrEqual(6);
     expect(sequence.some((color, index) => index > 0
       && index + 1 < sequence.length
       && color !== sequence[index - 1]
       && color === sequence[index + 1])).toBe(true);
+  });
+
+  it('extrudes each 3-D line stroke through its series depth interval', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'line',
+      categories: ['A', 'B'],
+      valMin: 0,
+      valMax: 40,
+      threeD: {
+        rotationX: 15, rotationY: 20, depthPercent: 100,
+        gapDepthPercent: 150, perspective: 30,
+      },
+      series: [series({ lineColor: 'FF0000', lineWidthEmu: 38_100, values: [20, 30] })],
+    }), RECT, 1);
+    const redFaces = materialFills(rec, 'FF0000');
+    // A flat stroke emits one screen-space polygon. Excel renders Line3D as a
+    // solid ribbon, so its camera projection exposes multiple shaded faces.
+    expect(redFaces.length).toBeGreaterThan(1);
+    expect(new Set(redFaces.map(event => event.fillStyle)).size).toBeGreaterThan(1);
   });
 
   it('applies a direct 3-D line point style to the segment ending at that point', () => {
@@ -2795,7 +3293,7 @@ describe('classic 3-D compatibility projection', () => {
     });
     const rec = recordingCtx();
     renderChart(rec.ctx, chart, RECT, 1);
-    const lineSegments = rec.filledPaths.filter(path => path.fillStyle === '#FF0000');
+    const lineSegments = rec.filledPaths.filter(path => isMaterialColor(path.fillStyle, 'FF0000'));
     expect(lineSegments.length).toBeGreaterThanOrEqual(2);
     const labels = recordingCtx();
     renderChart(labels.ctx, chart, RECT, 1);
@@ -3299,7 +3797,7 @@ describe('classic 3-D compatibility projection', () => {
     expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(5);
   });
 
-  it('charges the fixed bubble3D material for plot, legend, and label keys', () => {
+  it('charges every bounded bubble3D material stop for plot, legend, and label keys', () => {
     const model = baseModel({
       chartType: 'bubble', showLegend: true, categories: ['0'],
       series: [series({
@@ -3311,7 +3809,8 @@ describe('classic 3-D compatibility projection', () => {
       })],
       catAxisMin: 0, catAxisMax: 1, valMin: 0, valMax: 1,
     });
-    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(15);
+    // Three gradients consume 4 + 5 + 6 components per painted bubble.
+    expect(classicMarkerPaintWorkCount(model, undefined, 1, RECT)).toBe(45);
 
     model.series[0].chartexStyle = {
       fillHidden: true, fillPaintAuthored: true,
@@ -4186,6 +4685,23 @@ describe('classic 3-D compatibility projection', () => {
     expect(rec.texts.map(item => item.text)).toContain('Employees');
   });
 
+  it('reserves the effective DrawingML text insets for a 3-D axis title', () => {
+    const titleY = (withInsets: boolean): number => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line', categories: ['A', 'B'],
+        catAxisTitle: 'Categories', catAxisTitleFontSizeHpt: 1000,
+        catAxisTitleTextVerticalInsetEmu: withInsets ? 91_440 : undefined,
+        threeD: { rotationX: 15, rotationY: 20 },
+        series: [series({ values: [1, 2] })],
+      }), RECT, 1);
+      expect(rec.texts.map(item => item.text)).toContain('Categories');
+      return rec.translations.at(-1)?.y ?? Number.NaN;
+    };
+
+    expect(titleY(true)).toBeCloseTo(titleY(false) - 7.2);
+  });
+
   it('rejects derived 3-D face work before expanding a moderate source cache', () => {
     const rec = recordingCtx();
     const values = Array.from({ length: 300 }, (_, index) => index + 1);
@@ -4225,7 +4741,7 @@ describe('classic 3-D compatibility projection', () => {
         series({ values: [0.2, 0.8], chartexStyle: { lineDash: 'dash' } }),
         series({ values: [0.8, 0.2], chartexStyle: { lineDash: 'dash' } }),
       ],
-    }), { x: 0, y: 0, w: 100_000, h: 100_000 }, 1);
+    }), { x: 0, y: 0, w: 200_000, h: 200_000 }, 1);
     expect(rec.texts.map(text => text.text)).toContain('(too many data points)');
     expect(rec.rects.some(rect => rect.fs === '#FFFFFF')).toBe(false);
   });
@@ -4676,6 +5192,41 @@ describe('bar chart authored layout and fills', () => {
     )).toBe(true);
   });
 
+  it('keeps a non-overlay manual top legend outside the automatic bar plot', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBar',
+      title: 'Revenue',
+      titlePresent: true,
+      titleFontSizeHpt: 1200,
+      categories: ['A'],
+      series: [series({ name: 'Series', values: [10] })],
+      valMin: 0,
+      valMax: 10,
+      valAxisMajorUnit: 5,
+      valAxisFontSizeHpt: 1000,
+      showLegend: true,
+      legendPos: 't',
+      legendOverlay: false,
+      legendFillColor: '123456',
+      legendFontSizeHpt: 1000,
+      legendManualLayout: {
+        xMode: 'edge', yMode: 'edge', wMode: 'factor', hMode: 'factor',
+        x: 0.1, y: 0.25, w: 0.5, h: 0.1,
+      },
+    }), RECT, 1);
+
+    const legend = rec.rects.find(rect => rect.fs === '#123456');
+    if (!legend) throw new Error('expected the authored legend frame');
+    const horizontalGridLines = rec.strokedPaths
+      .filter(path => path.points.length === 2
+        && Math.abs(path.points[0].y - path.points[1].y) < 0.001
+        && Math.abs(path.points[1].x - path.points[0].x) > RECT.w / 2);
+    expect(horizontalGridLines.length).toBeGreaterThan(0);
+    const plotTop = Math.min(...horizontalGridLines.map(path => path.points[0].y));
+    expect(plotTop).toBeGreaterThanOrEqual(legend.y + legend.h);
+  });
+
   it('does not reserve plot space for an overlay legend and retains manual placement', () => {
     const render = (overlay: boolean) => {
       const rec = recordingCtx();
@@ -4923,6 +5474,22 @@ describe('bar chart authored layout and fills', () => {
     ]);
     expect(linked.strokeRects.find(rect => rect.ss === '#445566')?.dash)
       .toEqual([0.9375, 0.5625]);
+
+    const automaticHostFallback = recordingCtx();
+    renderChart(automaticHostFallback.ctx, {
+      ...chart,
+      plotAreaBg: 'FFFFFF',
+      plotAreaFillAutomatic: true,
+    }, RECT, 1, 30);
+    expect(automaticHostFallback.gradients).toHaveLength(1);
+    expect(automaticHostFallback.gradients[0]?.stops).toEqual([
+      { position: 0, color: 'rgba(17,34,51,1)' },
+      { position: 1, color: 'rgba(221,238,255,1)' },
+    ]);
+
+    const compatibilityDirect = recordingCtx();
+    renderChart(compatibilityDirect.ctx, { ...chart, plotAreaBg: 'FFFFFF' }, RECT, 1, 30);
+    expect(compatibilityDirect.gradients).toHaveLength(0);
 
     const directEmptyDash = recordingCtx();
     renderChart(directEmptyDash.ctx, { ...chart, plotAreaLineCustomDash: [] }, RECT, 1, 30);
@@ -7723,6 +8290,41 @@ describe('ChartEx flat layouts dispatch to semantic renderers', () => {
     expect(semanticLabels).toEqual(['Increase', 'Decrease', 'Total']);
   });
 
+  it('keeps Waterfall point fill/outline formatting above series noFill and linked colors', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'waterfall',
+      categories: ['Start', 'Increase', 'Decrease A', 'Decrease B', 'Decrease C', 'End'],
+      subtotalIndices: [5],
+      catAxisHidden: true,
+      valAxisHidden: true,
+      chartexDataPointStyle: {
+        fillColors: ['E46970', '8977D7', 'A5A5A5'],
+        fillPaintAuthored: true,
+      },
+      series: [series({
+        values: [245, 235, -52, -40, -108, 280],
+        chartexStyle: {
+          fillHidden: true,
+          fillPaintAuthored: true,
+          lineColors: ['E46970'],
+          linePaintAuthored: true,
+        },
+        dataPointOverrides: [
+          { idx: 0, color: '196ECA', lineHidden: true },
+          { idx: 1, lineColor: '196ECA' },
+          { idx: 5, color: '196ECA', lineHidden: true },
+        ],
+      })],
+    }), RECT, 1);
+
+    expect(rec.rects.filter(rect => rect.fs === '#196ECA')).toHaveLength(2);
+    expect(rec.rects.filter(rect => ['#E46970', '#8977D7', '#A5A5A5'].includes(rect.fs)))
+      .toHaveLength(0);
+    expect(rec.strokeRects.filter(rect => rect.ss === '#196ECA')).toHaveLength(1);
+    expect(rec.strokeRects.filter(rect => rect.ss === '#E46970')).toHaveLength(3);
+  });
+
   const chartExLegendModel = (
     chartType: string,
     localStyle: ChartSeries['chartexStyle'],
@@ -9693,41 +10295,61 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
     expect(rec.arcs.map(arc => arc.fillStyle)).toEqual(['#4472C4', '#ED7D31', '#A5A5A5']);
   });
 
-  it('resolves bubble3D as point over series over owning-group provenance', () => {
-    const rec = recordingCtx();
-    renderChart(rec.ctx, baseModel({
+  it('uses the series bubble3D value for every point as current Excel does', () => {
+    const seriesTrue = recordingCtx();
+    renderChart(seriesTrue.ctx, baseModel({
       chartType: 'bubble',
       categories: ['1', '2', '3'],
-      series: [
-        series({
-          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
-          bubble3DGroupDefault: false,
-          bubble3D: true,
-          dataPointOverrides: [{ idx: 0, bubble3D: false }],
-        }),
-        series({
-          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
-          bubble3DGroupDefault: true,
-          bubble3D: false,
-          dataPointOverrides: [{ idx: 2, bubble3D: true }],
-        }),
-        series({
-          values: [1, 2, 3], bubbleSizes: [100, 100, 100],
-          bubble3DGroupDefault: true,
-        }),
-      ],
+      series: [series({
+        values: [1, 2, 3], bubbleSizes: [100, 100, 100],
+        bubble3DGroupDefault: false,
+        bubble3D: true,
+        dataPointOverrides: [
+          { idx: 0, bubble3D: false },
+          { idx: 1, bubble3D: true },
+        ],
+      })],
       catAxisMin: 0,
       catAxisMax: 4,
       valMin: 0,
       valMax: 4,
     }), RECT, 1);
+    expect(seriesTrue.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(9);
 
-    const materials = rec.gradients.filter(gradient => gradient.kind === 'radial');
-    expect(materials).toHaveLength(6);
-    expect(materials.every(gradient => gradient.stops.length === 5)).toBe(true);
+    const seriesFalse = recordingCtx();
+    renderChart(seriesFalse.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1', '2', '3'],
+      series: [series({
+        values: [1, 2, 3], bubbleSizes: [100, 100, 100],
+        bubble3DGroupDefault: true,
+        bubble3D: false,
+        dataPointOverrides: [
+          { idx: 0, bubble3D: true },
+          { idx: 2, bubble3D: false },
+        ],
+      })],
+      catAxisMin: 0,
+      catAxisMax: 4,
+      valMin: 0,
+      valMax: 4,
+    }), RECT, 1);
+    expect(seriesFalse.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(0);
+
+    const groupFallback = recordingCtx();
+    renderChart(groupFallback.ctx, baseModel({
+      chartType: 'bubble',
+      categories: ['1'],
+      series: [series({
+        values: [1], bubbleSizes: [100], bubble3DGroupDefault: true,
+        dataPointOverrides: [{ idx: 0, bubble3D: false }],
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+    expect(groupFallback.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(3);
   });
 
-  it('paints one bounded Office-observed material in local bubble coordinates', () => {
+  it('paints bounded diffuse, shade, and reflected-light material layers in bubble-local coordinates', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'bubble', categories: ['1'],
@@ -9740,17 +10362,47 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
       catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
     }), RECT, 1);
 
-    const material = rec.gradients.find(gradient => gradient.kind === 'radial');
-    expect(material).toBeDefined();
-    expect(material!.stops).toHaveLength(5);
+    const materials = rec.gradients.filter(gradient => gradient.kind === 'radial');
+    expect(materials).toHaveLength(3);
+    expect(materials.map(gradient => gradient.stops.length)).toEqual([4, 5, 6]);
     const bubble = rec.arcs.at(-1)!;
     const size = bubble.r * 2;
-    const [highlightX, highlightY, innerRadius, , , outerRadius] = material!.args;
-    expect((highlightX - (bubble.x - bubble.r)) / size).toBeCloseTo(0.42, 2);
-    expect((highlightY - (bubble.y - bubble.r)) / size).toBeCloseTo(0.33, 2);
-    expect(innerRadius).toBe(0);
-    expect(outerRadius / size).toBeCloseTo(0.72, 2);
-    expect(rec.compositeModes).toContain('source-atop');
+    const normalizedGradient = (gradient: (typeof materials)[number]) => {
+      const [x0, y0, innerRadius, x1, y1, outerRadius] = gradient.args;
+      return {
+        x0: (x0 - (bubble.x - bubble.r)) / size,
+        y0: (y0 - (bubble.y - bubble.r)) / size,
+        innerRadius: innerRadius / size,
+        x1: (x1 - (bubble.x - bubble.r)) / size,
+        y1: (y1 - (bubble.y - bubble.r)) / size,
+        outerRadius: outerRadius / size,
+      };
+    };
+    expect(normalizedGradient(materials[0])).toMatchObject({
+      x0: expect.closeTo(0.42, 2), y0: expect.closeTo(0.33, 2),
+      innerRadius: 0, x1: expect.closeTo(0.42, 2), y1: expect.closeTo(0.33, 2),
+      outerRadius: expect.closeTo(0.55, 2),
+    });
+    expect(normalizedGradient(materials[1])).toMatchObject({
+      x0: expect.closeTo(0.42, 2), y0: expect.closeTo(0.32, 2),
+      innerRadius: 0, x1: expect.closeTo(0.42, 2), y1: expect.closeTo(0.32, 2),
+      outerRadius: expect.closeTo(0.78, 2),
+    });
+    expect(normalizedGradient(materials[2])).toMatchObject({
+      x0: expect.closeTo(0.30, 2), y0: expect.closeTo(0.05, 2),
+      innerRadius: 0, x1: expect.closeTo(0.30, 2), y1: expect.closeTo(0.05, 2),
+      outerRadius: expect.closeTo(1, 2),
+    });
+    expect(materials[0].stops.some(stop => stop.color === 'rgba(255,255,255,0.72)'))
+      .toBe(true);
+    expect(materials[1].stops.some(stop => stop.color === 'rgba(0,0,0,0.62)'))
+      .toBe(true);
+    expect(materials[2].stops.some(stop => stop.color === 'rgba(255,255,255,0.28)'))
+      .toBe(true);
+    expect(materials.flatMap(material => material.stops).every(stop =>
+      /^rgba\((?:255,255,255|0,0,0),/.test(stop.color)
+    )).toBe(true);
+    expect(rec.compositeModes.filter(mode => mode === 'source-atop')).toHaveLength(3);
   });
 
   it('keeps noFill and outline independent from the bubble3D material', () => {
@@ -9801,8 +10453,36 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
     expect(rec.paintEvents.some(event =>
       event.kind === 'fill' && event.fillStyle === '#FFFFFF'
     )).toBe(true);
-    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(1);
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(3);
     expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#7F6000')).toHaveLength(2);
+  });
+
+  it('uses the observed automatic black outline for a negative 3-D bubble', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'bubble', showNegativeBubbles: true, categories: ['1'],
+      series: [series({
+        values: [1], bubbleSizes: [-100], bubble3D: true,
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+
+    expect(rec.paintEvents.some(event =>
+      event.kind === 'fill' && event.fillStyle === '#FFFFFF'
+    )).toBe(true);
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(3);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#000000')).toBe(true);
+
+    const authoredNoLine = recordingCtx();
+    renderChart(authoredNoLine.ctx, baseModel({
+      chartType: 'bubble', showNegativeBubbles: true, categories: ['1'],
+      series: [series({
+        values: [1], bubbleSizes: [-100], bubble3D: true, lineHidden: true,
+      })],
+      catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
+    }), RECT, 1);
+    expect(authoredNoLine.strokeDetails.some(stroke => stroke.strokeStyle === '#000000'))
+      .toBe(false);
   });
 
   it('applies bubble3D to the series legend key as well as the plotted bubble', () => {
@@ -9816,7 +10496,7 @@ describe('CH9 — bubble scale and numeric-X trendlines', () => {
       catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
     }), RECT, 1);
 
-    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(2);
+    expect(rec.gradients.filter(gradient => gradient.kind === 'radial')).toHaveLength(6);
   });
 
   it('lists textual bubble x values as point legend entries', () => {
@@ -10413,7 +11093,7 @@ describe('showDLblsOverMax (§21.2.2.180)', () => {
     expect(renderedLabelTexts(chart)).toEqual(['5', '15']);
   });
 
-  it('compares stacked endpoints and negative values to the numeric maximum', () => {
+  it('compares each stacked data-point value, not the cumulative endpoint, to the numeric maximum', () => {
     const stacked = {
       chartType: 'stackedBar',
       categories: ['stack'],
@@ -10425,6 +11105,23 @@ describe('showDLblsOverMax (§21.2.2.180)', () => {
       valMax: 10,
       showLegend: false,
     } as ChartModel;
+    expect(renderedLabelTexts(stacked)).toEqual(['8', '8']);
+
+    const roundedPercentTotal = {
+      chartType: 'stackedBarPct',
+      categories: ['rounded'],
+      series: [
+        { name: 'Base', values: [0.18], color: '4472C4' },
+        { name: 'Middle', values: [0.456], color: 'ED7D31' },
+        { name: 'Top', values: [0.365], color: 'A5A5A5', seriesDataLabels: labels },
+      ],
+      valMin: 0,
+      valMax: 1,
+      showLegend: false,
+    } as ChartModel;
+    expect(renderedLabelTexts(roundedPercentTotal)).toEqual(['0.365']);
+
+    stacked.series[1].values = [15];
     expect(renderedLabelTexts(stacked)).toEqual(['8']);
 
     const negative = {
@@ -10931,6 +11628,147 @@ describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.48)
     expect(rec.texts.find(call => call.text === ' 3')?.font).toContain('11px');
   });
 
+  it('scatter: an automatic right endpoint label may use chart gutter and clears its marker', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      scatterStyle: 'marker',
+      catAxisMin: 0,
+      catAxisMax: 1.4,
+      valMin: 0,
+      valMax: 1,
+      plotAreaManualLayout: {
+        layoutTarget: 'inner', xMode: 'edge', yMode: 'edge',
+        x: 0.2, y: 0.2, w: 0.6, h: 0.6,
+      },
+      series: [series({
+        categories: ['1.32'],
+        catFormatCode: '0%',
+        values: [0.5],
+        showMarker: true,
+        markerSymbol: 'circle',
+        markerSize: 10,
+        seriesDataLabels: {
+          showVal: false,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+        },
+      })],
+    }), RECT, 1);
+
+    const marker = rec.arcs.find(arc => Math.abs(arc.r - 5) < 1e-6);
+    const label = rec.texts.find(text => text.text === '132%');
+    expect(marker).toBeDefined();
+    expect(label).toMatchObject({ align: 'left', baseline: 'middle' });
+    expect((label as TextCall).x).toBeGreaterThan((marker?.x ?? 0) + (marker?.r ?? 0));
+    // The authored inner plot ends at 80% of chart width. Office permits this
+    // automatic endpoint label to occupy the surrounding chart-area gutter.
+    expect((label as TextCall).x + ((label as TextCall).width ?? 0))
+      .toBeGreaterThan(RECT.w * 0.8);
+  });
+
+  it('bar-scatter combo: an automatic right label retains marker clearance at the chart edge', () => {
+    const rec = recordingCtx();
+    const values = [14.5, null, null, 11.5, 10.5, 9.5, 8.5, 7.5,
+      null, null, 4.5, 3.5, 2.5, 1.5, 0.5];
+    renderChart(rec.ctx, baseModel({
+      chartType: 'clusteredBarH',
+      categories: [
+        'Overall', '', 'Group A',
+        'Long category item A1', 'Long category item A2',
+        'Long category item A3', 'Long category item A4',
+        'Long category item A5', '', 'Group B',
+        'Long category item B1', 'Long category item B2',
+        'Long category item B3', 'Long category item B4',
+        'Long category item B5',
+      ],
+      valMax: 1.4,
+      catAxisOrientation: 'maxMin',
+      catAxisFontSizeHpt: 1200,
+      secondaryCatAxis: {
+        min: null, max: null, title: null, hidden: true, lineHidden: true,
+        majorTickMark: 'none', formatCode: '0%',
+      },
+      secondaryValAxis: {
+        min: 0, max: 15, title: null, hidden: true, lineHidden: true,
+        majorTickMark: 'none',
+      },
+      series: [
+        series({
+          values: values.map(value => value == null ? null : 0),
+          seriesType: 'bar',
+          showMarker: false,
+        }),
+        series({
+          values,
+          seriesType: 'scatter',
+          useSecondaryAxis: true,
+          categories: ['0.15', '', '', '0.83', '0.67', '0.58', '0.58', '0.54',
+            '', '', '0.75', '0.54', '0.53', '0.52', '0.49'],
+          showMarker: true,
+          markerSymbol: 'circle',
+          markerSize: 10,
+          seriesDataLabels: {
+            showVal: false,
+            showCatName: true,
+            showSerName: false,
+            showPercent: false,
+            position: 'l',
+            fontSizeHpt: 1200,
+          },
+          catFormatCode: '0%',
+        }),
+        series({
+          values,
+          seriesType: 'scatter',
+          useSecondaryAxis: true,
+          categories: ['0.45', '', '', '1.32', '1.11', '0.99', '0.99', '0.95',
+            '', '', '1.21', '0.95', '0.94', '0.92', '0.88'],
+          showMarker: true,
+          markerSymbol: 'circle',
+          markerSize: 10,
+          seriesDataLabels: {
+            showVal: false,
+            showCatName: true,
+            showSerName: false,
+            showPercent: false,
+            fontSizeHpt: 1200,
+            textLInsEmu: 38100,
+            textRInsEmu: 38100,
+            textTInsEmu: 19050,
+            textBInsEmu: 19050,
+            textBodyAuthored: true,
+          },
+          catFormatCode: '0%',
+        }),
+        series({
+          values,
+          seriesType: 'scatter',
+          useSecondaryAxis: true,
+          categories: values.map(() => '0'),
+          showMarker: false,
+          markerSymbol: 'none',
+        }),
+      ],
+      plotGroups: [
+        plotGroup('bar', 0, 1, { grouping: 'clustered', barDirection: 'bar' }),
+        plotGroup('scatter', 1, 3, {
+          categoryAxis: 'secondary', valueAxis: 'secondary', scatterStyle: 'lineMarker',
+        }),
+      ],
+    }), { x: 0, y: 0, w: 960, h: 540 }, 4 / 3);
+
+    const label = rec.texts.find(text => text.text === '132%');
+    const marker = rec.arcs
+      .filter(arc => Math.abs(arc.y - (label?.y ?? Number.POSITIVE_INFINITY)) < 1e-6)
+      .sort((a, b) => b.x - a.x)[0];
+    expect(marker).toBeDefined();
+    expect(label).toMatchObject({ align: 'left', baseline: 'middle' });
+    expect((label as TextCall).x)
+      .toBeGreaterThanOrEqual((marker?.x ?? 0) + (marker?.r ?? 0) + 6);
+  });
+
   it.each(['line', 'area', 'scatter'] as const)(
     '%s: rich label run faces resolve major/minor theme references and concrete faces',
     (chartType) => {
@@ -11024,6 +11862,17 @@ describe('CH11 — line/area/scatter data labels honor <c:dLblPos> (§21.2.2.48)
 });
 
 describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
+  it('uses Excel automatic smooth lines for an unformatted marker scatter', () => {
+    const rec = markerRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'scatter',
+      scatterStyle: 'marker',
+      categories: ['1', '2', '3', '4'],
+      series: [series({ name: 'S', values: [10, 15, 12, 22], showMarker: true })],
+    }), RECT, 1);
+    expect(rec.beziers).toBeGreaterThan(0);
+  });
+
   for (const chartType of ['line', 'area'] as const) {
     it(`${chartType}: smooth series draws a bezier spline; non-smooth draws straight segments`, () => {
       const smooth = markerRecordingCtx();
@@ -11307,6 +12156,7 @@ describe('classic chart data table (CT_DTable)', () => {
         lineColor: '445566',
         lineWidthEmu: 12700,
         lineDash: 'dash',
+        fillColor: 'FFF2CC',
       },
     }), RECT, 1);
 
@@ -11319,6 +12169,13 @@ describe('classic chart data table (CT_DTable)', () => {
     expect(text).toContain('Feb-25');
     expect(rec.strokeRects.some(rect => rect.ss === '#445566')).toBe(true);
     expect(rec.strokeRects.find(rect => rect.ss === '#445566')?.dash.length).toBeGreaterThan(0);
+    const textBackgrounds = rec.rects.filter(rect => rect.fs === '#FFF2CC');
+    expect(textBackgrounds.length).toBeGreaterThan(0);
+    const sales = rec.texts.find(call => call.text === 'Sales') as NonNullable<typeof rec.texts[number]>;
+    expect(textBackgrounds.some(rect =>
+      rect.x <= sales.x && rect.x + rect.w >= sales.x
+      && rect.y <= sales.y && rect.y + rect.h >= sales.y,
+    )).toBe(false);
     expect(rec.arcs.length).toBeGreaterThan(0); // line-series key marker
   });
 
@@ -11357,6 +12214,81 @@ describe('classic chart data table (CT_DTable)', () => {
       showOutline: true,
       lineHidden: true,
     })).toEqual({ lineStrokes: 0, outlines: 0 });
+  });
+
+  it('applies the text-background semantic independently of chart layout details', () => {
+    const renderFillRects = (over: Partial<ChartModel>) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'line',
+        categories: ['Q1', 'Q2'],
+        series: [series({ name: 'North', values: [10, 15], seriesType: 'line' })],
+        dataTable: {
+          showHorizontalBorder: true,
+          showVerticalBorder: true,
+          showOutline: true,
+          showKeys: false,
+          fillColor: 'FFF2CC',
+        },
+        ...over,
+      }), RECT, 1);
+      return rec.rects.filter(rect => rect.fs === '#FFF2CC');
+    };
+
+    expect(renderFillRects({}).length).toBeGreaterThan(0);
+    expect(renderFillRects({
+      plotGroups: [{
+        kind: 'line',
+        seriesStart: 0,
+        seriesCount: 1,
+        categoryAxis: 'primary',
+        valueAxis: 'primary',
+        seriesAxis: 'none',
+      }],
+    }).length).toBeGreaterThan(0);
+    expect(renderFillRects({
+      series: [
+        series({ name: 'North', values: [10, 15], seriesType: 'line' }),
+        series({ name: 'South', values: [8, 12], seriesType: 'bar' }),
+      ],
+      plotGroups: [
+        {
+          kind: 'line',
+          seriesStart: 0,
+          seriesCount: 1,
+          categoryAxis: 'primary',
+          valueAxis: 'primary',
+          seriesAxis: 'none',
+        },
+        {
+          kind: 'bar',
+          seriesStart: 1,
+          seriesCount: 1,
+          categoryAxis: 'primary',
+          valueAxis: 'primary',
+          seriesAxis: 'none',
+          barDirection: 'col',
+        },
+      ],
+    }).length).toBeGreaterThan(0);
+    expect(renderFillRects({
+      series: [
+        series({ name: 'North', values: [10, 15], seriesType: 'line' }),
+        series({ name: 'South', values: [8, 12], seriesType: 'bar' }),
+      ],
+    }).length).toBeGreaterThan(0);
+    expect(renderFillRects({ chartType: 'clusteredBarH' }).length).toBeGreaterThan(0);
+    expect(renderFillRects({ chartType: 'stock' }).length).toBeGreaterThan(0);
+    expect(renderFillRects({ plotAreaManualLayout: { x: 0.2, y: 0.2 } }).length)
+      .toBeGreaterThan(0);
+    expect(renderFillRects({ categories: [
+      ['First quarter with wrapped text repeated', 'until it exceeds the category column'].join(' '),
+      'Q2',
+    ] }).length)
+      .toBeGreaterThan(0);
+    expect(renderFillRects({
+      series: [series({ name: 'North', values: [10, null], seriesType: 'line' })],
+    }).length).toBeGreaterThan(0);
   });
 
   it('uses the linked dataTable line role only for omitted grid properties', () => {
@@ -14522,6 +15454,24 @@ describe('CH6-follow — series trendlines (commit 3)', () => {
     }
   });
 
+  it('keeps both automatic equation and R-squared lines with an empty authored bodyPr', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, lineWithTrend({
+      values: [3, 3, 5, 6],
+      trendLines: [{
+        trendlineType: 'linear',
+        dispEq: true,
+        dispRSqr: true,
+        labelTextBodyAuthored: true,
+        labelFontSizeHpt: 800,
+        labelBox: { fill: 'FFFFFF', borderColor: '808080', borderWidthEmu: 3175 },
+      }],
+    }), RECT, 4 / 3);
+
+    expect(rec.texts.filter(text => text.text.startsWith('y = '))).toHaveLength(1);
+    expect(rec.texts.filter(text => text.text.startsWith('R² = '))).toHaveLength(1);
+  });
+
   it('honors trendline-label manual layout and text properties independently of line paint', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, lineWithTrend({
@@ -14905,6 +15855,14 @@ describe('classic line-chart group decorations', () => {
     const outlines = rec.strokeRects.filter(rect => rect.ss === '#333333');
     expect(outlines).toHaveLength(5);
     expect(new Set(outlines.map(rect => rect.w.toFixed(6))).size).toBe(1);
+    const firstSeries = rec.paintEvents.findIndex(event =>
+      event.kind === 'stroke' && event.strokeStyle === '#4472C4'
+    );
+    const firstBar = rec.paintEvents.findIndex(event =>
+      event.kind === 'rect' && event.fillStyle === '#EEEEEE'
+    );
+    expect(firstSeries).toBeGreaterThanOrEqual(0);
+    expect(firstBar).toBeGreaterThan(firstSeries);
   });
 
   it('fills missing line-group decoration paint from linked Chart Style roles', () => {
@@ -15460,6 +16418,24 @@ describe('CH13 — stock chart (high/low/close)', () => {
     expect(labels).toContain('Close');
   });
 
+  it('keeps cached date labels when dateAx leaves the automatic major interval omitted', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, stockModel({
+      categories: ['43851', '43852', '43853'],
+      catAxisIsDate: true,
+      catAxisBaseTimeUnit: 'days',
+      catAxisFormatCode: 'mm/dd/yyyy',
+      catAxisMajorUnit: null,
+      catAxisTickLabelPos: 'nextTo',
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(expect.arrayContaining([
+      '01/21/2020',
+      '01/22/2020',
+      '01/23/2020',
+    ]));
+  });
+
   it('honors an explicit hi-lo line color', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, stockModel({ stockHiLowLineColor: 'FF0000' }), RECT, 1);
@@ -15997,6 +16973,49 @@ describe('CH13 — stock chart (high/low/close)', () => {
     expect(rec.rects.filter(rect => rect.fs === '#3F3F3F')).toHaveLength(3);
     expect(rec.arcs).toHaveLength(4); // three plotted High points + one legend marker
     expect(rec.texts.map(text => text.text)).toEqual(expect.arrayContaining(['High', 'Low', 'Close']));
+    const lastBar = rec.paintEvents.reduce((lastIndex, event, index) =>
+      event.kind === 'rect' && event.fillStyle === '#3F3F3F' ? index : lastIndex,
+      -1,
+    );
+    const markerFills = rec.paintEvents.flatMap((event, index) =>
+      event.kind === 'fill' && event.fillStyle === '#4472C4' ? [index] : []
+    );
+    expect(lastBar).toBeGreaterThanOrEqual(0);
+    expect(markerFills).toHaveLength(4);
+    expect(markerFills.every(index => index > lastBar)).toBe(true);
+  });
+
+  it('paints up/down bars over the high-low rule and owning line series', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, stockModel({
+      stockUpDownBars: true,
+      stockHiLowLineColor: '123456',
+      series: [
+        series({
+          name: 'Open', values: [40], markerSymbol: 'none',
+          lineColor: '4472C4', seriesType: 'line',
+        }),
+        series({
+          name: 'Close', values: [20], markerSymbol: 'none',
+          lineColor: 'C0504D', seriesType: 'line',
+        }),
+      ],
+      plotGroups: [plotGroup('line', 0, 2)],
+    }), RECT, 1);
+
+    const hiLowIndex = rec.paintEvents.findIndex(event =>
+      event.kind === 'stroke' && event.strokeStyle === '#123456'
+    );
+    const owningLineIndex = rec.paintEvents.findIndex(event =>
+      event.kind === 'stroke' && event.strokeStyle === '#4472C4'
+    );
+    const barIndex = rec.paintEvents.findIndex(event =>
+      event.kind === 'rect' && event.fillStyle === '#3F3F3F'
+    );
+    expect(hiLowIndex).toBeGreaterThanOrEqual(0);
+    expect(owningLineIndex).toBeGreaterThanOrEqual(0);
+    expect(barIndex).toBeGreaterThan(hiLowIndex);
+    expect(barIndex).toBeGreaterThan(owningLineIndex);
   });
 });
 
@@ -16092,6 +17111,25 @@ describe('surface contour charts', () => {
     expect(wireframe).toHaveLength(4);
   });
 
+  it('adds interpolated band-boundary contours across wireframe cells', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      categories: ['X1', 'X2', 'X3'],
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({ name: 'Y1', values: [0, 0, 0], lineColor: 'AA0000' }),
+        series({ name: 'Y2', values: [0, 20, 0] }),
+        series({ name: 'Y3', values: [0, 0, 0] }),
+      ],
+    }), RECT, 1);
+
+    // The uniform line style keeps the 3x3 source mesh at 12 segments. Its
+    // four cells each contribute two interpolated contours at value 10.
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#AA0000'))
+      .toHaveLength(20);
+  });
+
   it('keeps unresolved, no-fill, and compound dataPointWireframe lines fail-closed', () => {
     for (const role of [
       { linePaintAuthored: true, lineColorIndex: 0 },
@@ -16123,39 +17161,143 @@ describe('surface contour charts', () => {
     expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#595959')).toBe(false);
   });
 
-  it('does not let a linked wireframe line overwrite direct series or band outlines', () => {
-    const linked = {
-      lineColors: ['123456'],
-      lineColorIndex: 0,
-      linePaintAuthored: true,
-    };
-    const directModels: Array<Partial<ChartModel>> = [
-      {
-        series: [
-          series({ name: 'Y1', values: [2, 4], lineColor: 'AA0000' }),
-          series({ name: 'Y2', values: [6, 8] }),
-        ],
+  it('uses the first Surface series as the mesh default and lets direct bands override it', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({
+          name: 'Y1', values: [2, 18], lineColor: 'AA0000', lineWidthEmu: 50_800,
+          chartexStyle: { lineDash: 'dash', lineDashAuthored: true },
+        }),
+        series({
+          name: 'Y2', values: [2, 18], lineColor: '00AA00', lineWidthEmu: 25_400,
+          chartexStyle: { lineDash: 'dot', lineDashAuthored: true },
+        }),
+      ],
+      surfaceBandFormats: [{
+        idx: 0,
+        lineColor: '00FFFF',
+        lineWidthEmu: 38_100,
+        style: { lineDash: 'dot', lineDashAuthored: true },
+      }],
+      chartStyleRoles: {
+        dataPointWireframe: {
+          lineColors: ['123456'],
+          lineColorIndex: 0,
+          linePaintAuthored: true,
+        },
       },
-      {
-        series: [
-          series({
-            name: 'Y1', values: [2, 4],
-            chartexStyle: { lineHidden: true, linePaintAuthored: true },
-          }),
-          series({ name: 'Y2', values: [6, 8] }),
-        ],
-      },
-      { surfaceBandFormats: [{ idx: 0, lineColor: '00AA00' }] },
-    ];
-    for (const direct of directModels) {
-      const rec = recordingCtx();
-      renderChart(rec.ctx, wireframeSurfaceModel({
-        ...direct,
-        chartStyleRoles: { dataPointWireframe: linked },
-      }), RECT, 1);
-      expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#123456')).toBe(false);
-      expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#595959')).toBe(false);
-    }
+    }), RECT, 1);
+
+    const mesh = rec.strokeDetails.filter(stroke =>
+      stroke.strokeStyle === '#AA0000' || stroke.strokeStyle === '#00FFFF'
+    );
+    expect(mesh.filter(stroke => stroke.strokeStyle === '#AA0000')).toHaveLength(3);
+    expect(mesh.filter(stroke => stroke.strokeStyle === '#00FFFF')).toHaveLength(5);
+    expect(mesh.every(stroke => stroke.dash.length > 0)).toBe(true);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#00AA00')).toBe(false);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#123456')).toBe(false);
+  });
+
+  it('keeps a uniform first-series wireframe on the source grid and contours', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({
+          name: 'Y1', values: [2, 18], lineColor: 'AA0000',
+          chartexStyle: { lineDash: 'dash', lineDashAuthored: true },
+        }),
+        series({ name: 'Y2', values: [2, 18], lineColor: '00AA00' }),
+      ],
+    }), RECT, 1);
+
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#AA0000'))
+      .toHaveLength(6);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle === '#00AA00')).toBe(false);
+  });
+
+  it('resolves one structured first-series wireframe recipe for all fallback bands', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({
+          name: 'Y1', values: [2, 18],
+          chartexStyle: {
+            linePaints: [{
+              fillType: 'gradient', gradType: 'linear', angle: 0,
+              stops: [
+                { position: 0, color: '112233' },
+                { position: 1, color: 'DDEEFF' },
+              ],
+            }],
+            linePaintAuthored: true,
+          },
+        }),
+        series({ name: 'Y2', values: [2, 18] }),
+      ],
+      surfaceBandFormats: [{ idx: 0, lineColor: '00FFFF' }],
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(1);
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '[object Object]'))
+      .toHaveLength(3);
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#00FFFF'))
+      .toHaveLength(5);
+  });
+
+  it('keeps first-series no-line and direct band no-line authoritative per band', () => {
+    const firstSeriesNoLine = recordingCtx();
+    renderChart(firstSeriesNoLine.ctx, wireframeSurfaceModel({
+      series: [
+        series({
+          name: 'Y1', values: [2, 4],
+          chartexStyle: { lineHidden: true, linePaintAuthored: true },
+        }),
+        series({ name: 'Y2', values: [6, 8], lineColor: '00AA00' }),
+      ],
+    }), RECT, 1);
+    expect(firstSeriesNoLine.strokeDetails.some(stroke =>
+      stroke.strokeStyle === '#595959' || stroke.strokeStyle === '#00AA00'
+    )).toBe(false);
+
+    const bandNoLine = recordingCtx();
+    renderChart(bandNoLine.ctx, wireframeSurfaceModel({
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({ name: 'Y1', values: [2, 18], lineColor: 'AA0000' }),
+        series({ name: 'Y2', values: [2, 18], lineColor: '00AA00' }),
+      ],
+      surfaceBandFormats: [{ idx: 0, lineHidden: true }],
+    }), RECT, 1);
+    expect(bandNoLine.strokeDetails.filter(stroke => stroke.strokeStyle === '#AA0000'))
+      .toHaveLength(3);
+    expect(bandNoLine.strokeDetails.some(stroke => stroke.strokeStyle === '#00AA00'))
+      .toBe(false);
+  });
+
+  it('ignores later-series wireframe defaults and retains automatic band colours', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      valMax: 20,
+      valAxisMajorUnit: 10,
+      series: [
+        series({ name: 'Y1', values: [2, 18] }),
+        series({ name: 'Y2', values: [2, 18], lineColor: '00B050' }),
+      ],
+    }), RECT, 1);
+
+    const meshColors = new Set(rec.strokeDetails
+      .map(stroke => stroke.strokeStyle)
+      .filter(color => color !== '#000000'));
+    expect(meshColors.size).toBe(2);
+    expect(meshColors.has('#00B050')).toBe(false);
   });
 
   it('does not apply dataPointWireframe paint to a filled Surface', () => {
@@ -16184,19 +17326,20 @@ describe('surface contour charts', () => {
   });
 
   it('rejects an oversized dataPointWireframe line before resolving it', () => {
+    const oversized = {
+      fillType: 'gradient' as const,
+      gradType: 'linear' as const,
+      angle: 0,
+      stops: Array.from({ length: 4_097 }, (_, index) => ({
+        position: index / 4_096,
+        color: '123456',
+      })),
+    };
     const rec = recordingCtx();
     renderChart(rec.ctx, wireframeSurfaceModel({
       chartStyleRoles: {
         dataPointWireframe: {
-          linePaints: [{
-            fillType: 'gradient',
-            gradType: 'linear',
-            angle: 0,
-            stops: Array.from({ length: 4_097 }, (_, index) => ({
-              position: index / 4_096,
-              color: '123456',
-            })),
-          }],
+          linePaints: [oversized],
           linePaintAuthored: true,
           lineColorIndex: 0,
         },
@@ -16205,6 +17348,45 @@ describe('surface contour charts', () => {
 
     expect(rec.gradients).toHaveLength(0);
     expect(rec.strokeDetails).toHaveLength(0);
+
+    const direct = recordingCtx();
+    renderChart(direct.ctx, wireframeSurfaceModel({
+      surfaceBandFormats: [{
+        idx: 0,
+        style: { linePaints: [oversized], linePaintAuthored: true },
+      }],
+    }), RECT, 1);
+    expect(direct.gradients).toHaveLength(0);
+    expect(direct.strokeDetails).toHaveLength(0);
+  });
+
+  it('does not charge or resolve a first-series recipe fully overridden by direct bands', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, wireframeSurfaceModel({
+      series: [
+        series({
+          name: 'Y1', values: [2, 4],
+          chartexStyle: {
+            linePaints: [{
+              fillType: 'gradient',
+              gradType: 'linear',
+              angle: 0,
+              stops: Array.from({ length: 4_097 }, (_, index) => ({
+                position: index / 4_096,
+                color: '123456',
+              })),
+            }],
+            linePaintAuthored: true,
+          },
+        }),
+        series({ name: 'Y2', values: [6, 8] }),
+      ],
+      surfaceBandFormats: [{ idx: 0, lineColor: '00FFFF' }],
+    }), RECT, 1);
+
+    expect(rec.gradients).toHaveLength(0);
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle === '#00FFFF'))
+      .toHaveLength(4);
   });
 
   it('resolves Surface band paint once with direct structured/unresolved/no-fill precedence', () => {
@@ -16333,6 +17515,59 @@ describe('surface contour charts', () => {
     }
   });
 
+  it('continues Surface3D category and value gridlines across visible thick slab faces', () => {
+    const render = (thicknessPercent: number) => {
+      const rec = strokedPolylineCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'surface3D',
+        categories: ['X1', 'X2', 'X3'],
+        catAxisCrossBetween: 'between',
+        catAxisMajorGridlines: true,
+        catAxisGridlineColor: 'FF00FF',
+        catAxisGridlineWidthEmu: 25_400,
+        catAxisGridlineDash: 'dash',
+        catAxisMinorGridlines: true,
+        catAxisMinorGridlineColor: 'FF8000',
+        catAxisMinorGridlineWidthEmu: 25_400,
+        catAxisMinorGridlineDash: 'dot',
+        valAxisMajorGridlines: true,
+        valAxisGridlineColor: '00FFFF',
+        valAxisGridlineWidthEmu: 25_400,
+        valAxisGridlineDash: 'dot',
+        valAxisMinorGridlines: true,
+        valAxisMinorGridlineColor: '123456',
+        valAxisMinorGridlineWidthEmu: 25_400,
+        valAxisMinorGridlineDash: 'dash',
+        valAxisMinorUnit: 1,
+        valMin: 0,
+        valMax: 10,
+        valAxisMajorUnit: 2,
+        surfaceWireframe: false,
+        threeD: {
+          rotationX: 20, rotationY: 20, perspective: 30,
+          floor: { fillColor: 'C00000', thicknessPercent },
+          sideWall: { fillColor: '008000', thicknessPercent },
+          backWall: { fillColor: '4472C4', thicknessPercent },
+        },
+        series: [
+          series({ name: 'Y1', values: [2, 5, 3] }),
+          series({ name: 'Y2', values: [4, 9, 6] }),
+        ],
+      }), RECT, 1);
+      return rec.strokes;
+    };
+    const planar = render(0);
+    const thick = render(25);
+    for (const color of ['#FF00FF', '#FF8000', '#00FFFF', '#123456']) {
+      const planarLines = planar.filter(stroke => stroke.ss === color);
+      const thickLines = thick.filter(stroke => stroke.ss === color);
+      expect(planarLines.length).toBeGreaterThan(0);
+      expect(thickLines.length).toBeGreaterThan(planarLines.length);
+      expect(thickLines.every(stroke => stroke.lw === 2)).toBe(true);
+      expect(thickLines.every(stroke => stroke.dash.length > 0)).toBe(true);
+    }
+  });
+
   it('rejects an oversized linked Surface recipe before resolving any paint', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -16425,8 +17660,13 @@ describe('surface contour charts', () => {
     const categoryDx = categoryEnd.x - categoryStart.x;
     const categoryDy = categoryEnd.y - categoryStart.y;
     const categoryLengthSquared = categoryDx * categoryDx + categoryDy * categoryDy;
-    const gridFractions = rec.strokes
-      .filter(stroke => stroke.ss === '#00AA00' && stroke.points.length === 2)
+    const categoryGridStrokes = rec.strokes
+      .filter(stroke => stroke.ss === '#00AA00' && stroke.points.length === 2);
+    // Excel continues each planar rule across both the floor and back wall.
+    // Positive-thickness exterior continuation has its own face-count tests.
+    expect(categoryGridStrokes).toHaveLength(6);
+    const gridFractions = categoryGridStrokes
+      .filter((_, index) => index % 2 === 0)
       .map(stroke => {
         const point = stroke.points[0];
         return ((point.x - categoryStart.x) * categoryDx
@@ -16690,6 +17930,66 @@ describe('surface contour charts', () => {
     expect(labels).toEqual(expect.arrayContaining(['X1', 'X2', 'X3', 'Y1', 'Y2', 'Y3', '0-20', '80-100']));
   });
 
+  it('paints authored major and minor ticks on both ordinal Surface axes', () => {
+    const rec = segRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'surface',
+      categories: ['X1', 'X2', 'X3', 'X4', 'X5'],
+      valMin: 0,
+      valMax: 100,
+      valAxisHidden: true,
+      catAxisLineColor: 'AA0000',
+      catAxisLineHidden: false,
+      catAxisMajorTickMark: 'cross',
+      catAxisMinorTickMark: 'cross',
+      threeD: {
+        rotationX: 90,
+        rotationY: 0,
+        perspective: 0,
+        rightAngleAxes: false,
+        seriesAxis: {
+          hidden: false,
+          orientation: 'minMax',
+          majorTickMark: 'cross',
+          minorTickMark: 'cross',
+          lineColor: '0000AA',
+          lineHidden: false,
+        },
+      },
+      series: [
+        series({ name: 'Y1', values: [10, 20, 30, 20, 10] }),
+        series({ name: 'Y2', values: [20, 40, 60, 40, 20] }),
+        series({ name: 'Y3', values: [30, 60, 90, 60, 30] }),
+        series({ name: 'Y4', values: [20, 40, 60, 40, 20] }),
+        series({ name: 'Y5', values: [10, 20, 30, 20, 10] }),
+      ],
+    }), RECT, 1);
+
+    const categoryTicks = rec.segs.filter(segment =>
+      segment.ss === '#AA0000'
+      && Math.abs(segment.x1 - segment.x0) < 0.01
+      && Math.abs(segment.y1 - segment.y0) <= 6.01
+    );
+    expect(categoryTicks.filter(segment =>
+      Math.abs(Math.abs(segment.y1 - segment.y0) - 6) < 0.01
+    )).toHaveLength(5);
+    expect(categoryTicks.filter(segment =>
+      Math.abs(Math.abs(segment.y1 - segment.y0) - 4) < 0.01
+    )).toHaveLength(4);
+
+    const seriesTicks = rec.segs.filter(segment =>
+      segment.ss === '#0000AA'
+      && Math.abs(segment.y1 - segment.y0) < 0.01
+      && Math.abs(segment.x1 - segment.x0) <= 6.01
+    );
+    expect(seriesTicks.filter(segment =>
+      Math.abs(Math.abs(segment.x1 - segment.x0) - 6) < 0.01
+    )).toHaveLength(5);
+    expect(seriesTicks.filter(segment =>
+      Math.abs(Math.abs(segment.x1 - segment.x0) - 4) < 0.01
+    )).toHaveLength(4);
+  });
+
   it('uses the shared automatic value-axis unit with one bounded surface material', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -16767,6 +18067,35 @@ function pieCalloutModel(over: Partial<ChartModel> = {}): ChartModel {
 }
 
 describe('CH14 — pie callout data labels', () => {
+  it('keeps border-only bestFit labels on their slices without inventing callout leaders', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie',
+      categories: ['Point 1', 'Point 2', 'Point 3', 'Point 4'],
+      series: [series({
+        values: [8, 6, 2, 2],
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: false,
+          showSerName: false,
+          showPercent: false,
+          showLeaderLines: true,
+          leaderLineColor: '808080',
+          labelBox: {
+            fillHidden: true,
+            fillPaintAuthored: true,
+            borderColor: '808080',
+            borderWidthEmu: 3175,
+          },
+        },
+      })],
+    }), RECT, 1);
+
+    expect(rec.texts.map(text => text.text)).toEqual(expect.arrayContaining(['8', '6', '2']));
+    expect(rec.strokeRects.some(rect => rect.ss === '#808080')).toBe(true);
+    expect(rec.strokedPaths.filter(path => path.strokeStyle === '#808080')).toHaveLength(0);
+  });
+
   it('paints a custom rich callout from the same measured inline block', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -18200,6 +19529,34 @@ describe('CH15 — chartEx box-and-whisker', () => {
     expect(outlineSegments.every(segment => segment.lw === 2)).toBe(true);
   });
 
+  it('uses the box-series outline for raw observation markers', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, boxModel({
+      catAxisHidden: true,
+      valAxisHidden: true,
+      chartexDataPointMarkerStyle: {
+        fillColors: ['FFFFFF'],
+        lineColors: ['FFFFFF'],
+        lineWidthEmu: 9525,
+      },
+      chartexBox: {
+        categories: ['A'],
+        series: [{
+          name: 'S', color: 'FFFFFF', lineColor: '000000', lineWidthEmu: 6350,
+          valuesByCategory: [[1, 2, 3]],
+          meanMarker: false, meanLine: false, showOutliers: false, showNonoutliers: true,
+          quartileMethod: 'inclusive',
+        }],
+      },
+    }), RECT, 1);
+
+    expect(rec.arcs).toHaveLength(3);
+    expect(rec.strokeDetails.some(stroke => stroke.strokeStyle.toLowerCase() === '#ffffff'))
+      .toBe(false);
+    expect(rec.strokeDetails.filter(stroke => stroke.strokeStyle.toLowerCase() === '#000000').length)
+      .toBeGreaterThanOrEqual(3);
+  });
+
   it('uses the same 14pt omitted-title fallback for classic and ChartEx charts', () => {
     const cases: Array<{ title: string; chart: ChartModel }> = [
       {
@@ -18360,6 +19717,17 @@ describe('CH15 — chartEx sunburst', () => {
       ],
     };
     expect(chartLabelPaintWorkCount(sparse, undefined)).toBe(4096);
+  });
+
+  it.each([
+    { x: 0, y: 0, w: 640, h: 360 },
+    { x: 0, y: 0, w: 360, h: 640 },
+    { x: 0, y: 0, w: 900, h: 240 },
+  ])('keeps the Office-observed automatic hole ratio local to sunburst (%o)', (rect) => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, sunburstModel(), rect, 1);
+    const radii = rec.arcs.map(arc => arc.r).filter(radius => radius > 0);
+    expect(Math.min(...radii) / Math.max(...radii)).toBeCloseTo(0.18, 5);
   });
 
   it('draws three concentric rings (Branch / Stem / Leaf) with distinct radii', () => {
@@ -18797,17 +20165,14 @@ describe('CH15 — chartEx treemap', () => {
     expect(area('#5B9BD5') / area('#ED7D31')).toBeCloseTo(2, 5);
   });
 
-  it('keeps an overflowing aggregate display label finite', () => {
+  it('keeps an overflowing leaf display label finite', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'treemap',
       chartexAccents: ['5B9BD5'],
       chartexTreemap: {
-        parentLabelLayout: 'overlapping',
-        rows: [
-          { path: ['Aggregate', 'A'], size: Number.MAX_VALUE },
-          { path: ['Aggregate', 'B'], size: Number.MAX_VALUE },
-        ],
+        parentLabelLayout: 'none',
+        rows: [{ path: ['Finite'], size: Number.MAX_VALUE }],
       },
       series: [series({
         seriesDataLabels: {
@@ -18819,11 +20184,46 @@ describe('CH15 — chartEx treemap', () => {
       })],
     }), RECT, 1);
 
-    const parentValues = rec.texts
-      .filter(text => text.baseline === 'top')
+    const leafValues = rec.texts
       .map(text => Number(text.text));
-    expect(parentValues).toEqual([Number.MAX_VALUE]);
-    expect(parentValues.every(Number.isFinite)).toBe(true);
+    expect(leafValues).toContain(Number.MAX_VALUE);
+    expect(leafValues.filter(Number.isFinite).every(Number.isFinite)).toBe(true);
+  });
+
+  it('keeps overlapping treemap parent captions category-only when leaf labels show values', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'treemap',
+      chartexTreemap: {
+        parentLabelLayout: 'overlapping',
+        rows: [
+          { path: ['Civilian', 'Public services'], size: 0.62 },
+          { path: ['Civilian', 'Infrastructure'], size: 0.38 },
+          { path: ['Military', 'Personnel'], size: 0.55 },
+          { path: ['Military', 'Equipment'], size: 0.45 },
+        ],
+      },
+      series: [series({
+        valFormatCode: '0%',
+        seriesDataLabels: {
+          showVal: true,
+          showCatName: true,
+          showSerName: false,
+          showPercent: false,
+          position: 'inEnd',
+          separator: '\n',
+        },
+      })],
+    }), RECT, 1);
+
+    const parentCaptions = rec.texts
+      .filter(text => text.baseline === 'top')
+      .map(text => text.text);
+    expect(parentCaptions).toEqual(expect.arrayContaining(['Civilian', 'Military']));
+    expect(parentCaptions.every(text => !text.includes('%') && !text.includes('\n'))).toBe(true);
+    expect(rec.texts.map(text => text.text)).toEqual(
+      expect.arrayContaining(['Public services', '62%']),
+    );
   });
 
   it('keeps equal-weight top-level tiles in first-seen source order', () => {

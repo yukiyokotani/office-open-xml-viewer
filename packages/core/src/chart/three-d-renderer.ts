@@ -34,6 +34,7 @@ import {
   axisTitleFontPx,
   axisTitleMargin,
   axisTitleRotationRad,
+  axisTitleVerticalInsetPx,
   cartesianTitleBand,
   chartLegendBands,
   chartLegendReserve,
@@ -62,6 +63,7 @@ import {
   fitChartThreeDProjectionToPoints,
   fitChartThreeDProjectionToWallThickness,
   pieThreeDThicknessMultiplier,
+  planChartThreeDSurfaceGridSegments,
   planChartThreeDSurfaceGeometry,
   planChartThreeDProjection,
   planThreeDBarClusterSlot,
@@ -70,9 +72,15 @@ import {
   type ThreeDScenePoint,
 } from './three-d.js';
 import { scaleHexColor } from './material-color.js';
-import { categoryLabelOffsetPx, categoryPositionFraction } from './category-spacing.js';
+import {
+  categoryGridlineFractions,
+  categoryMinorGridlineFractions,
+  categoryLabelOffsetPx,
+  categoryPositionFraction,
+} from './category-spacing.js';
 import {
   buildThreeDAreaStripMeshes,
+  buildThreeDLineRibbonMesh,
   buildThreeDPieSectorMesh,
   buildThreeDShapeMesh,
   DEFAULT_THREE_D_ROUND_SEGMENTS,
@@ -1582,11 +1590,21 @@ function titleAndPlot(
   ctx.restore();
   const legendBands = chartLegendBands(legendReserve, chart.legendOverlay === true);
   const axisBands = chartAxisTitleBands(chart, rect.w, rect.h, ptToPx);
+  const catAxisTitleInset = axisTitleVerticalInsetPx(
+    chart.catAxisTitleTextVerticalInsetEmu, ptToPx,
+  );
+  const valAxisTitleInset = axisTitleVerticalInsetPx(
+    chart.valAxisTitleTextVerticalInsetEmu, ptToPx,
+  );
   const leftTitleBand = orientation === 'horizontal'
-    ? chart.catAxisTitle ? axisBands.catFontPx + axisTitleMargin(rect.w) + 4 : 0
+    ? chart.catAxisTitle
+      ? axisBands.catFontPx + catAxisTitleInset + axisTitleMargin(rect.w) + 4
+      : 0
     : orientation === 'vertical' ? axisBands.valBandW : 0;
   const bottomTitleBand = orientation === 'horizontal'
-    ? chart.valAxisTitle ? axisBands.valFontPx + axisTitleMargin(rect.h) + 4 : 0
+    ? chart.valAxisTitle
+      ? axisBands.valFontPx + valAxisTitleInset + axisTitleMargin(rect.h) + 4
+      : 0
     : orientation === 'vertical' ? axisBands.catBandH : 0;
   const frame = computeChartFrame(chart, rect.x, rect.y, rect.w, rect.h, ptToPx, {
     titleBand: band,
@@ -1736,6 +1754,7 @@ function drawThreeDSeriesAxis(
   categoryBetween: boolean,
   categoryReversed: boolean,
   orientation: 'vertical' | 'horizontal',
+  barFamily: boolean,
   ptToPx: number,
 ): void {
   const spec = chart.threeD?.seriesAxis;
@@ -1779,8 +1798,8 @@ function drawThreeDSeriesAxis(
   }
 
   if (!spec.lineHidden) {
-    applyThreeDStroke(ctx, threeDStroke(
-      spec.lineColor, spec.lineWidthEmu, spec.lineDash, ptToPx, '898989', 1,
+    applyThreeDStroke(ctx, threeDAxisStroke(
+      spec.lineColor, spec.lineWidthEmu, spec.lineDash, ptToPx,
     ));
     ctx.beginPath();
     ctx.moveTo(start.x, start.y);
@@ -1796,11 +1815,29 @@ function drawThreeDSeriesAxis(
   ctx.fillStyle = spec.fontColor ? `#${spec.fontColor}` : '#595959';
   ctx.textAlign = Math.abs(normal.x) < 0.2 ? 'center' : normal.x < 0 ? 'right' : 'left';
   ctx.textBaseline = Math.abs(normal.y) < 0.2 ? 'middle' : normal.y < 0 ? 'bottom' : 'top';
+  if (barFamily && !spec.lineHidden && tickMode !== 'none') {
+    applyThreeDStroke(ctx, threeDAxisTickStroke(
+      spec.lineColor, spec.lineWidthEmu, spec.lineDash, ptToPx,
+    ));
+    const boundaryCount = chart.series.length;
+    for (let boundaryIndex = 0; boundaryIndex <= boundaryCount; boundaryIndex += markSkip) {
+      const authoredDepth = boundaryIndex / boundaryCount;
+      const depth = spec.orientation === 'maxMin' ? 1 - authoredDepth : authoredDepth;
+      const point = projection.project(seriesAxisX, seriesAxisY, depth);
+      const total = 6 * ptToPx;
+      const outer = tickMode === 'cross' ? total / 2 : tickMode === 'out' ? total : 0;
+      const inner = tickMode === 'cross' ? total / 2 : tickMode === 'in' ? total : 0;
+      ctx.beginPath();
+      ctx.moveTo(point.x + normal.x * outer, point.y + normal.y * outer);
+      ctx.lineTo(point.x - normal.x * inner, point.y - normal.y * inner);
+      ctx.stroke();
+    }
+  }
   for (let seriesIndex = 0; seriesIndex < chart.series.length; seriesIndex++) {
     const authoredDepth = projection.seriesDepth(seriesIndex, chart.series.length, false);
     const depth = spec.orientation === 'maxMin' ? 1 - authoredDepth : authoredDepth;
     const point = projection.project(seriesAxisX, seriesAxisY, depth);
-    if (!spec.lineHidden && seriesIndex % markSkip === 0 && tickMode !== 'none') {
+    if (!barFamily && !spec.lineHidden && seriesIndex % markSkip === 0 && tickMode !== 'none') {
       const total = 6 * ptToPx;
       const outer = tickMode === 'cross' ? total / 2 : tickMode === 'out' ? total : 0;
       const inner = tickMode === 'cross' ? total / 2 : tickMode === 'in' ? total : 0;
@@ -2066,7 +2103,7 @@ function axisPlan(
 ): NumericValueAxisPlan {
   const factor = percent ? 100 : 1;
   const minorTickMark = chart.valAxisMinorTickMark ?? 'none';
-  return planNumericValueAxis({
+  const options = {
     dataMin,
     dataMax,
     explicitMin: chart.valMin == null ? (percent ? dataMin : null) : chart.valMin * factor,
@@ -2078,6 +2115,26 @@ function axisPlan(
     logBase: chart.valAxisLogBase,
     reversed: chart.valAxisOrientation === 'maxMin',
     needMinor: chart.valAxisMinorGridlines === true || minorTickMark !== 'none',
+  } as const;
+  const automaticPlan = planNumericValueAxis(options);
+
+  // In the measured compact classic 3-D column charts, Excel applies its
+  // explicit-bounds vertical density rule when only one value-axis bound is
+  // authored. Keep that application-defined behavior local to the observed
+  // family instead of changing the shared 2-D automatic-axis policy.
+  const compactThreeDColumnWithOneBound = !percent
+    && orientation === 'vertical'
+    && (chart.chartType === 'clusteredBar' || chart.chartType === 'stackedBar')
+    && chart.valAxisMajorUnit == null
+    && chart.valAxisLogBase == null
+    && chart.valAxisDisplayUnits == null
+    && ((chart.valMin == null) !== (chart.valMax == null));
+  if (!compactThreeDColumnWithOneBound) return automaticPlan;
+
+  return planNumericValueAxis({
+    ...options,
+    explicitMin: automaticPlan.min,
+    explicitMax: automaticPlan.max,
   });
 }
 
@@ -2192,6 +2249,36 @@ function threeDStroke(
   };
 }
 
+function threeDAxisStroke(
+  color: string | null | undefined,
+  widthEmu: number | null | undefined,
+  dash: string | null | undefined,
+  ptToPx: number,
+): ThreeDStroke {
+  const stroke = threeDStroke(color, widthEmu, dash, ptToPx, '898989', 1);
+  if (widthEmu == null || !Number.isFinite(widthEmu) || widthEmu < 0) return stroke;
+  // `<c:*Ax><c:spPr><a:ln@w>` owns the coordinate-rule width. Keep it in the
+  // same projected point scale as the chart instead of applying a device-pixel
+  // floor; otherwise zoom changes and a thin authored axis can become thicker
+  // than the surrounding CT_Surface rules.
+  const authoredWidth = widthEmu / EMU_PER_PT * ptToPx;
+  if (!(authoredWidth > 0)) return stroke;
+  const width = authoredWidth;
+  return { ...stroke, width, dash: pptxPresetDashArray(dash ?? 'solid', width) };
+}
+
+function threeDAxisTickStroke(
+  color: string | null | undefined,
+  widthEmu: number | null | undefined,
+  dash: string | null | undefined,
+  ptToPx: number,
+): ThreeDStroke {
+  // Tick rules use the same authored DrawingML point scale as the coordinate
+  // axes; they are kept separate here because their projected geometry and
+  // default visibility are resolved independently.
+  return threeDStroke(color, widthEmu, dash, ptToPx, '898989', 1);
+}
+
 function applyThreeDStroke(ctx: CanvasRenderingContext2D, stroke: ThreeDStroke): void {
   ctx.strokeStyle = stroke.color;
   ctx.lineWidth = stroke.width;
@@ -2216,12 +2303,55 @@ function walls(
   const {
     sideX: farX, floorY, oppositeFloorY, nearDepth, farDepth,
   } = geometry;
+  const axisGeometry = threeDAxisGeometry(
+    chart, projection, axis, categoryCount, categoryBetween, categoryReversed, orientation,
+  );
+  const axisOwnedEdges: Array<readonly [Point, Point]> = [];
+  // Linked chart styles may resolve the same color/width fields without a
+  // direct axis line. Only a direct `<c:*Ax><c:spPr><a:ln>` owns a coincident
+  // CT_Surface perimeter; style-derived axes retain the complete wall frame.
+  const categoryAxisPaintAuthored = chart.catAxisLinePaintAuthored === true;
+  const valueAxisPaintAuthored = chart.valAxisLinePaintAuthored === true;
+  const horizontalAxisVisible = orientation === 'vertical'
+    ? categoryAxisPaintAuthored && !chart.catAxisHidden && !chart.catAxisLineHidden
+    : valueAxisPaintAuthored && !chart.valAxisHidden && !chart.valAxisLineHidden;
+  const verticalAxisVisible = orientation === 'vertical'
+    ? valueAxisPaintAuthored && !chart.valAxisHidden && !chart.valAxisLineHidden
+    : categoryAxisPaintAuthored && !chart.catAxisHidden && !chart.catAxisLineHidden;
+  if (horizontalAxisVisible) {
+    axisOwnedEdges.push([axisGeometry.horizontalStart, axisGeometry.horizontalEnd]);
+  }
+  if (verticalAxisVisible) {
+    axisOwnedEdges.push([axisGeometry.verticalStart, axisGeometry.verticalEnd]);
+  }
+  const seriesAxis = chart.threeD?.seriesAxis;
+  const seriesAxisPaintAuthored = seriesAxis?.linePaintAuthored === true;
+  if (seriesAxis && !seriesAxis.hidden && !seriesAxis.lineHidden
+    && seriesAxisPaintAuthored
+    && chart.threeD?.barGrouping === 'standard' && chart.series.length > 0) {
+    const seriesAxisX = orientation === 'vertical' ? geometry.seriesAxisX : axisGeometry.axisX;
+    const seriesAxisY = orientation === 'horizontal'
+      ? (floorY === projection.front.y
+        ? projection.front.y + projection.front.h : projection.front.y)
+      : floorY;
+    axisOwnedEdges.push([
+      projection.project(seriesAxisX, seriesAxisY, nearDepth),
+      projection.project(seriesAxisX, seriesAxisY, farDepth),
+    ]);
+  }
+  const samePoint = (left: Point, right: Point): boolean =>
+    Math.hypot(left.x - right.x, left.y - right.y) <= 1e-6;
+  const axisOwnsEdge = (start: Point, end: Point): boolean =>
+    axisOwnedEdges.some(([axisStart, axisEnd]) =>
+      (samePoint(start, axisStart) && samePoint(end, axisEnd))
+      || (samePoint(start, axisEnd) && samePoint(end, axisStart))
+    );
   const projectedSurfaceFaces = (
     kind: 'floor' | 'sideWall' | 'backWall',
     surface: NonNullable<ChartModel['threeD']>['floor'],
   ) => {
     const slab = planChartThreeDSurfaceGeometry(projection, kind, surface?.thicknessPercent);
-    return { slab, faces: slab.faces
+    const faces = slab.faces
       .map((scenePoints, faceIndex) => ({ scenePoints, faceIndex }))
       .filter(({ scenePoints }) => slab.thickness === 0 || projection.cameraFacing(scenePoints))
       .map(({ scenePoints, faceIndex }) => ({
@@ -2235,7 +2365,12 @@ function walls(
           0,
         ) / scenePoints.length,
       }))
-      .sort((left, right) => left.depth - right.depth) };
+      .sort((left, right) => left.depth - right.depth);
+    return {
+      slab,
+      faces,
+      visibleFaceIndices: new Set(faces.map(face => face.faceIndex)),
+    };
   };
   const floorSurface = projectedSurfaceFaces('floor', chart.threeD?.floor);
   const sideWallSurface = projectedSurfaceFaces('sideWall', chart.threeD?.sideWall);
@@ -2286,25 +2421,64 @@ function walls(
   drawSurfaceFill(floorSurface, chart.threeD?.floor, 'floor', 'floor');
   drawSurfaceFill(sideWallSurface, chart.threeD?.sideWall, 'wall', 'sideWall');
   drawSurfaceFill(backWallSurface, chart.threeD?.backWall, 'wall', 'backWall');
-  const drawValueGrid = (values: readonly number[], stroke: ThreeDStroke) => {
+  const strokeSurfaceGridRule = (
+    group: ReturnType<typeof projectedSurfaceFaces>,
+    kind: 'floor' | 'sideWall' | 'backWall',
+    coordinate: 'x' | 'y',
+    fraction: number,
+    includeExterior = true,
+  ): void => {
+    for (const segment of planChartThreeDSurfaceGridSegments(
+      group.slab,
+      kind,
+      coordinate,
+      fraction,
+    )) {
+      if (!includeExterior && segment.faceIndex !== 0) continue;
+      if (!group.visibleFaceIndices.has(segment.faceIndex)) continue;
+      const [start, end] = segment.scenePoints.map(point =>
+        projection.projectUnbounded(point.x, point.y, point.depth)
+      );
+      ctx.beginPath();
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+    }
+  };
+  const drawValueGrid = (
+    values: readonly number[],
+    stroke: ThreeDStroke,
+    authoredSurfaceRule: boolean,
+  ) => {
     applyThreeDStroke(ctx, stroke);
     for (const value of values) {
-    if (orientation === 'horizontal') {
-      const x = front.x + axis.fraction(value) * front.w;
-      const near = projection.project(x, floorY, farDepth);
-      const far = projection.project(x, oppositeFloorY, farDepth);
-      ctx.beginPath(); ctx.moveTo(near.x, near.y); ctx.lineTo(far.x, far.y); ctx.stroke();
-    } else {
-      const y = front.y + front.h - axis.fraction(value) * front.h;
-      const sideNear = projection.project(farX, y, nearDepth);
-      const sideFar = projection.project(farX, y, farDepth);
-      const backEnd = projection.project(farX === xMin ? xMax : xMin, y, farDepth);
-      // The same value plane crosses both the visible side wall and the back
-      // wall. Leaving out the side segment makes the grid appear to change
-      // direction at the wall boundary even though the scene is projective.
-      ctx.beginPath(); ctx.moveTo(sideNear.x, sideNear.y); ctx.lineTo(sideFar.x, sideFar.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(sideFar.x, sideFar.y); ctx.lineTo(backEnd.x, backEnd.y); ctx.stroke();
-    }
+      const fraction = axis.fraction(value);
+      if (authoredSurfaceRule) {
+        if (orientation === 'horizontal') {
+          strokeSurfaceGridRule(floorSurface, 'floor', 'x', fraction);
+          strokeSurfaceGridRule(backWallSurface, 'backWall', 'x', fraction);
+        } else {
+          strokeSurfaceGridRule(sideWallSurface, 'sideWall', 'y', fraction);
+          strokeSurfaceGridRule(backWallSurface, 'backWall', 'y', fraction);
+        }
+        continue;
+      }
+      if (orientation === 'horizontal') {
+        const x = front.x + fraction * front.w;
+        const near = projection.project(x, floorY, farDepth);
+        const far = projection.project(x, oppositeFloorY, farDepth);
+        ctx.beginPath(); ctx.moveTo(near.x, near.y); ctx.lineTo(far.x, far.y); ctx.stroke();
+      } else {
+        // The same value plane crosses both the visible side wall and the back
+        // wall. Leaving out the side segment makes the grid appear to change
+        // direction at the wall boundary even though the scene is projective.
+        const y = front.y + front.h - fraction * front.h;
+        const sideNear = projection.project(farX, y, nearDepth);
+        const sideFar = projection.project(farX, y, farDepth);
+        const backEnd = projection.project(farX === xMin ? xMax : xMin, y, farDepth);
+        ctx.beginPath(); ctx.moveTo(sideNear.x, sideNear.y); ctx.lineTo(sideFar.x, sideFar.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sideFar.x, sideFar.y); ctx.lineTo(backEnd.x, backEnd.y); ctx.stroke();
+      }
     }
   };
   if (chart.valAxisMinorGridlines === true) {
@@ -2315,9 +2489,13 @@ function walls(
       ptToPx,
       'D9D9D9',
       0.5,
-    ));
+    ), true);
   }
-  if (chart.valAxisMajorGridlines !== false) {
+  // CT_ValAx/majorGridlines is an optional element, not an on-by-default
+  // property. Its absence therefore contributes no value-grid geometry. This
+  // mirrors the 2-D axis path and prevents synthetic back-wall rules from
+  // appearing in 3-D charts that author only the axis line.
+  if (chart.valAxisMajorGridlines === true) {
     drawValueGrid(axis.majorTicks, threeDStroke(
       chart.valAxisGridlineColor,
       chart.valAxisGridlineWidthEmu,
@@ -2325,28 +2503,51 @@ function walls(
       ptToPx,
       '898989',
       1,
-    ));
+    ), true);
   }
-  // Category-depth rays divide the 3-D wall itself. Office retains them when
-  // c:catAx has no 2-D majorGridlines, so keep their automatic wall stroke
-  // independent from authored category-axis gridline styling.
-  applyThreeDStroke(ctx, threeDStroke(null, null, null, ptToPx, '898989', 1));
-  for (let categoryIndex = 0; categoryIndex < categoryCount; categoryIndex++) {
-    if (orientation === 'vertical') {
-      const x = front.x + categoryPositionFraction(
-        categoryIndex, categoryCount, categoryBetween, categoryReversed,
-      ) * front.w;
-      const near = projection.project(x, floorY, nearDepth);
-      const far = projection.project(x, floorY, farDepth);
-      ctx.beginPath(); ctx.moveTo(near.x, near.y); ctx.lineTo(far.x, far.y); ctx.stroke();
-    } else {
-      const y = front.y + categoryPositionFraction(
-        categoryIndex, categoryCount, categoryBetween, categoryReversed,
-      ) * front.h;
-      const near = projection.project(farX, y, nearDepth);
-      const far = projection.project(farX, y, farDepth);
-      ctx.beginPath(); ctx.moveTo(near.x, near.y); ctx.lineTo(far.x, far.y); ctx.stroke();
+  // CT_CatAx/majorGridlines is optional. Only an authored element contributes
+  // category-grid geometry; omission must not synthesize depth rays. Authored
+  // rules continue across visible thick surface faces.
+  const strokeCategorySurfaceGrid = (
+    fractions: readonly number[],
+    stroke: ThreeDStroke,
+  ): void => {
+    applyThreeDStroke(ctx, stroke);
+    for (const fraction of fractions) {
+      if (orientation === 'vertical') {
+        strokeSurfaceGridRule(floorSurface, 'floor', 'x', fraction);
+        strokeSurfaceGridRule(backWallSurface, 'backWall', 'x', fraction);
+      } else {
+        strokeSurfaceGridRule(sideWallSurface, 'sideWall', 'y', fraction);
+        strokeSurfaceGridRule(backWallSurface, 'backWall', 'y', fraction);
+      }
     }
+  };
+  if (chart.catAxisMinorGridlines === true) {
+    strokeCategorySurfaceGrid(
+      categoryMinorGridlineFractions(categoryCount, categoryBetween),
+      threeDStroke(
+        chart.catAxisMinorGridlineColor,
+        chart.catAxisMinorGridlineWidthEmu,
+        chart.catAxisMinorGridlineDash,
+        ptToPx,
+        'E0E0E0',
+        0.5,
+      ),
+    );
+  }
+  if (chart.catAxisMajorGridlines === true) {
+    strokeCategorySurfaceGrid(
+      categoryGridlineFractions(categoryCount, categoryBetween),
+      threeDStroke(
+        chart.catAxisGridlineColor,
+        chart.catAxisGridlineWidthEmu,
+        chart.catAxisGridlineDash,
+        ptToPx,
+        'E0E0E0',
+        0.5,
+      ),
+    );
   }
   const strokeSurface = (
     faces: readonly { points: readonly Point[] }[],
@@ -2382,6 +2583,25 @@ function walls(
       ? effective.lineJoin : 'miter';
     for (const face of faces) {
       if (face.points.length < 2) continue;
+      const edges = face.points.map((point, index) => ({
+        start: point,
+        end: face.points[(index + 1) % face.points.length],
+      }));
+      if (edges.some(edge => axisOwnsEdge(edge.start, edge.end))) {
+        // A visible axis and a CT_Surface perimeter can describe the same
+        // projected cuboid edge with different authored paints. Office gives
+        // the coordinate axis visual ownership; painting both produces the
+        // gray halo seen around a thinner black axis. Retain every independent
+        // surface edge and omit only the exactly coincident segment.
+        for (const edge of edges) {
+          if (axisOwnsEdge(edge.start, edge.end)) continue;
+          ctx.beginPath();
+          ctx.moveTo(edge.start.x, edge.start.y);
+          ctx.lineTo(edge.end.x, edge.end.y);
+          ctx.stroke();
+        }
+        continue;
+      }
       ctx.beginPath();
       ctx.moveTo(face.points[0].x, face.points[0].y);
       for (let index = 1; index < face.points.length; index++) {
@@ -2424,11 +2644,11 @@ function frontAxes(
     ? !chart.valAxisHidden && !chart.valAxisLineHidden
     : !chart.catAxisHidden && !chart.catAxisLineHidden;
   if (drawHorizontal) {
-    applyThreeDStroke(ctx, threeDStroke(
+    applyThreeDStroke(ctx, threeDAxisStroke(
       orientation === 'vertical' ? chart.catAxisLineColor : chart.valAxisLineColor,
       orientation === 'vertical' ? chart.catAxisLineWidthEmu : chart.valAxisLineWidthEmu,
       orientation === 'vertical' ? chart.catAxisLineDash : chart.valAxisLineDash,
-      ptToPx, '898989', 1,
+      ptToPx,
     ));
     ctx.beginPath();
     ctx.moveTo(geometry.horizontalStart.x, geometry.horizontalStart.y);
@@ -2436,11 +2656,11 @@ function frontAxes(
     ctx.stroke();
   }
   if (drawVertical) {
-    applyThreeDStroke(ctx, threeDStroke(
+    applyThreeDStroke(ctx, threeDAxisStroke(
       orientation === 'vertical' ? chart.valAxisLineColor : chart.catAxisLineColor,
       orientation === 'vertical' ? chart.valAxisLineWidthEmu : chart.catAxisLineWidthEmu,
       orientation === 'vertical' ? chart.valAxisLineDash : chart.catAxisLineDash,
-      ptToPx, '898989', 1,
+      ptToPx,
     ));
     ctx.beginPath();
     ctx.moveTo(geometry.verticalStart.x, geometry.verticalStart.y);
@@ -2613,6 +2833,7 @@ function cartesianAxisTicks(
   categoryBetween: boolean,
   categoryReversed: boolean,
   orientation: 'vertical' | 'horizontal',
+  barFamily: boolean,
   ptToPx: number,
 ): void {
   const { front } = projection;
@@ -2626,10 +2847,11 @@ function cartesianAxisTicks(
     depth,
   );
   const valueMinorTickMark = chart.valAxisMinorTickMark ?? 'none';
+  const axisTickStroke = barFamily ? threeDAxisTickStroke : threeDAxisStroke;
   if (!chart.valAxisHidden && !chart.valAxisLineHidden) {
-    applyThreeDStroke(ctx, threeDStroke(
+    applyThreeDStroke(ctx, axisTickStroke(
       chart.valAxisLineColor, chart.valAxisLineWidthEmu, chart.valAxisLineDash,
-      ptToPx, '898989', 1,
+      ptToPx,
     ));
     const valueAnchor = (value: number) => orientation === 'horizontal'
       ? projection.project(front.x + axis.fraction(value) * front.w, axisY, depth)
@@ -2652,19 +2874,16 @@ function cartesianAxisTicks(
     }
   }
   if (!chart.catAxisHidden && !chart.catAxisLineHidden) {
-    applyThreeDStroke(ctx, threeDStroke(
+    applyThreeDStroke(ctx, axisTickStroke(
       chart.catAxisLineColor, chart.catAxisLineWidthEmu, chart.catAxisLineDash,
-      ptToPx, '898989', 1,
+      ptToPx,
     ));
     const categoryStart = orientation === 'vertical'
       ? geometry.horizontalStart : geometry.verticalStart;
     const categoryEnd = orientation === 'vertical'
       ? geometry.horizontalEnd : geometry.verticalEnd;
     const tickSkip = Math.max(1, Math.floor(chart.catAxisTickMarkSkip ?? 1));
-    for (let categoryIndex = 0; categoryIndex < categoryCount; categoryIndex += tickSkip) {
-      const fraction = categoryPositionFraction(
-        categoryIndex, categoryCount, categoryBetween, categoryReversed,
-      );
+    const drawCategoryTick = (fraction: number): void => {
       const anchor = orientation === 'vertical'
         ? projection.project(front.x + fraction * front.w, axisY, depth)
         : projection.project(axisX, front.y + fraction * front.h, depth);
@@ -2672,6 +2891,18 @@ function cartesianAxisTicks(
         ctx, chart.catAxisMajorTickMark, anchor, categoryStart, categoryEnd,
         projectedCenter, orientation === 'vertical' ? 'vertical' : 'horizontal', 'major', ptToPx,
       );
+    };
+    if (barFamily) {
+      const boundaries = categoryGridlineFractions(categoryCount, categoryBetween);
+      for (let index = 0; index < boundaries.length; index += tickSkip) {
+        drawCategoryTick(categoryReversed ? 1 - boundaries[index] : boundaries[index]);
+      }
+    } else {
+      for (let index = 0; index < categoryCount; index += tickSkip) {
+        drawCategoryTick(categoryPositionFraction(
+          index, categoryCount, categoryBetween, categoryReversed,
+        ));
+      }
     }
     const minorUnit = chart.catAxisMinorUnit;
     if (chart.catAxisMinorTickMark && chart.catAxisMinorTickMark !== 'none'
@@ -2733,6 +2964,14 @@ function renderCartesian(
     // made its convergence visibly too severe.
     sceneDepthScale: bars ? (depthArranged ? 0.65 : 0.10) : 0.40,
     perspectiveTangentGain: depthArranged ? 1 : 2,
+    // MS-OE376 §2.1.1501(a) assigns omitted hPercent to Office automatic
+    // scaling. Repeated Excel/PDF line/area probes resolve that automatic
+    // model-space height to one third of the scene width; an authored
+    // hPercent continues to own the ratio in planChartThreeDProjection.
+    sceneHeightScale: !bars
+      && !(chart.threeD.heightPercentAuthored ?? chart.threeD.heightPercent != null)
+      ? 1 / 3
+      : undefined,
   });
   if (!projection) return true;
   projection = fitChartThreeDProjectionToWallThickness(projection, chart.threeD, plot);
@@ -2795,9 +3034,42 @@ function renderCartesian(
     dataMin = logarithmic ? extent.min : Math.min(0, extent.min);
     dataMax = logarithmic ? extent.max : Math.max(0, extent.max);
   }
+  const projectedValueAxisStart = horizontal
+    ? projection.project(
+        projection.front.x,
+        projection.topology.axisY === 'min'
+          ? projection.front.y
+          : projection.front.y + projection.front.h,
+        projection.topology.nearDepth,
+      )
+    : projection.project(
+        projection.topology.axisX === 'min'
+          ? projection.front.x
+          : projection.front.x + projection.front.w,
+        projection.front.y,
+        projection.topology.nearDepth,
+      );
+  const projectedValueAxisEnd = horizontal
+    ? projection.project(
+        projection.front.x + projection.front.w,
+        projection.topology.axisY === 'min'
+          ? projection.front.y
+          : projection.front.y + projection.front.h,
+        projection.topology.nearDepth,
+      )
+    : projection.project(
+        projection.topology.axisX === 'min'
+          ? projection.front.x
+          : projection.front.x + projection.front.w,
+        projection.front.y + projection.front.h,
+        projection.topology.nearDepth,
+      );
+  const projectedValueAxisLenPt = Math.hypot(
+    projectedValueAxisEnd.x - projectedValueAxisStart.x,
+    projectedValueAxisEnd.y - projectedValueAxisStart.y,
+  ) / ptToPx;
   const axis = axisPlan(
-    chart, dataMin, dataMax,
-    (horizontal ? projection.front.w : projection.front.h) / ptToPx,
+    chart, dataMin, dataMax, projectedValueAxisLenPt,
     percent, horizontal ? 'horizontal' : 'vertical',
   );
   // A column/bar datum is zero only while zero belongs to the value-axis
@@ -3351,6 +3623,7 @@ function renderCartesian(
       }
       const lineStrokeRuns: Array<{
         path: ProjectedStrokePoint[];
+        modelPath: Point[];
         ownerIndex: number;
         startClipped: boolean;
         endClipped: boolean;
@@ -3469,6 +3742,13 @@ function renderCartesian(
             );
             const start = projectModelPoint(at(clipped.startT));
             const end = projectModelPoint(at(clipped.endT));
+            const modelStart = at(clipped.startT);
+            const modelEnd = at(clipped.endT);
+            const toModelPoint = (point: ModelLinePoint): Point => ({
+              x: point.x,
+              y: front.y + front.h
+                - Math.max(0, Math.min(1, point.fraction)) * front.h,
+            });
             const continues = visible != null && Math.hypot(
               visible.path.at(-1)!.x - start.x,
               visible.path.at(-1)!.y - start.y,
@@ -3477,6 +3757,7 @@ function renderCartesian(
               finishVisibleRun(visible);
               visible = {
                 path: [start, end],
+                modelPath: [toModelPoint(modelStart), toModelPoint(modelEnd)],
                 ownerIndex: endModel.ownerIndex,
                 startClipped: index > 0 || clipped.startT > 0,
                 endClipped: index + 1 < sampled.length - 1 || clipped.endT < 1,
@@ -3485,6 +3766,7 @@ function renderCartesian(
               };
             } else {
               visible!.path.push(end);
+              visible!.modelPath.push(toModelPoint(modelEnd));
               visible!.endClipped = index + 1 < sampled.length - 1 || clipped.endT < 1;
             }
             traversedLength += modelLength;
@@ -3517,12 +3799,17 @@ function renderCartesian(
           return paint;
         };
         const strokeFaceGroups = new Map<ThreeDDatumPaint, SceneFace[]>();
+        const lineRibbonBudget: ScenePrimitiveBudget = {
+          remaining: MAX_PROJECTED_STROKE_PRIMITIVES,
+          exceeded: false,
+        };
         const pushStrokeGeometry = (
           path: readonly ProjectedStrokePoint[],
           paint: ThreeDDatumPaint,
           startCap: CanvasLineCap,
           endCap: CanvasLineCap = startCap,
           dashOffset = 0,
+          modelPath?: readonly Point[],
         ) => {
           if (paint.lineFill === null) return;
           // Automatic 3-D line/area edges use the darker Chart Style line
@@ -3537,7 +3824,7 @@ function renderCartesian(
           const lineDash = drawingmlLineDashArray(
             paint.lineCustomDash, paint.lineDash, lineWidth,
           );
-          const strokes = buildProjectedStrokePrimitives(path, {
+          const strokeOptions = {
             width: lineWidth,
             dash: lineDash,
             dashOffset,
@@ -3545,7 +3832,52 @@ function renderCartesian(
             startCap,
             endCap,
             lineJoin: paint.lineJoin,
-          });
+          };
+          // ECMA Line3D is a depth-bearing ribbon. Tessellate the same bounded
+          // dash/cap/join polygon in the chart's model X/Y plane, extrude it
+          // through the series interval, then hand every face to the existing
+          // camera/depth/material pipeline. Area ridges remain ordinary edge
+          // strokes because their slab already supplies the depth faces.
+          if (!areaFamily && modelPath && modelPath.length >= 2) {
+            const modelStrokes = buildProjectedStrokePrimitives(
+              modelPath.map(point => ({ ...point, cameraDepth: 0, cameraWeight: 1 })),
+              strokeOptions,
+            );
+            if (modelStrokes == null) {
+              strokeBudgetExceeded = true;
+              return;
+            }
+            const group = strokeFaceGroups.get(paint) ?? [];
+            for (const stroke of modelStrokes) {
+              const mesh = buildThreeDLineRibbonMesh({
+                outline: stroke.points,
+                nearDepth: depthInterval.near,
+                farDepth: depthInterval.far,
+              });
+              if (!mesh) continue;
+              const faces = projectThreeDMesh(
+                projection, mesh, strokeStyle, undefined, lineRibbonBudget,
+              ).map(face => ({ ...face, paintRole: 'outline' as const }));
+              if (lineRibbonBudget.exceeded) {
+                strokeBudgetExceeded = true;
+                return;
+              }
+              group.push(...faces);
+              for (const face of faces) {
+                sceneCommands.push({
+                  points: face.points,
+                  cameraDepth: face.cameraDepth,
+                  cameraDepths: face.cameraDepths,
+                  cameraWeights: face.cameraWeights,
+                  layer: 1,
+                  paint: () => paintSceneFace(ctx, face),
+                });
+              }
+            }
+            strokeFaceGroups.set(paint, group);
+            return;
+          }
+          const strokes = buildProjectedStrokePrimitives(path, strokeOptions);
           if (strokes == null) {
             strokeBudgetExceeded = true;
             return;
@@ -3591,6 +3923,7 @@ function renderCartesian(
               item.startClipped ? 'butt' : paint.lineCap,
               item.endClipped ? 'butt' : paint.lineCap,
               item.dashOffset,
+              item.modelPath,
             );
           }
         }
@@ -3681,7 +4014,7 @@ function renderCartesian(
   );
   cartesianAxisTicks(
     ctx, chart, projection, axis, categoryCount, categoryBetween, categoryReversed,
-    horizontal ? 'horizontal' : 'vertical', ptToPx,
+    horizontal ? 'horizontal' : 'vertical', bars, ptToPx,
   );
   drawThreeDSeriesAxis(
     ctx,
@@ -3693,6 +4026,7 @@ function renderCartesian(
     categoryBetween,
     categoryReversed,
     horizontal ? 'horizontal' : 'vertical',
+    bars,
     ptToPx,
   );
   const resolvedAxisGeometry = threeDAxisGeometry(

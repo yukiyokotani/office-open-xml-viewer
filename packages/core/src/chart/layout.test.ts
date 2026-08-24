@@ -15,6 +15,7 @@ import {
   chartAxisTitleBands,
   axisTitleFontPx,
   axisTitleRotationRad,
+  axisTitleVerticalInsetPx,
   chartTitleFontPx,
   resolveManualLayoutRect,
   TITLE_TOP_PAD_FONT_FRAC,
@@ -35,6 +36,12 @@ describe('axis-title authored properties', () => {
     expect(axisTitleRotationRad('left', null, 'eaVert')).toBeCloseTo(Math.PI / 2);
     expect(axisTitleRotationRad('right', null, 'horz')).toBe(0);
     expect(axisTitleRotationRad('right', null, null)).toBeCloseTo(-Math.PI / 2);
+  });
+
+  it('bounds malformed public-model text inset values', () => {
+    expect(axisTitleVerticalInsetPx(91_440, 4 / 3)).toBeCloseTo(9.6);
+    expect(axisTitleVerticalInsetPx(Number.NaN, 1)).toBe(0);
+    expect(axisTitleVerticalInsetPx(-12_700, 1)).toBe(0);
   });
 });
 
@@ -280,6 +287,19 @@ describe('chartAxisTitleBands', () => {
     const valF = 10 * PTPX;
     expect(b.catBandH).toBe(catF + Math.max(8, H * 0.02) + 4);
     expect(b.valBandW).toBe(valF + Math.max(8, W * 0.02) + 4);
+  });
+
+  it('adds the effective DrawingML top and bottom text insets to each title band', () => {
+    const b = chartAxisTitleBands(model({
+      catAxisTitle: ' ',
+      catAxisTitleTextVerticalInsetEmu: 91_440,
+      valAxisTitle: 'V',
+      valAxisTitleTextVerticalInsetEmu: 38_100,
+    }), W, H, PTPX);
+    const catInsetsPx = (45_720 + 45_720) / 12_700 * PTPX;
+    const valInsetsPx = (12_700 + 25_400) / 12_700 * PTPX;
+    expect(b.catBandH).toBe(10 * PTPX + catInsetsPx + Math.max(8, H * 0.02) + 4);
+    expect(b.valBandW).toBe(10 * PTPX + valInsetsPx + Math.max(8, W * 0.02) + 4);
   });
 });
 

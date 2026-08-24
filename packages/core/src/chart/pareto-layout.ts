@@ -20,6 +20,11 @@ export interface ParetoLayout {
   categories: string[];
 }
 
+export interface ParetoLayoutOptions {
+  /** Owner-backed Pareto bars sort frequencies; a standalone paretoLine does not. */
+  sortDescending?: boolean;
+}
+
 function remapIndexed<T extends { idx: number }>(
   values: readonly T[] | null | undefined,
   newIndexBySource: ReadonlyMap<number, number>,
@@ -50,13 +55,16 @@ function reorderNullable<T>(
 export function planParetoLayout(
   series: ChartSeries,
   chartCategories: readonly string[],
+  options: ParetoLayoutOptions = {},
 ): ParetoLayout {
   const retained = series.values
     .map((value, sourceIndex) => ({ value, sourceIndex }))
     .filter((entry): entry is { value: number; sourceIndex: number } =>
       entry.value != null && Number.isFinite(entry.value) && entry.value >= 0
-    )
-    .sort((a, b) => b.value - a.value || a.sourceIndex - b.sourceIndex);
+    );
+  if (options.sortDescending !== false) {
+    retained.sort((a, b) => b.value - a.value || a.sourceIndex - b.sourceIndex);
+  }
 
   // Normalize before summing so finite values near Number.MAX_VALUE cannot
   // overflow the denominator to Infinity and collapse early fractions to 0.

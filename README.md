@@ -91,6 +91,7 @@ pnpm add @silurus/ooxml
 > | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
 > | `@silurus/ooxml/three-d` | 92 KB | 27 KB | Optional model-space 3-D chart mesh and camera |
 > | `@silurus/ooxml/region-map` | 236 KB | 66 KB | Optional offline Region Map renderer and fixed country geometry |
+> | `@silurus/ooxml/chart-ex` | 37 KB | 11 KB | Optional Microsoft ChartEx families |
 >
 > These are production-artifact estimates, not initial-load figures: each row
 > sums all assets reachable from that entry, including parser WASM and worker
@@ -104,7 +105,7 @@ pnpm add @silurus/ooxml
 > [Rendering equations](#rendering-equations)). Never import the `math` entry
 > and the loader chunk never enters your graph at all.
 >
-> The 3-D chart and Region Map renderers follow the same dependency-injection
+> The ChartEx, 3-D chart and Region Map renderers follow the same dependency-injection
 > boundary: import and pass only the optional renderer modules an application
 > needs. Their implementations are not eagerly loaded or evaluated in main
 > mode. Worker mode fetches a self-contained render-worker asset that includes
@@ -209,22 +210,30 @@ shapes / text boxes the same way.)
 
 ### Optional chart renderers
 
-Model-space 3-D charts and offline country-level Region Maps are separate
-entries. Inject them once in the same load options object as `math`; omitting a
-renderer keeps it out of the ordinary render path. The built-in renderers work
-in both main and worker modes. Without `threeD`, 3-D chart groups
+Classic DrawingML 2-D chart families are included in every format entry.
+Microsoft ChartEx, model-space 3-D charts and offline country-level Region Maps
+are separate entries. Inject them once in the same load options object as
+`math`; omitting a renderer keeps it out of the ordinary render path. The
+built-in renderers work in both main and worker modes. Without `chartEx`,
+ChartEx families show the standard unsupported-chart placeholder. Without
+`threeD`, 3-D chart groups
 fall back to their canonical 2-D family. Without `regionMap`, Region Maps show
-the standard unsupported-chart placeholder.
+the standard unsupported-chart placeholder. The code-size boundary applies to
+the default main-mode application graph. The separately loaded render-worker
+asset stays self-contained for broad bundler compatibility and therefore
+contains its built-in optional renderer implementations.
 
 ```typescript
 import { XlsxViewer } from '@silurus/ooxml/xlsx';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
+import { chartEx } from '@silurus/ooxml/chart-ex';
 
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const workbookViewer = new XlsxViewer(container, {
   threeD,
   regionMap,
+  chartEx,
   mode: 'worker',
 });
 await workbookViewer.load('/workbook-with-advanced-charts.xlsx');
@@ -737,7 +746,7 @@ file without uploading it.
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
 | | Charts (ordered classic combo groups — observed bar/line/area, scatter/bubble, and stock/line combinations; unsupported mixes fail closed) | ✅ |
-| | Charts (chartEx — funnel / histogram / treemap / sunburst / box &amp; whisker) | ✅ |
+| | Charts (chartEx — funnel / histogram / treemap / sunburst / box &amp; whisker) | ✅ opt-in |
 | | Charts (stock — high / low / close candlesticks) | ✅ |
 | | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`, or a staged fallback to a text list when no drawing part is present; no native diagram layout engine) | ✅ |
 | | OLE embedded objects (`p:oleObj` — the baked preview `p:pic` is drawn; the embedded app is not run) | ✅ |

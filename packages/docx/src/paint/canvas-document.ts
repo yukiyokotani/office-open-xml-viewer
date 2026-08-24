@@ -13,7 +13,7 @@ import {
   preferVectorBlip,
 } from '@silurus/ooxml-core';
 import type { Duotone } from '@silurus/ooxml-core';
-import type { ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer } from '@silurus/ooxml-core';
 import type {
   DocumentLayout,
   LayoutPage,
@@ -52,6 +52,7 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly onTextRun?: (run: TTextRun) => void;
   readonly threeD?: ChartThreeDRenderer;
   readonly regionMap?: ChartRegionMapRenderer;
+  readonly chartEx?: ChartExRenderer;
 }
 
 /** Per-canvas cancellation token: only the newest asynchronous image preload
@@ -250,11 +251,12 @@ export async function renderSelectedDocumentPage<TTextRun>(
     });
     const resources = createCanvasPaintResourcePainter(
       session,
-      options.threeD || options.regionMap || chartImages.size > 0
+      options.threeD || options.regionMap || options.chartEx || chartImages.size > 0
         ? createCanonicalCanvasPaintResourceHandlers(
             options.threeD,
             options.regionMap,
             fill => chartImages.get(chartImageFillKey(fill)),
+            options.chartEx,
           )
         : canonicalCanvasPaintResourceHandlers,
     );

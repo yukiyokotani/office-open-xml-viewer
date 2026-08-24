@@ -103,7 +103,14 @@ import {
 } from '@silurus/ooxml-core';
 import type { WarpEnvelope, WarpGlyphTransform } from '@silurus/ooxml-core';
 import type { CameraInput, Vec2, BevelInput, ExtrusionInput, BevelRegion } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, RasterizedMathSvg, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import type {
+  MathNode,
+  MathRenderer,
+  RasterizedMathSvg,
+  ChartThreeDRenderer,
+  ChartRegionMapRenderer,
+  ChartExRenderer,
+} from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
@@ -3592,6 +3599,11 @@ export function renderTextBody(
   // `vert`/`vert270` (whose spec meaning IS to rotate every glyph), keeping those
   // paths byte-identical.
   eaVertUpright = false,
+  // A zero-height table row asks PowerPoint to derive its height from the
+  // natural line box. A positive a:tr@h is instead an authored minimum: use the
+  // glyph-size box when checking whether content actually exceeds that minimum,
+  // so implicit leading alone does not enlarge an already-sufficient row.
+  measureNaturalLineSpacing = measureOnly,
 ): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
   // "vert" and "eaVert" both approximate to 90° clockwise rotation.
@@ -3948,21 +3960,28 @@ export function renderTextBody(
         maxSizePx = bulletImage.sizePx;
       }
 
-      // PowerPoint's existing natural-line approximation for authored
-      // percentage spacing. The document-font design floor applies only when
-      // line spacing is omitted; an explicit percentage is already the
-      // author's vertical-spacing decision, and `spcPts` remains absolute.
+      // PowerPoint's natural single-line box is 120% of the authored text size.
+      // An explicit percentage is instead based directly on that authored size
+      // (ECMA-376 §21.1.2.2.5/.11). Table measurement therefore retains the
+      // natural 120% box only when line spacing is omitted in an auto-height
+      // row. A positive a:tr@h remains a minimum and uses the glyph-size box for
+      // overflow measurement. Both exclude a substituted font's larger
+      // design-metric floor; glyph painting may keep that floor below without
+      // enlarging the table structure.
       const naturalSingle = maxSizePx * 1.2;
       const implicitSingle = Math.max(naturalSingle, designSingle);
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
-          lineHeight = naturalSingle * (para.spaceLine.val / 100000);
+          const percentageBase = measureOnly ? maxSizePx : naturalSingle;
+          lineHeight = percentageBase * (para.spaceLine.val / 100000);
         } else {
           lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = implicitSingle;
+        lineHeight = measureOnly
+          ? (measureNaturalLineSpacing ? naturalSingle : maxSizePx)
+          : implicitSingle;
       }
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font
@@ -5812,7 +5831,7 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true,
+        '#000000', slideNumber, rc, undefined, true, undefined, false, row.height === 0,
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
     }
@@ -5829,9 +5848,12 @@ export function renderTable(ctx: CanvasRenderingContext2D, el: TableElement, sca
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      const hasAutoHeightRow = el.rows
+        .slice(ri, Math.min(el.rows.length, ri + span))
+        .some((spannedRow) => spannedRow.height === 0);
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true,
+        '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
       ) as number) || 0;
       let have = 0;
       for (let s = 0; s < span && ri + s < rowHeights.length; s++) have += rowHeights[ri + s];
@@ -6149,6 +6171,7 @@ export type SlideRenderOptions = RenderOptions & {
   math?: MathRenderer;
   threeD?: ChartThreeDRenderer;
   regionMap?: ChartRegionMapRenderer;
+  chartEx?: ChartExRenderer;
   dim?: DimOptions;
 };
 
@@ -6546,6 +6569,7 @@ async function renderSlideLeased(
         fill => chartMarkerImages.get(
           chartImageFillKey(fill),
         ),
+        opts.chartEx,
       );
       ctx.restore();
     }

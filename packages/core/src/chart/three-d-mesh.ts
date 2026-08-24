@@ -9,7 +9,7 @@ export type ThreeDMeshShape =
   | 'pyramid'
   | 'pyramidToMax';
 
-export type ThreeDMeshKind = ThreeDMeshShape | 'areaStrip' | 'pieSector';
+export type ThreeDMeshKind = ThreeDMeshShape | 'areaStrip' | 'lineRibbon' | 'pieSector';
 
 export type ThreeDMeshFaceRole = 'baseCap' | 'endCap' | 'side';
 
@@ -46,6 +46,13 @@ export interface ThreeDAreaStripMeshOptions {
   readonly farDepth: number;
   readonly capStart: boolean;
   readonly capEnd: boolean;
+}
+
+export interface ThreeDLineRibbonMeshOptions {
+  /** One bounded stroke polygon in the chart's model-space X/Y plane. */
+  readonly outline: readonly { readonly x: number; readonly y: number }[];
+  readonly nearDepth: number;
+  readonly farDepth: number;
 }
 
 export interface ThreeDPieSectorMeshOptions {
@@ -350,6 +357,51 @@ export function buildThreeDAreaStripMeshes(
   }
   const mesh = buildAreaStripMeshSingle(options);
   return mesh ? [mesh] : [];
+}
+
+/** Extrude one already-tessellated line-stroke polygon through its authored
+ * series-depth interval. Line3D is a solid ribbon in Excel, not a flat Canvas
+ * stroke; reusing the bounded stroke polygon preserves dash/cap/join geometry
+ * while the ordinary mesh projector supplies culling, depth order and material
+ * shading exactly like bars and area strips. */
+export function buildThreeDLineRibbonMesh(
+  options: ThreeDLineRibbonMeshOptions,
+): ThreeDMesh | null {
+  const outline = options.outline;
+  if (outline.length < 3
+    || outline.length > 64
+    || ![options.nearDepth, options.farDepth].every(Number.isFinite)
+    || Math.abs(options.nearDepth - options.farDepth) < 1e-9
+    || !outline.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) {
+    return null;
+  }
+  const z0 = Math.min(options.nearDepth, options.farDepth);
+  const z1 = Math.max(options.nearDepth, options.farDepth);
+  const count = outline.length;
+  const vertices: ThreeDScenePoint[] = [
+    ...outline.map(point => ({ ...point, depth: z0 })),
+    ...outline.map(point => ({ ...point, depth: z1 })),
+  ];
+  const near = Array.from({ length: count }, (_, index) => index);
+  const far = Array.from({ length: count }, (_, index) => count + index).reverse();
+  const faces: ThreeDMeshFace[] = [
+    { indices: near, role: 'side', smoothSurface: false },
+    { indices: far, role: 'side', smoothSurface: false },
+    ...Array.from({ length: count }, (_, index): ThreeDMeshFace => {
+      const next = (index + 1) % count;
+      return {
+        indices: [index, next, count + next, count + index],
+        role: 'side',
+        smoothSurface: false,
+      };
+    }),
+  ];
+  return {
+    shape: 'lineRibbon',
+    vertices,
+    faces: outwardWoundFaces(vertices, faces),
+    silhouetteEdges: [],
+  };
 }
 
 /** Build a closed cylindrical sector in the shared cartesian camera space.

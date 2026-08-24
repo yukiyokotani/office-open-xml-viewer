@@ -3,6 +3,64 @@ import { describe, expect, it } from 'vitest';
 import { announcements } from './lib/announcements';
 
 const articlePage = readFileSync(new URL('./pages/announcements/[slug].astro', import.meta.url), 'utf8');
+const bundleSizePage = readFileSync(new URL('./pages/bundle-size.astro', import.meta.url), 'utf8');
+const apiReference = readFileSync(new URL('./components/ApiReference.astro', import.meta.url), 'utf8');
+const apiReferenceData = readFileSync(new URL('./lib/api-reference.ts', import.meta.url), 'utf8');
+const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.meta.url), 'utf8');
+
+describe('v0.81 ChartEx migration guide', () => {
+  const announcement = announcements.find((item) => item.slug === 'v081-chartex-opt-in');
+
+  it('makes the required migration decision explicit', () => {
+    expect(announcement).toMatchObject({
+      label: 'Upcoming release',
+      version: 'v0.81.0',
+    });
+    expect(announcement?.sections.map(({ title }) => title)).toEqual(['ChartEx support', 'Migration']);
+    expect(announcement?.sections[0]).toMatchObject({ kind: 'summary' });
+
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...(section.modules ?? []),
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    expect(text).toContain('Classic charts remain built in and require no application changes');
+    expect(text).toContain("@silurus/ooxml/chart-ex");
+    expect(text).toContain('chartEx');
+    expect(text).toContain('waterfall');
+  });
+
+  it('keeps volatile measurements and implementation detail out of the announcement', () => {
+    const text = announcement?.sections.flatMap((section) => [
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+    ]).join('\n') ?? '';
+
+    expect(text).not.toMatch(/\b(?:KB|KiB|gzip)\b/);
+    expect(text).not.toContain('structured-clone');
+    expect(text).not.toContain('self-contained render-worker');
+    expect(text).not.toContain('shared chart model');
+  });
+});
+
+describe('stable documentation boundaries', () => {
+  it('keeps the current bundle measurements on one stable page', () => {
+    expect(bundleSizePage).toContain('Updated for the upcoming v0.81.0 release');
+    expect(bundleSizePage).toContain('+116 KiB');
+    expect(bundleSizePage).toContain('+31 KiB');
+    expect(bundleSizePage).toContain('+38 KB');
+    expect(bundleSizePage).toContain('+12 KB');
+    expect(siteFooter).toContain('href="/bundle-size"');
+  });
+
+  it('does not link API details directly to release notes', () => {
+    expect(apiReference).not.toContain('href="/announcements/');
+    expect(apiReferenceData).not.toContain("detailsHref: '/announcements/");
+  });
+});
 
 describe('v0.80 worker rendering announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v080-worker-rendering');

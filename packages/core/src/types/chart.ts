@@ -162,6 +162,8 @@ export interface ChartSeries {
    * showMarker is true).
    */
   markerSymbol?: string | null;
+  /** Host-resolved automatic scatter marker when no `<c:marker>` symbol is authored. */
+  automaticMarkerSymbol?: string | null;
   /**
    * `<c:marker><c:size val>` (ECMA-376 §21.2.2.34) — marker side length in
    * points. null = renderer default (~5 pt).
@@ -705,6 +707,16 @@ export interface ChartDataTable {
   fontColor?: string | null;
   fontBold?: boolean | null;
   fontItalic?: boolean | null;
+  /** Resolved solid compatibility projection of `<c:dTable><c:spPr>`. */
+  fillColor?: string | null;
+  /** Direct DrawingML fill recipe. Preserved even where Office's application-
+   * defined data-table paint extent has not been established for that recipe. */
+  fill?: SolidFill | GradientFill | PatternFill | null;
+  /** Explicit `<a:noFill>` on the data-table shape properties. */
+  fillHidden?: boolean | null;
+  /** True when `spPr` authored any DrawingML fill child, including one whose
+   * paint recipe this implementation cannot resolve. */
+  fillPaintAuthored?: boolean | null;
   lineColor?: string | null;
   lineWidthEmu?: number | null;
   lineDash?: string | null;
@@ -773,6 +785,8 @@ export interface ChartModel {
   plotAreaFillHidden?: boolean | null;
   /** A direct plot-area fill paint was authored, even when unresolved. */
   plotAreaFillPaintAuthored?: boolean | null;
+  /** `plotAreaBg` is a host automatic fallback, not direct formatting. */
+  plotAreaFillAutomatic?: boolean | null;
   /** Direct plot-area outline paint and width. */
   plotAreaLineColor?: string | null;
   plotAreaLineFill?: SolidFill | GradientFill | PatternFill | null;
@@ -924,6 +938,9 @@ export interface ChartModel {
     | null;
   /** `<c:catAx><c:title><c:layout><c:manualLayout>`. */
   catAxisTitleManualLayout?: ChartManualLayout | null;
+  /** Effective sum of the DrawingML top/bottom text insets for the
+   * category-axis title, including CT_TextBodyProperties defaults. */
+  catAxisTitleTextVerticalInsetEmu?: number | null;
   /** `<c:valAx><c:title>` run-prop font size (hpt). null = renderer default. */
   valAxisTitleFontSizeHpt?: number | null;
   /** `<c:valAx><c:title>` run-prop bold flag. null = not bold. */
@@ -947,6 +964,9 @@ export interface ChartModel {
     | null;
   /** `<c:valAx><c:title><c:layout><c:manualLayout>`. */
   valAxisTitleManualLayout?: ChartManualLayout | null;
+  /** Effective sum of the DrawingML top/bottom text insets for the
+   * value-axis title. */
+  valAxisTitleTextVerticalInsetEmu?: number | null;
   // ── Chart text font faces (CH10) ─────────────────────────────────────────
   // Each is the `<a:latin typeface>` (ECMA-376 §20.1.4.2.24) resolved from the
   // element's `<c:txPr>`. When absent the renderer falls back to the theme
@@ -1042,9 +1062,13 @@ export interface ChartModel {
   catAxisLineColor?: string | null;
   catAxisLineWidthEmu?: number | null;
   catAxisLineDash?: string | null;
+  /** A direct `<c:catAx><c:spPr><a:ln>` paint was authored. */
+  catAxisLinePaintAuthored?: boolean | null;
   valAxisLineColor?: string | null;
   valAxisLineWidthEmu?: number | null;
   valAxisLineDash?: string | null;
+  /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
+  valAxisLinePaintAuthored?: boolean | null;
   /**
    * `<c:catAx><c:numFmt@formatCode>` (or scatter X-axis valAx). When set,
    * the renderer formats X-axis tick labels with this code (e.g. dates).
@@ -1552,6 +1576,8 @@ export interface ChartThreeDSeriesAxis {
   tickLabelSkip?: number | null;
   tickMarkSkip?: number | null;
   majorTickMark: string;
+  /** `<c:serAx><c:minorTickMark>`; omission means no minor tick marks. */
+  minorTickMark?: string | null;
   fontColor?: string | null;
   fontSizeHpt?: number | null;
   fontBold?: boolean | null;
@@ -1560,6 +1586,8 @@ export interface ChartThreeDSeriesAxis {
   lineColor?: string | null;
   lineWidthEmu?: number | null;
   lineDash?: string | null;
+  /** A direct `<c:serAx><c:spPr><a:ln>` paint was authored. */
+  linePaintAuthored?: boolean | null;
   lineHidden: boolean;
   titleFontSizeHpt?: number | null;
   titleFontBold?: boolean | null;

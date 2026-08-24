@@ -138,6 +138,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     // layout acquisition or permit a renderer back-edge.
     ['ChartThreeDRenderer', 'type'],
     ['ChartRegionMapRenderer', 'type'],
+    ['ChartExRenderer', 'type'],
     ['ChartImageLookup', 'type'],
     ['Duotone', 'type'],
     ['MathRenderer', 'type'],

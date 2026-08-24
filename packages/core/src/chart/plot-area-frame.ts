@@ -3,6 +3,7 @@ import { drawingmlLineDashArray } from '../draw/dash.js';
 import { resolveFill } from '../shape/paint.js';
 import { EMU_PER_PT } from '../units.js';
 import { strokeChartFrameRect } from './compound-frame.js';
+import { paintChartImageFill } from './image-fill.js';
 
 /** Paint the effective DrawingML plot-area frame behind chart geometry.
  *
@@ -20,12 +21,18 @@ export function paintPlotAreaFrame(
   shapeRotationDeg = 0,
 ): void {
   if (chart.plotAreaFillHidden !== true) {
-    const fill = chart.plotAreaFill
-      ? resolveFill(chart.plotAreaFill, ctx, x, y, w, h, shapeRotationDeg)
-      : chart.plotAreaBg ? `#${chart.plotAreaBg}` : null;
-    if (fill) {
-      ctx.fillStyle = fill;
-      ctx.fillRect(x, y, w, h);
+    if (chart.plotAreaFill?.fillType === 'image') {
+      paintChartImageFill(
+        ctx, chart.plotAreaFill, x, y, w, h, ptToPx, shapeRotationDeg,
+      );
+    } else {
+      const fill = chart.plotAreaFill
+        ? resolveFill(chart.plotAreaFill, ctx, x, y, w, h, shapeRotationDeg)
+        : chart.plotAreaBg ? `#${chart.plotAreaBg}` : null;
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(x, y, w, h);
+      }
     }
   }
   if (chart.plotAreaLineHidden === true

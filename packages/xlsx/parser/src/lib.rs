@@ -759,7 +759,7 @@ mod retained_model_limit_tests {
             col: 1,
             row,
             value,
-            style_index: 0,
+            style_index: None,
             formula: formula.map(str::to_string),
             show_phonetic: false,
         }
@@ -1547,6 +1547,7 @@ fn parse_projected_worksheet(
     // All authored width declarations in XML order. The boolean records
     // whether the declaration also needs the compact public wire form.
     let mut authored_col_widths: Vec<(crate::types::ColumnWidthRange, bool)> = Vec::new();
+    let mut authored_col_styles: Vec<crate::types::ColumnStyleRange> = Vec::new();
     let mut row_heights = streamed.row_heights;
     // Outline (grouping) metadata — ECMA-376 §18.3.1.13 (col) / §18.3.1.73
     // (row) / §18.3.1.61 (outlinePr). Only non-default entries are recorded so
@@ -1731,6 +1732,9 @@ fn parse_projected_worksheet(
             "col" if is_x_ns(node.tag_name().namespace()) => {
                 let custom = attr_bool(&node, "customWidth").unwrap_or(false);
                 let hidden = attr_bool(&node, "hidden").unwrap_or(false);
+                let authored_style = node
+                    .attribute("style")
+                    .and_then(|value| value.parse::<u32>().ok());
                 let authored_width = node
                     .attribute("width")
                     .and_then(|s| s.parse::<f64>().ok())
@@ -1750,7 +1754,12 @@ fn parse_projected_worksheet(
                 // Also retain outline-only columns so their gutter metadata
                 // reaches the viewer at the default width.
                 let has_outline = outline_level > 0 || collapsed;
-                if authored_width.is_none() && !custom && !hidden && !has_outline {
+                if authored_width.is_none()
+                    && authored_style.is_none()
+                    && !custom
+                    && !hidden
+                    && !has_outline
+                {
                     continue;
                 }
                 let min: u32 = node
@@ -1765,6 +1774,13 @@ fn parse_projected_worksheet(
                     .clamp(1, 16_384);
                 if full_max < min {
                     continue;
+                }
+                if let Some(style_index) = authored_style {
+                    authored_col_styles.push(crate::types::ColumnStyleRange {
+                        min,
+                        max: full_max,
+                        style_index,
+                    });
                 }
                 let width: f64 = if hidden {
                     0.0
@@ -2217,6 +2233,22 @@ fn parse_projected_worksheet(
         .filter_map(|(range, compact)| compact.then_some(range))
         .collect();
 
+    // ECMA-376 §18.3.1.13: a column style is the default XF for cells in that
+    // column. Resolve it onto sparse authored cells only after every `<col>`
+    // declaration is known; an explicit `c/@s="0"` remains `Some(0)` and wins.
+    for row in &mut rows {
+        for cell in &mut row.cells {
+            if cell.style_index.is_some() {
+                continue;
+            }
+            cell.style_index = authored_col_styles
+                .iter()
+                .rev()
+                .find(|range| cell.col >= range.min && cell.col <= range.max)
+                .map(|range| range.style_index);
+        }
+    }
+
     conditional_formats.extend(x14_icon_formats);
 
     if rows_hidden_by_default {
@@ -2241,6 +2273,7 @@ fn parse_projected_worksheet(
         rows,
         col_widths,
         col_width_ranges,
+        col_style_ranges: authored_col_styles,
         row_heights,
         col_outline_levels,
         col_collapsed,
@@ -3027,10 +3060,7 @@ fn parse_row_cells(
             ),
         };
         let cell_type = c_node.attribute("t").unwrap_or("");
-        let style_index: u32 = c_node
-            .attribute("s")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let style_index: Option<u32> = c_node.attribute("s").and_then(|s| s.parse().ok());
 
         // Inline string: <c t="inlineStr"><is>...</is></c>
         let is_node = c_node.children().find(|n| n.tag_name().name() == "is");
@@ -4127,6 +4157,44 @@ mod sheet_view_tests {
     }
 
     #[test]
+    fn column_style_is_preserved_without_expanding_the_range() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col min="1" max="16384" style="17"/></cols><sheetData/></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(
+            ws.col_style_ranges,
+            vec![crate::types::ColumnStyleRange {
+                min: 1,
+                max: 16_384,
+                style_index: 17,
+            }],
+        );
+    }
+
+    #[test]
+    fn explicit_zero_cell_style_remains_distinct_from_column_inheritance() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col min="1" max="1" style="17"/></cols><sheetData><row r="1"><c r="A1" s="0"/></row></sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(ws.rows[0].cells[0].style_index, Some(0));
+    }
+
+    #[test]
+    fn cell_without_authored_style_inherits_its_column_style() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><cols><col min="1" max="2" style="17"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="C1"><v>2</v></c></row></sheetData></worksheet>"#
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        assert_eq!(ws.rows[0].cells[0].style_index, Some(17));
+        assert_eq!(ws.rows[0].cells[1].style_index, None);
+    }
+
+    #[test]
     fn later_compact_col_width_range_overrides_legacy_point_projection() {
         let xml = format!(
             r#"<worksheet xmlns="{NS}"><cols>
@@ -5097,7 +5165,8 @@ mod strict_namespace_cell_tests {
             other => panic!("expected shared-string reference, got {other:?}"),
         }
         assert_eq!(
-            cells[0].style_index, 2,
+            cells[0].style_index,
+            Some(2),
             "the `s` style index must round-trip"
         );
 

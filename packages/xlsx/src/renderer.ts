@@ -6,7 +6,12 @@ import type {
   SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone,
 } from './types.js';
-import type { Stroke, ChartThreeDRenderer, ChartRegionMapRenderer } from '@silurus/ooxml-core';
+import type {
+  Stroke,
+  ChartThreeDRenderer,
+  ChartRegionMapRenderer,
+  ChartExRenderer,
+} from '@silurus/ooxml-core';
 import { chartImageFillKey } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
@@ -767,6 +772,23 @@ function resolveXf(styles: Styles, styleIndex: number): { font: CellFont; fill: 
   const fill: CellFill = styles.fills[xf.fillId] ?? { patternType: 'none', fgColor: null, bgColor: null };
   const border: Border = styles.borders[xf.borderId] ?? { left: null, right: null, top: null, bottom: null };
   return { font, fill, border, xf };
+}
+
+function columnStyleIndex(worksheet: Worksheet, col: number): number {
+  const ranges = worksheet.colStyleRanges ?? [];
+  for (let index = ranges.length - 1; index >= 0; index--) {
+    const range = ranges[index];
+    if (col >= range.min && col <= range.max) return range.styleIndex;
+  }
+  return 0;
+}
+
+function effectiveCellStyleIndex(
+  worksheet: Worksheet,
+  cell: Cell | undefined,
+  col: number,
+): number {
+  return cell?.styleIndex ?? columnStyleIndex(worksheet, col);
 }
 
 function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -2016,7 +2038,9 @@ function renderQuadrant(
     aCx = mirrorX(aCx, cW);
     const key = `${aRow}:${aCol}`;
     const cell = rc.cellMap.get(key);
-    const { font, fill, border, xf } = resolveXf(styles, cell?.styleIndex ?? 0);
+    const { font, fill, border, xf } = resolveXf(
+      styles, effectiveCellStyleIndex(rc.worksheet, cell, aCol),
+    );
     const cf = evaluateCf(cell, aRow, aCol, cfContext, styles.dxfs ?? []);
     const effectiveFill = cf.fill ?? fill;
 
@@ -2172,7 +2196,9 @@ function renderQuadrant(
         const ckey = `${rowIndex}:${colIndices[ci]}`;
         if (!mergeSkipSet.has(ckey) && !mergeAnchorMap.has(ckey)) {
           const c = cellMap.get(ckey);
-          const cXf = resolveXf(styles, c?.styleIndex ?? 0).xf;
+          const cXf = resolveXf(
+            styles, effectiveCellStyleIndex(rc.worksheet, c, colIndices[ci]),
+          ).xf;
           isCC = cXf.alignH === 'centerContinuous';
           hasValue = !!(c && c.value && c.value.type !== 'empty');
         }
@@ -2215,7 +2241,7 @@ function renderQuadrant(
       const cx = mirrorX(ltrCx, cellW);
 
       const cell = cellMap.get(key);
-      const styleIndex = cell?.styleIndex ?? 0;
+      const styleIndex = effectiveCellStyleIndex(rc.worksheet, cell, colIndex);
       const { font, fill, border, xf } = resolveXf(styles, styleIndex);
       const cf = evaluateCf(cell, rowIndex, colIndex, cfContext, styles.dxfs ?? []);
       const effectiveFill = cf.fill ?? fill;
@@ -2249,18 +2275,21 @@ function renderQuadrant(
       // - directional hatches (dark/light Horizontal/Vertical/Down/Up/Grid/
       //   Trellis): render via a small repeating tile using createPattern so
       //   the hatch actually shows, rather than approximating as a blend.
-      if (paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH)) {
+      let hasCellBackground = paintCellPatternFill(ctx, effectiveFill, cx, cy, cellW, cellH);
+      if (hasCellBackground) {
         // own fill painted; tableStyle fallbacks intentionally skipped
       } else if (tableStyle && tableFillDxf?.fill?.fgColor) {
         // Custom or built-in: a resolved table-element dxf fill wins.
         ctx.fillStyle = hexToRgba(tableFillDxf.fill.fgColor);
         ctx.fillRect(cx, cy, cellW, cellH);
+        hasCellBackground = true;
       } else if (tableStyle && !tableStyle.isCustom && tableStyle.isBanded) {
         // Accent-tint banding is an approximation for built-in style names
         // only. Custom styles with no stripe dxf get no banding fill (Excel
         // draws none — §18.5.1.2).
         ctx.fillStyle = stripeColorFor(tableStyle.accent);
         ctx.fillRect(cx, cy, cellW, cellH);
+        hasCellBackground = true;
       }
 
       // Comment indicator triangle — drawn above fill but below borders so
@@ -2292,7 +2321,9 @@ function renderQuadrant(
       // 0.5/dpr offset blurs at even device widths, e.g. dpr=3).
       // Skipped when the sheet has `<sheetView showGridLines="0">` (View →
       // Gridlines unchecked; ECMA-376 §18.3.1.83).
-      if (rc.worksheet.isChartSheet !== true && rc.worksheet.showGridlines !== false) {
+      if (rc.worksheet.isChartSheet !== true
+          && rc.worksheet.showGridlines !== false
+          && !hasCellBackground) {
         ctx.strokeStyle = '#d0d0d0';
         ctx.lineWidth = 0.5;
         ctx.beginPath();
@@ -2354,7 +2385,9 @@ function renderQuadrant(
       // only as the neighbour's bottom/right still shows at the viewport edge.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
       const aboveBottom = aboveCell
-        ? resolveXf(styles, aboveCell.styleIndex ?? 0).border.bottom
+        ? resolveXf(
+            styles, effectiveCellStyleIndex(rc.worksheet, aboveCell, colIndex),
+          ).border.bottom
         : null;
       if (aboveBottom?.style && (ri === 0 || mergedBorder.top?.style)) {
         mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
@@ -2365,7 +2398,9 @@ function renderQuadrant(
         // neighbour's xf.right re-introduces the internal vertical we just hid.
         const leftCell = cellMap.get(`${rowIndex}:${colIndex - 1}`);
         const leftRight = leftCell
-          ? resolveXf(styles, leftCell.styleIndex ?? 0).border.right
+          ? resolveXf(
+              styles, effectiveCellStyleIndex(rc.worksheet, leftCell, colIndex - 1),
+            ).border.right
           : null;
         if (leftRight?.style && (ci === 0 || mergedBorder.left?.style)) {
           mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
@@ -2510,7 +2545,9 @@ function renderQuadrant(
           if (mergeSkipSet.has(adjKey) || mergeAnchorMap.has(adjKey)) break;
           const adjCell = cellMap.get(adjKey);
           if (adjCell && adjCell.value.type !== 'empty') break;
-          const adjStyleIndex = adjCell?.styleIndex ?? 0;
+          const adjStyleIndex = effectiveCellStyleIndex(
+            rc.worksheet, adjCell, colIndices[oci],
+          );
           const adjXf = resolveXf(styles, adjStyleIndex).xf;
           if (adjXf.alignH !== 'centerContinuous') break;
           centerContinuousW += colWidths[oci];
@@ -3807,7 +3844,7 @@ export function renderViewport(
     ctx, worksheet, colAxis, rowAxis, opts.loadedImages, cs,
     startRow, startCol, scrollOffsetX, scrollOffsetY,
     scrollAreaX, scrollAreaY, scrollAreaW, scrollAreaH,
-    worksheet.rightToLeft === true, canvasW, opts.threeD, opts.regionMap,
+    worksheet.rightToLeft === true, canvasW, opts.threeD, opts.regionMap, opts.chartEx,
   );
 
   // ── Anchored slicers (Office 2010+ pivot/table filter buttons) ──
@@ -4113,6 +4150,7 @@ function renderAnchoredDrawings(
   canvasW: number,
   threeD?: ChartThreeDRenderer,
   regionMap?: ChartRegionMapRenderer,
+  chartEx?: ChartExRenderer,
 ): void {
   const drawings: AnchoredDrawing[] = [];
   let fallbackOrder = 0;
@@ -4156,6 +4194,7 @@ function renderAnchoredDrawings(
         [drawing.anchor],
         threeD,
         regionMap,
+        chartEx,
       );
     }
   }
@@ -5293,6 +5332,7 @@ function renderCharts(
   anchors: readonly ChartAnchor[] = ws.charts,
   threeD?: ChartThreeDRenderer,
   regionMap?: ChartRegionMapRenderer,
+  chartEx?: ChartExRenderer,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
 
@@ -5327,22 +5367,30 @@ function renderCharts(
     ctx.rect(clipX, scrollAreaY, scrollAreaW, scrollAreaH);
     ctx.clip();
 
-    // XLSX natural rendering is device-px at 96 DPI where 1pt = 4/3 px. Scale
-    // that by `cs` so OOXML-specified font sizes (title/axes) scale with zoom.
-    const ptToPx = PT_TO_PX * cs;
+    // Render the chart in its natural 96-DPI coordinate space, then let Canvas
+    // scale the complete paint by the worksheet zoom. Passing a smaller rect
+    // and only shrinking `ptToPx` leaves renderer-owned gaps/padding at fixed
+    // screen pixels; that can repack or entirely suppress a manual legend at a
+    // zoom step even though Excel scales the chart as one proportional object.
+    ctx.save();
+    if (cs !== 1) ctx.scale(cs, cs);
     // `anchor.chart` is already the canonical ChartModel emitted by the Rust
     // parser (`ooxml_common::chart::ChartModel`) — the former `adaptChartData`
     // default/mapping logic now lives in the parser's `From<ChartData>`.
     renderChart(
       ctx,
       anchor.chart,
-      { x: cx, y: cy, w: cw, h: ch },
-      ptToPx,
+      cs === 1
+        ? { x: cx, y: cy, w: cw, h: ch }
+        : { x: cx / cs, y: cy / cs, w: cw / cs, h: ch / cs },
+      PT_TO_PX,
       0,
       threeD,
       regionMap,
       fill => loadedImages?.get(chartImageFillKey(fill)),
+      chartEx,
     );
+    ctx.restore();
     ctx.restore();
   }
 }

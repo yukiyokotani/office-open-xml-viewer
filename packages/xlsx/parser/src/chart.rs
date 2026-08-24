@@ -209,7 +209,7 @@ impl XlsxChartReferenceResolver<'_, '_, '_, '_> {
                             .iter()
                             .find(|cell| cell.row == range.top && cell.col == range.left)
                     })
-                    .map(|cell| cell.style_index);
+                    .map(|cell| cell.style_index.unwrap_or(0));
             }
         }
 
@@ -888,6 +888,13 @@ impl ooxml_common::chart::ColorResolver for XlsxColorResolver<'_> {
         Some("FFFFFF".to_string())
     }
 
+    /// Excel's automatic plot-area paint is opaque white even when the chart
+    /// area itself has a different authored fill. A direct plot-area fill or
+    /// noFill remains authoritative in the shared parser.
+    fn default_plot_area_bg(&self) -> Option<String> {
+        Some("FFFFFF".to_string())
+    }
+
     fn implicit_outline_only_negative_column_style(&self) -> bool {
         true
     }
@@ -1535,6 +1542,27 @@ mod worksheet_reference_tests {
         assert_eq!(chart.series[0].name, "المبيعات");
         assert_eq!(chart.categories, vec!["أحمد", "سارة", "خالد"]);
         assert_eq!(chart.series[0].categories, None);
+        assert_eq!(
+            chart.series[0].values,
+            vec![Some(5000.0), Some(6200.0), Some(7500.0)],
+        );
+    }
+
+    #[test]
+    fn zero_point_chart_caches_resolve_cross_sheet_series() {
+        let xml = chart_xml(false)
+            .replace(
+                "</c:strRef>",
+                "<c:strCache><c:ptCount val=\"0\"/></c:strCache></c:strRef>",
+            )
+            .replace(
+                "</c:numRef>",
+                "<c:numCache><c:ptCount val=\"0\"/></c:numCache></c:numRef>",
+            );
+        let chart = load_model(&xml);
+
+        assert_eq!(chart.series[0].name, "المبيعات");
+        assert_eq!(chart.categories, vec!["أحمد", "سارة", "خالد"]);
         assert_eq!(
             chart.series[0].values,
             vec![Some(5000.0), Some(6200.0), Some(7500.0)],

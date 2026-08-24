@@ -3,6 +3,7 @@ import { PptxViewer } from './viewer';
 import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
+import { chartEx } from '../../../src/chart-ex';
 
 type Args = {
   width: number;
@@ -72,6 +73,7 @@ export function buildViewerUI(
     math,
     threeD,
     regionMap,
+    chartEx,
     onSlideChange: (idx, total) => {
       slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
       prevBtn.disabled = idx === 0;
@@ -190,6 +192,7 @@ function renderFileUpload(args: Args, mode: 'main' | 'worker'): HTMLElement {
         math,
         threeD,
         regionMap,
+        chartEx,
         onSlideChange: (idx, total) => {
           slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
           prevBtn.disabled = idx === 0;

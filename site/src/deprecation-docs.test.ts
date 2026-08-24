@@ -50,14 +50,12 @@ describe('public migration documentation', () => {
     expect(selectionContextMigration).toContain('XlsxRangeSelectionContext');
   });
 
-  it('links every current maxZipEntryBytes option to its release announcement', () => {
+  it('documents maxZipEntryBytes directly without linking API details to a release note', () => {
     for (const classes of Object.values(apiReference)) {
       for (const apiClass of classes) {
         const option = apiClass.options?.find(({ name }) => name === 'maxZipEntryBytes');
         expect(option?.desc, apiClass.name).toContain('scheduled for removal in a future breaking release');
-        expect(option?.detailsHref, apiClass.name).toBe(
-          '/announcements/v075-resource-governance#migrate-max-zip-entry-bytes',
-        );
+        expect(option?.detailsHref, apiClass.name).toBeUndefined();
       }
     }
   });

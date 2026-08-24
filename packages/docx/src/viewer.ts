@@ -246,6 +246,7 @@ export class DocxViewer implements ZoomableViewer {
         math: this._opts.math,
         threeD: this._opts.threeD,
         regionMap: this._opts.regionMap,
+        chartEx: this._opts.chartEx,
         mode: this._mode,
       }), () => {
         // Invalidate operations owned by the old document before its worker is

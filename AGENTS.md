@@ -280,6 +280,15 @@ README, docs, and Storybook public-facing code examples should:
 - use `container` for container-backed viewers (`XlsxViewer`),
 - avoid documenting private/local-only sample paths as public API.
 
+Keep announcements concise and user-facing:
+
+- state the supported capability and any required migration;
+- omit implementation detail that does not change a user's decision or action;
+- keep version-sensitive bundle measurements on the stable `/bundle-size` page,
+  not in release announcements;
+- do not link API reference details directly to release notes. Use a stable
+  reference page when more detail is necessary.
+
 ## Release Workflow
 
 When the user asks for a release, prepare a dedicated PR named
@@ -297,6 +306,7 @@ Release checklist:
 3. Sync public API documentation:
    - `site/src/lib/api-reference.ts`,
    - `site/src/components/Capabilities.astro` when capabilities changed.
+   - `site/src/pages/bundle-size.astro` with the latest production measurements.
 4. Add a new top `CHANGELOG.md` section:
    `## 0.x.0 — YYYY-MM-DD`.
 5. Bump all versions consistently:

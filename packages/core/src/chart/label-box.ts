@@ -3,6 +3,19 @@ import { drawingmlLineDashArray } from '../draw/dash.js';
 import { resolveFill } from '../shape/paint.js';
 import { EMU_PER_PT } from '../units.js';
 
+/** Whether a label shape supplies an actual Canvas-visible box paint. A bare
+ * `<c:spPr>` or explicit `noFill`/no-line still carries authored provenance,
+ * but it must not turn an ordinary pie label into a boxed callout. */
+export function chartLabelBoxHasVisiblePaint(
+  box: ChartLabelBox | null | undefined,
+): boolean {
+  if (!box) return false;
+  const hasFill = box.fillHidden !== true && (box.fill != null || box.fillPaint != null);
+  const hasBorder = box.borderHidden !== true
+    && (box.borderColor != null || box.borderFill != null);
+  return hasFill || hasBorder;
+}
+
 /** Merge two directly-authored label shapes property-by-property. The higher
  * precedence shape owns an authored paint/noFill choice even when that choice
  * cannot be resolved to a Canvas paint; omitted geometry continues to inherit

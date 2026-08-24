@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ChartModel } from '@silurus/ooxml-core';
+import type { ChartExRenderer, ChartModel } from '@silurus/ooxml-core';
 import { renderSlide } from './renderer.js';
 import type { Slide } from './types.js';
 
@@ -44,7 +44,7 @@ function recordingCanvas() {
 }
 
 describe('PPTX rotated bubble3D chart', () => {
-  it('rotates the chart frame while keeping one bounded material in local coordinates', async () => {
+  it('rotates the chart frame while keeping the complete material in local coordinates', async () => {
     const chart = {
       chartType: 'bubble', categories: ['1'], showLegend: false,
       catAxisMin: 0, catAxisMax: 2, valMin: 0, valMax: 2,
@@ -64,8 +64,33 @@ describe('PPTX rotated bubble3D chart', () => {
     await renderSlide(rec.canvas, slide, 9_144_000, 6_858_000, { width: 960, dpr: 1 });
 
     expect(rec.rotations).toContain(Math.PI / 2);
-    expect(rec.radialGradients).toHaveLength(1);
-    expect(rec.radialGradients[0].stops).toHaveLength(5);
-    expect(rec.compositeModes).toContain('source-atop');
+    expect(rec.radialGradients).toHaveLength(3);
+    expect(rec.radialGradients.map(gradient => gradient.stops.length)).toEqual([4, 5, 6]);
+    expect(rec.compositeModes.filter(mode => mode === 'source-atop')).toHaveLength(3);
+  });
+
+  it('forwards the opt-in ChartEx module through the PPTX chart element boundary', async () => {
+    const chart = {
+      chartType: 'boxWhisker', categories: [], series: [], showLegend: false,
+      chartexBox: { categories: [], series: [] },
+    } as unknown as ChartModel;
+    const slide = {
+      index: 0, slideNumber: 1, background: null,
+      elements: [{
+        type: 'chart', x: 500_000, y: 500_000, width: 4_000_000, height: 3_000_000,
+        rotation: 0, flipH: false, flipV: false, chart,
+      }],
+    } as Slide;
+    const rec = recordingCanvas();
+    const render = vi.fn<ChartExRenderer['render']>(() => true);
+    const chartEx = { render } as ChartExRenderer;
+
+    await renderSlide(rec.canvas, slide, 9_144_000, 6_858_000, {
+      width: 960, dpr: 1, chartEx,
+    });
+
+    expect(render).toHaveBeenCalledOnce();
+    expect(render.mock.calls[0]?.[1]).toBe(chart);
+    expect(render.mock.calls[0]?.[4]).toBe(0);
   });
 });

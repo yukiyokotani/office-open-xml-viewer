@@ -20,6 +20,7 @@ import {
   type MathRenderer,
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
+  type ChartExRenderer,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
@@ -186,6 +187,7 @@ export class PptxPresentation {
   private _math: MathRenderer | undefined;
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
+  private _chartEx: ChartExRenderer | undefined;
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this._worker = worker;
@@ -294,6 +296,12 @@ export class PptxPresentation {
         );
       }
       pres._regionMap = mode === 'worker' ? undefined : opts.regionMap;
+      if (opts.chartEx && mode === 'worker' && !rendererDescriptors?.chartEx) {
+        console.warn(
+          "[ooxml] a custom ChartEx renderer cannot cross the worker boundary; ChartEx charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/chart-ex.",
+        );
+      }
+      pres._chartEx = mode === 'worker' ? undefined : opts.chartEx;
       await pres._parse(
         buffer,
         resourceOptions.policy,
@@ -541,6 +549,7 @@ export class PptxPresentation {
             math: this._math,
             threeD: this._threeD,
             regionMap: this._regionMap,
+            chartEx: this._chartEx,
           },
           opts.onTextRun,
         );

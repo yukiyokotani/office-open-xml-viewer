@@ -5,6 +5,12 @@ import { PptxViewer } from './viewer';
 import { PptxScrollViewer } from './scroll-viewer';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
+import { math } from '../../../src/math';
+import { threeD } from '../../../src/three-d';
+import { regionMap } from '../../../src/region-map';
+import { chartEx } from '../../../src/chart-ex';
+
+const fullRenderers = { math, threeD, regionMap, chartEx } as const;
 
 type DemoArgs = { width: number };
 type LayoutArgs = Record<string, never>;
@@ -68,7 +74,7 @@ export const ScrollView: LayoutStory = {
       'max-height:720px;overflow-y:auto;border:1px solid #ccc;background:#f5f5f5;padding:12px;';
     root.appendChild(scroller);
 
-    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
+    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true, ...fullRenderers })
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} slides…`;
         const widthPx = 800;
@@ -182,7 +188,7 @@ export const ThumbnailGrid: LayoutStory = {
       'display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;';
     root.appendChild(grid);
 
-    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true })
+    PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true, ...fullRenderers })
       .then(async (pres) => {
         status.textContent = `Rendering ${pres.slideCount} thumbnails…`;
         const thumbWidth = 240;
@@ -247,11 +253,12 @@ export const MasterDetail: LayoutStory = {
       width: 800,
       useGoogleFonts: true,
       enableTextSelection: true,
+      ...fullRenderers,
     });
 
     // Load thumbnails using PptxPresentation; detail viewer loads independently
     Promise.all([
-      PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true }),
+      PptxPresentation.load(SAMPLE_URL, { useGoogleFonts: true, ...fullRenderers }),
       detailViewer.load(SAMPLE_URL),
     ])
       .then(async ([pres]) => {

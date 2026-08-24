@@ -82,6 +82,21 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
     expect(b.destroy).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards the opt-in ChartEx renderer to the workbook load', async () => {
+    const chartEx = { render: vi.fn() };
+    const { v } = build({ chartEx });
+    const loaded = fakeWorkbook();
+    const loadSpy = vi.spyOn(XlsxWorkbook, 'load').mockResolvedValueOnce(loaded.wb);
+
+    await v.load('chartex.xlsx');
+
+    expect(loadSpy).toHaveBeenCalledWith(
+      'chartex.xlsx',
+      expect.objectContaining({ chartEx }),
+    );
+    v.destroy();
+  });
+
   it('does not report an old worksheet acquisition rejected by a successful reload', async () => {
     installDom();
     const onError = vi.fn();

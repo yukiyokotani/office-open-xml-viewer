@@ -276,6 +276,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
         threeD: renderers.threeD,
         regionMap: renderers.regionMap,
+        chartEx: renderers.chartEx,
       });
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
