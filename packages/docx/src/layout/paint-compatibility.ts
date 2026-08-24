@@ -45,6 +45,15 @@ export const WORD_RUN_DECORATION_JUSTIFIED_ADVANCE = defineCompatibilityRule({
   description: 'Extend run shading, borders, underline, and strike decoration through the justification pitch owned by that run, including widened spaces.',
 });
 
+export const WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE = defineCompatibilityRule({
+  id: 'word-snap-to-chars-terminal-underline',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/snap-to-chars-underline.test.ts#ends a soft-wrapped underline at the final glyph instead of the unused cell edge',
+  },
+  description: 'For horizontal LTR snapToChars text, retain trailing character-cell slack in line advance while ending a terminal underline at the retained final-glyph extent.',
+});
+
 export const WORD_PARAGRAPH_BORDER_FLOW_RESERVATION = defineCompatibilityRule({
   id: 'word-paragraph-border-flow-reservation',
   evidence: {

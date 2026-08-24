@@ -36,6 +36,41 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v081-chartex-opt-in',
+    date: '2026-08-22',
+    label: 'Upcoming release',
+    version: 'v0.81.0',
+    title: 'Migrating to v0.81.0',
+    summary: 'v0.81.0 adds Microsoft ChartEx rendering and moves it to an opt-in module. Applications that display ChartEx charts must import and enable the renderer.',
+    audience: 'Applications that display waterfall, histogram, Pareto, funnel, box-and-whisker, treemap or sunburst charts. Applications that use only classic charts need no changes.',
+    sections: [
+      {
+        title: 'ChartEx support',
+        kind: 'summary',
+        paragraphs: [
+          'v0.81.0 adds rendering for Microsoft ChartEx chart families, including waterfall, histogram, Pareto, funnel, box-and-whisker, treemap and sunburst charts.',
+          'Classic charts remain built in and require no application changes.',
+        ],
+      },
+      {
+        title: 'Migration',
+        paragraphs: [
+          'ChartEx is now provided by the separate @silurus/ooxml/chart-ex module. Import chartEx and pass it to any DOCX, XLSX or PPTX viewer that needs these chart families.',
+        ],
+        examples: [
+          {
+            title: 'Enable ChartEx',
+            code: `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { chartEx } from '@silurus/ooxml/chart-ex';
+
+const viewer = new XlsxViewer(container, { chartEx });
+await viewer.load(source);`,
+          },
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v080-worker-rendering',
     date: '2026-08-16',
     label: 'Release note',

@@ -82,6 +82,16 @@ pub struct ColumnWidthRange {
     pub width: f64,
 }
 
+/// Compact `<col min max style>` default formatting. SpreadsheetML applies
+/// this style to cells in the column that do not carry their own `c/@s`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnStyleRange {
+    pub min: u32,
+    pub max: u32,
+    pub style_index: u32,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Worksheet {
@@ -98,6 +108,8 @@ pub struct Worksheet {
     pub col_widths: BTreeMap<u32, f64>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub col_width_ranges: Vec<ColumnWidthRange>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub col_style_ranges: Vec<ColumnStyleRange>,
     pub row_heights: BTreeMap<u32, f64>,
     /// Per-column outline (grouping) depth, 0-7 (ECMA-376 §18.3.1.13
     /// `<col outlineLevel>`). Only columns whose level is non-zero are recorded,
@@ -234,6 +246,7 @@ impl Worksheet {
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
             col_width_ranges: Vec::new(),
+            col_style_ranges: Vec::new(),
             row_heights: BTreeMap::new(),
             col_outline_levels: BTreeMap::new(),
             col_collapsed: BTreeMap::new(),
@@ -1371,13 +1384,6 @@ pub struct Row {
     pub hidden: bool,
 }
 
-/// serde `skip_serializing_if` predicate: drop the common unstyled `0` so the
-/// per-cell JSON doesn't carry a redundant `styleIndex` on every plain cell.
-/// The TS side reads it as `styleIndex ?? 0`, so an omitted field is equivalent.
-fn is_zero_u32(v: &u32) -> bool {
-    *v == 0
-}
-
 /// serde `skip_serializing_if` predicate for the common ungrouped `outlineLevel`
 /// of `0`, so a sheet without outlining keeps its byte-identical JSON.
 fn is_zero_u8(v: &u8) -> bool {
@@ -1390,8 +1396,10 @@ pub struct Cell {
     pub col: u32,
     pub row: u32,
     pub value: CellValue,
-    #[serde(skip_serializing_if = "is_zero_u32")]
-    pub style_index: u32,
+    /// Explicit `c/@s`. `None` inherits the owning column's `<col style>`;
+    /// `Some(0)` is intentionally distinct and resets to the Normal XF.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_index: Option<u32>,
     /// Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The
     /// renderer uses this to recompute volatile functions like TODAY() /
     /// NOW() at display time so the cached `<v>` (frozen when the file was

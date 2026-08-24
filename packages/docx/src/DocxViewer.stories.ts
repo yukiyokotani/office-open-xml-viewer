@@ -4,6 +4,7 @@ import { DocxViewer } from './viewer';
 import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
+import { chartEx } from '../../../src/chart-ex';
 
 type Args = {
   width: number;
@@ -74,6 +75,7 @@ export function buildViewerUI(
     math,
     threeD,
     regionMap,
+    chartEx,
     ...extra,
   });
 
@@ -202,6 +204,7 @@ function renderFileUpload(args: Args, mode: 'main' | 'worker'): HTMLElement {
         math,
         threeD,
         regionMap,
+        chartEx,
       });
       try {
         await viewer.load(buffer);

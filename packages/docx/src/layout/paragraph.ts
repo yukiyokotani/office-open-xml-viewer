@@ -172,6 +172,9 @@ export type MeasuredTextPlanSegment = Readonly<
   Omit<TextPlacement, 'origin' | 'bounds' | 'advancePt' | 'paintOps'> & {
     measuredWidthPt: number;
     basePaintOps: readonly import('./types.js').TextPaintOp[];
+    /** Physical advance from the segment origin through the final glyph. Word
+     * retains later grid slack for layout but excludes it from a terminal underline. */
+    decorationTerminalAdvancePt?: number;
     /** False when this segment continues the preceding shaped grapheme. */
     breakBefore?: boolean;
     /** WordprocessingML bidi classification facts consumed by the shared UAX#9 seam. */
@@ -617,6 +620,27 @@ function mergedContinuousDecoration(
   };
 }
 
+function trimTerminalUnderline(
+  decoration: TextDecorationLayout,
+  trimPt: number,
+): TextDecorationLayout {
+  const retainedTrimPt = Math.min(
+    trimPt,
+    Math.max(0, decoration.to.xPt - decoration.from.xPt),
+  );
+  const from = decoration.from;
+  const to = { ...decoration.to, xPt: decoration.to.xPt - retainedTrimPt };
+  const { path: _discardedPath, ...withoutPath } = decoration;
+  return {
+    ...withoutPath,
+    from,
+    to,
+    ...(decoration.style === 'wavy'
+      ? { path: retainedWavePath(from, to, decoration.widthPt) }
+      : {}),
+  };
+}
+
 /** Adjacent underlined source runs form one visual rule. Use a common
  * clearance below every glyph in the contiguous span; acquiring each run in
  * isolation instead creates stepped solid rules and restarts dash/wave phase
@@ -779,6 +803,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
   const placements: ParagraphPlacement[] = [];
+  const terminalDecorationTrims = new Map<number, number>();
   for (const segmentIndex of visual.order) {
     const segment = segments[segmentIndex];
     if (!segment) continue;
@@ -851,6 +876,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         rtl: _rtl,
         digitsAsAN: _digitsAsAN,
         fixedPitch: _fixedPitch,
+        decorationTerminalAdvancePt,
         textLayoutService: _textLayoutService,
         textShapeRequest: _textShapeRequest,
         retainedGeometry,
@@ -943,10 +969,36 @@ export function planLine(input: PlanLineInput): LineLayout {
           },
         } : {}),
       };
+      const terminalDecorationTrimPt = decorationTerminalAdvancePt === undefined
+        ? 0
+        : Math.max(
+            0,
+            widthPt + ownedTrailingSlackPt - decorationTerminalAdvancePt,
+          );
+      // The physical end of a bidi line is not the logical run tail. Keep this
+      // compatibility path scoped to horizontal LTR text.
+      if (direction === 'ltr' && terminalDecorationTrimPt > 0) {
+        terminalDecorationTrims.set(placements.length, terminalDecorationTrimPt);
+      }
       placements.push(placed);
     }
     xPt += widthPt;
     if (stretch?.trailingGap) xPt += perGapPt;
+  }
+  for (const [placementIndex, trimPt] of terminalDecorationTrims) {
+    const placement = placements[placementIndex];
+    if (placement?.kind !== 'text' || !placement.decorations) continue;
+    const next = placements[placementIndex + 1];
+    const decorations = placement.decorations.map((decoration) => {
+      if (decoration.kind !== 'underline') return decoration;
+      const continues = (next?.kind === 'text' || next?.kind === 'tab')
+        && next.decorations?.some((candidate) =>
+          sameContinuousDecoration(decoration, candidate));
+      return continues
+        ? decoration
+        : trimTerminalUnderline(decoration, trimPt);
+    });
+    placements[placementIndex] = { ...placement, decorations };
   }
   for (let start = 0; start < placements.length;) {
     const first = placements[start];
@@ -1784,10 +1836,12 @@ function textPlanSegment(
     };
   });
   const snapLeadingPadPt = segment.snapGridLeadingPadPx ?? 0;
+  let decorationTerminalAdvancePt = segment.measuredWidth
+    - (segment.snapGridTrailingPadPx ?? 0);
   if (segment.snapGridClass === 'eastAsia' && segment.snapGridCellPitchPx) {
     const cellPitchPt = segment.snapGridCellPitchPx;
     let precedingCells = 0;
-    clusters = clusters.map((cluster) => {
+    clusters = clusters.map((cluster, index) => {
       const text = segment.text.slice(
         cluster.range.start - sourceOffset,
         cluster.range.end - sourceOffset,
@@ -1797,6 +1851,11 @@ function textPlanSegment(
         cellPitchPt,
       );
       const allocatedAdvancePt = cells * cellPitchPt;
+      if (index === clusters.length - 1) {
+        decorationTerminalAdvancePt = precedingCells * cellPitchPt
+          + (allocatedAdvancePt - cluster.advancePt) / 2
+          + cluster.advancePt;
+      }
       const placed = {
         ...cluster,
         offset: {
@@ -1958,6 +2017,16 @@ function textPlanSegment(
             yPt: operation.offset.yPt,
           },
         }));
+  const retainedDecorationTerminalAdvancePt =
+    characterGrid?.type === 'snapToChars'
+    && segment.underline
+    && !segment.verticalRun
+    && basePaintOps.length === 1
+    && segment.selectedFaceInkBounds
+      ? basePaintOps[0]!.offset.xPt
+        + (basePaintOps[0]!.glyphOffsetPt?.xPt ?? 0)
+        + segment.selectedFaceInkBounds.xMaxPt * (basePaintOps[0]!.scaleX ?? 1)
+      : decorationTerminalAdvancePt;
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
@@ -1995,6 +2064,9 @@ function textPlanSegment(
     rtl: segment.rtl,
     digitsAsAN: segment.digitsAsAN,
     fixedPitch: segment.fitTextRegionIndex !== undefined || segment.snapGridClass !== undefined,
+    ...(characterGrid?.type === 'snapToChars' && segment.underline
+      ? { decorationTerminalAdvancePt: retainedDecorationTerminalAdvancePt }
+      : {}),
     ...(retainedGeometry ? { retainedGeometry } : {}),
     ...(segment.textLayoutService ? { textLayoutService: segment.textLayoutService } : {}),
     ...(segment.textShapeRequest ? { textShapeRequest: segment.textShapeRequest } : {}),

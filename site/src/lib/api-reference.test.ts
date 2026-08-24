@@ -10,6 +10,11 @@ describe('official-site API reference', () => {
     expect(optionalChartRenderers.map(({ entry, exportName, contract }) => ({ entry, exportName, contract })))
       .toEqual([
         {
+          entry: '@silurus/ooxml/chart-ex',
+          exportName: 'chartEx',
+          contract: 'ChartExRenderer',
+        },
+        {
           entry: '@silurus/ooxml/three-d',
           exportName: 'threeD',
           contract: 'ChartThreeDRenderer',
@@ -30,6 +35,8 @@ describe('official-site API reference', () => {
           .toBe('ChartThreeDRenderer');
         expect(options.find(({ name }) => name === 'regionMap')?.type, apiClass.name)
           .toBe('ChartRegionMapRenderer');
+        expect(options.find(({ name }) => name === 'chartEx')?.type, apiClass.name)
+          .toBe('ChartExRenderer');
       }
     }
   });

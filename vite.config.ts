@@ -115,6 +115,9 @@ export default defineConfig(({ command, mode }) => ({
         'three-d': resolve(__dirname, 'src/three-d.ts'),
         // Opt-in offline ChartEx Region Map geometry/projector.
         'region-map': resolve(__dirname, 'src/region-map.ts'),
+        // Opt-in Microsoft ChartEx family renderer. Classic 2-D charts remain
+        // part of every format entry.
+        'chart-ex': resolve(__dirname, 'src/chart-ex.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),

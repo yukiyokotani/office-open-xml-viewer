@@ -1,5 +1,6 @@
 import type { ChartRegionMapRenderer } from '../chart/region-map-contract.js';
 import type { ChartThreeDRenderer } from '../chart/three-d-contract.js';
+import type { ChartExRenderer } from '../chart/chart-ex-contract.js';
 import type { MathRenderer } from '../math/mathjax.js';
 import {
   assertWorkerRendererDescriptor,
@@ -11,6 +12,7 @@ export interface LoadedWorkerRenderers {
   readonly math?: MathRenderer;
   readonly threeD?: ChartThreeDRenderer;
   readonly regionMap?: ChartRegionMapRenderer;
+  readonly chartEx?: ChartExRenderer;
 }
 
 /** Import a renderer's named export in the calling realm (normally a render
@@ -41,6 +43,10 @@ async function loadBuiltinRenderer(descriptor: WorkerRendererDescriptor): Promis
       const renderer = await import('../chart/region-map-renderer.js');
       return Object.freeze({ render: renderer.renderRegionMapChart });
     }
+    case 'chartEx': {
+      const renderer = await import('../chart/chart-ex-renderer.js');
+      return Object.freeze({ render: renderer.renderChartExChart });
+    }
   }
 }
 
@@ -65,10 +71,11 @@ function requireRendererMethods<T extends object>(
 export async function loadWorkerRenderers(
   descriptors: WorkerRendererDescriptors | undefined,
 ): Promise<LoadedWorkerRenderers> {
-  const [math, threeD, regionMap] = await Promise.all([
+  const [math, threeD, regionMap, chartEx] = await Promise.all([
     descriptors?.math ? loadWorkerRenderer(descriptors.math) : undefined,
     descriptors?.threeD ? loadWorkerRenderer(descriptors.threeD) : undefined,
     descriptors?.regionMap ? loadWorkerRenderer(descriptors.regionMap) : undefined,
+    descriptors?.chartEx ? loadWorkerRenderer(descriptors.chartEx) : undefined,
   ]);
   return Object.freeze({
     ...(math ? {
@@ -87,6 +94,9 @@ export async function loadWorkerRenderers(
         regionMap,
         ['render'],
       ),
+    } : {}),
+    ...(chartEx ? {
+      chartEx: requireRendererMethods<ChartExRenderer>('chartEx', chartEx, ['render']),
     } : {}),
   });
 }

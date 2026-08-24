@@ -386,6 +386,7 @@ export {
   type ChartThreeDRenderer,
 } from './chart/three-d-contract';
 export type { ChartRegionMapRenderer } from './chart/region-map-contract';
+export type { ChartExRenderer } from './chart/chart-ex-contract';
 export { workerRendererDescriptors } from './worker/renderer-module-contract';
 export {
   mathToMathML,

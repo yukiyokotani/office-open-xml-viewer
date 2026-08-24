@@ -147,6 +147,21 @@ describe('CH — value-axis gridlines paint under the data series', () => {
     expect(firstGridline).toBeLessThan(firstSeriesFill);
   });
 
+  it('paints a standard area chart in document order so the later series is on top', () => {
+    const rec = orderedRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'area',
+      categories: ['Q1', 'Q2'],
+      series: [
+        series({ name: 'North', color: '156082', values: [10, 15] }),
+        series({ name: 'South', color: 'E97132', values: [18, 13] }),
+      ],
+    }), RECT, 1);
+
+    expect(rec.events.filter(event => event.op === 'fill').map(event => event.fillStyle))
+      .toEqual(['#156082', '#E97132']);
+  });
+
   it('a stacked area/line combo stacks only area series and paints the line as an overlay', () => {
     const rec = orderedRecordingCtx();
     renderChart(rec.ctx, baseModel({

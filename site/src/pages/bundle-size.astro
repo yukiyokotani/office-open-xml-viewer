@@ -1,0 +1,68 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+---
+
+<Base
+  title="Bundle size — @silurus/ooxml"
+  description="Current production bundle-size measurements for @silurus/ooxml."
+  canonicalPath="/bundle-size/"
+>
+  <Nav />
+  <main>
+    <header class="size-hero">
+      <div class="wrap">
+        <p class="eyebrow">Current measurement</p>
+        <h1>Bundle size.</h1>
+        <p>Updated for the upcoming v0.81.0 release.</p>
+      </div>
+    </header>
+
+    <section class="wrap size-content">
+      <div class="size-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Configuration</th><th>Raw</th><th>gzip</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>XLSX main-mode change from v0.80.2</th>
+              <td>+116 KiB</td>
+              <td>+31 KiB</td>
+            </tr>
+            <tr>
+              <th>Enable the optional ChartEx module</th>
+              <td>+38 KB</td>
+              <td>+12 KB</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Measurements use the production build. Actual application bundles vary by bundler and the
+        imports used by the application. This page is refreshed for each release.
+      </p>
+    </section>
+  </main>
+  <SiteFooter />
+</Base>
+
+<style>
+  .size-hero { padding: 100px 0 72px; background: var(--hero-bg); color: var(--hero-text); }
+  .size-hero .eyebrow { color: var(--hero-text); }
+  .size-hero h1 { margin: 18px 0 20px; font-size: clamp(52px, 8vw, 92px); letter-spacing: -.06em; }
+  .size-hero p:last-child { max-width: 46ch; margin: 0; color: var(--hero-muted); font-size: 18px; }
+  .size-content { padding-top: 56px; padding-bottom: 96px; }
+  .size-table-wrap { overflow-x: auto; border-top: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 20px 16px; border-bottom: 1px solid var(--border); text-align: left; }
+  th { font-weight: 700; }
+  thead th { color: var(--text-faint); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  tbody td { font-family: var(--mono); white-space: nowrap; }
+  .size-content > p { max-width: 68ch; margin: 28px 0 0; color: var(--text-dim); }
+  @media (max-width: 640px) {
+    .size-hero { padding: 76px 0 56px; }
+    th, td { padding: 16px 12px; }
+  }
+</style>

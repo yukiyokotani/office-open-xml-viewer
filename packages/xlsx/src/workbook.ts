@@ -13,6 +13,7 @@ import {
   type MathRenderer,
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
+  type ChartExRenderer,
   OoxmlResourceLimitError,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
@@ -143,6 +144,8 @@ export class XlsxWorkbook {
   /** Optional synchronous Region Map renderer. Worker mode reconstructs the
    * built-in implementation from its serializable identity. */
   private regionMap: ChartRegionMapRenderer | undefined;
+  /** Optional Microsoft ChartEx renderer. */
+  private chartEx: ChartExRenderer | undefined;
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   private googleFontNames: string[] = [];
@@ -281,6 +284,7 @@ export class XlsxWorkbook {
     this.math = this._mode === 'worker' ? undefined : opts.math;
     this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
     this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
+    this.chartEx = this._mode === 'worker' ? undefined : opts.chartEx;
     const rendererDescriptors = this._mode === 'worker'
       ? workerRendererDescriptors(opts)
       : undefined;
@@ -297,6 +301,11 @@ export class XlsxWorkbook {
     if (opts.regionMap && this._mode === 'worker' && !rendererDescriptors?.regionMap) {
       console.warn(
         "[ooxml] a custom Region Map renderer cannot cross the worker boundary; geospatial charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/region-map.",
+      );
+    }
+    if (opts.chartEx && this._mode === 'worker' && !rendererDescriptors?.chartEx) {
+      console.warn(
+        "[ooxml] a custom ChartEx renderer cannot cross the worker boundary; ChartEx charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/chart-ex.",
       );
     }
     // In worker mode the worker preloads fonts before its first render
@@ -755,7 +764,14 @@ export class XlsxWorkbook {
         GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
       }
       return renderWorksheetViewport(
-        { ws, styles, math: this.math, threeD: this.threeD, regionMap: this.regionMap },
+        {
+          ws,
+          styles,
+          math: this.math,
+          threeD: this.threeD,
+          regionMap: this.regionMap,
+          chartEx: this.chartEx,
+        },
         target,
         viewport,
         // The stable closure uses the archive operation already reserved by

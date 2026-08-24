@@ -7,6 +7,7 @@ import type {
   ArrowEnd,
   ChartThreeDRenderer,
   ChartRegionMapRenderer,
+  ChartExRenderer,
 } from '@silurus/ooxml-core';
 
 export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
@@ -71,6 +72,9 @@ export interface Worksheet {
    *  normalizes overlapping legacy point entries in `colWidths` to the final
    *  effective width; later live point edits can therefore override ranges. */
   colWidthRanges?: Array<{ min: number; max: number; width: number }>;
+  /** Compact `<col style>` defaults. A cell with its own `styleIndex`,
+   * including explicit zero, overrides the owning column range. */
+  colStyleRanges?: Array<{ min: number; max: number; styleIndex: number }>;
   rowHeights: Record<number, number>;
   /** Per-column outline (grouping) depth 0-7 (ECMA-376 §18.3.1.13
    *  `<col outlineLevel>`), keyed by 1-based column index. Present only for
@@ -820,8 +824,9 @@ export interface Cell {
   col: number;
   row: number;
   value: CellValue;
-  /** Style index into the styles table. Omitted on the wire when `0` (the
-   *  common unstyled case), so read it as `styleIndex ?? 0`. */
+  /** Effective style index into the styles table. An omitted `c/@s` inherits
+   *  its column's `<col style>` in the parser; absent here means Normal (0).
+   *  Explicit `c/@s="0"` remains distinct while inheritance is resolved. */
   styleIndex?: number;
   /** Raw `<f>` formula text (ECMA-376 §18.3.1.40), when present. The renderer
    *  uses this to recompute volatile functions (TODAY, NOW) at display time
@@ -1099,6 +1104,8 @@ export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   threeD?: ChartThreeDRenderer;
   /** @internal Optional synchronous offline Region Map renderer. */
   regionMap?: ChartRegionMapRenderer;
+  /** @internal Optional Microsoft ChartEx renderer. */
+  chartEx?: ChartExRenderer;
 }
 
 export type WorkerRequest =

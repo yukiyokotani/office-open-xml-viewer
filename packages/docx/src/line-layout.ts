@@ -346,6 +346,20 @@ export interface LayoutTextSeg extends LayoutSegSource {
   seaBreaks?: readonly number[];
 }
 
+/** Shaping and line allocation are derived from the current text slice. A
+ * segment split for wrapping must not retain geometry from the parent slice;
+ * measurement and addToLine recompute these facts from the new text. */
+const RESET_SLICED_TEXT_MEASUREMENT = {
+  shapedClusters: undefined,
+  selectedFaceInkBounds: undefined,
+  selectedFaceFontBox: undefined,
+  snapGridClass: undefined,
+  snapGridNaturalWidthPx: undefined,
+  snapGridLeadingPadPx: undefined,
+  snapGridTrailingPadPx: undefined,
+  snapGridCellPitchPx: undefined,
+} as const;
+
 /** ECMA-376 §17.3.3.12 defines `hpsRaise` as the “distance [...] between the
  * phonetic guide base text and the phonetic guide text.” The absent case needs
  * selected-face ink and is therefore resolved by retainedRubyAscentReservePx. */
@@ -4816,6 +4830,7 @@ export function layoutLines(
     const hangingText = follower.text.slice(0, hangingCount);
     const hangingSegment: LayoutTextSeg = {
       ...follower,
+      ...RESET_SLICED_TEXT_MEASUREMENT,
       text: hangingText,
       measuredWidth: 0,
       punctuationCompressions: slicedPunctuationCompressions(follower, 0, 1),
@@ -4833,6 +4848,7 @@ export function layoutLines(
     if (remainder.length > 0) {
       queue.unshift({
         ...follower,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
         text: remainder,
         measuredWidth: 0,
         joinPrev: undefined,
@@ -5204,6 +5220,7 @@ export function layoutLines(
     ) {
       const visibleSegment: LayoutTextSeg = {
         ...s,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
         text: visibleBeforeParagraphFinalTail,
         paragraphFinalIdeographicSpaceTail: undefined,
         paragraphFinalIdeographicSpaceLocalCount: undefined,
@@ -5218,6 +5235,7 @@ export function layoutLines(
       };
       const trailingSegment: LayoutTextSeg = {
         ...s,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
         text: s.text.slice(visibleBeforeParagraphFinalTail.length),
         paragraphFinalIdeographicSpaceLocalCount,
         joinPrev: undefined,
@@ -5609,6 +5627,7 @@ export function layoutLines(
         const pw = strNaturalAdvance(s, prefix);
         const headSeg: LayoutTextSeg = {
           ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
           punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
@@ -5618,6 +5637,7 @@ export function layoutLines(
         if (tail) {
           queue.unshift({
             ...s,
+            ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
             punctuationCompressions: slicedPunctuationCompressions(
               s,
@@ -5653,6 +5673,7 @@ export function layoutLines(
             const tailText = chars.slice(chars.length - k).join('');
             retracted = {
               ...lastText,
+              ...RESET_SLICED_TEXT_MEASUREMENT,
               text: tailText,
               punctuationCompressions: slicedPunctuationCompressions(
                 lastText,
@@ -5670,6 +5691,7 @@ export function layoutLines(
               currentWidth -= lastText.measuredWidth - headW;
               currentLine[currentLine.length - 1] = {
                 ...lastText,
+                ...RESET_SLICED_TEXT_MEASUREMENT,
                 text: headText,
                 measuredWidth: headW,
                 punctuationCompressions: slicedPunctuationCompressions(
@@ -5710,6 +5732,7 @@ export function layoutLines(
           const fw = strNaturalAdvance(s, firstChar);
           const headSeg: LayoutTextSeg = {
             ...s,
+            ...RESET_SLICED_TEXT_MEASUREMENT,
             text: firstChar,
             measuredWidth: fw,
             punctuationCompressions: slicedPunctuationCompressions(s, 0, firstChar.length),
@@ -5719,6 +5742,7 @@ export function layoutLines(
           if (tail) {
             queue.unshift({
               ...s,
+              ...RESET_SLICED_TEXT_MEASUREMENT,
               text: tail,
               punctuationCompressions: slicedPunctuationCompressions(
                 s,
@@ -5763,6 +5787,7 @@ export function layoutLines(
         const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
           punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
@@ -5771,6 +5796,7 @@ export function layoutLines(
         if (tail) {
           queue.unshift({
             ...s,
+            ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
             punctuationCompressions: slicedPunctuationCompressions(
               s,
@@ -5803,6 +5829,7 @@ export function layoutLines(
             const tailText = chars.slice(chars.length - k).join('');
             retracted = {
               ...lastText,
+              ...RESET_SLICED_TEXT_MEASUREMENT,
               text: tailText,
               punctuationCompressions: slicedPunctuationCompressions(
                 lastText,
@@ -5821,6 +5848,7 @@ export function layoutLines(
               currentWidth -= lastText.measuredWidth - headW;
               currentLine[currentLine.length - 1] = {
                 ...lastText,
+                ...RESET_SLICED_TEXT_MEASUREMENT,
                 text: headText,
                 measuredWidth: headW,
                 punctuationCompressions: slicedPunctuationCompressions(
@@ -5851,6 +5879,7 @@ export function layoutLines(
         const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
           punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
@@ -5859,6 +5888,7 @@ export function layoutLines(
         if (tail) {
           queue.unshift({
             ...s,
+            ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
             punctuationCompressions: slicedPunctuationCompressions(
               s,
@@ -5913,12 +5943,14 @@ export function layoutLines(
         const pw = strNaturalAdvance(s, prefix);
         addToLine({
           ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
           punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
         }, pw, h, asc, desc);
         queue.unshift({
           ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
           text: s.text.slice(split),
           punctuationCompressions: slicedPunctuationCompressions(
             s,

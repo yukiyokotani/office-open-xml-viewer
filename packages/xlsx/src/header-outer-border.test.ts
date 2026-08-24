@@ -65,6 +65,52 @@ function recordingCtx(width = 300, height = 120): { ctx: CanvasRenderingContext2
 }
 
 describe('XLSX header frame ownership', () => {
+  it('does not paint sheet gridlines over a cell background fill', () => {
+    const ws = worksheet(false);
+    ws.rows = [{
+      index: 1,
+      height: null,
+      cells: [{ col: 1, row: 1, styleIndex: 1, value: { type: 'empty' } }],
+    }];
+    const styles: Styles = {
+      ...STYLES,
+      fills: [
+        { patternType: 'none', fgColor: null, bgColor: null },
+        { patternType: 'solid', fgColor: 'FFFFFF', bgColor: null },
+      ],
+      cellXfs: [
+        STYLES.cellXfs[0],
+        { ...STYLES.cellXfs[0], fillId: 1 },
+      ],
+    };
+    const { ctx, segments } = recordingCtx();
+
+    renderViewport(ctx, ws, styles, { row: 1, col: 1, rows: 1, cols: 1 });
+
+    expect(segments.filter(segment => segment.stroke === '#d0d0d0')).toEqual([]);
+  });
+
+  it('inherits a column background style for otherwise empty cells', () => {
+    const ws = worksheet(false);
+    ws.colStyleRanges = [{ min: 1, max: 16_384, styleIndex: 1 }];
+    const styles: Styles = {
+      ...STYLES,
+      fills: [
+        { patternType: 'none', fgColor: null, bgColor: null },
+        { patternType: 'solid', fgColor: 'FFFFFF', bgColor: null },
+      ],
+      cellXfs: [
+        STYLES.cellXfs[0],
+        { ...STYLES.cellXfs[0], fillId: 1 },
+      ],
+    };
+    const { ctx, segments } = recordingCtx();
+
+    renderViewport(ctx, ws, styles, { row: 1, col: 1, rows: 1, cols: 1 });
+
+    expect(segments.filter(segment => segment.stroke === '#d0d0d0')).toEqual([]);
+  });
+
   it('bounds frozen-band materialization to the visible canvas', () => {
     const ws = worksheet(false);
     let rowReads = 0;

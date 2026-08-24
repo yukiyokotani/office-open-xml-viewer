@@ -280,6 +280,37 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
       ? null
       : undefined;
   };
+  const frameImageDecision = (
+    directFill: ChartModel['chartFill'] | ChartModel['plotAreaFill'],
+    directColor: string | null | undefined,
+    hidden: boolean | null | undefined,
+    paintAuthored: boolean | null | undefined,
+    linked: ChartExElementStyle | null | undefined,
+  ): ImageFill | null | undefined => {
+    if (hidden === true) return null;
+    if (directFill?.fillType === 'image') return directFill;
+    if (directFill != null || directColor != null || paintAuthored === true) return null;
+    if (linked?.fillNoStyle === true) return undefined;
+    return styleImageDecision(linked, 0);
+  };
+  const chartAreaImage = frameImageDecision(
+    chart.chartFill,
+    // `chartStyleRoleChartArea` treats the structured/provenance fields as
+    // authoritative; retain that exact ownership rule for prefetch too.
+    undefined,
+    chart.chartFillHidden,
+    chart.chartFillPaintAuthored,
+    chart.chartStyleRoles?.chartArea,
+  );
+  if (chartAreaImage) add(chartAreaImage);
+  const plotAreaImage = frameImageDecision(
+    chart.plotAreaFill,
+    chart.plotAreaBg,
+    chart.plotAreaFillHidden,
+    chart.plotAreaFillPaintAuthored,
+    chart.threeD ? chart.chartStyleRoles?.plotArea3D : chart.chartStyleRoles?.plotArea,
+  );
+  if (plotAreaImage) add(plotAreaImage);
   const finiteSurfaceValue = chart.series.some(series =>
     series.values.some(value => value != null && Number.isFinite(value))
   );

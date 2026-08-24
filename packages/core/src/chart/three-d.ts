@@ -154,7 +154,7 @@ export interface ChartThreeDProjectionOptions {
    */
   perspectiveTangentGain?: number;
   /** Model-space scene height as a fraction of scene width when the chart has
-   * no authored hPercent. Radial solids use their actual shallow Y extent
+   * no authored hPercent. Callers use an Office-observed family boundary
    * instead of fitting an otherwise empty full-height cartesian cuboid. */
   sceneHeightScale?: number;
 }
@@ -244,6 +244,12 @@ export interface ChartThreeDSurfaceGeometry {
   modelDepth: number;
 }
 
+export interface ChartThreeDSurfaceGridSegment {
+  /** Index into {@link ChartThreeDSurfaceGeometry.faces}. */
+  faceIndex: number;
+  scenePoints: [ThreeDScenePoint, ThreeDScenePoint];
+}
+
 const MAX_UNSIGNED_INT = 4_294_967_295;
 
 /** Resolve one CT_Surface as a bounded slab outside the plot volume.
@@ -267,10 +273,17 @@ export function planChartThreeDSurfaceGeometry(
     projection.projectUnbounded(xMax, topY, farDepth),
     projection.projectUnbounded(xMin, floorY, farDepth),
   ];
-  const stackReferenceWidth = Math.hypot(
-    stackReference[0].x - stackReference[1].x,
-    stackReference[0].y - stackReference[1].y,
+  // Office sizes one plain-stack repetition from the complete projected plot
+  // volume width, then anchors that repetition on the selected floor/wall
+  // face. The near depth edge can extend beyond the back-wall edge under
+  // perspective, so measuring only the far face makes the repeated picture
+  // too short and exposes source rows that Office clips above the wall.
+  const projectedVolumeX = [xMin, xMax].flatMap(x =>
+    [topY, floorY].flatMap(y =>
+      [nearDepth, farDepth].map(depth => projection.projectUnbounded(x, y, depth).x)
+    )
   );
+  const stackReferenceWidth = Math.max(...projectedVolumeX) - Math.min(...projectedVolumeX);
   const stackReferenceHeight = Math.hypot(
     stackReference[0].x - stackReference[2].x,
     stackReference[0].y - stackReference[2].y,
@@ -366,6 +379,59 @@ export function planChartThreeDSurfaceGeometry(
   return { thickness, inner, outer, faces, pictureStackAspect, modelDepth: projection.modelDepth };
 }
 
+/** Continue one grid rule over the planar face or every corresponding face of
+ * a positive-thickness CT_Surface slab. The input fraction is expressed in
+ * the owning plot-face x or y direction, so no screen-space fitting or camera
+ * heuristic is involved. */
+export function planChartThreeDSurfaceGridSegments(
+  geometry: ChartThreeDSurfaceGeometry,
+  kind: ChartThreeDSurfaceKind,
+  coordinate: 'x' | 'y',
+  fraction: number,
+): ChartThreeDSurfaceGridSegment[] {
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) return [];
+  if ((coordinate === 'x' && kind === 'sideWall')
+    || (coordinate === 'y' && kind === 'floor')) return [];
+  const interpolate = (start: ThreeDScenePoint, end: ThreeDScenePoint): ThreeDScenePoint => ({
+    x: start.x + (end.x - start.x) * fraction,
+    y: start.y + (end.y - start.y) * fraction,
+    depth: start.depth + (end.depth - start.depth) * fraction,
+  });
+  let innerStart: ThreeDScenePoint;
+  let innerEnd: ThreeDScenePoint;
+  let outerStart: ThreeDScenePoint;
+  let outerEnd: ThreeDScenePoint;
+  let startFaceIndex: number;
+  let endFaceIndex: number;
+  if (coordinate === 'x') {
+    innerStart = interpolate(geometry.inner[0], geometry.inner[1]);
+    innerEnd = interpolate(geometry.inner[3], geometry.inner[2]);
+    outerStart = interpolate(geometry.outer[0], geometry.outer[1]);
+    outerEnd = interpolate(geometry.outer[3], geometry.outer[2]);
+    startFaceIndex = 2;
+    endFaceIndex = 4;
+  } else {
+    innerStart = interpolate(geometry.inner[0], geometry.inner[3]);
+    innerEnd = interpolate(geometry.inner[1], geometry.inner[2]);
+    outerStart = interpolate(geometry.outer[0], geometry.outer[3]);
+    outerEnd = interpolate(geometry.outer[1], geometry.outer[2]);
+    startFaceIndex = 5;
+    endFaceIndex = 3;
+  }
+  const segments: ChartThreeDSurfaceGridSegment[] = [{
+    faceIndex: 0,
+    scenePoints: [innerStart, innerEnd],
+  }];
+  if (geometry.thickness > 0) {
+    segments.push(
+      { faceIndex: 1, scenePoints: [outerStart, outerEnd] },
+      { faceIndex: startFaceIndex, scenePoints: [innerStart, outerStart] },
+      { faceIndex: endFaceIndex, scenePoints: [innerEnd, outerEnd] },
+    );
+  }
+  return segments;
+}
+
 /** Refit the complete base cuboid and the three authored surface slabs into
  * the existing plot rectangle with the same 3% scene margin used by the base
  * camera. This is one uniform viewport transform, so data, axes and surfaces
@@ -425,7 +491,8 @@ export function planChartThreeDProjection(
   const depthPercent = clamp(finiteOr(view.depthPercent, 100), 20, 2000);
   const perspective = clamp(finiteOr(view.perspective, 30), 0, 240);
   const gapDepth = clamp(finiteOr(view.gapDepthPercent, 150), 0, 500);
-  const authoredHeightPercent = view.heightPercent != null
+  const heightPercentAuthored = view.heightPercentAuthored ?? view.heightPercent != null;
+  const authoredHeightPercent = heightPercentAuthored && view.heightPercent != null
     && Number.isFinite(view.heightPercent)
     ? clamp(view.heightPercent, 5, 500)
     : null;

@@ -109,6 +109,7 @@ vi.mock('../../../packages/core/src/math/engine', () => ({
 
 vi.mock('../../../src/three-d', () => ({ threeD: mocks.threeD }));
 vi.mock('../../../src/region-map', () => ({ regionMap: mocks.regionMap }));
+vi.mock('../../../src/chart-ex', () => ({ chartEx: { render: vi.fn() } }));
 
 import { disposeRenderedFile, renderFile } from './try';
 

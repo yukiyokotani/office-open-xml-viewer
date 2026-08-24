@@ -4,8 +4,9 @@ import { PptxPresentation } from '@silurus/ooxml/pptx';
 import { math } from '@silurus/ooxml/math';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
+import { chartEx } from '@silurus/ooxml/chart-ex';
 
-const renderers = { math, threeD, regionMap };
+const renderers = { math, threeD, regionMap, chartEx };
 const paint = (id, bitmap) => {
   const canvas = document.getElementById(id);
   canvas.width = bitmap.width;

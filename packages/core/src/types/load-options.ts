@@ -1,6 +1,7 @@
 import type { MathRenderer } from '../math/mathjax';
 import type { ChartThreeDRenderer } from '../chart/three-d-contract';
 import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
+import type { ChartExRenderer } from '../chart/chart-ex-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
@@ -163,4 +164,12 @@ export interface LoadOptions {
    * The on-demand render-worker asset includes its worker-side implementation.
    */
   regionMap?: ChartRegionMapRenderer;
+  /**
+   * Opt in to Microsoft ChartEx (`cx:*`) chart families. Import `chartEx`
+   * from `@silurus/ooxml/chart-ex` and inject it once. Classic DrawingML 2-D
+   * charts remain available without this module. In main mode the implementation
+   * stays outside the format entry; the on-demand render-worker asset remains
+   * self-contained and includes its worker-side implementation.
+   */
+  chartEx?: ChartExRenderer;
 }

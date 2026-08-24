@@ -23,11 +23,13 @@ const formatModeNote = formatRenderModeGuidance[format];
 const rendererExample = `import { ${viewerName} } from '@silurus/ooxml/${format}';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
+import { chartEx } from '@silurus/ooxml/chart-ex';
 
 const viewer = new ${viewerName}(${viewerTarget}, {
   mode: 'worker',
   threeD,
   regionMap,
+  chartEx,
 });`;
 ---
 <section class="api" data-reveal>
@@ -69,7 +71,7 @@ const viewer = new ${viewerName}(${viewerTarget}, {
           <tr>
             <th>Equations and advanced charts</th>
             <td>Built-in and custom renderer objects.</td>
-            <td>Built-in math, 3-D and Region Map renderers; arbitrary custom renderer objects cannot be transferred.</td>
+            <td>Built-in math, ChartEx, 3-D and Region Map renderers; arbitrary custom renderer objects cannot be transferred.</td>
           </tr>
         </tbody>
       </table>
@@ -133,11 +135,12 @@ const viewer = new ${viewerName}(${viewerTarget}, {
   </div>
 
   <div id="chart-rendering-addons" class="api-addons">
-    <h4>3-D charts and Region Maps</h4>
+    <h4>ChartEx, 3-D charts and Region Maps</h4>
     <p>
       Import these capabilities from their separate package entries when a document needs them.
-      The same exports work with DOCX, XLSX and PPTX in both render modes. If omitted, authored 3-D
-      charts use the canonical 2-D fallback, while Region Maps are not drawn.
+      The same exports work with DOCX, XLSX and PPTX in both render modes. Classic 2-D charts need no
+      add-on. If omitted, ChartEx and Region Maps are not drawn, while authored 3-D charts use the
+      canonical 2-D fallback.
     </p>
     <pre><code>{rendererExample}</code></pre>
     <div class="api-addon-table-wrap">
@@ -155,7 +158,6 @@ const viewer = new ${viewerName}(${viewerTarget}, {
         </tbody>
       </table>
     </div>
-    <a class="api-detail-link" href="/announcements/v079-chart-rendering-addons">Read the chart rendering release note →</a>
   </div>
 
   {groupedClasses.map((c) => (

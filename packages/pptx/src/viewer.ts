@@ -317,6 +317,7 @@ export class PptxViewer implements ZoomableViewer {
         math: this.opts.math,
         threeD: this.opts.threeD,
         regionMap: this.opts.regionMap,
+        chartEx: this.opts.chartEx,
         mode: this._mode,
       }), () => {
         // Retire old-engine hit promises before install() destroys that engine:

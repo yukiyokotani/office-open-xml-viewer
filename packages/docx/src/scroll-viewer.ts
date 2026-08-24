@@ -485,6 +485,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         math: this._opts.math,
         threeD: this._opts.threeD,
         regionMap: this._opts.regionMap,
+        chartEx: this._opts.chartEx,
         mode: this._mode,
       }), (ownedDocument) => {
         this._invalidateElementContext(false);

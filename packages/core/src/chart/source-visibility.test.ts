@@ -130,4 +130,29 @@ describe('plotVisOnly source filtering', () => {
       dataPointOverrides: [{ idx: 1, markerSize: 9 }],
     });
   });
+
+  it('applies Excel automatic point styles after hidden scatter points are removed', () => {
+    const filtered = applyPlotVisibleOnly(chart({
+      chartType: 'scatter',
+      scatterStyle: 'marker',
+      plotVisibleOnly: true,
+      themeAccentColors: ['156082', 'E97132', '196B24', '0F9ED5', 'A02B93', '4EA72E'],
+      series: [series({
+        color: '156082',
+        categories: ['1', '2', '3', '4', '5'],
+        values: [10, 20, 90, 40, 50],
+        sourceHidden: [false, false, true, false, false],
+      })],
+    }));
+
+    expect(filtered.series[0].dataPointColors).toEqual([
+      '156082', 'E97132', '196B24', '0F9ED5',
+    ]);
+    expect(filtered.series[0].dataPointOverrides).toMatchObject([
+      { idx: 0, markerSymbol: 'diamond' },
+      { idx: 1, markerSymbol: 'square' },
+      { idx: 2, markerSymbol: 'triangle' },
+      { idx: 3, markerSymbol: 'x' },
+    ]);
+  });
 });

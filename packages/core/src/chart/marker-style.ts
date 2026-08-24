@@ -46,15 +46,15 @@ export function visibleBubbleSize(
   return Math.abs(value);
 }
 
-/** Effective ECMA-376 `bubble3D` provenance for one bubble. A point override
- * wins over its series, then the owning bubble-chart group copied onto the
- * series. Complete omission means the ordinary flat bubble. */
+/** Effective Office `bubble3D` paint for one bubble. Current Excel retains
+ * point-level CT_DPt provenance but paints every point from the owning series'
+ * value. The owning bubble-chart group remains the ECMA fallback when the
+ * series omits the property. Complete omission means an ordinary flat bubble. */
 export function bubblePointIsThreeD(
   series: ChartSeries,
-  point: ChartDataPointOverride | undefined,
+  _point: ChartDataPointOverride | undefined,
 ): boolean {
-  return point?.bubble3D
-    ?? series.bubble3D
+  return series.bubble3D
     ?? series.bubble3DGroupDefault
     ?? false;
 }

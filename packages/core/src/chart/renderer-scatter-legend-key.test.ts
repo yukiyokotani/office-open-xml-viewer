@@ -167,11 +167,10 @@ const scatterModel = (over: Partial<ChartModel>, serOver: Partial<ChartSeries> =
   });
 
 describe('scatter legend key reflects the plotted mark (#803, §21.2.2.42/.198)', () => {
-  it('draws a MARKER key for a markers-only scatter (scatterStyle default)', () => {
+  it('draws a LINE + MARKER key for Excel automatic marker scatter style', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, scatterModel({ scatterStyle: 'marker' }), RECT, 1);
-    expect(rec.keys).toContain('marker');
-    expect(rec.keys).not.toContain('line');
+    expect(rec.keys).toContain('line-marker');
   });
 
   it('draws a MARKER key when a series line is noFill (lineHidden) despite lineMarker style', () => {
@@ -194,7 +193,7 @@ describe('scatter legend key reflects the plotted mark (#803, §21.2.2.42/.198)'
       scatterModel({ scatterStyle: 'marker' }, { markerSymbol: 'square' }),
       RECT, 1,
     );
-    expect(rec.keys).toEqual(['marker']);
+    expect(rec.keys).toEqual(['line-marker']);
   });
 
   it('draws a LINE + MARKER key for a lineMarker scatter', () => {

@@ -111,6 +111,45 @@ function allSourcePointsHidden(series: ChartSeries): boolean {
   return hidden != null && hidden.length > 0 && hidden.every(Boolean);
 }
 
+export const EXCEL_AUTOMATIC_SCATTER_MARKERS = [
+  'diamond', 'square', 'triangle', 'x', 'star', 'circle',
+] as const;
+
+function applyExcelFilteredScatterAutomaticStyle(
+  chart: ChartModel,
+  series: ChartSeries,
+): ChartSeries {
+  const accents = chart.themeAccentColors;
+  const hasDirectPointStyle = series.dataPointColors?.some(color => color != null) === true
+    || (series.dataPointOverrides?.length ?? 0) > 0;
+  const hasDirectMarkerStyle = series.markerSymbol != null
+    || series.markerFill != null
+    || series.markerFillPaintAuthored === true
+    || series.markerLine != null;
+  if (
+    chart.scatterStyle !== 'marker'
+    || !accents?.length
+    || hasDirectPointStyle
+    || hasDirectMarkerStyle
+    || series.lineHidden === true
+  ) return series;
+
+  // Current Excel restyles the compacted visible points of an otherwise
+  // unformatted `scatterStyle="marker"` series as consecutive automatic
+  // theme entries. Keep this compatibility behavior after the normative
+  // plotVisOnly filtering step so hidden source slots consume no palette entry.
+  return {
+    ...series,
+    dataPointColors: series.values.map((_, index) => accents[index % accents.length]),
+    dataPointOverrides: series.values.map((_, index) => ({
+      idx: index,
+      markerSymbol: EXCEL_AUTOMATIC_SCATTER_MARKERS[
+        index % EXCEL_AUTOMATIC_SCATTER_MARKERS.length
+      ],
+    })),
+  };
+}
+
 /**
  * Apply ECMA-376 §21.2.2.146 once, before any chart-family extent, stacking,
  * trendline, error-bar, or label work. Hosts only contribute aligned source
@@ -129,7 +168,11 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
         const hidden = effective.sourceHidden;
         const plan = hidden && makeVisibilityPlan(hidden, pointCount(effective));
         if (!plan) return [effective];
-        return plan.keep.length > 0 ? [applyPlanToSeries(effective, plan)] : [];
+        if (plan.keep.length === 0) return [];
+        const filtered = applyPlanToSeries(effective, plan);
+        return chart.chartType === 'scatter'
+          ? [applyExcelFilteredScatterAutomaticStyle(chart, filtered)]
+          : [filtered];
       }),
     };
   }

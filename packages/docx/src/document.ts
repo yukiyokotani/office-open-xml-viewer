@@ -15,6 +15,7 @@ import {
   type MathRenderer,
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
+  type ChartExRenderer,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
@@ -114,6 +115,7 @@ export class DocxDocument {
   private _mode: 'main' | 'worker' = 'main';
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
+  private _chartEx: ChartExRenderer | undefined;
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private readonly _rawParts = new BoundedRawPartCache({
@@ -258,6 +260,12 @@ export class DocxDocument {
         );
       }
       doc._regionMap = doc._mode === 'worker' ? undefined : opts.regionMap;
+      if (opts.chartEx && doc._mode === 'worker' && !rendererDescriptors?.chartEx) {
+        console.warn(
+          "[ooxml] a custom ChartEx renderer cannot cross the worker boundary; ChartEx charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/chart-ex.",
+        );
+      }
+      doc._chartEx = doc._mode === 'worker' ? undefined : opts.chartEx;
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
@@ -640,6 +648,7 @@ export class DocxDocument {
       defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
       threeD: this._threeD,
       regionMap: this._regionMap,
+      chartEx: this._chartEx,
     });
   }
 

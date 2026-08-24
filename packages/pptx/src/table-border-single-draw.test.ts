@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Stroke } from '@silurus/ooxml-core';
 import { renderTable } from './renderer.js';
-import type { TableCell, TableElement, TableRow } from './types';
+import type { TableCell, TableElement, TableRow, TextBody } from './types';
 
 // DrawingML `<a:tbl>` — end-to-end render: an interior gridline SHARED by two
 // adjacent cells is drawn exactly ONCE (not once per cell), and when the two
@@ -112,6 +112,81 @@ function rgba(hex: string): string {
 }
 
 describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent)', () => {
+  it('does not grow an authored row from substituted-font design metrics', () => {
+    // ECMA-376 §21.1.2.2.5/.11: 120% line spacing is based on the largest
+    // authored text size. 16pt * 120% + 3pt after + 2 * 8.5pt insets = 39.2pt,
+    // so the authored 40.6pt row already fits. The old measure-only path used
+    // Meiryo's ~1.596em design line box and moved this boundary down to 42.5pt.
+    const textBody = {
+      verticalAnchor: 'ctr',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: 300,
+        spaceLine: { type: 'pct', val: 120000 },
+        runs: [{ type: 'text', text: '流動負債', fontSize: 16, fontFamily: 'Meiryo' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 108000, rIns: 108000, tIns: 108000, bIns: 108000,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const rowH = 40.6 * EMU;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[0].height = rowH;
+
+    expect(horizontalAt(render(t), 40.6)).toHaveLength(1);
+  });
+
+  it('uses the natural 120% line box when table line spacing is omitted', () => {
+    // ECMA-376 leaves omitted line spacing to the text font. Current
+    // PowerPoint grows a zero-height table row from the natural single-line
+    // box: 16pt * 120% + 1pt top + 1pt bottom = 21.2pt. This is distinct from
+    // an authored `<a:spcPct val="120000"/>`, whose percentage base is the
+    // authored 16pt size rather than a second 120% multiplication.
+    const textBody = {
+      verticalAnchor: 'ctr',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'auto', fontSize: 16, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: EMU, bIns: EMU,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+    t.rows[0].height = 0;
+
+    expect(horizontalAt(render(t), 21.2)).toHaveLength(1);
+  });
+
+  it('keeps a positive authored row height when the glyph box and insets fit', () => {
+    // ECMA-376 §21.1.3.18 makes a:tr@h a minimum, not an auto-height request.
+    // PowerPoint keeps this 18pt minimum because the 16pt glyph box plus 1pt
+    // top/bottom insets fits. Applying the auto-row 120% leading here would
+    // incorrectly enlarge the row to 21.2pt.
+    const textBody = {
+      verticalAnchor: 'ctr',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'fixed', fontSize: 16, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: EMU, bIns: EMU,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+    t.rows[0].height = 18 * EMU;
+
+    expect(horizontalAt(render(t), 18)).toHaveLength(1);
+  });
+
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {
     // Left cell right = 1pt; right cell left = 1pt (same). Previously TWO strokes
     // at x=60 (one per cell); now exactly one.

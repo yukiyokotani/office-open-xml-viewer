@@ -128,6 +128,16 @@ export interface ChartDataTable {
     fontColor?: string | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
+    /** Resolved solid compatibility projection of `<c:dTable><c:spPr>`. */
+    fillColor?: string | null;
+    /** Direct DrawingML fill recipe. Preserved even where Office's application-
+     * defined data-table paint extent has not been established for that recipe. */
+    fill?: SolidFill | GradientFill | PatternFill | null;
+    /** Explicit `<a:noFill>` on the data-table shape properties. */
+    fillHidden?: boolean | null;
+    /** True when `spPr` authored any DrawingML fill child, including one whose
+     * paint recipe this implementation cannot resolve. */
+    fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
@@ -346,6 +356,7 @@ export interface ChartModel {
     plotAreaFill?: Fill | null;
     plotAreaFillHidden?: boolean | null;
     plotAreaFillPaintAuthored?: boolean | null;
+    plotAreaFillAutomatic?: boolean | null;
     plotAreaLineColor?: string | null;
     plotAreaLineFill?: SolidFill | GradientFill | PatternFill | null;
     plotAreaLineWidthEmu?: number | null;
@@ -404,6 +415,7 @@ export interface ChartModel {
     catAxisTitleRotation?: number | null;
     catAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     catAxisTitleManualLayout?: ChartManualLayout | null;
+    catAxisTitleTextVerticalInsetEmu?: number | null;
     valAxisTitleFontSizeHpt?: number | null;
     valAxisTitleFontBold?: boolean | null;
     valAxisTitleFontItalic?: boolean | null;
@@ -411,6 +423,7 @@ export interface ChartModel {
     valAxisTitleRotation?: number | null;
     valAxisTitleVerticalMode?: 'horz' | 'vert' | 'vert270' | 'wordArtVert' | 'eaVert' | 'mongolianVert' | 'wordArtVertRtl' | null;
     valAxisTitleManualLayout?: ChartManualLayout | null;
+    valAxisTitleTextVerticalInsetEmu?: number | null;
     catAxisFontFace?: string | null;
     valAxisFontFace?: string | null;
     catAxisTitleFontFace?: string | null;
@@ -455,9 +468,13 @@ export interface ChartModel {
     catAxisLineColor?: string | null;
     catAxisLineWidthEmu?: number | null;
     catAxisLineDash?: string | null;
+    /** A direct `<c:catAx><c:spPr><a:ln>` paint was authored. */
+    catAxisLinePaintAuthored?: boolean | null;
     valAxisLineColor?: string | null;
     valAxisLineWidthEmu?: number | null;
     valAxisLineDash?: string | null;
+    /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
+    valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -570,6 +587,9 @@ export interface ChartRect {
     w: number;
     h: number;
 }
+export interface ChartExRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
+}
 export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
@@ -636,6 +656,8 @@ export interface ChartSeries {
     catFormatBuiltinId?: number | null;
     catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
+    /** Host-resolved automatic scatter marker when no `<c:marker>` symbol is authored. */
+    automaticMarkerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
     markerFillPaint?: Fill | null;
@@ -793,6 +815,8 @@ export interface ChartThreeDSeriesAxis {
     tickLabelSkip?: number | null;
     tickMarkSkip?: number | null;
     majorTickMark: string;
+    /** `<c:serAx><c:minorTickMark>`; omission means no minor tick marks. */
+    minorTickMark?: string | null;
     fontColor?: string | null;
     fontSizeHpt?: number | null;
     fontBold?: boolean | null;
@@ -801,6 +825,8 @@ export interface ChartThreeDSeriesAxis {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
+    /** A direct `<c:serAx><c:spPr><a:ln>` paint was authored. */
+    linePaintAuthored?: boolean | null;
     lineHidden: boolean;
     titleFontSizeHpt?: number | null;
     titleFontBold?: boolean | null;
@@ -1482,6 +1508,7 @@ interface LoadOptions__emitterCollision1 {
     math?: MathRenderer;
     threeD?: ChartThreeDRenderer;
     regionMap?: ChartRegionMapRenderer;
+    chartEx?: ChartExRenderer;
 }
 export interface MatchRunSlice {
     runIndex: number;

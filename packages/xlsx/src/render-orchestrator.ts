@@ -13,6 +13,7 @@ import {
   type MathRenderer,
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
+  type ChartExRenderer,
   type SrcRect,
   type Duotone,
   type OffscreenFactory,
@@ -407,6 +408,7 @@ export interface RenderDeps {
   math?: MathRenderer;
   threeD?: ChartThreeDRenderer;
   regionMap?: ChartRegionMapRenderer;
+  chartEx?: ChartExRenderer;
 }
 
 const autoHeightProjectionCache = new WeakMap<Worksheet, Worksheet>();
@@ -578,6 +580,7 @@ async function renderWorksheetViewportLeased(
     loadedImages: imageCache,
     threeD: deps.threeD,
     regionMap: deps.regionMap,
+    chartEx: deps.chartEx,
   });
 }
 

@@ -22,6 +22,7 @@
 // renderer.ts; only the frame is shared.
 
 import type { ChartManualLayout, ChartModel } from '../types/chart';
+import { EMU_PER_PT } from '../units.js';
 import { categoryLabelOffsetPx } from './category-spacing';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -300,6 +301,17 @@ export function axisTitleFontPx(
   return chartTextFontSizePx(sizeHpt, ptToPx) ?? AXIS_TITLE_FALLBACK_PT * ptToPx;
 }
 
+/** Convert local top/bottom DrawingML text-body insets into the screen extent
+ * perpendicular to an axis title's baseline. Rotation changes which screen
+ * dimension reserves the already-resolved local inset sum. */
+export function axisTitleVerticalInsetPx(
+  insetEmu: number | null | undefined,
+  ptToPx: number,
+): number {
+  const inset = insetEmu != null && Number.isFinite(insetEmu) ? insetEmu : 0;
+  return Math.max(0, inset) / EMU_PER_PT * ptToPx;
+}
+
 export type ChartAxisTitleSide = 'left' | 'right' | 'horizontal';
 
 /** Resolve the title's paint rotation. DrawingML `ST_Angle` is expressed in
@@ -364,11 +376,21 @@ export function chartAxisTitleBands(
 ): ChartAxisTitleBands {
   const catFontPx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, ptToPx);
   const valFontPx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, ptToPx);
+  const catTextInsetPx = axisTitleVerticalInsetPx(
+    chart.catAxisTitleTextVerticalInsetEmu, ptToPx,
+  );
+  const valTextInsetPx = axisTitleVerticalInsetPx(
+    chart.valAxisTitleTextVerticalInsetEmu, ptToPx,
+  );
   return {
     catFontPx,
     valFontPx,
-    catBandH: chart.catAxisTitle ? catFontPx + axisTitleMargin(h) + 4 : 0,
-    valBandW: chart.valAxisTitle ? valFontPx + axisTitleMargin(w) + 4 : 0,
+    catBandH: chart.catAxisTitle
+      ? catFontPx + catTextInsetPx + axisTitleMargin(h) + 4
+      : 0,
+    valBandW: chart.valAxisTitle
+      ? valFontPx + valTextInsetPx + axisTitleMargin(w) + 4
+      : 0,
   };
 }
 

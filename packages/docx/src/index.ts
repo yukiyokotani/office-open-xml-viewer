@@ -52,6 +52,7 @@ export type {
   ChartThreeDSeriesAxis,
   ChartThreeDRenderer,
   ChartRegionMapRenderer,
+  ChartExRenderer,
   ChartExElementStyle,
   ChartLineDashSegment,
   ChartexHistogramBinning,

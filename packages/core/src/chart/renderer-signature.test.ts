@@ -17,7 +17,10 @@
 
 import { describe, it, expect } from 'vitest';
 import type { ChartModel, ChartSeries, ChartRect } from '../types/chart';
+import { renderChartExChart } from './chart-ex-renderer.js';
 import { renderChart } from './renderer.js';
+
+const testChartEx = { render: renderChartExChart };
 
 // ─── Recording mock context ─────────────────────────────────────────────────
 
@@ -477,7 +480,17 @@ describe('renderChart draw-call signature (characterization)', () => {
   for (const [label, model, rect] of batteryModels()) {
     it(`is stable for: ${label}`, () => {
       const ctx = makeRecordingCtx();
-      renderChart(ctx, model, rect, 1.05);
+      renderChart(
+        ctx,
+        model,
+        rect,
+        1.05,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        testChartEx,
+      );
       // Snapshot the full ordered call log. A verbatim layout extraction must
       // not change a single entry.
       expect(ctx.log.join('\n')).toMatchSnapshot();

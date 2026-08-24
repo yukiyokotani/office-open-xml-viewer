@@ -15,11 +15,12 @@ import { XlsxViewer } from '@silurus/ooxml-xlsx';
 import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
+import { chartEx } from '../../../src/chart-ex';
 
 // Opt-in OMML equation engine — enabled here so user-supplied docx/pptx with
 // equations render. (In the published library this is `@silurus/ooxml/math`.)
 const math = { loadMathJax, mathMLToSvg };
-const advancedChartRenderers = { threeD, regionMap };
+const advancedChartRenderers = { threeD, regionMap, chartEx };
 
 const VIEWER_GAP = 26;
 const MIN_SCALE = 0.5;

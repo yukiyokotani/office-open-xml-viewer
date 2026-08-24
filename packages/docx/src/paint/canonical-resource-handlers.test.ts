@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import type { ChartModel } from '@silurus/ooxml-core';
+import { describe, expect, it, vi } from 'vitest';
+import type { ChartExRenderer, ChartModel } from '@silurus/ooxml-core';
 import {
   createPaintResourceRegistry,
 } from '../layout/paint-resources.js';
@@ -9,7 +9,10 @@ import {
   unavailablePaintResourceHandle,
 } from './resource-session.js';
 import { createCanvasPaintResourcePainter } from './canvas-page.js';
-import { canonicalCanvasPaintResourceHandlers } from './canonical-resource-handlers.js';
+import {
+  canonicalCanvasPaintResourceHandlers,
+  createCanonicalCanvasPaintResourceHandlers,
+} from './canonical-resource-handlers.js';
 
 function chartModel(): ChartModel {
   return {
@@ -155,5 +158,35 @@ describe('canonical Canvas paint resource handlers', () => {
       { name: 'strokeRect', args: [10.5, 20.5, 119, 79] },
       { name: 'fillText', args: ['(no data)', 70, 60] },
     ]));
+  });
+
+  it('forwards the opt-in ChartEx module through the DOCX chart paint boundary', () => {
+    const resourceKey = 'chart:chartex';
+    const render = vi.fn(() => true);
+    const chartEx = { render } as ChartExRenderer;
+    const registry = createPaintResourceRegistry([{
+      kind: 'chart', resourceKey, intrinsicSize: { widthPt: 120, heightPt: 80 },
+      model: {
+        ...chartModel(),
+        chartType: 'boxWhisker',
+        chartexBox: { categories: [], series: [] },
+      },
+    }]);
+    const paint = createCanvasPaintResourcePainter(
+      createPaintResourceSession(registry, [{ kind: 'chart', resourceKey, handle: null }]),
+      createCanonicalCanvasPaintResourceHandlers(undefined, undefined, undefined, chartEx),
+    );
+    const { ctx } = recordingContext();
+
+    paint.paint(resourceKey, 'chart', { xPt: 10, yPt: 20, widthPt: 120, heightPt: 80 }, ctx);
+
+    expect(render).toHaveBeenCalledOnce();
+    expect(render).toHaveBeenCalledWith(
+      ctx,
+      expect.objectContaining({ chartType: 'boxWhisker' }),
+      { x: 10, y: 20, w: 120, h: 80 },
+      1,
+      0,
+    );
   });
 });

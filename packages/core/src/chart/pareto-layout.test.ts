@@ -7,6 +7,17 @@ function series(values: Array<number | null>): ChartSeries {
 }
 
 describe('planParetoLayout', () => {
+  it('can retain authored order for a standalone paretoLine', () => {
+    const layout = planParetoLayout(
+      series([4, 8, 6, 4]),
+      ['A', 'B', 'C', 'D'],
+      { sortDescending: false },
+    );
+
+    expect(layout.points.map(point => point.sourceIndex)).toEqual([0, 1, 2, 3]);
+    expect(layout.series.values).toEqual([4 / 22, 12 / 22, 18 / 22, 1]);
+  });
+
   it('sorts descending, preserves tie source order, and omits invalid values', () => {
     const layout = planParetoLayout(
       series([5, 20, 10, 20, null, 0, -2, 10]),

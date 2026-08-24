@@ -16,6 +16,7 @@ export const sitemapPaths = [
   '/frameworks/solid/',
   '/announcements/',
   ...announcements.map(({ slug }) => `/announcements/${slug}/`),
+  '/bundle-size/',
   '/errors/',
   '/selection-context/',
 ] as const;
