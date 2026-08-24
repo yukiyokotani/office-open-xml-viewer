@@ -1838,6 +1838,7 @@ function textPlanSegment(
   const snapLeadingPadPt = segment.snapGridLeadingPadPx ?? 0;
   let decorationTerminalAdvancePt = segment.measuredWidth
     - (segment.snapGridTrailingPadPx ?? 0);
+  let griddedTerminalInkAdvancePt: number | undefined;
   if (segment.snapGridClass === 'eastAsia' && segment.snapGridCellPitchPx) {
     const cellPitchPt = segment.snapGridCellPitchPx;
     let precedingCells = 0;
@@ -1851,16 +1852,29 @@ function textPlanSegment(
         cellPitchPt,
       );
       const allocatedAdvancePt = cells * cellPitchPt;
+      const centeredOffsetPt = precedingCells * cellPitchPt
+        + (allocatedAdvancePt - cluster.advancePt) / 2;
       if (index === clusters.length - 1) {
-        decorationTerminalAdvancePt = precedingCells * cellPitchPt
-          + (allocatedAdvancePt - cluster.advancePt) / 2
-          + cluster.advancePt;
+        decorationTerminalAdvancePt = centeredOffsetPt + cluster.advancePt;
+        const naturalClusterOffsetPt = shapedClusters?.[index]?.offsetPt;
+        if (
+          segment.selectedFaceInkBounds
+          && naturalClusterOffsetPt !== undefined
+          && !/\s$/u.test(segment.text)
+        ) {
+          // The selected-face ink bounds describe the whole unsnapped segment.
+          // Translate the terminal glyph's tight extent from its natural
+          // cluster origin to the independently centered final grid cell.
+          griddedTerminalInkAdvancePt = centeredOffsetPt + Math.max(
+            0,
+            (segment.selectedFaceInkBounds.xMaxPt - naturalClusterOffsetPt) * scaleX,
+          );
+        }
       }
       const placed = {
         ...cluster,
         offset: {
-          xPt: precedingCells * cellPitchPt
-            + (allocatedAdvancePt - cluster.advancePt) / 2,
+          xPt: centeredOffsetPt,
           yPt: cluster.offset.yPt,
         },
         advancePt: allocatedAdvancePt,
@@ -2022,11 +2036,14 @@ function textPlanSegment(
     && segment.underline
     && !segment.verticalRun
     && paragraph.bidi !== true
-    && basePaintOps.length === 1
     && segment.selectedFaceInkBounds
-      ? basePaintOps[0]!.offset.xPt
-        + (basePaintOps[0]!.glyphOffsetPt?.xPt ?? 0)
-        + segment.selectedFaceInkBounds.xMaxPt * (basePaintOps[0]!.scaleX ?? 1)
+      ? griddedTerminalInkAdvancePt ?? (
+          basePaintOps.length === 1
+            ? basePaintOps[0]!.offset.xPt
+              + (basePaintOps[0]!.glyphOffsetPt?.xPt ?? 0)
+              + segment.selectedFaceInkBounds.xMaxPt * (basePaintOps[0]!.scaleX ?? 1)
+            : decorationTerminalAdvancePt
+        )
       : decorationTerminalAdvancePt;
   return {
     ...style,

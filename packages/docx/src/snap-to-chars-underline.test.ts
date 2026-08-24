@@ -216,6 +216,21 @@ describe('snap-to-chars-terminal-underline-boundaries', () => {
     expect(horizontal[0]!.x2).toBeLessThan(15);
   });
 
+  it('uses the final glyph ink for a multi-character East Asian line', async () => {
+    const { canvas, strokes, texts } = recordingCanvas(0.6);
+    await renderDocumentToCanvas(document('あい'), canvas, 0, { dpr: 1, width: 80 });
+
+    expect(texts.map(({ text, x }) => ({ text, x }))).toEqual([
+      { text: 'あ', x: 5 },
+      { text: 'い', x: 25 },
+    ]);
+    const horizontal = strokes.filter((line) => Math.abs(line.y1 - line.y2) < 1e-6);
+    expect(horizontal).toHaveLength(1);
+    // The grid still owns two 20pt cells, but the underline ends at the
+    // second glyph's tight 6pt ink edge rather than its 10pt advance edge.
+    expect(horizontal[0]!.x2).toBeCloseTo(31, 6);
+  });
+
   it('does not discard an explicitly authored terminal space', async () => {
     const plain = recordingCanvas();
     const spaced = recordingCanvas();
