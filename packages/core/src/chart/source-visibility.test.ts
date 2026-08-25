@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ChartModel, ChartSeries } from '../types/chart';
-import { applyPlotVisibleOnly } from './source-visibility';
+import {
+  applyPlotVisibleOnly,
+  hasFilteredScatterAutomaticPointStyle,
+} from './source-visibility';
 
 const series = (overrides: Partial<ChartSeries> = {}): ChartSeries => ({
   name: 'Series',
@@ -154,5 +157,13 @@ describe('plotVisOnly source filtering', () => {
       { idx: 2, markerSymbol: 'triangle' },
       { idx: 3, markerSymbol: 'x' },
     ]);
+    expect(hasFilteredScatterAutomaticPointStyle(filtered.series[0])).toBe(true);
+
+    const coincidentalPublicSeries = {
+      ...filtered.series[0],
+      dataPointColors: [...(filtered.series[0].dataPointColors ?? [])],
+      dataPointOverrides: (filtered.series[0].dataPointOverrides ?? []).map(point => ({ ...point })),
+    };
+    expect(hasFilteredScatterAutomaticPointStyle(coincidentalPublicSeries)).toBe(false);
   });
 });

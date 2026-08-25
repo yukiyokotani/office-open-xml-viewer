@@ -48,10 +48,13 @@ export const WORD_RUN_DECORATION_JUSTIFIED_ADVANCE = defineCompatibilityRule({
 export const WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE = defineCompatibilityRule({
   id: 'word-snap-to-chars-terminal-underline',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/snap-to-chars-underline.test.ts#ends a soft-wrapped underline at the final glyph instead of the unused cell edge',
+    kind: 'office-observation',
+    syntheticFixtureId: 'snap-to-chars-terminal-underline-boundaries',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
-  description: 'For horizontal LTR snapToChars text, retain trailing character-cell slack in line advance while ending a terminal underline at the retained final-glyph extent.',
+  description: 'In the observed horizontal LTR snapToChars matrix, retain trailing character-cell slack in line advance while ending a terminal underline at the retained final-glyph ink extent. Authored trailing spaces remain content, and RTL/vertical text stays outside this rule.',
 });
 
 export const WORD_PARAGRAPH_BORDER_FLOW_RESERVATION = defineCompatibilityRule({

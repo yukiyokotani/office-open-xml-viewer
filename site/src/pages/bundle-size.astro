@@ -15,7 +15,7 @@ import SiteFooter from '../components/SiteFooter.astro';
       <div class="wrap">
         <p class="eyebrow">Current measurement</p>
         <h1>Bundle size.</h1>
-        <p>Updated for the upcoming v0.81.0 release.</p>
+        <p>Updated for v0.81.0.</p>
       </div>
     </header>
 
@@ -28,20 +28,22 @@ import SiteFooter from '../components/SiteFooter.astro';
           <tbody>
             <tr>
               <th>XLSX main-mode change from v0.80.2</th>
-              <td>+116 KiB</td>
-              <td>+31 KiB</td>
+              <td>+118 KiB</td>
+              <td>+32 KiB</td>
             </tr>
             <tr>
               <th>Enable the optional ChartEx module</th>
-              <td>+38 KB</td>
+              <td>+42 KB</td>
               <td>+12 KB</td>
             </tr>
           </tbody>
         </table>
       </div>
       <p>
-        Measurements use the production build. Actual application bundles vary by bundler and the
-        imports used by the application. This page is refreshed for each release.
+        Measurements use the static JavaScript import closure from the production build. The
+        comparison excludes parser WASM and lazy worker assets, which are unchanged by a main-mode
+        import. gzip is measured per emitted asset at level 9. Actual application bundles vary by
+        bundler and imported entries. This page is refreshed for each release.
       </p>
     </section>
   </main>

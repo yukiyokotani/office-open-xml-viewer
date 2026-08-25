@@ -31,6 +31,11 @@ for (const hostName of hosts) {
 
 for (const assetPath of workerAssets) {
   const source = readFileSync(assetPath, 'utf8');
+  if (/\bimport\.meta\b/.test(source)) {
+    throw new Error(
+      `${assetPath} contains import.meta; opaque worker assets must remain parseable as classic scripts`,
+    );
+  }
   const specifiers = [
     ...source.matchAll(/\bfrom\s*["']([^"']+)["']/g),
     ...source.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g),

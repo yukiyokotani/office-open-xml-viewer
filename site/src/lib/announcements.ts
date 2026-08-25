@@ -37,18 +37,18 @@ export interface Announcement {
 export const announcements: readonly Announcement[] = [
   {
     slug: 'v081-chartex-opt-in',
-    date: '2026-08-22',
-    label: 'Upcoming release',
+    date: '2026-08-25',
+    label: 'Release note',
     version: 'v0.81.0',
     title: 'Migrating to v0.81.0',
-    summary: 'v0.81.0 adds Microsoft ChartEx rendering and moves it to an opt-in module. Applications that display ChartEx charts must import and enable the renderer.',
+    summary: 'v0.81.0 expands Microsoft ChartEx rendering and moves it to an opt-in module. Applications that display ChartEx charts must import and enable the renderer.',
     audience: 'Applications that display waterfall, histogram, Pareto, funnel, box-and-whisker, treemap or sunburst charts. Applications that use only classic charts need no changes.',
     sections: [
       {
         title: 'ChartEx support',
         kind: 'summary',
         paragraphs: [
-          'v0.81.0 adds rendering for Microsoft ChartEx chart families, including waterfall, histogram, Pareto, funnel, box-and-whisker, treemap and sunburst charts.',
+          'v0.81.0 expands rendering for Microsoft ChartEx chart families, including waterfall, histogram, Pareto, funnel, box-and-whisker, treemap and sunburst charts.',
           'Classic charts remain built in and require no application changes.',
         ],
       },

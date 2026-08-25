@@ -42,11 +42,14 @@ export interface ChartSeries {
   invertedFill?: SolidFill | GradientFill | PatternFill | null;
   /** Alternate negative fill explicitly authored as `<a:noFill>`. */
   invertedFillHidden?: boolean | null;
-  /** Effective outline for a negative inverted bar. Office supplies a black
-   *  0.75pt outline when `invertSolidFillFmt` authors a fill but no line. */
+  /** Whether `c14:invertSolidFillFmt` directly authored a fill choice. */
+  invertedFillAuthored?: boolean | null;
+  /** Effective directly-authored outline for a negative inverted bar. */
   invertedLineColor?: string | null;
   invertedLineWidthEmu?: number | null;
   invertedLineHidden?: boolean | null;
+  /** Whether the alternate `c14:spPr` directly contains `<a:ln>`. */
+  invertedLineAuthored?: boolean | null;
   /** ChartEx `<cx:series><cx:spPr>` local shape paint. Positive fill/line
    * properties override linked style roles; series noFill remains distinct
    * from a data-point noFill. */

@@ -2364,22 +2364,6 @@ pub(crate) fn parse_rels_map(xml: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Target of the first `<Relationship>` whose `Type` ends with `type_suffix`.
-/// Matched by `ends_with` so both the Transitional and Strict namespace
-/// prefixes resolve (mirrors pptx/docx `find_rel_target_by_type`). `None` when
-/// no relationship of that type is present or the XML is malformed.
-pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option<String> {
-    let doc = roxmltree::Document::parse(rels_xml).ok()?;
-    for rel in doc.root_element().children().filter(|n| n.is_element()) {
-        if let Some(rel_type) = rel.attribute("Type") {
-            if rel_type.ends_with(type_suffix) {
-                return rel.attribute("Target").map(|t| t.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Internal package-part target of the first relationship whose type ends in
 /// `type_suffix`. Unlike hyperlink-oriented callers, workbook-owned resources
 /// such as the theme must never treat an external URI as a ZIP part name.

@@ -19,7 +19,10 @@ import {
   classicMarkerPaintWorkCount,
   renderChart as renderChartCore,
 } from './renderer.js';
-import { renderChartExChart } from './chart-ex-renderer.js';
+import {
+  chartExHierarchyLabelPaintWorkCount,
+  renderChartExChart,
+} from './chart-ex-renderer.js';
 import { renderSimpleThreeDChart } from './three-d-renderer.js';
 import { formatChartValWithCode } from './chart-number-format.js';
 import { BOX_WHISKER_SLOT_GUTTER_FRACTION } from './box-whisker.js';
@@ -1316,7 +1319,7 @@ describe('classic 3-D compatibility projection', () => {
     }
   });
 
-  it('uses the observed compact 3-D column tick density with only an authored maximum', () => {
+  it('uses the shared automatic tick density with only an authored 3-D maximum', () => {
     const rec = strokedPolylineCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'clusteredBar',
@@ -1334,8 +1337,7 @@ describe('classic 3-D compatibility projection', () => {
     }), { x: 0, y: 0, w: 300, h: 190 }, 1);
 
     const labels = rec.texts.map(text => text.text);
-    expect(labels).toEqual(expect.arrayContaining(['0', '2', '4', '6', '8']));
-    expect(labels).not.toEqual(expect.arrayContaining(['1', '3', '5', '7']));
+    expect(labels).toEqual(expect.arrayContaining(['0', '1', '2', '3']));
   });
 
   it('keeps the ordinary one-sided tick density when 3-D display units are authored', () => {
@@ -1437,7 +1439,9 @@ describe('classic 3-D compatibility projection', () => {
     expect(rec.strokes.filter(stroke => stroke.ss === '#898989')).toHaveLength(0);
   });
 
-  it('uses the authored 0.25pt width for 3-D axis rules and ticks', () => {
+  it.each([0.5, 1, 2])(
+    'uses the same authored 0.25pt width for 3-D axis rules and ticks at %sx',
+    (ptToPx) => {
     const rec = strokedPolylineCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'clusteredBar',
@@ -1474,7 +1478,7 @@ describe('classic 3-D compatibility projection', () => {
         series({ values: [5, 15], lineHidden: true }),
         series({ values: [8, 12], lineHidden: true }),
       ],
-    }), RECT, 1);
+    }), RECT, ptToPx);
 
     for (const color of ['#FF00FF', '#00AA00', '#0000FF']) {
       const strokes = rec.strokes.filter(stroke => stroke.ss === color);
@@ -1486,9 +1490,9 @@ describe('classic 3-D compatibility projection', () => {
       const frame = strokes.reduce((longest, stroke) =>
         length(stroke) > length(longest) ? stroke : longest);
       const ticks = strokes.filter(stroke => stroke !== frame);
-      expect(frame.lw).toBe(0.25);
+      expect(frame.lw).toBe(0.25 * ptToPx);
       expect(ticks.length).toBeGreaterThan(0);
-      expect(ticks.every(stroke => stroke.lw === 0.25)).toBe(true);
+      expect(ticks.every(stroke => stroke.lw === 0.25 * ptToPx)).toBe(true);
     }
   });
 
@@ -7066,7 +7070,7 @@ describe('CH5 — category axis numFmt applies to category tick labels (§21.2.2
     expect(range[0].x + range[0].w).toBeCloseTo(range[1].x);
   });
 
-  it('shares fractional calendar ticks across primary and secondary series', () => {
+  it('keeps fractional calendar-unit labels fail-closed while sharing series positions', () => {
     const rec = strokedPolylineCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'line',
@@ -7092,10 +7096,7 @@ describe('CH5 — category axis numFmt applies to category tick labels (§21.2.2
     }), RECT, 1);
 
     const labels = rec.texts.map(text => text.text);
-    expect(labels).toContain('1/1/2024');
-    expect(labels).toContain('2/1/2024');
-    expect(labels).toContain('3/1/2024');
-    expect(labels).toContain('4/1/2024');
+    expect(labels.some(label => label.includes('/2024'))).toBe(false);
     const primary = rec.strokes.find(stroke => stroke.ss === '#4472C4' && stroke.points.length === 3);
     const secondary = rec.strokes.find(stroke => stroke.ss === '#ED7D31' && stroke.points.length === 3);
     expect(primary).toBeDefined();
@@ -8807,11 +8808,13 @@ function markerRecordingCtx(): {
   beziers: number;
   texts: TextCall[];
   segments: Array<Array<{ x: number; y: number }>>;
+  strokeStyles: string[];
 } {
   const arcs: ArcCall[] = [];
   const fillRects: FillRectCall[] = [];
   const texts: TextCall[] = [];
   const segments: Array<Array<{ x: number; y: number }>> = [];
+  const strokeStyles: string[] = [];
   let current: Array<{ x: number; y: number }> | null = null;
   let beziers = 0;
   let fillCalls = 0;
@@ -8859,6 +8862,8 @@ function markerRecordingCtx(): {
           return (x: number, y: number, w: number, h: number) => fillRects.push({ x, y, w, h });
         case 'fill':
           return () => { fillCalls += 1; };
+        case 'stroke':
+          return () => { strokeStyles.push(String(state.strokeStyle)); };
         case 'bezierCurveTo':
           return () => { beziers += 1; };
         case 'fillText':
@@ -8875,7 +8880,7 @@ function markerRecordingCtx(): {
   };
   return {
     ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
-    arcs, fillRects, texts, segments,
+    arcs, fillRects, texts, segments, strokeStyles,
     get beziers() { return beziers; },
     get fillCalls() { return fillCalls; },
   } as never;
@@ -11873,6 +11878,43 @@ describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
     expect(rec.beziers).toBeGreaterThan(0);
   });
 
+  it('keeps filtered automatic scatter topology and colors local to its series', () => {
+    const model = baseModel({
+      chartType: 'scatter',
+      scatterStyle: 'marker',
+      plotVisibleOnly: true,
+      themeAccentColors: ['156082', 'E97132', '196B24'],
+      categories: ['1', '2', '3', '4'],
+      series: [
+        series({
+          values: [10, 20, 30, 40],
+          sourceHidden: [false, true, false, false],
+        }),
+        series({
+          color: '7030A0',
+          values: [12, 18, 24, 36],
+          sourceHidden: [false, true, false, false],
+          markerSymbol: 'circle',
+        }),
+      ],
+    });
+    const filtered = markerRecordingCtx();
+    renderChart(filtered.ctx, model, RECT, 1);
+
+    expect(filtered.strokeStyles).toEqual(expect.arrayContaining(['#E97132', '#196B24']));
+    // The directly formatted sibling retains the ordinary marker-scatter
+    // spline; the filtered automatic series alone changes to straight,
+    // point-colored segments.
+    expect(filtered.beziers).toBeGreaterThan(0);
+
+    const visibleOnlyOff = markerRecordingCtx();
+    renderChart(visibleOnlyOff.ctx, { ...model, plotVisibleOnly: false }, RECT, 1);
+    expect(visibleOnlyOff.strokeStyles).not.toEqual(
+      expect.arrayContaining(['#E97132', '#196B24']),
+    );
+    expect(visibleOnlyOff.beziers).toBeGreaterThan(filtered.beziers);
+  });
+
   for (const chartType of ['line', 'area'] as const) {
     it(`${chartType}: smooth series draws a bezier spline; non-smooth draws straight segments`, () => {
       const smooth = markerRecordingCtx();
@@ -12111,6 +12153,45 @@ describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
       .toHaveLength(1);
   });
 
+  it('limits an omitted alternate outline below authored line ownership', () => {
+    const render = (legacyChartStyle: number, overrides: Partial<ChartSeries> = {}) => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'clusteredBar',
+        legacyChartStyle,
+        categories: ['Negative'],
+        series: [series({
+          values: [-3],
+          invertIfNegative: true,
+          invertedFill: { fillType: 'solid', color: 'FFFFFF' },
+          invertedFillAuthored: true,
+          invertedLineAuthored: false,
+          ...overrides,
+        })],
+      }), RECT, 1);
+      return rec;
+    };
+
+    expect(render(2).strokeRects.filter(rect => rect.ss === '#000000' && rect.lw === 0.75))
+      .toHaveLength(1);
+    expect(render(10).strokeRects.filter(rect => rect.ss === '#000000' && rect.lw === 0.75))
+      .toHaveLength(0);
+    const directLine = render(2, { lineColor: 'FF0000', lineWidthEmu: 12_700 });
+    expect(directLine.strokeRects.filter(rect => rect.ss === '#FF0000' && rect.lw === 1))
+      .toHaveLength(1);
+    expect(directLine.strokeRects.filter(rect => rect.ss === '#000000')).toHaveLength(0);
+    expect(render(2, { lineHidden: true }).strokeRects).toHaveLength(0);
+    expect(render(2, {
+      invertedLineAuthored: true,
+      invertedLineColor: '00AA00',
+      invertedLineWidthEmu: 25_400,
+    }).strokeRects.filter(rect => rect.ss === '#00AA00' && rect.lw === 2)).toHaveLength(1);
+    expect(render(2, {
+      invertedLineAuthored: true,
+      invertedLineHidden: true,
+    }).strokeRects).toHaveLength(0);
+  });
+
   it('keeps the application-generated outline-only negative style separate from authored inversion', () => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
@@ -12121,9 +12202,6 @@ describe('CH9 — line/area smooth splines (§21.2.2.194)', () => {
         color: '4472C4',
         values: [-24_000, -18_000, -11_500],
         automaticNegativeStyle: true,
-        invertedFillHidden: true,
-        invertedLineColor: '000000',
-        invertedLineWidthEmu: 9_525,
       })],
     }), RECT, 1);
 
@@ -19706,9 +19784,9 @@ describe('CH15 — chartEx sunburst', () => {
         }],
       },
     });
-    expect(chartLabelPaintWorkCount(build(1), undefined)).toBe(4096);
-    expect(chartLabelPaintWorkCount(build(256), undefined)).toBe(1_048_576);
-    expect(chartLabelPaintWorkCount(build(257), undefined)).toBe(1_048_577);
+    expect(chartExHierarchyLabelPaintWorkCount(build(1))).toBe(4096);
+    expect(chartExHierarchyLabelPaintWorkCount(build(256))).toBe(1_048_576);
+    expect(chartExHierarchyLabelPaintWorkCount(build(257))).toBe(1_048_577);
     const sparse = build(1);
     sparse.chartexSunburst = {
       rows: [
@@ -19716,7 +19794,7 @@ describe('CH15 — chartEx sunburst', () => {
         { path: ['Visible'], size: 1 },
       ],
     };
-    expect(chartLabelPaintWorkCount(sparse, undefined)).toBe(4096);
+    expect(chartExHierarchyLabelPaintWorkCount(sparse)).toBe(4096);
   });
 
   it.each([

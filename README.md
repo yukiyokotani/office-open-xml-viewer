@@ -76,40 +76,13 @@ pnpm add @silurus/ooxml
 > new DocxViewer(canvas, { wasmUrl: 'https://cdn.example.com/docx_parser_bg.wasm' });
 > ```
 
-> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked
-> Size* sums every entry bundle **and** the standalone MathJax + STIX Two Math
-> asset, so the reported figure is much larger than any single app build. For
-> v0.79.0, the complete npm package is approximately 13.0 MB unpacked (4.3 MB
-> as the downloaded tarball), while a format-specific application graph is
-> approximately:
->
-> | Imported entry | Reachable assets | gzip | Includes |
-> |---|---:|---:|---|
-> | `@silurus/ooxml/docx` | 4.0 MB | 1.2 MB | DOCX renderer, parser WASM, and lazy worker |
-> | `@silurus/ooxml/xlsx` | 2.6 MB | 0.82 MB | XLSX renderer, parser WASM, and lazy worker |
-> | `@silurus/ooxml/pptx` | 2.5 MB | 0.78 MB | PPTX renderer, parser WASM, and lazy worker |
-> | `@silurus/ooxml/math` | 3.1 MB | 1.1 MB | Optional MathJax + STIX Two Math engine |
-> | `@silurus/ooxml/three-d` | 92 KB | 27 KB | Optional model-space 3-D chart mesh and camera |
-> | `@silurus/ooxml/region-map` | 236 KB | 66 KB | Optional offline Region Map renderer and fixed country geometry |
-> | `@silurus/ooxml/chart-ex` | 37 KB | 11 KB | Optional Microsoft ChartEx families |
->
-> These are production-artifact estimates, not initial-load figures: each row
-> sums all assets reachable from that entry, including parser WASM and worker
-> chunks loaded on demand. Exact output varies by bundler and compression. Import
-> only the format you need (for example, `@silurus/ooxml/pptx`) so the other
-> formats can be tree-shaken. The math engine is a **separate entry** whose
-> main-thread chunk is a ~1 KB loader referencing the ~3 MB engine as a
-> **sibling file**, not an inline data URL. The engine is fetched lazily, only
-> when a document contains equations, and only if you imported
-> `@silurus/ooxml/math` and passed it to a viewer (see
-> [Rendering equations](#rendering-equations)). Never import the `math` entry
-> and the loader chunk never enters your graph at all.
->
-> The ChartEx, 3-D chart and Region Map renderers follow the same dependency-injection
-> boundary: import and pass only the optional renderer modules an application
-> needs. Their implementations are not eagerly loaded or evaluated in main
-> mode. Worker mode fetches a self-contained render-worker asset that includes
-> the worker-side built-ins, so consumer bundlers can copy it safely.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size*
+> includes every entry and optional asset, so it is not the size of a
+> format-specific application graph. See the current production measurements on
+> the stable [Bundle size](https://ooxml.silurus.dev/bundle-size/) page. Import
+> only the format and optional renderer entries your application needs. In main
+> mode, MathJax, ChartEx, 3-D and Region Map implementations remain outside the
+> graph unless imported; the separately loaded worker asset is self-contained.
 
 ---
 
@@ -281,10 +254,10 @@ Notes:
 - The canvas-target methods (`renderSlide(canvas)`, `renderPage(canvas)`,
   `renderViewport(canvas)`) are unavailable in worker mode — use the `*ToBitmap`
   variants instead.
-- The built-in math, 3-D chart, and Region Map renderers work in both modes
-  through the same `math`, `threeD`, and `regionMap` options. Custom renderer
-  objects are main-realm code and therefore use the feature's documented
-  fallback in `mode: 'worker'`.
+- The built-in math, ChartEx, 3-D chart, and Region Map renderers work in both
+  modes through the same `math`, `chartEx`, `threeD`, and `regionMap` options.
+  Custom renderer objects are main-realm code and therefore use the feature's
+  documented fallback in `mode: 'worker'`.
 - A DOCX document that requires browser-only OpenType vertical-glyph selection
   automatically uses effective main mode for correct shaping. Read
   `document.mode` after loading when your integration needs to observe this
@@ -535,38 +508,33 @@ flowchart TB
     end
 
     subgraph browser["🌐  Runtime  (Browser)"]
-        subgraph core_pkg["@silurus/ooxml-core  (shared primitives)"]
-            CORE["renderChart · resolveFill · applyStroke\nbuildCustomPath · autoResize · shared types"]
-        end
-        subgraph docx_pkg["@silurus/ooxml · docx"]
-            DV["DocxViewer"] --> DD["DocxDocument"]
-            DD --> DW["worker.ts\n〈Web Worker — parse only〉"]
-            DD --> DR["renderer.ts\n〈Canvas 2D — main thread〉"]
-        end
-        subgraph xlsx_pkg["@silurus/ooxml · xlsx"]
-            XV["XlsxViewer"] --> XB["XlsxWorkbook"]
-            XB --> XW["worker.ts\n〈Web Worker — parse only〉"]
-            XB --> XR["renderer.ts\n〈Canvas 2D — main thread〉"]
-        end
-        subgraph pptx_pkg["@silurus/ooxml · pptx"]
-            PV["PptxViewer"] --> PP["PptxPresentation"]
-            PP --> PW["worker.ts\n〈Web Worker — parse only〉"]
-            PP --> PR["renderer.ts\n〈Canvas 2D — main thread〉"]
-        end
-        DR -. uses .-> CORE
-        XR -. uses .-> CORE
-        PR -. uses .-> CORE
+        VIEWER["DOCX / XLSX / PPTX Viewer"] --> ENGINE["format headless engine"]
+        ENGINE -->|mode: main| PARSE["parser worker\n〈WASM parse〉"]
+        PARSE --> MODEL["validated document model"]
+        MODEL --> MAIN["layout + Canvas paint\n〈main thread〉"]
+        ENGINE -->|mode: worker| RENDER_WORKER["render-worker.ts\n〈WASM parse + layout + paint〉"]
+        RENDER_WORKER --> BITMAP["ImageBitmap"]
+        MAIN --> CANVAS["&lt;canvas&gt;"]
+        BITMAP --> CANVAS
+        CORE["@silurus/ooxml-core\nshared layout and paint primitives"]
+        MAIN -. uses .-> CORE
+        RENDER_WORKER -. uses .-> CORE
     end
 
-    docx_wasm --> DW
-    xlsx_wasm --> XW
-    pptx_wasm --> PW
-    DR --> canvas["&lt;canvas&gt;"]
-    XR --> canvas
-    PR --> canvas
+    docx_wasm --> PARSE
+    xlsx_wasm --> PARSE
+    pptx_wasm --> PARSE
+    docx_wasm --> RENDER_WORKER
+    xlsx_wasm --> RENDER_WORKER
+    pptx_wasm --> RENDER_WORKER
 ```
 
-All three formats follow the same shape: the worker parses the `.docx` / `.xlsx` / `.pptx` archive via WASM and posts a JSON model back to the main thread, where the renderer draws to the canvas. Rendering stays on the main thread so the canvas shares the document's `FontFaceSet` — an `OffscreenCanvas` in a worker has its own font registry and would silently fall back to a system font, producing subtly different text measurements (and wrap positions) from the installed theme webfonts. `@silurus/ooxml-core` holds the cross-format primitives that the three renderers all depend on: a unified chart renderer (bar / line / area / radar / waterfall), shape helpers (`resolveFill`, `applyStroke`, `buildCustomPath`, `hexToRgba`), the `autoResize` viewer utility, and the shared type definitions.
+All three formats use the same public mode boundary. In the default `main` mode,
+WASM parsing runs in a Worker and the validated model is laid out and painted on
+the main thread. In `worker` mode, parsing, layout and Canvas paint run in a
+render Worker, which returns an `ImageBitmap` for presentation. Built-in optional
+renderers use the same injection options in both modes. `@silurus/ooxml-core`
+owns the layout, paint and type primitives shared by DOCX, XLSX and PPTX.
 
 ### Key files
 
@@ -575,10 +543,11 @@ All three formats follow the same shape: the worker parses the `.docx` / `.xlsx`
 | `packages/docx/parser/src/lib.rs` | Rust WASM parser — DOCX ZIP → `Document` JSON |
 | `packages/xlsx/parser/src/lib.rs` | Rust WASM parser — XLSX ZIP → `Workbook` JSON |
 | `packages/pptx/parser/src/lib.rs` | Rust WASM parser — PPTX ZIP → `Presentation` JSON |
-| `packages/docx/src/renderer.ts` | Canvas 2D rendering engine with text layout (main thread) |
-| `packages/xlsx/src/renderer.ts` | Canvas 2D rendering engine with virtual scroll (main thread) |
-| `packages/pptx/src/renderer.ts` | Canvas 2D rendering engine (main thread) |
-| `packages/*/src/worker.ts` | Web Worker: WASM init and parsing only (one per format) |
+| `packages/docx/src/renderer.ts` | DOCX Canvas 2D rendering and text layout |
+| `packages/xlsx/src/renderer.ts` | XLSX Canvas 2D viewport rendering |
+| `packages/pptx/src/renderer.ts` | PPTX Canvas 2D rendering |
+| `packages/*/src/worker.ts` | Main-mode parser Worker entry |
+| `packages/*/src/render-worker.ts` | Worker-mode parser, layout and Canvas paint entry |
 | `packages/*/src/viewer.ts` | Public Viewer API — canvas lifecycle, navigation |
 | `packages/core/src/index.ts` | Cross-format primitives — chart renderer, shape helpers, `autoResize`, shared types |
 
@@ -637,6 +606,7 @@ file without uploading it.
 | | Table indent (`w:tblInd`, §17.4.50) | ✅ |
 | | Right-to-left table column order (`w:bidiVisual`, §17.4.1) | ✅ |
 | | Charts (embedded DrawingML `c:chart` — bar / line / area / pie / doughnut / radar / scatter, via the shared core chart renderer; data labels honour `dLblPos`, §21.2.2.48) | ✅ |
+| | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
@@ -696,6 +666,7 @@ file without uploading it.
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
 | | Math equations in shapes (OMML `m:oMath` / `m:oMathPara` in `xdr:txBody`, incl. `a14:m` / `mc:AlternateContent`; rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Charts (bar, line, area, pie, doughnut, radar, scatter / bubble) | ✅ |
+| | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Chart markers (circle / square / diamond / triangle / x / plus / star / dot / dash, per-point `<c:dPt>` overrides; markers-only scatter series draw a marker legend key) | ✅ |
 | | Chart data labels (`<c:dLbl>` per-point with CELLRANGE / VALUE / SERIESNAME / CATEGORYNAME field references, position `l`/`r`/`t`/`b`/`ctr`/`outEnd`) | ✅ |
 | | Chart error bars (`<c:errBars>` X/Y direction, `cust` / `fixedVal` / `stdErr` / `stdDev` / `percentage`, dashed/styled lines) | ✅ |
@@ -741,12 +712,12 @@ file without uploading it.
 | | Groups (`grpSp`) with nested transforms | ✅ |
 | | Connectors (`cxnSp`) | ✅ |
 | | Tables (`tbl` in `graphicFrame`) | ✅ |
-| | Charts (bar, line, area, radar, waterfall) | ✅ |
+| | Charts (bar, line, area, radar) | ✅ |
 | | Charts (pie, doughnut) | ✅ |
 | | Charts (scatter — `scatterStyle` marker / line / smooth variants) | ✅ |
 | | Charts (bubble — `bubbleSize` per-point area scaling) | ✅ |
 | | Charts (ordered classic combo groups — observed bar/line/area, scatter/bubble, and stock/line combinations; unsupported mixes fail closed) | ✅ |
-| | Charts (chartEx — funnel / histogram / treemap / sunburst / box &amp; whisker) | ✅ opt-in |
+| | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Charts (stock — high / low / close candlesticks) | ✅ |
 | | SmartArt (renders the PowerPoint-saved drawing layout `dsp:drawing`, or a staged fallback to a text list when no drawing part is present; no native diagram layout engine) | ✅ |
 | | OLE embedded objects (`p:oleObj` — the baked preview `p:pic` is drawn; the embedded app is not run) | ✅ |

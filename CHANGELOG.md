@@ -5,6 +5,44 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.81.0 — 2026-08-25
+
+Minor release expanding Microsoft ChartEx support and improving chart fidelity
+across Word, Excel, and PowerPoint. Applications that display ChartEx charts
+must opt in to the new module; classic charts remain built in.
+
+- **ChartEx migration:** move waterfall, histogram, Pareto, funnel,
+  box-and-whisker, treemap, and sunburst rendering to the tree-shakeable
+  `@silurus/ooxml/chart-ex` entry. Pass `chartEx` to DOCX, XLSX, or PPTX viewers
+  that need these chart families.
+- **chart fidelity:** preserve more authored Chart Style, Chart Color, fill,
+  line, marker, axis, legend, label, data-table, visible-source, and plot-area
+  semantics through the shared classic and ChartEx pipeline.
+- **3-D charts:** improve Bubble3D material and series precedence, axis and
+  gridline ownership, Surface wireframes, and projected picture fills,
+  including crop, tile, stack, wall, and reversed-axis behavior.
+- **host integration:** apply the shared chart behavior consistently in DOCX,
+  XLSX, and PPTX main and worker rendering, while keeping ChartEx outside the
+  default main-mode import closure.
+- **Word layout:** exclude truly empty unnumbered cell paragraphs from AutoFit
+  content width while retaining authored spaces and non-breaking spaces, and
+  end horizontal snap-grid underlines at the terminal glyph ink.
+- **documentation:** add the ChartEx migration announcement and maintain current
+  bundle-size measurements on the independent bundle-size page.
+
+## 0.80.3 — 2026-08-25
+
+Patch release improving Word list resilience and production worker compatibility
+without changing the 0.80 public integration contract.
+
+- **Word numbering resilience:** keep list bodies at the authored paragraph
+  start when `nothing` or `space` suffixes remain inside a hanging-indent region,
+  avoiding a non-negative layout invariant failure. (#1366)
+- **production worker compatibility:** resolve the optional MathJax asset in the
+  main realm so emitted render-worker assets contain no inner `import.meta`,
+  including when rebundled by Next.js 14 and webpack. (#1367)
+- **compatibility:** no application or API migration is required from 0.80.2.
+
 ## 0.80.2 — 2026-08-18
 
 Compatible patch release improving Office document fidelity and navigation

@@ -55,6 +55,35 @@ function textService(advancePt: number): TextLayoutService {
 }
 
 describe('resolveNumberingMarkerGeometry', () => {
+  function geometryWithSuffix(suff: 'nothing' | 'space', authoredFirstIndentPt: number) {
+    return resolveNumberingMarkerGeometry(
+      {
+        numId: 1,
+        level: 0,
+        format: 'decimal',
+        text: '1.',
+        indentLeft: 36,
+        tab: 36,
+        suff,
+        jc: 'left',
+      },
+      {
+        fontSizePt: 10,
+        fonts: { ascii: 'serif', eastAsia: 'serif' },
+        weight: 400,
+        style: 'normal',
+        complexScript: false,
+      },
+      {
+        authoredFirstIndentPt,
+        physicalIndentLeftPt: 36,
+        tabStops: [],
+        defaultTabPt: 36,
+      },
+      textService(10),
+    );
+  }
+
   function geometryAtCoincidentStop(alignment: 'left' | 'num') {
     return resolveNumberingMarkerGeometry(
       {
@@ -96,4 +125,24 @@ describe('resolveNumberingMarkerGeometry', () => {
   it('keeps ordinary coincident tabs strictly forward', () => {
     expect(geometryAtCoincidentStop('left').bodyOffsetPt).toBeCloseTo(24.55, 10);
   });
+
+  it.each([
+    ['nothing', -36],
+    ['space', -36],
+  ] as const)(
+    'keeps a %s suffix body at the paragraph start when its marker ends inside the hanging region',
+    (suffix, authoredFirstIndentPt) => {
+      expect(geometryWithSuffix(suffix, authoredFirstIndentPt).bodyOffsetPt).toBe(0);
+    },
+  );
+
+  it.each([
+    ['nothing', 2],
+    ['space', 12],
+  ] as const)(
+    'keeps a positive %s suffix advance beyond the paragraph start',
+    (suffix, expectedBodyOffsetPt) => {
+      expect(geometryWithSuffix(suffix, -8).bodyOffsetPt).toBe(expectedBodyOffsetPt);
+    },
+  );
 });
