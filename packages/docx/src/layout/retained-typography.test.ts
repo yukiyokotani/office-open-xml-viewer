@@ -99,6 +99,41 @@ describe('retained typography geometry', () => {
     expect(structuredClone(underline)).toEqual(underline);
   });
 
+  it('adds an author-coloured revision underline for insertions and strike for deletions', () => {
+    const base = { ascentPt: 9, descentPt: 4 };
+    const inserted = retainedTextDecorations({
+      origin: { xPt: 5, yPt: 10 }, advancePt: 20,
+      base, color: '#000000',
+      revision: { color: '#C00000', underline: { probe: { ascentPt: 2, descentPt: 2 } } },
+    });
+    expect(inserted).toEqual([{
+      kind: 'underline', color: '#C00000', widthPt: 2, style: 'solid',
+      from: { xPt: 5, yPt: 15 }, to: { xPt: 25, yPt: 15 },
+    }]);
+    const deleted = retainedTextDecorations({
+      origin: { xPt: 5, yPt: 10 }, advancePt: 20,
+      base, color: '#000000',
+      revision: { color: '#0070C0', strike: { probe: { ascentPt: 2, descentPt: 2 } } },
+    });
+    expect(deleted).toEqual([{
+      kind: 'strikethrough', color: '#0070C0', widthPt: 2, style: 'solid',
+      from: { xPt: 5, yPt: 10 }, to: { xPt: 25, yPt: 10 },
+    }]);
+  });
+
+  it('stacks the author-coloured revision decoration on the authored underline', () => {
+    const decorations = retainedTextDecorations({
+      origin: { xPt: 5, yPt: 10 }, advancePt: 20,
+      base: { ascentPt: 9, descentPt: 4 }, color: '#000000',
+      underline: { color: '#112233', probe: { ascentPt: 2, descentPt: 2 } },
+      revision: { color: '#C00000', underline: { probe: { ascentPt: 2, descentPt: 2 } } },
+    });
+    expect(decorations.map((decoration) => [decoration.kind, decoration.color])).toEqual([
+      ['underline', '#112233'],
+      ['underline', '#C00000'],
+    ]);
+  });
+
   it('centers a shaped tab-leader sequence inside the authored tab interval', () => {
     expect(centeredLeaderGlyphOrigins({
       interval: { xPt: 10, yPt: 4, widthPt: 23, heightPt: 12 },

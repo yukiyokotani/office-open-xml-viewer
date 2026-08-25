@@ -135,15 +135,26 @@ export function retainedTextDecorations(input: Readonly<{
   color: string;
   underline?: Readonly<{ authoredStyle?: string; color: string; probe: RetainedInkMetric }>;
   strike?: Readonly<{ double: boolean; probe: RetainedInkMetric; doubleProbe?: RetainedInkMetric }>;
+  /** ECMA-376 §17.13.5 tracked-changes markup: an additional decoration in the
+   * deterministic revision-author color, layered AFTER any authored underline /
+   * strike so the author color stays visible. Insertions underline, deletions
+   * strike through; both reuse the same selected-face probes as the authored
+   * decorations. */
+  revision?: Readonly<{
+    color: string;
+    underline?: Readonly<{ probe: RetainedInkMetric }>;
+    strike?: Readonly<{ probe: RetainedInkMetric }>;
+  }>;
 }>): readonly TextDecorationLayout[] {
   const decorations: TextDecorationLayout[] = [];
   const rightPt = input.origin.xPt + input.advancePt;
+  const underlineCenterPt = (probe: RetainedInkMetric, strokeWidthPt: number): number => Math.max(
+    input.origin.yPt + (inkTop(probe) + inkBottom(probe)) / 2,
+    input.origin.yPt + inkBottom(input.base) + strokeWidthPt / 2,
+  );
   if (input.underline) {
     const strokeWidthPt = inkStrokeWidth(input.underline.probe);
-    const nativeCenterPt = input.origin.yPt
-      + (inkTop(input.underline.probe) + inkBottom(input.underline.probe)) / 2;
-    const clearCenterPt = input.origin.yPt + inkBottom(input.base) + strokeWidthPt / 2;
-    const centerPt = Math.max(nativeCenterPt, clearCenterPt);
+    const centerPt = underlineCenterPt(input.underline.probe, strokeWidthPt);
     const style = underlineStyle(input.underline.authoredStyle);
     const common = {
       kind: 'underline' as const,
@@ -189,6 +200,23 @@ export function retainedTextDecorations(input: Readonly<{
         from: { xPt: input.origin.xPt, yPt }, to: { xPt: rightPt, yPt },
       });
     }
+  }
+  if (input.revision?.underline) {
+    const strokeWidthPt = inkStrokeWidth(input.revision.underline.probe);
+    const centerPt = underlineCenterPt(input.revision.underline.probe, strokeWidthPt);
+    decorations.push({
+      kind: 'underline', color: input.revision.color, widthPt: strokeWidthPt, style: 'solid',
+      from: { xPt: input.origin.xPt, yPt: centerPt }, to: { xPt: rightPt, yPt: centerPt },
+    });
+  }
+  if (input.revision?.strike) {
+    const strokeWidthPt = inkStrokeWidth(input.revision.strike.probe);
+    const yPt = input.origin.yPt
+      + (inkTop(input.revision.strike.probe) + inkBottom(input.revision.strike.probe)) / 2;
+    decorations.push({
+      kind: 'strikethrough', color: input.revision.color, widthPt: strokeWidthPt, style: 'solid',
+      from: { xPt: input.origin.xPt, yPt }, to: { xPt: rightPt, yPt },
+    });
   }
   return decorations;
 }

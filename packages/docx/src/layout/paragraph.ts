@@ -73,6 +73,10 @@ import {
   type RetainedEmphasisClusterInk,
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
+import {
+  wordTrackChangeAuthorColor,
+  wordTrackChangeDecoration,
+} from './track-changes.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
 import { resolveAnchorFrame, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapPt } from './paragraph-spacing.js';
@@ -208,6 +212,13 @@ interface RetainedTextGeometryPlan {
     double: boolean;
     probe: RetainedInkMetric;
     doubleProbe?: RetainedInkMetric;
+  }>;
+  /** ECMA-376 §17.13.5 tracked-changes markup in the deterministic
+   * revision-author color, painted in addition to authored decorations. */
+  readonly revision?: Readonly<{
+    color: string;
+    underline?: Readonly<{ probe: RetainedInkMetric }>;
+    strike?: Readonly<{ probe: RetainedInkMetric }>;
   }>;
   readonly emphasis?: Readonly<{
     authored: string;
@@ -913,6 +924,7 @@ export function planLine(input: PlanLineInput): LineLayout {
             color: retainedColorString(style.color),
             ...(retainedGeometry.underline ? { underline: retainedGeometry.underline } : {}),
             ...(retainedGeometry.strike ? { strike: retainedGeometry.strike } : {}),
+            ...(retainedGeometry.revision ? { revision: retainedGeometry.revision } : {}),
           })
         : style.decorations;
       const emphasis = retainedGeometry?.emphasis ? {
@@ -1680,8 +1692,10 @@ function retainedGeometryPlan(
   sourceOffset: number,
   color: TextPlacement['color'],
 ): RetainedTextGeometryPlan | undefined {
+  const revisionDecoration = wordTrackChangeDecoration(segment.revision?.kind);
   if (!(segment.highlight || segment.underline || segment.strikethrough
-    || segment.doubleStrikethrough || segment.emphasisMark)) return undefined;
+    || segment.doubleStrikethrough || segment.emphasisMark
+    || revisionDecoration.underline || revisionDecoration.strike)) return undefined;
   const service = segment.textLayoutService;
   const request = segment.textShapeRequest;
   if (!service || !request) {
@@ -1721,6 +1735,18 @@ function retainedGeometryPlan(
     probe: glyphProbe('-'),
     ...(segment.doubleStrikethrough ? { doubleProbe: glyphProbe('=') } : {}),
   } : undefined;
+  // §17.13.5 — a visible revision (insertion / deletion) adds its own
+  // author-coloured decoration on top of any authored underline / strike,
+  // reusing the authored probes when they already shaped the same glyph.
+  const revision = revisionDecoration.underline || revisionDecoration.strike ? {
+    color: wordTrackChangeAuthorColor(segment.revision?.author),
+    ...(revisionDecoration.underline
+      ? { underline: { probe: underline?.probe ?? glyphProbe('_') } }
+      : {}),
+    ...(revisionDecoration.strike
+      ? { strike: { probe: strike?.probe ?? glyphProbe('-') } }
+      : {}),
+  } : undefined;
   const emphasis = segment.emphasisMark ? (() => {
     const glyph = emphasisGlyph(segment.emphasisMark);
     const markShape = shape(glyph);
@@ -1755,6 +1781,7 @@ function retainedGeometryPlan(
     base,
     ...(underline ? { underline } : {}),
     ...(strike ? { strike } : {}),
+    ...(revision ? { revision } : {}),
     ...(emphasis ? { emphasis } : {}),
   };
 }
