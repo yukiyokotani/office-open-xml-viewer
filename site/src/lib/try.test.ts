@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   rejectXlsx: false,
   threeD: { render: vi.fn() },
   regionMap: { render: vi.fn() },
+  chartEx: { render: vi.fn() },
 }));
 
 vi.mock('@silurus/ooxml-docx', () => {
@@ -109,7 +110,7 @@ vi.mock('../../../packages/core/src/math/engine', () => ({
 
 vi.mock('../../../src/three-d', () => ({ threeD: mocks.threeD }));
 vi.mock('../../../src/region-map', () => ({ regionMap: mocks.regionMap }));
-vi.mock('../../../src/chart-ex', () => ({ chartEx: { render: vi.fn() } }));
+vi.mock('../../../src/chart-ex', () => ({ chartEx: mocks.chartEx }));
 
 import { disposeRenderedFile, renderFile } from './try';
 
@@ -190,6 +191,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.mode).toBe('main');
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
+    expect(viewer.opts.chartEx).toBe(mocks.chartEx);
     expect(viewer.setScaleCalls).toEqual([]);
     expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(4);
@@ -215,6 +217,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.mode).toBe('main');
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
+    expect(viewer.opts.chartEx).toBe(mocks.chartEx);
     expect(viewer.setScaleCalls).toEqual([]);
     expect(viewer.events[0]).toBe('load');
     expect(viewer.opts.overscan).toBe(6);
@@ -247,6 +250,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.math).toBeDefined();
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
+    expect(viewer.opts.chartEx).toBe(mocks.chartEx);
     expect(viewer.opts.useGoogleFonts).toBe(true);
   });
 

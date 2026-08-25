@@ -187,6 +187,11 @@ export function resolveNumberingMarkerGeometry(
       bodyOffsetPt = stop ? stop.pos - input.physicalIndentLeftPt : markerEndPt;
     }
   }
+  // ECMA-376 §17.3.1.12 keeps paragraph content at the authored start indent.
+  // The §17.9.28 suffix advances that body only when the marker plus suffix
+  // crosses the start edge; a marker contained by its hanging region cannot
+  // pull the paragraph body backward into that region.
+  bodyOffsetPt = Math.max(0, bodyOffsetPt);
   return {
     bodyOffsetPt,
     markerText,

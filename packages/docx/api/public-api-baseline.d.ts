@@ -623,9 +623,11 @@ export interface ChartSeries {
     automaticNegativeStyle?: boolean | null;
     invertedFill?: SolidFill | GradientFill | PatternFill | null;
     invertedFillHidden?: boolean | null;
+    invertedFillAuthored?: boolean | null;
     invertedLineColor?: string | null;
     invertedLineWidthEmu?: number | null;
     invertedLineHidden?: boolean | null;
+    invertedLineAuthored?: boolean | null;
     chartexStyle?: ChartExElementStyle | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;

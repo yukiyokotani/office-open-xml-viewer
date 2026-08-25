@@ -115,6 +115,16 @@ export const EXCEL_AUTOMATIC_SCATTER_MARKERS = [
   'diamond', 'square', 'triangle', 'x', 'star', 'circle',
 ] as const;
 
+// Provenance for the Office compatibility style synthesized below. Keep this
+// out of the public ChartSeries model: the fact exists only for the filtered
+// object identity produced in this realm, and must never be reconstructed from
+// coincidentally equal paint arrays.
+const filteredScatterAutomaticPointStyles = new WeakSet<ChartSeries>();
+
+export function hasFilteredScatterAutomaticPointStyle(series: ChartSeries): boolean {
+  return filteredScatterAutomaticPointStyles.has(series);
+}
+
 function applyExcelFilteredScatterAutomaticStyle(
   chart: ChartModel,
   series: ChartSeries,
@@ -138,7 +148,7 @@ function applyExcelFilteredScatterAutomaticStyle(
   // unformatted `scatterStyle="marker"` series as consecutive automatic
   // theme entries. Keep this compatibility behavior after the normative
   // plotVisOnly filtering step so hidden source slots consume no palette entry.
-  return {
+  const styled: ChartSeries = {
     ...series,
     dataPointColors: series.values.map((_, index) => accents[index % accents.length]),
     dataPointOverrides: series.values.map((_, index) => ({
@@ -148,6 +158,8 @@ function applyExcelFilteredScatterAutomaticStyle(
       ],
     })),
   };
+  filteredScatterAutomaticPointStyles.add(styled);
+  return styled;
 }
 
 /**

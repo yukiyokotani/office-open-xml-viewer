@@ -46,18 +46,11 @@ test.describe('README screenshots', () => {
     await page.setViewportSize({ width: 1200, height: 720 });
     const res = await page.goto('/iframe.html?id=xlsxviewer-examples--demo&viewMode=story');
     expect(res?.status()).toBeLessThan(400);
-    // XlsxViewer's status text is "Loaded — N sheet(s)" or "Sheet: Name"
-    await page.waitForFunction(
-      () => {
-        for (const el of Array.from(document.querySelectorAll('div'))) {
-          const t = (el.textContent ?? '').trim();
-          if (/^(Loaded|Sheet:)/.test(t)) return true;
-        }
-        return false;
-      },
-      null,
-      { timeout: 60_000 },
-    );
+    // The story intentionally omits a status banner so the tab strip remains
+    // visible. Wait for rendered viewer state instead of presentation text.
+    await page.getByRole('button', { name: 'Dashboard', exact: true })
+      .waitFor({ state: 'visible', timeout: 60_000 });
+    await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 60_000 });
     await page.waitForTimeout(600);
     await page.screenshot({ path: `${OUT_DIR}/xlsx.png`, fullPage: false });
   });

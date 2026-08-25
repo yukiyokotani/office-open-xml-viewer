@@ -54,6 +54,31 @@ try {
   paint('pptx', await pptx.renderSlideToBitmap(0, { width: 360, dpr: 1 }));
   pptx.destroy();
 
+  const chartExDocx = await DocxDocument.load(
+    await bytes('/consumer/chart-ex.docx'),
+    { mode: 'worker', ...renderers },
+  );
+  paint('docx-chart-ex', await chartExDocx.renderPageToBitmap(0, { width: 640, dpr: 1 }));
+  chartExDocx.destroy();
+
+  const chartExXlsx = await XlsxWorkbook.load(
+    await bytes('/consumer/chart-ex.xlsx'),
+    { mode: 'worker', ...renderers },
+  );
+  paint('xlsx-chart-ex', await chartExXlsx.renderViewportToBitmap(
+    0,
+    { row: 0, col: 0, rows: 20, cols: 10 },
+    { width: 640, height: 360, dpr: 1 },
+  ));
+  chartExXlsx.destroy();
+
+  const chartExPptx = await PptxPresentation.load(
+    await bytes('/consumer/chart-ex.pptx'),
+    { mode: 'worker', ...renderers },
+  );
+  paint('pptx-chart-ex', await chartExPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
+  chartExPptx.destroy();
+
   document.body.dataset.status = 'ready';
 } catch (error) {
   document.body.dataset.status = 'error';

@@ -129,6 +129,7 @@ import {
   wordTrailingEmptyMarkAdmissionAllowancePt,
 } from './section-compatibility.js';
 import {
+  WORD_AUTOFIT_EMPTY_PARAGRAPH_CONTENT_WIDTH,
   WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK,
   WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
   WORD_EXACT_ROW_VERTICAL_CLIP_ONLY,
@@ -149,6 +150,7 @@ import {
   WORD_VERTICAL_MERGE_TERMINAL_BORDER,
   WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE,
   wordAlignedTableOriginPt,
+  wordAutofitEmptyParagraphHasNoIntrinsicContent,
   wordAuthoredAutoRowHeightUsesFloor,
   wordAuthoredBorderParticipates,
   wordClipsOverPageCantSplitRow,
@@ -264,6 +266,29 @@ describe('defineCompatibilityRule', () => {
     expect(wordFramePositionExtendsLineBox('none')).toBe(true);
     expect(wordFramePositionExtendsLineBox('drop')).toBe(false);
     expect(wordFramePositionExtendsLineBox('margin')).toBe(false);
+  });
+});
+
+describe('Word table AutoFit observations', () => {
+  it('records the empty-paragraph content-width boundary', () => {
+    expect(WORD_AUTOFIT_EMPTY_PARAGRAPH_CONTENT_WIDTH.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'autofit-empty-paragraph-boundary-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_AUTOFIT_EMPTY_PARAGRAPH_CONTENT_WIDTH.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordAutofitEmptyParagraphHasNoIntrinsicContent({
+      runs: [], numbering: null,
+    })).toBe(true);
+    expect(wordAutofitEmptyParagraphHasNoIntrinsicContent({
+      runs: [{ type: 'text', text: ' ' }] as never, numbering: null,
+    })).toBe(false);
+    expect(wordAutofitEmptyParagraphHasNoIntrinsicContent({
+      runs: [], numbering: { numId: 1, level: 0 } as never,
+    })).toBe(false);
   });
 });
 

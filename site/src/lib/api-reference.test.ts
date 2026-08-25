@@ -46,6 +46,7 @@ describe('official-site API reference', () => {
       const guidance = formatRenderModeGuidance[format as keyof typeof formatRenderModeGuidance];
       expect(guidance, format).toContain('both modes');
       expect(guidance, format).toContain('Worker mode');
+      expect(guidance, format).toContain('ChartEx');
       for (const apiClass of classes) {
         const mode = apiClass.options?.find(({ name }) => name === 'mode');
         expect(mode?.def, apiClass.name).toBe("'main'");
@@ -53,10 +54,21 @@ describe('official-site API reference', () => {
         expect(mode?.desc, apiClass.name).toContain("Use 'worker'");
         expect(mode?.desc, apiClass.name).toContain('larger');
         expect(mode?.desc, apiClass.name).toMatch(/built-in/i);
+        expect(mode?.desc, apiClass.name).toContain('ChartEx');
       }
     }
     expect(formatRenderModeGuidance.docx).toContain('automatically use main mode');
     expect(formatRenderModeGuidance.docx).toContain("document's mode");
+  });
+
+  it('keeps worker bitmap descriptions synchronized with optional ChartEx rendering', () => {
+    for (const classes of Object.values(apiReference)) {
+      for (const apiClass of classes) {
+        for (const method of apiClass.methods.filter(({ sig }) => sig.includes('ToBitmap('))) {
+          expect(method.desc, `${apiClass.name}: ${method.sig}`).toContain('ChartEx');
+        }
+      }
+    }
   });
 
   it('documents the shared resource controls on every browser API class', () => {

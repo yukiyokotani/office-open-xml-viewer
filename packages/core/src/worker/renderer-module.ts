@@ -26,10 +26,10 @@ export async function loadWorkerRenderer<T>(descriptor: WorkerRendererDescriptor
 async function loadBuiltinRenderer(descriptor: WorkerRendererDescriptor): Promise<object> {
   switch (descriptor.builtin) {
     case 'math': {
-      const engine = await import('../math/engine.js');
+      const engine = await import('../math/engine-runtime.js');
       return Object.freeze({
-        loadMathJax: () => engine.loadMathJaxFromAsset(descriptor.engineAssetUrl),
-        mathMLToSvg: (mathml: string) => engine.mathMLToSvgFromAsset(
+        loadMathJax: () => engine.loadMathJaxFromResolvedAsset(descriptor.engineAssetUrl),
+        mathMLToSvg: (mathml: string) => engine.mathMLToSvgFromResolvedAsset(
           mathml,
           descriptor.engineAssetUrl,
         ),

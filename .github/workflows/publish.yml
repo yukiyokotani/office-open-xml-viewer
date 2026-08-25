@@ -75,6 +75,9 @@ jobs:
       - name: Verify production render-worker assets
         run: pnpm check:production-render-workers
 
+      - name: Verify optional ChartEx bundle boundary
+        run: pnpm check:optional-chart-ex
+
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,
       # module/type field sanity). attw checks that every entrypoint resolves to
@@ -100,7 +103,7 @@ jobs:
           mkdir -p /tmp/pack-smoke && cd /tmp/pack-smoke
           npm init -y
           npm i "$GITHUB_WORKSPACE"/silurus-ooxml-*.tgz
-          node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); console.log('pack smoke OK');"
+          node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); const c = await import('@silurus/ooxml/chart-ex'); if (!c.chartEx?.render) throw new Error('chartEx missing'); console.log('pack smoke OK');"
 
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Publish to npm

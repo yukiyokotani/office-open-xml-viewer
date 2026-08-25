@@ -80,21 +80,11 @@ export function planDateCategoryAxis(
   ): number | null => {
     if (value == null || !(value > 0) || !Number.isFinite(value)) return null;
     if (unit === 'days') return value;
-    // ST_AxisUnit permits positive doubles, but MS-OE376 requires Office date
-    // axes to use values >= 1 and does not define fractional calendar
-    // arithmetic. Excel's retained vector boundary is discontinuous: integral
-    // n.0 advances by n units, while non-integral n.f advances by floor(n)^2
-    // units (observed at 1.01/1.5/1.9, 2.1/2.5, and 3.1 for both months and
-    // years). Apply that compatibility rule only inside its observed
-    // 1 <= value < 4 boundary; larger non-integral values remain unsupported.
-    // Keep this separate from omitted, application-defined automatic interval
-    // selection.
-    if (value < 1) return null;
-    if (Number.isInteger(value)) return value;
-    if (value >= 4) return null;
-    const calendarPart = Math.floor(value);
-    const calendarStep = calendarPart * calendarPart;
-    return Number.isFinite(calendarStep) ? calendarStep : null;
+    // ST_AxisUnit permits positive doubles, but neither ECMA-376 nor MS-OE376
+    // defines fractional calendar-month/year arithmetic. Preserve integral
+    // authored calendar units and fail closed for fractional ones instead of
+    // extrapolating a cadence from a finite set of application observations.
+    return value >= 1 && Number.isInteger(value) ? value : null;
   };
   const majorStep = authoredStep(options.majorUnit, majorUnit);
   const minorStep = authoredStep(options.minorUnit, minorUnit);
