@@ -10,6 +10,7 @@ import type {
   AcquiredParagraphLayoutInput,
   LayoutServices,
   ParagraphLayout,
+  TableCellLayoutInput,
   TableEdgeInputs,
   TableLayoutInput,
   TableRowLayoutInput,
@@ -1147,6 +1148,72 @@ describe('retained table pagination', () => {
     expect(first.fragment?.rows[0]?.cells[0]?.contentRanges).toEqual([
       { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 },
     ]);
+  });
+
+  it('trims a trailing partial row when a vMerge owner deficit relocates into the truncated span', () => {
+    const cell = (
+      logicalRowIndex: number,
+      columnStart: number,
+      verticalMerge: 'none' | 'restart' | 'continue',
+      layout: ParagraphLayout | null,
+    ): TableCellLayoutInput => ({
+      id: `cell-${logicalRowIndex}-${columnStart}`,
+      source: { story: 'body', storyInstance: 'body', path: [0, logicalRowIndex, columnStart] },
+      columnStart, columnSpan: 1,
+      verticalMerge,
+      margins: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      vAlign: 'top' as const, borders: noBorders,
+      blocks: layout ? [{ layout, sourceBlockIndex: 0 }] : [],
+    });
+    const twoColumnRow = (
+      logicalRowIndex: number,
+      first: ReturnType<typeof cell>,
+      second: ParagraphLayout,
+    ): TableRowLayoutInput => ({
+      id: `row-${logicalRowIndex}`,
+      source: { story: 'body', storyInstance: 'body', path: [0, logicalRowIndex] },
+      logicalRowIndex,
+      cantSplit: false,
+      heightPt: null,
+      heightRule: 'auto',
+      cellSpacingPt: 0,
+      exceptionBorders: null,
+      alignment: 'left', indentPt: 0,
+      repeatedHeader: false,
+      cells: [first, cell(logicalRowIndex, 1, 'none', second)],
+    });
+    // A split plain row's tail completes on this page, after which the vMerge
+    // group is admitted by retained track heights. Materializing the
+    // fragment-truncated span relocates the owner deficit into the trailing
+    // partial row, so the fragment outgrows the page even though every
+    // admission fit; pagination must trim back to a whole-row boundary
+    // instead of returning an over-page fragment that cannot advance.
+    const source = acquisition([
+      twoColumnRow(0, cell(0, 0, 'none', paragraph('split-row', [40, 40, 40, 40])), paragraph('r0-side', [40])),
+      twoColumnRow(1, cell(1, 0, 'restart', paragraph('merged-owner', [30, 30, 30, 30, 30])), paragraph('r1-side', [40])),
+      twoColumnRow(2, cell(2, 0, 'continue', null), paragraph('r2-side', [40])),
+      twoColumnRow(3, cell(3, 0, 'continue', null), paragraph('r3-side', [30, 30, 30, 30])),
+    ]);
+    const tailCursor = Object.freeze({
+      rowIndex: 0,
+      rowFragmentIndex: 1,
+      cells: Object.freeze([
+        Object.freeze({ blockIndex: 0, paragraphLineStart: 2, nestedCursor: null, nestedFragmentIndex: 0 }),
+        Object.freeze({ blockIndex: 1, paragraphLineStart: 0, nestedCursor: null, nestedFragmentIndex: 0 }),
+      ]),
+    });
+
+    const first = take(source, 200, tailCursor, { freshPageHeightPt: 200 });
+
+    expect(first.requiresFreshPage).toBe(false);
+    expect(first.fragment?.advancePt).toBeLessThanOrEqual(200);
+    expect(first.fragment?.rows.map((item) => [item.logicalRowIndex, item.fragmentIndex])).toEqual([[0, 1]]);
+    expect(first.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 0 });
+
+    const rest = take(source, 200, first.nextCursor!, { freshPageHeightPt: 200 });
+    expect(rest.requiresFreshPage).toBe(false);
+    expect(rest.fragment?.rows.map((item) => item.logicalRowIndex)).toEqual([1, 2, 3]);
+    expect(rest.nextCursor).toBeNull();
   });
 
   it('reacquires only page-dependent blocks with stable source indices per occurrence', () => {

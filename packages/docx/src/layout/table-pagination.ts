@@ -1293,10 +1293,15 @@ export function takeTableFragment(
   while (fragment.advancePt > context.availableHeightPt + EPSILON_PT) {
     const last = selected.at(-1);
     const sourceCount = selected.filter((row) => row.ownership === 'source').length;
-    const wholeSourceRow = last?.ownership === 'source'
-      && last.fragmentIndex === 0
-      && last.ranges.every((ranges) => ranges.every((range) => range.kind === 'whole'));
-    if (!wholeSourceRow || sourceCount <= 1) break;
+    // Only a first-fragment source row is a legal trim boundary. Materializing
+    // a fragment-truncated vMerge span relocates the owner's deficit into the
+    // span's last row (table.ts resolveRowHeights), which can grow a trailing
+    // partial row past the budget its lines were selected against. Such a row
+    // has emitted nothing yet, so deferring it whole loses no content; a later
+    // fragment (fragmentIndex > 0) or a non-source row would.
+    const trimmableSourceRow = last?.ownership === 'source'
+      && last.fragmentIndex === 0;
+    if (!trimmableSourceRow || sourceCount <= 1) break;
     selected.pop();
     nextCursor = Object.freeze({
       rowIndex: last.logicalRowIndex,
