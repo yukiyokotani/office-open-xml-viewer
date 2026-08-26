@@ -100,10 +100,6 @@ import {
   WORD_PARAGRAPH_SHADING_BORDER_BOX,
   WORD_RUN_DECORATION_JUSTIFIED_ADVANCE,
   WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE,
-  WORD_TRACK_CHANGE_DECORATION,
-  WORD_TRACK_CHANGE_AUTHOR_COLORS,
-  WORD_TRACK_CHANGE_AUTHOR_PALETTE,
-  wordTrackChangeDecoration,
 } from './paint-compatibility.js';
 import {
   WORD_KASHIDA_FINAL_FORM_PRIORITY,
@@ -374,9 +370,7 @@ describe('layout compatibility inventory', () => {
       WORD_RTL_COMPLEX_SCRIPT_EUROPEAN_DIGITS_AN,
       WORD_KASHIDA_FINAL_FORM_PRIORITY,
       WORD_VERTICAL_TU_CORNER_PLACEMENT,
-      WORD_TRACK_CHANGE_AUTHOR_PALETTE,
       WORD_PARAGRAPH_SHADING_BORDER_BOX,
-      WORD_TRACK_CHANGE_DECORATION,
       WORD_AUTO_TEXT_CONTRAST_EFFECTIVE_BACKGROUND,
       WORD_RUN_DECORATION_JUSTIFIED_ADVANCE,
       WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE,
@@ -712,30 +706,6 @@ describe('layout compatibility inventory', () => {
     expect(wordFarEastSingleLinePx(0, 10)).toBe(13);
     expect(wordUseFeLayoutInheritedGridHeightPx(36, 18, 1.15)).toBe(36);
     expect(wordUseFeLayoutInheritedGridHeightPx(18, 18, 1.15)).toBeCloseTo(20.7, 12);
-  });
-
-  it('pins the eight track-change author colors independently of author indexing', () => {
-    expect(WORD_TRACK_CHANGE_AUTHOR_COLORS).toEqual([
-      '#C00000', '#0070C0', '#00B050', '#7030A0',
-      '#E97132', '#196B24', '#9E480E', '#525252',
-    ]);
-    expect(Object.isFrozen(WORD_TRACK_CHANGE_AUTHOR_COLORS)).toBe(true);
-  });
-
-  it('maps visible track-change kinds to their revision decorations', () => {
-    expect(wordTrackChangeDecoration('insertion')).toEqual({
-      underline: true,
-      strike: false,
-    });
-    expect(wordTrackChangeDecoration('deletion')).toEqual({
-      underline: false,
-      strike: true,
-    });
-    expect(wordTrackChangeDecoration(null)).toEqual({
-      underline: false,
-      strike: false,
-    });
-    expect(Object.isFrozen(wordTrackChangeDecoration('insertion'))).toBe(true);
   });
 
   it('keeps neutral characters attached to the active script slice', () => {

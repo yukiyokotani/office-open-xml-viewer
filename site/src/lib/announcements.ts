@@ -36,6 +36,64 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v082-review-comments',
+    date: '2026-08-26',
+    label: 'Release note',
+    version: 'v0.82.0',
+    title: 'Comments and tracked changes in v0.82.0',
+    summary: 'v0.82.0 adds read-only comment presentation across Word, Excel and PowerPoint, together with detached Word tracked-change data.',
+    audience: 'Applications that display review comments or Word tracked changes. Existing viewers continue to work without source changes.',
+    sections: [
+      {
+        title: 'Comments in context',
+        kind: 'summary',
+        paragraphs: [
+          'DOCX and PPTX ScrollViewers can place comment cards beside the page or slide, close to the authored location. XLSX viewers retain cell-anchored comment markers and cards. Replies and resolved state are kept when present in the file.',
+          'The feature is read-only. Editing, replying, resolving and application-specific review workflows remain the responsibility of the host application.',
+        ],
+      },
+      {
+        title: 'Use the built-in presentation',
+        paragraphs: [
+          'Pass comments: true to a DOCX or PPTX ScrollViewer to use the built-in margin. The same comments option controls visibility and resolved-thread policy across DOCX, XLSX and PPTX. XLSX keeps its existing default comment presentation.',
+          'The default structure is intentionally simple. Applications can adjust its appearance with stable CSS classes and custom properties without recreating the Viewer.',
+        ],
+        examples: [
+          {
+            title: 'Show DOCX comments',
+            code: `import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const viewer = new DocxScrollViewer(container, {
+  comments: true,
+});
+
+await viewer.load(source);`,
+          },
+        ],
+      },
+      {
+        title: 'Compose a different UI',
+        paragraphs: [
+          'Applications that need a different structure can use format-scoped comment data and anchor geometry. DOCX resolves comment threads per rendered page, PPTX exposes comments per slide and element bounds, and XLSX exposes comments per sheet plus current-viewport cell rectangles.',
+          'This lower-level path leaves framework components, interaction, list virtualization and editing workflows under application ownership.',
+        ],
+      },
+      {
+        title: 'Word tracked changes',
+        paragraphs: [
+          'DOCX parsing now retains recorded insertions, deletions and moves from the document body as detached data. The rendered document is the accepted-final state: deletions and move sources do not appear on the page, and there is no built-in tracked-change markup view.',
+          'Comments and tracked changes remain separate document concepts and separate public data. The Viewer does not combine them into an editable review model.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No existing option is removed or renamed. DOCX and PPTX comments appear only when enabled, while XLSX preserves its established default. Applications that do not display review information require no changes.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v081-chartex-opt-in',
     date: '2026-08-25',
     label: 'Release note',

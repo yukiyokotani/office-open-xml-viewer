@@ -46,6 +46,7 @@ import {
   limitPptxElementContext,
   MAX_ELEMENT_TEXT_CHARACTERS,
 } from './element-selection';
+import { renderPptxFocusedSlide } from './focused-view-runtime';
 
 const borrowedPresentationOption = Symbol('PptxViewer.borrowedPresentation');
 type InternalPptxViewerOptions = PptxViewerOptions & {
@@ -580,10 +581,22 @@ export class PptxViewer implements ZoomableViewer {
         }
         this.handle = handle;
       } else if (isWorker) {
-        const bmp = await this.engine.renderSlideToBitmap(this.currentSlide, { width: targetWidth, dpr, dim, onTextRun });
+        const bmp = await renderPptxFocusedSlide(
+          this.engine,
+          this.canvas,
+          this.currentSlide,
+          'worker',
+          { width: targetWidth, dpr, dim, onTextRun },
+        );
         if (!this.renderDispatcher.commitBitmap(generation, bmp)) return;
       } else {
-        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, dim });
+        await renderPptxFocusedSlide(
+          this.engine,
+          this.canvas,
+          this.currentSlide,
+          'main',
+          { width: targetWidth, dpr, onTextRun, dim },
+        );
         if (!this.renderDispatcher.isCurrent(generation)) return;
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);

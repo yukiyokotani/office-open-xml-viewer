@@ -2,12 +2,13 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const component = readFileSync(new URL('./components/ApiReference.astro', import.meta.url), 'utf8');
+const productionPage = readFileSync(new URL('./pages/production.astro', import.meta.url), 'utf8');
 const errorPage = readFileSync(new URL('./pages/errors.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
 describe('public error documentation', () => {
-  it('links every format API page to a dedicated error reference', () => {
-    expect(component).toContain('href="/errors"');
+  it('links the shared production guidance and API details to the error reference', () => {
+    expect(productionPage).toContain('href="/errors"');
     expect(component).toContain('href={o.detailsHref}');
     expect(errorPage).toContain('id="delivery"');
     expect(errorPage).toContain('id="ooxml-error"');

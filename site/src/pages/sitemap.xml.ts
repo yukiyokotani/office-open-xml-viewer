@@ -8,6 +8,10 @@ export const sitemapPaths = [
   '/docx/',
   '/xlsx/',
   '/pptx/',
+  '/api/docx/',
+  '/api/xlsx/',
+  '/api/pptx/',
+  '/production/',
   '/try/',
   '/frameworks/',
   '/frameworks/react/',
@@ -19,6 +23,8 @@ export const sitemapPaths = [
   '/bundle-size/',
   '/errors/',
   '/selection-context/',
+  '/review-ui/',
+  '/review-ui/source/',
 ] as const;
 
 export function GET(): Response {

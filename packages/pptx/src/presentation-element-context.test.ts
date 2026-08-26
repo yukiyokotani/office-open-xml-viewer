@@ -56,3 +56,53 @@ describe('PptxPresentation.getElementContextAt', () => {
     )).resolves.toEqual(context);
   });
 });
+
+describe('PptxPresentation.getElementBoundsByIds', () => {
+  it('resolves authored ids without hit-testing in main mode', async () => {
+    const instance = presentation('main');
+    instance._slides = { withSlide: vi.fn(async (_index, consume) => consume(slide())) };
+
+    await expect((instance as unknown as PptxPresentation).getElementBoundsByIds(
+      0, ['7'],
+    )).resolves.toEqual([{
+      elementId: '7', elementIndex: 0, origin: 'slide', elementType: 'shape',
+      bounds: { x: 0, y: 0, width: 100, height: 50, rotation: 0, flipH: false, flipV: false },
+    }]);
+  });
+
+  it('prefers the slide-authored id when composed master content reuses it', async () => {
+    const instance = presentation('main');
+    const master = { ...shape(), x: 1, width: 10 };
+    const authored = { ...shape(), x: 40, width: 60 };
+    instance._slides = { withSlide: vi.fn(async (_index, consume) => consume({
+      ...slide(),
+      elements: [master, authored],
+      elementSources: [{ origin: 'master' }, { origin: 'slide' }],
+    })) };
+
+    await expect((instance as unknown as PptxPresentation).getElementBoundsByIds(
+      0, ['7'],
+    )).resolves.toMatchObject([{
+      elementId: '7', elementIndex: 1, origin: 'slide',
+      bounds: { x: 40, width: 60 },
+    }]);
+  });
+
+  it('uses one worker request for every requested id', async () => {
+    const instance = presentation('worker');
+    const bounds = [{
+      elementId: '7', elementIndex: 0, origin: 'slide' as const, elementType: 'shape' as const,
+      bounds: { x: 0, y: 0, width: 100, height: 50, rotation: 0, flipH: false, flipV: false },
+    }];
+    instance._bridge = { request: vi.fn(async (build: (id: number) => unknown) => {
+      expect(build(13)).toEqual({
+        kind: 'resolveElementBounds', id: 13, slideIndex: 0, elementIds: ['7', '8'],
+      });
+      return { kind: 'elementBoundsResolved', id: 13, bounds };
+    }) };
+
+    await expect((instance as unknown as PptxPresentation).getElementBoundsByIds(
+      0, ['7', '8'],
+    )).resolves.toEqual(bounds);
+  });
+});

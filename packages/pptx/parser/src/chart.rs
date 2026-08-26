@@ -133,6 +133,7 @@ pub(crate) fn parse_legacy_chart_with_style_parts_and_images(
         }
     }
     Some(ChartElement {
+        id: None,
         x: 0,
         y: 0,
         width: 0,
@@ -200,6 +201,7 @@ pub(crate) fn parse_chartex_with_images(
         image_resolver,
     )?;
     Some(ChartElement {
+        id: None,
         x: 0,
         y: 0,
         width: 0,

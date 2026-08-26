@@ -3873,6 +3873,7 @@ export function renderViewport(
       opts.selectedRowRange ?? null,
       opts.selectedColRange ?? null,
       worksheet.rightToLeft === true,
+      opts.chromeColors,
     );
   }
 
@@ -3933,13 +3934,14 @@ function renderHeaders(
   selectedRowRange: { start: number; end: number; strong: boolean } | null,
   selectedColRange: { start: number; end: number; strong: boolean } | null,
   rtl: boolean,
+  chromeColors: import('./types.js').XlsxChromeColors | undefined,
 ): void {
-  const HEADER_BG = '#f8f9fa';
-  const HEADER_BG_SUBTLE = '#e8eaed';
-  const HEADER_BG_STRONG = '#caddf6';
-  const HEADER_BORDER = '#c8ccd0';
-  const HEADER_BORDER_STRONG = '#5b9bd5';
-  const HEADER_TEXT = '#444';
+  const HEADER_BG = chromeColors?.surface ?? '#f8f9fa';
+  const HEADER_BG_SUBTLE = chromeColors?.mutedSurface ?? '#e8eaed';
+  const HEADER_BG_STRONG = chromeColors?.selectedSurface ?? '#caddf6';
+  const HEADER_BORDER = chromeColors?.border ?? '#c8ccd0';
+  const HEADER_BORDER_STRONG = chromeColors?.accent ?? '#5b9bd5';
+  const HEADER_TEXT = chromeColors?.text ?? '#444';
 
   const colBg = (col: number): string => {
     if (!selectedColRange || col < selectedColRange.start || col > selectedColRange.end) return HEADER_BG;

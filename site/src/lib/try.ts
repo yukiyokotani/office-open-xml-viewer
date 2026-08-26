@@ -86,6 +86,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       mode: 'main',
       useGoogleFonts: true,
       showZoomSlider: true,
+      comments: true,
       math,
       ...advancedChartRenderers,
     });
@@ -115,6 +116,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       zoomMin: MIN_SCALE,
       pageShadow: false,
       useGoogleFonts: true,
+      comments: true,
       math,
       mode: 'main',
       ...advancedChartRenderers,
@@ -151,6 +153,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     zoomMin: MIN_SCALE,
     pageShadow: false,
     useGoogleFonts: true,
+    comments: true,
     math,
     mode: 'main',
     ...advancedChartRenderers,

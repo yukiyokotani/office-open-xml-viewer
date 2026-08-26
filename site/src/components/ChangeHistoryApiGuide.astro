@@ -1,0 +1,90 @@
+---
+import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
+
+interface Props {
+  format: 'docx' | 'xlsx' | 'pptx';
+}
+
+const { format } = Astro.props;
+
+const docxExample = `import {
+  DocxDocument,
+  resolveRevisionAnchorRuns,
+} from '@silurus/ooxml/docx';
+
+const document = await DocxDocument.load(source);
+const revisions = document.revisions;
+
+// Add visible page geometry only when your UI needs it.
+const ranges = document.revisionAnchorRanges();
+const runs = await document.collectPageRuns(pageIndex, { width: 760 });
+const changesOnPage = ranges.flatMap((range) => {
+  const revision = revisions[range.revisionIndex];
+  if (!revision) return [];
+  const targets = resolveRevisionAnchorRuns(range, runs);
+  return targets.length > 0 ? [{ revision, targets }] : [];
+});
+
+renderChangeList(changesOnPage);
+document.destroy();`;
+---
+
+<section id="review-data" class="change-history" data-reveal>
+  <h2>Review data</h2>
+  <div class="comments-guide">
+    <div>
+      <strong>Comments</strong>
+      <span>Read comments stored in Office files, use the built-in UI, or connect an application-owned list to its authored targets.</span>
+    </div>
+    <a href="/review-ui">Comments guide →</a>
+  </div>
+  <h3 id="revision-records">Office revision records</h3>
+
+  {format === 'docx' ? (
+    <>
+      <p class="status"><strong>Available for DOCX.</strong> <code>DocxDocument</code> exposes read-only insertion, deletion, and move records stored in the WordprocessingML document.</p>
+      <div class="availability" aria-label="DOCX change-history support">
+        <p><strong>You can</strong><span>Read detached records, inspect author/date/text metadata, and resolve their location against a rendered page.</span></p>
+        <p><strong>You cannot</strong><span>Accept, reject, or edit changes, or ask the built-in Viewer to render Word-style revision markup.</span></p>
+      </div>
+      <h4>Use the records</h4>
+      <p>Read <code>document.revisions</code> for an application-owned list. Call <code>revisionAnchorRanges()</code>, <code>collectPageRuns()</code>, and <code>resolveRevisionAnchorRuns()</code> only when that list must point to visible page content.</p>
+      <Code code={docxExample} lang="ts" themes={codeThemes} defaultColor={false} />
+      <p class="note"><code>renderChangeList()</code> is application code. The renderer shows the accepted-final document: insertions and move destinations have their own geometry, while deletions and move sources resolve to a nearby final-state position.</p>
+    </>
+  ) : format === 'xlsx' ? (
+    <p class="status"><strong>Not available for XLSX.</strong> SpreadsheetML revision logs are not currently parsed or exposed. Comments remain available through <code>XlsxWorkbook.getComments(sheetIndex)</code> and the Viewer comment APIs.</p>
+  ) : (
+    <p class="status"><strong>Not available for PPTX.</strong> The library does not expose PowerPoint comparison results or cloud collaboration change indicators as revision records. Comments remain available through <code>PptxPresentation.getComments(slideIndex)</code> and the Viewer comment APIs.</p>
+  )}
+</section>
+
+<style>
+  .change-history { margin-top: 42px; padding: 34px 0 0; border-top: 1px solid var(--border); }
+  .change-history h2 { margin: 0 0 14px; font-size: 24px; }
+  .change-history h3 { margin: 8px 0; font-size: 19px; }
+  .change-history h4 { margin: 24px 0 8px; font-size: 17px; }
+  .change-history p { max-width: 76ch; }
+  .comments-guide { display: flex; gap: 20px; align-items: center; justify-content: space-between; margin-bottom: 26px; padding: 15px 16px; border: 1px solid var(--border); background: var(--panel); }
+  .comments-guide div { max-width: 66ch; }
+  .comments-guide strong, .comments-guide span { display: block; }
+  .comments-guide strong { margin-bottom: 4px; color: var(--text); font-size: 14px; }
+  .comments-guide span { color: var(--text-dim); font-size: 14px; line-height: 1.55; }
+  .comments-guide a { flex: 0 0 auto; color: var(--accent); font-size: 14px; font-weight: 700; }
+  .status { margin: 0; color: var(--text-dim); font-size: 15px; line-height: 1.65; }
+  .status strong { color: var(--text); }
+  .availability { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+  .availability p { margin: 0; padding: 15px 16px; border: 1px solid var(--border); background: var(--panel); }
+  .availability strong, .availability span { display: block; }
+  .availability strong { margin-bottom: 5px; color: var(--text); font-size: 13px; }
+  .availability span { color: var(--text-dim); font-size: 14px; line-height: 1.55; }
+  .change-history > p:not(.status, .note) { margin: 0 0 14px; color: var(--text-dim); line-height: 1.65; }
+  .change-history :global(pre) { margin: 0; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
+  .note { margin: 12px 0 0; color: var(--text-faint); font-size: 13px; line-height: 1.6; }
+  code { font-family: var(--mono); font-size: .9em; }
+  @media (max-width: 700px) {
+    .availability { grid-template-columns: 1fr; }
+    .comments-guide { align-items: flex-start; flex-direction: column; gap: 10px; }
+  }
+</style>

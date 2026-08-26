@@ -2,6 +2,7 @@ import {
   composeAffine,
   translationAffine,
 } from './affine.js';
+import { sourceKey } from './source-key.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -65,6 +66,7 @@ export type ElementGeometry = DrawingGeometry | InlineResourceGeometry;
 
 interface ProjectionContext {
   readonly collectTextRuns: boolean;
+  readonly collectTextRunSources: boolean;
   readonly collectDrawings: boolean;
   readonly drawingEntries: ReadonlyMap<string, PagePaintDrawingEntry>;
   readonly rootPointToPage: ReadonlyMap<string, Matrix2DData>;
@@ -73,6 +75,7 @@ interface ProjectionContext {
   readonly emittedTextBoxes: Set<string>;
   readonly emittedDrawings: Set<string>;
   readonly runs: TextRunGeometry[];
+  readonly sourceRuns: Map<string, Set<number>>;
   readonly drawings: DrawingGeometry[];
   readonly inlineResources: InlineResourceGeometry[];
   drawingSourceOrder: number;
@@ -283,18 +286,30 @@ function visitParagraph(
   context: ProjectionContext,
 ): void {
   const paragraphProjection = withClip(projection, paragraph.clipBounds);
-  if (context.collectTextRuns) {
+  if (context.collectTextRuns || context.collectTextRunSources) {
     for (const line of paragraph.lines) {
       for (const placement of line.placements) {
         if (placement.kind === 'text') {
-          context.runs.push(Object.freeze({
-            placement,
-            pointToPage: projection.pointToPage,
-            source: paragraph.source,
-            ...(paragraph.paragraphId !== undefined
-              ? { paragraphId: paragraph.paragraphId }
-              : {}),
-          }));
+          if (context.collectTextRuns) {
+            context.runs.push(Object.freeze({
+              placement,
+              pointToPage: projection.pointToPage,
+              source: paragraph.source,
+              ...(paragraph.paragraphId !== undefined
+                ? { paragraphId: paragraph.paragraphId }
+                : {}),
+            }));
+          }
+          if (
+            context.collectTextRunSources
+            && placement.sourceRunIndex !== undefined
+            && placement.text.length > 0
+          ) {
+            const key = sourceKey(paragraph.source);
+            const indices = context.sourceRuns.get(key) ?? new Set<number>();
+            if (!context.sourceRuns.has(key)) context.sourceRuns.set(key, indices);
+            indices.add(placement.sourceRunIndex);
+          }
         }
       }
     }
@@ -437,7 +452,11 @@ function visitNode(
 function pageGeometryIndex(
   layout: DocumentLayout,
   pageIndex: number,
-  options: Readonly<{ collectTextRuns: boolean; collectDrawings: boolean }>,
+  options: Readonly<{
+    collectTextRuns: boolean;
+    collectTextRunSources: boolean;
+    collectDrawings: boolean;
+  }>,
 ): ProjectionContext {
   const page = layout.pages[pageIndex];
   if (!page) throw new RangeError(`Page index ${pageIndex} is out of range`);
@@ -464,6 +483,7 @@ function pageGeometryIndex(
     emittedTextBoxes: new Set(),
     emittedDrawings: new Set(),
     runs: [],
+    sourceRuns: new Map(),
     drawings: [],
     inlineResources: [],
     drawingSourceOrder: 0,
@@ -490,8 +510,31 @@ export function textRunGeometryForPage(
 ): readonly TextRunGeometry[] {
   return Object.freeze(pageGeometryIndex(layout, pageIndex, {
     collectTextRuns: true,
+    collectTextRunSources: false,
     collectDrawings: false,
   }).runs);
+}
+
+/** Lightweight index of text placements that actually survived final-state
+ * layout. It deliberately omits coordinates, font strings, and transforms;
+ * comment-anchor fallback needs only canonical paragraph/run identity. */
+export function textRunSourceIndexForDocument(
+  layout: DocumentLayout,
+): ReadonlyMap<string, ReadonlySet<number>> {
+  const result = new Map<string, Set<number>>();
+  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
+    const pageIndexResult = pageGeometryIndex(layout, pageIndex, {
+      collectTextRuns: false,
+      collectTextRunSources: true,
+      collectDrawings: false,
+    }).sourceRuns;
+    for (const [key, pageIndices] of pageIndexResult) {
+      const indices = result.get(key) ?? new Set<number>();
+      if (!result.has(key)) result.set(key, indices);
+      for (const index of pageIndices) indices.add(index);
+    }
+  }
+  return result;
 }
 
 /**
@@ -504,6 +547,7 @@ export function drawingGeometryForPage(
 ): readonly DrawingGeometry[] {
   const drawings = pageGeometryIndex(layout, pageIndex, {
     collectTextRuns: false,
+    collectTextRunSources: false,
     collectDrawings: true,
   }).drawings;
   drawings.sort((left, right) => left.paintOrderIndex - right.paintOrderIndex ||
@@ -518,6 +562,7 @@ export function elementGeometryForPage(
 ): readonly ElementGeometry[] {
   const index = pageGeometryIndex(layout, pageIndex, {
     collectTextRuns: false,
+    collectTextRunSources: false,
     collectDrawings: true,
   });
   const elements: ElementGeometry[] = [...index.drawings, ...index.inlineResources];

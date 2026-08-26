@@ -54,9 +54,11 @@ describe('public-site SEO foundation', () => {
   it.each([
     ['./pages/try.astro', 'canonicalPath="/try/"'],
     ['./pages/errors.astro', 'canonicalPath="/errors/"'],
+    ['./pages/production.astro', 'canonicalPath="/production/"'],
     ['./pages/announcements/index.astro', 'canonicalPath="/announcements/"'],
     ['./pages/announcements/[slug].astro', 'canonicalPath={`/announcements/${announcement.slug}/`}'],
     ['./layouts/FormatPage.astro', 'canonicalPath={`/${format}/`}'],
+    ['./layouts/ApiPage.astro', 'canonicalPath={`/api/${format}/`}'],
     ['./components/FrameworkGuide.astro', 'canonicalPath={canonicalPath}'],
   ])('declares a canonical for %s', (path, canonicalDeclaration) => {
     expect(source(path)).toContain(canonicalDeclaration);

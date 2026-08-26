@@ -50,9 +50,11 @@ export interface FakeEl {
   scrollHeight: number;
   offsetLeft: number;
   offsetWidth: number;
+  offsetHeight: number;
   width: number;
   height: number;
   appendChild(c: FakeEl): FakeEl;
+  replaceChildren(...children: FakeEl[]): void;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
@@ -127,6 +129,7 @@ export function makeEl(tag: string, ownerDocument: FakeDocument | null = null): 
     scrollHeight: 0,
     offsetLeft: 0,
     offsetWidth: 0,
+    offsetHeight: 0,
     width: 0,
     height: 0,
     classList: {
@@ -159,6 +162,10 @@ export function makeEl(tag: string, ownerDocument: FakeDocument | null = null): 
       c.parentElement = this;
       this.children.push(c);
       return c;
+    },
+    replaceChildren(...children: FakeEl[]) {
+      for (const child of [...this.children]) this.removeChild(child);
+      for (const child of children) this.appendChild(child);
     },
     removeChild(c: FakeEl) {
       const i = this.children.indexOf(c);

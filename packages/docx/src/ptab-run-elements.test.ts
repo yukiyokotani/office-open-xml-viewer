@@ -226,6 +226,72 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
     expect(allTexts).toEqual([['lead '], ['999-99']]);
   });
 
+  it('keeps a comment-boundary noBreakHyphen run joined without coalescing model runs', () => {
+    const hyphenRun = textRun('-cd') as DocRun & { __noBreakBefore?: boolean };
+    hyphenRun.__noBreakBefore = true;
+    const segs = buildSegments(
+      [textRun('lead '), textRun('ab'), hyphenRun],
+      {} as LineLayoutEnvironment,
+    );
+    expect(segs.filter((seg): seg is LayoutTextSeg => 'text' in seg).map((seg) => [
+      seg.text,
+      seg.joinPrev,
+    ])).toEqual([
+      ['lead ', undefined],
+      ['ab', undefined],
+      ['-cd', true],
+    ]);
+
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 70, 0, 1);
+    expect(lines.map((line) => line.segments.map((seg) => (seg as LayoutTextSeg).text)))
+      .toEqual([['lead '], ['ab', '-cd']]);
+  });
+
+  it('keeps the following CT_R joined when noBreakHyphen ends its own run', () => {
+    const mergedLeft = textRun('ab-') as DocRun & { __noBreakAfter?: boolean };
+    mergedLeft.__noBreakAfter = true;
+    const separateHyphen = textRun('-') as DocRun & {
+      __noBreakBefore?: boolean;
+      __noBreakAfter?: boolean;
+    };
+    separateHyphen.__noBreakBefore = true;
+    separateHyphen.__noBreakAfter = true;
+    const formattedFollower = { ...textRun('cd'), bold: true } as DocRun;
+
+    expect(buildSegments(
+      [mergedLeft, textRun('cd')],
+      {} as LineLayoutEnvironment,
+    ).filter((seg): seg is LayoutTextSeg => 'text' in seg).map((seg) => [
+      seg.text,
+      seg.joinPrev,
+    ])).toEqual([
+      ['ab-', undefined],
+      ['cd', true],
+    ]);
+
+    const segs = buildSegments(
+      [textRun('lead '), textRun('ab'), separateHyphen, formattedFollower],
+      {} as LineLayoutEnvironment,
+    );
+    expect(segs.filter((seg): seg is LayoutTextSeg => 'text' in seg).map((seg) => [
+      seg.text,
+      seg.joinPrev,
+    ])).toEqual([
+      ['lead ', undefined],
+      ['ab', undefined],
+      ['-', true],
+      ['cd', true],
+    ]);
+
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 70, 0, 1);
+    expect(lines.map((line) => line.segments.map((seg) => (seg as LayoutTextSeg).text)))
+      .toEqual([['lead '], ['ab', '-', 'cd']]);
+  });
+
   // §17.3.3.29: a soft hyphen "shall have zero width" and "shall not change
   // the normal display of text" unless it is the chosen break point; since
   // this renderer performs no automatic hyphenation (§17.15.1.x), it is never

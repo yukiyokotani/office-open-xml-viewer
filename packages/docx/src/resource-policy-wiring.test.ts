@@ -17,6 +17,7 @@ describe('DocxDocument resource-policy wiring', () => {
           id: 7,
           meta: {
             pageCount: 0,
+            revisions: [],
             comments: [],
             footnotes: [],
             endnotes: [],

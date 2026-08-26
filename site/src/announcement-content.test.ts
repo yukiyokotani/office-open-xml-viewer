@@ -10,6 +10,36 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.82 review announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v082-review-comments');
+
+  it('states the read-only cross-format boundary and compatibility', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.82.0',
+      title: 'Comments and tracked changes in v0.82.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'Comments in context', kind: 'summary' });
+
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    for (const format of ['DOCX', 'XLSX', 'PPTX']) expect(text).toContain(format);
+    expect(text).toContain('read-only');
+    expect(text).toContain('comments: true');
+    expect(text).toContain('stable CSS classes and custom properties');
+    expect(text).toContain('list virtualization');
+    expect(text).toContain('insertions, deletions and moves');
+    expect(text).toContain('there is no built-in tracked-change markup view');
+    expect(text).not.toContain('select the tracked-change presentation');
+    expect(text).toContain('No existing option is removed or renamed');
+    expect(text).not.toMatch(/\b(?:KB|KiB|gzip)\b/);
+  });
+});
+
 describe('v0.81 ChartEx migration guide', () => {
   const announcement = announcements.find((item) => item.slug === 'v081-chartex-opt-in');
 
@@ -53,12 +83,14 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Updated for v0.81.0');
-    expect(bundleSizePage).toContain('+118 KiB');
-    expect(bundleSizePage).toContain('+32 KiB');
-    expect(bundleSizePage).toContain('+42 KB');
-    expect(bundleSizePage).toContain('+12 KB');
-    expect(bundleSizePage).toContain('static JavaScript import closure');
+    expect(bundleSizePage).toContain('Current production assets in v0.82.0');
+    expect(bundleSizePage).toContain('DOCX static JavaScript');
+    expect(bundleSizePage).toContain('XLSX static JavaScript');
+    expect(bundleSizePage).toContain('PPTX static JavaScript');
+    expect(bundleSizePage).toContain('ChartEx');
+    expect(bundleSizePage).toContain('Parser WASM');
+    expect(bundleSizePage).toContain('complete synchronous import graph');
+    expect(bundleSizePage).not.toContain('change from v0.81.0');
     expect(siteFooter).toContain('href="/bundle-size"');
     expect(readme).toContain('https://ooxml.silurus.dev/bundle-size/');
     expect(readme).not.toContain('For v0.79.0, the complete npm package');

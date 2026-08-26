@@ -71,6 +71,8 @@ describe('official selection-context guide', () => {
     expect(page).toContain('maxTextCharacters: 4_096');
     expect(page).toContain('JSON.stringify(latestContext, null, 2)');
     expect(page).toContain('grid-template-columns: minmax(0, 7fr) minmax(0, 5fr)');
+    expect(page).toContain('background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%)');
+    expect(page).not.toContain("background: '#eef2f7'");
     expect(page).not.toContain("viewer.setSelection('B2:D6')");
     expect(page.match(/updateContext\(null\);/g)?.length).toBeGreaterThanOrEqual(3);
     expect(page).toContain('onContextMenu: async ({ originalEvent, getContext })');
@@ -84,12 +86,14 @@ describe('official selection-context guide', () => {
     expect(page).not.toContain('void context.then');
   });
 
-  it('keeps the guide at API-detail level and leaves migration to its dedicated guide', () => {
+  it('links the guide from cross-format decisions and every format API', () => {
     expect(page).toContain('canonicalPath="/selection-context/"');
     expect(sitemapPaths).toContain('/selection-context/');
     expect(source('./components/Nav.astro')).not.toContain('href="/selection-context"');
     expect(source('./components/SiteFooter.astro')).not.toContain('href="/selection-context"');
-    expect(source('./components/ApiReference.astro')).toContain('Open the selection &amp; AI guide');
+    expect(source('./pages/production.astro')).toContain('href="/selection-context"');
+    expect(source('./components/ApiReference.astro')).toContain('href="/selection-context"');
+    expect(source('./pages/review-ui.astro')).toContain('href="/selection-context"');
     expect(page).not.toContain('XLSX 0.77 migration');
     expect(source('./lib/announcements.ts')).toContain("slug: 'v077-migration-guide'");
     expect(source('./lib/announcements.ts')).toContain('setSelection(), selectionState');

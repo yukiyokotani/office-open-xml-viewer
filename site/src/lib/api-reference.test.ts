@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   apiReference,
   formatRenderModeGuidance,
-  optionalChartRenderers,
+  optionalRenderers,
 } from './api-reference.js';
 
 describe('official-site API reference', () => {
-  it('documents both optional chart renderer entries and their shared contracts', () => {
-    expect(optionalChartRenderers.map(({ entry, exportName, contract }) => ({ entry, exportName, contract })))
+  it('documents every optional renderer entry and its shared contract', () => {
+    expect(optionalRenderers.map(({ entry, exportName, contract }) => ({ entry, exportName, contract })))
       .toEqual([
+        {
+          entry: '@silurus/ooxml/math',
+          exportName: 'math',
+          contract: 'MathRenderer',
+        },
         {
           entry: '@silurus/ooxml/chart-ex',
           exportName: 'chartEx',

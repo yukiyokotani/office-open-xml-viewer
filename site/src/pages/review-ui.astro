@@ -1,0 +1,485 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import BuiltInCommentViewer from '../components/BuiltInCommentViewer.astro';
+import CodeTabs from '../components/CodeTabs.astro';
+import CommentListNavigationDemo from '../components/CommentListNavigationDemo.astro';
+import { codeThemes } from '../lib/code-theme';
+
+const transcriptExample = `// Source records for an application-owned list, search, or export.
+const docxComments = docxDocument.comments;
+const pptxComments = presentation.getComments(slideIndex);
+const xlsxComments = await workbook.getComments(sheetIndex);`;
+
+const docxListExample = `import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const document = await DocxDocument.load(source);
+const viewer = DocxScrollViewer.fromDocument(container, document, {
+  comments: { cards: false, markers: false },
+});
+
+// addRow(label, onSelect) creates an application-owned list row.
+document.comments
+  .filter((comment) => comment.parentId === undefined)
+  .forEach((comment) => addRow(comment.text, () =>
+    viewer.goToComment(comment.id, { behavior: 'smooth' })
+  ));
+
+const destroy = () => {
+  viewer.destroy();
+  document.destroy();
+};`;
+
+const xlsxListExample = `import { XlsxViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
+
+const workbook = await XlsxWorkbook.load(source);
+const viewer = XlsxViewer.fromWorkbook(container, workbook, { comments: false });
+const sheetIndex = 0;
+
+// addRow(label, onSelect) creates an application-owned list row.
+(await workbook.getComments(sheetIndex))
+  .forEach((comment) => addRow(comment.text, () =>
+    viewer.goToComment(sheetIndex, comment.cellRef, { align: 'center' })
+  ));
+
+const destroy = () => {
+  viewer.destroy();
+  workbook.destroy();
+};`;
+
+const pptxListExample = `import { PptxPresentation, PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const presentation = await PptxPresentation.load(source);
+const viewer = PptxScrollViewer.fromPresentation(container, presentation, {
+  comments: { cards: false, markers: false },
+});
+const slideIndex = 0;
+
+// addRow(label, onSelect) creates an application-owned list row.
+presentation.getComments(slideIndex)
+  .forEach((comment, commentIndex) => addRow(comment.text, () =>
+    viewer.goToComment(slideIndex, commentIndex, { behavior: 'smooth' })
+  ));
+
+const destroy = () => {
+  viewer.destroy();
+  presentation.destroy();
+};`;
+
+const commentListTabs = [
+  { id: 'docx', label: 'DOCX', lang: 'ts', code: docxListExample },
+  { id: 'xlsx', label: 'XLSX', lang: 'ts', code: xlsxListExample },
+  { id: 'pptx', label: 'PPTX', lang: 'ts', code: pptxListExample },
+];
+
+const docxViewerExample = `import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const viewer = new DocxScrollViewer(container, {
+  comments: {
+    markers: true, // Default. Set false to hide the message icons only.
+  },
+});
+
+await viewer.load(source);`;
+
+const pptxViewerExample = `import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const viewer = new PptxScrollViewer(container, {
+  comments: {
+    markers: true, // Default. Set false to hide the message icons only.
+  },
+});
+
+await viewer.load(source);`;
+
+const xlsxViewerExample = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+
+// Comments are shown by default. Pass options only to change the policy.
+const viewer = new XlsxViewer(container, {
+  comments: { includeResolved: false },
+});
+
+await viewer.load(source);`;
+
+const connectorExample = `// Available on DocxScrollViewer and PptxScrollViewer.
+const viewer = new DocxScrollViewer(container, {
+  comments: {
+    side: 'auto',
+    connectors: {
+      route: 'bezier', // or 'orthogonal'
+      stroke: 'solid', // or 'dashed'
+      color: '#94a3b8',
+      activeColor: '#2563eb',
+    },
+  },
+});`;
+
+const classStyleExample = `/* Control the complete appearance with stable classes. */
+#viewer .ooxml-comment-card {
+  box-shadow: 0 12px 32px rgb(15 23 42 / 0.14);
+  backdrop-filter: blur(14px);
+}
+
+#viewer .ooxml-comment-card__author {
+  letter-spacing: 0.01em;
+}
+
+#viewer .ooxml-comment-card[data-active="true"] {
+  box-shadow: 0 0 0 2px #2563eb;
+}`;
+
+const themeTokenExample = `/* Switch common theme tokens with CSS variables. */
+#viewer {
+  --ooxml-comment-card-background: rgb(255 255 255 / 0.78);
+  --ooxml-comment-card-border: 1px solid #cbd5e1;
+  --ooxml-comment-card-border-left: 3px solid #2563eb;
+  --ooxml-comment-card-border-right: 1px solid #cbd5e1;
+  --ooxml-comment-card-radius: 8px;
+  --ooxml-comment-card-active-background: #dbeafe;
+  --ooxml-comment-highlight: rgba(59, 130, 246, 0.18);
+  --ooxml-comment-highlight-active: rgba(37, 99, 235, 0.34);
+  --ooxml-comment-marker-color: #2563eb;
+}`;
+
+const anchoredExample = `import { DocxDocument } from '@silurus/ooxml/docx';
+
+const doc = await DocxDocument.load(source);
+await doc.renderPage(canvas, pageIndex, {
+  width: 760,
+});
+const threads = await doc.getCommentThreads(pageIndex, {
+  width: 760,
+  includeResolved: false,
+});
+
+showReviewMargin({ canvas, threads });
+// Destroy doc when the owning UI unmounts.`;
+
+const xlsxAnchoredExample = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+
+let viewer: XlsxViewer;
+const refreshComments = () => {
+  const placements = viewer.getComments().flatMap((comment) => {
+    const rect = viewer.getCellViewportRect(comment.cellRef);
+    return rect ? [{ comment, rect }] : [];
+  });
+  renderCellCommentCards(placements);
+};
+
+viewer = new XlsxViewer(container, {
+  onSheetChange: refreshComments,
+  onViewportChange: refreshComments,
+  onScaleChange: refreshComments,
+});
+await viewer.load(source);
+refreshComments();
+
+// Mount cards relative to the worksheet viewport.
+const destroy = () => viewer.destroy(); // Call from the owning UI's cleanup.`;
+
+const pptxAnchoredExample = `import { PptxPresentation } from '@silurus/ooxml/pptx';
+
+const slideIndex = 0;
+const presentation = await PptxPresentation.load(source);
+await presentation.renderSlide(canvas, slideIndex, { width: 960 });
+
+const comments = presentation.getComments(slideIndex);
+const elementIds = comments.flatMap((comment) =>
+  (comment.anchors ?? []).flatMap((anchor) =>
+    'elementId' in anchor && anchor.elementId ? [anchor.elementId] : []
+  )
+);
+const bounds = await presentation.getElementBoundsByIds(slideIndex, elementIds);
+const byId = new Map(bounds.map((item) => [item.elementId, item.bounds]));
+const scaleX = canvas.clientWidth / presentation.slideWidth;
+const scaleY = canvas.clientHeight / presentation.slideHeight;
+
+const placements = comments.map((comment) => {
+  const target = (comment.anchors ?? []).find(
+    (anchor) => 'elementId' in anchor && anchor.elementId && byId.has(anchor.elementId)
+  );
+  if (target && 'elementId' in target && target.elementId) {
+    const rect = byId.get(target.elementId);
+    if (rect) {
+      return { comment, rect: {
+        x: rect.x * scaleX, y: rect.y * scaleY,
+        width: rect.width * scaleX, height: rect.height * scaleY,
+      }};
+    }
+  }
+  const anchors = comment.anchors ?? [];
+  const isSlidePoint = anchors.length === 0 || anchors.some((anchor) => anchor.type === 'slide');
+  return isSlidePoint && Number.isFinite(comment.x) && Number.isFinite(comment.y)
+    ? { comment, point: {
+        x: (comment.x as number) * scaleX,
+        y: (comment.y as number) * scaleY,
+      }}
+    : { comment, unresolved: true };
+});
+
+renderSlideCommentCards(placements);
+const destroy = () => presentation.destroy(); // Call from the owning UI's cleanup.`;
+
+const primitiveTabs = [
+  { id: 'records', label: 'Source records', lang: 'ts', code: transcriptExample },
+  { id: 'docx', label: 'DOCX page', lang: 'ts', code: anchoredExample },
+  { id: 'xlsx', label: 'XLSX sheet', lang: 'ts', code: xlsxAnchoredExample },
+  { id: 'pptx', label: 'PPTX slide', lang: 'ts', code: pptxAnchoredExample },
+];
+---
+
+<Base
+  title="Comments in DOCX, XLSX, and PPTX | @silurus/ooxml"
+  description="Show authored comments with the built-in viewers or compose an application-owned UI from comment data and format-specific geometry."
+  canonicalPath="/review-ui/"
+>
+  <Nav />
+
+  <header class="review-hero">
+    <div class="wrap">
+      <a class="back" href="/">← Overview</a>
+      <h1>Comments in DOCX, XLSX, and PPTX</h1>
+      <p class="lead">
+        <code>@silurus/ooxml</code> reads comments already stored in Office files. Start with each
+        Viewer's read-only UI, or use detached comment records and format-specific anchor geometry
+        when the application needs a different layout.
+      </p>
+      <nav class="hero-actions" aria-label="Review UI resources">
+        <a class="primary" href="#built-in-ui">Built-in UI</a>
+        <a href="/api/docx#docx-scroll-viewer">DOCX API</a>
+        <a href="/api/xlsx#xlsx-viewer">XLSX API</a>
+        <a href="/api/pptx#pptx-scroll-viewer">PPTX API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap review-main">
+    <section class="review-section" aria-labelledby="built-in-ui">
+      <div class="section-heading">
+        <h2 id="built-in-ui">Start with the built-in UI</h2>
+        <p>Use the same <code>comments</code> option across formats. The presentation follows the document type: a page margin for DOCX, a slide margin and markers for PPTX, and a cell-anchored popup for XLSX.</p>
+      </div>
+      <div class="format-setup-grid">
+        <article>
+          <h3>DOCX</h3>
+          <p class="code-intro">Opt in to page-side cards, range highlights, and message icons.</p>
+          <Code code={docxViewerExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+        <article>
+          <h3>PPTX</h3>
+          <p class="code-intro">Opt in to slide message icons and page-side cards.</p>
+          <Code code={pptxViewerExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+        <article>
+          <h3>XLSX</h3>
+          <p class="code-intro">Cell comments are visible by default; options can narrow visibility.</p>
+          <Code code={xlsxViewerExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </article>
+      </div>
+      <p class="setup-note">These snippets assume an application-owned, laid-out host element and a <code>source</code> URL or <code>ArrayBuffer</code>. Keep the Viewer for as long as the screen is mounted, then call <code>viewer.destroy()</code>. See the <a href="/docx">DOCX</a>, <a href="/xlsx">XLSX</a>, and <a href="/pptx">PPTX</a> live pages for complete Viewer setup.</p>
+      <div class="table-wrap" role="region" aria-label="Built-in comment options" tabindex="0">
+        <table>
+          <thead><tr><th>Option</th><th>Formats</th><th>Behavior</th></tr></thead>
+          <tbody>
+            <tr><th><code>comments: true</code></th><td>DOCX, PPTX, XLSX</td><td>Use the built-in presentation and its format defaults. XLSX comments are already visible when the option is omitted.</td></tr>
+            <tr><th><code>comments: false</code></th><td>DOCX, PPTX, XLSX</td><td>Do not show the built-in comment presentation.</td></tr>
+            <tr><th><code>includeResolved</code></th><td>DOCX, PPTX, XLSX</td><td>Include resolved or closed threads. Defaults to <code>false</code> for DOCX/PPTX and <code>true</code> for XLSX.</td></tr>
+            <tr><th><code>cards</code></th><td>DOCX, PPTX</td><td>Show built-in margin cards. Defaults to <code>true</code>. Set it to <code>false</code> for an application-owned list while retaining Viewer-owned target highlighting.</td></tr>
+            <tr><th><code>markers</code></th><td>DOCX, PPTX</td><td>Show the built-in message icon at each comment anchor. Defaults to <code>true</code>. Set it to <code>false</code> to hide only the icons; cards and DOCX range highlights remain visible.</td></tr>
+            <tr><th><code>side</code></th><td>DOCX, PPTX</td><td>Place margin cards on <code>auto</code>, <code>left</code>, or <code>right</code>. <code>auto</code> follows the container direction.</td></tr>
+            <tr><th><code>connectors</code></th><td>DOCX, PPTX</td><td>Optionally connect an anchor or marker to its card. Omit it for no lines.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <article class="basic-theme">
+        <h3>Optional DOCX/PPTX connectors</h3>
+        <p>Choose the route, stroke, and colors in Viewer options. Omit <code>connectors</code> for no line. A color may be a CSS variable such as <code>var(--review-connector)</code>, so a theme switch can update an existing Viewer.</p>
+        <Code code={connectorExample} lang="ts" themes={codeThemes} defaultColor={false} />
+      </article>
+      <article class="basic-theme">
+        <h3>Style the built-in UI</h3>
+        <p>Two complementary styling surfaces are available. Use either one or combine them.</p>
+        <div class="styling-paths">
+          <section class="styling-path" aria-labelledby="css-variables-title">
+            <p class="styling-path__label">CSS variables</p>
+            <h4 id="css-variables-title">Switch common theme tokens.</h4>
+            <p>Use variables for colors, card borders, and corner radius. This convenience layer intentionally does not mirror every CSS property.</p>
+            <Code code={themeTokenExample} lang="css" themes={codeThemes} defaultColor={false} />
+          </section>
+          <section class="styling-path" aria-labelledby="stable-classes-title">
+            <p class="styling-path__label">Stable classes</p>
+            <h4 id="stable-classes-title">Control the complete appearance.</h4>
+            <p>Use classes for typography, spacing, shadows, filters, and state selectors. Cards expose <code>data-active</code> and <code>data-focused</code>. Viewer defaults use low-specificity selectors, so application CSS can override them without <code>!important</code>.</p>
+            <Code code={classStyleExample} lang="css" themes={codeThemes} defaultColor={false} />
+          </section>
+        </div>
+        <p>Changing variables, a theme class, or <code>data-theme</code> on the Viewer container or an ancestor updates mounted cards, highlights, and markers without recreating the Viewer. Geometry-affecting changes such as font size, font family, or padding are measured again before the cards are repositioned.</p>
+        <p>By default, the Viewer assigns each author a stable accent color. Here, <code>#viewer</code> is an example ID on the application-owned Viewer container. The fixed blue values deliberately replace per-author accents; omit them to keep automatic author colors.</p>
+        <div class="table-wrap styling-contract" role="region" aria-label="Built-in comment styling applicability" tabindex="0">
+          <table>
+            <thead><tr><th>Hook</th><th>Formats</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><th><code>.ooxml-comment-card</code> and child classes</th><td>DOCX, PPTX, XLSX</td><td>Complete card typography, spacing, effects, and content styling.</td></tr>
+              <tr><th><code>data-active</code>, <code>data-focused</code></th><td>DOCX, PPTX</td><td>Selected and keyboard-focused margin-card states. The XLSX popup is non-interactive.</td></tr>
+              <tr><th>Card CSS variables</th><td>DOCX, PPTX, XLSX</td><td>Common colors, borders, and corner radius.</td></tr>
+              <tr><th>Highlight and marker variables</th><td>DOCX, PPTX</td><td>DOM range highlights and message icons. XLSX's cell-corner marker is Canvas-painted and is not changed by these tokens.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+      <div class="built-in-preview">
+        <h3>Default appearance</h3>
+        <p>Switch between the live DOCX margin, XLSX cell popup, and PPTX slide margin. Lines are off unless requested.</p>
+        <p class="demo-surface-note">The demo background is applied by the surrounding page, not by <code>ScrollViewer</code>.</p>
+        <BuiltInCommentViewer />
+      </div>
+    </section>
+
+    <section class="review-section" aria-labelledby="concepts">
+      <div class="section-heading">
+        <h2 id="concepts">How comments are represented</h2>
+        <p>Every format exposes detached comment data. What differs is how an authored comment is anchored to visible content.</p>
+      </div>
+      <div class="concept-grid">
+        <article><h3>Comments and threads</h3><p>Reviewer notes, replies, authors, dates, and resolved state.</p></article>
+        <article><h3>Anchors</h3><p>A text range in DOCX, a slide, drawing element, or text range in PPTX, and a cell reference in XLSX.</p></article>
+        <article><h3>Built-in presentation</h3><p>The Viewer turns those anchors into a margin, marker, highlight, or popup.</p></article>
+        <article><h3>Surface geometry</h3><p>Primitive APIs expose page pixels, slide EMUs, or current-sheet viewport pixels when the application owns the UI.</p></article>
+      </div>
+      <div class="table-wrap" role="region" aria-label="Comment APIs by format" tabindex="0">
+        <table>
+          <thead><tr><th>Format</th><th>Source records</th><th>Surface-scoped access</th><th>Coordinates</th></tr></thead>
+          <tbody>
+            <tr><th>DOCX</th><td><code>doc.comments</code>, document-wide</td><td><code>await doc.getCommentThreads(pageIndex)</code> returns threads rendered on that page</td><td>Page-render CSS pixels</td></tr>
+            <tr><th>PPTX</th><td><code>presentation.getComments(slideIndex)</code></td><td>Drawing-element bounds from <code>getElementBoundsByIds()</code>; classic and slide anchors retain authored points</td><td>Slide EMUs; scale them to the rendered canvas</td></tr>
+            <tr><th>XLSX</th><td><code>await workbook.getComments(sheetIndex)</code></td><td>Each record has a <code>cellRef</code>; <code>getCellViewportRect()</code> resolves it only for the current sheet</td><td>Current Viewer viewport CSS pixels</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="format-context"><a href="/selection-context"><code>getSelectionContext()</code></a> includes the selected comment thread in DOCX and PPTX, and comments attached to selected XLSX cells.</p>
+    </section>
+
+    <section class="review-section" aria-labelledby="choose-ui">
+      <div class="section-heading">
+        <h2 id="choose-ui">Built-in or custom</h2>
+        <p>Use the built-in Viewer UI when its format-specific presentation is enough. DOCX and PPTX ScrollViewer, and XlsxViewer, keep comments aligned while the file scrolls or zooms.</p>
+      </div>
+      <div class="responsibility-boundary">
+        <p><strong>The Viewer owns its built-in presentation.</strong> It renders the default cards or popup, markers, highlights, and their scroll and zoom behavior.</p>
+        <p><strong>The application owns custom product behavior.</strong> Use detached comment records for application-specific lists, filtering, search, export, or virtualization. Call <code>goToComment()</code> to reveal and highlight the authored target; use geometry APIs only when custom UI must remain attached to authored content.</p>
+      </div>
+      <article class="independent-list-example">
+        <h3>Application-owned list, Viewer-owned target</h3>
+        <p>Switch between DOCX, XLSX, and PPTX. Each example keeps the list outside the document surface while <code>goToComment()</code> reveals and highlights the authored target.</p>
+        <CommentListNavigationDemo />
+        <CodeTabs id="comment-list-navigation-code" tabs={commentListTabs} />
+      </article>
+    </section>
+
+    <section class="review-section" aria-labelledby="minimum-flow">
+      <div class="section-heading">
+        <h2 id="minimum-flow">Custom UI with primitive APIs</h2>
+        <p>Start with source records at the format's natural scope: the DOCX document, a PPTX slide, or an XLSX sheet. Add surface geometry only when custom UI must stay attached to rendered content.</p>
+      </div>
+      <CodeTabs id="comment-primitives" tabs={primitiveTabs} />
+      <p class="format-context">DOCX comments are stored for the document, not authored as page-owned records. <code>getCommentThreads(pageIndex)</code> resolves the occurrences created by layout; a range that crosses pages can therefore appear in more than one page result. PPTX text-range anchors currently resolve to their containing element bounds, and an unresolved modern element anchor is not guessed from its local offset. The rendering functions in these examples are application code.</p>
+      <p class="format-context">Canvas content needs an accessible transcript or text layer. The complete example includes an accessible comment transcript; a production document viewer must also provide access to the document text itself.</p>
+      <nav class="detail-links detail-links--single" aria-label="Complete custom UI example">
+        <a href="/review-ui/source"><strong>Complete DOCX custom UI →</strong><span>Open the finished custom UI, its exact source, and a portable starter.</span></a>
+      </nav>
+    </section>
+
+    <section class="review-section next-steps" aria-labelledby="next-steps">
+      <div class="section-heading">
+        <h2 id="next-steps">API references</h2>
+        <p>Look up each format's comment records, anchors, geometry, and Viewer options.</p>
+      </div>
+      <nav class="detail-links" aria-label="Review UI details">
+        <a href="/api/docx#docx-document"><strong>DOCX API reference →</strong><span>Look up comment records, anchor ranges, text runs, and method signatures.</span></a>
+        <a href="/api/xlsx#xlsx-viewer"><strong>XLSX API reference →</strong><span>Look up cell comments, popup options, and viewport geometry.</span></a>
+        <a href="/api/pptx#pptx-presentation"><strong>PPTX API reference →</strong><span>Look up slide comments, modern anchors, element bounds, and Viewer options.</span></a>
+        <a href="/production#rendering-mode"><strong>Rendering modes →</strong><span>Choose main-thread or Worker rendering for your application.</span></a>
+      </nav>
+    </section>
+  </main>
+
+  <SiteFooter />
+</Base>
+
+<style>
+  .review-hero { padding: 50px 0 44px; border-bottom: 1px solid var(--border); }
+  .back { color: var(--text-faint); font: 12px var(--mono); }
+  .review-hero h1 { max-width: 920px; margin: 20px 0 16px; font-size: clamp(38px, 6vw, 66px); line-height: 1; letter-spacing: -.045em; }
+  .lead { max-width: 78ch; color: var(--text-dim); font-size: 18px; line-height: 1.7; }
+  code { font-family: var(--mono); font-size: .9em; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; margin-top: 24px; }
+  .hero-actions a { color: var(--accent); font-weight: 700; }
+  .hero-actions .primary { padding: 10px 14px; border: 1px solid var(--accent); }
+  .review-main { padding-bottom: 32px; }
+  .review-section { padding: 46px 0; border-bottom: 1px solid var(--border); }
+  .section-heading { max-width: 820px; margin-bottom: 24px; }
+  .section-heading h2 { margin: 0; font-size: clamp(28px, 4vw, 42px); line-height: 1.08; letter-spacing: -.03em; }
+  .section-heading p { margin: 12px 0 0; color: var(--text-dim); }
+  .concept-grid { display: grid; gap: 14px; }
+  .concept-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  article { padding: 20px; border: 1px solid var(--border); background: var(--panel); }
+  article h3 { margin: 0; font-size: 18px; }
+  article p { margin: 9px 0 0; color: var(--text-dim); }
+  .responsibility-boundary { max-width: 820px; }
+  .responsibility-boundary p { margin: 0; color: var(--text-dim); }
+  .responsibility-boundary p + p { margin-top: 12px; }
+  .responsibility-boundary strong { color: var(--text); }
+  .independent-list-example { margin-top: 16px; padding: 0; overflow: hidden; }
+  .independent-list-example h3 { padding: 20px 20px 0; }
+  .independent-list-example p { padding: 0 20px; }
+  .independent-list-example :global(pre) { margin: 18px 0 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.6; }
+  .table-wrap { margin-top: 20px; overflow-x: auto; border: 1px solid var(--border); }
+  table { width: 100%; min-width: 740px; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  thead th { color: var(--text-faint); background: var(--bg-elev); font: 600 12px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+  tbody th { width: 21%; }
+  tbody td { color: var(--text-dim); }
+  .format-context { margin: 14px 0 0; color: var(--text-dim); }
+  .format-context a { color: var(--accent); font-weight: 700; }
+  .setup-note { margin: 18px 0 0; color: var(--text-dim); }
+  .setup-note a { color: var(--accent); font-weight: 700; }
+  .format-setup-grid { display: grid; gap: 16px; align-items: start; }
+  .format-setup-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .format-setup-grid article { min-width: 0; padding: 0; overflow: hidden; }
+  .format-setup-grid h3 { padding: 20px 20px 0; }
+  .basic-theme { margin-top: 16px; padding: 0; overflow: hidden; }
+  .basic-theme h3 { padding: 20px 20px 0; }
+  .basic-theme > p { padding: 0 20px; }
+  .basic-theme :global(pre) { margin: 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.6; }
+  .styling-paths { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 18px; border-block: 1px solid var(--border); background: var(--border); }
+  .styling-path { min-width: 0; padding: 20px 20px 0; background: var(--panel); }
+  .styling-path__label { margin: 0 0 8px; color: var(--accent); font: 600 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .styling-path h4 { margin: 0; font-size: 16px; }
+  .styling-path > p:not(.styling-path__label) { min-height: 72px; margin: 9px 0 18px; color: var(--text-dim); }
+  .styling-path :global(pre) { margin-inline: -20px; }
+  .styling-contract { margin: 18px 20px 20px; }
+  .built-in-preview { margin-top: 32px; }
+  .built-in-preview > h3 { margin: 0; font-size: 18px; }
+  .built-in-preview > p { margin: 9px 0 16px; color: var(--text-dim); }
+  .built-in-preview > .demo-surface-note { margin-top: -6px; font: 500 11px/1.5 var(--mono); }
+  .code-intro { min-height: 48px; padding: 0 20px; }
+  .format-setup-grid :global(pre) { margin: 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.6; }
+  .detail-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .detail-links--single { grid-template-columns: minmax(0, 820px); margin-top: 18px; }
+  .detail-links a { padding: 17px 18px; border: 1px solid var(--border); background: var(--panel); }
+  .detail-links strong { display: block; color: var(--accent); }
+  .detail-links span { display: block; margin-top: 6px; color: var(--text-dim); font-size: 14px; line-height: 1.5; }
+  @media (max-width: 900px) {
+    .concept-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .format-setup-grid { grid-template-columns: 1fr; }
+    .code-intro { min-height: 0; }
+    .styling-paths { grid-template-columns: 1fr; }
+    .styling-path > p:not(.styling-path__label) { min-height: 0; }
+  }
+  @media (max-width: 620px) {
+    .concept-grid, .detail-links { grid-template-columns: 1fr; }
+  }
+</style>

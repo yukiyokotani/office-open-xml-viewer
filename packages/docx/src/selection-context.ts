@@ -1,5 +1,11 @@
-import type { TextSelectionContextOptions } from '@silurus/ooxml-core';
+import type {
+  TextSelectionContextOptions,
+  ViewerCommentThreadContext,
+} from '@silurus/ooxml-core';
+import { boundedViewerCommentThreadContext } from '@silurus/ooxml-core/internal/comment-context';
 import { readBoundedNativeTextSelection } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import type { CommentAnchorRange } from './comments.js';
+import type { DocComment } from './types.js';
 
 /** Bounds for a DOCX selection-context snapshot. Extensible per format. */
 export type DocxSelectionContextOptions = TextSelectionContextOptions;
@@ -57,7 +63,79 @@ export interface DocxElementContext {
   readonly maxTextCharacters: number;
 }
 
-export type DocxSelectionContext = DocxTextSelectionContext | DocxElementContext;
+/** Detached selected comment thread for read-only AI/MCP handoff. */
+export interface DocxCommentSelectionContext {
+  readonly format: 'docx';
+  readonly kind: 'comment';
+  readonly pageIndex: number;
+  readonly commentId: string;
+  readonly source?: DocxSelectionSourceLocator;
+  readonly thread: ViewerCommentThreadContext;
+  readonly truncated: boolean;
+  readonly truncationReasons: readonly ('text')[];
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
+}
+
+export type DocxSelectionContext =
+  | DocxTextSelectionContext
+  | DocxElementContext
+  | DocxCommentSelectionContext;
+
+export function createDocxCommentSelectionContext(
+  comments: readonly Readonly<DocComment>[],
+  anchors: readonly Readonly<CommentAnchorRange>[],
+  commentId: string,
+  pageIndex: number,
+  options: DocxSelectionContextOptions = {},
+): DocxCommentSelectionContext | null {
+  const root = comments.find((comment) => comment.id === commentId && comment.parentId === undefined);
+  if (!root) return null;
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const replies = comments.filter((comment) => {
+    if (comment.parentId === undefined) return false;
+    let current: Readonly<DocComment> | undefined = comment;
+    const seen = new Set<string>();
+    while (current.parentId !== undefined && !seen.has(current.id)) {
+      seen.add(current.id);
+      const parent = byId.get(current.parentId);
+      if (!parent) return false;
+      if (parent.id === root.id) return true;
+      current = parent;
+    }
+    return false;
+  });
+  const bounded = boundedViewerCommentThreadContext(
+    {
+      id: root.id,
+      author: root.author,
+      date: root.date,
+      text: root.paragraphs?.join('\n') ?? root.text,
+      status: root.resolved ? 'resolved' : 'active',
+    },
+    replies.map((reply) => ({
+      id: reply.id,
+      author: reply.author,
+      date: reply.date,
+      text: reply.paragraphs?.join('\n') ?? reply.text,
+      status: reply.resolved ? 'resolved' : 'active',
+    })),
+    options.maxTextCharacters,
+  );
+  const source = anchors.find((anchor) => anchor.commentId === commentId)?.source;
+  return Object.freeze({
+    format: 'docx',
+    kind: 'comment',
+    pageIndex,
+    commentId,
+    ...(source ? { source: Object.freeze({ ...source, path: Object.freeze([...source.path]) }) } : {}),
+    thread: bounded.thread,
+    truncated: bounded.truncated,
+    truncationReasons: bounded.truncated ? ['text'] as const : [],
+    textCharacters: bounded.textCharacters,
+    maxTextCharacters: bounded.maxTextCharacters,
+  });
+}
 
 function nonNegativeInteger(value: string | undefined): number | null {
   if (value === undefined || !/^\d+$/.test(value)) return null;

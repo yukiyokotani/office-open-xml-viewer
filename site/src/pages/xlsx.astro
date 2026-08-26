@@ -1,7 +1,6 @@
 ---
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
-import ApiReference from '../components/ApiReference.astro';
 import { xlsxSheetSnippet, xlsxSheetWindowsSnippet } from '../lib/demo-snippets';
 ---
 <FormatPage format="xlsx" name="XLSX" ext=".xlsx">
@@ -17,5 +16,4 @@ import { xlsxSheetSnippet, xlsxSheetWindowsSnippet } from '../lib/demo-snippets'
     description="Parse the file once in the parent page, then open any sheet in its own browser window. Every window gets its own visible scrollbars, zoom and selection state while the workbook archive, worksheet cache and render worker remain shared. Open two or more sheets to compare them side by side."
     code={xlsxSheetWindowsSnippet}
   />
-  <ApiReference format="xlsx" />
 </FormatPage>

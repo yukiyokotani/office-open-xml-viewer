@@ -83,7 +83,7 @@ const formats = ['docx', 'xlsx', 'pptx'] as const;
 
     tabs.forEach((tab) => {
       tab.addEventListener('click', () => {
-        tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+        tabs.forEach((t) => t.setAttribute('aria-pressed', String(t === tab)));
         show(tab.dataset.formatTab!);
       });
     });

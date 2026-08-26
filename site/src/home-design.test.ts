@@ -10,9 +10,9 @@ const home = readFileSync(new URL('./pages/index.astro', import.meta.url), 'utf8
 describe('official-site home design', () => {
   it('keeps the format switcher inside the preview toolbar', () => {
     expect(showcase).toMatch(/<div class="panel-head">\s*<FormatTabs selected="docx"/);
-    expect(formatTabs).toContain(".tab[aria-selected='true'] {");
+    expect(formatTabs).toContain(".tab[aria-pressed='true'] {");
     expect(formatTabs).toContain('background: var(--border);');
-    expect(formatTabs).not.toMatch(/\.tab\[aria-selected='true'\][\s\S]*?var\(--signal\)/);
+    expect(formatTabs).not.toMatch(/\.tab\[aria-pressed='true'\][\s\S]*?var\(--signal\)/);
     expect(formatTabs).not.toContain('tab-dot');
     expect(formatTabs).not.toContain('--fmt');
   });

@@ -1,9 +1,11 @@
 import { vi } from 'vitest';
 import type { DocxDocument } from './document';
 import type { DocxTextRunInfo } from './renderer';
+import type { CommentAnchorRange } from './comments';
 import type { RenderPageOptions } from './types';
 import type { WireRenderPageOptions } from './worker-protocol';
 import type { DocxElementContext, DocxPagePoint } from './selection-context';
+import type { DocComment } from './types';
 import type { DocxElementContextOptions } from './element-context';
 import { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 
@@ -29,9 +31,12 @@ export interface FakeEl {
   /** Uppercase tag, mirroring the real DOM (`div` → `DIV`) — the viewer's
    *  canvas-container guard reads it. */
   tagName: string;
+  className: string;
   textContent: string;
   innerHTML: string;
   style: Record<string, string> & { cssText: string };
+  dataset: Record<string, string>;
+  ownerDocument: { createElement(tag: string): FakeEl };
   children: FakeEl[];
   parentElement: FakeEl | null;
   /** DOM alias of `parentElement` (viewer destroy reads `canvas.parentNode`). */
@@ -63,6 +68,9 @@ export interface FakeEl {
    *  freshly-created spare canvas from the on-screen one it replaces. */
   _uid: number;
   appendChild(c: FakeEl): FakeEl;
+  append(...children: FakeEl[]): void;
+  replaceChildren(...children: FakeEl[]): void;
+  setAttribute(name: string, value: string): void;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
   insertBefore(n: FakeEl, ref: FakeEl | null): FakeEl;
@@ -82,6 +90,7 @@ export function makeEl(tag: string): FakeEl {
   const el: FakeEl = {
     tag,
     tagName: tag.toUpperCase(),
+    className: '',
     textContent: '',
     innerHTML: '',
     width: 0,
@@ -100,6 +109,8 @@ export function makeEl(tag: string): FakeEl {
     _listeners: new Map(),
     _deviceResizes: [],
     _uid: _uidSeq++,
+    dataset: {},
+    ownerDocument: globalThis.document as unknown as { createElement(tag: string): FakeEl },
     style: new Proxy(style as Record<string, string> & { cssText: string }, {
       set(target, prop: string, value: string) {
         if (prop === 'cssText') {
@@ -125,6 +136,21 @@ export function makeEl(tag: string): FakeEl {
       c.parentElement = this;
       this.children.push(c);
       return c;
+    },
+    append(...children: FakeEl[]) {
+      for (const child of children) this.appendChild(child);
+    },
+    replaceChildren(...children: FakeEl[]) {
+      for (const child of this.children) child.parentElement = null;
+      this.children.length = 0;
+      for (const child of children) this.appendChild(child);
+    },
+    setAttribute(name: string, value: string) {
+      if (name === 'class') this.className = value;
+      if (name.startsWith('data-')) {
+        const key = name.slice(5).replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+        this.dataset[key] = value;
+      }
     },
     removeChild(c: FakeEl) {
       const i = this.children.indexOf(c);
@@ -269,9 +295,22 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
 /** Install a recording document + window + ResizeObserver into globals.
  *  Returns the last-constructed ResizeObserver callback so a test can fire a
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
-export function installDom(): { resizeCb: () => (() => void) | undefined } {
+export function installDom(): {
+  resizeCb: () => (() => void) | undefined;
+  dispatchDocument(type: string, event?: unknown): void;
+} {
   let lastResizeCb: (() => void) | undefined;
-  vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+  const listeners = new Map<string, Array<(event: unknown) => void>>();
+  vi.stubGlobal('document', {
+    createElement: (t: string) => makeEl(t),
+    createElementNS: (_namespace: string, t: string) => makeEl(t),
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
+    },
+  });
   vi.stubGlobal('window', { devicePixelRatio: 1 });
   vi.stubGlobal(
     'ResizeObserver',
@@ -283,7 +322,12 @@ export function installDom(): { resizeCb: () => (() => void) | undefined } {
       disconnect(): void {}
     },
   );
-  return { resizeCb: () => lastResizeCb };
+  return {
+    resizeCb: () => lastResizeCb,
+    dispatchDocument: (type, event = {}) => {
+      for (const listener of listeners.get(type) ?? []) listener(event);
+    },
+  };
 }
 
 export interface RenderCall {
@@ -292,6 +336,7 @@ export interface RenderCall {
    *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
   width?: number;
   currentDate?: Date | number;
+  hasTextRunCallback?: boolean;
   /** The canvas element the viewer handed to `renderPage` (main mode). The
    *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
    *  a test confirm the on-screen canvas was NOT the render target until swap. */
@@ -322,6 +367,8 @@ export class FakeDocxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderPageToBitmap`'s `onTextRun` too. */
   feedTextRuns?: DocxTextRunInfo[];
+  comments: DocComment[] = [];
+  commentAnchors: CommentAnchorRange[] = [];
   constructor(
     private _pageCount: number,
     // Uniform-page convention: a single-element `_sizes` array means EVERY page
@@ -344,6 +391,9 @@ export class FakeDocxEngine {
     const clamped = Math.max(0, Math.min(i, this._sizes.length - 1));
     const s = this._sizes[clamped] ?? { widthPt: 0, heightPt: 0 };
     return { widthPt: s.widthPt, heightPt: s.heightPt };
+  }
+  commentAnchorRanges(): readonly CommentAnchorRange[] {
+    return this.commentAnchors;
   }
   renderPage(_canvas: unknown, page: number, opts?: RenderPageOptions): Promise<void> {
     if (this._mode === 'worker') {
@@ -379,6 +429,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        hasTextRunCallback: typeof opts?.onTextRun === 'function',
         canvas,
         resolve: () => resolve(),
         reject,
@@ -403,6 +454,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        hasTextRunCallback: typeof opts?.onTextRun === 'function',
         resolve: () => resolve(bmp as unknown as ImageBitmap),
         reject,
       };

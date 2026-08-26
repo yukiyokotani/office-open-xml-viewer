@@ -148,6 +148,18 @@ function requireMethod(api, className, methodName, returnType) {
   return member;
 }
 
+function requireMethodParameters(api, className, methodName, expectedTypes) {
+  const member = requireMethod(api, className, methodName);
+  const actual = member.parameters.map((parameter) => parameter.type?.getText(api.file));
+  if (actual.length !== expectedTypes.length || actual.some((type, index) => type !== expectedTypes[index])) {
+    fail(
+      `${className}.${methodName}() parameters are (${actual.join(', ')}), ` +
+        `expected (${expectedTypes.join(', ')})`,
+    );
+  }
+  return member;
+}
+
 function requireStaticLoad(api, className) {
   const declaration = classDeclaration(api, className);
   const load = declaration.members.find((member) => memberName(member) === 'load');
@@ -183,6 +195,17 @@ function requireConstructorTarget(api, className, targetType) {
 function forbidOption(api, interfaceName, optionName) {
   if (interfaceMembers(api, interfaceName).has(optionName)) {
     fail(`${interfaceName}.${optionName} must be replaced by a named factory`);
+  }
+}
+
+function requireOption(api, interfaceName, optionName, expectedType) {
+  const member = interfaceMembers(api, interfaceName).get(optionName);
+  if (!member || !ts.isPropertySignature(member)) {
+    fail(`${interfaceName}.${optionName} is missing`);
+  }
+  const actual = member.type?.getText(api.file);
+  if (actual !== expectedType) {
+    fail(`${interfaceName}.${optionName} is ${actual ?? 'untyped'}, expected ${expectedType}`);
   }
 }
 
@@ -258,8 +281,71 @@ for (const format of formats) {
   forbidOption(api, format.canvasOptions, format.borrowedOption);
   forbidOption(api, format.containerOptions, format.borrowedOption);
 
+  const commentsType = `${format.label[0]}${format.label.slice(1).toLowerCase()}CommentsOptions`;
+  const commentsOptionType = `boolean | ${commentsType}`;
+  if (format.label === 'XLSX') {
+    for (const options of [format.canvasOptions, format.containerOptions]) {
+      requireOption(api, options, 'comments', commentsOptionType);
+    }
+  } else {
+    forbidOption(api, format.canvasOptions, 'comments');
+    requireOption(api, format.containerOptions, 'comments', commentsOptionType);
+  }
+  const commentsMembers = interfaceMembers(api, commentsType);
+  if (!commentsMembers.has('includeResolved')) {
+    fail(`${format.label} comment UI must expose the shared resolved-thread policy`);
+  }
+
   if (format.label === 'XLSX' && classMembers(api, format.engine).has('renderSheet')) {
     fail('XlsxWorkbook.renderSheet() must not imply that an unbounded worksheet is one finite canvas unit');
+  }
+  if (format.label === 'XLSX') {
+    for (const viewer of [format.canvasViewer, format.containerViewer]) {
+      requireMethod(api, viewer, 'getCellViewportRect', 'XlsxCellViewportRect | null');
+    }
+  }
+}
+
+// Comments use format-native locators, but their responsibilities stay
+// symmetric: source records live on the headless engine, navigation includes
+// the owning surface identity, and every navigation Promise settles only after
+// the authored target has been revealed.
+{
+  const api = loadApi('packages/docx/api/public-api-baseline.d.ts');
+  requireProperty(api, 'DocxDocument', 'comments');
+  requireMethod(
+    api,
+    'DocxDocument',
+    'getCommentThreads',
+    'Promise<readonly Readonly<ResolvedDocxCommentThread>[]>',
+  );
+  requireMethodParameters(api, 'DocxScrollViewer', 'goToComment', [
+    'string',
+    "{\n        pageIndex?: number;\n        behavior?: 'auto' | 'smooth';\n    }",
+  ]);
+  requireMethod(api, 'DocxScrollViewer', 'goToComment', 'Promise<boolean>');
+}
+{
+  const api = loadApi('packages/pptx/api/public-api-baseline.d.ts');
+  requireMethod(api, 'PptxPresentation', 'getComments', 'readonly Readonly<PptxComment>[]');
+  requireMethodParameters(api, 'PptxScrollViewer', 'goToComment', [
+    'number',
+    'number',
+    "{\n        behavior?: 'auto' | 'smooth';\n    }",
+  ]);
+  requireMethod(api, 'PptxScrollViewer', 'goToComment', 'Promise<boolean>');
+}
+{
+  const api = loadApi('packages/xlsx/api/public-api-baseline.d.ts');
+  requireMethod(api, 'XlsxWorkbook', 'getComments', 'Promise<readonly Readonly<XlsxComment>[]>');
+  for (const viewer of ['XlsxSheetViewer', 'XlsxViewer']) {
+    requireMethod(api, viewer, 'getComments', 'readonly Readonly<XlsxComment>[]');
+    requireMethodParameters(api, viewer, 'goToComment', [
+      'number',
+      'string',
+      'XlsxScrollToCellOptions',
+    ]);
+    requireMethod(api, viewer, 'goToComment', 'Promise<boolean>');
   }
 }
 
@@ -281,21 +367,18 @@ for (const relativePath of ['docs/api-architecture-0.76.md']) {
   }
 }
 
-const publicGuide = readFileSync(path.join(root, 'site/src/components/ApiReference.astro'), 'utf8');
+const publicGuide = readFileSync(path.join(root, 'site/src/pages/production.astro'), 'utf8');
 for (const token of [
-  'Load once for one Viewer or share one document',
-  'For most applications',
-  'When several views need the same document',
-  'viewer.load(source)',
+  'id="ownership"',
+  'one Viewer own one document',
+  'several views must share one parse',
   'DocxDocument',
   'PptxPresentation',
   'XlsxWorkbook',
-  "factory: 'fromDocument()'",
-  "factory: 'fromPresentation()'",
-  "factory: 'fromWorkbook()'",
-  'Those Viewers cannot replace the file',
-  'your application must destroy the shared engine',
-  "engine's mode is authoritative",
+  'fromDocument()',
+  'fromPresentation()',
+  'fromWorkbook()',
+  'Destroy every view before the shared document',
 ]) {
   if (!publicGuide.includes(token)) fail(`official-site ownership guide is missing: ${token}`);
 }

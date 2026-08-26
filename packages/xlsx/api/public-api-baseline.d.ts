@@ -237,15 +237,9 @@ export interface ChartDataTable {
     fontColor?: string | null;
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
-    /** Resolved solid compatibility projection of `<c:dTable><c:spPr>`. */
     fillColor?: string | null;
-    /** Direct DrawingML fill recipe. Preserved even where Office's application-
-     * defined data-table paint extent has not been established for that recipe. */
     fill?: SolidFill | GradientFill | PatternFill | null;
-    /** Explicit `<a:noFill>` on the data-table shape properties. */
     fillHidden?: boolean | null;
-    /** True when `spPr` authored any DrawingML fill child, including one whose
-     * paint recipe this implementation cannot resolve. */
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -381,6 +375,9 @@ export interface ChartexRegionMapRow {
     label: string;
     entityId?: string | null;
     value?: number | null;
+}
+export interface ChartExRenderer {
+    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartexSunburst {
     rows: ChartexSunburstRow[];
@@ -577,12 +574,10 @@ export interface ChartModel {
     catAxisLineColor?: string | null;
     catAxisLineWidthEmu?: number | null;
     catAxisLineDash?: string | null;
-    /** A direct `<c:catAx><c:spPr><a:ln>` paint was authored. */
     catAxisLinePaintAuthored?: boolean | null;
     valAxisLineColor?: string | null;
     valAxisLineWidthEmu?: number | null;
     valAxisLineDash?: string | null;
-    /** A direct `<c:valAx><c:spPr><a:ln>` paint was authored. */
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
     catAxisMin?: number | null;
@@ -690,14 +685,31 @@ export interface ChartOfPie {
     gapWidthPercent: number;
     seriesLines: boolean;
 }
+export interface ChartPlotGroup {
+    kind: ChartPlotGroupKind;
+    seriesStart: number;
+    seriesCount: number;
+    categoryAxis: ChartPlotGroupAxisSlot;
+    valueAxis: ChartPlotGroupAxisSlot;
+    seriesAxis: ChartPlotGroupAxisSlot;
+    axisIds?: string[] | null;
+    grouping?: string | null;
+    barDirection?: string | null;
+    scatterStyle?: string | null;
+    radarStyle?: string | null;
+    gapWidth?: number | null;
+    overlap?: number | null;
+    bubbleScale?: number | null;
+    bubbleSizeRepresents?: 'area' | 'w' | null;
+    showNegativeBubbles?: boolean | null;
+}
+export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
+export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
 export interface ChartRect {
     x: number;
     y: number;
     w: number;
     h: number;
-}
-export interface ChartExRenderer {
-    render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
@@ -736,9 +748,6 @@ export interface ChartSeries {
     barGroupOverlap?: number | null;
     useSecondaryAxis?: boolean | null;
     categories?: string[] | null;
-    /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
-     * exposes such a lone bubble series as one legend entry per point while a
-     * numeric X source keeps the ordinary one-entry-per-series legend. */
     bubbleXSourceIsString?: boolean | null;
     showMarker?: boolean | null;
     valFormatCode?: string | null;
@@ -746,7 +755,6 @@ export interface ChartSeries {
     catFormatBuiltinId?: number | null;
     catFormatCodes?: (string | null)[] | null;
     markerSymbol?: string | null;
-    /** Host-resolved automatic scatter marker when no `<c:marker>` symbol is authored. */
     automaticMarkerSymbol?: string | null;
     markerSize?: number | null;
     markerFill?: string | null;
@@ -888,10 +896,8 @@ export interface ChartThreeDPictureOptions {
     applyToSides?: boolean | null;
     applyToEnd?: boolean | null;
     pictureFormat?: 'stretch' | 'stack' | 'stackScale' | string | null;
-    /** Whether `<c:pictureFormat>` was authored, including an unsupported value. */
     pictureFormatAuthored?: boolean | null;
     pictureStackUnit?: number | null;
-    /** Whether `<c:pictureStackUnit>` was authored, including an invalid value. */
     pictureStackUnitAuthored?: boolean | null;
 }
 export interface ChartThreeDRenderer {
@@ -905,7 +911,6 @@ export interface ChartThreeDSeriesAxis {
     tickLabelSkip?: number | null;
     tickMarkSkip?: number | null;
     majorTickMark: string;
-    /** `<c:serAx><c:minorTickMark>`; omission means no minor tick marks. */
     minorTickMark?: string | null;
     fontColor?: string | null;
     fontSizeHpt?: number | null;
@@ -915,7 +920,6 @@ export interface ChartThreeDSeriesAxis {
     lineColor?: string | null;
     lineWidthEmu?: number | null;
     lineDash?: string | null;
-    /** A direct `<c:serAx><c:spPr><a:ln>` paint was authored. */
     linePaintAuthored?: boolean | null;
     lineHidden: boolean;
     titleFontSizeHpt?: number | null;
@@ -979,26 +983,6 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
-export type ChartPlotGroupKind = 'area' | 'area3D' | 'line' | 'line3D' | 'stock' | 'radar' | 'scatter' | 'pie' | 'pie3D' | 'doughnut' | 'bar' | 'bar3D' | 'ofPie' | 'surface' | 'surface3D' | 'bubble';
-export type ChartPlotGroupAxisSlot = 'primary' | 'secondary' | 'none' | 'unresolved';
-export interface ChartPlotGroup {
-    kind: ChartPlotGroupKind;
-    seriesStart: number;
-    seriesCount: number;
-    categoryAxis: ChartPlotGroupAxisSlot;
-    valueAxis: ChartPlotGroupAxisSlot;
-    seriesAxis: ChartPlotGroupAxisSlot;
-    axisIds?: string[] | null;
-    grouping?: string | null;
-    barDirection?: string | null;
-    scatterStyle?: string | null;
-    radarStyle?: string | null;
-    gapWidth?: number | null;
-    overlap?: number | null;
-    bubbleScale?: number | null;
-    bubbleSizeRepresents?: 'area' | 'w' | null;
-    showNegativeBubbles?: boolean | null;
-}
 export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];
@@ -1865,6 +1849,20 @@ export interface TileInfo {
     flip?: string;
     algn?: string;
 }
+export interface ViewerCommentMessageContext {
+    readonly id?: string;
+    readonly author?: string;
+    readonly date?: string;
+    readonly text: string;
+    readonly status?: 'active' | 'resolved' | 'closed';
+}
+interface ViewerCommentsOptions {
+    readonly includeResolved?: boolean;
+}
+export interface ViewerCommentThreadContext {
+    readonly root: ViewerCommentMessageContext;
+    readonly replies: readonly ViewerCommentMessageContext[];
+}
 export interface ViewerContextMenuEvent<TContext> {
     readonly originalEvent: MouseEvent;
     getContext(): Promise<TContext | null>;
@@ -1936,10 +1934,34 @@ export interface WorksheetCellRange {
     bottom: number;
     right: number;
 }
+export interface XlsxCellViewportRect {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+}
 export interface XlsxComment {
+    kind?: 'note' | 'thread';
     cellRef: string;
+    id?: string;
+    personId?: string;
     author?: string;
+    date?: string;
+    rootText?: string;
     text: string;
+    resolved?: boolean;
+    replies?: XlsxCommentReply[];
+}
+export interface XlsxCommentReply {
+    id: string;
+    parentId: string;
+    personId: string;
+    author?: string;
+    date?: string;
+    text: string;
+    resolved?: boolean;
+}
+export interface XlsxCommentsOptions extends ViewerCommentsOptions {
 }
 export type XlsxCopyResult = Readonly<{
     status: 'copied';
@@ -2055,6 +2077,7 @@ export interface XlsxSelectionContextCell {
     readonly valueType: 'empty' | 'text' | 'number' | 'bool' | 'error' | 'shared';
     readonly value: string | number | boolean | null;
     readonly formula?: string;
+    readonly comment?: ViewerCommentThreadContext;
 }
 export interface XlsxSelectionContextOptions {
     readonly maxCells?: number;
@@ -2089,6 +2112,9 @@ export class XlsxSheetViewer implements ZoomableViewer {
     fitWidth(): void;
     fitPage(): void;
     getCellAt(clientX: number, clientY: number): CellAddress | null;
+    getCellViewportRect(cell: CellAddress | string): XlsxCellViewportRect | null;
+    getComments(): readonly Readonly<XlsxComment>[];
+    goToComment(sheetIndex: number, cellRef: string, options?: XlsxScrollToCellOptions): Promise<boolean>;
     get selectionState(): XlsxSelectionState | null;
     setSelection(selection: XlsxSelectionInput): void;
     getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
@@ -2123,6 +2149,7 @@ export interface XlsxSheetViewerOptions extends LoadOptions {
     enableHyperlinks?: boolean;
     selectionColor?: string;
     findHighlightColors?: FindHighlightColors;
+    comments?: boolean | XlsxCommentsOptions;
     hiddenSheetMode?: HiddenSheetMode;
     onViewportChange?: (offset: XlsxViewportOffset) => void;
 }
@@ -2154,6 +2181,9 @@ class XlsxViewerEngine implements ZoomableViewer {
     relayout(): Promise<void>;
     scrollToCell(ref: string, options?: XlsxScrollToCellOptions): Promise<void>;
     getCellAt(clientX: number, clientY: number): CellAddress | null;
+    getCellViewportRect(cell: CellAddress | string): XlsxCellViewportRect | null;
+    getComments(): readonly Readonly<XlsxComment>[];
+    goToComment(sheetIndex: number, cellRef: string, options?: XlsxScrollToCellOptions): Promise<boolean>;
     get selectionState(): XlsxSelectionState | null;
     setSelection(input: XlsxSelectionInput): void;
     getSelectionContext(options?: XlsxSelectionContextOptions): XlsxSelectionContext | null;
@@ -2201,6 +2231,7 @@ export class XlsxWorkbook {
     sheetVisibility(sheetIndex: number): SheetVisibility;
     isHidden(sheetIndex: number): boolean;
     getWorksheet(sheetIndex: number): Promise<Worksheet>;
+    getComments(sheetIndex: number): Promise<readonly Readonly<XlsxComment>[]>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     toMarkdown(): Promise<string>;

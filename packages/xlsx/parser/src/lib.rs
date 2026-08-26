@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(test)]
 use std::io::Cursor;
 use std::rc::Rc;
@@ -681,7 +681,7 @@ fn finalize_projected_sheet(
         shared.theme_format_scheme.as_ref(),
     );
     ws.hyperlinks = load_hyperlinks(archive, sheet_path, hyperlink_rids);
-    ws.comments = load_sheet_comments(archive, sheet_path);
+    ws.comments = load_sheet_comments(archive, sheet_path, &shared.rels_xml);
     ws.comment_refs = ws.comments.iter().map(|c| c.cell_ref.clone()).collect();
     ws.defined_names = defined_names;
     ws.tables = load_sheet_tables(archive, sheet_path, theme_colors);
@@ -2390,7 +2390,11 @@ fn find_internal_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Option
 /// Reads xl/commentsN.xml for the given sheet and returns each `<comment>` as
 /// a structured `XlsxComment` (cell ref, resolved author name, plain text).
 /// Callers can derive `comment_refs: Vec<String>` from `c.cell_ref`.
-fn load_sheet_comments(archive: &mut XlsxZip, sheet_path: &str) -> Vec<XlsxComment> {
+fn load_sheet_comments(
+    archive: &mut XlsxZip,
+    sheet_path: &str,
+    workbook_rels_xml: &str,
+) -> Vec<XlsxComment> {
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
         return Vec::new();
     };
@@ -2404,11 +2408,9 @@ fn load_sheet_comments(archive: &mut XlsxZip, sheet_path: &str) -> Vec<XlsxComme
 
     // A sheet may carry classic notes (`/comments`, ECMA-376 §18.7) and/or
     // Office-365 threaded comments (`/threadedComment`, MS extension). Excel
-    // writes a back-compat `xl/commentsN.xml` alongside every threaded comment,
-    // so the classic file is preferred when present (it already includes the
-    // threaded text). Only when there is no classic file do we fall back to the
-    // threaded part — which is the case for files authored by tools that emit
-    // threaded comments exclusively.
+    // also writes legacy placeholders in `xl/commentsN.xml` for threaded roots.
+    // Parse both parts, then apply the explicit MS-XLSX §2.3.7.3 reconciliation
+    // identity so unrelated classic notes remain visible.
     let mut classic_target: Option<String> = None;
     let mut threaded_target: Option<String> = None;
     for rel in rels_doc
@@ -2427,63 +2429,148 @@ fn load_sheet_comments(archive: &mut XlsxZip, sheet_path: &str) -> Vec<XlsxComme
         }
     }
 
+    let threaded_comments = if let Some(target) = threaded_target {
+        let tc_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
+        let comments = if let Ok(tc_xml) = read_zip_string(archive, &tc_path) {
+            let persons = load_persons(archive, workbook_rels_xml);
+            parse_threaded_comments_xml(&tc_xml, &persons)
+        } else {
+            Vec::new()
+        };
+        Some(comments)
+    } else {
+        None
+    };
+
+    let mut classic_comments = Vec::new();
     if let Some(target) = classic_target {
         let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
         if let Ok(comments_xml) = read_zip_string(archive, &comments_path) {
-            return parse_comments_xml(&comments_xml);
+            classic_comments = parse_comments_xml(&comments_xml);
         }
     }
 
-    if let Some(target) = threaded_target {
-        let tc_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        if let Ok(tc_xml) = read_zip_string(archive, &tc_path) {
-            let persons = load_persons(archive);
-            return parse_threaded_comments_xml(&tc_xml, &persons);
-        }
-    }
-
-    Vec::new()
+    merge_sheet_comments(threaded_comments, classic_comments)
 }
 
-/// Load `personId` → display-name map from `xl/persons/person*.xml`
-/// (Office-365 threaded-comment authors, MS-XLSX schema
-/// `…/office/spreadsheetml/2018/threadedcomments`). `<person displayName id/>`.
-/// Returns an empty map when no persons part exists.
-fn load_persons(archive: &mut XlsxZip) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    // Persons live under xl/persons/ by convention; collect every part there so
-    // we don't depend on the exact file name (person.xml vs person1.xml).
-    let person_paths: Vec<String> = archive
-        .entry_paths()
-        .into_iter()
-        .filter(|n| n.starts_with("xl/persons/") && n.ends_with(".xml"))
-        .collect();
-    for path in person_paths {
-        let Ok(xml) = read_zip_string(archive, &path) else {
-            continue;
-        };
-        let Ok(doc) = parse_guarded(&xml) else {
-            continue;
-        };
-        for p in doc
-            .descendants()
-            .filter(|n| n.is_element() && n.tag_name().name() == "person")
+/// Reconcile modern threads with the legacy placeholders required by MS-XLSX
+/// §2.3.7.3/.3.1, while retaining unrelated ECMA-376 §18.7 notes. A recognized
+/// placeholder is metadata for a thread, not a second user-visible note. `None`
+/// means the worksheet has no threaded-comment relationship; `Some(empty)`
+/// preserves the fact that a declared part yielded no valid thread records.
+fn merge_sheet_comments(
+    threaded_part: Option<Vec<XlsxComment>>,
+    classic: Vec<XlsxComment>,
+) -> Vec<XlsxComment> {
+    let Some(threaded) = threaded_part else {
+        return classic;
+    };
+
+    fn guid_key(value: &str) -> Option<String> {
+        let value = value.trim().trim_start_matches('{').trim_end_matches('}');
+        if value.len() != 36
+            || !value.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
         {
-            if let (Some(id), Some(name)) = (p.attribute("id"), p.attribute("displayName")) {
-                out.insert(id.to_string(), name.to_string());
+            return None;
+        }
+        Some(value.to_ascii_lowercase())
+    }
+
+    fn placeholder_key(comment: &XlsxComment) -> Option<String> {
+        let uid = guid_key(comment.id.as_deref()?)?;
+        let author = comment.author.as_deref()?;
+        let marker = author.find("tc=")?;
+        let candidate: String = author[marker + 3..]
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_hexdigit() || matches!(character, '-' | '{' | '}')
+            })
+            .collect();
+        (guid_key(&candidate).as_deref() == Some(uid.as_str())).then_some(uid)
+    }
+
+    let thread_ids: HashSet<String> = threaded
+        .iter()
+        .filter_map(|comment| comment.id.as_deref().and_then(guid_key))
+        .collect();
+    let mut placeholders: HashMap<String, Vec<XlsxComment>> = HashMap::new();
+    let mut notes = Vec::new();
+    for comment in classic {
+        let Some(key) = placeholder_key(&comment) else {
+            notes.push(comment);
+            continue;
+        };
+        // MS-XLSX §2.3.7.3.1 removes an orphan placeholder instead of showing
+        // it as a note. A matching placeholder supplies the displayed ref.
+        if thread_ids.contains(&key) {
+            placeholders.entry(key).or_default().push(comment);
+        }
+    }
+
+    let mut merged = Vec::with_capacity(threaded.len() + notes.len());
+    for comment in threaded {
+        let key = comment.id.as_deref().and_then(guid_key);
+        let matching = key.as_ref().and_then(|id| placeholders.remove(id));
+        match matching {
+            Some(occurrences) => {
+                // Reconciliation may copy one logical thread to multiple
+                // placeholder locations. Preserve the source id while giving
+                // each read-only occurrence its authored cell reference.
+                for placeholder in occurrences {
+                    let mut occurrence = comment.clone();
+                    occurrence.cell_ref = placeholder.cell_ref;
+                    merged.push(occurrence);
+                }
             }
+            None => merged.push(comment),
+        }
+    }
+    merged.extend(notes);
+    merged
+}
+
+/// Load the `personId` → display-name map from the Persons part targeted by the
+/// workbook's implicit relationship ([MS-XLSX] §2.1.18, relationship Type
+/// `http://schemas.microsoft.com/office/2017/10/relationships/person`). The
+/// package part name is relationship-owned; `xl/persons/` is only a convention
+/// and unreferenced entries there must not be observed. `<person displayName id/>`.
+/// Returns an empty map when no internal Persons relationship or readable part exists.
+fn load_persons(archive: &mut XlsxZip, workbook_rels_xml: &str) -> HashMap<String, String> {
+    const PERSON_RELATIONSHIP_TYPE: &str =
+        "http://schemas.microsoft.com/office/2017/10/relationships/person";
+    let mut out: HashMap<String, String> = HashMap::new();
+    let Some(target) =
+        find_internal_rel_target_by_type(workbook_rels_xml, PERSON_RELATIONSHIP_TYPE)
+    else {
+        return out;
+    };
+    let path = resolve_zip_path("xl", &target);
+    let Ok(xml) = read_zip_string(archive, &path) else {
+        return out;
+    };
+    let Ok(doc) = parse_guarded(&xml) else {
+        return out;
+    };
+    for p in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "person")
+    {
+        if let (Some(id), Some(name)) = (p.attribute("id"), p.attribute("displayName")) {
+            out.insert(id.to_string(), name.to_string());
         }
     }
     out
 }
 
-/// Parse `xl/threadedComments/threadedCommentN.xml` (MS-XLSX threaded comments,
-/// schema `…/office/spreadsheetml/2018/threadedcomments`). Each
-/// `<threadedComment ref personId>` carries a `<text>`; `personId` resolves to a
-/// display name via the `persons` map. Multiple comments on the same cell (a
-/// thread of replies) are joined into one body, mirroring how the classic
-/// back-compat file flattens a thread. Returns one `XlsxComment` per cell that
-/// has at least one threaded comment.
+/// Parse MS-XLSX CT_ThreadedComment records without flattening their reply
+/// identities. Parentage follows `@parentId` only; malformed orphan/cyclic
+/// records are not guessed into a thread.
 fn parse_threaded_comments_xml(
     tc_xml: &str,
     persons: &HashMap<String, String>,
@@ -2491,52 +2578,159 @@ fn parse_threaded_comments_xml(
     let Ok(doc) = parse_guarded(tc_xml) else {
         return Vec::new();
     };
-    // Preserve document order of first appearance per cell ref.
-    let mut order: Vec<String> = Vec::new();
-    let mut by_ref: HashMap<String, (Option<String>, String)> = HashMap::new();
+    struct RawThreadedComment {
+        cell_ref: Option<String>,
+        id: String,
+        parent_id: Option<String>,
+        person_id: String,
+        author: Option<String>,
+        date: Option<String>,
+        text: String,
+        resolved: Option<bool>,
+    }
+
+    fn xml_bool(value: Option<&str>) -> Option<bool> {
+        match value?.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Some(true),
+            "0" | "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    let mut records: Vec<RawThreadedComment> = Vec::new();
     for node in doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "threadedComment")
     {
-        let Some(cell_ref) = node.attribute("ref") else {
+        let Some(id) = node.attribute("id") else {
             continue;
         };
-        let author = node
-            .attribute("personId")
-            .and_then(|id| persons.get(id).cloned())
-            .filter(|s| !s.is_empty());
+        let Some(person_id) = node.attribute("personId") else {
+            continue;
+        };
+        let author = persons.get(person_id).cloned().filter(|s| !s.is_empty());
         let text = node
             .children()
             .find(|c| c.is_element() && c.tag_name().name() == "text")
             .and_then(|t| t.text())
             .unwrap_or("")
             .to_string();
-        let entry = by_ref.entry(cell_ref.to_string()).or_insert_with(|| {
-            order.push(cell_ref.to_string());
-            (None, String::new())
+        records.push(RawThreadedComment {
+            cell_ref: node.attribute("ref").map(str::to_owned),
+            id: id.to_string(),
+            parent_id: node.attribute("parentId").map(str::to_owned),
+            person_id: person_id.to_string(),
+            author,
+            date: node.attribute("dT").map(str::to_owned),
+            text,
+            resolved: xml_bool(node.attribute("done")),
         });
-        // First comment in the thread sets the author; replies are appended.
-        if entry.0.is_none() {
-            entry.0 = author;
-        }
-        if !entry.1.is_empty() {
-            entry.1.push('\n');
-        }
-        entry.1.push_str(&text);
     }
-    order
-        .into_iter()
-        .map(|cell_ref| {
-            // `order` holds exactly the keys inserted into `by_ref` (each ref is
-            // pushed to `order` the first time it is inserted), so `remove` is
-            // always Some.
-            // ast-grep-ignore: no-unwrap-in-parser-production
-            let (author, text) = by_ref.remove(&cell_ref).unwrap();
-            XlsxComment {
-                cell_ref,
-                author,
-                text,
+
+    // `@id` is the only authored identity. A duplicate is ambiguous, so do not
+    // attach replies to whichever duplicate happened to be visited last.
+    let mut by_id: HashMap<&str, usize> = HashMap::new();
+    let mut duplicate_ids: HashSet<&str> = HashSet::new();
+    for (index, record) in records.iter().enumerate() {
+        if by_id.insert(record.id.as_str(), index).is_some() {
+            duplicate_ids.insert(record.id.as_str());
+        }
+    }
+    for id in &duplicate_ids {
+        by_id.remove(id);
+    }
+
+    #[derive(Clone, Copy)]
+    enum RootResolution {
+        Unknown,
+        Resolving,
+        Resolved(Option<usize>),
+    }
+
+    fn resolve_root(
+        start: usize,
+        records: &[RawThreadedComment],
+        by_id: &HashMap<&str, usize>,
+        states: &mut [RootResolution],
+    ) -> Option<usize> {
+        let mut current = start;
+        let mut path = Vec::new();
+        let root = loop {
+            match states[current] {
+                RootResolution::Resolved(root) => break root,
+                RootResolution::Resolving => break None,
+                RootResolution::Unknown => {}
             }
+            states[current] = RootResolution::Resolving;
+            path.push(current);
+            let Some(parent_id) = records[current].parent_id.as_deref() else {
+                break Some(current);
+            };
+            let Some(parent) = by_id.get(parent_id).copied() else {
+                break None;
+            };
+            current = parent;
+        };
+        for index in path {
+            states[index] = RootResolution::Resolved(root);
+        }
+        root
+    }
+
+    let mut states = vec![RootResolution::Unknown; records.len()];
+    let mut replies_by_root: HashMap<usize, Vec<XlsxCommentReply>> = HashMap::new();
+    for (index, reply) in records.iter().enumerate() {
+        if reply.parent_id.is_none() || duplicate_ids.contains(reply.id.as_str()) {
+            continue;
+        }
+        let Some(root_index) = resolve_root(index, &records, &by_id, &mut states) else {
+            continue;
+        };
+        let Some(parent_id) = reply.parent_id.clone() else {
+            continue;
+        };
+        replies_by_root
+            .entry(root_index)
+            .or_default()
+            .push(XlsxCommentReply {
+                id: reply.id.clone(),
+                parent_id,
+                person_id: reply.person_id.clone(),
+                author: reply.author.clone(),
+                date: reply.date.clone(),
+                text: reply.text.clone(),
+                resolved: reply.resolved,
+            });
+    }
+
+    records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            record.parent_id.is_none()
+                && record.cell_ref.is_some()
+                && !duplicate_ids.contains(record.id.as_str())
+        })
+        .map(|(root_index, root)| XlsxComment {
+            root_text: Some(root.text.clone()),
+            kind: XlsxCommentKind::Thread,
+            cell_ref: root.cell_ref.clone().unwrap_or_default(),
+            id: Some(root.id.clone()),
+            person_id: Some(root.person_id.clone()),
+            author: root.author.clone(),
+            date: root.date.clone(),
+            text: std::iter::once(root.text.as_str())
+                .chain(
+                    replies_by_root
+                        .get(&root_index)
+                        .into_iter()
+                        .flatten()
+                        .map(|reply| reply.text.as_str()),
+                )
+                .collect::<Vec<_>>()
+                .join("\n"),
+            resolved: root.resolved,
+            replies: replies_by_root.remove(&root_index).unwrap_or_default(),
         })
         .collect()
 }
@@ -2590,9 +2784,19 @@ fn parse_comments_xml(comments_xml: &str) -> Vec<XlsxComment> {
             }
         }
         comments.push(XlsxComment {
+            root_text: None,
+            kind: XlsxCommentKind::Note,
             cell_ref: cell_ref.to_string(),
+            id: node
+                .attributes()
+                .find(|attribute| attribute.name() == "uid")
+                .map(|attribute| attribute.value().to_string()),
+            person_id: None,
             author,
+            date: None,
             text,
+            resolved: None,
+            replies: Vec::new(),
         });
     }
     comments
@@ -4716,7 +4920,7 @@ mod data_validation_tests {
 
 #[cfg(test)]
 mod comment_tests {
-    use super::parse_comments_xml;
+    use super::{parse_comments_xml, XlsxCommentKind};
 
     const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -4729,6 +4933,7 @@ mod comment_tests {
         );
         let cs = parse_comments_xml(&xml);
         assert_eq!(cs.len(), 2);
+        assert!(matches!(cs[0].kind, XlsxCommentKind::Note));
         assert_eq!(cs[0].cell_ref, "B1");
         assert_eq!(cs[0].author.as_deref(), Some("Reviewer"));
         assert_eq!(cs[0].text, "Set the order status.");
@@ -4767,8 +4972,12 @@ mod comment_tests {
 
 #[cfg(test)]
 mod threaded_comment_tests {
-    use super::parse_threaded_comments_xml;
+    use super::{
+        merge_sheet_comments, parse_comments_xml, parse_sheet_native, parse_threaded_comments_xml,
+        XlsxCommentKind,
+    };
     use std::collections::HashMap;
+    use std::io::{Cursor, Write};
 
     const TC_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments";
 
@@ -4779,8 +4988,104 @@ mod threaded_comment_tests {
         m
     }
 
-    /// MS-XLSX threaded comments — each `<threadedComment>` yields its cell ref,
-    /// the author resolved from `personId`, and the `<text>` body.
+    fn workbook_with_threaded_comment(
+        person_relationship: &str,
+        person_parts: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rSheet1"/></sheets></workbook>"#;
+        let workbook_rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>{person_relationship}</Relationships>"#,
+        );
+        let worksheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let worksheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rThread" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/></Relationships>"#;
+        let threaded_comments = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}" id="thread-1"><text>Review this.</text></threadedComment></ThreadedComments>"#,
+        );
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, body) in [
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", workbook_rels.as_str()),
+                ("xl/worksheets/sheet1.xml", worksheet),
+                ("xl/worksheets/_rels/sheet1.xml.rels", worksheet_rels),
+                (
+                    "xl/threadedComments/threadedComment1.xml",
+                    threaded_comments.as_str(),
+                ),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            for (path, body) in person_parts {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn parsed_thread_author(package: &[u8]) -> Option<String> {
+        let json = parse_sheet_native(package, 0, "Sheet1").expect("sheet parses");
+        let sheet: serde_json::Value = serde_json::from_str(&json).expect("sheet JSON");
+        sheet["comments"][0]["author"].as_str().map(str::to_owned)
+    }
+
+    #[test]
+    fn resolves_persons_from_unconventional_workbook_relationship_target() {
+        let package = workbook_with_threaded_comment(
+            r#"<Relationship Id="rPersons" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="reviewers/custom-person-list.xml"/>"#,
+            &[(
+                "xl/reviewers/custom-person-list.xml",
+                r#"<personList><person id="{p1}" displayName="Referenced Reviewer"/></personList>"#,
+            )],
+        );
+
+        assert_eq!(
+            parsed_thread_author(&package).as_deref(),
+            Some("Referenced Reviewer")
+        );
+    }
+
+    #[test]
+    fn ignores_unreferenced_conventional_persons_part_poison() {
+        let package = workbook_with_threaded_comment(
+            r#"<Relationship Id="rPersons" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="reviewers/custom-person-list.xml"/>"#,
+            &[
+                (
+                    "xl/reviewers/custom-person-list.xml",
+                    r#"<personList><person id="{p1}" displayName="Referenced Reviewer"/></personList>"#,
+                ),
+                (
+                    "xl/persons/person.xml",
+                    r#"<personList><person id="{p1}" displayName="Unreferenced Poison"/></personList>"#,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            parsed_thread_author(&package).as_deref(),
+            Some("Referenced Reviewer")
+        );
+    }
+
+    #[test]
+    fn external_person_relationship_is_not_treated_as_a_package_part() {
+        let package = workbook_with_threaded_comment(
+            r#"<Relationship Id="rPersons" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="https://example.invalid/person-list.xml" TargetMode="External"/>"#,
+            &[(
+                "xl/persons/person.xml",
+                r#"<personList><person id="{p1}" displayName="Unreferenced Poison"/></personList>"#,
+            )],
+        );
+
+        assert_eq!(parsed_thread_author(&package), None);
+    }
+
+    /// MS-XLSX top-level comments retain their source identity and metadata.
     #[test]
     fn resolves_ref_person_and_text() {
         let xml = format!(
@@ -4788,18 +5093,21 @@ mod threaded_comment_tests {
         );
         let cs = parse_threaded_comments_xml(&xml, &persons());
         assert_eq!(cs.len(), 2);
+        assert!(matches!(cs[0].kind, XlsxCommentKind::Thread));
         assert_eq!(cs[0].cell_ref, "B1");
+        assert_eq!(cs[0].id.as_deref(), Some("a"));
+        assert_eq!(cs[0].person_id.as_deref(), Some("{p1}"));
         assert_eq!(cs[0].author.as_deref(), Some("Reviewer"));
         assert_eq!(cs[0].text, "Set the status.");
         assert_eq!(cs[1].author.as_deref(), Some("Ops Team"));
     }
 
-    /// A thread of replies on one cell is flattened into a single comment body,
-    /// keeping the original author.
+    /// Structured records are additive: the historical flattened `text` wire
+    /// field remains available while `root_text` and `replies` preserve identity.
     #[test]
-    fn replies_collapse_into_one_thread() {
+    fn replies_remain_structured_in_one_thread() {
         let xml = format!(
-            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}" id="a"><text>Question?</text></threadedComment><threadedComment ref="A1" personId="{{p2}}" id="b" parentId="a"><text>Answer.</text></threadedComment></ThreadedComments>"#
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}" id="a" dT="2026-08-20T09:00:00Z" done="1"><text>Question?</text></threadedComment><threadedComment personId="{{p2}}" id="b" parentId="a" dT="2026-08-20T09:01:00Z"><text>Answer.</text></threadedComment></ThreadedComments>"#
         );
         let cs = parse_threaded_comments_xml(&xml, &persons());
         assert_eq!(cs.len(), 1, "one comment per cell");
@@ -4809,7 +5117,15 @@ mod threaded_comment_tests {
             Some("Reviewer"),
             "first author kept"
         );
+        assert_eq!(cs[0].root_text.as_deref(), Some("Question?"));
         assert_eq!(cs[0].text, "Question?\nAnswer.");
+        assert_eq!(cs[0].date.as_deref(), Some("2026-08-20T09:00:00Z"));
+        assert_eq!(cs[0].resolved, Some(true));
+        assert_eq!(cs[0].replies.len(), 1);
+        assert_eq!(cs[0].replies[0].id, "b");
+        assert_eq!(cs[0].replies[0].parent_id, "a");
+        assert_eq!(cs[0].replies[0].author.as_deref(), Some("Ops Team"));
+        assert_eq!(cs[0].replies[0].text, "Answer.");
     }
 
     /// An unknown `personId` leaves the author as None (no persons part).
@@ -4821,6 +5137,117 @@ mod threaded_comment_tests {
         let cs = parse_threaded_comments_xml(&xml, &HashMap::new());
         assert_eq!(cs[0].author, None);
         assert_eq!(cs[0].text, "hi");
+    }
+
+    /// Invalid identity graphs are not repaired by document-order guesses.
+    /// A valid independent thread remains available.
+    #[test]
+    fn ambiguous_or_cyclic_threads_fail_closed() {
+        let xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}" id="duplicate"><text>first</text></threadedComment><threadedComment ref="B1" personId="{{p2}}" id="duplicate"><text>second</text></threadedComment><threadedComment personId="{{p1}}" id="cycle-a" parentId="cycle-b"><text>a</text></threadedComment><threadedComment personId="{{p2}}" id="cycle-b" parentId="cycle-a"><text>b</text></threadedComment><threadedComment ref="C1" personId="{{p1}}" id="valid"><text>kept</text></threadedComment><threadedComment personId="{{p2}}" id="reply" parentId="valid"><text>reply</text></threadedComment></ThreadedComments>"#
+        );
+        let cs = parse_threaded_comments_xml(&xml, &persons());
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].id.as_deref(), Some("valid"));
+        assert_eq!(cs[0].replies.len(), 1);
+        assert_eq!(cs[0].replies[0].id, "reply");
+    }
+
+    /// A compatibility note for a threaded cell is suppressed, while an
+    /// independent classic note on the same worksheet remains available.
+    #[test]
+    fn threaded_and_classic_comments_reconcile_by_authored_identity() {
+        const ID: &str = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+        let threaded_xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="Z9" personId="{{p1}}" id="{ID}"><text>structured</text></threadedComment></ThreadedComments>"#
+        );
+        let classic_xml = format!(
+            r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"><authors><author>tc={ID}</author><author>Legacy</author></authors><commentList><comment ref="A1" authorId="0" x15ac:uid="{ID}"><text><t>compatibility copy</t></text></comment><comment ref="B2" authorId="1"><text><t>real note</t></text></comment></commentList></comments>"#
+        );
+        let comments = merge_sheet_comments(
+            Some(parse_threaded_comments_xml(&threaded_xml, &persons())),
+            parse_comments_xml(&classic_xml),
+        );
+        assert_eq!(comments.len(), 2);
+        assert!(matches!(comments[0].kind, XlsxCommentKind::Thread));
+        assert_eq!(comments[0].cell_ref, "A1");
+        assert!(matches!(comments[1].kind, XlsxCommentKind::Note));
+        assert_eq!(comments[1].cell_ref, "B2");
+    }
+
+    #[test]
+    fn copied_placeholders_create_occurrences_and_orphans_stay_hidden() {
+        const ID: &str = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+        const ORPHAN: &str = "{11111111-2222-3333-4444-555555555555}";
+        let threaded_xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="Z9" personId="{{p1}}" id="{ID}"><text>structured</text></threadedComment></ThreadedComments>"#
+        );
+        let classic_xml = format!(
+            r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"><authors><author>tc={ID}</author><author>tc={ORPHAN}</author><author>ordinary</author></authors><commentList><comment ref="A1" authorId="0" x15ac:uid="{ID}"><text><t>copy one</t></text></comment><comment ref="C3" authorId="0" x15ac:uid="{ID}"><text><t>copy two</t></text></comment><comment ref="D4" authorId="1" x15ac:uid="{ORPHAN}"><text><t>orphan</t></text></comment><comment ref="E5" authorId="2" x15ac:uid="{ID}"><text><t>same uid, not a placeholder</t></text></comment></commentList></comments>"#
+        );
+
+        let comments = merge_sheet_comments(
+            Some(parse_threaded_comments_xml(&threaded_xml, &persons())),
+            parse_comments_xml(&classic_xml),
+        );
+        assert_eq!(
+            comments
+                .iter()
+                .map(|comment| comment.cell_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A1", "C3", "E5"]
+        );
+        assert!(matches!(comments[0].kind, XlsxCommentKind::Thread));
+        assert!(matches!(comments[1].kind, XlsxCommentKind::Thread));
+        assert!(matches!(comments[2].kind, XlsxCommentKind::Note));
+    }
+
+    #[test]
+    fn empty_threaded_part_hides_only_compatibility_placeholders() {
+        const ORPHAN: &str = "{11111111-2222-3333-4444-555555555555}";
+        let classic_xml = format!(
+            r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"><authors><author>tc={ORPHAN}</author><author>ordinary</author></authors><commentList><comment ref="A1" authorId="0" x15ac:uid="{ORPHAN}"><text><t>orphan compatibility record</t></text></comment><comment ref="B2" authorId="1"><text><t>real note</t></text></comment></commentList></comments>"#
+        );
+
+        let comments = merge_sheet_comments(Some(Vec::new()), parse_comments_xml(&classic_xml));
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].cell_ref, "B2");
+        assert_eq!(comments[0].text, "real note");
+    }
+
+    #[test]
+    fn invalid_threaded_records_still_hide_compatibility_placeholders() {
+        const ORPHAN: &str = "{11111111-2222-3333-4444-555555555555}";
+        let threaded_xml = format!(
+            r#"<ThreadedComments xmlns="{TC_NS}"><threadedComment ref="A1" personId="{{p1}}"><text>missing identity</text></threadedComment></ThreadedComments>"#
+        );
+        let classic_xml = format!(
+            r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"><authors><author>tc={ORPHAN}</author><author>ordinary</author></authors><commentList><comment ref="A1" authorId="0" x15ac:uid="{ORPHAN}"><text><t>orphan compatibility record</t></text></comment><comment ref="B2" authorId="1"><text><t>real note</t></text></comment></commentList></comments>"#
+        );
+
+        let parsed = parse_threaded_comments_xml(&threaded_xml, &persons());
+        assert!(parsed.is_empty());
+        let comments = merge_sheet_comments(Some(parsed), parse_comments_xml(&classic_xml));
+        assert_eq!(
+            comments
+                .iter()
+                .map(|comment| comment.cell_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B2"]
+        );
+    }
+
+    #[test]
+    fn classic_only_sheet_does_not_apply_threaded_placeholder_rules() {
+        const ID: &str = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+        let classic_xml = format!(
+            r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"><authors><author>tc={ID}</author></authors><commentList><comment ref="A1" authorId="0" x15ac:uid="{ID}"><text><t>classic-only authored record</t></text></comment></commentList></comments>"#
+        );
+
+        let comments = merge_sheet_comments(None, parse_comments_xml(&classic_xml));
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].cell_ref, "A1");
+        assert_eq!(comments[0].text, "classic-only authored record");
     }
 }
 

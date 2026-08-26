@@ -9,14 +9,13 @@ interface Props {
 const { selected = 'docx', label = 'Document format' } = Astro.props;
 const formats: readonly DocumentFormat[] = ['docx', 'xlsx', 'pptx'];
 ---
-<div class="tabs" role="tablist" aria-label={label}>
+<div class="tabs" role="group" aria-label={label}>
   {formats.map((format) => (
     <button
       class="tab"
       type="button"
-      role="tab"
       data-format-tab={format}
-      aria-selected={format === selected ? 'true' : 'false'}
+      aria-pressed={format === selected ? 'true' : 'false'}
     >
       <span class="tab-label">{format.toUpperCase()}</span>
     </button>
@@ -48,7 +47,7 @@ const formats: readonly DocumentFormat[] = ['docx', 'xlsx', 'pptx'];
     transition: color .18s, background .18s;
   }
   .tab:hover { color: var(--text); background: var(--bg-elev); }
-  .tab[aria-selected='true'] {
+  .tab[aria-pressed='true'] {
     color: var(--text);
     background: var(--border);
   }

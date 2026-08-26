@@ -27,6 +27,7 @@ import {
   limitDocxElementContext,
   MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
 } from './element-context';
+import { renderDocxFocusedPage } from './focused-view-runtime';
 
 const borrowedDocumentOption = Symbol('DocxViewer.borrowedDocument');
 type InternalDocxViewerOptions = DocxViewerOptions & {
@@ -666,20 +667,27 @@ export class DocxViewer implements ZoomableViewer {
     // at the zoom-aware `renderWidth` (the geometry follows setScale).
     const runs: DocxTextRunInfo[] = [];
     const onTextRun = (r: DocxTextRunInfo) => runs.push(r);
+    const dpr = this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
+    const renderOptions = {
+      width: renderWidth,
+      dpr: this._opts.dpr,
+      defaultTextColor: this._opts.defaultTextColor,
+      currentDate: this._opts.currentDate,
+      onTextRun,
+    };
     if (isWorker) {
-      const dpr = this._opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
       // Only serializable render options may cross to the worker — spreading the
       // full viewer opts would postMessage non-cloneable values (the math
       // engine, callbacks, container element) and throw a DataCloneError. The
       // `onTextRun` callback stays main-thread; the proxy invokes it with the
       // worker's returned runs (IX6).
-      const bmp = await this._doc.renderPageToBitmap(this._currentPage, {
-        width: renderWidth,
-        dpr: this._opts.dpr,
-        defaultTextColor: this._opts.defaultTextColor,
-        currentDate: this._opts.currentDate,
-        onTextRun,
-      });
+      const bmp = await renderDocxFocusedPage(
+        this._doc,
+        this._canvas,
+        this._currentPage,
+        'worker',
+        renderOptions,
+      );
       // The bitmap is sized in device px; mirror the main renderer by setting
       // the CSS size to the logical (÷dpr) dimensions so it isn't 2× on HiDPI.
       if (!this._renderDispatcher.commitBitmap(generation, bmp, {
@@ -687,7 +695,13 @@ export class DocxViewer implements ZoomableViewer {
         cssHeight: Math.round(bmp.height / dpr),
       })) return;
     } else {
-      await this._doc.renderPage(this._canvas, this._currentPage, { ...this._opts, width: renderWidth, onTextRun });
+      await renderDocxFocusedPage(
+        this._doc,
+        this._canvas,
+        this._currentPage,
+        'main',
+        renderOptions,
+      );
       if (!this._renderDispatcher.isCurrent(generation)) return;
     }
     // IX6 — identical overlay build for both modes: the run geometry the worker

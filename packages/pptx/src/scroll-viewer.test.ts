@@ -3,11 +3,18 @@ import { PptxScrollViewer } from './scroll-viewer.js';
 import { PptxPresentation } from './presentation.js';
 import { installDom, makeContainer, makeEl, makeBorrowedPptxScrollViewer, FakePptxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as pptxIndex from './index.js';
+import type { PptxElementBounds } from './element-selection.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+async function waitForBuiltInCommentUi(viewer: unknown): Promise<void> {
+  await vi.waitFor(() => {
+    expect((viewer as { _commentUi: unknown })._commentUi).not.toBeNull();
+  });
+}
 
 describe('PptxScrollViewer — skeleton (T1)', () => {
   it('builds the wrapper → scrollHost → spacer DOM inside the container', () => {
@@ -149,6 +156,444 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     const scrollHost = container.children[0].children[0];
     expect(scrollHost.style.background).toBe('');
     v.destroy();
+  });
+});
+
+describe('PptxScrollViewer — opt-in comment cards', () => {
+  it('can highlight a selected coordinate comment while an application owns the list', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'external-list', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { cards: false, markers: false } },
+    );
+    await waitForBuiltInCommentUi(viewer);
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    expect(slide.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    expect(markerLayer.children.some((child) =>
+      child.dataset.ooxmlCommentTarget !== undefined)).toBe(false);
+
+    await expect(viewer.goToComment(0, 0)).resolves.toBe(true);
+    expect(markerLayer.children.some((child) =>
+      child.dataset.ooxmlCommentTarget === 'slide:0:external-list')).toBe(true);
+    viewer.destroy();
+  });
+
+  it('navigates from an application-owned comment list by slide and occurrence', async () => {
+    installDom();
+    const engine = new FakePptxEngine(4, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[], [], [{
+      id: 'modern-1', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU * 0.9,
+    }], []];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+    );
+
+    const scrollHost = container.children[0]!.children[0]!;
+    viewer.scrollToSlide(2);
+    const slideTop = scrollHost.scrollTop;
+    viewer.scrollToSlide(0);
+    await expect(viewer.goToComment(2, 0)).resolves.toBe(true);
+    expect(scrollHost.scrollTop).toBeGreaterThan(slideTop);
+    expect(viewer.getSelectionContext()).toMatchObject({
+      kind: 'comment', commentId: 'modern-1', slideIndex: 2, commentIndex: 0,
+    });
+    await expect(viewer.goToComment(2, 9)).resolves.toBe(false);
+    viewer.destroy();
+  });
+
+  it('resolves goToComment only after a drawing-element target is available', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'anchored', author: 'Grace', text: 'Review this',
+      x: 100, y: 200,
+      anchors: [{ type: 'drawingElement', elementId: '7' }],
+    }]];
+    let resolveBounds!: (bounds: readonly PptxElementBounds[]) => void;
+    const boundsPromise = new Promise<readonly PptxElementBounds[]>((resolve) => {
+      resolveBounds = resolve;
+    });
+    engine.getElementBoundsByIds = vi.fn(() => boundsPromise);
+    const viewer = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
+
+    let settled = false;
+    const navigation = viewer.goToComment(0, 0).then((value) => {
+      settled = true;
+      return value;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveBounds([{
+      elementId: '7',
+      elementIndex: 0,
+      origin: 'slide',
+      elementType: 'shape',
+      bounds: {
+        x: 1_000, y: 2_000, width: 3_000, height: 4_000,
+        rotation: 0, flipH: false, flipV: false,
+      },
+    }]);
+    await expect(navigation).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({
+      kind: 'comment', slideIndex: 0, commentIndex: 0,
+    });
+    viewer.destroy();
+  });
+
+  it('does not reinterpret an unresolved modern element offset as a slide point', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'unresolved', author: 'Grace', text: 'Review this',
+      x: 100, y: 200,
+      anchors: [{ type: 'drawingElement', creationId: 'creation-only' }],
+    }]];
+    const viewer = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
+    const scrollTop = (viewer as unknown as { _scrollHost: { scrollTop: number } })._scrollHost.scrollTop;
+
+    await expect(viewer.goToComment(0, 0)).resolves.toBe(false);
+    expect(viewer.getSelectionContext()).toBeNull();
+    expect((viewer as unknown as { _scrollHost: { scrollTop: number } })._scrollHost.scrollTop)
+      .toBe(scrollTop);
+    viewer.destroy();
+  });
+
+  it('does not reinterpret an unknown modern anchor offset as a slide point', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'unknown', author: 'Grace', text: 'Review this',
+      x: 100, y: 200,
+      anchors: [{ type: 'unknown' }],
+    }]];
+    const viewer = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
+
+    await expect(viewer.goToComment(0, 0)).resolves.toBe(false);
+    expect(viewer.getSelectionContext()).toBeNull();
+    viewer.destroy();
+  });
+
+  it('uses an explicit slide anchor when an element anchor cannot be resolved', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'slide-fallback', author: 'Grace', text: 'Review this',
+      x: 100, y: 200,
+      anchors: [
+        { type: 'drawingElement', creationId: 'creation-only' },
+        { type: 'slide' },
+      ],
+    }]];
+    const viewer = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+    );
+
+    await expect(viewer.goToComment(0, 0)).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({
+      kind: 'comment', slideIndex: 0, commentIndex: 0,
+    });
+    viewer.destroy();
+  });
+
+  it('does not reserve an empty margin when every thread is resolved', () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'resolved', author: 'Grace', text: 'Done', status: 'resolved',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { connectors: {} } },
+    );
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    expect(slide.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    viewer.destroy();
+  });
+
+  it('resolves shared drawing-element anchors only once per slide', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[
+      {
+        id: 'first', author: 'Grace', text: 'First',
+        anchors: [{ type: 'drawingElement', elementId: '7' }],
+      },
+      {
+        id: 'second', author: 'Linus', text: 'Second',
+        anchors: [{ type: 'drawingElement', elementId: '7' }],
+      },
+    ]];
+    const viewer = PptxScrollViewer.fromPresentation(
+      makeContainer() as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: true },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    await vi.waitFor(() => expect(engine.elementBoundsCalls).toHaveLength(1));
+
+    expect(engine.elementBoundsCalls[0]).toEqual({ slideIndex: 0, elementIds: ['7'] });
+    viewer.destroy();
+  });
+
+  it('renders themeable built-in cards, replies, and markers without connectors', async () => {
+    const dom = installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'modern-1', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+      replies: [{ id: 'reply-1', author: 'Linus', text: 'Done' }],
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: true },
+    );
+    await waitForBuiltInCommentUi(viewer);
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(margin.style.background).toBe('');
+    const card = margin.children[0]!.children[0]!;
+    const geometry = vi.spyOn(
+      viewer as unknown as { _scheduleCommentGeometry(slide: number, slot: unknown): void },
+      '_scheduleCommentGeometry',
+    );
+    dom.resizeCb()?.();
+    expect(geometry).not.toHaveBeenCalled();
+    const frame = card.children.find((child) => child.dataset.ooxmlCommentPart === 'frame')!;
+    expect(card.className).toBe('ooxml-comment-card');
+    expect(card.style.cssText).toContain('--ooxml-comment-author-accent:');
+    expect(card.style.cssText).not.toContain('background:');
+    expect(card.style.cssText).not.toContain('border-radius:');
+    expect(frame.style.cssText).toBe('');
+    expect(card.children[0]?.children[0]?.children[1]?.textContent).toBe('Review this');
+    expect(card.children[1]?.children[0]?.children[1]?.textContent).toBe('Done');
+    card.dispatch('click');
+    expect(card.dataset.active).toBe('true');
+    expect(viewer.getSelectionContext()).toMatchObject({
+      format: 'pptx', kind: 'comment', slideIndex: 0, commentId: 'modern-1',
+      thread: {
+        root: { author: 'Grace', text: 'Review this' },
+        replies: [{ author: 'Linus', text: 'Done' }],
+      },
+    });
+    const marker = slide.children.find((child) => child.style.cssText.includes('inset:0'))!.children[0]!;
+    expect(marker.dataset.ooxmlCommentMarker).toBe('');
+    expect(marker.className).toBe('ooxml-comment-marker');
+    expect(marker.style.cssText).toContain('--ooxml-comment-author-accent:');
+    expect(slide.children.some((child) =>
+      child.dataset.ooxmlCommentConnectors !== undefined)).toBe(false);
+    dom.dispatchDocument('pointerdown', { target: container });
+    expect(card.dataset.active).toBe('false');
+    expect(viewer.getSelectionContext()).toBeNull();
+    viewer.destroy();
+  });
+
+  it('updates only connector geometry when the comment margin scrolls', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'connector', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { connectors: {} } },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    expect(slide.children.some((child) =>
+      child.dataset.ooxmlCommentConnectors !== undefined)).toBe(true);
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    // Let the initial presentation-handle commit settle before counting the
+    // margin-scroll path below.
+    await Promise.resolve();
+    await Promise.resolve();
+    const marker = markerLayer.children.find((child) =>
+      child.dataset.ooxmlCommentMarker !== undefined)!;
+    const card = margin.children[0]!.children[0]!;
+    const fullRedraw = vi.spyOn(
+      viewer as unknown as { _redrawSlotComments(slide: number, slot: unknown): void },
+      '_redrawSlotComments',
+    );
+    const connectorRedraw = vi.spyOn(
+      viewer as unknown as { _redrawSlotCommentConnectors(slide: number, slot: unknown): void },
+      '_redrawSlotCommentConnectors',
+    );
+    margin.scrollTop = 24;
+    margin.dispatch('scroll');
+    await Promise.resolve();
+
+    expect(fullRedraw).toHaveBeenCalledTimes(0);
+    expect(connectorRedraw).toHaveBeenCalledTimes(1);
+    expect(markerLayer.children.filter((child) =>
+      child.dataset.ooxmlCommentMarker !== undefined)).toHaveLength(1);
+    expect(markerLayer.children.find((child) =>
+      child.dataset.ooxmlCommentMarker !== undefined)).toBe(marker);
+    expect(margin.children[0]!.children[0]).toBe(card);
+    viewer.destroy();
+  });
+
+  it('can hide authored markers without hiding comment cards', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'no-marker', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { markers: false } },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(markerLayer.children.some((child) =>
+      child.dataset.ooxmlCommentMarker !== undefined)).toBe(false);
+    expect(margin.children).toHaveLength(1);
+    viewer.destroy();
+  });
+
+  it('places the margin on the requested side', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'left', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { side: 'left', connectors: {} } },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    const connectors = slide.children.find((child) =>
+      child.dataset.ooxmlCommentConnectors !== undefined)!;
+    expect(margin.style.right).toContain('calc(100% +');
+    expect(margin.style.left).toBe('');
+    expect(parseFloat(connectors.style.left)).toBeLessThan(0);
+    viewer.destroy();
+  });
+
+  it('smoothly previews cards and authored markers while the zoom render is pending', async () => {
+    installDom();
+    const engine = new FakePptxEngine(1, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[{
+      id: 'modern-2', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]];
+    const container = makeContainer();
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: { connectors: {} } },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    const markerLayer = slide.children.find((child) => child.style.cssText.includes('inset:0'))!;
+    const decoration = slide.children.find((child) =>
+      child.dataset.ooxmlCommentConnectors !== undefined)!;
+    const item = margin.children[0]!;
+    margin.clientHeight = 1000;
+    item.children[0]!.dispatch('click');
+    const baseScale = viewer.getScale();
+    const baseTop = parseFloat(item.style.top);
+    expect(baseTop).toBeGreaterThan(0);
+    expect(parseFloat(margin.style.width)).toBeCloseTo(440 * baseScale);
+    expect(parseFloat(margin.style.fontSize)).toBeCloseTo(20);
+    expect(item.style.transform).toBe(`scale(${baseScale})`);
+    expect(parseFloat(markerLayer.children[0]?.style.width ?? '0')).toBeCloseTo(24 * baseScale);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    viewer.setScale(baseScale * 1.5);
+    expect(parseFloat(margin.style.width)).toBeCloseTo(440 * baseScale * 1.5);
+    expect(parseFloat(margin.style.fontSize)).toBeCloseTo(20);
+    expect(parseFloat(item.style.top)).toBeCloseTo(baseTop * 1.5);
+    expect(item.style.transform).toBe(`scale(${baseScale * 1.5})`);
+    expect(markerLayer.children[0]?.style.transform).toBe('translate(-50%,-50%) scale(1.5)');
+    expect(markerLayer.style.visibility).toBe('');
+    expect(margin.style.visibility).toBe('');
+    expect(decoration.style.visibility).toBe('');
+    await vi.waitFor(() => {
+      expect(markerLayer.children[0]?.style.transform).toBe('translate(-50%,-50%)');
+      expect(markerLayer.style.visibility).toBe('');
+      expect(margin.style.visibility).toBe('');
+      expect(decoration.style.visibility).toBe('');
+    });
+    viewer.destroy();
+  });
+
+  it('uses slide-scoped occurrence keys when source comment ids repeat', async () => {
+    installDom();
+    const engine = new FakePptxEngine(2, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [0, 1].map(() => [{
+      id: 'same-source-id', author: 'Grace', text: 'Review this',
+      x: SLIDE_W_EMU / 2, y: SLIDE_H_EMU / 2,
+    }]);
+    const container = makeContainer(200, 400);
+    const viewer = PptxScrollViewer.fromPresentation(
+      container as unknown as HTMLElement,
+      engine.asPres(),
+      { comments: true },
+    );
+    await waitForBuiltInCommentUi(viewer);
+    const scrollHost = container.children[0]!.children[0]!;
+    const keys = scrollHost.children
+      .flatMap((slide) => slide.children)
+      .filter((child) => child.style.cssText.includes('overflow-y:auto'))
+      .flatMap((margin) => margin.children)
+      .map((item) => item.children[0]?.dataset.ooxmlCommentId)
+      .filter((key): key is string => key !== undefined);
+    expect(new Set(keys)).toEqual(new Set([
+      'slide:0:same-source-id',
+      'slide:1:same-source-id',
+    ]));
+    viewer.destroy();
   });
 });
 
@@ -366,9 +811,14 @@ describe('PptxScrollViewer — rendering (T3)', () => {
     scrollHost.clientWidth = 200;
     v.relayout();
     const before = engine.renderCalls.length;
+    const position = vi.spyOn(
+      v as unknown as { _positionSlot(slot: unknown, slide: number, range: unknown): void },
+      '_positionSlot',
+    );
     scrollHost.scrollTop = 0; // unchanged window
     scrollHost.dispatch('scroll');
     expect(engine.renderCalls.length).toBe(before); // no duplicate renders
+    expect(position).not.toHaveBeenCalled(); // retained geometry is scroll-invariant
     v.destroy();
   });
 

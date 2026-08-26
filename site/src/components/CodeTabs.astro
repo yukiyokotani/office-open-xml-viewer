@@ -9,16 +9,25 @@ interface Tab {
   code: string;
 }
 interface Props {
+  id: string;
   tabs: Tab[];
   filename?: string;
 }
-const { tabs, filename } = Astro.props;
+const { id, tabs, filename } = Astro.props;
 ---
 <div class="codetabs" data-codetabs>
   <div class="ct-head">
     <div class="ct-tabs" role="tablist">
       {tabs.map((t, i) => (
-        <button class="ct-tab" role="tab" data-ct-tab={t.id} aria-selected={i === 0 ? 'true' : 'false'}>
+        <button
+          id={`${id}-tab-${t.id}`}
+          class="ct-tab"
+          role="tab"
+          data-ct-tab={t.id}
+          aria-selected={i === 0 ? 'true' : 'false'}
+          aria-controls={`${id}-panel-${t.id}`}
+          tabindex={i === 0 ? 0 : -1}
+        >
           {t.label}
         </button>
       ))}
@@ -26,11 +35,19 @@ const { tabs, filename } = Astro.props;
     {filename && <span class="ct-file">{filename}</span>}
     <button class="ct-copy" data-ct-copy aria-label="Copy code">
       <span class="ct-copy-default">Copy</span>
-      <span class="ct-copy-done">Copied ✓</span>
+      <span class="ct-copy-done" aria-live="polite"></span>
     </button>
   </div>
   {tabs.map((t, i) => (
-    <div class="ct-panel" data-ct-panel={t.id} hidden={i !== 0} data-code={t.code}>
+    <div
+      id={`${id}-panel-${t.id}`}
+      class="ct-panel"
+      role="tabpanel"
+      aria-labelledby={`${id}-tab-${t.id}`}
+      data-ct-panel={t.id}
+      hidden={i !== 0}
+      data-code={t.code}
+    >
       <Code code={t.code} lang={t.lang as any} themes={codeThemes} defaultColor={false} />
     </div>
   ))}
@@ -42,11 +59,28 @@ const { tabs, filename } = Astro.props;
     const panels = Array.from(root.querySelectorAll<HTMLElement>('[data-ct-panel]'));
     const copy = root.querySelector<HTMLButtonElement>('[data-ct-copy]');
 
-    function select(id: string): void {
-      tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.ctTab === id)));
-      panels.forEach((p) => { p.hidden = p.dataset.ctPanel !== id; });
+    function select(id: string, focus = false): void {
+      tabs.forEach((tab) => {
+        const selected = tab.dataset.ctTab === id;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected && focus) tab.focus();
+      });
+      panels.forEach((panel) => { panel.hidden = panel.dataset.ctPanel !== id; });
     }
-    tabs.forEach((t) => t.addEventListener('click', () => select(t.dataset.ctTab!)));
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => select(tab.dataset.ctTab as string));
+      tab.addEventListener('keydown', (event) => {
+        let next = index;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        select(tabs[next]?.dataset.ctTab as string, true);
+      });
+    });
 
     copy?.addEventListener('click', async () => {
       const active = panels.find((p) => !p.hidden);
@@ -54,8 +88,14 @@ const { tabs, filename } = Astro.props;
       try {
         await navigator.clipboard.writeText(active.dataset.code ?? '');
         copy.classList.add('done');
+        const status = copy.querySelector<HTMLElement>('.ct-copy-done');
+        if (status) status.textContent = 'Copied.';
         setTimeout(() => copy.classList.remove('done'), 1400);
-      } catch { /* clipboard unavailable */ }
+      } catch {
+        const status = copy.querySelector<HTMLElement>('.ct-copy-done');
+        if (status) status.textContent = 'Copy failed. Select the code and copy it manually.';
+        copy.classList.add('done');
+      }
     });
   });
 </script>

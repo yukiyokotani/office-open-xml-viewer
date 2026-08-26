@@ -32,15 +32,26 @@ function worksheet(rightToLeft: boolean): Worksheet {
 }
 
 interface Segment { x1: number; y1: number; x2: number; y2: number; stroke: string }
+interface Fill { x: number; y: number; w: number; h: number; fill: string }
+interface TextPaint { text: string; fill: string }
 
-function recordingCtx(width = 300, height = 120): { ctx: CanvasRenderingContext2D; segments: Segment[] } {
+function recordingCtx(width = 300, height = 120): {
+  ctx: CanvasRenderingContext2D;
+  segments: Segment[];
+  fills: Fill[];
+  texts: TextPaint[];
+} {
   const segments: Segment[] = [];
+  const fills: Fill[] = [];
+  const texts: TextPaint[] = [];
   let strokeStyle = '#000';
+  let fillStyle = '#000';
   let cursor: [number, number] | null = null;
   const ctx: Record<string, unknown> = {
     canvas: { width, height },
     font: '11px sans-serif',
-    fillStyle: '#000',
+    get fillStyle() { return fillStyle; },
+    set fillStyle(value: string) { fillStyle = value; },
     get strokeStyle() { return strokeStyle; },
     set strokeStyle(value: string) { strokeStyle = value; },
     lineWidth: 1,
@@ -50,7 +61,12 @@ function recordingCtx(width = 300, height = 120): { ctx: CanvasRenderingContext2
     direction: 'ltr',
     globalAlpha: 1,
     measureText: (text: string) => ({ width: text.length * 8 }),
-    fillText: () => {}, strokeText: () => {}, fillRect: () => {}, strokeRect: () => {}, clearRect: () => {},
+    fillText: (text: string) => { texts.push({ text, fill: fillStyle }); },
+    strokeText: () => {},
+    fillRect: (x: number, y: number, w: number, h: number) => {
+      fills.push({ x, y, w, h, fill: fillStyle });
+    },
+    strokeRect: () => {}, clearRect: () => {},
     beginPath: () => { cursor = null; }, closePath: () => {},
     moveTo: (x: number, y: number) => { cursor = [x, y]; },
     lineTo: (x: number, y: number) => {
@@ -61,7 +77,7 @@ function recordingCtx(width = 300, height = 120): { ctx: CanvasRenderingContext2
     translate: () => {}, rotate: () => {}, scale: () => {}, setLineDash: () => {}, setTransform: () => {},
     createLinearGradient: () => ({ addColorStop: () => {} }),
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, segments };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, segments, fills, texts };
 }
 
 describe('XLSX header frame ownership', () => {
@@ -164,5 +180,25 @@ describe('XLSX header frame ownership', () => {
     expect(segments.some(segment =>
       segment.stroke === '#7a7a7a' && segment.x1 === 0 && segment.x2 === 300,
     )).toBe(true);
+  });
+
+  it('themes only Viewer-owned row and column header chrome', () => {
+    const { ctx, segments, fills, texts } = recordingCtx();
+    renderViewport(ctx, worksheet(false), STYLES, { row: 1, col: 1, rows: 2, cols: 2 }, {
+      chromeColors: {
+        surface: '#101820',
+        mutedSurface: '#182430',
+        text: '#f5f7fa',
+        border: '#52606d',
+        selectedSurface: '#203a56',
+        accent: '#62a8e5',
+      },
+    });
+
+    expect(fills.some(({ fill }) => fill === '#101820')).toBe(true);
+    expect(segments.some(({ stroke }) => stroke === '#52606d')).toBe(true);
+    expect(texts.some(({ fill }) => fill === '#f5f7fa')).toBe(true);
+    // Authored worksheet/grid paint keeps its own palette.
+    expect(segments.some(({ stroke }) => stroke === '#d0d0d0')).toBe(true);
   });
 });

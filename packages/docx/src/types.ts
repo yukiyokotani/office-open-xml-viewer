@@ -49,7 +49,8 @@ export interface DocxDocumentModel {
    *  and registers each as a FontFace before pagination so text measures/draws
    *  with the authored typeface. */
   embeddedFonts?: EmbeddedFontRef[];
-  /** ECMA-376 §17.13.5 — flat list of `<w:ins>` / `<w:del>` events in the
+  /** ECMA-376 §17.13.5 — flat list of insertion, deletion, move-source, and
+   *  move-destination events in the
    *  body. Each entry carries author / date / text. The renderer marks
    *  runs inline via {@link DocxTextRun.revision}; this array is primarily for
    *  tooling (MCP, agents, change-summary panels). */
@@ -119,8 +120,10 @@ export interface DocSettings {
 }
 
 export interface DocRevision {
-  /** "insertion" | "deletion" */
-  kind: 'insertion' | 'deletion' | string;
+  /** "insertion" | "deletion" | "moveFrom" | "moveTo" */
+  kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
+  /** Required ECMA-376 §17.13.5 revision identifier (`@w:id`), when valid. */
+  id?: string;
   author?: string;
   /** ISO-8601 timestamp */
   date?: string;
@@ -133,6 +136,36 @@ export interface DocComment {
   initials?: string;
   date?: string;
   text: string;
+  /** `w15:commentEx@paraIdParent` (the commentsExtended extension part)
+   *  resolved to the parent comment's `id` — present when this comment is a
+   *  reply in a thread. Absent for top-level comments and for documents
+   *  without `word/commentsExtended.xml`. */
+  parentId?: string;
+  /** `w15:commentEx@done` (the commentsExtended extension part) — `true` when
+   *  the thread is marked resolved. Absent when the document ships no
+   *  commentsExtended entry for this comment. */
+  resolved?: boolean;
+  /** Per-paragraph plain text of the comment body, in document order (one
+   *  entry per `<w:p>`, empty string for an empty paragraph). {@link text} is
+   *  the historical flattened join of the same content. */
+  paragraphs?: string[];
+}
+
+/** One comment-anchor boundary inside a paragraph (ECMA-376 §17.13.4).
+ *  `commentRangeStart` (§17.13.4.4) / `commentRangeEnd` (§17.13.4.3) delimit
+ *  the annotated text; `commentReference` (§17.13.4.5) marks the anchor run.
+ *  Marks are zero-width metadata — they produce no painted run and do not
+ *  alter measured width, line breaking, or paint geometry. The parser may
+ *  preserve a run boundary so the authored position remains addressable. */
+export interface DocxCommentMark {
+  /** `@w:id` linking the mark to its {@link DocComment}. */
+  id: string;
+  /** "rangeStart" | "rangeEnd" | "reference" */
+  kind: 'rangeStart' | 'rangeEnd' | 'reference' | string;
+  /** Boundary position: the mark sits immediately BEFORE
+   *  `paragraph.runs[runIndex]` (equal to `runs.length` when the mark closes
+   *  the paragraph). */
+  runIndex: number;
 }
 
 export interface DocNote {
@@ -464,6 +497,12 @@ export interface DocParagraph {
    * for the common paragraph that anchors nothing.
    */
   bookmarks?: string[];
+  /**
+   * ECMA-376 §17.13.4 comment-anchor boundaries inside this paragraph, in
+   * document order. Absent (`undefined`) for the common paragraph that
+   * anchors no comment.
+   */
+  commentMarks?: DocxCommentMark[];
   /** Paragraph background hex color (w:shd fill) */
   shading?: string | null;
   /** Force a page break before this paragraph (w:pageBreakBefore) */
@@ -678,7 +717,7 @@ export interface NumberingInfo {
   picBulletHeightPt?: number;
 }
 
-export type DocRun =
+type DocRunContent =
   | { type: 'text' } & DocxTextRun
   | { type: 'anchorHost' } & AnchorHostMetrics
   | { type: 'image' } & ImageRun
@@ -688,6 +727,10 @@ export type DocRun =
   | { type: 'shape' } & ShapeRun
   | { type: 'math'; nodes: MathNode[]; display: boolean; fontSize: number; jc?: string }
   | { type: 'ptab' } & PTabRun;
+
+/** One authored inline occurrence. Revision provenance applies to every run
+ * kind because §17.13.5 containers wrap CT_R content, not only text nodes. */
+export type DocRun = DocRunContent & { revision?: RunRevision };
 
 /** ECMA-376 §21.2 — a DrawingML chart embedded in the run flow via
  *  `<w:drawing><wp:inline|wp:anchor>…<a:graphicData uri=".../chart"><c:chart r:id>`.
@@ -1172,10 +1215,9 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana). Renders above the
    *  base text in a smaller font; line height is expanded to fit it. */
   ruby?: RubyAnnotation;
-  /** ECMA-376 §17.13.5 — set when this run sits inside `<w:ins>` or
-   *  `<w:del>`. The renderer paints insertions with an author-coloured
-   *  underline and deletions with an author-coloured strikethrough so
-   *  tracked changes appear inline. */
+  /** ECMA-376 §17.13.5 — set when this run sits inside `<w:ins>`, `<w:del>`,
+   *  `<w:moveFrom>`, or `<w:moveTo>`. Rendering projects the accepted final
+   *  state; consumers can use this metadata to build their own review UI. */
   revision?: RunRevision;
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
    *  `true` = RTL, `false` = explicitly LTR, absent = unspecified. The renderer
@@ -1265,9 +1307,12 @@ export interface NoteRef {
 }
 
 export interface RunRevision {
-  /** "insertion" or "deletion" */
-  kind: 'insertion' | 'deletion' | string;
-  /** `<w:ins w:author>` / `<w:del w:author>`. Used to colour the markup. */
+  /** "insertion" | "deletion" | "moveFrom" | "moveTo" (ECMA-376 §17.13.5.18 /
+   *  §17.13.5.14 / §17.13.5.22 / §17.13.5.25). */
+  kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
+  /** Required ECMA-376 §17.13.5 revision identifier (`@w:id`), when valid. */
+  id?: string;
+  /** Authored revision owner (`@w:author`). */
   author?: string;
   /** ISO-8601 timestamp. */
   date?: string;
@@ -1589,16 +1634,25 @@ export type WorkerResponse =
 
 // ===== Public API types =====
 
+/** Canonical structural identity shared by parsed anchors and rendered text runs. */
+export interface DocxStorySource {
+  story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
+  storyInstance: string;
+  path: readonly number[];
+}
+
 /** Information about a rendered text segment for overlays and read-only integrations. */
 export interface DocxTextRunInfo {
   /** Canonical structural source of the owning paragraph. */
-  source?: Readonly<{
-    story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
-    storyInstance: string;
-    path: readonly number[];
-  }>;
+  source?: Readonly<DocxStorySource>;
   /** Authored `w14:paraId`, when present. */
   paragraphId?: string;
+  /** Index of the originating run within the owning paragraph's normalized
+   *  runs. With {@link source}, this joins a rendered fragment back to its
+   *  model run — e.g. to place ECMA-376 §17.13.4 comment-anchor overlays. */
+  sourceRunIndex?: number;
+  /** Resolved direction of this rendered text segment. */
+  direction?: 'ltr' | 'rtl';
   text: string;
   /** Left edge in canvas CSS px. */
   x: number;
@@ -1608,6 +1662,11 @@ export interface DocxTextRunInfo {
   w: number;
   /** Line height in CSS px. */
   h: number;
+  /** Exact font-box rectangle used for Word-style highlighting. Falls back to
+   * x/y/w/h only when retained font metrics are unavailable. */
+  /** Character-height rectangle for authored or application-owned highlighting.
+   * Unlike x/y/w/h, this excludes additional paragraph line advance. */
+  highlightBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
   /** Font size in CSS px. */
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing. */

@@ -1,0 +1,480 @@
+---
+const formats = ['docx', 'xlsx', 'pptx'] as const;
+const demoId = 'comment-list-navigation';
+---
+
+<div class="comment-list-demo" data-comment-list-demo data-initial-format="docx">
+  <div class="comment-list-demo__tabs" role="tablist" aria-label="Comment list navigation demo format">
+    {formats.map((format, index) => (
+      <button
+        type="button"
+        role="tab"
+        id={`${demoId}-tab-${format}`}
+        aria-controls={`${demoId}-panel`}
+        aria-selected={String(index === 0)}
+        tabindex={index === 0 ? 0 : -1}
+        data-comment-list-format={format}
+      >{format.toUpperCase()}</button>
+    ))}
+    <span class="comment-list-demo__file" data-comment-list-file>sample-1.docx</span>
+  </div>
+  <div
+    class="comment-list-demo__body"
+    id={`${demoId}-panel`}
+    role="tabpanel"
+    aria-labelledby={`${demoId}-tab-docx`}
+    data-comment-list-panel
+  >
+    <div class="comment-list-demo__viewer-wrap">
+      <p class="comment-list-demo__loading" data-comment-list-loading>Loading sample-1.docx…</p>
+      <div class="comment-list-demo__viewer" data-comment-list-viewer></div>
+    </div>
+    <aside class="comment-list-demo__rail" aria-label="Document comments">
+      <div class="comment-list-demo__rail-head">
+        <strong>Comments</strong>
+        <span data-comment-list-count></span>
+      </div>
+      <div class="comment-list-demo__items" data-comment-list-items></div>
+      <p class="comment-list-demo__status" data-comment-list-status aria-live="polite"></p>
+    </aside>
+  </div>
+</div>
+
+<script>
+  import { DocxDocument, DocxScrollViewer, type DocComment } from '@silurus/ooxml-docx';
+  import { PptxPresentation, PptxScrollViewer, type PptxComment } from '@silurus/ooxml-pptx';
+  import { XlsxViewer, type XlsxComment } from '@silurus/ooxml-xlsx';
+
+  type DemoFormat = 'docx' | 'xlsx' | 'pptx';
+  type Viewer = Readonly<{ destroy: () => void }>;
+  type OwnedModel = DocxDocument | PptxPresentation;
+  type ListMessage = Readonly<{ author?: string; date?: string; text: string }>;
+  type ListThread = Readonly<{
+    key: string;
+    location?: string;
+    root: ListMessage;
+    replies: readonly ListMessage[];
+    reveal: () => boolean | Promise<boolean>;
+  }>;
+
+  const base = import.meta.env.BASE_URL;
+  const samples: Record<DemoFormat, string> = {
+    docx: 'sample-1.docx',
+    xlsx: 'sample-1.xlsx',
+    pptx: 'sample-1.pptx',
+  };
+  const sampleUrl = (format: DemoFormat) =>
+    `${base}samples/${samples[format]}`.replace(/([^:])\/\/+/g, '$1/');
+
+  const authorAccent = (author: string | undefined): string => {
+    if (!author) return '#2563eb';
+    let hash = 2166136261;
+    for (const character of author.normalize('NFKC')) {
+      hash ^= character.codePointAt(0) ?? 0;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `hsl(${(hash >>> 0) % 360} 68% 42%)`;
+  };
+
+  const displayDate = (value: string | undefined): string | undefined => {
+    if (!value) return undefined;
+    const instant = new Date(value);
+    if (!Number.isFinite(instant.getTime())) return value;
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(instant);
+  };
+
+  const appendMessage = (card: HTMLButtonElement, message: ListMessage, reply: boolean): void => {
+    const block = document.createElement('span');
+    block.className = reply
+      ? 'comment-list-demo__message comment-list-demo__reply'
+      : 'comment-list-demo__message';
+    const identity = document.createElement('span');
+    identity.className = 'comment-list-demo__identity';
+    const author = document.createElement('strong');
+    author.className = 'comment-list-demo__author';
+    author.textContent = message.author || 'Comment';
+    identity.append(author);
+    const formattedDate = displayDate(message.date);
+    if (formattedDate) {
+      const date = document.createElement('time');
+      date.className = 'comment-list-demo__date';
+      date.dateTime = message.date as string;
+      date.textContent = formattedDate;
+      identity.append(date);
+    }
+    const body = document.createElement('span');
+    body.className = 'comment-list-demo__text';
+    body.textContent = message.text;
+    block.append(identity, body);
+    card.append(block);
+  };
+
+  const createCard = (
+    thread: ListThread,
+    items: HTMLElement,
+    status: HTMLElement,
+  ): HTMLButtonElement => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'comment-list-demo__item';
+    button.dataset.active = 'false';
+    button.setAttribute('aria-pressed', 'false');
+    button.style.setProperty('--comment-list-accent', authorAccent(thread.root.author));
+    if (thread.location) {
+      const location = document.createElement('span');
+      location.className = 'comment-list-demo__location';
+      location.textContent = thread.location;
+      button.append(location);
+    }
+    appendMessage(button, thread.root, false);
+    for (const reply of thread.replies) appendMessage(button, reply, true);
+    button.addEventListener('click', async () => {
+      const found = await thread.reveal();
+      for (const item of items.querySelectorAll<HTMLButtonElement>('button')) {
+        const active = item === button && found;
+        item.dataset.active = String(active);
+        item.setAttribute('aria-pressed', String(active));
+      }
+      status.textContent = found
+        ? `Revealed and highlighted comment by ${thread.root.author || 'Comment'}.`
+        : 'This comment has no rendered anchor.';
+    });
+    return button;
+  };
+
+  const docxThreads = (
+    comments: readonly Readonly<DocComment>[],
+    viewer: Pick<DocxScrollViewer, 'goToComment'>,
+  ): ListThread[] => comments
+    .filter((comment) => comment.parentId === undefined && !comment.resolved)
+    .map((comment) => ({
+      key: comment.id,
+      root: comment,
+      replies: comments.filter((reply) => reply.parentId === comment.id),
+      reveal: () => viewer.goToComment(comment.id, { behavior: 'smooth' }),
+    }));
+
+  const pptxThreads = (
+    presentation: PptxPresentation,
+    viewer: Pick<PptxScrollViewer, 'goToComment'>,
+  ): ListThread[] => {
+    const threads: ListThread[] = [];
+    for (let slideIndex = 0; slideIndex < presentation.slideCount; slideIndex += 1) {
+      presentation.getComments(slideIndex).forEach((comment: Readonly<PptxComment>, commentIndex) => {
+        if (comment.status === 'resolved' || comment.status === 'closed') return;
+        threads.push({
+          key: `${slideIndex}:${comment.id ?? commentIndex}`,
+          location: `Slide ${slideIndex + 1}`,
+          root: comment,
+          replies: comment.replies ?? [],
+          reveal: () => viewer.goToComment(slideIndex, commentIndex, { behavior: 'smooth' }),
+        });
+      });
+    }
+    return threads;
+  };
+
+  const xlsxThreads = (
+    comments: readonly Readonly<XlsxComment>[],
+    viewer: XlsxViewer,
+    sheetIndex: number,
+  ): ListThread[] => comments
+    .filter((comment) => !comment.resolved)
+    .map((comment, index) => ({
+      key: comment.id ?? `${comment.cellRef}:${index}`,
+      location: comment.cellRef,
+      root: { author: comment.author, date: comment.date, text: comment.rootText ?? comment.text },
+      replies: comment.replies ?? [],
+      reveal: () => viewer.goToComment(sheetIndex, comment.cellRef, { align: 'center' }),
+    }));
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-comment-list-demo]')) {
+    if (root.dataset.mounted === '1') continue;
+    root.dataset.mounted = '1';
+    const panel = root.querySelector<HTMLElement>('[data-comment-list-panel]') as HTMLElement;
+    const host = root.querySelector<HTMLElement>('[data-comment-list-viewer]') as HTMLElement;
+    const loading = root.querySelector<HTMLElement>('[data-comment-list-loading]') as HTMLElement;
+    const items = root.querySelector<HTMLElement>('[data-comment-list-items]') as HTMLElement;
+    const status = root.querySelector<HTMLElement>('[data-comment-list-status]') as HTMLElement;
+    const file = root.querySelector<HTMLElement>('[data-comment-list-file]') as HTMLElement;
+    const count = root.querySelector<HTMLElement>('[data-comment-list-count]') as HTMLElement;
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-comment-list-format]')];
+    let model: OwnedModel | null = null;
+    let viewer: Viewer | null = null;
+    let generation = 0;
+    let disposed = false;
+
+    const destroyViewer = () => {
+      generation += 1;
+      viewer?.destroy();
+      model?.destroy();
+      viewer = null;
+      model = null;
+      host.replaceChildren();
+      items.replaceChildren();
+    };
+
+    const destroy = () => {
+      if (disposed) return;
+      disposed = true;
+      destroyViewer();
+    };
+
+    const show = async (format: DemoFormat) => {
+      destroyViewer();
+      const request = generation;
+      tabs.forEach((tab) => {
+        const selected = tab.dataset.commentListFormat === format;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected) panel.setAttribute('aria-labelledby', tab.id);
+      });
+      file.textContent = samples[format];
+      count.textContent = '';
+      status.textContent = '';
+      loading.hidden = false;
+      loading.textContent = `Loading ${samples[format]}…`;
+
+      try {
+        let threads: ListThread[] = [];
+        if (format === 'docx') {
+          const doc = await DocxDocument.load(sampleUrl(format), { useGoogleFonts: true });
+          if (request !== generation || disposed) {
+            doc.destroy();
+            return;
+          }
+          model = doc;
+          const next = DocxScrollViewer.fromDocument(host, doc, {
+            background: 'transparent',
+            comments: { cards: false, markers: false },
+          });
+          viewer = next;
+          threads = docxThreads(doc.comments, next);
+        } else if (format === 'pptx') {
+          const presentation = await PptxPresentation.load(sampleUrl(format), { useGoogleFonts: true });
+          if (request !== generation || disposed) {
+            presentation.destroy();
+            return;
+          }
+          model = presentation;
+          const next = PptxScrollViewer.fromPresentation(host, presentation, {
+            comments: { cards: false, markers: false },
+          });
+          viewer = next;
+          threads = pptxThreads(presentation, next);
+        } else {
+          const next = new XlsxViewer(host, { comments: false });
+          viewer = next;
+          await next.load(sampleUrl(format));
+          if (request !== generation || disposed) return;
+          threads = xlsxThreads(next.getComments(), next, next.sheetIndex);
+        }
+
+        if (request !== generation || disposed) return;
+        for (const thread of threads) items.append(createCard(thread, items, status));
+        count.textContent = `${threads.length} ${threads.length === 1 ? 'thread' : 'threads'}`;
+        loading.hidden = true;
+        status.textContent = threads.length > 0
+          ? 'Select a comment to reveal and highlight its authored location.'
+          : 'This sample has no unresolved comments.';
+      } catch (error: unknown) {
+        if (request !== generation || disposed) return;
+        loading.textContent = error instanceof Error ? error.message : 'Unable to load the sample.';
+      }
+    };
+
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+      const format = tab.dataset.commentListFormat as DemoFormat | undefined;
+      if (format) void show(format);
+    }));
+    tabs.forEach((tab, index) => tab.addEventListener('keydown', (event) => {
+      let next = index;
+      if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next]?.focus();
+      tabs[next]?.click();
+    }));
+
+    void show((root.dataset.initialFormat as DemoFormat | undefined) ?? 'docx');
+    window.addEventListener('pagehide', destroy, { once: true });
+    document.addEventListener('astro:before-swap', destroy, { once: true });
+  }
+</script>
+
+<style>
+  .comment-list-demo {
+    height: clamp(560px, 74vh, 700px);
+    margin-top: 18px;
+    overflow: hidden;
+    border-block: 1px solid var(--border);
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+  }
+  .comment-list-demo__tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 48px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  }
+  .comment-list-demo__tabs button {
+    min-width: 68px;
+    padding: 7px 12px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: var(--text-dim);
+    background: transparent;
+    font: 650 11px/1 var(--mono);
+    cursor: pointer;
+  }
+  .comment-list-demo__tabs button:hover { color: var(--text); background: var(--panel); }
+  .comment-list-demo__tabs button[aria-selected='true'] {
+    border-color: var(--border-bright);
+    color: var(--text);
+    background: var(--panel);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+  }
+  .comment-list-demo__file { margin-left: auto; color: var(--text-faint); font: 500 11px/1 var(--mono); }
+  .comment-list-demo__body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+    height: calc(100% - 48px);
+  }
+  .comment-list-demo__viewer-wrap { position: relative; min-width: 0; min-height: 0; }
+  .comment-list-demo__viewer { height: 100%; }
+  .comment-list-demo__loading {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    color: var(--text-dim);
+    background: var(--bg);
+    font: 500 12px/1.5 var(--mono);
+  }
+  .comment-list-demo__loading[hidden] { display: none; }
+  .comment-list-demo__rail {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    min-width: 0;
+    min-height: 0;
+    border-left: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .comment-list-demo__rail-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .comment-list-demo__rail-head strong { font-size: 14px; }
+  .comment-list-demo__rail-head span { color: var(--text-faint); font: 11px var(--mono); }
+  .comment-list-demo__items { min-height: 0; overflow-y: auto; padding: 10px; }
+  :global(.comment-list-demo__item) {
+    position: relative;
+    display: block;
+    width: 100%;
+    padding: 10px 11px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--text);
+    background: #fff;
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+  }
+  :global(.comment-list-demo__item::after) {
+    position: absolute;
+    inset: 0;
+    border: 1px solid rgba(148, 163, 184, .34);
+    border-left: 3px solid var(--comment-list-accent, #2563eb);
+    border-radius: inherit;
+    pointer-events: none;
+    content: '';
+  }
+  :global(.comment-list-demo__item + .comment-list-demo__item) { margin-top: 7px; }
+  :global(.comment-list-demo__item:hover) { background: #f8fafc; }
+  :global(.comment-list-demo__item[data-active='true']) { background: #eff6ff; }
+  :global(.comment-list-demo__item[data-active='true']::after) {
+    border-color: rgba(37, 99, 235, .5);
+    border-left-color: var(--comment-list-accent, #2563eb);
+  }
+  :global(.comment-list-demo__item:focus-visible) { box-shadow: 0 0 0 2px rgba(37, 99, 235, .65); }
+  :global(.comment-list-demo__location) {
+    position: absolute;
+    top: 10px;
+    right: 11px;
+    z-index: 1;
+    color: #64748b;
+    font: 500 10px/1.35 var(--mono);
+  }
+  :global(.comment-list-demo__message) { display: block; min-width: 0; }
+  :global(.comment-list-demo__identity) {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    min-width: 0;
+    padding-right: 44px;
+  }
+  :global(.comment-list-demo__author) {
+    min-width: 0;
+    overflow: hidden;
+    color: #0f172a;
+    font: 700 12px/1.3 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  :global(.comment-list-demo__date) {
+    color: #64748b;
+    font: 500 9.5px/1.35 var(--mono);
+    white-space: nowrap;
+  }
+  :global(.comment-list-demo__text) {
+    display: block;
+    margin-top: 4px;
+    color: #334155;
+    font: 400 12px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+  :global(.comment-list-demo__reply) {
+    margin: 8px 0 0 6px;
+    padding: 1px 0 0 9px;
+    border-left: 1px solid rgba(100, 116, 139, .24);
+  }
+  .comment-list-demo__status {
+    min-height: 38px;
+    margin: 0;
+    padding: 10px 13px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    font: 11px/1.5 var(--mono);
+  }
+  @media (max-width: 760px) {
+    .comment-list-demo { height: auto; }
+    .comment-list-demo__body {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(440px, 62vh) minmax(260px, 38vh);
+      height: auto;
+    }
+    .comment-list-demo__rail { border-top: 1px solid var(--border); border-left: 0; }
+  }
+  :root[data-theme='dark'] :global(.comment-list-demo__item) { background: #111827; }
+  :root[data-theme='dark'] :global(.comment-list-demo__item:hover) { background: #182235; }
+  :root[data-theme='dark'] :global(.comment-list-demo__item[data-active='true']) { background: #172554; }
+  :root[data-theme='dark'] :global(.comment-list-demo__author) { color: #f8fafc; }
+  :root[data-theme='dark'] :global(.comment-list-demo__date),
+  :root[data-theme='dark'] :global(.comment-list-demo__location) { color: #94a3b8; }
+  :root[data-theme='dark'] :global(.comment-list-demo__text) { color: #cbd5e1; }
+</style>

@@ -70,8 +70,9 @@ pub(crate) struct Slide {
     /// the slide has no notes part. Renderer ignores this; surfaced for tools.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) notes: Option<String>,
-    /// Legacy slide comments (`ppt/comments/commentN.xml`). Modern Office365
-    /// "threaded comments" are not yet parsed.
+    /// Classic ECMA-376 comments and modern threaded comments related from this
+    /// slide. The part target is relationship-defined and need not use the
+    /// conventional `ppt/comments/` directory.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) comments: Vec<PptxComment>,
     /// `<p:sld show="0">` — slide is hidden in the slide show (§19.3.1.38).
@@ -102,9 +103,52 @@ pub(crate) struct SlideElementSource {
     pub(crate) origin: SlideElementOrigin,
 }
 
+/// Explicit target carried by a PowerPoint modern comment. [MS-PPTX]
+/// §2.16.3.3 requires one anchor group; drawing and text anchors use the
+/// content-moniker lists from [MS-ODRAWXML] §2.29.3.20/21.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum PptxCommentAnchor {
+    Slide,
+    DrawingElement {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "elementId")]
+        element_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "creationId")]
+        creation_id: Option<String>,
+    },
+    TextRange {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "elementId")]
+        element_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        length: Option<i32>,
+    },
+    Unknown,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PptxComment {
+    /// `<cm @authorId>` — author-list identifier. Required by ECMA-376
+    /// §19.4.1, but optional here so a malformed comment can still degrade to
+    /// its text instead of poisoning the slide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_id: Option<u32>,
+    /// Modern `p188:cm@authorId` ([MS-PPTX] §2.16). Kept separate from the
+    /// classic decimal `authorId` so adding modern comments does not change the
+    /// existing public field's type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) modern_author_id: Option<String>,
+    /// Modern `p188:cm@id`. Classic identity remains `(authorId, idx)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    /// `<cm @idx>` — identifier unique among this author's comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index: Option<u32>,
     /// Resolved author name from `ppt/commentAuthors.xml` (`<cmAuthor @id>`
     /// matches `<cm @authorId>`). `None` when authors file is missing or
     /// authorId is out of range.
@@ -113,7 +157,41 @@ pub(crate) struct PptxComment {
     /// `<cm @dt>` — ISO-8601 date string when the comment was authored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) date: Option<String>,
-    /// Plain-text body from `<p:text>`.
+    /// `<p:pos @x/@y>` comment anchor on the slide surface, in EMU
+    /// (ECMA-376 §19.4.5). Each coordinate remains independently optional for
+    /// malformed input; the standard requires both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) x: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) y: Option<i64>,
+    /// Modern comment targets. Multiple drawing/text moniker lists mean one
+    /// comment can explicitly target multiple slide elements.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) anchors: Vec<PptxCommentAnchor>,
+    /// Modern `p188:cm@status`; omitted for classic comments. The schema
+    /// defaults a missing value to `active`, so the parser resolves that value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
+    /// Plain-text body from classic `<p:text>` or modern `<p188:txBody>`.
+    pub(crate) text: String,
+    /// Modern threaded replies in authored order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) replies: Vec<PptxCommentReply>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PptxCommentReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<String>,
     pub(crate) text: String,
 }
 
@@ -142,6 +220,9 @@ pub(crate) enum SlideElement {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChartElement {
+    /// `<p:nvGraphicFramePr><p:cNvPr @id>` for the chart frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
     pub(crate) x: i64,
     pub(crate) y: i64,
     pub(crate) width: i64,
@@ -155,6 +236,9 @@ pub(crate) struct ChartElement {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TableElement {
+    /// `<p:nvGraphicFramePr><p:cNvPr @id>` for the table frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
     pub(crate) x: i64,
     pub(crate) y: i64,
     pub(crate) width: i64,
@@ -458,6 +542,9 @@ pub(crate) struct ShapeElement {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PictureElement {
+    /// The source drawing node's `<p:cNvPr @id>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
     pub(crate) x: i64,
     pub(crate) y: i64,
     pub(crate) width: i64,
@@ -569,6 +656,9 @@ pub(crate) struct PictureElement {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaElement {
+    /// `<p:nvPicPr><p:cNvPr @id>` for the media frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
     pub(crate) x: i64,
     pub(crate) y: i64,
     pub(crate) width: i64,
@@ -1489,6 +1579,7 @@ mod group_transform_tests {
             .expect("minimal chart");
         let mut elements = vec![
             SlideElement::Table(TableElement {
+                id: None,
                 x: 10,
                 y: 20,
                 width: 20,
@@ -1501,6 +1592,7 @@ mod group_transform_tests {
                 rtl: false,
             }),
             SlideElement::Chart(ChartElement {
+                id: None,
                 x: 10,
                 y: 20,
                 width: 20,
@@ -1511,6 +1603,7 @@ mod group_transform_tests {
                 ..chart
             }),
             SlideElement::Media(MediaElement {
+                id: None,
                 x: 10,
                 y: 20,
                 width: 20,

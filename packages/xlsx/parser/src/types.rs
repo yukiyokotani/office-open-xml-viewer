@@ -593,25 +593,59 @@ pub struct TableColumnInfo {
 }
 
 /// One cell comment. Sourced from the classic notes file `xl/commentsN.xml`
-/// (ECMA-376 §18.7) when present, otherwise from the Office-365 threaded
-/// comments part `xl/threadedComments/threadedCommentN.xml` (MS-XLSX schema
-/// `…/office/spreadsheetml/2018/threadedcomments`, `personId` resolved against
-/// `xl/persons/person*.xml`). `text` is the joined plain text — every `<r><t>`
-/// run for classic notes, every reply in the thread (newline-joined) for
-/// threaded comments; rich-text formatting is dropped.
-#[derive(Debug, Serialize)]
+/// One cell-attached classic note or threaded-comment root.
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxComment {
+    /// `note` for ECMA-376 §18.7; `thread` for MS-XLSX §2.3.7.
+    pub kind: XlsxCommentKind,
     /// A1-style cell reference (`@ref` on the comment element).
     pub cell_ref: String,
-    /// Resolved author name. For classic notes this is the `<authors>` entry
-    /// indexed by `@authorId`; for threaded comments it is the `<person>`
-    /// `displayName` matching `@personId`. `None` when unresolved / absent.
+    /// Source GUID: `CT_ThreadedComment@id` for a thread or the optional
+    /// namespaced `comment@uid` for a classic note/compatibility placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// MS-XLSX `CT_ThreadedComment@personId` for a threaded root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
-    /// Concatenated plain text (every run for classic; every threaded reply,
-    /// newline-joined, for threaded).
+    /// MS-XLSX `CT_ThreadedComment@dT` for a threaded root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Root message only. Threaded comments retain the historical flattened
+    /// root-plus-replies representation in `text` for wire compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_text: Option<String>,
     pub text: String,
+    /// MS-XLSX `CT_ThreadedComment@done` for a threaded root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<bool>,
+    /// Thread replies in authored document order. Empty for classic notes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<XlsxCommentReply>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum XlsxCommentKind {
+    Note,
+    Thread,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct XlsxCommentReply {
+    pub id: String,
+    pub parent_id: String,
+    pub person_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<bool>,
 }
 
 /// One `<dataValidation>` rule (ECMA-376 §18.3.1.32). `type` covers the

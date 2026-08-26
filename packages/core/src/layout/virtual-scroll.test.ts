@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { computeVisibleRange } from './virtual-scroll.js';
+import {
+  computeUniformVisibleWindow,
+  computeVisibleRange,
+  computeVisibleWindow,
+  createVirtualScrollGeometry,
+} from './virtual-scroll.js';
 
 // Design §5.1 contract. computeVisibleRange(heights, gap, scrollTop,
 // viewportHeight, overscan) → { start, end, topIndex, offsets, totalHeight }.
@@ -203,5 +208,72 @@ describe('computeVisibleRange — leading/trailing padding (desk margin)', () =>
   it('empty input ignores pad entirely (empty-doc no-op contract)', () => {
     const r = computeVisibleRange([], 16, 0, 500, 1, { leading: 24, trailing: 24 });
     expect(r).toEqual({ start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 });
+  });
+});
+
+describe('cached virtual-scroll geometry', () => {
+  it('reads variable heights once and reuses the same offsets for every scroll query', () => {
+    let reads = 0;
+    const heights = new Proxy(Array.from({ length: 10_000 }, () => 100), {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) reads++;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const geometry = createVirtualScrollGeometry(heights, 10, {
+      leading: 16,
+      trailing: 16,
+    });
+    expect(reads).toBe(10_000);
+
+    for (let scrollTop = 0; scrollTop < 100_000; scrollTop += 997) {
+      const window = computeVisibleWindow(geometry, scrollTop, 800, 1);
+      expect(window.offsets).toBe(geometry.offsets);
+    }
+    expect(reads).toBe(10_000);
+  });
+
+  it('computes a huge uniform window arithmetically without materializing offsets', () => {
+    const window = computeUniformVisibleWindow(
+      1_000_000,
+      100,
+      10,
+      16 + 543_210 * 110,
+      250,
+      2,
+      { leading: 16, trailing: 24 },
+    );
+    expect(window).toEqual({
+      start: 543_208,
+      end: 543_214,
+      topIndex: 543_210,
+      totalHeight: 16 + 1_000_000 * 100 + 999_999 * 10 + 24,
+    });
+  });
+
+  it('matches the existing range semantics for uniform heights, including padding and gaps', () => {
+    const heights = Array.from({ length: 20 }, () => 100);
+    const expected = computeVisibleRange(
+      heights,
+      10,
+      355,
+      250,
+      2,
+      { leading: 24, trailing: 40 },
+    );
+    expect(computeUniformVisibleWindow(
+      heights.length,
+      100,
+      10,
+      355,
+      250,
+      2,
+      { leading: 24, trailing: 40 },
+    )).toEqual({
+      start: expected.start,
+      end: expected.end,
+      topIndex: expected.topIndex,
+      totalHeight: expected.totalHeight,
+    });
   });
 });

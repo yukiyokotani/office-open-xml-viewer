@@ -93,7 +93,9 @@ pub struct Document {
     /// ECMA-376 §17.13.5 — track-changes events found in the body. Each entry
     /// is one `<w:ins>` or `<w:del>` block, with the change author / date /
     /// text content. Empty when the document has no tracked changes.
-    /// Renderer ignores this; surfaced for tools (MCP, agents).
+    /// A flat tool-facing projection (MCP, agents) whose shape is pinned:
+    /// moves are deliberately NOT listed here (run-level `revision` tags carry
+    /// them). The renderer reads the run tags, not this list.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub revisions: Vec<DocxRevision>,
     /// ECMA-376 §17.13.4 — `word/comments.xml` flat list. Each comment carries
@@ -244,15 +246,19 @@ pub struct DocumentSettings {
     pub adjust_line_height_in_table: Option<bool>,
 }
 
-/// Single track-changes event extracted from a body `<w:ins>` / `<w:del>`.
+/// Single track-changes event extracted from a body revision wrapper.
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DocxRevision {
-    /// "insertion" | "deletion"
+    /// "insertion" | "deletion" | "moveFrom" | "moveTo"
     pub kind: String,
+    /// ECMA-376 §17.13.5 revision identifier (`@w:id`). Present when the
+    /// required ST_DecimalNumber value is lexically valid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
-    /// `<w:ins w:date>` / `<w:del w:date>` — ISO-8601 timestamp.
+    /// Revision wrapper `@w:date` — ISO-8601 timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     /// Concatenated plain text. For deletions, this is the deleted text
@@ -272,6 +278,42 @@ pub struct DocxComment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     pub text: String,
+    /// [MS-DOCX] §2.5.3.1 `w15:commentEx@paraIdParent` resolved to the parent
+    /// comment's `w:id` — set when this comment is a reply in a thread. The
+    /// join key is the `w14:paraId` of the LAST paragraph of each comment's
+    /// body in `word/comments.xml`. Absent for top-level comments and for
+    /// documents without `word/commentsExtended.xml`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// [MS-DOCX] §2.5.3.1 `w15:commentEx@done` — `Some(true)` when the thread
+    /// is marked resolved. Absent when the document ships no commentsExtended
+    /// entry for this comment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<bool>,
+    /// Per-paragraph plain text of the comment body, in document order (one
+    /// entry per `<w:p>`, empty string for an empty paragraph). The flattened
+    /// `text` join above predates this field and keeps its exact shape.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub paragraphs: Vec<String>,
+}
+
+/// One comment-anchor boundary inside a paragraph (ECMA-376 §17.13.4).
+/// `commentRangeStart` (§17.13.4.4) / `commentRangeEnd` (§17.13.4.3) delimit
+/// the annotated text; `commentReference` (§17.13.4.5) marks the anchor run.
+/// Marks are zero-width metadata: they produce no painted run and do not alter
+/// measured width, line breaking, or paint geometry. The parser may preserve a
+/// run boundary at a mark so the authored position remains addressable.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DocxCommentMark {
+    /// `@w:id` linking the mark to its `word/comments.xml` entry.
+    pub id: String,
+    /// "rangeStart" | "rangeEnd" | "reference".
+    pub kind: String,
+    /// Boundary position: the mark sits immediately BEFORE
+    /// `paragraph.runs[run_index]` (== `runs.len()` at record time, i.e. the
+    /// paragraph end when no further run follows).
+    pub run_index: u32,
 }
 
 /// ECMA-376 §17.11.2 (endnote) / §17.11.10 (footnote) — one note's block-level
@@ -770,6 +812,16 @@ pub struct DocParagraph {
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
+    /// Parser-private revision provenance aligned one-to-one with `runs`.
+    /// ECMA-376 §17.13.5 revision containers can wrap every CT_R child, not
+    /// only text. The TypeScript normalization boundary projects each entry
+    /// onto the corresponding public `DocRun` and removes this sidecar.
+    #[serde(
+        rename = "__runRevisions",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub(crate) run_revisions: Vec<Option<RunRevision>>,
     /// Parser-private structural events for a complex field's cached result.
     /// ECMA-376 §17.16 defines the result as the content between the `separate`
     /// and `end` fldChars. Keeping the half-open run interval here preserves
@@ -793,6 +845,11 @@ pub struct DocParagraph {
     /// is free to make instead.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub bookmarks: Vec<String>,
+    /// ECMA-376 §17.13.4 comment-anchor boundaries inside this paragraph, in
+    /// document order. Empty (and omitted from JSON) for the common paragraph
+    /// that anchors no comment, so existing snapshots are unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub comment_marks: Vec<DocxCommentMark>,
     /// Paragraph background hex color (w:shd fill on paragraph)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shading: Option<String>,
@@ -2195,6 +2252,19 @@ pub struct FieldRun {
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
     pub text: String,
+    /// The authored run begins with `<w:noBreakHyphen/>` but could not be
+    /// coalesced with its predecessor because a zero-width semantic boundary
+    /// (such as a comment anchor) must remain addressable. Layout keeps this
+    /// run in the predecessor's unbreakable group without merging their model
+    /// identities.
+    #[serde(rename = "__noBreakBefore", skip_serializing_if = "std::ops::Not::not")]
+    pub no_break_before: bool,
+    /// The authored run ends with `<w:noBreakHyphen/>` and the protected
+    /// following character is in a later model run. Layout applies the same
+    /// no-break constraint to that following run without coalescing either
+    /// run's addressable identity.
+    #[serde(rename = "__noBreakAfter", skip_serializing_if = "std::ops::Not::not")]
+    pub no_break_after: bool,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -2282,10 +2352,11 @@ pub struct TextRun {
     /// (half-points) inside the rubyPr.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ruby: Option<RubyAnnotation>,
-    /// ECMA-376 §17.13.5 — set when this run sits inside a `<w:ins>` or
-    /// `<w:del>` block. The renderer paints insertions with a per-author
-    /// underline and deletions with a per-author strikethrough so reviewers
-    /// can see tracked edits inline.
+    /// ECMA-376 §17.13.5 — set when this run sits inside a `<w:ins>`,
+    /// `<w:del>`, `<w:moveFrom>`, or `<w:moveTo>` block. The default render
+    /// is the final document state (deletions and moved-away text hidden).
+    /// Consumers can use this metadata to build a review UI independently of
+    /// the viewer's read-only document rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<RunRevision>,
     /// ECMA-376 §17.3.2.30 `<w:rtl>` — complex-script / right-to-left run.
@@ -2410,17 +2481,22 @@ pub struct NoteRef {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRevision {
-    /// "insertion" or "deletion".
+    /// "insertion" | "deletion" | "moveFrom" | "moveTo" (ECMA-376 §17.13.5.18
+    /// / §17.13.5.14 / §17.13.5.22 / §17.13.5.25).
     pub kind: String,
-    /// `<w:ins w:author>` / `<w:del w:author>`. Used by the renderer to pick
-    /// a stable per-author colour (modulo a fixed palette).
+    /// Required revision identifier (`@w:id`), exposed only when its
+    /// ST_DecimalNumber lexical form is valid. Layout and review projections
+    /// use it to keep adjacent authored revision containers distinct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Authored revision owner (`@w:author`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
     /// `<w:ins w:date>` / `<w:del w:date>` ISO-8601 timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    /// ECMA-376 §17.13.5 requires `w:id`. It stays off the stable public
-    /// revision shape and is projected through the private typography wire.
+    /// Tri-state parser provenance for typography acquisition and conformance
+    /// diagnostics. The public `id` above carries only a valid lexical value.
     #[serde(skip)]
     pub(crate) typography_id: TypographyValueWire<String>,
 }

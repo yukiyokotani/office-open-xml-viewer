@@ -8,7 +8,13 @@ import {
 } from '@silurus/ooxml-core/internal/resource-measurement';
 import { HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES } from '@silurus/ooxml-core/worker';
 import { PptxFontPreloadAccumulator } from './google-fonts';
-import type { MediaElement, Slide } from './types';
+import type {
+  MediaElement,
+  PptxComment,
+  PptxCommentAnchor,
+  PptxCommentReply,
+  Slide,
+} from './types';
 import type {
   PresentationBootstrap,
   PresentationBootstrapSlide,
@@ -30,6 +36,9 @@ export interface PresentationPreflightSlide {
   readonly notes: string | null;
   readonly hidden: boolean;
   readonly mediaElements: readonly Readonly<MediaElement>[];
+  /** Compact slide comments retained for synchronous ScrollViewer UI in both
+   * main and worker modes. Omitted for the common comment-free slide. */
+  readonly comments?: readonly Readonly<PptxComment>[];
 }
 
 /**
@@ -131,6 +140,131 @@ function copyMediaElement(element: MediaElement): Readonly<MediaElement> {
   });
 }
 
+function copyCommentReply(reply: PptxCommentReply): Readonly<PptxCommentReply> {
+  return Object.freeze({
+    ...(reply.id === undefined ? {} : { id: reply.id }),
+    ...(reply.authorId === undefined ? {} : { authorId: reply.authorId }),
+    ...(reply.author === undefined ? {} : { author: reply.author }),
+    ...(reply.date === undefined ? {} : { date: reply.date }),
+    ...(reply.status === undefined ? {} : { status: reply.status }),
+    text: reply.text,
+  });
+}
+
+function copyCommentAnchor(anchor: PptxCommentAnchor): Readonly<PptxCommentAnchor> {
+  return Object.freeze({ ...anchor });
+}
+
+function copyComment(comment: PptxComment): Readonly<PptxComment> {
+  return Object.freeze({
+    ...(comment.authorId === undefined ? {} : { authorId: comment.authorId }),
+    ...(comment.modernAuthorId === undefined ? {} : { modernAuthorId: comment.modernAuthorId }),
+    ...(comment.id === undefined ? {} : { id: comment.id }),
+    ...(comment.index === undefined ? {} : { index: comment.index }),
+    ...(comment.author === undefined ? {} : { author: comment.author }),
+    ...(comment.date === undefined ? {} : { date: comment.date }),
+    ...(comment.x === undefined ? {} : { x: comment.x }),
+    ...(comment.y === undefined ? {} : { y: comment.y }),
+    ...(comment.anchors?.length
+      ? { anchors: Object.freeze(comment.anchors.map(copyCommentAnchor)) }
+      : {}),
+    ...(comment.status === undefined ? {} : { status: comment.status }),
+    text: comment.text,
+    ...(comment.replies?.length
+      ? { replies: Object.freeze(comment.replies.map(copyCommentReply)) }
+      : {}),
+  });
+}
+
+function assertOptionalString(value: unknown, field: string, slideIndex: number): void {
+  if (value !== undefined && typeof value !== 'string') {
+    throw new Error(`invalid PPTX presentation preflight comment ${field} at slide ${slideIndex}`);
+  }
+}
+
+function normalizeCommentReply(value: unknown, slideIndex: number): Readonly<PptxCommentReply> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid PPTX presentation preflight comment reply at slide ${slideIndex}`);
+  }
+  const reply = value as Partial<PptxCommentReply>;
+  for (const field of ['id', 'authorId', 'author', 'date', 'status'] as const) {
+    assertOptionalString(reply[field], field, slideIndex);
+  }
+  if (typeof reply.text !== 'string') {
+    throw new Error(`invalid PPTX presentation preflight comment reply text at slide ${slideIndex}`);
+  }
+  if (reply.status !== undefined && !['active', 'resolved', 'closed'].includes(reply.status)) {
+    throw new Error(`invalid PPTX presentation preflight comment reply status at slide ${slideIndex}`);
+  }
+  return copyCommentReply(reply as PptxCommentReply);
+}
+
+function normalizeComment(value: unknown, slideIndex: number): Readonly<PptxComment> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid PPTX presentation preflight comment at slide ${slideIndex}`);
+  }
+  const comment = value as Partial<PptxComment>;
+  for (const field of ['modernAuthorId', 'id', 'author', 'date', 'status'] as const) {
+    assertOptionalString(comment[field], field, slideIndex);
+  }
+  for (const field of ['authorId', 'index', 'x', 'y'] as const) {
+    const item = comment[field];
+    if (item !== undefined && (typeof item !== 'number' || !Number.isSafeInteger(item))) {
+      throw new Error(`invalid PPTX presentation preflight comment ${field} at slide ${slideIndex}`);
+    }
+  }
+  if (typeof comment.text !== 'string' ||
+      (comment.replies !== undefined && !Array.isArray(comment.replies)) ||
+      (comment.anchors !== undefined && !Array.isArray(comment.anchors))) {
+    throw new Error(`invalid PPTX presentation preflight comment fields at slide ${slideIndex}`);
+  }
+  if (comment.status !== undefined && !['active', 'resolved', 'closed'].includes(comment.status)) {
+    throw new Error(`invalid PPTX presentation preflight comment status at slide ${slideIndex}`);
+  }
+  return copyComment({
+    ...(comment as PptxComment),
+    ...(comment.anchors?.length
+      ? { anchors: comment.anchors.map((anchor) => normalizeCommentAnchor(anchor, slideIndex)) }
+      : {}),
+    ...(comment.replies?.length
+      ? { replies: comment.replies.map((reply) => normalizeCommentReply(reply, slideIndex)) }
+      : {}),
+  });
+}
+
+function normalizeCommentAnchor(value: unknown, slideIndex: number): Readonly<PptxCommentAnchor> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid PPTX presentation preflight comment anchor at slide ${slideIndex}`);
+  }
+  const anchor = value as Partial<PptxCommentAnchor>;
+  if (anchor.type === 'slide' || anchor.type === 'unknown') return Object.freeze({ type: anchor.type });
+  if (anchor.type === 'drawingElement') {
+    assertOptionalString(anchor.elementId, 'anchor.elementId', slideIndex);
+    assertOptionalString(anchor.creationId, 'anchor.creationId', slideIndex);
+    return Object.freeze({
+      type: 'drawingElement',
+      ...(anchor.elementId === undefined ? {} : { elementId: anchor.elementId }),
+      ...(anchor.creationId === undefined ? {} : { creationId: anchor.creationId }),
+    });
+  }
+  if (anchor.type === 'textRange') {
+    assertOptionalString(anchor.elementId, 'anchor.elementId', slideIndex);
+    for (const field of ['start', 'length'] as const) {
+      const item = anchor[field];
+      if (item !== undefined && (typeof item !== 'number' || !Number.isSafeInteger(item))) {
+        throw new Error(`invalid PPTX presentation preflight comment anchor.${field} at slide ${slideIndex}`);
+      }
+    }
+    return Object.freeze({
+      type: 'textRange',
+      ...(anchor.elementId === undefined ? {} : { elementId: anchor.elementId }),
+      ...(anchor.start === undefined ? {} : { start: anchor.start }),
+      ...(anchor.length === undefined ? {} : { length: anchor.length }),
+    });
+  }
+  throw new Error(`invalid PPTX presentation preflight comment anchor type at slide ${slideIndex}`);
+}
+
 function normalizeMediaElement(value: unknown, slideIndex: number): Readonly<MediaElement> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`invalid PPTX presentation preflight media at slide ${slideIndex}`);
@@ -188,6 +322,7 @@ export function normalizePresentationPreflight(value: unknown): PresentationPref
       (slide.notes !== null && typeof slide.notes !== 'string') ||
       typeof slide.hidden !== 'boolean' ||
       !Array.isArray(slide.mediaElements)
+      || (slide.comments !== undefined && !Array.isArray(slide.comments))
     ) {
       throw new Error(`invalid PPTX presentation preflight slide fields at ${index}`);
     }
@@ -199,6 +334,9 @@ export function normalizePresentationPreflight(value: unknown): PresentationPref
       mediaElements: Object.freeze(
         slide.mediaElements.map((media) => normalizeMediaElement(media, index)),
       ),
+      ...(slide.comments?.length
+        ? { comments: Object.freeze(slide.comments.map((comment) => normalizeComment(comment, index))) }
+        : {}),
     });
   });
   const fontPreloadNames = candidate.fontPreloadNames.map((name, index) => {
@@ -251,6 +389,9 @@ function projectSlide(
         .filter((element): element is MediaElement => element.type === 'media')
         .map(copyMediaElement),
     ),
+    ...(slide.comments?.length
+      ? { comments: Object.freeze(slide.comments.map(copyComment)) }
+      : {}),
   });
 }
 

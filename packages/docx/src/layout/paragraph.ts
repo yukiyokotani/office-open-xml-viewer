@@ -185,6 +185,9 @@ export type MeasuredTextPlanSegment = Readonly<
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
+    /** Selected face's font box, retained independently of authored decoration
+     * so application overlays can use the same character-height rectangle. */
+    selectedFaceFontBox?: Readonly<{ ascentPt: number; descentPt: number }>;
     retainedGeometry?: RetainedTextGeometryPlan;
   }
 >;
@@ -879,6 +882,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         decorationTerminalAdvancePt,
         textLayoutService: _textLayoutService,
         textShapeRequest: _textShapeRequest,
+        selectedFaceFontBox,
         retainedGeometry,
         direction: _direction,
         ...style
@@ -926,11 +930,24 @@ export function planLine(input: PlanLineInput): LineLayout {
           scaleX: segment.basePaintOps[0]?.scaleX ?? 1,
         }),
       } : undefined;
+      const highlightFontBox = selectedFaceFontBox ?? retainedGeometry?.base;
+      const highlightBounds = highlightFontBox ? {
+        xPt,
+        yPt: line.baselinePt + baselineOffsetPt - highlightFontBox.ascentPt,
+        widthPt: widthPt + ownedTrailingSlackPt,
+        heightPt: highlightFontBox.ascentPt + highlightFontBox.descentPt,
+      } : {
+        xPt,
+        yPt: line.topPt,
+        widthPt: widthPt + ownedTrailingSlackPt,
+        heightPt: line.advancePt,
+      };
       const placed: TextPlacement = {
         ...style,
         kind: 'text',
         origin,
         bounds: { xPt, yPt: line.topPt, widthPt, heightPt: line.advancePt },
+        highlightBounds,
         advancePt: widthPt,
         clusters: textGeometry.clusters,
         paintOps: paintOps.map((operation) => ({ ...operation, direction })),
@@ -940,15 +957,11 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...(ownedTrailingSlackPt !== 0 ? { ownedTrailingSlackPt } : {}),
         ...((style.highlight || style.background) ? {
           highlightFragments: [{
-            rect: style.highlight && retainedGeometry ? {
+            // ECMA-376 §17.3.2.15 applies highlighting behind the run
+            // contents, not across the paragraph's authored line advance.
+            rect: style.highlight ? highlightBounds : {
               xPt,
-              // ECMA-376 §17.3.2.15 applies highlighting behind the run
-              // contents, not across the paragraph's authored line advance.
-              yPt: line.baselinePt + baselineOffsetPt - retainedGeometry.base.ascentPt,
-              widthPt: widthPt + ownedTrailingSlackPt,
-              heightPt: retainedGeometry.base.ascentPt + retainedGeometry.base.descentPt,
-            } : {
-              xPt, yPt: line.topPt,
+              yPt: line.topPt,
               widthPt: widthPt + ownedTrailingSlackPt,
               heightPt: line.advancePt,
             },
@@ -2086,6 +2099,7 @@ function textPlanSegment(
       ? { decorationTerminalAdvancePt: retainedDecorationTerminalAdvancePt }
       : {}),
     ...(retainedGeometry ? { retainedGeometry } : {}),
+    ...(segment.selectedFaceFontBox ? { selectedFaceFontBox: segment.selectedFaceFontBox } : {}),
     ...(segment.textLayoutService ? { textLayoutService: segment.textLayoutService } : {}),
     ...(segment.textShapeRequest ? { textShapeRequest: segment.textShapeRequest } : {}),
   };

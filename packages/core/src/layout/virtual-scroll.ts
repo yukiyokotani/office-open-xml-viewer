@@ -7,7 +7,7 @@
  * binary search of the first visible index. See design §5.1
  * (docs/dev-notes/2026-07-01-scroll-viewer-design.md).
  */
-export interface VisibleRange {
+export interface VisibleWindow {
   /** First index to mount (inclusive, includes overscan). `start > end` ⇒ nothing
    *  to mount (empty input, or a 0-height viewport whose top sits exactly on an
    *  item boundary) — mount loops over `[start, end]` naturally run zero times. */
@@ -20,14 +20,25 @@ export interface VisibleRange {
    *  item — the standard virtualization convention; mount-safe, and flips to i+1
    *  exactly at `offsets[i+1]`). */
   topIndex: number;
-  /** Top offset (px) of every item i: `leading` + Σ heights[0..i-1] + i*gap.
-   *  length = heights.length. With no padding (`leading` 0) this reduces to the
-   *  bare prefix-sum. */
-  offsets: number[];
   /** `leading` + Σ heights + (n-1)*gap + `trailing` (gap between items only, none
    *  after the last) → spacer height. With no padding this reduces to
    *  Σ heights + (n-1)*gap. */
   totalHeight: number;
+}
+
+export interface VisibleRange extends VisibleWindow {
+  /** Top offset (px) of every item i: `leading` + Σ heights[0..i-1] + i*gap.
+   *  length = heights.length. With no padding (`leading` 0) this reduces to the
+   *  bare prefix-sum. Cached callers retain this array across scroll queries. */
+  offsets: number[];
+}
+
+/** Scale-dependent prefix geometry. Build it when item sizes change, then use
+ * {@link computeVisibleWindow} for O(log n) scroll queries without rebuilding
+ * or reallocating the document-length offsets array. */
+export interface VirtualScrollGeometry {
+  readonly offsets: number[];
+  readonly totalHeight: number;
 }
 
 /** Optional leading/trailing padding (px) added OUTSIDE the item run — the desk
@@ -44,6 +55,107 @@ export interface VisibleRangePad {
 /** Clamp `v` to `[lo, hi]` (hi < lo yields lo — only reached when n === 0, guarded upstream). */
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Build the variable-height prefix geometry once per layout/scale revision. */
+export function createVirtualScrollGeometry(
+  heights: readonly number[],
+  gap: number,
+  pad?: VisibleRangePad,
+): VirtualScrollGeometry {
+  const n = heights.length;
+  if (n === 0) return { offsets: [], totalHeight: 0 };
+  const leading = pad?.leading ?? 0;
+  const trailing = pad?.trailing ?? 0;
+  const offsets = new Array<number>(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    offsets[i] = leading + acc + i * gap;
+    acc += heights[i];
+  }
+  return {
+    offsets,
+    totalHeight: leading + acc + (n - 1) * gap + trailing,
+  };
+}
+
+/** Query cached variable-height geometry. Only the two binary searches depend
+ * on the current scroll position; the returned range reuses `geometry.offsets`. */
+export function computeVisibleWindow(
+  geometry: VirtualScrollGeometry,
+  scrollTop: number,
+  viewportHeight: number,
+  overscan: number,
+): VisibleRange {
+  const offsets = geometry.offsets;
+  const n = offsets.length;
+  if (n === 0) {
+    return { start: 0, end: -1, topIndex: 0, offsets, totalHeight: 0 };
+  }
+
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (offsets[mid] <= scrollTop) lo = mid + 1;
+    else hi = mid;
+  }
+  const topIndex = clamp(lo - 1, 0, n - 1);
+
+  const bottom = scrollTop + viewportHeight;
+  lo = 0;
+  hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (offsets[mid] < bottom) lo = mid + 1;
+    else hi = mid;
+  }
+  const lastVisible = clamp(lo - 1, 0, n - 1);
+  return {
+    start: clamp(topIndex - overscan, 0, n - 1),
+    end: clamp(lastVisible + overscan, 0, n - 1),
+    topIndex,
+    offsets,
+    totalHeight: geometry.totalHeight,
+  };
+}
+
+/** O(1) visible-window arithmetic for uniform slides. Unlike the compatibility
+ * `computeVisibleRange` API, this deliberately materializes no offsets array. */
+export function computeUniformVisibleWindow(
+  itemCount: number,
+  itemHeight: number,
+  gap: number,
+  scrollTop: number,
+  viewportHeight: number,
+  overscan: number,
+  pad?: VisibleRangePad,
+): VisibleWindow {
+  if (itemCount === 0) return { start: 0, end: -1, topIndex: 0, totalHeight: 0 };
+  const leading = pad?.leading ?? 0;
+  const trailing = pad?.trailing ?? 0;
+  const stride = itemHeight + gap;
+  const topIndex = clamp(
+    scrollTop < leading
+      ? 0
+      : stride > 0 ? Math.floor((scrollTop - leading) / stride) : itemCount - 1,
+    0,
+    itemCount - 1,
+  );
+  const bottom = scrollTop + viewportHeight;
+  const lastVisible = clamp(
+    bottom <= leading
+      ? 0
+      : stride > 0 ? Math.ceil((bottom - leading) / stride) - 1 : itemCount - 1,
+    0,
+    itemCount - 1,
+  );
+  return {
+    start: clamp(topIndex - overscan, 0, itemCount - 1),
+    end: clamp(lastVisible + overscan, 0, itemCount - 1),
+    topIndex,
+    totalHeight: leading + itemCount * itemHeight + (itemCount - 1) * gap + trailing,
+  };
 }
 
 /**
@@ -79,54 +191,10 @@ export function computeVisibleRange(
   overscan: number,
   pad?: VisibleRangePad,
 ): VisibleRange {
-  const n = heights.length;
-  if (n === 0) {
-    // Empty doc: no items ⇒ no desk padding (leading/trailing deliberately ignored).
-    // Preserves the exact pre-padding empty result the viewers rely on.
-    return { start: 0, end: -1, topIndex: 0, offsets: [], totalHeight: 0 };
-  }
-
-  const leading = pad?.leading ?? 0;
-  const trailing = pad?.trailing ?? 0;
-
-  // Prefix-sum offsets: offsets[i] = leading + Σ heights[0..i-1] + i*gap.
-  const offsets = new Array<number>(n);
-  let acc = 0;
-  for (let i = 0; i < n; i++) {
-    offsets[i] = leading + acc + i * gap;
-    acc += heights[i];
-  }
-  // leading + Σ heights + (n-1) gaps + trailing — no gap after the last item; the
-  // desk padding brackets the run (leading above the first, trailing below the last).
-  const totalHeight = leading + acc + (n - 1) * gap + trailing;
-
-  // topIndex = largest i with offsets[i] <= scrollTop (the item under the
-  // viewport top), clamped to [0, n-1]. Binary search over the non-decreasing
-  // offsets: find the first index whose offset EXCEEDS scrollTop, minus one.
-  let lo = 0;
-  let hi = n; // exclusive upper bound
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (offsets[mid] <= scrollTop) lo = mid + 1;
-    else hi = mid;
-  }
-  const topIndex = clamp(lo - 1, 0, n - 1);
-
-  // lastVisible = last index whose item TOP begins within the viewport
-  // (offsets[i] < scrollTop + viewportHeight). Same binary search on the
-  // viewport bottom edge.
-  const bottom = scrollTop + viewportHeight;
-  lo = 0;
-  hi = n;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (offsets[mid] < bottom) lo = mid + 1;
-    else hi = mid;
-  }
-  const lastVisible = clamp(lo - 1, 0, n - 1);
-
-  const start = clamp(topIndex - overscan, 0, n - 1);
-  const end = clamp(lastVisible + overscan, 0, n - 1);
-
-  return { start, end, topIndex, offsets, totalHeight };
+  return computeVisibleWindow(
+    createVirtualScrollGeometry(heights, gap, pad),
+    scrollTop,
+    viewportHeight,
+    overscan,
+  );
 }

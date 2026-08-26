@@ -1,5 +1,6 @@
 import { parseA1 } from './a1.js';
 import { MAX_WORKSHEET_COL, MAX_WORKSHEET_ROW } from './internal/grid-geometry.js';
+import type { ViewerCommentThreadContext } from '@silurus/ooxml-core';
 
 export interface CellAddress {
   row: number;
@@ -52,6 +53,8 @@ export interface XlsxSelectionContextCell {
   /** Detached scalar value; rich-text formatting stays outside the AI context. */
   readonly value: string | number | boolean | null;
   readonly formula?: string;
+  /** Authored note or threaded comment attached to this selected cell. */
+  readonly comment?: ViewerCommentThreadContext;
 }
 
 /**
