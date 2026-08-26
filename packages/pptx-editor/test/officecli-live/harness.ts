@@ -116,10 +116,19 @@ export function addShape(
   slidePath: string,
   props: Readonly<Record<string, string>>,
 ): string {
-  const result = runOfficeCliOk(['add', pptxPath, slidePath, '--type', 'shape', ...propArgs(props)]);
+  return addSlideElement(pptxPath, slidePath, 'shape', props);
+}
+
+export function addSlideElement(
+  pptxPath: string,
+  slidePath: string,
+  type: string,
+  props: Readonly<Record<string, string>>,
+): string {
+  const result = runOfficeCliOk(['add', pptxPath, slidePath, '--type', type, ...propArgs(props)]);
   const message = typeof result.data === 'string' ? result.data : result.message ?? '';
   const match = message.match(/at (\/\S+)/);
-  if (!match) throw new Error(`Cannot extract the canonical shape path from: ${message}`);
+  if (!match) throw new Error(`Cannot extract the canonical ${type} path from: ${message}`);
   return match[1];
 }
 

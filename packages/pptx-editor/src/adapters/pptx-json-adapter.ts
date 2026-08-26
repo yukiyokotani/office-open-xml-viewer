@@ -33,7 +33,7 @@ export function getSlideMutationId(slide: Slide): string {
  * with a numeric authored id.
  */
 export function getElementMutationId(element: SlideElement, elementIndex: number): string {
-  const authoredId = (element as SlideElement & { readonly id?: unknown }).id;
+  const authoredId = element.id;
   return typeof authoredId === 'string' && authoredId.length > 0
     ? authoredId
     : `${POSITIONAL_ELEMENT_ID_PREFIX}${elementIndex}`;

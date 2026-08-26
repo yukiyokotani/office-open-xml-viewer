@@ -23,7 +23,7 @@ import {
   plainTextOf,
   resolveMutationTarget,
   resolveStableParagraphPath,
-  resolveStableShapePath,
+  resolveStableElementPath,
 } from '../mutation-utils';
 import {
   applyTextStyleEdit,
@@ -267,7 +267,7 @@ export class UpdateTextMutation extends Mutation {
       if (this.style) {
         commands.push(Object.freeze({
           command: OFFICECLI_COMMAND_TYPES.SET,
-          path: resolveStableShapePath(presentation, this, context),
+          path: resolveStableElementPath(presentation, this, context, 'shape'),
           props: freezeProps(styleToOfficeCliProps(this.style, context, this)),
         }));
       }
@@ -309,7 +309,7 @@ export class UpdateTextMutation extends Mutation {
         if (Object.keys(props).length > 0) {
           commands.push(Object.freeze({
             command: OFFICECLI_COMMAND_TYPES.SET,
-            path: resolveStableShapePath(presentation, this, context),
+            path: resolveStableElementPath(presentation, this, context, 'shape'),
             props: freezeProps(props),
           }));
         }
@@ -350,7 +350,7 @@ export class UpdateTextMutation extends Mutation {
 
     return Object.freeze({
       command: OFFICECLI_COMMAND_TYPES.SET,
-      path: resolveStableShapePath(presentation, this, context),
+      path: resolveStableElementPath(presentation, this, context, 'shape'),
       props: freezeProps(props),
     });
   }
@@ -388,7 +388,7 @@ export class UpdateTextMutation extends Mutation {
       }
       return Object.freeze({
         command: OFFICECLI_COMMAND_TYPES.SET,
-        path: resolveStableShapePath(presentation, this, context),
+        path: resolveStableElementPath(presentation, this, context, 'shape'),
         props: freezeProps({
           range: formatOfficeCliRange(edit.scope.spans),
           ...styleProps,

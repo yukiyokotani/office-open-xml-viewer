@@ -1,4 +1,4 @@
-import type { ShapeElement } from '@maxgent/ooxml/pptx';
+import type { ShapeElement, SlideElement } from '@maxgent/ooxml/pptx';
 
 import type { ElementRef } from '../domain/mutation';
 import type { PptxEditorSession } from '../session/pptx-editor-session';
@@ -14,25 +14,33 @@ export interface SlidePoint {
   readonly y: number;
 }
 
-export interface ShapeHitTestOptions {
+export interface ElementHitTestOptions {
   /** Extra hit area in slide EMUs, useful for zero-width lines and connectors. */
   readonly hitSlop?: number;
 }
 
-export interface PptxEditorShapeSelection {
+export type ShapeHitTestOptions = ElementHitTestOptions;
+
+export type PptxEditorSelectableElement = Exclude<SlideElement, { readonly type: 'media' }>;
+
+export interface PptxEditorElementSelection<
+  Element extends PptxEditorSelectableElement = PptxEditorSelectableElement,
+> {
   readonly target: ElementRef;
   readonly slideIndex: number;
   readonly presentationElementIndex: number;
-  readonly element: ShapeElement;
-  /** False when the parser did not expose a stable numeric OfficeCLI shape id. */
+  readonly element: Element;
+  /** False when OfficeCLI cannot address this element with a stable `@id` path. */
   readonly isOfficeCliTargetable: boolean;
 }
+
+export type PptxEditorShapeSelection = PptxEditorElementSelection<ShapeElement>;
 
 export type PptxEditorSelectionChangeReason =
   (typeof EDITOR_SELECTION_CHANGE_REASONS)[keyof typeof EDITOR_SELECTION_CHANGE_REASONS];
 
 export interface PptxEditorSelectionSnapshot {
-  readonly selection: PptxEditorShapeSelection | null;
+  readonly selection: PptxEditorElementSelection | null;
 }
 
 export interface PptxEditorSelectionChange {

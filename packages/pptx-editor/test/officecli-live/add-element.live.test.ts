@@ -206,6 +206,7 @@ describe('AddElementMutation × OfficeCLI 真实执行', () => {
     // before the removal mutates any state, exactly as the history stack does.
     const remove = new RemoveElementMutation({ target: ref });
     const undo = remove.inverse(original);
+    if (!undo) throw new TypeError('A removed shape must remain restorable');
     const afterRemove = remove.apply(original).presentation;
 
     runBatch(pptxPath, toOfficeCliBatch(original, {
