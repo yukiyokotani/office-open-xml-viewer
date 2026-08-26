@@ -1,4 +1,4 @@
-import type { DimOptions, Presentation, Slide } from './types';
+import type { DimOptions, Presentation, PptxComment, Slide } from './types';
 import { renderSlide, dropImageBitmapCache, type TextRunCallback, type PptxTextRunInfo } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
 import {
