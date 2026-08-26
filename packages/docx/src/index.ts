@@ -1,17 +1,27 @@
 export {
   DocxDocument,
   type CollectPageRunsOptions,
+  type DocxPageCommentThreadsOptions,
   type LoadOptions,
   type RenderPageToBitmapOptions,
 } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
+export type { DocxCommentsOptions } from './comment-margin';
+export type {
+  ViewerCommentConnectorOptions,
+  ViewerCommentConnectorRoute,
+  ViewerCommentConnectorStroke,
+  ViewerCommentMessageContext,
+  ViewerCommentThreadContext,
+} from '@silurus/ooxml-core';
 export { buildDocxTextLayer } from './text-layer';
 export {
   readDocxTextSelectionContext,
   type DocxSelectionContext,
   type DocxTextSelectionContext,
   type DocxElementContext,
+  type DocxCommentSelectionContext,
   type DocxPagePoint,
   type DocxSelectionContextOptions,
   type DocxSelectionSourceLocator,
@@ -113,6 +123,25 @@ export {
   type DocxHighlightMatch,
   type DocxHighlightColors,
 } from './find-highlight-layer';
+// ECMA-376 §17.13.4 comment data projections for application-owned review UIs.
+export {
+  resolveCommentAnchorRuns,
+  resolveDocxCommentThreads,
+  type CommentAnchorPoint,
+  type CommentAnchorGeometryFallback,
+  type CommentAnchorRange,
+  type DocxCommentAnchorKind,
+  type DocxCommentHighlightRect,
+  type ResolvedDocxCommentAnchor,
+  type ResolvedDocxCommentThread,
+  type ResolveDocxCommentThreadsOptions,
+} from './comments';
+export {
+  resolveRevisionAnchorRuns,
+  type RevisionAnchorGeometryFallback,
+  type RevisionAnchorRange,
+} from './revisions';
+export type { DocxStorySource } from './types';
 export type { DocxMatchLocation } from './find';
 export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
@@ -192,6 +221,8 @@ export type {
   RunRevision,
   DocRevision,
   DocComment,
+  // Comment-anchor boundary (reachable via DocParagraph.commentMarks).
+  DocxCommentMark,
   DocNote,
   NoteRef,
   // Paragraph / line-spacing sub-types.

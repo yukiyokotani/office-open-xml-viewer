@@ -29,6 +29,12 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
 
   <main class="wrap fp-main">
     <slot />
+    <nav class="fp-reference" aria-label={`${name} reference`}>
+      <a href={`/api/${format}`}>
+        <span>API reference</span>
+        <strong>Open the {name} API →</strong>
+      </a>
+    </nav>
   </main>
 
   <SiteFooter />
@@ -78,4 +84,11 @@ const fileNoun = { docx: 'Word document', xlsx: 'Excel workbook', pptx: 'PowerPo
   .fp-lead { margin: 16px 0 0; max-width: 70ch; font-size: 17px; color: var(--text-dim); }
   .fp-lead code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
   .fp-main { padding-bottom: 32px; }
+  .fp-reference { padding: 32px 0 8px; border-top: 1px solid var(--border); }
+  .fp-reference a {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding: 18px 20px; border: 1px solid var(--border); background: var(--panel);
+  }
+  .fp-reference span { color: var(--text-dim); font-size: 14px; }
+  .fp-reference strong { color: var(--accent); }
 </style>

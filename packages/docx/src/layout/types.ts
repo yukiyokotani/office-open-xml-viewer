@@ -1,4 +1,5 @@
 import type { SectionLayoutContext } from '../layout-context.js';
+import type { DocxStorySource } from '../types.js';
 import type {
   GlyphInkBounds,
   TextFontSlotPresence,
@@ -24,11 +25,7 @@ export type { MathLayoutResource, MathOccurrence } from './resources.js';
 
 export type LayoutNodeId = string;
 
-export type SourceRef = Readonly<{
-  story: 'body' | 'header' | 'footer' | 'footnote' | 'endnote' | 'textbox';
-  storyInstance: string;
-  path: readonly number[];
-}>;
+export type SourceRef = Readonly<DocxStorySource>;
 
 export type DeepReadonly<T> =
   T extends (...args: never[]) => unknown ? T
@@ -359,6 +356,9 @@ export interface TextPlacement {
   readonly range: TextRange;
   readonly origin: PointPt;
   readonly bounds: LayoutRect;
+  /** Font-box rectangle used by WordprocessingML run highlighting. Unlike
+   * {@link bounds}, this excludes extra line leading. */
+  readonly highlightBounds?: LayoutRect;
   readonly advancePt: number;
   /** Shaped cluster geometry for selection/hit testing. Always covers `range`. */
   readonly clusters: readonly TextClusterLayout[];

@@ -15,7 +15,7 @@ import SiteFooter from '../components/SiteFooter.astro';
       <div class="wrap">
         <p class="eyebrow">Current measurement</p>
         <h1>Bundle size.</h1>
-        <p>Updated for v0.81.0.</p>
+        <p>Current production assets in v0.82.0.</p>
       </div>
     </header>
 
@@ -27,23 +27,58 @@ import SiteFooter from '../components/SiteFooter.astro';
           </thead>
           <tbody>
             <tr>
-              <th>XLSX main-mode change from v0.80.2</th>
-              <td>+118 KiB</td>
-              <td>+32 KiB</td>
+              <th>DOCX static JavaScript</th>
+              <td>1,871 KiB</td>
+              <td>453 KiB</td>
             </tr>
             <tr>
-              <th>Enable the optional ChartEx module</th>
-              <td>+42 KB</td>
-              <td>+12 KB</td>
+              <th>XLSX static JavaScript</th>
+              <td>1,241 KiB</td>
+              <td>294 KiB</td>
+            </tr>
+            <tr>
+              <th>PPTX static JavaScript</th>
+              <td>1,244 KiB</td>
+              <td>288 KiB</td>
             </tr>
           </tbody>
         </table>
       </div>
+      <h2>Optional renderers</h2>
+      <div class="size-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Additional entry asset</th><th>Raw</th><th>gzip</th></tr>
+          </thead>
+          <tbody>
+            <tr><th>ChartEx</th><td>40.6 KiB</td><td>12.0 KiB</td></tr>
+            <tr><th>3-D charts</th><td>100.9 KiB</td><td>28.5 KiB</td></tr>
+            <tr><th>Region Map</th><td>231.5 KiB</td><td>62.6 KiB</td></tr>
+            <tr><th>Math adapter</th><td>1.3 KiB</td><td>0.7 KiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h2>Runtime assets</h2>
+      <div class="size-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Asset</th><th>Raw</th><th>gzip</th></tr>
+          </thead>
+          <tbody>
+            <tr><th>DOCX parser WASM</th><td>1,781 KiB</td><td>740 KiB</td></tr>
+            <tr><th>XLSX parser WASM</th><td>1,577 KiB</td><td>650 KiB</td></tr>
+            <tr><th>PPTX parser WASM</th><td>1,624 KiB</td><td>641 KiB</td></tr>
+            <tr><th>MathJax runtime</th><td>3,025 KiB</td><td>1,084 KiB</td></tr>
+          </tbody>
+        </table>
+      </div>
       <p>
-        Measurements use the static JavaScript import closure from the production build. The
-        comparison excludes parser WASM and lazy worker assets, which are unchanged by a main-mode
-        import. gzip is measured per emitted asset at level 9. Actual application bundles vary by
-        bundler and imported entries. This page is refreshed for each release.
+        Static JavaScript is the complete synchronous import graph for each format entry. Optional
+        rows show the extra entry asset after shared imports already present in a format graph.
+        Parser WASM, MathJax, workers, and the built-in comment UI load separately; the comment UI
+        is fetched only when it is needed. gzip is measured per emitted asset at level 9. Actual
+        application bundles vary by bundler and imported entries. This page is refreshed for each
+        release.
       </p>
     </section>
   </main>
@@ -56,6 +91,7 @@ import SiteFooter from '../components/SiteFooter.astro';
   .size-hero h1 { margin: 18px 0 20px; font-size: clamp(52px, 8vw, 92px); letter-spacing: -.06em; }
   .size-hero p:last-child { max-width: 46ch; margin: 0; color: var(--hero-muted); font-size: 18px; }
   .size-content { padding-top: 56px; padding-bottom: 96px; }
+  .size-content h2 { margin: 48px 0 16px; font-size: 24px; letter-spacing: -.02em; }
   .size-table-wrap { overflow-x: auto; border-top: 1px solid var(--border); }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 20px 16px; border-bottom: 1px solid var(--border); text-align: left; }

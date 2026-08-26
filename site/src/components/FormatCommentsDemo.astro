@@ -1,0 +1,62 @@
+---
+import { Code } from 'astro:components';
+import BuiltInCommentViewer from './BuiltInCommentViewer.astro';
+import { codeThemes } from '../lib/code-theme';
+
+interface Props {
+  format: 'docx' | 'pptx';
+}
+
+const { format } = Astro.props;
+const config = {
+  docx: {
+    viewer: 'DocxScrollViewer',
+    description: 'Turn on the built-in read-only UI when a conventional page-side comment margin is enough. The Viewer owns positioning, highlights, markers, zoom, and scrolling.',
+  },
+  pptx: {
+    viewer: 'PptxScrollViewer',
+    description: 'Turn on the built-in read-only UI for slide-side comment cards and authored markers. The Viewer owns positioning, selection, zoom, and scrolling.',
+  },
+}[format];
+
+const snippet = `import { ${config.viewer} } from '@silurus/ooxml/${format}';
+
+const viewer = new ${config.viewer}(container, {
+  comments: true,
+});
+
+await viewer.load(source);`;
+---
+
+<section id="review-ui" class="format-comments-demo" data-reveal>
+  <div class="format-comments-demo__head">
+    <p>Live · Built-in comment UI</p>
+    <h3>Comments in context, rendered by ScrollViewer.</h3>
+    <span>{config.description}</span>
+    <a href="/review-ui">Comment UI implementation guide →</a>
+  </div>
+  <BuiltInCommentViewer formats={[format]} />
+  <div class="format-comments-demo__code">
+    <Code code={snippet} lang="ts" themes={codeThemes} defaultColor={false} />
+  </div>
+</section>
+
+<style>
+  .format-comments-demo { padding: 40px 0; border-top: 1px solid var(--border); }
+  .format-comments-demo__head { max-width: 70ch; margin-bottom: 22px; }
+  .format-comments-demo__head p {
+    margin: 0; color: var(--accent); font: 600 12px/1.4 var(--mono);
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .format-comments-demo__head h3 { margin: 8px 0; font-size: 24px; font-weight: 700; }
+  .format-comments-demo__head span { display: block; color: var(--text-dim); font-size: 16px; }
+  .format-comments-demo__head a {
+    display: inline-block; margin-top: 12px; color: var(--accent); font-size: 14px; font-weight: 700;
+  }
+  .format-comments-demo__code { margin-top: 18px; }
+  .format-comments-demo__code :global(pre) {
+    margin: 0; padding: 20px; overflow-x: auto; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--code-bg); font-size: 12px; line-height: 1.7;
+  }
+  .format-comments-demo__code :global(code) { font-family: var(--mono); }
+</style>

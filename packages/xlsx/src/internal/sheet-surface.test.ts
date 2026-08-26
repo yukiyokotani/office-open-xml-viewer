@@ -48,12 +48,16 @@ describe('XLSX sheet surface roles', () => {
       overlays.find,
       input,
       overlays.comment,
+      overlays.commentStatus,
       overlays.validation,
     ]);
+    overlays.announceComment('Comment on B2 by Ada: Review this');
+    expect(overlays.commentStatus.textContent).toBe('Comment on B2 by Ada: Review this');
     overlays.showComment(12, 34);
     expect(overlays.comment.style.left).toBe('12px');
     expect(overlays.comment.style.top).toBe('34px');
     overlays.hideComment();
     expect(overlays.comment.style.display).toBe('none');
+    expect(overlays.commentStatus.textContent).toBe('');
   });
 });

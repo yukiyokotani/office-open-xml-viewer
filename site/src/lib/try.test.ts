@@ -189,6 +189,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.zoomMin).toBe(0.5);
     expect(viewer.opts.pageShadow).toBe(false);
     expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.comments).toBe(true);
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
     expect(viewer.opts.chartEx).toBe(mocks.chartEx);
@@ -215,6 +216,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.zoomMin).toBe(0.5);
     expect(viewer.opts.pageShadow).toBe(false);
     expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.comments).toBe(true);
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
     expect(viewer.opts.chartEx).toBe(mocks.chartEx);
@@ -247,6 +249,7 @@ describe('Try Yours ScrollViewer integration', () => {
     const viewer = mocks.xlsx[0];
 
     expect(viewer.opts.mode).toBe('main');
+    expect(viewer.opts.comments).toBe(true);
     expect(viewer.opts.math).toBeDefined();
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);

@@ -27,6 +27,9 @@ function projectTextRun(
 ): DocxTextRunInfo {
   const { placement } = geometry;
   const origin = mapAffinePoint(pointToCss, placement.bounds);
+  const highlightOrigin = placement.highlightBounds
+    ? mapAffinePoint(pointToCss, placement.highlightBounds)
+    : undefined;
   const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
@@ -40,11 +43,23 @@ function projectTextRun(
     ...(geometry.paragraphId !== undefined
       ? { paragraphId: geometry.paragraphId }
       : {}),
+    ...(placement.sourceRunIndex !== undefined
+      ? { sourceRunIndex: placement.sourceRunIndex }
+      : {}),
+    direction: placement.direction,
     text: placement.text,
     x: origin.xPt,
     y: origin.yPt,
     w: placement.bounds.widthPt * inlineScale,
     h: placement.bounds.heightPt * blockScale,
+    ...(placement.highlightBounds && highlightOrigin ? {
+      highlightBounds: Object.freeze({
+        x: highlightOrigin.xPt,
+        y: highlightOrigin.yPt,
+        width: placement.highlightBounds.widthPt * inlineScale,
+        height: placement.highlightBounds.heightPt * blockScale,
+      }),
+    } : {}),
     fontSize: placement.fontSizePt * blockScale,
     font: canvasFontString(
       placement.fontRoute,

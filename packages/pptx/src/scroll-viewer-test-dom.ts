@@ -2,7 +2,9 @@ import { vi } from 'vitest';
 import type { PptxPresentation, PresentSlideOptions, RenderSlideOptions, RenderSlideToBitmapOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
+import type { PptxComment } from './types';
 import type {
+  PptxElementBounds,
   PptxElementContextOptions,
   PptxElementContext,
   PptxSlidePoint,
@@ -31,6 +33,7 @@ export interface FakeEl {
   /** Uppercase tag, mirroring the real DOM (`div` → `DIV`) — the viewer's
    *  canvas-container guard reads it. */
   tagName: string;
+  className: string;
   textContent: string;
   innerHTML: string;
   dataset: Record<string, string>;
@@ -67,6 +70,9 @@ export interface FakeEl {
    *  freshly-created spare canvas from the on-screen one it replaces. */
   _uid: number;
   appendChild(c: FakeEl): FakeEl;
+  append(...children: FakeEl[]): void;
+  replaceChildren(...children: FakeEl[]): void;
+  setAttribute(name: string, value: string): void;
   removeChild(c: FakeEl): FakeEl;
   remove(): void;
   contains(other: FakeEl | null): boolean;
@@ -86,6 +92,7 @@ export function makeEl(tag: string): FakeEl {
   const el: FakeEl = {
     tag,
     tagName: tag.toUpperCase(),
+    className: '',
     textContent: '',
     innerHTML: '',
     dataset: {},
@@ -131,6 +138,21 @@ export function makeEl(tag: string): FakeEl {
       c.parentElement = this;
       this.children.push(c);
       return c;
+    },
+    append(...children: FakeEl[]) {
+      for (const child of children) this.appendChild(child);
+    },
+    replaceChildren(...children: FakeEl[]) {
+      for (const child of this.children) child.parentElement = null;
+      this.children.length = 0;
+      for (const child of children) this.appendChild(child);
+    },
+    setAttribute(name: string, value: string) {
+      if (name === 'class') this.className = value;
+      if (name.startsWith('data-')) {
+        const key = name.slice(5).replace(/-([a-z])/g, (_, char: string) => char.toUpperCase());
+        this.dataset[key] = value;
+      }
     },
     removeChild(c: FakeEl) {
       const i = this.children.indexOf(c);
@@ -284,20 +306,21 @@ export function makeContainer(clientWidth = 800, clientHeight = 600): FakeEl {
  *  synthetic resize. Call `vi.unstubAllGlobals()` in afterEach. */
 export function installDom(): {
   resizeCb: () => (() => void) | undefined;
-  dispatchDocument(type: string): void;
+  dispatchDocument(type: string, event?: unknown): void;
   listenerCount(type: string): number;
   setSelection(selection: Selection | null): void;
 } {
   let lastResizeCb: (() => void) | undefined;
   let currentSelection: Selection | null = null;
-  const listeners = new Map<string, Array<() => void>>();
+  const listeners = new Map<string, Array<(event: unknown) => void>>();
   vi.stubGlobal('document', {
     createElement: (t: string) => makeEl(t),
+    createElementNS: (_namespace: string, t: string) => makeEl(t),
     getSelection: () => currentSelection,
-    addEventListener: (type: string, listener: () => void) => {
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
       listeners.set(type, [...(listeners.get(type) ?? []), listener]);
     },
-    removeEventListener: (type: string, listener: () => void) => {
+    removeEventListener: (type: string, listener: (event: unknown) => void) => {
       listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener));
     },
   });
@@ -314,8 +337,8 @@ export function installDom(): {
   );
   return {
     resizeCb: () => lastResizeCb,
-    dispatchDocument: (type) => {
-      for (const listener of listeners.get(type) ?? []) listener();
+    dispatchDocument: (type, event = {}) => {
+      for (const listener of listeners.get(type) ?? []) listener(event);
     },
     listenerCount: (type) => listeners.get(type)?.length ?? 0,
     setSelection: (selection) => { currentSelection = selection; },
@@ -360,12 +383,14 @@ export class FakePptxEngine {
    *  worker path now ships runs back beside the bitmap, so the stub mirrors that
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
+  commentsBySlide: readonly (readonly Readonly<PptxComment>[])[] = [];
   elementContext: PptxElementContext | null = null;
   elementContextCalls: Array<{
     slideIndex: number;
     point: PptxSlidePoint;
     options: PptxElementContextOptions;
   }> = [];
+  elementBoundsCalls: Array<{ slideIndex: number; elementIds: readonly string[] }> = [];
   constructor(
     private _slideCount: number,
     public readonly slideWidth: number, // EMU, deck-wide (uniform)
@@ -382,6 +407,9 @@ export class FakePptxEngine {
    *  silent mis-pathing. */
   get mode(): 'main' | 'worker' {
     return this._mode;
+  }
+  getComments(slideIndex: number): readonly Readonly<PptxComment>[] {
+    return this.commentsBySlide[slideIndex] ?? [];
   }
   renderSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<void> {
     const canvas = _canvas as FakeEl | undefined;
@@ -484,6 +512,13 @@ export class FakePptxEngine {
       slideIndex,
       point: { ...point },
     } : null);
+  }
+  getElementBoundsByIds(
+    slideIndex: number,
+    elementIds: readonly string[],
+  ): Promise<readonly PptxElementBounds[]> {
+    this.elementBoundsCalls.push({ slideIndex, elementIds: [...elementIds] });
+    return Promise.resolve([]);
   }
   /** The per-call `width` (px) recorded for every renderSlide call, in call order.
    *  T3 asserts each mounted slide received its OWN px width. */

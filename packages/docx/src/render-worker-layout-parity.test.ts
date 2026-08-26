@@ -166,6 +166,7 @@ function metadataForDefaultLayout(
 ): DocumentMeta {
   return {
     pageCount: layout.pages.length,
+    revisions: model.revisions ?? [],
     comments: model.comments ?? [],
     footnotes: model.footnotes ?? [],
     endnotes: model.endnotes ?? [],
@@ -178,6 +179,58 @@ function metadataForDefaultLayout(
 }
 
 describe('render worker canonical layout parity', () => {
+  it('exposes identical review metadata in main and worker modes', () => {
+    const model = realModel();
+    model.revisions = [{ kind: 'insertion', author: 'Reviewer', text: 'field' }];
+    model.comments = [{ id: '7', author: 'Reviewer', text: 'Check field' }];
+    const paragraph = model.body[0] as Extract<BodyElement, { type: 'paragraph' }>;
+    paragraph.commentMarks = [
+      { id: '7', kind: 'rangeStart', runIndex: 0 },
+      { id: '7', kind: 'rangeEnd', runIndex: 1 },
+      { id: '7', kind: 'reference', runIndex: 1 },
+    ];
+    const source = layoutSourceStore(model);
+    const main = Object.create(DocxDocument.prototype) as DocxDocument;
+    Object.assign(main, {
+      _mode: 'main', _document: model, _source: source, _meta: null,
+      _commentAnchorRanges: null,
+      _revisionAnchorRanges: null,
+    });
+    attachDocumentLayoutRuntime(main, 0);
+    const layoutServices = createLayoutServices(model, { measureContext: measureContext() });
+    const variants = attachDocumentLayoutVariants({
+      source,
+      services: layoutServices,
+      defaultCurrentDateMs: 0,
+      buildLayout: (options) => layoutDocument(model, layoutServices, options),
+    });
+    documentLayoutRuntimeOf(main).services = layoutServices;
+    const layout = variants.store.defaultLayout;
+    const worker = Object.create(DocxDocument.prototype) as DocxDocument;
+    Object.assign(worker, {
+      _mode: 'worker', _document: null, _source: null,
+      _meta: {
+        ...metadataForDefaultLayout(model, layout),
+        commentAnchorRanges: main.commentAnchorRanges(),
+        revisionAnchorRanges: main.revisionAnchorRanges(),
+      },
+    });
+
+    expect(worker.comments).toEqual(main.comments);
+    expect(worker.revisions).toEqual(main.revisions);
+    expect(worker.comments).toBe(worker.comments);
+    expect(main.revisions).toBe(main.revisions);
+    expect(Object.isFrozen(worker.comments)).toBe(true);
+    expect(Object.isFrozen(worker.comments[0])).toBe(true);
+    expect(Object.isFrozen(main.revisions)).toBe(true);
+    expect(() => {
+      (worker.comments[0] as { text: string }).text = 'caller mutation';
+    }).toThrow(TypeError);
+    expect(worker.comments[0]?.text).toBe('Check field');
+    expect(worker.commentAnchorRanges()).toEqual(main.commentAnchorRanges());
+    expect(worker.revisionAnchorRanges()).toEqual(main.revisionAnchorRanges());
+  });
+
   it('switches the effective mode to main when the worker returns a vertical model', async () => {
     const model = realModel();
     model.section.textDirection = 'tbRl';
@@ -219,7 +272,7 @@ describe('render worker canonical layout parity', () => {
     Object.assign(document, {
       _mode: 'worker',
       _meta: {
-        pageCount: 1, comments: [], footnotes: [], endnotes: [],
+        pageCount: 1, revisions: [], comments: [], footnotes: [], endnotes: [],
         pageSizes: [{ widthPt: 612, heightPt: 792 }], bookmarkPages: [],
       },
       _bridge: {
@@ -478,7 +531,7 @@ describe('render worker canonical layout parity', () => {
     } satisfies RenderWorkerRequest;
     const parsed = {
       type: 'parsedMeta', id: 1,
-      meta: { pageCount: 1, comments: [], footnotes: [], endnotes: [], pageSizes: [], bookmarkPages: [] },
+      meta: { pageCount: 1, revisions: [], comments: [], footnotes: [], endnotes: [], pageSizes: [], bookmarkPages: [] },
     } satisfies RenderWorkerResponse;
     const verticalFallback = {
       type: 'mainThreadVerticalFallback', id: 1,

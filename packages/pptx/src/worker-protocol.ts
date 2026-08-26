@@ -11,6 +11,7 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type {
   PptxElementContextOptions,
   PptxElementContext,
+  PptxElementBounds,
   PptxSlidePoint,
 } from './element-selection';
 
@@ -94,6 +95,12 @@ export type RenderWorkerRequest =
       slideIndex: number;
       point: PptxSlidePoint;
       options: PptxElementContextOptions;
+    }
+  | {
+      kind: 'resolveElementBounds';
+      id: number;
+      slideIndex: number;
+      elementIds: readonly string[];
     };
 
 export type RenderWorkerResponse =
@@ -109,4 +116,5 @@ export type RenderWorkerResponse =
     }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }
   | { kind: 'runsCollected'; id: number; runs: PptxTextRunInfo[] }
-  | { kind: 'elementHit'; id: number; context: PptxElementContext | null };
+  | { kind: 'elementHit'; id: number; context: PptxElementContext | null }
+  | { kind: 'elementBoundsResolved'; id: number; bounds: readonly PptxElementBounds[] };

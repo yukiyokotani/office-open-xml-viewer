@@ -32,7 +32,7 @@ import {
   HARD_MAX_RAW_PART_CACHE_ENTRIES,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility } from './types.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
@@ -461,6 +461,13 @@ export class XlsxWorkbook {
     } finally {
       if (this.sheetLoads.get(sheetIndex) === load) this.sheetLoads.delete(sheetIndex);
     }
+  }
+
+  /** Detached comments for one worksheet, in authored order. Worksheet models
+   * are materialized lazily, so this accessor is asynchronous. */
+  async getComments(sheetIndex: number): Promise<readonly Readonly<XlsxComment>[]> {
+    const worksheet = await this.getWorksheet(sheetIndex);
+    return structuredClone(worksheet.comments ?? []);
   }
 
   /** Return a fresh content-free metrics snapshot, including lazy worksheet and

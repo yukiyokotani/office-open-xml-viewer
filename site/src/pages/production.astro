@@ -1,0 +1,178 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { codeThemes } from '../lib/code-theme';
+import { optionalRenderers } from '../lib/api-reference';
+
+const sharedDocumentExample = `import { DocxDocument, DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const document = await DocxDocument.load(source, { mode: 'worker' });
+const first = DocxScrollViewer.fromDocument(firstContainer, document);
+const second = DocxScrollViewer.fromDocument(secondContainer, document);
+
+// Destroy every view before the shared document.
+first.destroy();
+second.destroy();
+document.destroy();`;
+
+const optionalRendererExample = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { math } from '@silurus/ooxml/math';
+import { chartEx } from '@silurus/ooxml/chart-ex';
+import { threeD } from '@silurus/ooxml/three-d';
+import { regionMap } from '@silurus/ooxml/region-map';
+
+const viewer = new XlsxViewer(container, {
+  math,
+  chartEx,
+  threeD,
+  regionMap,
+});`;
+---
+
+<Base
+  title="Production decisions | @silurus/ooxml"
+  description="Shared rendering, ownership, and optional-renderer decisions for @silurus/ooxml applications."
+  canonicalPath="/production/"
+>
+  <Nav />
+  <header class="production-hero">
+    <div class="wrap">
+      <p class="eyebrow">Shared concepts</p>
+      <h1>Production decisions.</h1>
+      <p>Choices that apply across DOCX, XLSX, and PPTX.</p>
+    </div>
+  </header>
+
+  <main class="wrap production-layout">
+    <aside class="production-toc" aria-label="Production page contents">
+      <p>Contents</p>
+      <nav>
+        <a href="#rendering-mode">Rendering mode</a>
+        <a href="#ownership">Ownership</a>
+        <a href="#optional-renderers">Optional renderers</a>
+      </nav>
+    </aside>
+
+    <div class="production-content">
+      <section id="rendering-mode">
+        <p class="section-label">Rendering mode</p>
+        <h2>Choose where layout and paint run.</h2>
+        <p>
+          Parsing always runs in a Worker. Keep the default <code>mode: 'main'</code> for ordinary
+          previews. Choose <code>mode: 'worker'</code> when document layout and Canvas paint compete
+          with your application's UI.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th></th><th><code>main</code></th><th><code>worker</code></th></tr></thead>
+            <tbody>
+              <tr><th>Layout and paint</th><td>Main thread</td><td>Web Worker</td></tr>
+              <tr><th>Best fit</th><td>Most previews and custom renderer objects</td><td>Large or complex files</td></tr>
+              <tr><th>Browser requirement</th><td>Canvas</td><td>Worker and OffscreenCanvas</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="related"><a href="/bundle-size">See current bundle sizes →</a></p>
+      </section>
+
+      <section id="ownership">
+        <p class="section-label">Ownership</p>
+        <h2>Let one Viewer own one document, unless views need to share it.</h2>
+        <p>
+          The usual path is to construct a Viewer, call <code>load(source)</code>, and destroy the
+          Viewer when its host unmounts. The Viewer owns the loaded document.
+        </p>
+        <p>
+          Load the document model yourself only when several views must share one parse. Destroy
+          every borrowed view before destroying the shared model.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Format</th><th>Shared model</th><th>Borrowing factory</th></tr></thead>
+            <tbody>
+              <tr><th>DOCX</th><td><code>DocxDocument</code></td><td><code>fromDocument()</code></td></tr>
+              <tr><th>PPTX</th><td><code>PptxPresentation</code></td><td><code>fromPresentation()</code></td></tr>
+              <tr><th>XLSX</th><td><code>XlsxWorkbook</code></td><td><code>fromWorkbook()</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="code-card">
+          <Code code={sharedDocumentExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </div>
+      </section>
+
+      <section id="optional-renderers">
+        <p class="section-label">Optional renderers</p>
+        <h2>Add only the rendering modules a product needs.</h2>
+        <p>
+          Equations, ChartEx, 3-D charts, and Region Maps use separate package entries and the same
+          Viewer options across DOCX, XLSX, and PPTX. Classic 2-D charts remain included with each
+          format.
+        </p>
+        <div class="code-card">
+          <Code code={optionalRendererExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Capability</th><th>Import</th><th>Viewer option</th></tr></thead>
+            <tbody>
+              {optionalRenderers.map((renderer) => (
+                <tr>
+                  <th>{renderer.name}</th>
+                  <td><code>{renderer.entry}</code></td>
+                  <td><code>{renderer.exportName}</code></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <nav class="related-pages" aria-label="Related references">
+        <a href="/errors"><strong>Error handling →</strong><span>Stable error types and delivery rules.</span></a>
+        <a href="/selection-context"><strong>Selection context →</strong><span>Read-only context for AI and external tools.</span></a>
+      </nav>
+    </div>
+  </main>
+  <SiteFooter />
+</Base>
+
+<style>
+  .production-hero { padding: 72px 0 50px; border-bottom: 1px solid var(--border); }
+  .production-hero h1 { margin: 12px 0 0; font-size: clamp(42px, 7vw, 70px); letter-spacing: -.05em; }
+  .production-hero p:last-child { margin: 14px 0 0; color: var(--text-dim); font-size: 18px; }
+  .production-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 52px; padding-block: 48px 84px; }
+  .production-toc { align-self: start; position: sticky; top: 22px; padding-block: 14px; border-block: 1px solid var(--border); }
+  .production-toc > p { margin: 0 0 9px; color: var(--text-faint); font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .production-toc nav { display: grid; gap: 2px; }
+  .production-toc a { padding: 7px 8px; color: var(--text-dim); font-size: 13px; }
+  .production-toc a:hover { color: var(--text); background: var(--panel); }
+  .production-content { min-width: 0; }
+  section { scroll-margin-top: 24px; }
+  section + section { margin-top: 68px; padding-top: 60px; border-top: 1px solid var(--border); }
+  .section-label { margin: 0; color: var(--accent); font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .09em; }
+  h2 { max-width: 22ch; margin: 8px 0 16px; font-size: clamp(27px, 4vw, 38px); line-height: 1.12; letter-spacing: -.025em; }
+  section > p:not(.section-label, .related) { max-width: 72ch; color: var(--text-dim); }
+  code { font-family: var(--mono); font-size: .9em; color: var(--text); }
+  .table-wrap { margin-top: 22px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 11px 13px; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+  thead th { border-top: 0; background: var(--code-bg); color: var(--text); }
+  tbody th { color: var(--text); }
+  tbody td { color: var(--text-dim); }
+  th + th, th + td, td + td { border-left: 1px solid var(--border); }
+  .code-card { width: 100%; margin-top: 22px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); }
+  .code-card :global(pre) { margin: 0; padding: 20px 22px; }
+  .related { margin-top: 14px; }
+  .related a, .related-pages strong { color: var(--accent); }
+  .related-pages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 68px; padding-top: 32px; border-top: 1px solid var(--border); }
+  .related-pages a { display: grid; gap: 5px; padding: 17px 18px; border: 1px solid var(--border); background: var(--panel); }
+  .related-pages span { color: var(--text-dim); font-size: 13px; }
+  @media (max-width: 760px) {
+    .production-layout { grid-template-columns: 1fr; gap: 20px; }
+    .production-toc { position: static; }
+    .related-pages { grid-template-columns: 1fr; }
+  }
+</style>

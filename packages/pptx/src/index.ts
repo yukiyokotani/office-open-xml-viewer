@@ -1,5 +1,13 @@
 export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
 export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
+export type { PptxCommentsOptions } from './comment-margin';
+export type {
+  ViewerCommentConnectorOptions,
+  ViewerCommentConnectorRoute,
+  ViewerCommentConnectorStroke,
+  ViewerCommentMessageContext,
+  ViewerCommentThreadContext,
+} from '@silurus/ooxml-core';
 export {
   PptxPresentation,
   type LoadOptions,
@@ -19,10 +27,12 @@ export {
   readPptxTextSelectionContext,
   type PptxSelectionRunLocator,
   type PptxTextSelectionContext,
+  type PptxCommentSelectionContext,
 } from './selection-context';
 export {
   type PptxElementContextOptions,
   type PptxElementContext,
+  type PptxElementBounds,
   type PptxSelectionContext,
   type PptxSelectionContextOptions,
   type PptxSlidePoint,
@@ -155,6 +165,8 @@ export type {
   // Reachable via Slide.comments — exported so consumers reading legacy slide
   // comments have a name for the element type.
   PptxComment,
+  PptxCommentAnchor,
+  PptxCommentReply,
   SlideElement,
   ShapeElement,
   PictureElement,

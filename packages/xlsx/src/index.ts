@@ -10,10 +10,16 @@ export type {
   XlsxViewerOptions,
   XlsxSheetViewerOptions,
   XlsxViewportOffset,
+  XlsxCellViewportRect,
   XlsxScrollToCellOptions,
   HiddenSheetMode,
   XlsxCopyResult,
 } from './viewer.js';
+export type { XlsxCommentsOptions } from './comment-card.js';
+export type {
+  ViewerCommentMessageContext,
+  ViewerCommentThreadContext,
+} from '@silurus/ooxml-core';
 export type {
   CellAddress,
   XlsxSelectionArea,
@@ -187,6 +193,7 @@ export type {
   Hyperlink,
   // Cell comments / notes (reachable via Worksheet.comments).
   XlsxComment,
+  XlsxCommentReply,
   // Data validation rules (reachable via Worksheet.dataValidations).
   DataValidation,
   // Excel tables (reachable via Worksheet.tables).

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XlsxSheetViewer } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
 import type { OoxmlResourceMetrics } from '@silurus/ooxml-core';
-import type { Worksheet } from './types.js';
+import type { Worksheet, XlsxComment } from './types.js';
 import {
   installDom,
   makeContainer,
@@ -896,6 +896,48 @@ describe('XlsxSheetViewer canvas mount', () => {
     viewer.destroy();
   });
 
+  it('includes an authored comment when its cell is selected', () => {
+    installDom();
+    const parent = makeContainer();
+    const canvas = makeEl('canvas');
+    parent.appendChild(canvas);
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as { engine: {
+      currentWorksheet: Worksheet;
+      sourceCommentMap: Map<string, XlsxComment>;
+    } }).engine;
+    const comment = {
+      kind: 'thread' as const,
+      id: 'root',
+      cellRef: 'A1',
+      author: 'Ada',
+      rootText: 'Review this',
+      text: 'Review this\nDone',
+      replies: [{
+        id: 'reply', parentId: 'root', personId: 'person', author: 'Linus', text: 'Done',
+      }],
+    };
+    engine.currentWorksheet = {
+      ...worksheet('Comments'),
+      comments: [comment],
+      rows: [{ index: 1, cells: [{ row: 1, col: 1, value: { type: 'empty' } }] }],
+    } as unknown as Worksheet;
+    engine.sourceCommentMap = new Map([['1:1', comment]]);
+    viewer.setSelection('A1');
+
+    const context = viewer.getSelectionContext();
+    expect(context?.kind).toBe('range');
+    if (!context || context.kind !== 'range') throw new Error('Expected range context');
+    expect(context.cells[0]).toMatchObject({
+      address: { row: 1, col: 1 },
+      comment: {
+        root: { id: 'root', author: 'Ada', text: 'Review this' },
+        replies: [{ id: 'reply', author: 'Linus', text: 'Done' }],
+      },
+    });
+    viewer.destroy();
+  });
+
   it('preserves the published 1 MiB default text budget for direct range queries', () => {
     installDom();
     const parent = makeContainer();
@@ -1078,7 +1120,9 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(viewerStyle?.textContent).toContain(
       '[data-xlsx-viewport-input]:focus{outline:none}',
     );
-    expect(viewerStyle?.textContent).not.toContain(':focus-visible');
+    expect(viewerStyle?.textContent).toContain(
+      '[data-xlsx-viewport-input]:focus-visible{outline:2px solid var(--ooxml-xlsx-focus-ring,#2563eb);outline-offset:-2px}',
+    );
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
     const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;
     viewportInput.dispatch('pointerdown', {
@@ -1340,6 +1384,7 @@ describe('XlsxSheetViewer canvas mount', () => {
     await expect(viewer.prevSheet()).rejects.toThrow(closed);
     await expect(viewer.setViewportOffset({ x: 0, y: 0 })).rejects.toThrow(closed);
     await expect(viewer.scrollToCell('A1')).rejects.toThrow(closed);
+    await expect(viewer.goToComment(0, 'A1')).rejects.toThrow(closed);
     await expect(viewer.relayout()).rejects.toThrow(closed);
     await expect(viewer.setHiddenSheetMode('show')).rejects.toThrow(closed);
     await expect(viewer.findText('x')).rejects.toThrow(closed);

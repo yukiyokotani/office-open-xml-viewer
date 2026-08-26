@@ -234,9 +234,9 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       </p>
       <div class="actions">
         <a class="button" href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">Open the VS Code extension ↗</a>
-        <a href="/xlsx">XLSX API reference →</a>
-        <a href="/docx">DOCX API reference →</a>
-        <a href="/pptx">PPTX API reference →</a>
+        <a href="/api/xlsx">XLSX API reference →</a>
+        <a href="/api/docx">DOCX API reference →</a>
+        <a href="/api/pptx">PPTX API reference →</a>
       </div>
     </section>
 
@@ -316,7 +316,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       activeFormat = format;
       latestContext = null;
       for (const button of formatButtons) {
-        button.setAttribute('aria-selected', String(button.dataset.formatTab === format));
+        button.setAttribute('aria-pressed', String(button.dataset.formatTab === format));
       }
       fileLabel.textContent = `sample-1.${format}`;
       actionLabel.textContent = labels[format].action;
@@ -364,7 +364,6 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
             enableElementSelection: true,
             onSelectionContextChange: refresh,
             pageShadow: false,
-            background: '#eef2f7',
           });
           destroyViewer = () => {
             viewer?.destroy();
@@ -389,7 +388,6 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
           enableElementSelection: true,
           onSelectionContextChange: refresh,
           pageShadow: false,
-          background: '#eef2f7',
         });
         destroyViewer = () => {
           viewer?.destroy();
@@ -455,8 +453,11 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
   .context-demo-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
   .context-demo-toolbar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); font: 12px var(--mono); white-space: nowrap; }
   .context-demo-toolbar .context-demo-action { flex: 0 0 auto; color: var(--accent); font-weight: 700; }
-  .context-demo-canvas { width: 100%; height: 460px; background: #fff; }
-  .context-demo-canvas > p { display: grid; min-height: 100%; margin: 0; place-items: center; color: #526174; font: 12px var(--mono); }
+  .context-demo-canvas {
+    width: 100%; height: 460px;
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+  }
+  .context-demo-canvas > p { display: grid; min-height: 100%; margin: 0; place-items: center; color: var(--preview-text-dim); font: 12px var(--mono); }
   .context-demo-output-panel { min-width: 0; height: 504px; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid var(--border); background: var(--bg-elev); }
   .context-demo-output-head { padding: 18px; border-bottom: 1px solid var(--border); }
   .context-demo-output-head h3 { margin: 10px 0 0; font-size: 21px; }

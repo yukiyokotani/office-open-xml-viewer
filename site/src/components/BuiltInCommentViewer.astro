@@ -1,0 +1,230 @@
+---
+type DemoFormat = 'docx' | 'xlsx' | 'pptx';
+interface Props {
+  formats?: DemoFormat[];
+}
+const formats = Astro.props.formats ?? ['docx', 'xlsx', 'pptx'];
+const initialFormat = formats[0] ?? 'docx';
+const demoId = `built-in-comment-${formats.join('-')}`;
+---
+
+<div
+  class="built-in-comment-demo"
+  data-built-in-comment-demo
+  data-initial-format={initialFormat}
+>
+  <div
+    class="built-in-comment-demo__tabs"
+    role={formats.length > 1 ? 'tablist' : undefined}
+    aria-label={formats.length > 1 ? 'Comment UI demo format' : `${initialFormat.toUpperCase()} comment demo`}
+  >
+    {formats.length === 1 && (
+      <strong class="built-in-comment-demo__kind">{initialFormat.toUpperCase()} ScrollViewer</strong>
+    )}
+    {formats.length > 1 && formats.map((format, index) => (
+      <button
+        type="button"
+        role="tab"
+        id={`${demoId}-tab-${format}`}
+        aria-controls={`${demoId}-panel`}
+        aria-selected={String(index === 0)}
+        tabindex={index === 0 ? 0 : -1}
+        data-comment-demo-format={format}
+      >{format.toUpperCase()}</button>
+    ))}
+    <span class="built-in-comment-demo__file" data-built-in-comment-file>
+      sample-1.{initialFormat}
+    </span>
+  </div>
+  <div class="built-in-comment-demo__stage">
+    <p class="built-in-comment-demo__status" data-built-in-comment-status>Loading sample-1.{initialFormat}…</p>
+    <div
+      class="built-in-comment-demo__viewer"
+      id={`${demoId}-panel`}
+      data-built-in-comment-viewer
+      role="tabpanel"
+      aria-labelledby={`${demoId}-tab-${initialFormat}`}
+      aria-label={`${initialFormat.toUpperCase()} with the built-in read-only comment UI`}
+    ></div>
+  </div>
+  <p class="built-in-comment-demo__hint" data-built-in-comment-hint>
+    Comments appear beside the second page.
+  </p>
+</div>
+
+<script>
+  import { DocxScrollViewer } from '@silurus/ooxml-docx';
+  import { PptxScrollViewer } from '@silurus/ooxml-pptx';
+  import { XlsxViewer } from '@silurus/ooxml-xlsx';
+
+  type DemoFormat = 'docx' | 'xlsx' | 'pptx';
+  type Viewer = DocxScrollViewer | PptxScrollViewer | XlsxViewer;
+
+  const base = import.meta.env.BASE_URL;
+  const samples: Record<DemoFormat, string> = {
+    docx: 'sample-1.docx',
+    xlsx: 'sample-1.xlsx',
+    pptx: 'sample-1.pptx',
+  };
+  const sampleUrl = (format: DemoFormat) =>
+    `${base}samples/${samples[format]}`.replace(/([^:])\/\/+/g, '$1/');
+  const hints: Record<DemoFormat, string> = {
+    docx: 'Comments appear beside the second page.',
+    pptx: 'The marker and comment card appear on the first slide.',
+    xlsx: 'Hover the red corner on B18 to open the comment thread.',
+  };
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-built-in-comment-demo]')) {
+    if (root.dataset.mounted === '1') continue;
+    root.dataset.mounted = '1';
+    const host = root.querySelector<HTMLElement>('[data-built-in-comment-viewer]') as HTMLElement;
+    const status = root.querySelector<HTMLElement>('[data-built-in-comment-status]') as HTMLElement;
+    const hint = root.querySelector<HTMLElement>('[data-built-in-comment-hint]') as HTMLElement;
+    const file = root.querySelector<HTMLElement>('[data-built-in-comment-file]') as HTMLElement;
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-comment-demo-format]')];
+    let viewer: Viewer | null = null;
+    let generation = 0;
+
+    const destroy = () => {
+      generation += 1;
+      viewer?.destroy();
+      viewer = null;
+      host.replaceChildren();
+    };
+
+    const show = async (format: DemoFormat) => {
+      destroy();
+      const request = generation;
+      tabs.forEach((tab) => tab.setAttribute(
+        'aria-selected',
+        String(tab.dataset.commentDemoFormat === format),
+      ));
+      tabs.forEach((tab) => {
+        const selected = tab.dataset.commentDemoFormat === format;
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected) host.setAttribute('aria-labelledby', tab.id);
+      });
+      file.textContent = samples[format];
+      hint.textContent = hints[format];
+      host.setAttribute('aria-label', `${format.toUpperCase()} with the built-in read-only comment UI`);
+      status.hidden = false;
+      status.textContent = `Loading ${samples[format]}…`;
+
+      try {
+        if (format === 'docx') {
+          const next = new DocxScrollViewer(host, { comments: true, useGoogleFonts: true });
+          viewer = next;
+          await next.load(sampleUrl(format));
+          if (request !== generation) return;
+          next.scrollToPage(1);
+        } else if (format === 'pptx') {
+          const next = new PptxScrollViewer(host, { comments: true, useGoogleFonts: true });
+          viewer = next;
+          await next.load(sampleUrl(format));
+          if (request !== generation) return;
+          next.scrollToSlide(0);
+        } else {
+          const next = new XlsxViewer(host, { comments: true });
+          viewer = next;
+          await next.load(sampleUrl(format));
+          if (request !== generation) return;
+          await next.scrollToCell('B18', { block: 'center', inline: 'center' });
+          next.setSelection('B18');
+        }
+        if (request === generation) status.hidden = true;
+      } catch (error: unknown) {
+        if (request !== generation) return;
+        status.textContent = error instanceof Error ? error.message : 'Unable to load the sample.';
+      }
+    };
+
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+      const format = tab.dataset.commentDemoFormat as DemoFormat | undefined;
+      if (format) void show(format);
+    }));
+    tabs.forEach((tab, index) => tab.addEventListener('keydown', (event) => {
+      let next = index;
+      if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next]?.focus();
+      tabs[next]?.click();
+    }));
+    const initial = root.dataset.initialFormat as DemoFormat | undefined;
+    void show(initial ?? 'docx');
+    window.addEventListener('pagehide', destroy, { once: true });
+    document.addEventListener('astro:before-swap', destroy, { once: true });
+  }
+</script>
+
+<style>
+  .built-in-comment-demo {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: radial-gradient(120% 80% at 50% 0%, var(--preview-top), var(--preview-bottom) 70%);
+  }
+  .built-in-comment-demo__tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 48px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  }
+  .built-in-comment-demo__tabs button {
+    min-width: 68px;
+    padding: 7px 12px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: var(--text-dim);
+    background: transparent;
+    font: 650 11px/1 var(--mono);
+    cursor: pointer;
+  }
+  .built-in-comment-demo__tabs button:hover { color: var(--text); background: var(--panel); }
+  .built-in-comment-demo__tabs button[aria-selected='true'] {
+    border-color: var(--border-bright);
+    color: var(--text);
+    background: var(--panel);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+  }
+  .built-in-comment-demo__kind {
+    color: var(--text-dim);
+    font: 650 11px/1 var(--mono);
+  }
+  .built-in-comment-demo__file {
+    margin-left: auto;
+    color: var(--text-faint);
+    font: 500 11px/1 var(--mono);
+  }
+  .built-in-comment-demo__stage {
+    position: relative;
+    height: clamp(520px, 76vh, 720px);
+  }
+  .built-in-comment-demo__viewer { height: 100%; }
+  .built-in-comment-demo__status {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    color: var(--text-dim);
+    background: var(--bg);
+    font: 500 12px/1.5 var(--mono);
+  }
+  .built-in-comment-demo__status[hidden] { display: none; }
+  .built-in-comment-demo__hint {
+    margin: 0;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+    font: 500 11px/1.5 var(--mono);
+  }
+</style>

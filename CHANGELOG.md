@@ -5,6 +5,38 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## Unreleased
+
+## 0.82.0 — 2026-08-26
+
+Minor release adding read-only review information across Word, Excel, and
+PowerPoint while keeping application-owned workflows outside the Viewer.
+
+- **built-in comments:** add opt-in DOCX and PPTX comment margins and retain the
+  established XLSX cell-anchored presentation. Cards, markers, resolved-thread
+  filtering, author colors, zoom, RTL placement, and keyboard access share one
+  cross-format interaction model.
+- **application-owned comment UI:** expose format-scoped comment retrieval,
+  target geometry, selection context, and `goToComment()` navigation for DOCX
+  pages, XLSX sheets, and PPTX slides. Applications can build independent
+  lists or fully custom overlays without adopting the built-in cards.
+- **Word tracked changes:** retain body-story insertion, deletion, and move
+  records as detached data while rendering the accepted final state. Tracked
+  changes remain separate from comments and have no built-in markup UI.
+- **integration boundary:** keep comment parsers, models, and primitive APIs in
+  the base format entries while loading the built-in DOM presentation only when
+  needed. Stable classes and CSS custom properties cover ordinary visual
+  customization; custom structure remains application-owned.
+- **viewer composition:** share the focused main/worker paint boundary between
+  the single-canvas and virtualized DOCX/PPTX viewers, preserving the primitive
+  Viewer foundation for custom scroll or presentation shells.
+- **performance and reliability:** cache virtual-scroll geometry, bound sparse
+  DOCX anchor resolution, deduplicate PPTX target queries, and make asynchronous
+  XLSX/PPTX comment navigation fail closed and latest-request-wins.
+- **documentation:** publish live built-in and custom-list examples for all
+  three formats, symmetric review-data API guidance, and current production
+  bundle measurements.
+
 ## 0.81.0 — 2026-08-25
 
 Minor release expanding Microsoft ChartEx support and improving chart fidelity

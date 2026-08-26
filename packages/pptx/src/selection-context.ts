@@ -1,5 +1,9 @@
-import type { TextSelectionContextOptions } from '@silurus/ooxml-core';
-import type { SlideElementOrigin } from './types.js';
+import type {
+  TextSelectionContextOptions,
+  ViewerCommentThreadContext,
+} from '@silurus/ooxml-core';
+import { boundedViewerCommentThreadContext } from '@silurus/ooxml-core/internal/comment-context';
+import type { PptxComment, SlideElementOrigin } from './types.js';
 import { readBoundedNativeTextSelection } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 
 /** Snapshot-local locator for a rendered run intersecting a PPTX text selection. */
@@ -23,6 +27,64 @@ export interface PptxTextSelectionContext {
   readonly textCharacters: number;
   readonly maxTextCharacters: number;
   readonly maxRunLocators: number;
+}
+
+/** Detached selected slide-comment thread for read-only AI/MCP handoff. */
+export interface PptxCommentSelectionContext {
+  readonly format: 'pptx';
+  readonly kind: 'comment';
+  readonly slideIndex: number;
+  readonly commentIndex: number;
+  readonly occurrenceId: string;
+  readonly commentId?: string;
+  readonly point?: Readonly<{ x: number; y: number }>;
+  readonly thread: ViewerCommentThreadContext;
+  readonly truncated: boolean;
+  readonly truncationReasons: readonly ('text')[];
+  readonly textCharacters: number;
+  readonly maxTextCharacters: number;
+}
+
+export function createPptxCommentSelectionContext(
+  comment: Readonly<PptxComment>,
+  slideIndex: number,
+  commentIndex: number,
+  occurrenceId: string,
+  options: TextSelectionContextOptions = {},
+): PptxCommentSelectionContext {
+  const bounded = boundedViewerCommentThreadContext(
+    {
+      id: comment.id,
+      author: comment.author,
+      date: comment.date,
+      text: comment.text,
+      status: comment.status ?? 'active',
+    },
+    (comment.replies ?? []).map((reply) => ({
+      id: reply.id,
+      author: reply.author,
+      date: reply.date,
+      text: reply.text,
+      status: reply.status ?? 'active',
+    })),
+    options.maxTextCharacters,
+  );
+  return Object.freeze({
+    format: 'pptx',
+    kind: 'comment',
+    slideIndex,
+    commentIndex,
+    occurrenceId,
+    ...(comment.id ? { commentId: comment.id } : {}),
+    ...(Number.isFinite(comment.x) && Number.isFinite(comment.y)
+      ? { point: Object.freeze({ x: comment.x as number, y: comment.y as number }) }
+      : {}),
+    thread: bounded.thread,
+    truncated: bounded.truncated,
+    truncationReasons: bounded.truncated ? ['text'] as const : [],
+    textCharacters: bounded.textCharacters,
+    maxTextCharacters: bounded.maxTextCharacters,
+  });
 }
 
 function nonNegativeInteger(value: string | undefined): number | null {

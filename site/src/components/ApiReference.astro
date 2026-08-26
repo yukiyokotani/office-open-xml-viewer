@@ -1,5 +1,5 @@
 ---
-import { apiReference, formatRenderModeGuidance, optionalChartRenderers } from '../lib/api-reference';
+import { apiReference } from '../lib/api-reference';
 import InlineApiDescription from './InlineApiDescription.astro';
 interface Props {
   format: 'docx' | 'xlsx' | 'pptx';
@@ -12,157 +12,22 @@ const groupedClasses = classes.map((apiClass) => ({
   properties: (apiClass.options ?? []).filter((option) => !isEventHandler(option.name)),
   eventHandlers: (apiClass.options ?? []).filter((option) => isEventHandler(option.name)),
 }));
-const borrowedEngine = {
-  docx: { className: 'DocxDocument', factory: 'fromDocument()' },
-  pptx: { className: 'PptxPresentation', factory: 'fromPresentation()' },
-  xlsx: { className: 'XlsxWorkbook', factory: 'fromWorkbook()' },
-}[format];
-const viewerName = { docx: 'DocxViewer', xlsx: 'XlsxViewer', pptx: 'PptxViewer' }[format];
-const viewerTarget = format === 'xlsx' ? 'container' : 'canvas';
-const formatModeNote = formatRenderModeGuidance[format];
-const rendererExample = `import { ${viewerName} } from '@silurus/ooxml/${format}';
-import { threeD } from '@silurus/ooxml/three-d';
-import { regionMap } from '@silurus/ooxml/region-map';
-import { chartEx } from '@silurus/ooxml/chart-ex';
-
-const viewer = new ${viewerName}(${viewerTarget}, {
-  mode: 'worker',
-  threeD,
-  regionMap,
-  chartEx,
-});`;
+const classAnchor = (name: string): string => name
+  .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+  .toLowerCase();
 ---
-<section class="api" data-reveal>
-  <p class="api-badge">API reference</p>
-  <h3 class="api-title">Options &amp; methods</h3>
+<section id="api-reference" class="api" data-reveal>
+  <h2 class="api-title">Options &amp; methods</h2>
   <p class="api-desc">
-    Every public option and method, straight from the source. Types omitted for brevity are exported
-    from the package — your editor will autocomplete the rest.
+    Public options and methods. Types omitted for brevity are exported from the package.
+  </p>
+  <p class="api-related-guide">
+    Building selection-aware UI or an AI handoff? <a href="/selection-context">Read the selection context guide →</a>
   </p>
 
-  <div class="api-ownership">
-    <h4>Choose a rendering mode</h4>
-    <p>
-      Both modes parse the Office package in a Worker. The difference is where document layout and
-      Canvas rendering run. Start with <code>main</code>; choose <code>worker</code> when rendering
-      noticeably competes with the rest of your application UI.
-    </p>
-    <div class="api-mode-table-wrap">
-      <table class="api-mode-table">
-        <thead>
-          <tr><th>Decision</th><th><code>mode: 'main'</code> (default)</th><th><code>mode: 'worker'</code></th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th>Best for</th>
-            <td>Ordinary previews, smaller files, custom renderers and the smallest worker download.</td>
-            <td>Larger or more complex documents where rendering can interrupt scrolling, navigation or other UI.</td>
-          </tr>
-          <tr>
-            <th>Rendering</th>
-            <td>Layout and Canvas paint run on the main thread.</td>
-            <td>Layout and Canvas paint run in a Web Worker; the Viewer presents the returned frame.</td>
-          </tr>
-          <tr>
-            <th>Trade-offs</th>
-            <td>No frame-transfer overhead, but heavy rendering can occupy the UI thread.</td>
-            <td>Requires Worker + OffscreenCanvas, downloads a larger worker and transfers one bitmap per frame.</td>
-          </tr>
-          <tr>
-            <th>Equations and advanced charts</th>
-            <td>Built-in and custom renderer objects.</td>
-            <td>Built-in math, ChartEx, 3-D and Region Map renderers; arbitrary custom renderer objects cannot be transferred.</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <p>{formatModeNote}</p>
-
-    <h4>Load once for one Viewer or share one document</h4>
-    <p>
-      <strong>For most applications:</strong> construct one Viewer and call <code>viewer.load(source)</code>.
-      Use this when the Viewer is the only place displaying the document. It can replace the current
-      file with another <code>load()</code> call and releases the loaded engine during teardown.
-    </p>
-    <p>
-      <strong>When several views need the same document:</strong> load <code>{borrowedEngine.className}</code>
-      once, then create each view with <code>{borrowedEngine.factory}</code>. This avoids parsing the same
-      source again. Those Viewers cannot replace the file with <code>viewer.load()</code>; after every view
-      is destroyed, your application must destroy the shared engine.
-    </p>
-    <div class="api-mode-table-wrap">
-      <table class="api-mode-table">
-        <thead>
-          <tr><th>Use this when</th><th>Setup</th><th>Cleanup</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th>One Viewer displays the document</th>
-            <td>Pass <code>mode</code> to the Viewer, then call <code>load(source)</code>.</td>
-            <td>Destroy the Viewer; it also destroys its engine.</td>
-          </tr>
-          <tr>
-            <th>Several views share one parsed document</th>
-            <td><code>{borrowedEngine.className}.load(source, {'{'} mode: 'worker' {'}'})</code>, then <code>{borrowedEngine.factory}</code>.</td>
-            <td>Destroy every View first, then destroy the shared engine.</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <p>
-      On the shared-engine path, the engine's mode is authoritative: <code>{borrowedEngine.factory}</code>
-      deliberately does not accept a mode and cannot switch an already-loaded engine.
-    </p>
-  </div>
-
-  <div class="api-errors">
-    <h4>Error handling</h4>
-    <p>
-      Typed container, resource-limit and decoded-image failures expose stable fields. Other failures
-      remain ordinary JavaScript errors. The callback and Promise delivery rules are part of the public contract.
-    </p>
-    <a class="api-detail-link" href="/errors">Open the error reference →</a>
-  </div>
-
-  <div class="api-selection">
-    <h4>Selection context for AI and external tools</h4>
-    <p>
-      Viewer selection remains read-only UI state. <code>getSelectionContext()</code> turns the
-      current focus into a detached, resource-bounded snapshot; every format can notify you through
-      <code>onSelectionContextChange</code> when that snapshot may have changed.
-    </p>
-    <a class="api-detail-link" href="/selection-context">Open the selection &amp; AI guide →</a>
-  </div>
-
-  <div id="chart-rendering-addons" class="api-addons">
-    <h4>ChartEx, 3-D charts and Region Maps</h4>
-    <p>
-      Import these capabilities from their separate package entries when a document needs them.
-      The same exports work with DOCX, XLSX and PPTX in both render modes. Classic 2-D charts need no
-      add-on. If omitted, ChartEx and Region Maps are not drawn, while authored 3-D charts use the
-      canonical 2-D fallback.
-    </p>
-    <pre><code>{rendererExample}</code></pre>
-    <div class="api-addon-table-wrap">
-      <table class="api-addon-table">
-        <thead><tr><th>Renderer</th><th>Entry / export</th><th>Contract</th><th>Scope</th></tr></thead>
-        <tbody>
-          {optionalChartRenderers.map((renderer) => (
-            <tr>
-              <th>{renderer.name}</th>
-              <td><code>{renderer.entry}</code><br /><code>{renderer.exportName}</code></td>
-              <td><code>{renderer.contract}</code></td>
-              <td>{renderer.desc}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </div>
-
   {groupedClasses.map((c) => (
-    <div class="api-class">
-      <h4 class="api-class-name">{c.name}</h4>
+    <div id={classAnchor(c.name)} class="api-class">
+      <h3 class="api-class-name">{c.name}</h3>
       {c.note && <p class="api-note">{c.note}</p>}
       <pre class="api-ctor"><code>{c.ctor}</code></pre>
 
@@ -247,39 +112,11 @@ const viewer = new ${viewerName}(${viewerTarget}, {
 </section>
 
 <style>
-  .api { padding: 40px 0 8px; border-top: 1px solid var(--border); }
-  .api-badge {
-    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
-    text-transform: uppercase; color: var(--accent); margin: 0;
-  }
-  .api-title { font-size: 24px; font-weight: 700; margin: 8px 0 8px; }
+  .api { padding: 0 0 8px; }
+  .api-title { font-size: 24px; font-weight: 700; margin: 0 0 8px; }
   .api-desc { color: var(--text-dim); font-size: 16px; max-width: 70ch; margin: 0 0 8px; }
-
-  .api-ownership { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
-  .api-ownership h4 { margin: 0; font-size: 19px; }
-  .api-ownership p { max-width: 92ch; margin: 10px 0 0; color: var(--text-dim); font-size: 14.5px; }
-  .api-ownership code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
-  .api-mode-table-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
-  .api-mode-table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13.5px; }
-  .api-mode-table th, .api-mode-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
-  .api-mode-table thead th { border-top: 0; background: var(--code-bg); color: var(--text); font-weight: 700; }
-  .api-mode-table tbody th { width: 150px; color: var(--text); white-space: nowrap; }
-  .api-mode-table td { color: var(--text-dim); }
-  .api-mode-table th + th, .api-mode-table th + td, .api-mode-table td + td { border-left: 1px solid var(--border); }
-
-  .api-errors, .api-selection, .api-addons { margin-top: 30px; padding: 26px 28px 28px; border: 1px solid var(--border); background: var(--bg-elev); }
-  .api-errors h4, .api-selection h4, .api-addons h4 { margin: 0; font-size: 19px; }
-  .api-errors > p, .api-selection > p, .api-addons > p { max-width: 92ch; margin: 10px 0 14px; color: var(--text-dim); font-size: 14.5px; }
-  .api-selection code, .api-addons code { font-family: var(--mono); font-size: .9em; color: var(--text); }
-  .api-addons > pre { margin: 14px 0; padding: 16px 18px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); }
-  .api-addons > pre code { white-space: pre; color: var(--code-keyword); }
-  .api-addon-table-wrap { margin: 14px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
-  .api-addon-table { width: 100%; min-width: 820px; border-collapse: collapse; font-size: 13.5px; }
-  .api-addon-table th, .api-addon-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
-  .api-addon-table thead th { border-top: 0; background: var(--code-bg); color: var(--text); }
-  .api-addon-table tbody th { color: var(--text); white-space: nowrap; }
-  .api-addon-table td { color: var(--text-dim); }
-  .api-addon-table th + th, .api-addon-table th + td, .api-addon-table td + td { border-left: 1px solid var(--border); }
+  .api-related-guide { margin: 10px 0 0; color: var(--text-dim); font-size: 14px; }
+  .api-related-guide a { color: var(--accent); font-weight: 700; }
   .api-detail-link { color: var(--accent); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 
   .api-class { margin-top: 30px; }

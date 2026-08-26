@@ -50,8 +50,20 @@ export interface PptxElementContext {
   readonly maxTextCharacters: number;
 }
 
+/** Geometry resolved from a DrawingML element id. Used by modern-comment
+ * anchors and available to primitive-UI consumers without exposing the mutable
+ * slide model. */
+export interface PptxElementBounds {
+  readonly elementId: string;
+  readonly elementIndex: number;
+  readonly origin: SlideElementOrigin | 'unknown';
+  readonly elementType: SlideElement['type'];
+  readonly bounds: PptxElementContext['bounds'];
+}
+
 export type PptxSelectionContext =
   | import('./selection-context.js').PptxTextSelectionContext
+  | import('./selection-context.js').PptxCommentSelectionContext
   | PptxElementContext;
 
 export const MAX_ELEMENT_TEXT_CHARACTERS = 65_536;
@@ -261,4 +273,50 @@ export function hitTestPptxSlideContext(
     };
   }
   return null;
+}
+
+export function findPptxElementBoundsByIds(
+  slide: Slide,
+  elementIds: readonly string[],
+): readonly PptxElementBounds[] {
+  const requested = new Set(elementIds.filter((id) => id.length > 0));
+  if (requested.size === 0) return Object.freeze([]);
+  const found = new Map<string, PptxElementBounds>();
+  for (const [elementIndex, element] of slide.elements.entries()) {
+    const elementId = element.id;
+    if (!elementId || !requested.has(elementId)) continue;
+    const origin = slide.elementSources?.[elementIndex]?.origin ?? 'unknown';
+    const rank = origin === 'slide' ? 3 : origin === 'layout' ? 2 : origin === 'master' ? 1 : 0;
+    const previous = found.get(elementId);
+    const previousRank = previous?.origin === 'slide'
+      ? 3
+      : previous?.origin === 'layout'
+        ? 2
+        : previous?.origin === 'master'
+          ? 1
+          : 0;
+    // Drawing ids are scoped to a slide part. Master/layout decorations may
+    // reuse the same numeric id after their models are composed into the slide;
+    // the comment's slide moniker therefore resolves the slide-authored element.
+    if (previous && previousRank > rank) continue;
+    found.set(elementId, Object.freeze({
+      elementId,
+      elementIndex,
+      origin,
+      elementType: element.type,
+      bounds: Object.freeze({
+        x: element.x,
+        y: element.y,
+        width: element.width,
+        height: element.height,
+        rotation: element.rotation,
+        flipH: element.flipH,
+        flipV: element.flipV,
+      }),
+    }));
+  }
+  return Object.freeze(elementIds.flatMap((id) => {
+    const bounds = found.get(id);
+    return bounds ? [bounds] : [];
+  }));
 }

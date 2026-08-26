@@ -62,9 +62,11 @@ import type {
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 import {
+  findPptxElementBoundsByIds,
   hitTestPptxSlideContext,
   type PptxElementContextOptions,
   type PptxElementContext,
+  type PptxElementBounds,
   type PptxSlidePoint,
 } from './element-selection';
 
@@ -444,6 +446,17 @@ export class PptxPresentation {
       : null;
   }
 
+  /** Read-only slide comments in authored order. Classic and modern comments
+   * share this compact mode-independent projection; modern replies remain
+   * nested under their root. Use it for fully custom UI, or opt into the
+   * ScrollViewer's marker-and-card view. Returns `[]` for an invalid or
+   * comment-free slide. */
+  getComments(slideIndex: number): readonly Readonly<PptxComment>[] {
+    return Number.isInteger(slideIndex)
+      ? (this._preflight?.slides[slideIndex]?.comments ?? [])
+      : [];
+  }
+
   /**
    * Whether the slide at `slideIndex` (0-based, absolute) is marked hidden
    * (`<p:sld show="0">`, ECMA-376 §19.3.1.38). Like {@link getNotes} the index
@@ -658,6 +671,38 @@ export class PptxPresentation {
       if (!this._slides) throw new Error('Presentation not loaded');
       return await this._slides.withSlide(slideIndex, (slide) =>
         hitTestPptxSlideContext(slideIndex, slide, point, options));
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /** Resolve DrawingML element ids to immutable slide geometry in one lazy
+   * slide read. Modern-comment UIs use this to honor authored anchors; custom
+   * UIs can use the same primitive without receiving the full slide model. */
+  async getElementBoundsByIds(
+    slideIndex: number,
+    elementIds: readonly string[],
+  ): Promise<readonly PptxElementBounds[]> {
+    this._assertResourceHealthy();
+    if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= this.slideCount) {
+      throw new Error(`Slide index ${slideIndex} out of range (count: ${this.slideCount})`);
+    }
+    const ids = Object.freeze(elementIds.filter((id) => typeof id === 'string' && id.length > 0));
+    if (ids.length === 0) return Object.freeze([]);
+    try {
+      if (this._mode === 'worker') {
+        const response = await this._bridge.request(
+          (id) => ({
+            kind: 'resolveElementBounds', id, slideIndex, elementIds: ids,
+          }) satisfies RenderWorkerRequest,
+        );
+        return (response as Extract<RenderWorkerResponse, {
+          kind: 'elementBoundsResolved';
+        }>).bounds;
+      }
+      if (!this._slides) throw new Error('Presentation not loaded');
+      return await this._slides.withSlide(slideIndex, (slide) =>
+        findPptxElementBoundsByIds(slide, ids));
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }

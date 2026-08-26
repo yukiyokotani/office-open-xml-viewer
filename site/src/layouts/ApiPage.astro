@@ -1,0 +1,76 @@
+---
+import Base from './Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import ApiReference from '../components/ApiReference.astro';
+import ChangeHistoryApiGuide from '../components/ChangeHistoryApiGuide.astro';
+import { apiReference } from '../lib/api-reference';
+
+interface Props {
+  format: 'docx' | 'xlsx' | 'pptx';
+  name: string;
+}
+
+const { format, name } = Astro.props;
+const classAnchor = (value: string): string => value
+  .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+  .toLowerCase();
+const entries = apiReference[format];
+---
+
+<Base
+  title={`${name} API reference | @silurus/ooxml`}
+  description={`Options and methods for the @silurus/ooxml ${name} viewers and document model.`}
+  canonicalPath={`/api/${format}/`}
+>
+  <Nav active={format} />
+
+  <header class="api-hero">
+    <div class="wrap">
+      <a class="api-back" href={`/${format}`}>← {name} live examples</a>
+      <p class="api-eyebrow">API reference</p>
+      <h1>{name}</h1>
+      <p>Public options and methods. For rendering modes, model ownership, and optional renderers, see <a href="/production">Production decisions</a>.</p>
+    </div>
+  </header>
+
+  <main class="wrap api-layout">
+    <aside class="api-toc" aria-label={`${name} API contents`}>
+      <p>Contents</p>
+      <nav>
+        {entries.map((entry) => <a href={`#${classAnchor(entry.name)}`}>{entry.name}</a>)}
+        <a href="#review-data">Review data</a>
+      </nav>
+    </aside>
+    <div class="api-content">
+      <ApiReference format={format} />
+      <ChangeHistoryApiGuide format={format} />
+    </div>
+  </main>
+
+  <SiteFooter />
+</Base>
+
+<style>
+  .api-hero { padding: 42px 0 30px; border-bottom: 1px solid var(--border); }
+  .api-back { color: var(--text-faint); font-size: 13px; }
+  .api-eyebrow { margin: 22px 0 0; color: var(--accent); font: 700 12px var(--mono); text-transform: uppercase; letter-spacing: .1em; }
+  .api-hero h1 { margin: 8px 0 0; font-size: clamp(34px, 5vw, 52px); letter-spacing: -.035em; }
+  .api-hero p:last-child { max-width: 74ch; margin: 12px 0 0; color: var(--text-dim); }
+  .api-hero p:last-child a { color: var(--accent); font-weight: 700; }
+  .api-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 42px; padding-block: 34px 56px; }
+  .api-toc { align-self: start; position: sticky; top: 92px; }
+  .api-toc > p { margin: 0 0 10px; color: var(--text-faint); font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .api-toc nav { display: grid; gap: 3px; }
+  .api-toc a { padding: 7px 9px; color: var(--text-dim); font: 13px var(--mono); overflow-wrap: anywhere; }
+  .api-toc a:hover { color: var(--text); background: var(--panel); }
+  .api-content { min-width: 0; }
+  @media (max-width: 820px) {
+    .api-layout { grid-template-columns: 1fr; gap: 16px; }
+    .api-toc { position: static; }
+    .api-toc nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 520px) {
+    .api-toc nav { grid-template-columns: 1fr; }
+  }
+</style>

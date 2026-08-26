@@ -127,11 +127,9 @@ export interface Worksheet {
   /** A1-style cell refs of commented cells (ECMA-376 §18.7.3). Rendered as a
    *  small red triangle in each cell's top-right corner. */
   commentRefs?: string[];
-  /** Full-fidelity comment bodies (cell ref + author + plain text) for every
-   *  `<comment>` in `xl/commentsN.xml` (ECMA-376 §18.7). Parallel to
-   *  {@link commentRefs} (one entry per ref). Consume this to read the note
-   *  text; the renderer uses {@link commentRefs} for the red indicator and the
-   *  viewer surfaces these bodies in an Excel-style hover popup. */
+  /** Classic notes or MS-XLSX threaded comments, including reply metadata.
+   *  Parallel to {@link commentRefs}; the renderer uses the refs for indicators
+   *  and the viewer surfaces these records in its hover popup. */
   comments?: XlsxComment[];
   /** Data-validation rules on this sheet (ECMA-376 §18.3.1.32–33). Exposed for
    *  tooling. The viewer draws a list-dropdown arrow on the active cell when the
@@ -391,22 +389,38 @@ export interface DefinedName {
   formula: string;
 }
 
-/** One cell comment. Sourced from the classic notes file `xl/commentsN.xml`
- *  (ECMA-376 §18.7) when present, otherwise from the Office-365 threaded
- *  comments part `xl/threadedComments/` (MS-XLSX schema
- *  `…/spreadsheetml/2018/threadedcomments`, `personId` resolved via
- *  `xl/persons/`). `text` is the joined plain text — every `<r><t>` run for
- *  classic notes, every reply in the thread (newline-joined) for threaded
- *  comments; rich-text formatting is dropped. 1:1 with the Rust `XlsxComment`
- *  (serde camelCase). */
+/** One cell-attached classic note or threaded-comment root. */
 export interface XlsxComment {
+  /** `note` for ECMA-376 §18.7; `thread` for MS-XLSX §2.3.7. */
+  kind?: 'note' | 'thread';
   /** A1-style cell reference (`@ref` on the comment element). */
   cellRef: string;
-  /** Resolved author name — the `<authors>` entry (classic) or the `<person>`
-   *  `displayName` (threaded). Absent when unresolved. */
+  /** Source GUID: `CT_ThreadedComment@id` for a thread or a namespaced
+   * `comment@uid` when a classic note carries one. */
+  id?: string;
+  /** MS-XLSX `CT_ThreadedComment@personId` for a threaded root. */
+  personId?: string;
   author?: string;
-  /** Concatenated plain text of every run / threaded reply. */
+  /** MS-XLSX `CT_ThreadedComment@dT` for a threaded root. */
+  date?: string;
+  /** Root message only. `text` remains the historical root-plus-replies
+   * newline-flattened value for threaded comments. */
+  rootText?: string;
   text: string;
+  /** MS-XLSX `CT_ThreadedComment@done` for a threaded root. */
+  resolved?: boolean;
+  /** Thread replies in authored document order. Empty for classic notes. */
+  replies?: XlsxCommentReply[];
+}
+
+export interface XlsxCommentReply {
+  id: string;
+  parentId: string;
+  personId: string;
+  author?: string;
+  date?: string;
+  text: string;
+  resolved?: boolean;
 }
 
 /** One `<dataValidation>` rule (ECMA-376 §18.3.1.33). `type` is the constraint
@@ -1094,10 +1108,24 @@ export interface XlsxRenderViewportOptions {
   selectedColRange?: { start: number; end: number; strong: boolean } | null;
 }
 
+/** @internal Resolved host CSS colors for Viewer-owned worksheet chrome. */
+export interface XlsxChromeColors {
+  readonly background?: string;
+  readonly surface?: string;
+  readonly mutedSurface?: string;
+  readonly text?: string;
+  readonly mutedText?: string;
+  readonly border?: string;
+  readonly selectedSurface?: string;
+  readonly accent?: string;
+}
+
 /** Internal renderer options. The workbook owns both the byte source and the
  * frame-local decoded image map, so these fields are not part of its public
  * method contract. */
 export interface RenderViewportOptions extends XlsxRenderViewportOptions {
+  /** @internal Viewer chrome only; never applied to authored worksheet content. */
+  chromeColors?: XlsxChromeColors;
   loadedImages?: Map<string, CanvasImageSource | null>;
   fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
   /** @internal Optional synchronous 3-D chart renderer retained by the workbook. */

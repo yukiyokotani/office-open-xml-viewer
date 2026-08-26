@@ -34,7 +34,7 @@ import type {
   RenderWorkerRequest,
   RenderWorkerResponse,
 } from './worker-protocol';
-import { hitTestPptxSlideContext } from './element-selection';
+import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
 
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (archive) => archive.free(),
@@ -268,6 +268,13 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
       const context = await requireSlides().withSlide(request.slideIndex, (slide) =>
         hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options));
       post({ kind: 'elementHit', id: request.id, context });
+      return;
+    }
+
+    if (request.kind === 'resolveElementBounds') {
+      const bounds = await requireSlides().withSlide(request.slideIndex, (slide) =>
+        findPptxElementBoundsByIds(slide, request.elementIds));
+      post({ kind: 'elementBoundsResolved', id: request.id, bounds });
       return;
     }
 

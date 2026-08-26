@@ -1,4 +1,6 @@
-import type { DocComment, DocNote, RenderPageOptions, WorkerResponse } from './types';
+import type { DocComment, DocNote, DocRevision, RenderPageOptions, WorkerResponse } from './types';
+import type { CommentAnchorRange } from './comments';
+import type { RevisionAnchorRange } from './revisions';
 import type { DocxTextRunInfo } from './renderer';
 import type {
   NormalizedOoxmlResourcePolicy,
@@ -16,6 +18,7 @@ import type { DocxElementContext, DocxPagePoint } from './selection-context';
  *  stays in the worker. */
 export interface DocumentMeta {
   pageCount: number;
+  revisions: DocRevision[];
   comments: DocComment[];
   footnotes: DocNote[];
   endnotes: DocNote[];
@@ -30,6 +33,14 @@ export interface DocumentMeta {
    *  link can resolve its destination page in worker mode without the full model.
    *  Serialized as `[name, pageIndex]` entries (a `Map` can't cross the wire). */
   bookmarkPages: [string, number][];
+  /** ECMA-376 §17.13.4 comment-anchor ranges resolved from every retained
+   *  story. Built worker-side with the same source identities used by rendered
+   *  text runs, so consumers can join anchors to geometry without the full
+   *  model. Absent for metadata produced by an older worker build. */
+  commentAnchorRanges?: CommentAnchorRange[];
+  /** ECMA-376 §17.13.5 revision ranges joined to retained source identities.
+   * Deletions carry a deterministic final-state geometry fallback. */
+  revisionAnchorRanges?: RevisionAnchorRange[];
 }
 
 /** Serializable subset of RenderPageOptions (callbacks cannot cross the wire). */
