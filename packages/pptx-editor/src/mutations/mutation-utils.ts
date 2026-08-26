@@ -1,4 +1,8 @@
-import type { Presentation, TextBody } from '@maxgent/ooxml/pptx';
+import type {
+  Presentation,
+  SlideElement,
+  TextBody,
+} from '@maxgent/ooxml/pptx';
 
 import {
   getElementSources,
@@ -68,10 +72,11 @@ export function resolveMutationTarget(
   return resolved;
 }
 
-export function resolveStableShapePath(
+export function resolveStableElementPath(
   presentation: Presentation,
   mutation: ElementMutation,
   context: MutationCommandContext,
+  expectedType?: SlideElement['type'],
 ): string {
   const slide = presentation.slides.find(
     (candidate) => getSlideMutationId(candidate) === mutation.target.slideId,
@@ -111,12 +116,12 @@ export function resolveStableShapePath(
     );
   }
 
-  if (resolved.element.type !== 'shape') {
+  if (expectedType && resolved.element.type !== expectedType) {
     throw officeCliError(
       'target.unsupportedElement',
       context,
       mutation,
-      `OfficeCLI MVP cannot translate ${resolved.element.type} elements`,
+      `Expected ${expectedType}, got ${resolved.element.type}`,
     );
   }
   if (resolved.source.origin !== ELEMENT_ORIGINS.SLIDE) {
@@ -125,6 +130,15 @@ export function resolveStableShapePath(
       context,
       mutation,
       `Editing ${resolved.source.origin} elements is not supported`,
+    );
+  }
+  const segment = stableElementPathSegment(resolved.element);
+  if (!segment) {
+    throw officeCliError(
+      'target.unsupportedElement',
+      context,
+      mutation,
+      `OfficeCLI cannot address ${resolved.element.type} elements by stable id`,
     );
   }
   if (!resolved.element.id || !/^\d+$/.test(resolved.element.id)) {
@@ -136,7 +150,7 @@ export function resolveStableShapePath(
     );
   }
 
-  return `/slide[${resolved.slideIndex + 1}]/shape[@id=${resolved.element.id}]`;
+  return `/slide[${resolved.slideIndex + 1}]/${segment}[@id=${resolved.element.id}]`;
 }
 
 /** 0-based paragraphIndex → OfficeCLI 1-based `/p[N]` under the stable shape path. */
@@ -159,7 +173,7 @@ export function resolveStableParagraphPath(
       `Invalid paragraphIndex ${paragraphIndex}`,
     );
   }
-  const shapePath = resolveStableShapePath(presentation, mutation, context);
+  const shapePath = resolveStableElementPath(presentation, mutation, context, 'shape');
   const resolved = resolveElementRef(presentation, mutation.target);
   const paragraphCount = paragraphCountOverride ?? (
     resolved?.element.type === 'shape'
@@ -175,6 +189,20 @@ export function resolveStableParagraphPath(
     );
   }
   return `${shapePath}/p[${paragraphIndex + 1}]`;
+}
+
+function stableElementPathSegment(
+  element: SlideElement,
+): 'shape' | 'picture' | 'table' | 'chart' | undefined {
+  switch (element.type) {
+    case 'shape': return 'shape';
+    case 'picture': return 'picture';
+    case 'table': return 'table';
+    case 'chart': return 'chart';
+    // OfficeCLI 1.0.139 addresses video/audio by ordinal (`/video[M]`,
+    // `/audio[M]`) and does not expose a cNvPr `@id` selector.
+    case 'media': return undefined;
+  }
 }
 
 export function resolveStableSlidePath(

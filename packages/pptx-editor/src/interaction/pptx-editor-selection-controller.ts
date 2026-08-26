@@ -4,16 +4,16 @@ import { EDITOR_SELECTION_CHANGE_REASONS } from './constants';
 import { PptxEditorSelectionControllerError } from './errors';
 import {
   clientPointToSlidePoint,
-  hitTestSlideShape,
-  resolveShapeSelection,
+  hitTestSlideElement,
+  resolveElementSelection,
 } from './hit-test';
 import type {
+  PptxEditorElementSelection,
   PptxEditorSelectionChange,
   PptxEditorSelectionControllerOptions,
   PptxEditorSelectionListener,
   PptxEditorSelectionListenerErrorHandler,
   PptxEditorSelectionSnapshot,
-  PptxEditorShapeSelection,
 } from './types';
 
 const DEFAULT_HIT_SLOP_PX = 4;
@@ -26,6 +26,7 @@ export class PptxEditorSelectionController {
   readonly #listeners = new Set<PptxEditorSelectionListener>();
   readonly #unsubscribeSession: () => void;
   #snapshot: PptxEditorSelectionSnapshot = Object.freeze({ selection: null });
+  #unavailableSelectionTarget: ElementRef | undefined;
   #disposed = false;
 
   constructor(options: PptxEditorSelectionControllerOptions) {
@@ -53,7 +54,7 @@ export class PptxEditorSelectionController {
     };
   }
 
-  selectAtClientPoint(clientX: number, clientY: number): PptxEditorShapeSelection | null {
+  selectAtClientPoint(clientX: number, clientY: number): PptxEditorElementSelection | null {
     this.#assertActive();
     const slideIndex = this.#host.slideIndex;
     this.#clearSelectionFromAnotherSlide(slideIndex);
@@ -64,7 +65,7 @@ export class PptxEditorSelectionController {
       { clientX, clientY },
     );
     const selection = point
-      ? hitTestSlideShape(
+      ? hitTestSlideElement(
         presentation,
         slideIndex,
         point,
@@ -84,16 +85,16 @@ export class PptxEditorSelectionController {
     if (current && current.slideIndex !== slideIndex) this.clear();
   }
 
-  select(target: ElementRef): PptxEditorShapeSelection {
+  select(target: ElementRef): PptxEditorElementSelection {
     this.#assertActive();
-    const selection = resolveShapeSelection(
+    const selection = resolveElementSelection(
       this.#session.getSnapshot().presentation,
       target,
     );
     if (!selection) {
       throw new PptxEditorSelectionControllerError(
         'selection.targetUnavailable',
-        `Cannot select unavailable slide shape ${target.slideId}/${target.elementId}`,
+        `Cannot select unavailable slide element ${target.slideId}/${target.elementId}`,
       );
     }
     this.#setSelection(selection, EDITOR_SELECTION_CHANGE_REASONS.SELECTED);
@@ -102,6 +103,7 @@ export class PptxEditorSelectionController {
 
   clear(): void {
     this.#assertActive();
+    this.#unavailableSelectionTarget = undefined;
     if (!this.#snapshot.selection) return;
     this.#snapshot = Object.freeze({ selection: null });
     this.#publish(EDITOR_SELECTION_CHANGE_REASONS.CLEARED);
@@ -114,6 +116,7 @@ export class PptxEditorSelectionController {
     this.#unsubscribeSession();
     this.#listeners.clear();
     this.#snapshot = Object.freeze({ selection: null });
+    this.#unavailableSelectionTarget = undefined;
   }
 
   readonly #handlePointerDown = (event: PointerEvent): void => {
@@ -124,9 +127,24 @@ export class PptxEditorSelectionController {
   #handleSessionChange(change: PptxEditorSessionChange): void {
     if (this.#disposed) return;
     const current = this.#snapshot.selection;
-    if (!current) return;
-    const next = resolveShapeSelection(change.snapshot.presentation, current.target);
+    if (!current) {
+      if (!this.#unavailableSelectionTarget) return;
+      const restored = resolveElementSelection(
+        change.snapshot.presentation,
+        this.#unavailableSelectionTarget,
+      );
+      if (restored) {
+        this.#setSelection(restored, EDITOR_SELECTION_CHANGE_REASONS.UPDATED);
+      } else if (!change.snapshot.isSubmitting) {
+        this.#unavailableSelectionTarget = undefined;
+      }
+      return;
+    }
+    const next = resolveElementSelection(change.snapshot.presentation, current.target);
     if (!next) {
+      this.#unavailableSelectionTarget = change.snapshot.isSubmitting
+        ? current.target
+        : undefined;
       this.#snapshot = Object.freeze({ selection: null });
       this.#publish(EDITOR_SELECTION_CHANGE_REASONS.CLEARED);
       return;
@@ -142,9 +160,10 @@ export class PptxEditorSelectionController {
   }
 
   #setSelection(
-    selection: PptxEditorShapeSelection,
+    selection: PptxEditorElementSelection,
     reason: PptxEditorSelectionChange['reason'],
   ): void {
+    this.#unavailableSelectionTarget = undefined;
     const current = this.#snapshot.selection;
     if (
       current

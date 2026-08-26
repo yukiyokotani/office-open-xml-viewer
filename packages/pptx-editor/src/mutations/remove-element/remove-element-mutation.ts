@@ -14,7 +14,7 @@ import { AddElementMutation } from '../add-element';
 import {
   freezeTarget,
   resolveMutationTarget,
-  resolveStableShapePath,
+  resolveStableElementPath,
 } from '../mutation-utils';
 
 export interface RemoveElementMutationParams {
@@ -40,8 +40,9 @@ export class RemoveElementMutation extends Mutation {
     };
   }
 
-  inverse(presentation: Presentation): AddElementMutation {
+  inverse(presentation: Presentation): AddElementMutation | undefined {
     const resolved = resolveMutationTarget(presentation, this);
+    if (resolved.element.type !== 'shape') return undefined;
     return new AddElementMutation({
       target: this.target,
       element: resolved.element,
@@ -55,7 +56,7 @@ export class RemoveElementMutation extends Mutation {
   ): OfficeCliCommand {
     return Object.freeze({
       command: OFFICECLI_COMMAND_TYPES.REMOVE,
-      path: resolveStableShapePath(presentation, this, context),
+      path: resolveStableElementPath(presentation, this, context),
     });
   }
 }

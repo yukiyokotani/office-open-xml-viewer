@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ShapeElement } from '@maxgent/ooxml/pptx';
+import type { PictureElement, ShapeElement } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
@@ -361,6 +361,45 @@ describe('UndoRedoStack', () => {
 
     await history.redo().settled;
     expect(store.getSnapshot().basePresentation.slides[0].elements).toEqual([]);
+  });
+
+  it('treats removal of a non-restorable picture as a non-undoable history barrier', async () => {
+    const target: PictureElement = {
+      type: 'picture',
+      id: '7',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+      imagePath: 'ppt/media/image1.png',
+      mimeType: 'image/png',
+      stroke: null,
+    };
+    const presentation = deck([target]);
+    const store = new PptxEditorStore(presentation);
+    const ref = createElementRef(store.getSnapshot().presentation.slides[0], target, 0);
+    const sendBatch = vi.fn<(batch: OfficeCliBatch) => Promise<OfficeCliBatchSendResult>>()
+      .mockResolvedValue(confirmedSendResult());
+    const history = createHistory(store, sendBatch);
+
+    await history.submit({
+      id: 'remove-picture-1',
+      mutations: [new RemoveElementMutation({ target: ref })],
+    }).settled;
+
+    expect(store.getSnapshot().basePresentation.slides[0].elements).toEqual([]);
+    expect(sendBatch.mock.calls[0][0].commands).toEqual([{
+      command: 'remove',
+      path: '/slide[1]/picture[@id=7]',
+    }]);
+    expect(history.getSnapshot()).toMatchObject({
+      undoDepth: 0,
+      redoDepth: 0,
+      canUndo: false,
+    });
   });
 
   it('clears confirmed history after recovering a halted store from authoritative state', async () => {

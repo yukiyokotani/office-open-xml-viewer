@@ -28,6 +28,7 @@ describe('slide element provenance', () => {
     const ref = createElementRef(presentation.slides[0], target, 1);
 
     const inverse = new RemoveElementMutation({ target: ref }).inverse(presentation);
+    if (!inverse) throw new TypeError('A removed shape must remain restorable');
 
     expect(inverse).toMatchObject({
       presentationElementIndex: 1,

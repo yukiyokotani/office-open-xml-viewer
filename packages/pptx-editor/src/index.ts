@@ -184,13 +184,18 @@ export type {
 } from './interaction/errors';
 export {
   clientPointToSlidePoint,
+  hitTestSlideElement,
   hitTestSlideShape,
+  resolveElementSelection,
   resolveShapeSelection,
 } from './interaction/hit-test';
 export { PptxEditorSelectionController } from './interaction/pptx-editor-selection-controller';
 export type {
   ClientPoint,
+  ElementHitTestOptions,
   PptxEditorInteractionHost,
+  PptxEditorElementSelection,
+  PptxEditorSelectableElement,
   PptxEditorSelectionChange,
   PptxEditorSelectionChangeReason,
   PptxEditorSelectionControllerOptions,

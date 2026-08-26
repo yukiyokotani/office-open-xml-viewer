@@ -9,6 +9,7 @@ import { toOfficeCliBatch } from '../../src/transport/officecli/officecli-transl
 import {
   addShape,
   addSlide,
+  addSlideElement,
   assertLiveOfficeCli,
   createDeck,
   createLiveWorkspace,
@@ -28,6 +29,9 @@ describe('RemoveElementMutation × OfficeCLI 真实执行', () => {
   let presentation: Presentation;
   let victimShapePath: string;
   let keptShapePath: string;
+  let picturePptxPath: string;
+  let picturePresentation: Presentation;
+  let picturePath: string;
 
   beforeAll(() => {
     assertLiveOfficeCli();
@@ -51,9 +55,22 @@ describe('RemoveElementMutation × OfficeCLI 真实执行', () => {
     });
     flushDeck(pptxPath);
     presentation = parseDeck(pptxPath);
+
+    picturePptxPath = join(dir, 'picture-deck.pptx');
+    createDeck(picturePptxPath);
+    addSlide(picturePptxPath);
+    picturePath = addSlideElement(picturePptxPath, '/slide[1]', 'picture', {
+      src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      x: '0',
+      y: '0',
+      width: '914400emu',
+      height: '914400emu',
+    });
+    flushDeck(picturePptxPath);
+    picturePresentation = parseDeck(picturePptxPath);
   });
 
-  afterAll(() => destroyLiveWorkspace(dir, [pptxPath]));
+  afterAll(() => destroyLiveWorkspace(dir, [pptxPath, picturePptxPath]));
 
   it('RemoveElement 生成的 remove 命令能真实删除目标 shape 且不影响同页其他元素', () => {
     const ref = refForElementId(presentation, elementIdOfPath(victimShapePath));
@@ -72,5 +89,19 @@ describe('RemoveElementMutation × OfficeCLI 真实执行', () => {
     expect(reparsed.slides[0].elements).toHaveLength(1);
     expect((reparsed.slides[0].elements[0] as { id?: string }).id)
       .toBe(elementIdOfPath(keptShapePath));
+  });
+
+  it('RemoveElement deletes an ordinary picture from its frontend type and id', () => {
+    const ref = refForElementId(picturePresentation, elementIdOfPath(picturePath));
+    const batch = toOfficeCliBatch(picturePresentation, {
+      id: 'live-remove-picture-1',
+      mutations: [new RemoveElementMutation({ target: ref })],
+    });
+    expect(batch.commands).toEqual([{ command: 'remove', path: picturePath }]);
+
+    runBatch(picturePptxPath, batch);
+
+    expect(tryGetNode(picturePptxPath, picturePath)).toBeUndefined();
+    expect(parseDeck(picturePptxPath).slides[0].elements).toEqual([]);
   });
 });

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { PictureElement, Presentation } from '@maxgent/ooxml/pptx';
+import type {
+  ChartElement,
+  MediaElement,
+  PictureElement,
+  Presentation,
+  TableElement,
+} from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import type { Command } from '../../src/domain/command';
@@ -649,6 +655,7 @@ describe('toOfficeCliBatch', () => {
     const victimRef = createElementRef(presentation.slides[0], victim, 1);
     const remove = new RemoveElementMutation({ target: victimRef });
     const restore = remove.inverse(presentation);
+    if (!restore) throw new TypeError('A removed shape must remain restorable');
 
     const batch = toOfficeCliBatch(presentation, {
       id: 'remove-add-1',
@@ -754,20 +761,25 @@ describe('toOfficeCliBatch', () => {
     }));
   });
 
-  it('rejects element types outside the shape-only MVP', () => {
-    const target: PictureElement = {
-      type: 'picture',
-      x: 0,
-      y: 0,
-      width: 10,
-      height: 10,
-      rotation: 0,
-      flipH: false,
-      flipV: false,
-      imagePath: 'ppt/media/image1.png',
-      mimeType: 'image/png',
-      stroke: null,
-    };
+  it.each([
+    ['picture', picture('7'), '/slide[1]/picture[@id=7]'],
+    ['table', table('10'), '/slide[1]/table[@id=10]'],
+    ['chart', chart('11'), '/slide[1]/chart[@id=11]'],
+  ] as const)(
+    'translates removal of a %s from its frontend element type',
+    (_name, target, path) => {
+      const presentation = deck([target]);
+      const ref = createElementRef(presentation.slides[0], target, 0);
+
+      expect(toOfficeCliBatch(presentation, {
+        id: 'remove-1',
+        mutations: [new RemoveElementMutation({ target: ref })],
+      }).commands).toEqual([{ command: 'remove', path }]);
+    },
+  );
+
+  it('rejects removal of media; OfficeCLI has no stable @id selector for video/audio', () => {
+    const target = media('12');
     const presentation = deck([target]);
     const ref = createElementRef(presentation.slides[0], target, 0);
 
@@ -803,3 +815,55 @@ describe('toOfficeCliBatch', () => {
     }));
   });
 });
+
+function frame(id: string) {
+  return {
+    id,
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    rotation: 0,
+    flipH: false,
+    flipV: false,
+  } as const;
+}
+
+function picture(id: string): PictureElement {
+  return {
+    type: 'picture',
+    ...frame(id),
+    imagePath: 'ppt/media/image1.png',
+    mimeType: 'image/png',
+    stroke: null,
+  };
+}
+
+function table(id: string): TableElement {
+  return {
+    type: 'table',
+    ...frame(id),
+    cols: [],
+    rows: [],
+  };
+}
+
+function chart(id: string): ChartElement {
+  return {
+    type: 'chart',
+    ...frame(id),
+    chart: {} as ChartElement['chart'],
+  };
+}
+
+function media(id: string): MediaElement {
+  return {
+    type: 'media',
+    ...frame(id),
+    mediaKind: 'video',
+    posterPath: '',
+    posterMimeType: '',
+    mediaPath: 'ppt/media/video1.mp4',
+    mimeType: 'video/mp4',
+  };
+}

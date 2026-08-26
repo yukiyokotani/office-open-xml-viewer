@@ -191,8 +191,10 @@ const presentation = await loadedPresentation.toEditorPresentation();
 ```
 
 Editable slides must expose complete `elementSources` parallel to `elements`
-(same length). Mutations currently support **direct slide shapes** only
-(`origin: 'slide'`). OfficeCLI `zorder` is derived as the ordinal among
+(same length). Text, transform, and style mutations support direct slide shapes
+(`origin: 'slide'`). `RemoveElementMutation` also maps slide-origin pictures,
+tables, and charts to OfficeCLI paths from their frontend element type.
+OfficeCLI `zorder` is derived as the ordinal among
 slide-origin entries before `presentationElementIndex` (1-based). This matches
 true spTree position for top-level 1:1 shapes; groups / hidden nodes that expand
 or skip break that equivalence. Master/layout decorations are
@@ -213,7 +215,7 @@ hand-writing ids.
 import { createElementRef, ELEMENT_ORIGINS } from '@maxgent/ooxml-pptx-editor';
 
 const target = createElementRef(slide, element, elementIndex);
-// target.origin === ELEMENT_ORIGINS.SLIDE for editable slide shapes
+// target.origin === ELEMENT_ORIGINS.SLIDE for editable slide elements
 ```
 
 ## Commands and mutations
@@ -239,7 +241,7 @@ Built-in mutations:
 | `InsertSlideMutation` | Insert an empty slide at a 0-based index | `add` under `/` with `type: 'slide'` and `index` |
 | `RemoveSlideMutation` | Remove a slide; direct removal is not undoable | `remove` at the current slide path |
 | `AddElementMutation` | Insert a slide element at indexes | `add` under slide path |
-| `RemoveElementMutation` | Remove a slide element | `remove` path |
+| `RemoveElementMutation` | Remove a slide-origin shape, picture, table, or chart; only shape removal is undoable | type-based stable `remove` path |
 
 Low-level apply without a session:
 
@@ -420,10 +422,10 @@ Behavior:
 - Does not own resources. Dispose the binding, viewer, and presentation
   explicitly.
 
-## Shape selection
+## Element selection
 
 `PptxEditorSelectionController` maps canvas pointer coordinates into slide EMUs,
-hit-tests direct slide shapes from front to back, and exposes the selected
+hit-tests slide-origin elements from front to back, and exposes the selected
 `ElementRef` used by mutations:
 
 ```ts
@@ -455,11 +457,11 @@ loadedPresentation.destroy();
 session.dispose();
 ```
 
-The MVP hit test uses each rotated shape frame, reverse render order, and a
-4-CSS-pixel tolerance for lines. It skips layout/master decorations, and stops
-at a topmost non-shape slide element (picture, table, chart, media) instead of
-selecting a covered shape underneath. Shapes without a stable numeric OOXML id
-can be selected for UI feedback but report `isOfficeCliTargetable: false`. In
+The MVP hit test uses each rotated element frame, reverse render order, and a
+4-CSS-pixel tolerance for lines. It skips layout/master decorations. Media is
+not selectable and blocks selection of elements underneath it. Other elements
+without a stable numeric OOXML id can be selected for UI feedback but report
+`isOfficeCliTargetable: false`. In
 edit mode, keep viewer text selection and hyperlink overlays disabled unless
 the app forwards their pointer events into `selectAtClientPoint`.
 
@@ -479,8 +481,9 @@ per-mutation `toOfficeCli`. The product envelope looks like:
 }
 ```
 
-Paths use stable slide ordinals and shape ids. Shape editing currently targets
-direct slide shapes only.
+Paths use stable slide ordinals and OOXML `cNvPr` ids. Shape updates target
+direct slide shapes. Element removal selects `/shape`, `/picture`, `/table`, or
+`/chart` from the frontend element type.
 
 You can translate without submitting:
 
@@ -510,7 +513,16 @@ Document these in product code rather than papering over them:
    in `mode: 'worker'`. Load `PptxPresentation` with `{ mode: 'main' }`.
 2. **Slide content only.** The host installs slide models; presentation theme /
    size fields on the session snapshot are not pushed into the viewer.
-3. **Slide-origin shapes only.** Master/layout elements are not editable.
+3. **Slide-origin elements only.** Master/layout elements are not editable.
+   Shape text, transform, and style mutations remain shape-only. Removal also
+   maps pictures, tables, and charts from their frontend type. Media is rejected
+   at translate time (`target.unsupportedElement`) because OfficeCLI has no
+   stable `@id` selector for video/audio. A grouped,
+   wrapped, or projected element may produce a path that OfficeCLI rejects; a
+   rejected submission rolls the optimistic deletion back.
+   Removal of a non-shape element is not undoable because its binary parts and
+   relationships cannot be restored from the projected presentation model.
+   A confirmed non-undoable deletion clears command history.
    OfficeCLI `zorder` is derived from `origin: 'slide'` ordinals before
    `presentationElementIndex`; this matches spTree position for top-level 1:1
    shapes, not for groups / hidden nodes that expand or skip.

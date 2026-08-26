@@ -9,8 +9,10 @@ import { ELEMENT_ORIGINS } from '../domain/element-origin';
 import type { ElementRef } from '../domain/mutation';
 import type {
   ClientPoint,
+  ElementHitTestOptions,
+  PptxEditorElementSelection,
+  PptxEditorSelectableElement,
   PptxEditorShapeSelection,
-  ShapeHitTestOptions,
   SlidePoint,
 } from './types';
 
@@ -49,8 +51,20 @@ export function hitTestSlideShape(
   presentation: Presentation,
   slideIndex: number,
   point: SlidePoint,
-  options: ShapeHitTestOptions = {},
+  options: ElementHitTestOptions = {},
 ): PptxEditorShapeSelection | undefined {
+  const selection = hitTestSlideElement(presentation, slideIndex, point, options);
+  return selection?.element.type === 'shape'
+    ? selection as PptxEditorShapeSelection
+    : undefined;
+}
+
+export function hitTestSlideElement(
+  presentation: Presentation,
+  slideIndex: number,
+  point: SlidePoint,
+  options: ElementHitTestOptions = {},
+): PptxEditorElementSelection | undefined {
   if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= presentation.slides.length) {
     return undefined;
   }
@@ -66,9 +80,8 @@ export function hitTestSlideShape(
     const source = sources[index];
     if (source.origin !== ELEMENT_ORIGINS.SLIDE) continue;
     if (!containsPoint(element, point, hitSlop)) continue;
-    if (element.type !== 'shape') return undefined;
-
-    return createShapeSelection(
+    if (element.type === 'media') return undefined;
+    return createElementSelection(
       createElementRef(slide, element, index),
       slideIndex,
       index,
@@ -82,15 +95,25 @@ export function resolveShapeSelection(
   presentation: Presentation,
   target: ElementRef,
 ): PptxEditorShapeSelection | undefined {
+  const selection = resolveElementSelection(presentation, target);
+  return selection?.element.type === 'shape'
+    ? selection as PptxEditorShapeSelection
+    : undefined;
+}
+
+export function resolveElementSelection(
+  presentation: Presentation,
+  target: ElementRef,
+): PptxEditorElementSelection | undefined {
   const resolved = resolveElementRef(presentation, target);
   if (
     !resolved
-    || resolved.element.type !== 'shape'
+    || resolved.element.type === 'media'
     || resolved.source.origin !== ELEMENT_ORIGINS.SLIDE
   ) {
     return undefined;
   }
-  return createShapeSelection(
+  return createElementSelection(
     target,
     resolved.slideIndex,
     resolved.presentationElementIndex,
@@ -98,12 +121,12 @@ export function resolveShapeSelection(
   );
 }
 
-function createShapeSelection(
+function createElementSelection<Element extends PptxEditorSelectableElement>(
   target: ElementRef,
   slideIndex: number,
   presentationElementIndex: number,
-  element: PptxEditorShapeSelection['element'],
-): PptxEditorShapeSelection {
+  element: Element,
+): PptxEditorElementSelection<Element> {
   return Object.freeze({
     target,
     slideIndex,

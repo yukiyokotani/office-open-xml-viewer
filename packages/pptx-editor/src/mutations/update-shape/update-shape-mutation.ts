@@ -17,7 +17,7 @@ import {
   freezeTarget,
   officeCliError,
   resolveMutationTarget,
-  resolveStableShapePath,
+  resolveStableElementPath,
 } from '../mutation-utils';
 import { applyShapeFillProps, applyShapeStrokeProps } from '../shape-officecli';
 import type { ShapePatch } from './interface';
@@ -94,7 +94,7 @@ export class UpdateShapeMutation extends Mutation {
 
     return Object.freeze({
       command: OFFICECLI_COMMAND_TYPES.SET,
-      path: resolveStableShapePath(presentation, this, context),
+      path: resolveStableElementPath(presentation, this, context, 'shape'),
       props: freezeProps(props),
     });
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Presentation } from '@maxgent/ooxml/pptx';
+import type { PictureElement, Presentation } from '@maxgent/ooxml/pptx';
 
 import { createElementRef } from '../../src/adapters/pptx-json-adapter';
 import { RemoveElementMutation } from '../../src/mutations/remove-element';
@@ -69,6 +69,41 @@ describe('PptxEditorSelectionController', () => {
     session.dispose();
   });
 
+  it('selects pictures for element-level shortcut actions', () => {
+    const picture: PictureElement = {
+      type: 'picture',
+      id: '8',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+      imagePath: 'ppt/media/image1.png',
+      mimeType: 'image/png',
+      stroke: null,
+    };
+    const session = createSession(deck([picture]));
+    const canvas = new FakeCanvas();
+    const controller = new PptxEditorSelectionController({
+      session,
+      host: { canvasElement: canvas.element, slideIndex: 0 },
+      hitSlopPx: 0,
+    });
+
+    canvas.pointerDown(50, 50);
+
+    expect(controller.getSnapshot().selection).toMatchObject({
+      target: { elementId: '8' },
+      element: picture,
+      isOfficeCliTargetable: true,
+    });
+
+    controller.dispose();
+    session.dispose();
+  });
+
   it('clears selection on empty clicks and when a selected element is removed', async () => {
     const target = shape('7', 'target', { x: 0, y: 0, width: 5, height: 5 });
     const presentation = deck([target]);
@@ -100,6 +135,42 @@ describe('PptxEditorSelectionController', () => {
       reason: EDITOR_SELECTION_CHANGE_REASONS.CLEARED,
     }));
     await submission.settled;
+
+    controller.dispose();
+    session.dispose();
+  });
+
+  it('restores a deleted selection when OfficeCLI rejects the command', async () => {
+    const target = shape('7', 'target');
+    const presentation = deck([target]);
+    const session = new PptxEditorSession({
+      presentation,
+      sendBatch: async () => ({
+        status: OFFICECLI_BATCH_SEND_STATUSES.REJECTED,
+        cause: new Error('path not found'),
+      }),
+      createCommandId: () => 'unused',
+    });
+    const canvas = new FakeCanvas();
+    const controller = new PptxEditorSelectionController({
+      session,
+      host: { canvasElement: canvas.element, slideIndex: 0 },
+      hitSlopPx: 0,
+    });
+
+    canvas.pointerDown(50, 50);
+    const ref = createElementRef(presentation.slides[0], target, 0);
+    const submission = session.submit({
+      id: 'remove-rejected',
+      mutations: [new RemoveElementMutation({ target: ref })],
+    });
+
+    expect(controller.getSnapshot().selection).toBeNull();
+    await submission.settled;
+    expect(controller.getSnapshot().selection).toMatchObject({
+      target: ref,
+      element: target,
+    });
 
     controller.dispose();
     session.dispose();

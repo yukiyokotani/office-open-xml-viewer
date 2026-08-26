@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { PictureElement, Presentation } from '@maxgent/ooxml/pptx';
+import type { MediaElement, PictureElement, Presentation } from '@maxgent/ooxml/pptx';
 
 import {
   clientPointToSlidePoint,
+  hitTestSlideElement,
   hitTestSlideShape,
+  resolveElementSelection,
 } from '../../src/interaction/hit-test';
 import { deck, shape } from '../fixtures/presentation';
 
@@ -62,6 +64,57 @@ describe('PPTX editor shape hit testing', () => {
     const presentation = deck([bottom, top]);
 
     expect(hitTestSlideShape(presentation, 0, { x: 5, y: 5 })).toBeUndefined();
+  });
+
+  it('selects a topmost picture for element-level actions', () => {
+    const picture: PictureElement = {
+      type: 'picture',
+      id: '8',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+      imagePath: 'ppt/media/image1.png',
+      mimeType: 'image/png',
+      stroke: null,
+    };
+    const presentation = deck([picture]);
+
+    expect(hitTestSlideElement(presentation, 0, { x: 5, y: 5 })).toMatchObject({
+      target: { elementId: '8' },
+      element: picture,
+      isOfficeCliTargetable: true,
+    });
+  });
+
+  it('does not select media or elements covered by media', () => {
+    const media: MediaElement = {
+      type: 'media',
+      id: '12',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      rotation: 0,
+      flipH: false,
+      flipV: false,
+      mediaKind: 'video',
+      posterPath: '',
+      posterMimeType: '',
+      mediaPath: 'ppt/media/video1.mp4',
+      mimeType: 'video/mp4',
+    };
+    const presentation = deck([shape('7', 'covered'), media]);
+
+    expect(hitTestSlideElement(presentation, 0, { x: 5, y: 5 })).toBeUndefined();
+    expect(resolveElementSelection(presentation, {
+      origin: 'slide',
+      slideId: 'ppt/slides/slide1.xml',
+      elementId: '12',
+    })).toBeUndefined();
   });
 
   it('ignores inherited layout/master elements and non-shape elements', () => {
