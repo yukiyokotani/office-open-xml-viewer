@@ -414,11 +414,12 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
 
     void showFormat('xlsx');
 
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return;
       loadGeneration++;
       destroyViewer?.();
       destroyViewer = null;
-    }, { once: true });
+    });
   }
 </script>
 
