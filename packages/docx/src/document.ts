@@ -83,7 +83,7 @@ import {
 import { layoutDocumentInputAsync } from './layout/document.js';
 import { layoutDocumentProgressively } from './layout/progressive.js';
 import { PaginationAbortError } from './layout/pagination-scheduler.js';
-import { normalizeLayoutOptions } from './layout/options.js';
+import { normalizeLayoutOptions, type LayoutOptions } from './layout/options.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
@@ -254,6 +254,14 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+/** Two normalized layout views select the same retained variant. The final view
+ *  omits `showTrackedChanges` entirely (see `normalizeLayoutOptions`), so an
+ *  absent flag and an explicit `false` are the same view. */
+function sameLayoutView(left: LayoutOptions, right: LayoutOptions): boolean {
+  return left.currentDateMs === right.currentDateMs
+    && (left.showTrackedChanges === true) === (right.showTrackedChanges === true);
+}
+
 /** Identity-stable empties for the two anchor projections.
  *  `commentAnchorRanges()` is polled per draw and consumers cache on identity
  *  (`DocxScrollViewer._hasDisplayableComments`), so returning a fresh `[]` each
@@ -313,6 +321,26 @@ export class DocxDocument {
   private _parseRequestId: number | null = null;
   /** Set for the duration of a worker-mode progressive parse. */
   private _progressive: WorkerProgressiveLoad | null = null;
+  /** The variant the in-flight worker `parse` is paginating. Its provisional
+   *  pushes and its authoritative metadata describe THAT variant, so once a
+   *  runtime {@link setLayoutView} has moved the active view elsewhere they may
+   *  no longer be installed — they would put a different pagination's page count
+   *  and geometry behind the view being painted. */
+  private _parseLayoutOptions: LayoutOptions | null = null;
+  /** The worker-mode variant switch currently in flight, if any.
+   *
+   *  It is both the admission token and the de-duplication key. A switch is a
+   *  round-trip, so two toggles can overlap: a reply installs only while this
+   *  still holds ITS record, which makes superseding one (a newer switch), and
+   *  cancelling one (a toggle back to the installed view, or `destroy`), the
+   *  same single assignment. Its VIEW — not the installed one — is what a
+   *  further {@link setLayoutView} compares against: while a switch to the
+   *  markup view is pending the active view is still the final one, and
+   *  treating a toggle back to final as "already there" would leave the pending
+   *  switch to install a view nobody wants any more. */
+  private _pendingLayoutSwitch:
+    | { readonly view: LayoutOptions; promise: Promise<void> }
+    | null = null;
   /** Silence watchdog for a progressive parse. The parse request itself gives up
    *  its deadline (a background layout legitimately outlives any fixed timeout),
    *  so liveness is tracked here instead and re-armed by every worker push. */
@@ -786,6 +814,18 @@ export class DocxDocument {
     // `review` rides on the first publication only; later ones keep what the
     // first established.
     const review = partial.review ?? this._meta;
+    // The review data is variant-independent, so it is seeded even when the
+    // geometry is not: a switch away from the load-time variant must not leave
+    // the document reporting no comments.
+    if (partial.review) {
+      this._review = snapshotReviewData(partial.review.comments, partial.review.revisions);
+    }
+    // This prefix describes the variant the parse is paginating. A runtime
+    // `setLayoutView` may have moved the active view elsewhere and already
+    // installed that variant's metadata; overwriting it with this one's page
+    // count and page sizes would restore exactly the paint/geometry split the
+    // switch exists to prevent.
+    if (!this._parseViewIsActive()) return;
     this._meta = {
       pageCount: partial.pageCount,
       pageSizes: partial.pageSizes,
@@ -798,18 +838,56 @@ export class DocxDocument {
       // authoritative `parsedMeta` carries them. Absent is a shape
       // `DocumentMeta` already documents as supported.
     };
-    if (partial.review) {
-      this._review = snapshotReviewData(partial.review.comments, partial.review.revisions);
-    }
     this._invalidateLayoutDerivedCaches();
+  }
+
+  /** The active layout view, with the `null` that means "the document's default
+   *  view" resolved into the options that actually select it — so a comparison
+   *  cannot read an unrecorded default and an explicitly normalized one as two
+   *  different views. */
+  private _activeLayoutView(): LayoutOptions {
+    const runtime = documentLayoutRuntimeOf(this);
+    return runtime.activeLayoutOptions
+      ?? normalizeLayoutOptions(undefined, runtime.defaultCurrentDateMs, false);
+  }
+
+  /** Whether the in-flight parse is paginating the variant currently being
+   *  viewed. A `setLayoutView` during a progressive load moves the view to a
+   *  variant the worker built separately, and the parse's own publications
+   *  describe a pagination nobody is painting any more. Switching BACK hands
+   *  the parse its authority again — the test is variant equality, not "a
+   *  switch ever happened". */
+  private _parseViewIsActive(): boolean {
+    const runtime = documentLayoutRuntimeOf(this);
+    return sameLayoutView(
+      this._activeLayoutView(),
+      this._parseLayoutOptions
+        ?? normalizeLayoutOptions(undefined, runtime.defaultCurrentDateMs, false),
+    );
   }
 
   /** Install the authoritative metadata and close the progressive window. */
   private _onAuthoritativeMeta(meta: DocumentMeta): void {
     this._clearParseWatchdog();
-    this._meta = meta;
-    this._invalidateLayoutDerivedCaches();
+    // Variant-independent either way; the geometry half is not.
     this._review = snapshotReviewData(meta.comments, meta.revisions);
+    if (this._parseViewIsActive()) {
+      this._meta = meta;
+      this._invalidateLayoutDerivedCaches();
+    } else if (this._meta) {
+      // The active view was switched mid-load, so its own metadata is already
+      // installed (a switch cannot complete without installing some — which is
+      // why the null case here cannot be a switched view). Keep that geometry;
+      // take only the model-derived records the switch deliberately did not
+      // re-ship.
+      this._meta = {
+        ...this._meta,
+        revisions: meta.revisions,
+        comments: meta.comments,
+        footnotes: meta.footnotes,
+        endnotes: meta.endnotes,
+      };
+    }
     const progressive = this._progressive;
     if (!progressive) return;
     this._layoutComplete = true;
@@ -845,9 +923,13 @@ export class DocxDocument {
    *  time, but it may not go quiet: treat silence as a wedged worker. */
   private _onParseWentSilent(): void {
     const progressive = this._progressive;
+    // Read the deadline BEFORE clearing it: `_clearParseWatchdog` drops
+    // `_parseWatchdogMs`, and interpolating it afterwards reported the timeout
+    // this message exists to name as `undefinedms`.
+    const timeoutMs = this._parseWatchdogMs;
     this._clearParseWatchdog();
     const error = new Error(
-      `worker layout produced no progress for ${this._parseWatchdogMs}ms`,
+      `worker layout produced no progress for ${timeoutMs}ms`,
     );
     if (progressive && !progressive.published) {
       // load() has not resolved yet, so this can still be its rejection.
@@ -860,24 +942,34 @@ export class DocxDocument {
     this._bridge.terminate();
   }
 
+  /** The wire fields naming one layout variant. Omitted for the document's
+   *  default view, keeping the shape identical to what pre-variant builds sent. */
+  private _viewFields(options: LayoutOptions | null): Pick<
+    Extract<RenderWorkerRequest, { type: 'parse' }>,
+    'currentDateMs' | 'showTrackedChanges'
+  > {
+    if (!options) return {};
+    const runtime = documentLayoutRuntimeOf(this);
+    return {
+      ...(options.currentDateMs === runtime.defaultCurrentDateMs
+        ? {}
+        : { currentDateMs: options.currentDateMs }),
+      ...(options.showTrackedChanges === true ? { showTrackedChanges: true } : {}),
+    };
+  }
+
   /** The variant fields the worker `parse` carries, derived from the SAME
    *  recorded active options every render request is filled from — so the
-   *  worker cannot end up paginating one view and painting another. Omitted
-   *  when the load selects the document's default view, keeping the wire shape
-   *  identical to what pre-variant builds sent. */
+   *  worker cannot end up paginating one view and painting another. Recording
+   *  the variant here is also what lets the pushes it produces be refused once
+   *  a runtime {@link setLayoutView} has moved the active view elsewhere. */
   private _parseViewFields(): Pick<
     Extract<RenderWorkerRequest, { type: 'parse' }>,
     'currentDateMs' | 'showTrackedChanges'
   > {
-    const runtime = documentLayoutRuntimeOf(this);
-    const active = runtime.activeLayoutOptions;
-    if (!active) return {};
-    return {
-      ...(active.currentDateMs === runtime.defaultCurrentDateMs
-        ? {}
-        : { currentDateMs: active.currentDateMs }),
-      ...(active.showTrackedChanges === true ? { showTrackedChanges: true } : {}),
-    };
+    const active = documentLayoutRuntimeOf(this).activeLayoutOptions;
+    this._parseLayoutOptions = active;
+    return this._viewFields(active);
   }
 
   /**
@@ -997,6 +1089,9 @@ export class DocxDocument {
     this._clearParseWatchdog();
     this._parseRequestId = null;
     this._progressive = null;
+    // A variant switch still in flight can no longer install into a document
+    // that is going away; its bridge request rejects with the terminate below.
+    this._pendingLayoutSwitch = null;
     this._bridge.terminate();
     this._document = null;
     this._source = null;
@@ -1296,26 +1391,117 @@ export class DocxDocument {
    * whichever one the renderer is actually painting. Viewers call this when the
    * user toggles the markup view.
    *
-   * Switching to a variant that has never been built pays for building it on
-   * the next geometry read — unavoidable, since the variant genuinely
-   * repaginates the document. The guarantee progressive layout makes is about
-   * the INITIAL variant: that one is never built behind your back.
+   * Switching to a variant that has never been built pays for building it —
+   * unavoidable, since the variant genuinely repaginates the document. The
+   * guarantee progressive layout makes is about the INITIAL variant: that one
+   * is never built behind your back.
+   *
+   * Returns a promise because `mode: 'worker'` has to build the variant in the
+   * worker and bring its metadata back: the model never crosses the wire, so
+   * until that lands the document cannot answer a single geometry question
+   * about the selected view. The view and its metadata are installed together
+   * when it does, so a reader never sees one without the other. Main mode
+   * resolves immediately, having applied the switch before returning. AWAIT IT
+   * before reading {@link pageCount}, {@link pageSize} or
+   * {@link getBookmarkPage}, or rendering the new view.
    */
   setLayoutView(
     view: Readonly<{ showTrackedChanges?: boolean; currentDate?: Date | number }> = {},
-  ): void {
+  ): Promise<void> {
     const runtime = documentLayoutRuntimeOf(this);
-    runtime.activeLayoutOptions = normalizeLayoutOptions(
+    const selected = normalizeLayoutOptions(
       view.currentDate,
       runtime.defaultCurrentDateMs,
       view.showTrackedChanges === true,
     );
+    if (this._mode === 'worker') return this._selectWorkerLayoutView(selected);
+    // Main mode holds the model, so the variant store answers the new view
+    // synchronously (building it on the next geometry read). Resolved, not
+    // pending: a caller that does not await must still see the switch applied.
+    this._installLayoutView(selected);
+    return Promise.resolve();
+  }
+
+  /**
+   * Worker mode: repaginate in the worker, then install the view and the
+   * metadata that describes it TOGETHER.
+   *
+   * The model never crosses the wire, so `pageCount`, `pageSize`, bookmark
+   * pages and the anchor projections are all read from worker metadata. Moving
+   * the active view first and the metadata later — or not at all — leaves the
+   * viewer painting one pagination while measuring another: clamping, the
+   * scroll extent, and mount/recycle decisions all come from geometry that
+   * belongs to the variant being replaced.
+   */
+  private _selectWorkerLayoutView(selected: LayoutOptions): Promise<void> {
+    const pending = this._pendingLayoutSwitch;
+    // Asking again for the switch already in flight joins it rather than
+    // paying for a second pagination of the same variant.
+    if (pending && sameLayoutView(pending.view, selected)) return pending.promise;
+    if (sameLayoutView(this._activeLayoutView(), selected)) {
+      // Already the installed view — but a switch AWAY from it may be in
+      // flight, and its reply must not install a view that has since been
+      // taken back. Dropping the record IS that cancellation; the metadata for
+      // this view is installed already, so there is nothing to fetch.
+      this._pendingLayoutSwitch = null;
+      return Promise.resolve();
+    }
+    const record: { readonly view: LayoutOptions; promise: Promise<void> } = {
+      view: selected,
+      promise: Promise.resolve(),
+    };
+    this._pendingLayoutSwitch = record;
+    record.promise = this._requestWorkerLayoutView(selected, record);
+    return record.promise;
+  }
+
+  private async _requestWorkerLayoutView(
+    selected: LayoutOptions,
+    record: NonNullable<DocxDocument['_pendingLayoutSwitch']>,
+  ): Promise<void> {
+    let res: WorkerResponse | RenderWorkerResponse;
+    try {
+      res = await this._bridge.request(
+        (id) => ({
+          type: 'selectLayoutView',
+          id,
+          ...this._viewFields(selected),
+        }) satisfies RenderWorkerRequest,
+      );
+    } catch (error) {
+      // Only this switch's own record may be retired by its failure; a newer
+      // one already owns the slot.
+      if (this._pendingLayoutSwitch === record) this._pendingLayoutSwitch = null;
+      throw error;
+    }
+    // Superseded by a newer switch, cancelled by a toggle back, or destroyed.
+    // Installing now would put this variant's geometry behind another one's
+    // paint — the exact split the round-trip exists to prevent.
+    if (this._pendingLayoutSwitch !== record) return;
+    this._pendingLayoutSwitch = null;
+    const meta = (res as Extract<RenderWorkerResponse, { type: 'layoutViewSelected' }>).meta;
+    const review = this._meta;
+    // One assignment pair, no await between them: a reader cannot observe the
+    // new view against the old metadata, or the reverse.
+    this._meta = {
+      ...meta,
+      // Model-derived and variant-independent; the load established them and
+      // the worker deliberately does not re-ship them per switch.
+      revisions: review?.revisions ?? [],
+      comments: review?.comments ?? [],
+      footnotes: review?.footnotes ?? [],
+      endnotes: review?.endnotes ?? [],
+    };
+    this._installLayoutView(selected);
+  }
+
+  /** Record the active view and drop every cache derived from the variant it
+   *  replaces. */
+  private _installLayoutView(selected: LayoutOptions): void {
+    documentLayoutRuntimeOf(this).activeLayoutOptions = selected;
     // Bookmark pages and the review anchor caches are derived from the
     // layout, so they belong to the variant that produced them.
-    this._bookmarkPages = null;
-    this._commentAnchorRanges = null;
-    this._revisionAnchorRanges = null;
-    this._reviewTextRunSourceIndex = null;
+    this._invalidateLayoutDerivedCaches();
   }
 
   /** Lazily build (and cache) the `bookmarkName → page index` map from either

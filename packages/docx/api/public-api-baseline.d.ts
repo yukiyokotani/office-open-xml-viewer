@@ -1108,7 +1108,7 @@ export class DocxDocument {
     setLayoutView(view?: Readonly<{
         showTrackedChanges?: boolean;
         currentDate?: Date | number;
-    }>): void;
+    }>): Promise<void>;
     getBookmarkPage(bookmarkName: string): number | undefined;
     pageSize(pageIndex: number): {
         widthPt: number;
@@ -1198,7 +1198,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     zoomOut(): void;
     fitWidth(): void;
     fitPage(): void;
-    setShowTrackedChanges(value: boolean): void;
+    setShowTrackedChanges(value: boolean): Promise<void>;
     scrollToPage(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;

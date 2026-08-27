@@ -32,8 +32,6 @@ import {
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
-import { collectLayoutSourceRevisionRangesIfPresent } from './revisions.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
@@ -50,10 +48,13 @@ import {
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
 import { paginateRenderWorkerDocumentProgressively } from './render-worker-progressive.js';
+import {
+  renderWorkerLayoutViewMeta,
+  renderWorkerReviewAnchors,
+} from './render-worker-layout-view.js';
 import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
-import { textRunSourceIndexForDocument } from './layout/text-index.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { materializeDocumentPullOwnedModelsSession } from './document-pull-client.js';
@@ -84,6 +85,11 @@ const documentPull = new DocumentPullWorker(
 let documentGeneration = 0;
 let fallbackPull: DocumentPullWorker | null = null;
 let doc: RetainedRenderWorkerDocumentLayout | null = null;
+/** The retained document's model-derived review records, kept because
+ *  `selectLayoutView` has to re-resolve the §17.13.4 / §17.13.5 anchor ranges
+ *  against the newly selected variant's run index. Everything else a variant
+ *  switch reports comes from the layout itself. */
+let reviewRecords: Pick<DocumentMeta, 'comments' | 'revisions'> | null = null;
 /** Cancels a still-running progressive drain when a new `parse` supersedes it.
  *  The host's `destroy()` terminates the worker outright, so this covers only
  *  the re-parse path — where the worker survives and would otherwise keep
@@ -156,6 +162,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       await fallbackPull?.reset();
       fallbackPull = null;
       doc = null;
+      reviewRecords = null;
       if (localMetricFontFaces.length > 0) {
         unloadLocalFontMetrics(localMetricFontFaces);
         localMetricFontFaces = [];
@@ -312,6 +319,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         }, layoutOptions, abort.signal);
         if (layoutAbort === abort) layoutAbort = null;
       }
+      // Retained for `selectLayoutView`, which has to re-resolve the anchor
+      // ranges against whichever variant it is asked for.
+      reviewRecords = { comments: model.comments ?? [], revisions: model.revisions ?? [] };
       // Usually a cache hit: the progressive drive above primed this exact
       // variant, so this reads the authoritative layout back rather than
       // paginating a second time. Without progressive layout it is the
@@ -321,7 +331,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         widthPt: page.geometry.widthPt,
         heightPt: page.geometry.heightPt,
       }));
-      const renderedRunIndex = textRunSourceIndexForDocument(layout);
       const meta: DocumentMeta = {
         pageCount: layout.pages.length,
         revisions: model.revisions ?? [],
@@ -330,18 +339,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         endnotes: model.endnotes ?? [],
         pageSizes,
         bookmarkPages: [...buildBookmarkPageMap(layout)],
-        // §17.13.4 — story-aware anchor ranges use the exact retained source
-        // identities shipped by projected text runs in both modes.
-        commentAnchorRanges: collectLayoutSourceCommentRangesIfPresent(
-          model.comments,
-          source,
-          renderedRunIndex,
-        ),
-        revisionAnchorRanges: collectLayoutSourceRevisionRangesIfPresent(
-          model.revisions,
-          source,
-          renderedRunIndex,
-        ),
+        // §17.13.4 / §17.13.5 — story-aware anchor ranges from the exact
+        // retained source identities shipped by projected text runs. Shared
+        // with the variant-switch route so the two cannot describe the same
+        // layout differently.
+        ...renderWorkerReviewAnchors(layout, source, reviewRecords),
       };
       const loadedArchive = host.archive;
       if (!loadedArchive) throw new Error('No docx loaded');
@@ -349,6 +351,22 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         host.run(() => loadedArchive.resource_usage()),
       );
       post({ type: 'parsedMeta', id, meta, usage: resourceUsage });
+      return;
+    }
+    if (req.type === 'selectLayoutView') {
+      if (!doc || !reviewRecords) throw new Error('Document not loaded');
+      // Building the selected variant genuinely repaginates the document; that
+      // cost IS the switch. Under a progressive load it competes with the
+      // background drain for this thread, which is why the host installs this
+      // metadata only while the switch is still the active view.
+      post({
+        type: 'layoutViewSelected',
+        id,
+        meta: renderWorkerLayoutViewMeta(doc, reviewRecords, {
+          currentDateMs: req.currentDateMs,
+          showTrackedChanges: req.showTrackedChanges,
+        }),
+      });
       return;
     }
     if (req.type === 'renderPage') {

@@ -162,7 +162,7 @@ describe('DocxScrollViewer — growing page count', () => {
     viewer.destroy();
   });
 
-  it('moves the document to the markup variant when tracked changes are toggled', () => {
+  it('moves the document to the markup variant when tracked changes are toggled', async () => {
     installDom();
     const engine = new FakeDocxEngine(20, PAGE);
     const viewer = DocxScrollViewer.fromDocument(
@@ -171,14 +171,93 @@ describe('DocxScrollViewer — growing page count', () => {
     );
     expect(engine.layoutViews).toEqual([]);
 
-    viewer.setShowTrackedChanges(true);
+    await viewer.setShowTrackedChanges(true);
     expect(engine.layoutViews).toEqual([
       { showTrackedChanges: true, currentDate: undefined },
     ]);
     viewer.destroy();
   });
 
-  it('recycles out-of-range slots when the markup variant is shorter', () => {
+  it('reads no geometry from the markup variant until the document installs it', async () => {
+    // Worker mode builds the variant in the worker, so the switch is a
+    // round-trip. While it is in flight the document still answers for the
+    // variant on screen, and the viewer must keep measuring against THAT —
+    // adopting the new view early is the paint/geometry split all over again.
+    installDom();
+    const container = makeContainer(700, 500);
+    const engine = new FakeDocxEngine(20, PAGE, 'worker');
+    engine.setVariantPageCounts(20, 4);
+    engine.deferLayoutViews();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+    const finalHeight = parseFloat(spacerOf(container).style.height);
+    engine.bitmapCalls.length = 0;
+
+    const switching = viewer.setShowTrackedChanges(true);
+    await Promise.resolve();
+    // Nothing has moved: no repaint at the new variant, no new scroll extent.
+    expect(engine.bitmapCalls).toHaveLength(0);
+    expect(viewer.pageCount).toBe(20);
+    expect(parseFloat(spacerOf(container).style.height)).toBe(finalHeight);
+
+    // And a repaint forced WHILE the switch is in flight (a scroll, a resize,
+    // a progressive publication) must still name the variant the document's
+    // geometry describes — painting markup against the final view's page count
+    // is precisely the split this switch exists to avoid.
+    (viewer as unknown as { _invalidateRenderedSlots(): void })._invalidateRenderedSlots();
+    viewer.relayout();
+    expect(engine.bitmapCalls.length).toBeGreaterThan(0);
+    for (const call of engine.bitmapCalls) {
+      expect(call.showTrackedChanges ?? false).toBe(false);
+    }
+    expect(viewer.pageCount).toBe(20);
+    engine.bitmapCalls.length = 0;
+
+    expect(engine.pendingLayoutViews).toHaveLength(1);
+    engine.pendingLayoutViews[0]!();
+    await switching;
+
+    expect(viewer.pageCount).toBe(4);
+    expect(parseFloat(spacerOf(container).style.height)).toBeLessThan(finalHeight);
+    expect(engine.bitmapCalls.length).toBeGreaterThan(0);
+    for (const call of engine.bitmapCalls) expect(call.showTrackedChanges).toBe(true);
+    viewer.destroy();
+  });
+
+  it('lands on the last requested view when the toggle is flipped twice mid-switch', async () => {
+    // The viewer's own flag lags the request in worker mode, so a toggle back
+    // has to compare against what was ASKED for. Comparing against what is
+    // painted makes the second call a no-op and the first one wins.
+    installDom();
+    const engine = new FakeDocxEngine(20, PAGE, 'worker');
+    engine.setVariantPageCounts(20, 4);
+    engine.deferLayoutViews();
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer(700, 500) as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+
+    const toMarkup = viewer.setShowTrackedChanges(true);
+    const backToFinal = viewer.setShowTrackedChanges(false);
+    expect(engine.layoutViews.map((view) => view.showTrackedChanges)).toEqual([true, false]);
+
+    for (const release of [...engine.pendingLayoutViews]) release();
+    await Promise.all([toMarkup, backToFinal]);
+
+    expect(viewer.pageCount).toBe(20);
+    engine.bitmapCalls.length = 0;
+    viewer.relayout();
+    (viewer as unknown as { _invalidateRenderedSlots(): void })._invalidateRenderedSlots();
+    viewer.relayout();
+    for (const call of engine.bitmapCalls) {
+      expect(call.showTrackedChanges ?? false).toBe(false);
+    }
+    viewer.destroy();
+  });
+
+  it('recycles out-of-range slots when the markup variant is shorter', async () => {
     // Hiding vs showing deletions changes the page count. Toggling to a SHORTER
     // variant while scrolled deep used to leave slots asking for pages that no
     // longer exist, which surfaced as a RangeError and a blank page.
@@ -192,10 +271,11 @@ describe('DocxScrollViewer — growing page count', () => {
     viewer.scrollToPage(50);
     expect(viewer.topVisiblePage).toBeGreaterThan(0);
 
-    // The toggle shortens the document under the reader.
-    engine.setPageCount(3);
+    // The toggle shortens the document under the reader — the variant switch
+    // itself is what repaginates it, exactly as a real document does.
+    engine.setVariantPageCounts(60, 3);
     engine.renderCalls.length = 0;
-    viewer.setShowTrackedChanges(true);
+    await viewer.setShowTrackedChanges(true);
 
     expect(viewer.pageCount).toBe(3);
     // Every page requested AFTER the toggle must exist in the shorter variant.

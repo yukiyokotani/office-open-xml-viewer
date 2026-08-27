@@ -44,6 +44,20 @@ export interface DocumentMeta {
 }
 
 /**
+ * The layout-derived half of {@link DocumentMeta}: exactly what changes when the
+ * viewed layout VARIANT changes.
+ *
+ * `revisions`, `comments`, `footnotes` and `endnotes` come from the parsed model
+ * and are the same for every variant, so a variant switch keeps the ones the
+ * load established instead of re-cloning them across the wire — the same
+ * bandwidth rule {@link DocumentLayoutPartial.review} follows.
+ */
+export type DocumentLayoutMeta = Pick<
+  DocumentMeta,
+  'pageCount' | 'pageSizes' | 'bookmarkPages' | 'commentAnchorRanges' | 'revisionAnchorRanges'
+>;
+
+/**
  * Provisional layout geometry published by the render worker while it is still
  * paginating under `progressiveLayout`.
  *
@@ -91,6 +105,13 @@ export type RenderWorkerRequest =
   // pagination with its own page count. Omitted means the document's default
   // view, which is what every load selected before these existed.
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; defaultCurrentDateMs: number; currentDateMs?: number; showTrackedChanges?: boolean; renderers?: WorkerRendererDescriptors; progressiveLayout?: boolean }
+  // Repaginate the retained document as a DIFFERENT variant and report that
+  // variant's metadata. `setLayoutView` in worker mode is this round-trip: the
+  // model lives in the worker, so the host cannot compute the new page count,
+  // page sizes, or anchor projections itself — and until it has them its
+  // geometry accessors would describe a layout nobody is painting. Same field
+  // semantics as `parse`: omitted means the document's default view.
+  | { type: 'selectLayoutView'; id: number; currentDateMs?: number; showTrackedChanges?: boolean }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The
   // find controller scans every page for its runs; a bitmap per page would be
@@ -133,6 +154,9 @@ export type RenderWorkerResponse =
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[] }
   | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  // The selected variant's geometry, for the host to install atomically with
+  // the active-view record it belongs to.
+  | { type: 'layoutViewSelected'; id: number; meta: DocumentLayoutMeta }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
   // authoritative `parsedMeta`. Keyed by `forId` rather than `id` ON PURPOSE —

@@ -132,6 +132,13 @@ export class DocxViewer implements ZoomableViewer {
    *  1×1 offscreen canvas, so measuring never touches the visible canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private _opts: DocxViewerOptions;
+  /** The view the most recent {@link setShowTrackedChanges} ASKED for.
+   *
+   *  `_opts.showTrackedChanges` is what this viewer PAINTS and reads geometry
+   *  from; in `mode: 'worker'` it only moves once the document's variant switch
+   *  round-trips. Rapid toggles compare against the request so a toggle back
+   *  does not mistake its own target for the current view. */
+  private _requestedShowTrackedChanges: boolean;
   private readonly _mode: 'main' | 'worker';
   private readonly _renderDispatcher: StaticCanvasRenderDispatcher;
   private readonly _errorRouter: CanvasViewerErrorRouter;
@@ -163,6 +170,7 @@ export class DocxViewer implements ZoomableViewer {
   constructor(canvas: HTMLCanvasElement, opts: DocxViewerOptions = {}) {
     this._canvas = canvas;
     this._opts = opts;
+    this._requestedShowTrackedChanges = opts.showTrackedChanges === true;
     const borrowedDocument = (opts as InternalDocxViewerOptions)[borrowedDocumentOption];
     this._borrowed = borrowedDocument !== undefined;
     this._mode = resolveCanvasViewerMode('DocxViewer', opts.mode, borrowedDocument);
@@ -266,6 +274,10 @@ export class DocxViewer implements ZoomableViewer {
       });
       if (!doc) return;
       if (this._destroyed) throw new Error('DocxViewer is destroyed');
+      // The load selected its variant from `_opts.showTrackedChanges`, so a
+      // toggle still in flight when it landed no longer describes anything:
+      // re-anchor the request latch to the view this document actually holds.
+      this._requestedShowTrackedChanges = this._opts.showTrackedChanges === true;
       this._currentPage = 0;
       // A new document invalidates any prior find state (cached runs / matches).
       this._find.invalidate();
@@ -730,18 +742,50 @@ export class DocxViewer implements ZoomableViewer {
    * decoration + margin change bars) at runtime, re-rendering the current
    * page against the selected layout variant. Find results are invalidated:
    * the visible text differs between the views.
+   *
+   * Resolves once the switch is on screen. The markup view is a genuinely
+   * different pagination, and in `mode: 'worker'` it is built in the worker, so
+   * the document's geometry for it arrives asynchronously; the viewer keeps
+   * painting — and measuring — the previous variant until then rather than
+   * mixing the two.
    */
   async setShowTrackedChanges(value: boolean): Promise<void> {
-    if ((this._opts.showTrackedChanges === true) === value) return;
-    this._opts = { ...this._opts, showTrackedChanges: value };
-    this._find.invalidate();
+    if (this._requestedShowTrackedChanges === value) return;
+    this._requestedShowTrackedChanges = value;
     // The markup view paginates differently, so the document's geometry
     // accessors must follow it — and the current page may no longer exist:
     // hiding deletions can shorten the document past where the reader is.
-    this._doc?.setLayoutView?.({
-      showTrackedChanges: value,
-      currentDate: this._opts.currentDate,
-    });
+    // Move the DOCUMENT first: it installs the selected variant together with
+    // the metadata describing it (in `mode: 'worker'` that is a round-trip to
+    // the worker). This viewer's render options name the variant explicitly, so
+    // adopting it earlier would paint the new pagination while `pageCount` and
+    // `pageSize` still described the old one.
+    const doc = this._doc;
+    try {
+      await doc?.setLayoutView?.({
+        showTrackedChanges: value,
+        currentDate: this._opts.currentDate,
+      });
+    } catch (error) {
+      // Nothing moved, so the request latch must not either — a retry of the
+      // same value would otherwise short-circuit.
+      if (this._requestedShowTrackedChanges === value) {
+        this._requestedShowTrackedChanges = this._opts.showTrackedChanges === true;
+      }
+      // A teardown mid-switch is not a failed switch; report it the way every
+      // other post-destroy operation here does.
+      if (this._destroyed) throw new Error('DocxViewer is destroyed');
+      throw error;
+    }
+    // A later toggle, a re-load, or teardown already moved on.
+    if (
+      this._destroyed
+      || this._doc !== doc
+      || this._requestedShowTrackedChanges !== value
+      || (this._opts.showTrackedChanges === true) === value
+    ) return;
+    this._opts = { ...this._opts, showTrackedChanges: value };
+    this._find.invalidate();
     this._currentPage = Math.max(0, Math.min(this._currentPage, this.pageCount - 1));
     await this._render();
   }

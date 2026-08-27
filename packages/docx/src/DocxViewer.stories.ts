@@ -310,8 +310,19 @@ export const TrackedChanges: Story = {
 
     markupBtn.addEventListener('click', () => {
       markupOn = !markupOn;
-      refreshButtons();
-      void viewer?.setShowTrackedChanges(markupOn);
+      markupBtn.disabled = true;
+      // The markup view is a different pagination, built in the worker under
+      // mode: 'worker'. Await the switch, so the button reports the view that
+      // is actually on screen rather than the one that was requested.
+      void viewer?.setShowTrackedChanges(markupOn)
+        .catch((error: unknown) => {
+          markupOn = !markupOn;
+          status.textContent = `Markup view switch failed: ${String(error)}`;
+        })
+        .finally(() => {
+          markupBtn.disabled = false;
+          refreshButtons();
+        });
     });
     void loadFixture();
     return root;

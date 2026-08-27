@@ -23,7 +23,14 @@ describe('DocxScrollViewer.load() — no orphaned engine on re-load (SC20)', () 
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
-    return { v };
+    return { v, container };
+  }
+
+  /** The virtualization spacer whose height IS the document's scroll extent. */
+  function spacerHeight(container: FakeEl): number {
+    return parseFloat(
+      ((container.children[0] as FakeEl).children[0] as FakeEl).children[0].style.height,
+    );
   }
 
   it('destroys the previous engine when a self-loaded viewer is re-loaded', async () => {
@@ -94,6 +101,101 @@ describe('DocxScrollViewer.load() — no orphaned engine on re-load (SC20)', () 
 
     v.destroy();
     expect(first.destroyed).toBe(true);
+  });
+
+  it('keeps the retained document\u2019s layout alive when an OVERLAPPING newer load fails', async () => {
+    // Three-load overlap, which the single-reload case above cannot reach.
+    // A is installed; B is still acquiring; C starts and rejects.
+    // `TerminalResourceOwner`'s replacement generation is MONOTONIC, so C's
+    // start already condemned B: when B finally resolves the owner discards it
+    // and A stays installed. A viewer that answered "which document owns my
+    // relayout?" with the request counter would restore the number B captured
+    // — a document nobody installed — and A's own publications, captured one
+    // number lower, would be refused forever: the engine reports 80 pages while
+    // the spacer stays at the 2-page preview height.
+    const { v, container } = build({ progressiveLayout: true });
+    const retained = new FakeDocxEngine(2, SIZE);
+    const superseded = new FakeDocxEngine(9, SIZE);
+    let captured: Parameters<typeof DocxDocument.load>[1] | undefined;
+    let resolveSuperseded!: () => void;
+    const supersededLoad = new Promise<DocxDocument>((resolve) => {
+      resolveSuperseded = () => { resolve(superseded.asDoc()); };
+    });
+    vi.spyOn(DocxDocument, 'load')
+      .mockImplementationOnce((_source, opts) => {
+        captured = opts;
+        return Promise.resolve(retained.asDoc());
+      })
+      .mockImplementationOnce(() => supersededLoad)
+      .mockRejectedValueOnce(new Error('boom'));
+
+    await v.load('retained.docx');
+    const provisionalHeight = spacerHeight(container);
+    expect(v.pageCount).toBe(2);
+
+    const pending = v.load('superseded.docx');
+    await expect(v.load('failing.docx')).rejects.toThrow('boom');
+
+    // B loses the swap and destroys itself; A is untouched and still on screen.
+    resolveSuperseded();
+    await pending;
+    expect(superseded.destroyed).toBe(true);
+    expect(retained.destroyed).toBe(false);
+    expect(v.pageCount).toBe(2);
+
+    // A's background layout finishes. Its publications must still reach the
+    // viewer: it is the document being rendered. The spacer, not `pageCount`,
+    // is what pins that — `pageCount` reads straight through to the engine and
+    // so reports the growth whether or not the viewer ever relaid out.
+    retained.setPageCount(40);
+    captured?.onLayoutPartial?.({ pageCount: 40, exact: false });
+    const partialHeight = spacerHeight(container);
+    expect(partialHeight).toBeGreaterThan(provisionalHeight);
+
+    retained.setPageCount(80);
+    captured?.onLayoutComplete?.();
+    expect(v.pageCount).toBe(80);
+    expect(spacerHeight(container)).toBeGreaterThan(partialHeight);
+
+    v.destroy();
+    expect(retained.destroyed).toBe(true);
+  });
+
+  it('refuses a superseded load\u2019s publications while the retained document is on screen', async () => {
+    // The mirror image of the test above: B lost the swap, so B's own
+    // background layout may not relayout the viewer around A's geometry.
+    const { v } = build({ progressiveLayout: true });
+    const retained = new FakeDocxEngine(2, SIZE);
+    const superseded = new FakeDocxEngine(9, SIZE);
+    let supersededOpts: Parameters<typeof DocxDocument.load>[1] | undefined;
+    let resolveSuperseded!: () => void;
+    const supersededLoad = new Promise<DocxDocument>((resolve) => {
+      resolveSuperseded = () => { resolve(superseded.asDoc()); };
+    });
+    vi.spyOn(DocxDocument, 'load')
+      .mockImplementationOnce(() => Promise.resolve(retained.asDoc()))
+      .mockImplementationOnce((_source, opts) => {
+        supersededOpts = opts;
+        return supersededLoad;
+      })
+      .mockRejectedValueOnce(new Error('boom'));
+
+    await v.load('retained.docx');
+    const pending = v.load('superseded.docx');
+    await expect(v.load('failing.docx')).rejects.toThrow('boom');
+    resolveSuperseded();
+    await pending;
+
+    // A publication from the discarded document changes nothing on screen: it
+    // must not even repaint A's mounted slots, which is what a non-exact
+    // publication does for the document it belongs to.
+    const paintedBefore = retained.renderCalls.length;
+    supersededOpts?.onLayoutPartial?.({ pageCount: 500, exact: false });
+    supersededOpts?.onLayoutComplete?.();
+    expect(retained.renderCalls.length).toBe(paintedBefore);
+    expect(v.pageCount).toBe(2);
+
+    v.destroy();
   });
 
   it('rejects an initial window render failure without also calling onError', async () => {

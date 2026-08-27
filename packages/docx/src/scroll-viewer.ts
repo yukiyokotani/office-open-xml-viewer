@@ -320,9 +320,20 @@ export class DocxScrollViewer implements ZoomableViewer {
   /** Second half of the visible-page latch: a document that grows under the
    *  viewport changes `total` without changing `topIndex`. */
   private _lastReportedTotal = -1;
-  /** Bumped on every `load()`. Background-layout callbacks capture it so a
-   *  previous document's completion cannot relayout the current one. */
+  /** Bumped on every `load()` and NEVER rolled back: it answers only "is this
+   *  call still the newest request?", which a monotonic counter is the whole
+   *  point of. It is not an identity for the installed document — see
+   *  {@link _installedLoad}. */
   private _loadGeneration = 0;
+  /** The `load()` call whose document {@link _documentOwner} currently holds.
+   *
+   *  Background-layout callbacks are admitted on THIS, not on the request
+   *  counter. `TerminalResourceOwner` supersedes an in-flight loader the moment
+   *  a later `replace()` starts, so a rejected newer load can leave a document
+   *  from an OLDER call installed — and that document's publications still own
+   *  this viewer's relayout. A counter cannot express that: it names a request,
+   *  and no request number is the installed document's. */
+  private _installedLoad: object | null = null;
   private _scrollListener: (() => void) | null = null;
   private _selectionChangeListener: (() => void) | null = null;
   private _selectionContextKey = 'null';
@@ -431,6 +442,14 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  variant the viewer reads geometry from; toggle it with
    *  {@link setShowTrackedChanges}. */
   private _showTrackedChanges: boolean;
+  /** The view the most recent {@link setShowTrackedChanges} ASKED for.
+   *
+   *  In `mode: 'worker'` the document's variant switch is a round-trip, so
+   *  `_showTrackedChanges` — the view this viewer paints and reads geometry
+   *  from — only moves once that lands. Rapid toggles have to compare against
+   *  the request, not the paint, or a second toggle back sees its own target
+   *  already "current" and returns while the first is still in flight. */
+  private _requestedShowTrackedChanges: boolean;
 
   /**
    * Create a Scroll Viewer that borrows an already-loaded document.
@@ -465,6 +484,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._container = container;
     this._opts = opts;
     this._showTrackedChanges = opts.showTrackedChanges === true;
+    this._requestedShowTrackedChanges = this._showTrackedChanges;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
@@ -598,11 +618,23 @@ export class DocxScrollViewer implements ZoomableViewer {
     // (The borrowed path returned above can never reach here, so this only ever
     // frees an engine we created.)
     let elementInvalidated = false;
+    // Two separate identities, deliberately. `generation` answers "is this call
+    // still the newest request?" and therefore stays monotonic; `token` is this
+    // call's DOCUMENT identity, promoted to `_installedLoad` only once the owner
+    // actually commits it.
     const generation = ++this._loadGeneration;
+    const token: object = {};
     // Set once the owner has resolved the swap (installed a new document or
     // returned a superseded loser). Until then, a failure means the PREVIOUS
     // document is still installed — see the catch below.
     let swapResolved = false;
+    // A background publication may touch this viewer only while its own
+    // document is the installed one, or — before the swap resolves — while this
+    // call is still the newest request and so the one about to install.
+    const ownsViewer = (): boolean =>
+      !this._destroyed &&
+      (this._installedLoad === token ||
+        (!swapResolved && this._loadGeneration === generation));
     try {
       const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
         password: this._opts.password,
@@ -632,7 +664,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         // screen are only repainted when their content can still change —
         // for an exact publication they are provably final already.
         onLayoutPartial: ({ exact }) => {
-          if (this._destroyed || generation !== this._loadGeneration) return;
+          if (!ownsViewer()) return;
           this._find.invalidate();
           if (!exact) this._invalidateRenderedSlots();
           this.relayout();
@@ -643,7 +675,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         onLayoutComplete: (error?: unknown) => {
           // A superseded load's document may still finish in the background;
           // it must not touch the document that replaced it.
-          if (this._destroyed || generation !== this._loadGeneration) return;
+          if (!ownsViewer()) return;
           if (error !== undefined) {
             this._opts.onError?.(error instanceof Error ? error : new Error(String(error)));
             return;
@@ -670,6 +702,14 @@ export class DocxScrollViewer implements ZoomableViewer {
       });
       swapResolved = true;
       if (!doc) return;
+      // The owner committed THIS call's document, so its background layout now
+      // holds the viewer's relayout rights and the previous document — already
+      // destroyed by that commit — loses them.
+      this._installedLoad = token;
+      // The load selected its variant from `_showTrackedChanges`, so a toggle
+      // still in flight when it landed no longer describes anything: re-anchor
+      // the request latch to the view this document actually holds.
+      this._requestedShowTrackedChanges = this._showTrackedChanges;
       if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
       this._find.invalidate();
       this._findActive = false;
@@ -684,18 +724,16 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._relayout(initialRenders);
       await Promise.all(initialRenders);
     } catch (err) {
-      // A rejected acquisition leaves the PREVIOUS document installed (the
-      // atomic swap in `replace`), but its background-layout callbacks
-      // captured the pre-bump generation — without restoring it they would
-      // ignore every later progressive publication and completion, freezing
-      // the retained document at its preview prefix forever. Restore only
-      // when no newer load() has claimed the counter; that load's own
-      // bookkeeping owns it now. A post-swap failure (relayout, initial
-      // renders) keeps the new generation: the installed document's callbacks
-      // captured it.
-      if (!swapResolved && this._loadGeneration === generation) {
-        this._loadGeneration = generation - 1;
-      }
+      // A rejected acquisition leaves whatever the owner already holds
+      // installed — and that is not necessarily the load before this one. The
+      // owner's replacement generation is monotonic, so this call's own `++`
+      // has already condemned every loader still in flight: they will be
+      // discarded when they resolve, and a document from an older call stays
+      // installed. `_installedLoad` names that retained document directly and
+      // is untouched here, so its publications keep relaying out this viewer.
+      // Rolling the request counter back instead would hand authority to
+      // whichever call happens to share the restored number — in a three-load
+      // overlap, a document nobody ever installed.
       // Superseded loads own no error reporting — the winning load (or destroy())
       // is the outcome the caller awaits; swallow this stale rejection.
       if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
@@ -2014,18 +2052,47 @@ export class DocxScrollViewer implements ZoomableViewer {
    * decoration + margin change bars) at runtime. Every mounted page
    * re-renders against the selected layout variant; find results are
    * invalidated because the visible text differs between the views.
+   *
+   * Resolves once the switch is on screen. The markup view is a genuinely
+   * different pagination, and in `mode: 'worker'` it is built in the worker, so
+   * the document's geometry for it arrives asynchronously; the viewer keeps
+   * painting — and measuring — the previous variant until then rather than
+   * mixing the two.
    */
-  setShowTrackedChanges(value: boolean): void {
-    if (this._showTrackedChanges === value) return;
+  async setShowTrackedChanges(value: boolean): Promise<void> {
+    if (this._requestedShowTrackedChanges === value) return;
+    this._requestedShowTrackedChanges = value;
+    // Move the DOCUMENT first: it installs the selected variant together with
+    // the metadata describing it. Only then does this viewer adopt the view —
+    // its render requests name the variant explicitly, so flipping first would
+    // paint the new pagination against the old page count and page heights.
+    const doc = this._doc;
+    try {
+      await doc?.setLayoutView?.({
+        showTrackedChanges: value,
+        currentDate: this._opts.currentDate,
+      });
+    } catch (error) {
+      // The document is unchanged, so the viewer must be too — otherwise a
+      // retry of the same value would short-circuit on the stale request.
+      if (this._requestedShowTrackedChanges === value) {
+        this._requestedShowTrackedChanges = this._showTrackedChanges;
+      }
+      // A teardown mid-switch is not a failed switch; report it the way every
+      // other post-destroy operation here does.
+      if (this._destroyed) throw new Error('DocxScrollViewer is destroyed');
+      throw error;
+    }
+    // A later toggle, a re-load, or teardown happened while the switch was in
+    // flight; that call owns the viewer's view now.
+    if (
+      this._destroyed
+      || this._doc !== doc
+      || this._requestedShowTrackedChanges !== value
+      || this._showTrackedChanges === value
+    ) return;
     this._showTrackedChanges = value;
     this._find.invalidate();
-    // The markup view is a different retained layout with its own pagination,
-    // so move the document's active variant before reading any geometry from
-    // it — page count and page heights are about to change.
-    this._doc?.setLayoutView?.({
-      showTrackedChanges: value,
-      currentDate: this._opts.currentDate,
-    });
     // Re-render every mounted slot at the new variant, and relayout: heights,
     // spacer and mount window all follow the new page count, and a shrinking
     // document must recycle slots that are now out of range rather than ask for
@@ -2816,6 +2883,9 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     for (const [idx, slot] of [...this._slots]) this._recycleSlot(idx, slot);
     this._free.length = 0;
+    // Nothing is installed any more; `_destroyed` already refuses every
+    // callback, but a dropped reference is one less way to resurrect one.
+    this._installedLoad = null;
     this._documentOwner.close();
     this._wrapper.remove();
   }

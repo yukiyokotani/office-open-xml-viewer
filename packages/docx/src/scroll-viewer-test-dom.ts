@@ -390,9 +390,47 @@ export class FakeDocxEngine {
    *  active layout variant when its tracked-changes view toggles, BEFORE it
    *  reads any geometry from the new variant. */
   layoutViews: Array<{ showTrackedChanges?: boolean; currentDate?: Date | number }> = [];
+  /** Page count per §17.13.5 view. A real document REPAGINATES when the variant
+   *  switches, and its geometry accessors only start answering for the new one
+   *  once that pagination exists. A fake that reports one page count for both
+   *  views lets a viewer read geometry belonging to the variant it is not
+   *  painting and still look correct — so tests that drive the toggle set this
+   *  instead of moving `setPageCount` by hand. */
+  private _variantPageCounts: { final: number; markup: number } | null = null;
+  /** Worker-mode fidelity: the switch is a round-trip to the worker, so
+   *  `setLayoutView` stays pending until the test releases it. Until then the
+   *  document must still answer for the PREVIOUS variant. */
+  private _deferLayoutViews = false;
+  /** Releases for the deferred switches, in call order. */
+  readonly pendingLayoutViews: Array<() => void> = [];
 
-  setLayoutView(view: { showTrackedChanges?: boolean; currentDate?: Date | number }): void {
+  /** Give the two views different paginations, and start on the final one. */
+  setVariantPageCounts(final: number, markup: number): void {
+    this._variantPageCounts = { final, markup };
+    this._pageCount = final;
+  }
+
+  /** Model worker mode: hold every later `setLayoutView` until released. */
+  deferLayoutViews(): void {
+    this._deferLayoutViews = true;
+  }
+
+  setLayoutView(view: { showTrackedChanges?: boolean; currentDate?: Date | number }): Promise<void> {
     this.layoutViews.push(view);
+    const install = (): void => {
+      const counts = this._variantPageCounts;
+      if (!counts) return;
+      // The variant and the geometry describing it move together, exactly as
+      // the real document installs them.
+      this._pageCount = view.showTrackedChanges === true ? counts.markup : counts.final;
+    };
+    if (!this._deferLayoutViews) {
+      install();
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.pendingLayoutViews.push(() => { install(); resolve(); });
+    });
   }
 
   get pageCount(): number {

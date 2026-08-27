@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { WorkerBridge, type WorkerLike } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
-import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
+import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
+import { normalizeLayoutOptions } from './layout/options.js';
 import type {
+  DocumentLayoutMeta,
   DocumentLayoutPartial,
   DocumentMeta,
   RenderWorkerRequest,
@@ -43,6 +45,17 @@ const REVIEW = {
   endnotes: [],
 } as unknown as NonNullable<DocumentLayoutPartial['review']>;
 
+/** The layout-derived half a `selectLayoutView` reply carries. */
+function layoutMeta(pageCount: number): DocumentLayoutMeta {
+  return {
+    pageCount,
+    pageSizes: Array.from({ length: pageCount }, () => ({ ...PAGE })),
+    bookmarkPages: [['intro', 0], ['outro', pageCount - 1]],
+    commentAnchorRanges: [],
+    revisionAnchorRanges: [],
+  };
+}
+
 function fullMeta(pageCount: number): DocumentMeta {
   return {
     pageCount,
@@ -65,6 +78,8 @@ function fullMeta(pageCount: number): DocumentMeta {
 function progressiveDocument(opts: {
   timeoutMs?: number;
   view?: { currentDateMs?: number; showTrackedChanges?: boolean };
+  /** Pages the worker reports for a runtime `selectLayoutView`. */
+  switchedPageCount?: number;
   onPartial?: (p: { pageCount: number; exact: boolean }) => void;
   onComplete?: (error?: unknown) => void;
   onProgress?: (p: { committedPages: number }) => void;
@@ -73,6 +88,8 @@ function progressiveDocument(opts: {
   let fail!: (error: unknown) => void;
   const reply = new Promise<RenderWorkerResponse>((res, rej) => { settle = res; fail = rej; });
   const requests: RenderWorkerRequest[] = [];
+  // The parse takes 11, matching what every settle() below correlates on.
+  let nextId = 11;
   let terminated = false;
 
   const document = Object.create(DocxDocument.prototype) as DocxDocument;
@@ -89,7 +106,17 @@ function progressiveDocument(opts: {
     _localMetricFontFaces: [],
     _bridge: {
       request: (factory: (id: number) => RenderWorkerRequest) => {
-        requests.push(factory(11));
+        const request = factory(nextId++);
+        requests.push(request);
+        // A runtime view switch is its own round-trip; the parse's own reply
+        // stays under the test's control.
+        if (request.type === 'selectLayoutView') {
+          return Promise.resolve({
+            type: 'layoutViewSelected',
+            id: request.id,
+            meta: layoutMeta(opts.switchedPageCount ?? 13),
+          } satisfies RenderWorkerResponse);
+        }
         return reply;
       },
       terminate: () => { terminated = true; },
@@ -99,10 +126,13 @@ function progressiveDocument(opts: {
   if (opts.view) {
     // load() records the active variant before parsing; the parse request is
     // derived from that same record.
-    (document as unknown as { setLayoutView(v: unknown): void }).setLayoutView({
-      currentDate: opts.view.currentDateMs,
-      showTrackedChanges: opts.view.showTrackedChanges,
-    });
+    // Straight to the runtime record, exactly as load() does before parsing —
+    // the public setter is a worker round-trip and there is no worker yet.
+    documentLayoutRuntimeOf(document).activeLayoutOptions = normalizeLayoutOptions(
+      opts.view.currentDateMs,
+      0,
+      opts.view.showTrackedChanges === true,
+    );
   }
 
   const progressive = {
@@ -207,6 +237,54 @@ describe('worker-mode progressive load', () => {
     expect(completed).toBe(1);
   });
 
+  it('keeps a switched view when the superseded parse keeps publishing', async () => {
+    // Progressive layout resolves load() early, so a viewer can switch the
+    // §17.13.5 view while the worker is still paginating the LOAD-TIME variant.
+    // Its later prefixes and its authoritative metadata describe that variant;
+    // installing either would put its page count and page geometry behind the
+    // markup layout now being painted.
+    const harness = progressiveDocument({ switchedPageCount: 13 });
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(2, { review: REVIEW }) });
+    await harness.parsed;
+    expect(harness.document.pageCount).toBe(2);
+
+    await harness.document.setLayoutView({ showTrackedChanges: true });
+    expect(harness.document.pageCount).toBe(13);
+    expect(harness.document.getBookmarkPage('outro')).toBe(12);
+
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(9) });
+    expect(harness.document.pageCount).toBe(13);
+
+    harness.settle({ type: 'parsedMeta', id: 11, meta: fullMeta(40) });
+    await harness.document.whenLayoutComplete();
+
+    expect(harness.document.pageCount).toBe(13);
+    expect(harness.document.getBookmarkPage('outro')).toBe(12);
+    // The progressive window still closes, and the model-derived records the
+    // authoritative metadata carries ARE variant-independent, so they land.
+    expect(harness.document.layoutComplete).toBe(true);
+    expect(harness.document.comments).toHaveLength(1);
+  });
+
+  it('installs the load-time variant again when the view is switched back', async () => {
+    // The guard is variant equality, not "a switch ever happened": returning to
+    // the parse's own variant must let its metadata through again.
+    const harness = progressiveDocument({ switchedPageCount: 13 });
+    harness.push({ type: 'layoutPartial', forId: 11, partial: partial(2, { review: REVIEW }) });
+    await harness.parsed;
+
+    await harness.document.setLayoutView({ showTrackedChanges: true });
+    expect(harness.document.pageCount).toBe(13);
+    await harness.document.setLayoutView({});
+    // Switching back to the installed-at-load variant needs no round-trip, but
+    // it does hand the parse its authority back.
+    harness.settle({ type: 'parsedMeta', id: 11, meta: fullMeta(40) });
+    await harness.document.whenLayoutComplete();
+
+    expect(harness.document.pageCount).toBe(40);
+    expect(harness.document.getBookmarkPage('outro')).toBe(39);
+  });
+
   it('sends the default view as no view fields at all', async () => {
     // Keeps the wire shape identical to what pre-variant builds sent, so a
     // default load cannot accidentally select a different key.
@@ -308,9 +386,13 @@ describe('worker-mode progressive load', () => {
       }
       expect(harness.terminated()).toBe(false);
 
-      // Going quiet is what is not allowed.
+      // Going quiet is what is not allowed. The message must name the deadline
+      // it actually enforced — a diagnostic that reads `undefinedms` tells an
+      // integrator nothing about which timeout to raise.
       vi.advanceTimersByTime(1_001);
-      await expect(harness.parsed).rejects.toThrow(/no progress/);
+      await expect(harness.parsed).rejects.toThrow(
+        'worker layout produced no progress for 1000ms',
+      );
       expect(harness.terminated()).toBe(true);
     } finally {
       vi.useRealTimers();
