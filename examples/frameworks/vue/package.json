@@ -11,7 +11,7 @@
     "check": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@silurus/ooxml": "^0.75.3",
+    "@silurus/ooxml": "^0.82.0",
     "vue": "^3.5.40"
   },
   "devDependencies": {

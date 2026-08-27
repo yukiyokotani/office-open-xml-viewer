@@ -254,14 +254,15 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
           open.textContent = 'Rendering…';
           open.disabled = true;
 
-          popup.addEventListener('pagehide', () => {
+          popup.addEventListener('pagehide', (event) => {
+            if (event.persisted) return;
             themeObserver.disconnect();
             viewer.destroy();
             if (sessions.get(index) === session) sessions.delete(index);
             open.textContent = 'Open in window \u2197\uFE0E';
             open.disabled = false;
             closeAll.disabled = sessions.size === 0;
-          }, { once: true });
+          });
 
           viewer.goToSheet(index)
             .then(() => {
@@ -302,7 +303,8 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
 
       st.remove();
       launcher.append(summary, popupError, list);
-      window.addEventListener('pagehide', () => {
+      window.addEventListener('pagehide', (event) => {
+        if (event.persisted) return;
         sessions.forEach(({ popup, viewer, themeObserver }) => {
           themeObserver.disconnect();
           viewer.destroy();
@@ -310,7 +312,7 @@ function mountSheetWindows(el: HTMLElement, url: string): void {
         });
         sessions.clear();
         workbook.destroy();
-      }, { once: true });
+      });
     })
     .catch((error) => { st.textContent = err(error); });
 }
@@ -433,10 +435,11 @@ function mountMasterDetail(el: HTMLElement, format: Format, url: string): void {
       const viewer = makeBorrowedViewer(doc, detailCanvas, 960);
       const detailViewerWrapper = detailCanvas.parentElement as HTMLDivElement;
       detailViewerWrapper.hidden = true;
-      window.addEventListener('pagehide', () => {
+      window.addEventListener('pagehide', (event) => {
+        if (event.persisted) return;
         viewer.destroy();
         doc.engine.destroy();
-      }, { once: true });
+      });
       await viewer.go(0);
       detailCanvas.hidden = false;
       detailViewerWrapper.hidden = false;

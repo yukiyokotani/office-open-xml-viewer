@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml-site",
-  "version": "0.82.0",
+  "version": "0.82.1",
   "private": true,
   "type": "module",
   "description": "Showcase / marketing site for @silurus/ooxml",
@@ -22,7 +22,6 @@
   },
   "devDependencies": {
     "astro": "^6.4.8",
-    "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.6.0"
   }
 }

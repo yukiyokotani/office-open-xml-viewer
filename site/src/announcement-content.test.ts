@@ -83,7 +83,7 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets in v0.82.0');
+    expect(bundleSizePage).toContain('Current production assets in v0.82.1');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
     expect(bundleSizePage).toContain('XLSX static JavaScript');
     expect(bundleSizePage).toContain('PPTX static JavaScript');

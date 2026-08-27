@@ -280,16 +280,15 @@ const primitiveTabs = [
       </div>
       <p class="setup-note">These snippets assume an application-owned, laid-out host element and a <code>source</code> URL or <code>ArrayBuffer</code>. Keep the Viewer for as long as the screen is mounted, then call <code>viewer.destroy()</code>. See the <a href="/docx">DOCX</a>, <a href="/xlsx">XLSX</a>, and <a href="/pptx">PPTX</a> live pages for complete Viewer setup.</p>
       <div class="table-wrap" role="region" aria-label="Built-in comment options" tabindex="0">
-        <table>
-          <thead><tr><th>Option</th><th>Formats</th><th>Behavior</th></tr></thead>
+        <table class="option-matrix">
+          <thead><tr><th scope="col">Option</th><th class="format-column" scope="col">DOCX</th><th class="format-column" scope="col">XLSX</th><th class="format-column" scope="col">PPTX</th><th scope="col">Behavior</th></tr></thead>
           <tbody>
-            <tr><th><code>comments: true</code></th><td>DOCX, PPTX, XLSX</td><td>Use the built-in presentation and its format defaults. XLSX comments are already visible when the option is omitted.</td></tr>
-            <tr><th><code>comments: false</code></th><td>DOCX, PPTX, XLSX</td><td>Do not show the built-in comment presentation.</td></tr>
-            <tr><th><code>includeResolved</code></th><td>DOCX, PPTX, XLSX</td><td>Include resolved or closed threads. Defaults to <code>false</code> for DOCX/PPTX and <code>true</code> for XLSX.</td></tr>
-            <tr><th><code>cards</code></th><td>DOCX, PPTX</td><td>Show built-in margin cards. Defaults to <code>true</code>. Set it to <code>false</code> for an application-owned list while retaining Viewer-owned target highlighting.</td></tr>
-            <tr><th><code>markers</code></th><td>DOCX, PPTX</td><td>Show the built-in message icon at each comment anchor. Defaults to <code>true</code>. Set it to <code>false</code> to hide only the icons; cards and DOCX range highlights remain visible.</td></tr>
-            <tr><th><code>side</code></th><td>DOCX, PPTX</td><td>Place margin cards on <code>auto</code>, <code>left</code>, or <code>right</code>. <code>auto</code> follows the container direction.</td></tr>
-            <tr><th><code>connectors</code></th><td>DOCX, PPTX</td><td>Optionally connect an anchor or marker to its card. Omit it for no lines.</td></tr>
+            <tr><th scope="row"><code>comments</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell" aria-label="Supported">✓</td><td>Set to <code>true</code> to use the built-in presentation and each format's defaults, or <code>false</code> to hide it. XLSX comments are visible when the option is omitted.</td></tr>
+            <tr><th scope="row"><code>includeResolved</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell" aria-label="Supported">✓</td><td>Include resolved or closed threads. Defaults to <code>false</code> for DOCX/PPTX and <code>true</code> for XLSX.</td></tr>
+            <tr><th scope="row"><code>cards</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell support-cell--empty" aria-label="Not supported">—</td><td class="support-cell" aria-label="Supported">✓</td><td>Show built-in margin cards. Defaults to <code>true</code>. Set it to <code>false</code> for an application-owned list while retaining Viewer-owned target highlighting.</td></tr>
+            <tr><th scope="row"><code>markers</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell support-cell--empty" aria-label="Not supported">—</td><td class="support-cell" aria-label="Supported">✓</td><td>Show the built-in message icon at each comment anchor. Defaults to <code>true</code>. Set it to <code>false</code> to hide only the icons; cards and DOCX range highlights remain visible.</td></tr>
+            <tr><th scope="row"><code>side</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell support-cell--empty" aria-label="Not supported">—</td><td class="support-cell" aria-label="Supported">✓</td><td>Place margin cards on <code>auto</code>, <code>left</code>, or <code>right</code>. <code>auto</code> follows the container direction.</td></tr>
+            <tr><th scope="row"><code>connectors</code></th><td class="support-cell" aria-label="Supported">✓</td><td class="support-cell support-cell--empty" aria-label="Not supported">—</td><td class="support-cell" aria-label="Supported">✓</td><td>Optionally connect an anchor or marker to its card. Omit it for no lines.</td></tr>
           </tbody>
         </table>
       </div>
@@ -442,6 +441,12 @@ const primitiveTabs = [
   tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
   tbody th { width: 21%; }
   tbody td { color: var(--text-dim); }
+  .option-matrix { min-width: 820px; }
+  .option-matrix tbody th { width: 18%; }
+  .option-matrix .format-column,
+  .option-matrix .support-cell { width: 64px; padding-inline: 10px; text-align: center; }
+  .option-matrix .support-cell { color: var(--accent); font-weight: 700; }
+  .option-matrix .support-cell--empty { color: var(--text-faint); font-weight: 400; }
   .format-context { margin: 14px 0 0; color: var(--text-dim); }
   .format-context a { color: var(--accent); font-weight: 700; }
   .setup-note { margin: 18px 0 0; color: var(--text-dim); }

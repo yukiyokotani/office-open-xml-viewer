@@ -52,6 +52,9 @@ describe('VS Code webview math engine bundle', () => {
       ?? result.outputFiles.find((file) => file.path.endsWith('.js'))?.text
       ?? '';
     expect(bundle).toContain('globalThis.__ooxmlStix2');
+    expect(bundle).toContain('renderChartExChart');
+    expect(bundle).toContain('renderRegionMapChart');
+    expect(bundle).toContain('renderSimpleThreeDChart');
     expect(bundle).not.toContain('Failed to load math engine from');
     expect(bundle).not.toContain('ooxml-worker-renderer-module');
   });

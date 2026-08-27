@@ -1,6 +1,5 @@
 import { defineConfig } from 'astro/config';
 import wasm from 'vite-plugin-wasm';
-import topLevelAwait from 'vite-plugin-top-level-await';
 import { fileURLToPath } from 'node:url';
 
 const pkgSrc = (p) => fileURLToPath(new URL(`../packages/${p}/src/index.ts`, import.meta.url));
@@ -13,10 +12,15 @@ export default defineConfig({
   base: SITE_BASE,
   trailingSlash: 'ignore',
   vite: {
-    plugins: [wasm(), topLevelAwait()],
+    // Keep native module evaluation ordering for the WASM-backed Viewer
+    // graph. Transforming top-level await into exported `__tla` promises can
+    // leave Astro's separately emitted page scripts using Viewer exports before
+    // their chunks have initialized.
+    build: { target: 'esnext' },
+    plugins: [wasm()],
     worker: {
       format: 'es',
-      plugins: () => [wasm(), topLevelAwait()],
+      plugins: () => [wasm()],
     },
     resolve: {
       // Pull the workspace packages from source so Vite processes their

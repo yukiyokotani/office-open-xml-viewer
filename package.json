@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml",
-  "version": "0.82.0",
+  "version": "0.82.1",
   "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -101,6 +101,7 @@
     "vrt:fidelity": "pnpm -r --workspace-concurrency=1 vrt:fidelity",
     "vrt:worker": "pnpm --workspace-concurrency=1 --filter @silurus/ooxml-pptx --filter @silurus/ooxml-docx --filter @silurus/ooxml-xlsx vrt:worker",
     "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts",
+    "test:site-runtime": "playwright test --config tests/site-dist/playwright.config.ts",
     "test": "vitest run && node --test tests/visual/private-corpus.test.mjs",
     "check:no-inline-wasm": "node scripts/check-no-inline-wasm.mjs dist",
     "check:production-render-workers": "node scripts/check-production-render-workers.mjs dist",

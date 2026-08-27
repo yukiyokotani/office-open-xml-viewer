@@ -7,6 +7,30 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.82.1 — 2026-08-26
+
+Compatible patch release improving Word and PowerPoint layout reliability,
+comment-margin scrolling, and the bundled VS Code viewing experience without
+changing the 0.82 public integration contract.
+
+- **Word table pagination:** defer a trailing partial row that has not emitted
+  content when a vertically merged row group outgrows the remaining page band,
+  preventing repeated admission of the same over-page fragment. (#1373)
+- **PowerPoint baseline text:** render non-zero DrawingML baseline runs at the
+  Office-observed glyph scale while retaining authored line geometry, avoiding
+  citation-only lines near a wrap boundary. (#1376)
+- **comment margins:** omit the inter-card gap after the final built-in comment
+  card so a bottom-aligned card does not create a small nested scroll range.
+- **VS Code extension:** enable the first-party ChartEx, 3-D chart, and offline
+  Region Map renderers for DOCX, XLSX, and PPTX webviews.
+- **site and integration guidance:** preserve WASM-backed viewer initialization
+  in the production site, bring framework examples to the current 0.82 line,
+  and document host-controlled light and dark XLSX viewer chrome.
+- **package declarations:** align the published Node entry's declaration build
+  aliases with its existing typecheck boundary so the ESM package emits the
+  complete Node declaration graph.
+- **compatibility:** no application or API migration is required from 0.82.0.
+
 ## 0.82.0 — 2026-08-26
 
 Minor release adding read-only review information across Word, Excel, and

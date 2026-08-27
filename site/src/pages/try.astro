@@ -142,7 +142,10 @@ import BrandIcon from '../components/BrandIcon.astro';
       if (f) void handle(f);
     });
     reset.addEventListener('click', () => { input.value = ''; input.click(); });
-    window.addEventListener('pagehide', disposeRenderedFile, { once: true });
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return;
+      disposeRenderedFile();
+    });
   </script>
 </Base>
 

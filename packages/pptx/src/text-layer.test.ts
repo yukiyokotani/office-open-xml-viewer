@@ -91,7 +91,6 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     expect(shapeDiv.style.top).toBe(`${(20 / 540) * 100}%`);
     expect(shapeDiv.style.width).toBe(`${(200 / 960) * 100}%`);
     expect(shapeDiv.style.height).toBe(`${(80 / 540) * 100}%`);
-    expect(shapeDiv.style.overflow).toBe('hidden');
     expect(shapeDiv.children.map((c) => c.textContent)).toEqual(['A', 'B']);
     // Span uses the shipped `font` shorthand + line-height + letter-spacing reset.
     // Its position inside the shape div is a PERCENTAGE of the shape's own
@@ -104,6 +103,25 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     expect(spanA.style['line-height']).toBe('12px');
     expect(spanA.style['letter-spacing']).toBe('0');
     expect(spanA.style.color).toBe('transparent');
+  });
+
+  it('keeps text selectable when a rendered line overflows its shape frame', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    buildPptxTextLayer(
+      layer as unknown as HTMLDivElement,
+      [run({ text: 'OVERFLOW', inShapeY: 40, h: 20, shapeH: 50 })],
+      960,
+      540,
+    );
+
+    const shapeDiv = layer.children[0];
+    const span = shapeDiv.children[0];
+    expect(Number.parseFloat(span.style.top) + (20 / 50) * 100).toBeGreaterThan(100);
+    // Canvas deliberately paints DrawingML text beyond the shape rectangle.
+    // The matching transparent DOM run must not be clipped at that rectangle;
+    // the outer slide text layer remains responsible for slide-edge clipping.
+    expect(shapeDiv.style.overflow).toBe('visible');
   });
 
   it('splits runs of different shapes into separate group divs', () => {
