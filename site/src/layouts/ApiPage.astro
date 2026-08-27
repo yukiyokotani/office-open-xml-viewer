@@ -4,6 +4,7 @@ import Nav from '../components/Nav.astro';
 import SiteFooter from '../components/SiteFooter.astro';
 import ApiReference from '../components/ApiReference.astro';
 import ChangeHistoryApiGuide from '../components/ChangeHistoryApiGuide.astro';
+import XlsxChromeThemeGuide from '../components/XlsxChromeThemeGuide.astro';
 import { apiReference } from '../lib/api-reference';
 
 interface Props {
@@ -39,11 +40,13 @@ const entries = apiReference[format];
       <p>Contents</p>
       <nav>
         {entries.map((entry) => <a href={`#${classAnchor(entry.name)}`}>{entry.name}</a>)}
+        {format === 'xlsx' && <a href="#viewer-chrome-theme">Viewer chrome colors</a>}
         <a href="#review-data">Review data</a>
       </nav>
     </aside>
     <div class="api-content">
       <ApiReference format={format} />
+      {format === 'xlsx' && <XlsxChromeThemeGuide />}
       <ChangeHistoryApiGuide format={format} />
     </div>
   </main>

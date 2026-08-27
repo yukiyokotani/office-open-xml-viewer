@@ -84,10 +84,11 @@ for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
   await ${c.engineVariable}.${c.render}(thumb, i, { width: 200 });
 }
 
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
   viewer.destroy();
   ${c.engineVariable}.destroy(); // borrowed engines remain caller-owned
-}, { once: true });`,
+});`,
   };
 }
 
@@ -111,22 +112,24 @@ async function openSheetInWindow(sheetIndex: number): Promise<void> {
 
   const viewer = XlsxSheetViewer.fromWorkbook(canvas, workbook);
   viewers.set(popup, viewer);
-  popup.addEventListener('pagehide', () => {
+  popup.addEventListener('pagehide', (event) => {
+    if (event.persisted) return;
     viewer.destroy();
     viewers.delete(popup);
-  }, { once: true });
+  });
 
   await viewer.goToSheet(sheetIndex);
 }
 
 // Example: openSheetInWindow(1) from a sheet button's click handler.
-window.addEventListener('pagehide', () => {
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
   viewers.forEach((viewer, popup) => {
     viewer.destroy();
     popup.close();
   });
   workbook.destroy();
-}, { once: true });`;
+});`;
 
 export const xlsxSheetSnippet = `import { XlsxViewer } from '@silurus/ooxml/xlsx';
 

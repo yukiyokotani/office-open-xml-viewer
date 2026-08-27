@@ -369,6 +369,12 @@ type LayoutSegment = {
    */
   fontFamily?: string;
   sizePx: number;
+  /**
+   * Actual glyph size used for paint and width measurement. PowerPoint renders
+   * any non-zero DrawingML baseline run at about 65% of its authored size while
+   * retaining `sizePx` for line height and baseline displacement.
+   */
+  drawSizePx?: number;
   color: string;
   underline: boolean;
   /** OOXML rPr @u value when not the default "sng": "dbl"/"dotted"/"wavy"/etc. */
@@ -749,6 +755,13 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
   return hasBullet ? 0 : Math.max(0, indentPx);
 }
 
+/** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
+ * authored size. The authored size still owns line height and baseline offset;
+ * this helper is only for the glyph font used by measure and paint. */
+function baselineDrawSizePx(authoredSizePx: number, baseline: number | undefined): number {
+  return baseline != null && baseline !== 0 ? authoredSizePx * 0.65 : authoredSizePx;
+}
+
 /**
  * Decide whether `<a:spAutoFit/>` should let text wrap based on the paragraphs'
  * natural single-line width. Returns true when at least one paragraph would
@@ -798,7 +811,7 @@ export function naturalWidthExceedsBbox(
       const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
       const isBold = run.bold ?? para.defBold ?? body.defaultBold ?? false;
       const isItalic = run.italic ?? para.defItalic ?? body.defaultItalic ?? false;
-      ctx.font = buildFont(isBold, isItalic, sizePx, family, rc);
+      ctx.font = buildFont(isBold, isItalic, baselineDrawSizePx(sizePx, run.baseline ?? undefined), family, rc);
       const letterSpacingPx = (run.letterSpacing ?? 0) * PT_TO_EMU * scale;
       lineW += measureTextAdvance(ctx, run.text, letterSpacingPx);
       if (lineW > textMaxW) return true;
@@ -1064,6 +1077,7 @@ export function layoutParagraph(
       /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
       hyperlink?: HyperlinkTarget;
       sourceRunId?: number;
+      drawSizePx?: number;
     },
   ) => {
     if (!text) return;
@@ -1083,6 +1097,7 @@ export function layoutParagraph(
     const highlight = extras?.highlight;
     const fontFamily = extras?.fontFamily;
     const hyperlink = extras?.hyperlink;
+    const drawSizePx = extras?.drawSizePx ?? sizePx;
     // Shadow / outline use object identity for merging — adjacent runs share
     // the same object since the run is parsed once. Different objects (or
     // one set / one missing) force a new segment.
@@ -1103,6 +1118,7 @@ export function layoutParagraph(
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
       (a.fontFamily ?? '') === (fontFamily ?? '') &&
+      (a.drawSizePx ?? a.sizePx) === drawSizePx &&
       hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink) &&
       (lsPx === 0 || a.sourceRunId === sourceRunId);
     const last = currentLine.segments.at(-1);
@@ -1133,7 +1149,7 @@ export function layoutParagraph(
         && sourceRunId != null && last.sourceRunId === sourceRunId
         ? lsPx
         : 0;
-      currentLine.segments.push({ text, font, fontFamily, sizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
+      currentLine.segments.push({ text, font, fontFamily, sizePx, drawSizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -1177,6 +1193,7 @@ export function layoutParagraph(
       highlight: seg.highlight,
       fontFamily: seg.fontFamily,
       sourceRunId: seg.sourceRunId,
+      drawSizePx: seg.drawSizePx,
     });
     return true;
   };
@@ -1221,6 +1238,14 @@ export function layoutParagraph(
     }
 
     const sizePx = run.fontSize != null ? run.fontSize * PT_TO_EMU * scale * fontScale : defaultFontSizePx;
+    // ECMA-376 Part 1 §21.1.2.3.9 defines rPr@baseline as a percentage of
+    // the authored font size but does not specify glyph scaling. PowerPoint PDF
+    // boundary samples show the Office compatibility rule: every non-zero
+    // baseline (positive superscript or negative subscript) paints at ~65%,
+    // independent of the offset magnitude. Keep `sizePx` for line height and
+    // offset calculation; use the reduced size only for glyph width and paint.
+    // This matches the existing DOCX/XLSX vertical-alignment treatment.
+    const drawSizePx = baselineDrawSizePx(sizePx, run.baseline ?? undefined);
     // Font family cascade: run → paragraph defFontFamily → theme minor font → 'sans-serif'
     const family = normalizeFontFamily(run.fontFamily ?? para.defFontFamily ?? null, rc);
     // East Asian font (rPr > ea) — used for CJK glyphs when set; otherwise
@@ -1245,9 +1270,9 @@ export function layoutParagraph(
     // Cascade: run → paragraph defRPr → body/layout default → false
     const isBold   = run.bold   ?? para.defBold   ?? defaultBold;
     const isItalic = run.italic ?? para.defItalic ?? defaultItalic;
-    const font   = buildFont(isBold, isItalic, sizePx, family, rc);
+    const font   = buildFont(isBold, isItalic, drawSizePx, family, rc);
     const fontEa = familyEa
-      ? buildFont(isBold, isItalic, sizePx, familyEa, rc)
+      ? buildFont(isBold, isItalic, drawSizePx, familyEa, rc)
       : font;
     ctx.font = font;
 
@@ -1296,6 +1321,7 @@ export function layoutParagraph(
       // part name is treated as internal. Overlay-only; does not affect glyphs.
       hyperlink: classifyPptxHyperlink(run.hyperlink),
       sourceRunId,
+      drawSizePx,
     };
 
     // Split on whitespace boundaries, keeping the whitespace tokens
@@ -1358,9 +1384,9 @@ export function layoutParagraph(
             const mapped = symbolFontToUnicode(ch, symName);
             if (mapped !== ch) {
               drawCh = mapped;
-              chFont = buildFont(isBold, isItalic, sizePx, 'sans-serif', rc);
+              chFont = buildFont(isBold, isItalic, drawSizePx, 'sans-serif', rc);
             } else {
-              chFont = buildFont(isBold, isItalic, sizePx, symName, rc);
+              chFont = buildFont(isBold, isItalic, drawSizePx, symName, rc);
             }
           }
           ctx.font = chFont;
@@ -4431,6 +4457,7 @@ export function renderTextBody(
       }
       ctx.font = seg.font;
       ctx.fillStyle = seg.color;
+      const drawSizePx = seg.drawSizePx ?? seg.sizePx;
       // baseline shift: OOXML baseline in thousandths of a point; positive = superscript (up)
       const baselineShift = seg.baseline ? -(seg.baseline / 100000) * seg.sizePx : 0;
       const segBaseline = baseline + baselineShift;
@@ -4443,7 +4470,7 @@ export function renderTextBody(
         const hlW = measureTextAdvance(ctx, seg.text, ls)
           + internalStretch
           + jext;
-        paintHighlight(ctx, penX, segBaseline, hlW, seg.sizePx, seg.highlight, seg.color);
+        paintHighlight(ctx, penX, segBaseline, hlW, drawSizePx, seg.highlight, seg.color);
       }
 
       const segShadow = seg.shadow;
@@ -4537,7 +4564,7 @@ export function renderTextBody(
           // Partial `just` distribution (mixed Latin/CJK pieces) is a rare eaVert
           // edge and is not redistributed here.
           const eaPitch = fullyDistributed ? ls + segPerGap : ls;
-          drawEaVertRun(target, seg.text, penX, segBaseline, seg.sizePx, eaPitch, op);
+          drawEaVertRun(target, seg.text, penX, segBaseline, drawSizePx, eaPitch, op);
           return;
         }
         if (fullyDistributed) {
@@ -4584,14 +4611,14 @@ export function renderTextBody(
           const metrics = ctx.measureText(seg.text);
           const ascent = Number.isFinite(metrics.actualBoundingBoxAscent)
             ? metrics.actualBoundingBoxAscent
-            : seg.sizePx * 0.8;
+            : drawSizePx * 0.8;
           // Zero is a valid descent for all-uppercase runs. Treating it as
           // "missing" inserts a synthetic 0.2em blank band below the glyph;
           // the reflection's strongest stA region then lands on transparency
           // and the visible strokes are almost fully faded.
           const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
             ? metrics.actualBoundingBoxDescent
-            : seg.sizePx * 0.2;
+            : drawSizePx * 0.2;
           const left = Number.isFinite(metrics.actualBoundingBoxLeft)
             ? metrics.actualBoundingBoxLeft
             : 0;
@@ -4671,7 +4698,7 @@ export function renderTextBody(
           inShapeY: cursorY - by,
           w: segW + jext,
           h: lineHeight,
-          fontSize: seg.sizePx,
+          fontSize: drawSizePx,
           font: seg.font,
           shapeX: bx,
           shapeY: by,
@@ -4683,11 +4710,11 @@ export function renderTextBody(
       }
 
       if (seg.underline) {
-        drawUnderline(ctx, penX, segBaseline, segW + jext, seg.sizePx, seg.underlineColor ?? seg.color, seg.underlineStyle, rc.dpr);
+        drawUnderline(ctx, penX, segBaseline, segW + jext, drawSizePx, seg.underlineColor ?? seg.color, seg.underlineStyle, rc.dpr);
       }
 
       if (seg.strikethrough) {
-        const lineW = Math.max(1, seg.sizePx * 0.05);
+        const lineW = Math.max(1, drawSizePx * 0.05);
         ctx.strokeStyle = seg.color;
         ctx.lineWidth = lineW;
         ctx.setLineDash([]);
@@ -4695,7 +4722,7 @@ export function renderTextBody(
         // an odd device-pixel width is centered on one device row by snapping its
         // y onto the nearest crisp device position (otherwise it straddles two
         // rows → blurry). Snap each line from its own y.
-        const yMid = segBaseline - seg.sizePx * 0.32;
+        const yMid = segBaseline - drawSizePx * 0.32;
         if (seg.strikeDouble) {
           // Two parallel lines straddling the standard strike position,
           // separated by ~ 1.5× the line weight (visually distinct yet

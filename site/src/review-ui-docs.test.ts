@@ -30,8 +30,7 @@ describe('Office comment UI integration guide', () => {
       page.indexOf('id="stable-classes-title"'),
     );
     expect(page).toContain('await workbook.getComments(sheetIndex)');
-    expect(page).toContain('comments: true');
-    expect(page).toContain('comments: false');
+    expect(page).toContain('<code>comments</code>');
     expect(page).toContain('<code>markers</code>');
     expect(page).toContain('<code>cards</code>');
     expect(page).toContain('Defaults to <code>true</code>');
@@ -76,6 +75,25 @@ describe('Office comment UI integration guide', () => {
     expect(page).not.toContain('commentRenderer');
   });
 
+  it('presents built-in options as a cross-format support matrix', () => {
+    const match = page.match(/aria-label="Built-in comment options"[\s\S]*?<\/table>/);
+    expect(match).not.toBeNull();
+    const table = match?.[0] as string;
+
+    expect(table).toContain('<th scope="col">Option</th>');
+    for (const format of ['DOCX', 'XLSX', 'PPTX']) {
+      expect(table).toContain(`<th class="format-column" scope="col">${format}</th>`);
+    }
+    expect(table).toContain('<th scope="col">Behavior</th>');
+    expect(table.match(/<code>comments<\/code>/g)).toHaveLength(1);
+    expect(table).not.toContain('comments: true');
+    expect(table).not.toContain('comments: false');
+    expect(table).toContain('Set to <code>true</code>');
+    expect(table).toContain('or <code>false</code>');
+    expect(table).toContain('aria-label="Supported">✓</td>');
+    expect(table).toContain('aria-label="Not supported">—</td>');
+  });
+
   it('keeps the built-in preview separated and gives its frame one height contract', () => {
     const builtIn = read('./components/BuiltInCommentViewer.astro');
     expect(page).toContain('.built-in-preview { margin-top: 32px; }');
@@ -92,6 +110,13 @@ describe('Office comment UI integration guide', () => {
     expect(builtIn).toContain("new PptxScrollViewer(host, { comments: true");
     expect(builtIn).toContain("new XlsxViewer(host, { comments: true");
     expect(builtIn).not.toContain('min-height: 640px');
+  });
+
+  it('keeps the built-in viewer alive while the page is stored in the back-forward cache', () => {
+    const builtIn = read('./components/BuiltInCommentViewer.astro');
+    expect(builtIn).toContain("window.addEventListener('pagehide', (event) => {");
+    expect(builtIn).toContain('if (event.persisted) return;');
+    expect(builtIn).not.toContain("window.addEventListener('pagehide', destroy, { once: true });");
   });
 
   it('maps concepts to public APIs and distinguishes transcript from anchored UI', () => {

@@ -262,6 +262,12 @@ jobs:
       - name: Smoke tests
         run: pnpm smoke
 
+      - name: Build public site
+        run: pnpm --filter @silurus/ooxml-site build
+
+      - name: Public site runtime smoke
+        run: pnpm test:site-runtime
+
       - name: Published render-worker smoke
         run: |
           # This job validates runtime assets, not declarations. Declaration

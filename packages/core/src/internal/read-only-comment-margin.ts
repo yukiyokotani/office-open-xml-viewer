@@ -166,6 +166,9 @@ const READ_ONLY_COMMENT_STYLES = `
   box-sizing: border-box;
   transform-origin: 0 0;
 }
+:where([data-ooxml-comment-ui="margin"] > [data-ooxml-comment-item]:last-child > .ooxml-comment-card) {
+  margin-bottom: 0;
+}
 `;
 
 export function ensureReadOnlyCommentStyles(owner: Document): void {

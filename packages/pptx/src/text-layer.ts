@@ -77,7 +77,10 @@ export function buildPptxTextLayer(
         `position:absolute;` +
         `left:${overlayPercent(run.shapeX, cssWidth)};top:${overlayPercent(run.shapeY, cssHeight)};` +
         `width:${overlayPercent(run.shapeW, cssWidth)};height:${overlayPercent(run.shapeH, cssHeight)};` +
-        `pointer-events:all;overflow:hidden;`;
+        // DrawingML text may paint beyond its shape rectangle when the body does
+        // not autofit. Match the canvas renderer by keeping those runs selectable;
+        // the outer slide text layer still clips anything past the slide edge.
+        `pointer-events:all;overflow:visible;`;
       if (totalRot !== 0) {
         div.style.transformOrigin = 'center center';
         div.style.transform = `rotate(${totalRot}deg)`;

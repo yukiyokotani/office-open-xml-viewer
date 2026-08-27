@@ -1,0 +1,85 @@
+---
+import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
+
+const themeExample = `#xlsx-viewer {
+  --ooxml-xlsx-chrome-background: #eef2f6;
+  --ooxml-xlsx-chrome-surface: #ffffff;
+  --ooxml-xlsx-chrome-surface-muted: #e2e8f0;
+  --ooxml-xlsx-chrome-text: #172033;
+  --ooxml-xlsx-chrome-text-muted: #64748b;
+  --ooxml-xlsx-chrome-border: #cbd5e1;
+  --ooxml-xlsx-chrome-selection-background: #dbeafe;
+  --ooxml-xlsx-chrome-accent: #2563eb;
+  --ooxml-xlsx-chrome-scrollbar-color: #94a3b8 #e2e8f0;
+  --ooxml-xlsx-focus-ring: #2563eb;
+}
+
+[data-theme='dark'] #xlsx-viewer {
+  --ooxml-xlsx-chrome-background: #111827;
+  --ooxml-xlsx-chrome-surface: #1f2937;
+  --ooxml-xlsx-chrome-surface-muted: #334155;
+  --ooxml-xlsx-chrome-text: #f8fafc;
+  --ooxml-xlsx-chrome-text-muted: #cbd5e1;
+  --ooxml-xlsx-chrome-border: #475569;
+  --ooxml-xlsx-chrome-selection-background: #1e3a5f;
+  --ooxml-xlsx-chrome-accent: #60a5fa;
+  --ooxml-xlsx-chrome-scrollbar-color: #64748b #1f2937;
+  --ooxml-xlsx-focus-ring: #60a5fa;
+}`;
+
+const properties = [
+  ['--ooxml-xlsx-chrome-background', 'Tab bar and outline-gutter background.'],
+  ['--ooxml-xlsx-chrome-surface', 'Active sheet tab, row and column headers, and outline controls.'],
+  ['--ooxml-xlsx-chrome-surface-muted', 'Inactive sheet tabs and softly selected headers.'],
+  ['--ooxml-xlsx-chrome-text', 'Primary chrome text and header labels.'],
+  ['--ooxml-xlsx-chrome-text-muted', 'Inactive controls, tabs, and zoom text.'],
+  ['--ooxml-xlsx-chrome-border', 'Chrome dividers, header borders, and zoom track.'],
+  ['--ooxml-xlsx-chrome-selection-background', 'Strong row or column header selection.'],
+  ['--ooxml-xlsx-chrome-accent', 'Selected-header border accent.'],
+  ['--ooxml-xlsx-chrome-scrollbar-color', 'Native scrollbar thumb and track; use the CSS scrollbar-color syntax.'],
+  ['--ooxml-xlsx-focus-ring', 'Keyboard focus outline around the worksheet viewport.'],
+] as const;
+---
+
+<section id="viewer-chrome-theme" class="chrome-theme" data-reveal>
+  <h2>Viewer chrome colors</h2>
+  <p>
+    Set these CSS custom properties on the <code>XlsxViewer</code> container or an ancestor.
+    They cover the sheet tabs, navigation and zoom controls, scrollbars, outline controls,
+    and row and column headers. They do not recolor authored cells, charts, pictures, or shapes.
+  </p>
+  <p>
+    Changing a theme class, inline style, or <code>data-theme</code> updates an existing Viewer
+    without recreating or reloading the Viewer. Canvas-painted headers and gutters are repainted;
+    DOM controls inherit the new values directly.
+  </p>
+
+  <Code code={themeExample} lang="css" themes={codeThemes} defaultColor={false} />
+
+  <div class="theme-table-wrap">
+    <table class="theme-table">
+      <thead><tr><th>CSS custom property</th><th>Controls</th></tr></thead>
+      <tbody>
+        {properties.map(([name, description]) => (
+          <tr><td><code>{name}</code></td><td>{description}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<style>
+  .chrome-theme { margin-top: 42px; padding-top: 34px; border-top: 1px solid var(--border); scroll-margin-top: 94px; }
+  .chrome-theme h2 { margin: 0 0 10px; font-size: 24px; }
+  .chrome-theme > p { max-width: 76ch; margin: 0 0 10px; color: var(--text-dim); font-size: 15px; line-height: 1.65; }
+  .chrome-theme > :global(pre) { margin: 18px 0 0; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
+  .theme-table-wrap { margin-top: 18px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .theme-table { width: 100%; min-width: 660px; border-collapse: collapse; font-size: 14px; }
+  .theme-table th { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); background: var(--bg-elev); color: var(--text-dim); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .theme-table td { padding: 10px 14px; border-top: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
+  .theme-table tbody tr:first-child td { border-top: 0; }
+  .theme-table td:first-child { width: 47%; }
+  code { font-family: var(--mono); font-size: .9em; }
+  .theme-table code { color: var(--text); white-space: nowrap; }
+</style>

@@ -155,7 +155,13 @@ const demoId = `built-in-comment-${formats.join('-')}`;
     }));
     const initial = root.dataset.initialFormat as DemoFormat | undefined;
     void show(initial ?? 'docx');
-    window.addEventListener('pagehide', destroy, { once: true });
+    window.addEventListener('pagehide', (event) => {
+      // BFCache restores the existing DOM without rerunning this module. Keep
+      // the Viewer alive while the page is frozen so browser Back can resume
+      // the rendered document instead of restoring an emptied host.
+      if (event.persisted) return;
+      destroy();
+    });
     document.addEventListener('astro:before-swap', destroy, { once: true });
   }
 </script>

@@ -5,7 +5,8 @@
     "packages/core/src/**/*",
     "packages/pptx/src/**/*",
     "packages/xlsx/src/**/*",
-    "packages/docx/src/**/*"
+    "packages/docx/src/**/*",
+    "packages/node/typecheck/**/*"
   ],
   "compilerOptions": {
     "composite": false,
@@ -14,7 +15,13 @@
     "emitDeclarationOnly": true,
     "paths": {
       "@silurus/ooxml-core": ["./packages/core/src/index.ts"],
-      "@silurus/ooxml-core/*": ["./packages/core/src/*"]
+      "@silurus/ooxml-core/*": ["./packages/core/src/*"],
+      "@silurus/ooxml-pptx": ["./packages/pptx/src/types.ts"],
+      "@silurus/ooxml-pptx/internal/session": ["./packages/pptx/src/internal/session.ts"],
+      "@silurus/ooxml-docx": ["./packages/node/typecheck/docx-public-types.ts"],
+      "@silurus/ooxml-docx/internal/session": ["./packages/docx/src/internal/session.ts"],
+      "@silurus/ooxml-xlsx": ["./packages/xlsx/src/types.ts"],
+      "@silurus/ooxml-xlsx/internal/session": ["./packages/xlsx/src/internal/session.ts"]
     }
   }
 }

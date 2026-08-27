@@ -20,7 +20,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly, plus interactive playback for embedded audio and video.
 - **Find in preview** — Press **Ctrl+F / Cmd+F** to search the complete document, workbook, or presentation. Matching is case-insensitive; Enter / Shift+Enter moves between results.
-- **High fidelity** — Charts, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
+- **High fidelity** — Classic and ChartEx charts, 3-D charts, offline Region Maps, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
 - **MCP server (opt-in)** — Lets GitHub Copilot Chat in Agent mode read `.xlsx` / `.docx` / `.pptx` files and the active Viewer selection through dedicated tools instead of unzipping XML by hand. Claude Code and Codex can use the same binary for file tools through their own MCP configuration, but do not receive active Viewer selection. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
 
 All three formats share the same Rust parser (`wasm-pack`) for accuracy and speed.
