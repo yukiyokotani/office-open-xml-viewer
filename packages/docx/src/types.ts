@@ -1700,4 +1700,13 @@ export interface RenderPageOptions {
    *  or epoch-ms number. Default = the real current time at render. Set a fixed
    *  value for deterministic / reproducible DATE/TIME field output. */
   currentDate?: Date | number;
+  /** ECMA-376 §17.13.5 tracked-change view. `false`/absent (the default)
+   *  renders the document's FINAL state: deleted (`w:del`) and moved-away
+   *  (`w:moveFrom`) content is hidden, insertions and moved-in (`w:moveTo`)
+   *  content renders as plain text. `true` renders the MARKUP view:
+   *  insertions/moveTo are underlined and deletions/moveFrom struck through in
+   *  a stable per-author colour, with a vertical change bar in the margin next
+   *  to changed lines. Selects layout geometry (hiding deletions changes line
+   *  breaking), so each value is a separate cached layout variant. */
+  showTrackedChanges?: boolean;
 }

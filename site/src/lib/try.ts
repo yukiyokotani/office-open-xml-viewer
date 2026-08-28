@@ -12,14 +12,13 @@ import {
   type DocxScrollViewerOptions,
 } from '@silurus/ooxml-docx';
 import { XlsxViewer } from '@silurus/ooxml-xlsx';
-import { loadMathJax, mathMLToSvg } from '../../../packages/core/src/math/engine';
+import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
 import { chartEx } from '../../../src/chart-ex';
 
 // Opt-in OMML equation engine — enabled here so user-supplied docx/pptx with
 // equations render. (In the published library this is `@silurus/ooxml/math`.)
-const math = { loadMathJax, mathMLToSvg };
 const advancedChartRenderers = { threeD, regionMap, chartEx };
 
 const VIEWER_GAP = 26;
@@ -34,6 +33,8 @@ export interface RenderResult {
   format: 'docx' | 'xlsx' | 'pptx';
   units: number; // pages / slides; 0 for xlsx (sheet-based)
   unitLabel: string;
+  /** Resolves with the authoritative count when progressive layout finishes. */
+  finalUnits?: Promise<number>;
 }
 
 function scrollViewerHost(stage: HTMLElement): HTMLDivElement {
@@ -118,7 +119,10 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       useGoogleFonts: true,
       comments: true,
       math,
-      mode: 'main',
+      // Keep progressive preflight and paint off the UI thread while the user
+      // scrolls through slides that are still becoming available.
+      mode: 'worker',
+      progressiveLayout: true,
       ...advancedChartRenderers,
     };
     const viewer = new PptxScrollViewer(host, viewerOptions);
@@ -135,13 +139,28 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       viewer.destroy();
       throw new SupersededRenderError();
     }
-    // Browser-native Find only sees mounted DOM. Keep every selectable overlay
-    // mounted in Try Yours by setting the finite parsed slide count as overscan;
-    // the package default remains virtualized for normal integrations.
-    viewerOptions.overscan = viewer.slideCount;
-    viewer.relayout();
     activeCleanup = () => viewer.destroy();
-    return { format: 'pptx', units: viewer.slideCount, unitLabel: 'slide' };
+
+    const mountAllSlides = (): number => {
+      assertCurrentRender(generation);
+      // Native Find needs every slide's text layer in the DOM. Keep the opening
+      // progressive window virtualized, then expand only after every slide is
+      // paintable so unfinished slides do not create a deck-wide waiter set.
+      viewerOptions.overscan = viewer.slideCount;
+      viewer.relayout();
+      return viewer.slideCount;
+    };
+
+    if (viewer.layoutComplete) {
+      return { format: 'pptx', units: mountAllSlides(), unitLabel: 'slide' };
+    }
+
+    return {
+      format: 'pptx',
+      units: viewer.availableSlideCount,
+      unitLabel: 'slide',
+      finalUnits: viewer.waitUntilLayoutComplete().then(mountAllSlides),
+    };
   }
 
   const host = scrollViewerHost(stage);
@@ -155,7 +174,10 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     useGoogleFonts: true,
     comments: true,
     math,
-    mode: 'main',
+    // Keep progressive pagination and painting off the UI thread so scrolling
+    // remains responsive while later pages are still being prepared.
+    mode: 'worker',
+    progressiveLayout: true,
     ...advancedChartRenderers,
   };
   const viewer = new DocxScrollViewer(host, viewerOptions);
@@ -172,12 +194,28 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     viewer.destroy();
     throw new SupersededRenderError();
   }
-  // As above, native Find needs every page's text layer in the DOM. pageCount is
-  // a finite, parser-validated bound and avoids an unbounded overscan sentinel.
-  viewerOptions.overscan = viewer.pageCount;
-  viewer.relayout();
   activeCleanup = () => viewer.destroy();
-  return { format: 'docx', units: viewer.pageCount, unitLabel: 'page' };
+
+  const mountAllPages = (): number => {
+    assertCurrentRender(generation);
+    // Native Find needs every page's text layer in the DOM. Wait for the
+    // authoritative count before expanding overscan so progressive load can
+    // paint its opening window without immediately mounting unfinished pages.
+    viewerOptions.overscan = viewer.pageCount;
+    viewer.relayout();
+    return viewer.pageCount;
+  };
+
+  if (viewer.layoutComplete) {
+    return { format: 'docx', units: mountAllPages(), unitLabel: 'page' };
+  }
+
+  return {
+    format: 'docx',
+    units: viewer.pageCount,
+    unitLabel: 'page',
+    finalUnits: viewer.waitUntilLayoutComplete().then(mountAllPages),
+  };
 }
 
 // Hot standby: warm each WASM engine on an idle tick

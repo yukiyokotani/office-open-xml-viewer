@@ -8,4 +8,4 @@ allowBuilds:
   esbuild: false
 
 minimumReleaseAgeExclude:
-  - '@silurus/ooxml@0.82.0'
+  - '@silurus/ooxml@0.83.0'

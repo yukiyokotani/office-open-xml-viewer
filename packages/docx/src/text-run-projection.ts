@@ -18,6 +18,9 @@ export interface TextRunsForPageOptions {
 export interface SelectedTextRunsForPageOptions {
   readonly defaultCurrentDateMs: number;
   readonly currentDate?: Date | number;
+  /** ECMA-376 §17.13.5 tracked-change view — selects the same keyed layout
+   *  variant as paint (see RenderPageOptions.showTrackedChanges). */
+  readonly showTrackedChanges?: boolean;
   readonly width?: number;
 }
 
@@ -102,6 +105,7 @@ export function textRunsForSelectedPage(
   const selected = selectDocumentLayoutPage(services, {
     currentDate: options.currentDate,
     defaultCurrentDateMs: options.defaultCurrentDateMs,
+    showTrackedChanges: options.showTrackedChanges,
   }, pageIndex);
   const scale = (
     options.width ?? selected.page.geometry.widthPt * PT_TO_PX

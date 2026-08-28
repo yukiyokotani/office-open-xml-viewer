@@ -37,6 +37,7 @@ function fixture(policy = {
     maxPptxCachedSlideProjectionBytes: 1280,
     maxRawPartCacheEntries: 8,
     maxRawPartCacheBytes: 1280,
+    maxEmbeddedFontBytes: 320,
     maxPptxMarkdownBytes: 640,
     maxWorksheetRows: 100,
     maxWorksheetCells: 250,
@@ -151,6 +152,10 @@ test('generates matching TypeScript and Rust constants from one policy source', 
     /HARD_MAX_PPTX_MARKDOWN_BYTES: u64 = 640/,
   );
   assert.match(
+    readFileSync(path.join(root, 'packages/core/src/worker/resource-policy.generated.ts'), 'utf8'),
+    /HARD_MAX_EMBEDDED_FONT_BYTES = 320/,
+  );
+  assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /HARD_MAX_XLSX_RENDERER_COORDINATE_INDEX_ENTRIES: u64 = 250/,
   );
@@ -203,6 +208,7 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxPptxCachedSlideProjectionBytes: 1280,
       maxRawPartCacheEntries: 8,
       maxRawPartCacheBytes: 1280,
+      maxEmbeddedFontBytes: 320,
       maxPptxMarkdownBytes: 640,
       maxWorksheetRows: 100,
       maxWorksheetCells: 250,

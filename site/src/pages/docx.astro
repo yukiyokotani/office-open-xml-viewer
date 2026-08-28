@@ -2,6 +2,7 @@
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
 import FormatCommentsDemo from '../components/FormatCommentsDemo.astro';
+import DocxProgressiveLayoutGuide from '../components/DocxProgressiveLayoutGuide.astro';
 import { docxSnippets } from '../lib/demo-snippets';
 ---
 <FormatPage format="docx" name="DOCX" ext=".docx">
@@ -12,11 +13,12 @@ import { docxSnippets } from '../lib/demo-snippets';
     code={docxSnippets.demo}
   />
   <DemoBlock
-    format="docx" kind="scroll" badge="Story · ScrollView"
+    format="docx" kind="scroll" badge="Story · DocxScrollViewer"
     title="Scroll through every page"
-    description="Drive the headless DocxDocument engine to render each page into its own canvas, stacked in a scroll container — the natural way to read a long document."
+    description="Use DocxScrollViewer for a virtualized, ready-made long-document reader. For a custom scrolling UI, combine DocxViewer with DocxDocument and let your application own the container and navigation."
     code={docxSnippets.scroll}
   />
+  <DocxProgressiveLayoutGuide />
   <DemoBlock
     format="docx" kind="thumbnails" badge="Story · ThumbnailGrid"
     title="Page thumbnails"

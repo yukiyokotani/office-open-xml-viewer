@@ -67,6 +67,7 @@ export type ElementGeometry = DrawingGeometry | InlineResourceGeometry;
 interface ProjectionContext {
   readonly collectTextRuns: boolean;
   readonly collectTextRunSources: boolean;
+  readonly collectCompletedParagraphSources: boolean;
   readonly collectDrawings: boolean;
   readonly drawingEntries: ReadonlyMap<string, PagePaintDrawingEntry>;
   readonly rootPointToPage: ReadonlyMap<string, Matrix2DData>;
@@ -76,6 +77,7 @@ interface ProjectionContext {
   readonly emittedDrawings: Set<string>;
   readonly runs: TextRunGeometry[];
   readonly sourceRuns: Map<string, Set<number>>;
+  readonly completedParagraphSources: Set<string>;
   readonly drawings: DrawingGeometry[];
   readonly inlineResources: InlineResourceGeometry[];
   drawingSourceOrder: number;
@@ -286,6 +288,12 @@ function visitParagraph(
   context: ProjectionContext,
 ): void {
   const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  if (
+    context.collectCompletedParagraphSources
+    && paragraph.continuation?.continuesOnNext !== true
+  ) {
+    context.completedParagraphSources.add(sourceKey(paragraph.source));
+  }
   if (context.collectTextRuns || context.collectTextRunSources) {
     for (const line of paragraph.lines) {
       for (const placement of line.placements) {
@@ -455,6 +463,7 @@ function pageGeometryIndex(
   options: Readonly<{
     collectTextRuns: boolean;
     collectTextRunSources: boolean;
+    collectCompletedParagraphSources?: boolean;
     collectDrawings: boolean;
   }>,
 ): ProjectionContext {
@@ -476,6 +485,7 @@ function pageGeometryIndex(
   }
   const context: ProjectionContext = {
     ...options,
+    collectCompletedParagraphSources: options.collectCompletedParagraphSources === true,
     drawingEntries,
     rootPointToPage,
     rootPaintOrder,
@@ -484,6 +494,7 @@ function pageGeometryIndex(
     emittedDrawings: new Set(),
     runs: [],
     sourceRuns: new Map(),
+    completedParagraphSources: new Set(),
     drawings: [],
     inlineResources: [],
     drawingSourceOrder: 0,
@@ -533,6 +544,56 @@ export function textRunSourceIndexForDocument(
       if (!result.has(key)) result.set(key, indices);
       for (const index of pageIndices) indices.add(index);
     }
+  }
+  return result;
+}
+
+export interface ReviewProjectionIndex {
+  readonly renderedRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly completedSourceKeys: ReadonlySet<string>;
+}
+
+/** Build every index needed by comment/revision projection in one canonical
+ * geometry traversal. Progressive publications call this only when review data
+ * exists; combining the indexes avoids walking the growing prefix twice. */
+export function reviewProjectionIndexForDocument(
+  layout: DocumentLayout,
+): ReviewProjectionIndex {
+  const renderedRunIndex = new Map<string, Set<number>>();
+  const completedSourceKeys = new Set<string>();
+  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
+    const page = pageGeometryIndex(layout, pageIndex, {
+      collectTextRuns: false,
+      collectTextRunSources: true,
+      collectCompletedParagraphSources: true,
+      collectDrawings: false,
+    });
+    for (const [key, pageIndices] of page.sourceRuns) {
+      const indices = renderedRunIndex.get(key) ?? new Set<number>();
+      if (!renderedRunIndex.has(key)) renderedRunIndex.set(key, indices);
+      for (const index of pageIndices) indices.add(index);
+    }
+    for (const key of page.completedParagraphSources) completedSourceKeys.add(key);
+  }
+  return Object.freeze({ renderedRunIndex, completedSourceKeys });
+}
+
+/** Canonical paragraph sources that have an occurrence in the supplied layout.
+ * Unlike the rendered-run index this includes empty and final-state-hidden
+ * paragraphs, so a provisional review projection can distinguish content that
+ * is already paginated from content that belongs to a future prefix. */
+export function completedParagraphSourceKeysForDocument(
+  layout: DocumentLayout,
+): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
+    const pageSources = pageGeometryIndex(layout, pageIndex, {
+      collectTextRuns: false,
+      collectTextRunSources: false,
+      collectCompletedParagraphSources: true,
+      collectDrawings: false,
+    }).completedParagraphSources;
+    for (const key of pageSources) result.add(key);
   }
   return result;
 }

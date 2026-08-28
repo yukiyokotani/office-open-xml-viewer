@@ -154,10 +154,10 @@ const VIEWER_STYLE_ATTR = 'data-xlsx-viewer-styles';
 const VIEWER_STYLE_CSS =
   `.xlsx-tab-strip::-webkit-scrollbar{display:none}` +
   // The viewport remains focusable so copy shortcuts belong to the active
-  // Viewer. Pointer focus stays quiet, while keyboard focus remains visible at
-  // the viewport boundary and distinct from the selected-cell border.
+  // Viewer. Focus stays quiet by default; consumers can opt into a keyboard
+  // focus ring without conflating it with the selected-cell border.
   `[data-xlsx-viewport-input]:focus{outline:none}` +
-  `[data-xlsx-viewport-input]:focus-visible{outline:2px solid var(--ooxml-xlsx-focus-ring,#2563eb);outline-offset:-2px}` +
+  `[data-xlsx-viewport-input]:focus-visible{outline:2px solid var(--ooxml-xlsx-focus-ring,transparent);outline-offset:-2px}` +
   `.xlsx-tab-nav{background:transparent;transition:background 0.1s;}` +
   `.xlsx-tab-nav:hover{background:color-mix(in srgb,var(--ooxml-xlsx-chrome-text,#444) 8%,transparent);}` +
   // Excel-status-bar zoom slider: a thin uniform gray track (no colored

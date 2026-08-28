@@ -3,6 +3,7 @@
 
 interface Cfg {
   Viewer: string;
+  ScrollViewer: string;
   Engine: string;
   engineVariable: 'document' | 'presentation';
   fromEngine: 'fromDocument' | 'fromPresentation';
@@ -15,11 +16,11 @@ interface Cfg {
 }
 
 const pptx: Cfg = {
-  Viewer: 'PptxViewer', Engine: 'PptxPresentation', engineVariable: 'presentation', fromEngine: 'fromPresentation', sub: 'pptx',
+  Viewer: 'PptxViewer', ScrollViewer: 'PptxScrollViewer', Engine: 'PptxPresentation', engineVariable: 'presentation', fromEngine: 'fromPresentation', sub: 'pptx',
   count: 'slideCount', render: 'renderSlide', next: 'nextSlide', prev: 'prevSlide', go: 'goToSlide',
 };
 const docx: Cfg = {
-  Viewer: 'DocxViewer', Engine: 'DocxDocument', engineVariable: 'document', fromEngine: 'fromDocument', sub: 'docx',
+  Viewer: 'DocxViewer', ScrollViewer: 'DocxScrollViewer', Engine: 'DocxDocument', engineVariable: 'document', fromEngine: 'fromDocument', sub: 'docx',
   count: 'pageCount', render: 'renderPage', next: 'nextPage', prev: 'prevPage', go: 'goToPage',
 };
 
@@ -41,16 +42,21 @@ await viewer.load('/sample.${c.sub}');
 nextBtn.addEventListener('click', () => viewer.${c.next}());
 prevBtn.addEventListener('click', () => viewer.${c.prev}());`,
 
-    scroll: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
+    scroll: `import { ${c.ScrollViewer} } from '@silurus/ooxml/${c.sub}';
 
-// Headless engine — render every ${c.sub === 'pptx' ? 'slide' : 'page'} into a canvas you control.
-const ${c.engineVariable} = await ${c.Engine}.load('/sample.${c.sub}');
+// The built-in scroll viewer virtualizes a long ${c.sub === 'pptx' ? 'slide deck' : 'document'} for you.
+const scroller = document.querySelector('#scroller') as HTMLElement;
+const viewer = new ${c.ScrollViewer}(scroller, {
+  enableTextSelection: true,
+  useGoogleFonts: true,
+});
 
-for (let i = 0; i < ${c.engineVariable}.${c.count}; i++) {
-  const canvas = document.createElement('canvas');
-  scroller.appendChild(canvas);
-  await ${c.engineVariable}.${c.render}(canvas, i, { width: 1100 });
-}`,
+await viewer.load('/sample.${c.sub}');
+
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
+  viewer.destroy();
+});`,
 
     thumbnails: `import { ${c.Engine} } from '@silurus/ooxml/${c.sub}';
 

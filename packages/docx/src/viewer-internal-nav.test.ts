@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxViewer } from './viewer.js';
 import { DocxDocument } from './document.js';
+import { publishDocxLayout } from './document-layout-events.js';
 import { installDom, makeEl, FakeDocxEngine } from './scroll-viewer-test-dom.js';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 
@@ -54,6 +55,31 @@ describe('DocxViewer — internal-anchor click default (IX-nav)', () => {
     click({ kind: 'internal', ref: 'DoesNotExist' });
     expect(engine.bookmarkCalls).toContain('DoesNotExist'); // tried
     expect(goTo).not.toHaveBeenCalled(); // but did not navigate
+    v.destroy();
+  });
+
+  it('waits for the authoritative bookmark projection during progressive layout', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, PAGE);
+    engine.setLayoutComplete(false);
+    const doc = engine.asDoc();
+    const v = DocxViewer.fromDocument(
+      makeEl('canvas') as unknown as HTMLCanvasElement,
+      doc,
+    ) as DocxViewer;
+    const click = (
+      v as unknown as { _hyperlinkHandler: () => (t: HyperlinkTarget) => void }
+    )._hyperlinkHandler();
+    const goTo = vi.spyOn(v, 'goToPage');
+
+    click({ kind: 'internal', ref: 'Later' });
+    expect(engine.bookmarkCalls).not.toContain('Later');
+
+    engine.bookmarkPages.set('Later', 2);
+    engine.setPageCount(3);
+    engine.setLayoutComplete(true);
+    publishDocxLayout(doc, { pageCount: 3, exact: true, complete: true });
+    await vi.waitFor(() => expect(goTo).toHaveBeenCalledWith(2));
     v.destroy();
   });
 

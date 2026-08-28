@@ -214,11 +214,11 @@ describe('registerEmbeddedFonts', () => {
   it('warns once when a registered face fails to load', async () => {
     const { added } = installFontFaceSet({ failLoad: (f) => f === 'Flaky' });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await registerEmbeddedFonts([
+    const held = await registerEmbeddedFonts([
       { family: 'Flaky', bytes: validHeader(), odttf: false, weight: 'normal', style: 'normal' },
     ]);
-    // Still added to the set; the load rejection is surfaced diagnostically.
-    expect(added).toHaveLength(1);
+    expect(added).toHaveLength(0);
+    expect(held).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Flaky'));
   });
 
@@ -288,8 +288,9 @@ describe('registerEmbeddedFonts — dedup + unregisterEmbeddedFonts (#762)', () 
     expect(a).toHaveLength(1);
     expect(b).toHaveLength(1);
     expect(a[0]).toBe(b[0]);
-    // The single shared face is force-loaded exactly once (not per registration).
-    expect((added[0] as FakeFace).loadCalls).toBe(1);
+    // Each holder observes the idempotent load result so a concurrent/reused
+    // registration cannot mistake a failed first holder for a usable face.
+    expect((added[0] as FakeFace).loadCalls).toBe(2);
   });
 
   it('distinct faces (different bytes) are NOT deduped', async () => {

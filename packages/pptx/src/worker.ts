@@ -122,7 +122,13 @@ self.onmessage = async (
             new TextDecoder().decode(archive.presentation_bootstrap()),
           ) as PresentationBootstrap;
         });
-        preflightBuilder = new PresentationPreflightBuilder(bootstrap);
+        // Ordinary loads retain compact facts in the worker and return them at
+        // the end. Progressive main-mode loads decode each sequential slide in
+        // Window so the presentation can publish the opening prefix itself;
+        // keeping a second builder here would duplicate the bounded projection.
+        preflightBuilder = request.progressiveLayout
+          ? null
+          : new PresentationPreflightBuilder(bootstrap);
         post({ kind: 'presentationOpened', id, bootstrap });
         presentationState = 'ready';
         return;
@@ -148,6 +154,12 @@ self.onmessage = async (
       if (request.kind === 'extractImage') {
         const bytes = host.run(() => archive.extract_image(request.path).buffer as ArrayBuffer);
         post({ kind: 'imageExtracted', id, bytes }, [bytes]);
+        return;
+      }
+
+      if (request.kind === 'extractFont') {
+        const bytes = host.run(() => archive.extract_font(request.path).buffer as ArrayBuffer);
+        post({ kind: 'fontExtracted', id, bytes }, [bytes]);
         return;
       }
 

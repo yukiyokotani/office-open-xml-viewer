@@ -69,6 +69,7 @@ function readPolicy(root) {
     'maxPptxCachedSlideProjectionBytes',
     'maxRawPartCacheEntries',
     'maxRawPartCacheBytes',
+    'maxEmbeddedFontBytes',
     'maxPptxMarkdownBytes',
     'maxWorksheetRows',
     'maxWorksheetCells',
@@ -161,7 +162,8 @@ function render(policy) {
   };
   return {
     ...outputs,
-    rust: `${outputs.rust}pub const HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES: u64 = ${hard.maxWorkbookCachedCellContentUtf8Bytes};\npub const HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES: u64 = ${hard.maxWorkbookCachedJsonBytes};\n`,
+    typescript: `${outputs.typescript}export const HARD_MAX_EMBEDDED_FONT_BYTES = ${hard.maxEmbeddedFontBytes};\n`,
+    rust: `${outputs.rust}pub const HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES: u64 = ${hard.maxWorkbookCachedCellContentUtf8Bytes};\npub const HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES: u64 = ${hard.maxWorkbookCachedJsonBytes};\npub const HARD_MAX_EMBEDDED_FONT_BYTES: u64 = ${hard.maxEmbeddedFontBytes};\n`,
   };
 }
 

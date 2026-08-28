@@ -2,8 +2,8 @@
 // story (Demo / ScrollView / ThumbnailGrid / MasterDetail) using the real API.
 // Demos are mounted lazily (on scroll) so a page with several of them doesn't
 // parse the same file many times at once.
-import { PptxPresentation, PptxViewer } from '@silurus/ooxml-pptx';
-import { DocxDocument, DocxViewer } from '@silurus/ooxml-docx';
+import { PptxPresentation, PptxScrollViewer, PptxViewer } from '@silurus/ooxml-pptx';
+import { DocxDocument, DocxScrollViewer, DocxViewer } from '@silurus/ooxml-docx';
 import { XlsxSheetViewer, XlsxViewer, XlsxWorkbook } from '@silurus/ooxml-xlsx';
 
 export type Format = 'pptx' | 'docx' | 'xlsx';
@@ -377,17 +377,18 @@ function mountDemo(el: HTMLElement, format: Format, url: string): void {
 // ScrollView — every page stacked on a backdrop
 function mountScroll(el: HTMLElement, format: Format, url: string): void {
   const sc = document.createElement('div');
-  sc.className = 'demo-scroll';
+  sc.className = 'demo-scroll demo-scroll-viewer';
   el.appendChild(sc);
   const st = status(sc, 'Parsing…');
-  loadDoc(format, url).then(async (doc) => {
+  const viewer = format === 'pptx'
+    ? new PptxScrollViewer(sc, { gap: 22, useGoogleFonts: true })
+    : new DocxScrollViewer(sc, { gap: 22, useGoogleFonts: true });
+  window.addEventListener('pagehide', (event) => {
+    if (event.persisted) return;
+    viewer.destroy();
+  });
+  viewer.load(url).then(() => {
     st.remove();
-    for (let i = 0; i < doc.count; i++) {
-      const c = document.createElement('canvas');
-      c.className = 'demo-page';
-      sc.appendChild(c);
-      await doc.render(c, i, 1100);
-    }
   }).catch((e) => { st.textContent = err(e); });
 }
 

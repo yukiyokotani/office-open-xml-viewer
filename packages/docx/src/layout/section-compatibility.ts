@@ -15,7 +15,7 @@ export const WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART = defineCompatibilityRu
     kind: 'regression-test',
     reference: 'packages/docx/src/page-number-field-render.test.ts#restarts a spilling continuous section after its shared first page',
   },
-  description: 'Issue #804 records that Word anchors a continuous section page-number restart to the section first appearance on the shared physical page, so its next owned page advances from that appearance.',
+  description: 'Issue #804 records that Word anchors a continuous section page-number restart to the first physical page containing that section body content, even when another section owns the page top. An empty same-page region does not consume the restart.',
 });
 
 export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRule({

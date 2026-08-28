@@ -13,6 +13,7 @@ const VRT_HARNESS_PATHS = new Set([
   'packages/docx/package.json',
   'packages/docx/playwright.config.ts',
   'packages/docx/tests/visual/fixture.html',
+  'packages/docx/tests/visual/stable-canvas-render.mjs',
   'packages/docx/tests/visual/visual.spec.ts',
   'packages/xlsx/package.json',
   'packages/xlsx/playwright.config.ts',

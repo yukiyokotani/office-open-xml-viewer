@@ -1121,7 +1121,7 @@ describe('XlsxSheetViewer canvas mount', () => {
       '[data-xlsx-viewport-input]:focus{outline:none}',
     );
     expect(viewerStyle?.textContent).toContain(
-      '[data-xlsx-viewport-input]:focus-visible{outline:2px solid var(--ooxml-xlsx-focus-ring,#2563eb);outline-offset:-2px}',
+      '[data-xlsx-viewport-input]:focus-visible{outline:2px solid var(--ooxml-xlsx-focus-ring,transparent);outline-offset:-2px}',
     );
     expect(openerDocument.head.querySelector('style[data-xlsx-viewer-styles]')).toBeNull();
     const viewportInput = mounted.find((element) => element.hasAttribute('data-xlsx-viewport-input')) as FakeEl;

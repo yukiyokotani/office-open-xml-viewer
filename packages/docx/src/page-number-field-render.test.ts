@@ -262,6 +262,22 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
       .toEqual([['1'], ['51'], ['52']]);
   });
 
+  it('starts at the authored number when a continuous section first paints on the next page', async () => {
+    const doc = continuousSpilloverDoc({ start: 2 }, 5, 6);
+    const layout = layoutDocument(doc);
+
+    expect(layout.pages).toHaveLength(3);
+    const sharedRegions = layout.pages[0]!.sectionRegions;
+    expect(sharedRegions).toHaveLength(2);
+    expect(sharedRegions[0]!.sectionOccurrenceId).not.toBe(sharedRegions[1]!.sectionOccurrenceId);
+    expect(sharedRegions.map((region) => region.blockEndPt - region.blockStartPt))
+      .toEqual([100, 0]);
+    expect(layout.pages.map((page) => page.pageNumber.displayNumber)).toEqual([1, 2, 3]);
+    expect(await Promise.all(layout.pages.map((_, pageIndex) =>
+      continuousDecimalPageFieldTexts(doc, pageIndex))))
+      .toEqual([['1'], ['2'], ['3']]);
+  });
+
   it('keeps a continuous restart page-wide when both sections fit the shared page', async () => {
     const doc = continuousSpilloverDoc({ start: 99 }, 2, 2);
     const layout = layoutDocument(doc);

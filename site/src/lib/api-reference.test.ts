@@ -102,6 +102,70 @@ describe('official-site API reference', () => {
     }
   });
 
+  it('documents the complete progressive DOCX contract on every loading surface', () => {
+    for (const apiClass of apiReference.docx) {
+      const options = apiClass.options ?? [];
+      const progressive = options.find(({ name }) => name === 'progressiveLayout');
+      expect(progressive?.def, apiClass.name).toBe('false');
+      expect(progressive?.desc, apiClass.name).toContain('pages available so far');
+      expect(progressive?.detailsHref, apiClass.name).toBe('/docx#progressive-layout');
+      expect(options.map(({ name }) => name), apiClass.name).toEqual(expect.arrayContaining([
+        'showTrackedChanges',
+        'currentDate',
+        'sliceLayout',
+        'onLayoutProgress',
+        'onLayoutPartial',
+        'onLayoutComplete',
+      ]));
+      expect(options.find(({ name }) => name === 'onLayoutPartial')?.type, apiClass.name)
+        .toContain('availableUnits: number; totalUnits?: number; exact: boolean');
+      expect(options.find(({ name }) => name === 'onLayoutComplete')?.type, apiClass.name)
+        .toBe('(error?: unknown) => void');
+      expect(options.find(({ name }) => name === 'currentDate')?.desc, apiClass.name)
+        .toContain('layout variant');
+
+      const pageCount = apiClass.methods.find(({ sig }) => sig === 'get pageCount(): number');
+      expect(pageCount?.desc, apiClass.name).toContain('available so far');
+      expect(apiClass.methods.find(({ sig }) => sig === 'get layoutComplete(): boolean')?.desc, apiClass.name)
+        .toContain('remains false');
+      expect(apiClass.methods.find(({ sig }) => sig === 'waitUntilLayoutComplete(): Promise<void>')?.desc, apiClass.name)
+        .toContain('authoritative full layout');
+    }
+
+    const viewerCallback = apiReference.docx[0].options?.find(({ name }) => name === 'onPageChange');
+    expect(viewerCallback?.desc).toContain('page-count publication changes total');
+    const scrollCallback = apiReference.docx[2].options?.find(({ name }) => name === 'onVisiblePageChange');
+    expect(scrollCallback?.desc).toContain('even if the same page remains visible');
+  });
+
+  it('documents a symmetric PPTX lifecycle with a stable final slide extent', () => {
+    for (const apiClass of apiReference.pptx) {
+      const options = apiClass.options ?? [];
+      const progressive = options.find(({ name }) => name === 'progressiveLayout');
+      expect(progressive?.def, apiClass.name).toBe('false');
+      expect(progressive?.desc, apiClass.name).toContain('slideCount');
+      expect(progressive?.detailsHref, apiClass.name).toBe('/pptx#progressive-layout');
+      expect(options.map(({ name }) => name), apiClass.name).toEqual(expect.arrayContaining([
+        'onLayoutProgress',
+        'onLayoutPartial',
+        'onLayoutComplete',
+      ]));
+      expect(options.find(({ name }) => name === 'onLayoutPartial')?.type, apiClass.name)
+        .toContain('availableUnits: number; totalUnits?: number; exact: boolean');
+      expect(apiClass.methods.find(({ sig }) => sig === 'get availableSlideCount(): number'), apiClass.name)
+        .toBeDefined();
+      expect(apiClass.methods.find(({ sig }) => sig === 'get layoutComplete(): boolean')?.desc, apiClass.name)
+        .toContain('remains false');
+      expect(apiClass.methods.find(({ sig }) => sig === 'waitUntilLayoutComplete(): Promise<void>'), apiClass.name)
+        .toBeDefined();
+    }
+
+    const viewerCallback = apiReference.pptx[0].options?.find(({ name }) => name === 'onSlideChange');
+    expect(viewerCallback?.type).toContain('layoutComplete: boolean');
+    const scrollCallback = apiReference.pptx[2].options?.find(({ name }) => name === 'onVisibleSlideChange');
+    expect(scrollCallback?.desc).toContain('same slide remains visible');
+  });
+
   it('documents the Viewer error-delivery contract and typed resource failures', () => {
     for (const classes of Object.values(apiReference)) {
       for (const apiClass of classes.filter(({ name }) => name.endsWith('Viewer'))) {

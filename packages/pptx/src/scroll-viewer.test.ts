@@ -331,9 +331,7 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
       engine.asPres(),
       { comments: { connectors: {} } },
     );
-    const scrollHost = container.children[0]!.children[0]!;
-    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
-    expect(slide.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    expect((viewer as unknown as { _commentMarginExtent(): number })._commentMarginExtent()).toBe(0);
     viewer.destroy();
   });
 
@@ -527,7 +525,7 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
     const viewer = PptxScrollViewer.fromPresentation(
       container as unknown as HTMLElement,
       engine.asPres(),
-      { comments: { connectors: {} } },
+      { comments: { connectors: {} }, zoomMax: 10 },
     );
     await waitForBuiltInCommentUi(viewer);
     const scrollHost = container.children[0]!.children[0]!;

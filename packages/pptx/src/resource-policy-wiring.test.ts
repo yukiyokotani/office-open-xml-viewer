@@ -22,6 +22,7 @@ describe('PptxPresentation resource-policy wiring', () => {
             minorFont: null,
             hlinkColor: null,
             folHlinkColor: null,
+            embeddedFonts: [],
             slides: [],
             fontPreloadNames: [],
           },

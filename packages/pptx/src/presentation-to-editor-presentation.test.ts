@@ -22,11 +22,28 @@ describe('PptxPresentation.toEditorPresentation', () => {
     mode: 'main' | 'worker';
     slideCount?: number;
     withSlide?: (index: number, consume: (slide: Slide) => unknown) => Promise<unknown>;
+    waitUntilLayoutComplete?: () => Promise<void>;
+    replaceAll?: (slides: readonly Slide[]) => void;
   }) {
     const slideCount = args.slideCount ?? 2;
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._mode = args.mode;
     instance._resourceFailure = null;
+    instance._bootstrap = {
+      slideCount,
+      slideWidth: 9144000,
+      slideHeight: 6858000,
+      defaultTextColor: '383838',
+      majorFont: 'Aptos Display',
+      minorFont: 'Aptos',
+      hlinkColor: '0563C1',
+      folHlinkColor: null,
+      embeddedFonts: [],
+      slides: Array.from({ length: slideCount }, (_, index) => ({
+        index,
+        partName: `ppt/slides/slide${index + 1}.xml`,
+      })),
+    };
     instance._preflight = {
       slideCount,
       slideWidth: 9144000,
@@ -36,6 +53,7 @@ describe('PptxPresentation.toEditorPresentation', () => {
       minorFont: 'Aptos',
       hlinkColor: '0563C1',
       folHlinkColor: null,
+      embeddedFonts: [],
       slides: Array.from({ length: slideCount }, (_, index) => ({
         index,
         partName: `ppt/slides/slide${index + 1}.xml`,
@@ -47,7 +65,10 @@ describe('PptxPresentation.toEditorPresentation', () => {
     };
     instance._slides = {
       withSlide: args.withSlide ?? (async (index, consume) => consume(slide(index))),
+      replaceAll: args.replaceAll ?? vi.fn(),
     };
+    instance._availableSlideCount = slideCount;
+    instance.waitUntilLayoutComplete = args.waitUntilLayoutComplete ?? vi.fn().mockResolvedValue(undefined);
     return instance as unknown as PptxPresentation;
   }
 
@@ -77,6 +98,32 @@ describe('PptxPresentation.toEditorPresentation', () => {
     expect(model.slides[0]).not.toBe(original);
     model.slides[0].partName = 'mutated';
     expect(original.partName).toBe('ppt/slides/slide1.xml');
+  });
+
+  it('waits for progressive slide preparation before exporting', async () => {
+    let ready = false;
+    const pres = make({
+      mode: 'main',
+      waitUntilLayoutComplete: vi.fn(async () => { ready = true; }),
+      withSlide: async (index, consume) => {
+        expect(ready).toBe(true);
+        return consume(slide(index));
+      },
+    });
+
+    await pres.toEditorPresentation();
+  });
+
+  it('keeps bootstrap and paintable slide counts aligned after replacing the list', () => {
+    const replaceAll = vi.fn();
+    const pres = make({ mode: 'main', replaceAll });
+    const replacement = [slide(0)];
+
+    pres.replaceSlideList(replacement);
+
+    expect(replaceAll).toHaveBeenCalledWith(replacement);
+    expect(pres.slideCount).toBe(1);
+    expect(pres.availableSlideCount).toBe(1);
   });
 
   it('rejects worker mode', async () => {

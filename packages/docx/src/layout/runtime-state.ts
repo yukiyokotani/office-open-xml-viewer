@@ -5,10 +5,24 @@ import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutVariantStore } from './variant-store.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
+import type { LayoutOptions } from './options.js';
 
 export interface DocumentLayoutRuntimeState {
   services: LayoutServices | null;
   readonly defaultCurrentDateMs: number;
+  /**
+   * The layout variant this document is currently being VIEWED as.
+   *
+   * `showTrackedChanges` (and an explicit `currentDate`) select a different
+   * retained layout, with a different page count and different page geometry.
+   * Document-level accessors used to read the default variant unconditionally,
+   * which meant a tracked-changes viewer measured its scrollbar against
+   * final-view geometry while painting markup-view pages — and, worse, forced a
+   * whole extra synchronous pagination of the variant nobody was looking at.
+   *
+   * `null` means "the default view", which is what an ordinary load selects.
+   */
+  activeLayoutOptions: LayoutOptions | null;
 }
 
 const documentLayoutRuntime = Symbol('document-layout-runtime');
@@ -25,7 +39,7 @@ export function attachDocumentLayoutRuntime(
     configurable: false,
     enumerable: false,
     writable: false,
-    value: { services: null, defaultCurrentDateMs },
+    value: { services: null, defaultCurrentDateMs, activeLayoutOptions: null },
   });
 }
 

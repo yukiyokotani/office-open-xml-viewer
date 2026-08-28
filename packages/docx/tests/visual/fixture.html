@@ -14,6 +14,7 @@
   import { DocxDocument } from '/src/index.ts';
   import { threeD } from '@ooxml-test-three-d-renderer';
   import { regionMap } from '@ooxml-test-region-map-renderer';
+  import { stableCanvasRender } from './stable-canvas-render.mjs';
 
   const params = new URLSearchParams(location.search);
   const file = params.get('file') ?? 'sample-1.docx';
@@ -30,10 +31,15 @@
     // pages[0]`), so without this the harness cannot tell a genuine page from a
     // duplicated first page (see the #993 Thai-sample regression).
     document.body.dataset.pageCount = String(doc.pageCount);
-    await doc.renderPage(canvas, page, { width, dpr: 1 });
-    window.renderDocxVrtPage = async (pageIndex) => {
-      await doc.renderPage(canvas, pageIndex, { width, dpr: 1 });
+    const renderStablePage = async (pageIndex) => {
+      await stableCanvasRender({
+        render: () => doc.renderPage(canvas, pageIndex, { width, dpr: 1 }),
+        fonts: document.fonts,
+        nextFrame: () => new Promise((resolve) => requestAnimationFrame(resolve)),
+      });
     };
+    await renderStablePage(page);
+    window.renderDocxVrtPage = renderStablePage;
     document.body.dataset.status = 'ready';
   } catch (e) {
     document.body.dataset.status = 'error';

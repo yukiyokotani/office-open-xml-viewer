@@ -401,6 +401,51 @@ describe('canonical physical-page numbering', () => {
     ]);
   });
 
+  it('does not consume a continuous restart on an exhausted shared page', () => {
+    const outgoing = owner('section:outgoing');
+    const incoming = owner('section:incoming', {
+      startType: 'continuous',
+      pageNumbering: { start: 2, format: null },
+    });
+    const layout = paginate(outgoing, [
+      bodyBlock(0),
+      { kind: 'begin-section', source: bodySource(10), section: incoming },
+      bodyBlock(1),
+    ], new Map([[0, 80], [1, 20]]));
+
+    expect(layout.pages[0]!.sectionRegions.map((region) => ({
+      owner: region.sectionOccurrenceId,
+      height: region.blockEndPt - region.blockStartPt,
+    }))).toEqual([
+      { owner: 'section:outgoing', height: 80 },
+      { owner: 'section:incoming', height: 0 },
+    ]);
+    expect(layout.pages.map((page) => page.pageNumber.displayNumber)).toEqual([1, 2]);
+  });
+
+  it('does not consume a continuous restart on an empty shared region before pageBreakBefore', () => {
+    const outgoing = owner('section:outgoing');
+    const incoming = owner('section:incoming', {
+      startType: 'continuous',
+      pageNumbering: { start: 2, format: null },
+    });
+    const forced = bodyBlock(1);
+    const layout = paginate(outgoing, [
+      bodyBlock(0),
+      { kind: 'begin-section', source: bodySource(10), section: incoming },
+      { ...forced, block: { ...forced.block, pageBreakBefore: true } },
+    ], new Map([[0, 20], [1, 20]]));
+
+    expect(layout.pages[0]!.sectionRegions.map((region) => ({
+      owner: region.sectionOccurrenceId,
+      height: region.blockEndPt - region.blockStartPt,
+    }))).toEqual([
+      { owner: 'section:outgoing', height: 20 },
+      { owner: 'section:incoming', height: 60 },
+    ]);
+    expect(layout.pages.map((page) => page.pageNumber.displayNumber)).toEqual([1, 2]);
+  });
+
   it.each([
     {
       startType: 'oddPage' as const,

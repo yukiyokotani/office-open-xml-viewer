@@ -50,6 +50,33 @@ export interface ExactConvergenceOptions<T> {
 export function convergeExactState<T>(
   options: ExactConvergenceOptions<T>,
 ): Readonly<{ value: T; passes: number }> {
+  // One algorithm, driven to completion. The generator form below is the
+  // implementation; this wrapper just refuses to suspend.
+  const steps = convergeExactStateSteps<T, never>({
+    ...options,
+    step: function* generatorStep(previous, pass) {
+      return options.step(previous, pass);
+    },
+  });
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/**
+ * {@link convergeExactState} whose pass is itself suspendable.
+ *
+ * `step` is a generator, and its yields are forwarded to this generator's
+ * consumer, so a caller driving convergence can spread each pass across
+ * event-loop turns without the convergence policy — adjacent equality is a
+ * fixed point, a non-adjacent repeat is a cycle, exhaustion fails closed —
+ * being restated anywhere.
+ */
+export function* convergeExactStateSteps<T, Y>(
+  options: Omit<ExactConvergenceOptions<T>, 'step'> & {
+    readonly step: (previous: T | null, pass: number) => Generator<Y, T, void>;
+  },
+): Generator<Y, Readonly<{ value: T; passes: number }>, void> {
   const { seedState, step, stateOf, limit } = options;
   const minimumLimit = seedState === undefined ? 2 : 1;
   if (!Number.isInteger(limit) || limit < minimumLimit) {
@@ -61,7 +88,9 @@ export function convergeExactState<T>(
   const seen = new Set(states);
   let previous: T | null = null;
   for (let pass = 1; pass <= limit; pass += 1) {
-    const value = step(previous, pass);
+    // Annotated because `yield*` in a generator whose own return type mentions
+    // T cannot be inferred without circularity (TS7022).
+    const value: T = yield* step(previous, pass);
     const state = stateOf(value);
     const priorState = states.at(-1);
     states.push(state);
@@ -85,16 +114,32 @@ export function convergeLayout<T extends LayoutIteration>(
   step: (iteration: T) => T,
   limit: number,
 ): T {
+  const steps = convergeLayoutSteps<T, never>(
+    seed,
+    function* generatorStep(iteration) { return step(iteration); },
+    limit,
+  );
+  let next = steps.next();
+  while (!next.done) next = steps.next();
+  return next.value;
+}
+
+/** {@link convergeLayout} whose step is suspendable; yields are forwarded. */
+export function* convergeLayoutSteps<T extends LayoutIteration, Y>(
+  seed: T,
+  step: (iteration: T) => Generator<Y, T, void>,
+  limit: number,
+): Generator<Y, T, void> {
   if (!Number.isInteger(limit) || limit < 1) {
     throw new LayoutInvariantError('NON_CONVERGENCE', 'limit must be a positive integer');
   }
   try {
-    return convergeExactState<T>({
+    return (yield* convergeExactStateSteps<T, Y>({
       seedState: seed.fingerprint,
-      step: (previous) => step(previous ?? seed),
+      step: function* layoutStep(previous) { return yield* step(previous ?? seed); },
       stateOf: (iteration) => iteration.fingerprint,
       limit,
-    }).value;
+    })).value;
   } catch (error) {
     if (error instanceof ExactConvergenceError) {
       throw new LayoutInvariantError(

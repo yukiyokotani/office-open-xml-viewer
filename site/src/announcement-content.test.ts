@@ -10,6 +10,37 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.83 progressive viewing announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v083-progressive-viewing');
+
+  it('leads with user outcomes and keeps implementation detail last', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.83.0',
+      title: 'Open large Word and PowerPoint files sooner in v0.83.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections.at(-1)?.title).toBe('Technical note');
+
+    const userFacingText = announcement?.sections.slice(0, -1).flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    for (const outcome of ['opening pages', 'opening slide', 'large Word tables', 'Long web addresses', 'embedded fonts']) {
+      expect(userFacingText).toContain(outcome);
+    }
+    expect(userFacingText).toContain('No migration is required');
+    expect(userFacingText).toContain('progressiveLayout: true');
+    expect(userFacingText).toContain('waitUntilLayoutComplete()');
+    expect(userFacingText).toContain('showTrackedChanges: true');
+    expect(userFacingText).not.toMatch(/paginator|preflight|worker protocol|layout slice/i);
+    expect(userFacingText).not.toMatch(/\b(?:KB|KiB|gzip|ms)\b/);
+  });
+});
+
 describe('v0.82 review announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v082-review-comments');
 
@@ -83,7 +114,7 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets in v0.82.1');
+    expect(bundleSizePage).toContain('Current production assets in v0.83.0');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
     expect(bundleSizePage).toContain('XLSX static JavaScript');
     expect(bundleSizePage).toContain('PPTX static JavaScript');

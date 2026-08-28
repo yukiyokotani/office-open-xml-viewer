@@ -10,6 +10,7 @@ import type {
   PptxSlidePoint,
 } from './element-selection';
 import { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
+import { publishPptxLayout } from './presentation-layout-events';
 
 /** Test-only adapter for mechanics cases that need a preloaded engine. Public
  * callers use `PptxScrollViewer.fromPresentation()` directly. */
@@ -204,7 +205,7 @@ export function makeEl(tag: string): FakeEl {
       }
       // A minimal recording 2d context is never actually used by the viewer
       // (renderSlide owns the ctx); return a no-op object for safety.
-      return {};
+      return { drawImage() {} };
     },
     getBoundingClientRect() {
       return { top: 0, left: 0, width: this.clientWidth, height: this.clientHeight };
@@ -384,6 +385,8 @@ export class FakePptxEngine {
    *  by replaying `feedTextRuns` to `renderSlideToBitmap`'s `onTextRun` too. */
   feedTextRuns?: PptxTextRunInfo[];
   commentsBySlide: readonly (readonly Readonly<PptxComment>[])[] = [];
+  /** Test-authored hidden flags, exposed only once the slide is available. */
+  hiddenSlides = new Set<number>();
   elementContext: PptxElementContext | null = null;
   elementContextCalls: Array<{
     slideIndex: number;
@@ -391,15 +394,53 @@ export class FakePptxEngine {
     options: PptxElementContextOptions;
   }> = [];
   elementBoundsCalls: Array<{ slideIndex: number; elementIds: readonly string[] }> = [];
+  private _availableSlideCount: number;
+  private _layoutComplete = true;
+  private _layoutFailure: unknown = undefined;
+  private _layoutDeferred: Promise<void> | null = null;
+  private _resolveLayout: (() => void) | null = null;
   constructor(
     private _slideCount: number,
     public readonly slideWidth: number, // EMU, deck-wide (uniform)
     public readonly slideHeight: number, // EMU, deck-wide (uniform)
     private _mode: 'main' | 'worker' = 'main',
     private deferred = false,
-  ) {}
+  ) {
+    this._availableSlideCount = _slideCount;
+  }
   get slideCount(): number {
     return this._slideCount;
+  }
+  get availableSlideCount(): number {
+    return this._availableSlideCount;
+  }
+  get layoutComplete(): boolean {
+    return this._layoutComplete;
+  }
+  waitUntilLayoutComplete(): Promise<void> {
+    return (this._layoutDeferred ?? Promise.resolve()).then(() => {
+      if (this._layoutFailure !== undefined) throw this._layoutFailure;
+    });
+  }
+  /** Test-only progressive publication seam. */
+  setLayoutProgress(availableSlides: number, complete = false, error?: unknown): void {
+    this._resolveLayout?.();
+    this._availableSlideCount = availableSlides;
+    this._layoutComplete = complete;
+    this._layoutFailure = error;
+    this._resolveLayout = null;
+    if (error !== undefined) {
+      this._layoutDeferred = Promise.resolve();
+    } else if (!complete) {
+      this._layoutDeferred = new Promise<void>((resolve) => { this._resolveLayout = resolve; });
+    }
+    publishPptxLayout(this, {
+      availableSlides,
+      slideCount: this._slideCount,
+      exact: complete && error === undefined,
+      complete,
+      ...(error === undefined ? {} : { error }),
+    });
   }
   /** Mirrors the real `PptxPresentation.mode` fact (presentation.ts) — the exact
    *  fact the viewer constructor reads to decide the render path (main ⇒
@@ -411,7 +452,13 @@ export class FakePptxEngine {
   getComments(slideIndex: number): readonly Readonly<PptxComment>[] {
     return this.commentsBySlide[slideIndex] ?? [];
   }
+  isHidden(slideIndex: number): boolean {
+    return slideIndex < this._availableSlideCount && this.hiddenSlides.has(slideIndex);
+  }
   renderSlide(_canvas: unknown, slide: number, opts?: RenderSlideOptions): Promise<void> {
+    if (slide >= this._availableSlideCount && !this._layoutComplete) {
+      return this.waitUntilSlideAvailable(slide).then(() => this.renderSlide(_canvas, slide, opts));
+    }
     const canvas = _canvas as FakeEl | undefined;
     // Mirror the real renderer's backing-store sizing so tests can exercise the
     // dpr≠1 path: the real PptxPresentation.renderSlide sets `canvas.width =
@@ -448,6 +495,9 @@ export class FakePptxEngine {
     });
   }
   renderSlideToBitmap(slide: number, opts?: RenderSlideToBitmapOptions): Promise<ImageBitmap> {
+    if (slide >= this._availableSlideCount && !this._layoutComplete) {
+      return this.waitUntilSlideAvailable(slide).then(() => this.renderSlideToBitmap(slide, opts));
+    }
     const w = opts?.width ?? 960;
     const h = this.slideWidth > 0 ? Math.round((w * this.slideHeight) / this.slideWidth) : 0;
     const bmp = { width: w, height: h, close: vi.fn() };
@@ -468,6 +518,9 @@ export class FakePptxEngine {
     });
   }
   presentSlide(_canvas: unknown, slide: number, opts?: PresentSlideOptions): Promise<PresentationHandle> {
+    if (slide >= this._availableSlideCount && !this._layoutComplete) {
+      return this.waitUntilSlideAvailable(slide).then(() => this.presentSlide(_canvas, slide, opts));
+    }
     const canvas = _canvas as FakeEl | undefined;
     if (canvas && opts?.width && opts.width > 0) {
       const dpr = opts.dpr ?? 1;
@@ -500,6 +553,12 @@ export class FakePptxEngine {
    *  `PptxPresentation.collectSlideRuns`). Returns the fed runs regardless of mode. */
   collectSlideRuns(_slide: number, _width?: number): Promise<PptxTextRunInfo[]> {
     return Promise.resolve([...(this.feedTextRuns ?? [])]);
+  }
+  private async waitUntilSlideAvailable(slide: number): Promise<void> {
+    while (slide >= this._availableSlideCount && !this._layoutComplete) {
+      await this._layoutDeferred;
+    }
+    if (this._layoutFailure !== undefined) throw this._layoutFailure;
   }
   getElementContextAt(
     slideIndex: number,

@@ -18,6 +18,7 @@ import type {
 import type {
   PresentationBootstrap,
   PresentationBootstrapSlide,
+  PptxEmbeddedFontRef,
 } from './worker-protocol';
 
 const ZERO_RESOURCE_USAGE: OoxmlResourceUsageSnapshot = Object.freeze({
@@ -57,6 +58,7 @@ export interface PresentationPreflight {
   readonly minorFont: string | null;
   readonly hlinkColor: string | null;
   readonly folHlinkColor: string | null;
+  readonly embeddedFonts: readonly Readonly<PptxEmbeddedFontRef>[];
   readonly slides: readonly PresentationPreflightSlide[];
   readonly fontPreloadNames: readonly (string | null)[];
 }
@@ -87,6 +89,28 @@ function copyBootstrapSlide(
   });
 }
 
+function copyEmbeddedFont(value: unknown, index: number): Readonly<PptxEmbeddedFontRef> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`invalid PPTX presentation bootstrap embedded font at ${index}`);
+  }
+  const candidate = value as Partial<PptxEmbeddedFontRef>;
+  if (
+    typeof candidate.fontName !== 'string' || candidate.fontName.length === 0 ||
+    !['regular', 'bold', 'italic', 'boldItalic'].includes(candidate.style ?? '') ||
+    typeof candidate.partPath !== 'string' || candidate.partPath.length === 0 ||
+    candidate.partPath.startsWith('/') || candidate.partPath.split('/').includes('..') ||
+    !['application/x-font-ttf', 'application/x-fontdata'].includes(candidate.contentType ?? '')
+  ) {
+    throw new Error(`invalid PPTX presentation bootstrap embedded font fields at ${index}`);
+  }
+  return Object.freeze({
+    fontName: candidate.fontName,
+    style: candidate.style as PptxEmbeddedFontRef['style'],
+    partPath: candidate.partPath,
+    contentType: candidate.contentType as PptxEmbeddedFontRef['contentType'],
+  });
+}
+
 /** Validate and detach the JSON-decoded Rust bootstrap from mutable callers. */
 export function normalizePresentationBootstrap(
   value: unknown,
@@ -99,6 +123,7 @@ export function normalizePresentationBootstrap(
     !Number.isSafeInteger(candidate.slideCount) || (candidate.slideCount ?? -1) < 0 ||
     !Number.isSafeInteger(candidate.slideWidth) || (candidate.slideWidth ?? 0) <= 0 ||
     !Number.isSafeInteger(candidate.slideHeight) || (candidate.slideHeight ?? 0) <= 0 ||
+    !Array.isArray(candidate.embeddedFonts) ||
     !Array.isArray(candidate.slides) ||
     candidate.slides.length !== candidate.slideCount
   ) {
@@ -118,6 +143,9 @@ export function normalizePresentationBootstrap(
     minorFont: candidate.minorFont,
     hlinkColor: candidate.hlinkColor,
     folHlinkColor: candidate.folHlinkColor,
+    embeddedFonts: Object.freeze(
+      (candidate.embeddedFonts as readonly unknown[]).map(copyEmbeddedFont),
+    ),
     slides: Object.freeze(candidate.slides.map(copyBootstrapSlide)),
   });
 }
@@ -290,8 +318,10 @@ function normalizeMediaElement(value: unknown, slideIndex: number): Readonly<Med
   return copyMediaElement(element as MediaElement);
 }
 
-/** Validate, detach, and freeze a compact preflight crossing a worker boundary. */
-export function normalizePresentationPreflight(value: unknown): PresentationPreflight {
+function normalizePresentationPreflightValue(
+  value: unknown,
+  allowPartial: boolean,
+): PresentationPreflight {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('invalid PPTX presentation preflight payload');
   }
@@ -300,8 +330,11 @@ export function normalizePresentationPreflight(value: unknown): PresentationPref
     !Number.isSafeInteger(candidate.slideCount) || (candidate.slideCount ?? -1) < 0 ||
     !Number.isSafeInteger(candidate.slideWidth) || (candidate.slideWidth ?? 0) <= 0 ||
     !Number.isSafeInteger(candidate.slideHeight) || (candidate.slideHeight ?? 0) <= 0 ||
+    !Array.isArray(candidate.embeddedFonts) ||
     !Array.isArray(candidate.slides) ||
-    candidate.slides.length !== candidate.slideCount ||
+    (allowPartial
+      ? candidate.slides.length > (candidate.slideCount ?? -1)
+      : candidate.slides.length !== candidate.slideCount) ||
     !Array.isArray(candidate.fontPreloadNames)
   ) {
     throw new Error('invalid PPTX presentation preflight dimensions or slide count');
@@ -354,9 +387,22 @@ export function normalizePresentationPreflight(value: unknown): PresentationPref
     minorFont: candidate.minorFont,
     hlinkColor: candidate.hlinkColor,
     folHlinkColor: candidate.folHlinkColor,
+    embeddedFonts: Object.freeze(
+      (candidate.embeddedFonts as readonly unknown[]).map(copyEmbeddedFont),
+    ),
     slides: Object.freeze(slides),
     fontPreloadNames: Object.freeze(fontPreloadNames),
   });
+}
+
+/** Validate, detach, and freeze an authoritative compact preflight. */
+export function normalizePresentationPreflight(value: unknown): PresentationPreflight {
+  return normalizePresentationPreflightValue(value, false);
+}
+
+/** Validate a sequential compact prefix pushed by a progressive render worker. */
+export function normalizePresentationPreflightPrefix(value: unknown): PresentationPreflight {
+  return normalizePresentationPreflightValue(value, true);
 }
 
 export function findPreflightMimeType(
@@ -462,6 +508,7 @@ export class PresentationPreflightBuilder {
   private readonly minorFontValue: string | null;
   private readonly hlinkColorValue: string | null;
   private readonly folHlinkColorValue: string | null;
+  private readonly embeddedFontsValue: readonly Readonly<PptxEmbeddedFontRef>[];
   private descriptors: (PresentationBootstrapSlide | undefined)[];
   private slides: PresentationPreflightSlide[] = [];
   private fonts: PptxFontPreloadAccumulator;
@@ -493,6 +540,7 @@ export class PresentationPreflightBuilder {
     this.minorFontValue = normalized.minorFont;
     this.hlinkColorValue = normalized.hlinkColor;
     this.folHlinkColorValue = normalized.folHlinkColor;
+    this.embeddedFontsValue = normalized.embeddedFonts;
     this.descriptors = [...normalized.slides];
     this.fonts = new PptxFontPreloadAccumulator(
       this.majorFontValue,
@@ -512,6 +560,7 @@ export class PresentationPreflightBuilder {
       minorFont: this.minorFontValue,
       hlinkColor: this.hlinkColorValue,
       folHlinkColor: this.folHlinkColorValue,
+      embeddedFonts: this.embeddedFontsValue,
       remainingSlides: this.descriptors,
       slides: [],
       fontPreloadNames: this.fontPreloadNames,
@@ -529,6 +578,40 @@ export class PresentationPreflightBuilder {
 
   get remainingDescriptorCount(): number {
     return this.descriptors.reduce((count, descriptor) => count + Number(descriptor !== undefined), 0);
+  }
+
+  /** Latest immutable per-slide fact committed by the sequential cursor. */
+  get latestSlide(): PresentationPreflightSlide | undefined {
+    return this.slides[this.slides.length - 1];
+  }
+
+  /** Current cumulative font request set for the committed slide prefix. */
+  get currentFontPreloadNames(): readonly (string | null)[] {
+    return this.fontPreloadNames;
+  }
+
+  /**
+   * Read-only snapshot of the committed prefix while preflight is still open.
+   * `slideCount` remains the final bootstrap count; `slides.length` is the
+   * number currently paintable. The snapshot is created only for a consumer
+   * that needs the current compact facts, not once per cursor step.
+   */
+  snapshot(): PresentationPreflight {
+    if (this.finished) return this.finished;
+    if (this.pending) throw new Error('PPTX presentation preflight has an uncommitted slide');
+    return Object.freeze({
+      slideCount: this.slideCountValue,
+      slideWidth: this.slideWidthValue,
+      slideHeight: this.slideHeightValue,
+      defaultTextColor: this.defaultTextColorValue,
+      majorFont: this.majorFontValue,
+      minorFont: this.minorFontValue,
+      hlinkColor: this.hlinkColorValue,
+      folHlinkColor: this.folHlinkColorValue,
+      embeddedFonts: this.embeddedFontsValue,
+      slides: Object.freeze([...this.slides]),
+      fontPreloadNames: this.fontPreloadNames,
+    });
   }
 
   addSlide(
@@ -639,6 +722,7 @@ export class PresentationPreflightBuilder {
       minorFont: this.minorFontValue,
       hlinkColor: this.hlinkColorValue,
       folHlinkColor: this.folHlinkColorValue,
+      embeddedFonts: this.embeddedFontsValue,
       slides: Object.freeze([...this.slides]),
       fontPreloadNames: this.fontPreloadNames,
     });

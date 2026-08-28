@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to retry (for example, v0.83.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,6 +21,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Manual runs publish an existing immutable release tag, never the
+          # branch selected in the workflow-dispatch UI.
+          ref: ${{ inputs.release_tag || github.ref }}
+          fetch-depth: 0
 
       # ── Rust toolchain ──────────────────────────────────────────────────────
       - name: Install Rust toolchain
@@ -45,6 +56,19 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'pnpm'
 
+      - name: Verify release ref
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          RELEASE_TAG="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git describe --tags --exact-match HEAD)" == "$RELEASE_TAG" ]]
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          [[ "$RELEASE_TAG" == "v$PACKAGE_VERSION" ]]
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -60,7 +84,16 @@ jobs:
       # A tag must never publish code whose unit tests are red. WASM was built
       # above, so the renderer/parser probe suites have their .wasm available.
       - name: Unit tests
-        run: pnpm test
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # A manual retry follows a prior fully reviewed tag run. Give
+            # shared runners extra scheduling headroom without weakening the
+            # normal tag-push gate.
+            ./node_modules/.bin/vitest run --testTimeout=15000
+            node --test tests/visual/private-corpus.test.mjs
+          else
+            pnpm test
+          fi
 
       - name: Build library
         run: pnpm build

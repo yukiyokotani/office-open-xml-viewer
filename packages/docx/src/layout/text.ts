@@ -129,6 +129,11 @@ export function shapeRunToDocRun(
 /** Plain parser-boundary snapshot used by retained line acquisition. Private
  * parser extensions are copied into named immutable fields exactly once. */
 type ParagraphTextFacts = Readonly<{
+  /** Parser-projected CT_R boundary constraint around an authored
+   * `<w:noBreakHyphen/>`. These names are layout facts, not parser wire keys. */
+  noBreakBefore?: boolean;
+  noBreakAfter?: boolean;
+  noBreakRanges?: readonly Readonly<{ start: number; end: number }>[];
   fontFamilyHighAnsi?: string | null;
   fontFamilyEastAsia?: string | null;
   fontHint?: 'default' | 'eastAsia' | 'cs';

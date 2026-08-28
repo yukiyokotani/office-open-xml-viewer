@@ -1,0 +1,86 @@
+---
+import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
+
+const progressiveExample = `import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const container = document.querySelector('#presentation') as HTMLElement;
+const status = document.querySelector('#status') as HTMLElement;
+
+const viewer = new PptxScrollViewer(container, {
+  progressiveLayout: true,
+  mode: 'worker',
+  onVisibleSlideChange(slideIndex, slideCount, layoutComplete) {
+    status.textContent = \`Slide \${slideIndex + 1} of \${slideCount}\`;
+    status.setAttribute('aria-busy', String(!layoutComplete));
+  },
+});
+
+await viewer.load('/presentation.pptx');
+
+// slideCount and the scrollbar extent are already final here.
+// Await only when an operation needs every slide to be paintable.
+await viewer.waitUntilLayoutComplete();`;
+---
+
+<section class="progressive-guide" id="progressive-layout" aria-labelledby="progressive-layout-title">
+  <header class="progressive-head">
+    <p class="eyebrow">Large presentations</p>
+    <h2 id="progressive-layout-title">Show the opening slides while the deck prepares</h2>
+  </header>
+  <div class="progressive-body">
+    <div class="progressive-copy">
+      <p>
+        Set <code>progressiveLayout: true</code> on <code>PptxViewer</code>,
+        <code>PptxScrollViewer</code>, or <code>PptxPresentation.load()</code>. The opening
+        slide becomes available first while the same sequential preflight continues in the
+        background. The option and lifecycle API deliberately match DOCX progressive layout.
+      </p>
+      <div class="progressive-rules">
+        <article>
+          <h3>The total is stable</h3>
+          <p>
+            PPTX declares its slide list and uniform dimensions up front. <code>slideCount</code>
+            is final as soon as <code>load()</code> resolves, so a ScrollViewer reserves the full
+            height and its scrollbar does not shrink while slides prepare.
+          </p>
+        </article>
+        <article>
+          <h3>Availability grows</h3>
+          <p>
+            <code>availableSlideCount</code> is the paintable opening prefix. Navigating or
+            scrolling ahead shows a loading state until that slide is ready; already painted
+            slides remain stable.
+          </p>
+        </article>
+        <article>
+          <h3>Subscribe or await</h3>
+          <p>
+            Viewer callbacks receive <code>layoutComplete</code>. Await
+            <code>waitUntilLayoutComplete()</code> before export, full-deck search, or any work
+            that needs every slide prepared.
+          </p>
+        </article>
+      </div>
+    </div>
+    <div class="progressive-code">
+      <Code code={progressiveExample} lang="typescript" themes={codeThemes} defaultColor={false} />
+    </div>
+  </div>
+</section>
+
+<style>
+  .progressive-guide { padding: 64px 0; border-top: 1px solid var(--border); }
+  .progressive-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .92fr); gap: 40px; margin-top: 28px; align-items: start; }
+  .eyebrow { margin: 0 0 12px; font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+  h2 { margin: 0; max-width: 19ch; font-size: clamp(26px, 3vw, 42px); line-height: 1.05; }
+  .progressive-copy > p { max-width: 66ch; margin: 0; color: var(--text-dim); line-height: 1.7; }
+  code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+  .progressive-rules { display: grid; gap: 18px; margin-top: 32px; }
+  .progressive-rules article { padding-left: 16px; border-left: 2px solid var(--border-bright); }
+  .progressive-rules h3 { margin: 0; font-size: 14px; }
+  .progressive-rules p { margin: 6px 0 0; color: var(--text-dim); font-size: 13px; line-height: 1.6; }
+  .progressive-code { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--code-bg); }
+  .progressive-code :global(pre) { margin: 0; padding: 22px; min-width: max-content; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.65; }
+  @media (max-width: 900px) { .progressive-body { grid-template-columns: 1fr; } }
+</style>

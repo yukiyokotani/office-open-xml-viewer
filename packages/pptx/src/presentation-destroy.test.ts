@@ -1,7 +1,16 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { WorkerBridge, preloadGoogleFonts, type WorkerLike, type FontPreloadEntry } from '@silurus/ooxml-core';
+import {
+  WorkerBridge,
+  preloadGoogleFonts,
+  registerEmbeddedFonts,
+  type WorkerLike,
+  type FontPreloadEntry,
+} from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
+import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
 import { PptxPresentation } from './presentation';
+import { loadEmbeddedFonts } from './embedded-fonts';
+import type { PptxEmbeddedFontRef } from './worker-protocol';
 
 /**
  * `PptxPresentation.destroy()` tears the parser worker down via
@@ -59,7 +68,7 @@ interface FakeFace { family: string }
 function installFontFaceSet(): { added: FakeFace[] } {
   const added: FakeFace[] = [];
   class FakeFontFace {
-    constructor(public family: string, public source: string, public descriptors?: object) {}
+    constructor(public family: string, public source: string | ArrayBuffer, public descriptors?: object) {}
     load(): Promise<FakeFontFace> { return Promise.resolve(this); }
   }
   const set = {
@@ -89,6 +98,9 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
     instance._googleFontFaces = [];
+    instance._embeddedFontFaces = [];
+    instance._layoutWaiters = new Set();
+    instance._layoutLifecycle = new ProgressiveLayoutLifecycle();
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { pres: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -152,6 +164,52 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     expect(SilentWorker.instances[0].terminated).toBe(true);
   });
 
+  it('main-mode load registers embedded fonts before returning the presentation', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const { added } = installFontFaceSet();
+    vi.spyOn(
+      PptxPresentation.prototype as unknown as {
+        _parse(buffer: ArrayBuffer, resourcePolicy: object): Promise<void>;
+      },
+      '_parse',
+    ).mockImplementationOnce(async function (this: PptxPresentation) {
+      const embeddedFonts: PptxEmbeddedFontRef[] = [{
+        fontName: 'Main Deck Font',
+        style: 'regular' as const,
+        partPath: 'ppt/fonts/font1.fntdata',
+        contentType: 'application/x-font-ttf',
+      }];
+      (this as unknown as { _preflight: object })._preflight = {
+        slideCount: 0,
+        slideWidth: 914400,
+        slideHeight: 914400,
+        defaultTextColor: null,
+        majorFont: null,
+        minorFont: null,
+        hlinkColor: null,
+        folHlinkColor: null,
+        embeddedFonts,
+        slides: [],
+        fontPreloadNames: [],
+      };
+      const loaded = await loadEmbeddedFonts(
+        embeddedFonts,
+        async () => new Uint8Array([0, 1, 0, 0]),
+      );
+      (this as unknown as { _embeddedFontFaces: FontFace[] })._embeddedFontFaces = loaded.faces;
+      (this as unknown as { _embeddedFontAliases: ReadonlyMap<string, string> })
+        ._embeddedFontAliases = loaded.aliases;
+      (this as unknown as { _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> })
+        ._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
+    });
+
+    const presentation = await PptxPresentation.load(new ArrayBuffer(0));
+    expect(added).toEqual([expect.objectContaining({ family: expect.stringMatching(/^__ooxml_pptx_/) })]);
+    presentation.destroy();
+    expect(added).toHaveLength(0);
+  });
+
   it('terminates directly when construction fails before the factory owns an instance', async () => {
     G.Worker = SilentWorker;
     G.location = { href: 'not a valid base URL' };
@@ -192,5 +250,24 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
 
     expect(added).toHaveLength(0); // face left the set
     expect((pres as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
+  });
+
+  it('destroy() releases the deck’s embedded fonts from the FontFaceSet', async () => {
+    const { added } = installFontFaceSet();
+    const held = await registerEmbeddedFonts([{
+      family: 'Deck Sans',
+      bytes: new Uint8Array([0, 1, 0, 0]),
+      odttf: false,
+      weight: 'normal',
+      style: 'normal',
+    }]);
+    expect(added).toHaveLength(1);
+
+    const { pres } = makePresentation();
+    (pres as unknown as { _embeddedFontFaces: FontFace[] })._embeddedFontFaces = held;
+    pres.destroy();
+
+    expect(added).toHaveLength(0);
+    expect((pres as unknown as { _embeddedFontFaces: FontFace[] })._embeddedFontFaces).toHaveLength(0);
   });
 });

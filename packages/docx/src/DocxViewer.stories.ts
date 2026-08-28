@@ -256,3 +256,64 @@ export const FileUploadWorker: Story = {
   argTypes: fileUploadArgTypes,
   render: (args) => renderFileUpload(args, 'worker'),
 };
+
+
+export const TrackedChanges: Story = {
+  name: 'Tracked changes (\u00a717.13.5 markup view)',
+  args: { width: 700 },
+  render: (args) => {
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+
+    const toolbar = document.createElement('div');
+    toolbar.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;';
+    const markupBtn = document.createElement('button');
+    const status = document.createElement('div');
+    status.style.cssText = 'color:#666;font-size:13px;margin-bottom:8px;min-height:18px;';
+    toolbar.append(markupBtn);
+    root.append(toolbar, status);
+
+    const container = document.createElement('div');
+    container.style.cssText =
+      `position:relative;width:${args.width}px;max-width:100%;border:1px solid #ccc;`
+      + 'background:#f0f0f0;min-height:120px;overflow:auto;padding:8px;';
+    root.appendChild(container);
+
+    let viewer: DocxViewer | null = null;
+    let markupOn = false;
+    const refreshButtons = () => {
+      markupBtn.textContent = `Markup view: ${markupOn ? 'on' : 'off'}`;
+    };
+    refreshButtons();
+
+    async function loadFixture(): Promise<void> {
+      const { generateTrackedChangesDocx } = await import('./conformance/generate.js');
+      const bytes = generateTrackedChangesDocx();
+      container.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      container.appendChild(canvas);
+      viewer = new DocxViewer(canvas, {
+        width: args.width,
+        dpr: window.devicePixelRatio,
+        enableTextSelection: true,
+        showTrackedChanges: markupOn,
+      });
+      const copy = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      await viewer.load(copy);
+      status.textContent =
+        'Synthetic redistributable fixture \u2014 toggle the markup view: deletions appear '
+        + 'struck through and insertions underlined in per-author colours, with margin change bars.';
+    }
+
+    markupBtn.addEventListener('click', () => {
+      markupOn = !markupOn;
+      refreshButtons();
+      void viewer?.setShowTrackedChanges(markupOn);
+    });
+    void loadFixture();
+    return root;
+  },
+};

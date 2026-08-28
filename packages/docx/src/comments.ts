@@ -3,6 +3,7 @@ import { sourceKey } from './layout/source-key.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
+import type { ReviewAnchorProjectionOptions } from './review-projection.js';
 
 export interface CommentAnchorRange {
   readonly commentId: string;
@@ -330,9 +331,33 @@ export function collectLayoutSourceCommentRangesIfPresent(
   comments: readonly Readonly<{ id: string }>[] | undefined,
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  return collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  const ranges = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  const completed = options.completedSourceKeys;
+  if (completed === undefined) return ranges;
+  return ranges.filter((range) => {
+    const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
+    const hasCoveredRun = range.startRunIndex < range.endRunIndex
+      ? [...sourceIndices].some((index) =>
+          index >= range.startRunIndex && index < range.endRunIndex)
+      : sourceIndices.has(
+          range.reference.affinity === 'following'
+            ? range.startRunIndex
+            : range.startRunIndex - 1,
+        );
+    const referenceIndices = renderedRunIndex.get(sourceKey(range.reference.source));
+    const hasReferenceRun = referenceIndices?.has(
+      range.reference.affinity === 'following'
+        ? range.reference.runIndex
+        : range.reference.runIndex - 1,
+    ) === true;
+    return hasCoveredRun
+      || hasReferenceRun
+      || completed.has(sourceKey(range.source))
+      || completed.has(sourceKey(range.reference.source));
+  });
 }
 
 function sameStorySource(

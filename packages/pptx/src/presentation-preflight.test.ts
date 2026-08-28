@@ -20,6 +20,7 @@ const bootstrap: PresentationBootstrap = {
   minorFont: 'Aptos',
   hlinkColor: '0563C1',
   folHlinkColor: null,
+  embeddedFonts: [],
   slides: [
     { index: 0, partName: 'ppt/slides/slide1.xml' },
     { index: 1, partName: 'ppt/slides/slide2.xml' },
@@ -146,6 +147,7 @@ describe('PresentationPreflightBuilder', () => {
       minorFont: bootstrap.minorFont,
       hlinkColor: bootstrap.hlinkColor,
       folHlinkColor: bootstrap.folHlinkColor,
+      embeddedFonts: bootstrap.embeddedFonts,
       remainingSlides: [undefined, bootstrap.slides[1]],
       slides: [{
         index: 0,
@@ -319,6 +321,19 @@ describe('normalizePresentationBootstrap', () => {
     expect(normalized).toEqual(bootstrap);
     expect(normalized).not.toBe(bootstrap);
     expect(Object.isFrozen(normalized.slides[0])).toBe(true);
+  });
+
+  it('copies and freezes validated embedded-font references', () => {
+    const embeddedFonts = [{
+      fontName: 'Deck Sans',
+      style: 'boldItalic' as const,
+      partPath: 'ppt/fonts/font1.fntdata',
+      contentType: 'application/x-font-ttf' as const,
+    }];
+    const normalized = normalizePresentationBootstrap({ ...bootstrap, embeddedFonts });
+    expect(normalized.embeddedFonts).toEqual(embeddedFonts);
+    expect(normalized.embeddedFonts).not.toBe(embeddedFonts);
+    expect(Object.isFrozen(normalized.embeddedFonts[0])).toBe(true);
   });
 
   it('rejects malformed counts and non-canonical ordering', () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
 import { DocxDocument } from './document.js';
+import { publishDocxLayout } from './document-layout-events.js';
 import { installDom, makeContainer, makeEl, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import * as docxIndex from './index.js';
 import type { DocxElementContext } from './selection-context.js';
@@ -162,6 +163,166 @@ describe('DocxScrollViewer — skeleton (T1)', () => {
 });
 
 describe('DocxScrollViewer — opt-in comment cards', () => {
+  it.each(['main', 'worker'] as const)(
+    'shows opening-page comments immediately in progressive %s mode',
+    async (mode) => {
+      installDom();
+      const engine = new FakeDocxEngine(3, [{ widthPt: 612, heightPt: 792 }], mode);
+      const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
+      engine.setLayoutComplete(false);
+      engine.comments = [{ id: 'opening', author: 'Ada', text: 'Opening review' }];
+      engine.commentAnchors = [{
+        commentId: 'opening', source, startRunIndex: 0, endRunIndex: 1,
+        reference: { source, runIndex: 1, affinity: 'preceding' },
+      }] as CommentAnchorRange[];
+      engine.feedTextRuns = [{
+        text: 'opening', source, sourceRunIndex: 0,
+        x: 20, y: 20, w: 80, h: 14, fontSize: 12, font: '12px sans-serif',
+      }];
+      const viewer = DocxScrollViewer.fromDocument(
+        makeContainer() as unknown as HTMLElement,
+        engine.asDoc(),
+        { comments: true, overscan: 0 },
+      ) as DocxScrollViewer;
+      const slots = (viewer as unknown as {
+        _slots: Map<number, { commentTintLayer: FakeEl | null; commentMargin: FakeEl | null }>;
+      })._slots;
+
+      expect([...slots.values()].every((slot) =>
+        slot.commentTintLayer !== null && slot.commentMargin !== null)).toBe(true);
+      viewer.destroy();
+    },
+  );
+
+  it('keeps authored page screen position stable when a left review rail appears', () => {
+    installDom();
+    const engine = new FakeDocxEngine(3, [{ widthPt: 612, heightPt: 792 }], 'worker');
+    const source = { story: 'body', storyInstance: 'body', path: [2] } as const;
+    engine.setLayoutComplete(false);
+    engine.comments = [{ id: 'later-left', author: 'Ada', text: 'Later review' }];
+    engine.commentAnchors = [];
+    const doc = engine.asDoc();
+    const container = makeContainer();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      doc,
+      { comments: { side: 'left' }, overscan: 0 },
+    ) as DocxScrollViewer;
+    const state = viewer as unknown as {
+      _reviewOriginPx: number;
+      _slots: Map<number, { wrapper: FakeEl }>;
+    };
+    const scrollHost = container.children[0]!.children[0]!;
+    const spacer = scrollHost.children[0]!;
+    let browserScrollLeft = 0;
+    Object.defineProperty(scrollHost, 'scrollLeft', {
+      configurable: true,
+      get: () => browserScrollLeft,
+      set: (value: number) => {
+        const max = Math.max(0, parseFloat(spacer.style.width) - scrollHost.clientWidth);
+        browserScrollLeft = Math.min(max, Math.max(0, value));
+      },
+    });
+    const openingLeft = state._slots.get(0)!.wrapper.style.left;
+    const authoredLeft = Number(openingLeft.match(/calc\(([-\d.]+)px/)?.[1]);
+    const openingScreenX = authoredLeft + state._reviewOriginPx - scrollHost.scrollLeft;
+
+    engine.commentAnchors = [{
+      commentId: 'later-left', source, startRunIndex: 0, endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' },
+    }] as CommentAnchorRange[];
+    engine.setLayoutComplete(true);
+    publishDocxLayout(doc, { pageCount: 3, exact: true, complete: true });
+
+    expect(state._slots.get(0)!.wrapper.style.left).toBe(openingLeft);
+    expect(state._reviewOriginPx).toBeGreaterThan(0);
+    expect(scrollHost.scrollLeft).toBe(state._reviewOriginPx);
+    expect(authoredLeft + state._reviewOriginPx - scrollHost.scrollLeft).toBe(openingScreenX);
+    scrollHost.scrollTop = 10_000;
+    scrollHost.dispatch('scroll');
+    expect(state._slots.get(2)!.wrapper.style.left).toBe(openingLeft);
+    viewer.relayout();
+    expect(state._slots.get(2)!.wrapper.style.left).toBe(openingLeft);
+    expect(authoredLeft + state._reviewOriginPx - scrollHost.scrollLeft).toBe(openingScreenX);
+    viewer.destroy();
+  });
+
+  it.each(['main', 'worker'] as const)(
+    'waits for a later progressive %s-mode comment instead of treating it as absent',
+    async (mode) => {
+      installDom();
+      const engine = new FakeDocxEngine(3, [{ widthPt: 612, heightPt: 792 }], mode);
+      const source = { story: 'body', storyInstance: 'body', path: [2] } as const;
+      const anchors = [{
+        commentId: 'later', source, startRunIndex: 0, endRunIndex: 1,
+        reference: { source, runIndex: 1, affinity: 'preceding' },
+      }] as CommentAnchorRange[];
+      engine.setLayoutComplete(false);
+      engine.comments = [{ id: 'later', author: 'Ada', text: 'Later review' }];
+      engine.commentAnchors = [];
+      engine.collectPageRuns = async (page) => page === 2 ? [{
+        text: 'later', source, sourceRunIndex: 0,
+        x: 20, y: 20, w: 80, h: 14, fontSize: 12, font: '12px sans-serif',
+      }] : [];
+      const doc = engine.asDoc();
+      const container = makeContainer();
+      const viewer = DocxScrollViewer.fromDocument(
+        container as unknown as HTMLElement,
+        doc,
+        { comments: true },
+      ) as DocxScrollViewer;
+      const state = viewer as unknown as {
+        _slots: Map<number, {
+          canvas: FakeEl;
+          dispatcher: unknown;
+          wrapper: FakeEl;
+          commentTintLayer: FakeEl | null;
+          commentMargin: FakeEl | null;
+        }>;
+      };
+      const spacer = container.children[0]!.children[0]!.children[0]!;
+      const scrollHost = container.children[0]!.children[0]!;
+      scrollHost.scrollTop = 17;
+      const openingScale = viewer.getScale();
+      const openingHeight = spacer.style.height;
+      const openingWidth = parseFloat(spacer.style.width);
+      const openingSlots = new Map(state._slots);
+      const openingLeft = state._slots.get(0)!.wrapper.style.left;
+      expect([...state._slots.values()].every((slot) =>
+        slot.commentTintLayer !== null && slot.commentMargin !== null)).toBe(true);
+
+      let settled = false;
+      const navigation = viewer.goToComment('later').then((result) => {
+        settled = true;
+        return result;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      engine.commentAnchors = anchors;
+      engine.setPageCount(3);
+      engine.setLayoutComplete(true);
+      publishDocxLayout(doc, { pageCount: 3, exact: true, complete: true });
+      expect([...state._slots.values()].every((slot) =>
+        slot.commentTintLayer !== null && slot.commentMargin !== null)).toBe(true);
+      expect(viewer.getScale()).toBe(openingScale);
+      expect(spacer.style.height).toBe(openingHeight);
+      expect(scrollHost.scrollTop).toBe(17);
+      expect(parseFloat(spacer.style.width)).toBeGreaterThan(openingWidth);
+      for (const [index, openingSlot] of openingSlots) {
+        expect(state._slots.get(index)?.canvas).toBe(openingSlot.canvas);
+        expect(state._slots.get(index)?.dispatcher).toBe(openingSlot.dispatcher);
+        expect(state._slots.get(index)?.wrapper.style.left).toBe(openingLeft);
+      }
+      await expect(navigation).resolves.toBe(true);
+      expect(state._slots.get(2)?.wrapper.style.left).toBe(openingLeft);
+      viewer.relayout();
+      expect(state._slots.get(2)?.wrapper.style.left).toBe(openingLeft);
+      viewer.destroy();
+    },
+  );
+
   it('can keep authored range highlighting while an application owns the comment list', async () => {
     installDom();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
@@ -351,9 +512,7 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
       { comments: true },
     );
     await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
-    const scrollHost = container.children[0]!.children[0]!;
-    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
-    expect(page.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    expect((viewer as unknown as { _commentMarginExtent(): number })._commentMarginExtent()).toBe(0);
     viewer.destroy();
   });
 
@@ -368,9 +527,7 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
       { comments: true },
     );
     await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
-    const scrollHost = container.children[0]!.children[0]!;
-    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
-    expect(page.children.some((child) => child.style.cssText.includes('overflow-y:auto'))).toBe(false);
+    expect((viewer as unknown as { _commentMarginExtent(): number })._commentMarginExtent()).toBe(0);
     viewer.destroy();
   });
 
@@ -2723,7 +2880,7 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
     v.destroy();
   });
 
-  it('CSS preview: text layer gets a transform: scale(ratio) matching newScale / renderedScale', async () => {
+  it('CSS preview: text layer scales from its committed box so transformed overlays cannot inflate the scroll extent', async () => {
     const { v, scrollHost, engine } = setup(20, { enableTextSelection: true });
     engine.feedTextRuns = [{ text: 'Hi', x: 1, y: 2, w: 10, h: 12, fontSize: 12, font: '12px serif' }];
     // The overlay is built in the renderPage .then() microtask.
@@ -2736,6 +2893,14 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
     v.setScale(v.scaleForTest() * 2);
     expect(textLayer.style.transform).toBe('scale(2)');
     expect(textLayer.style.transformOrigin).toBe('0 0');
+    // The slot wrapper has already grown to 400×800. Keeping the text layer at
+    // width/height:100% and then scaling it by 2 would create an 800×1600
+    // transformed overflow box. In a real scroll container that temporarily
+    // expands both scrollbars; as each worker settle completes the extent then
+    // shrinks page-by-page and can strand the viewport in blank bottom-right
+    // space. Keep the overlay's pre-zoom box (200×400) during the transform.
+    expect(textLayer.style.width).toBe('200px');
+    expect(textLayer.style.height).toBe('400px');
     v.destroy();
   });
 
@@ -2846,6 +3011,24 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
     v.destroy();
   });
 
+  it('worker bitmap clamping never changes the logical CSS page size', async () => {
+    const { v, scrollHost } = setup(20, {}, 'worker');
+    // The fake worker deliberately returns a 100×200 backing bitmap for a
+    // logical 200×400 page. This models the production renderer reducing the
+    // backing resolution to MAX_CANVAS_AREA at a large zoom. The bitmap is a
+    // rasterization detail; it must still be stretched over the requested page
+    // box or the canvas occupies only the top-left of its wrapper.
+    await Promise.resolve();
+    await Promise.resolve();
+    const slot = slotAtTop(scrollHost, '0px')!;
+    const canvas = slot.children.find((k) => k.tag === 'canvas') as FakeEl;
+    expect(canvas.width).toBe(100);
+    expect(canvas.height).toBe(200);
+    expect(canvas.style.width).toBe('200px');
+    expect(canvas.style.height).toBe('400px');
+    v.destroy();
+  });
+
   // (e) A settle whose epoch is superseded (another setScale during the settle
   //     render) is discarded per the existing epoch gate.
   it('stale settle: an epoch bump during the settle render discards the settle (no swap, spare not attached)', () => {
@@ -2942,6 +3125,8 @@ describe('DocxScrollViewer — flicker-free zoom (T8)', () => {
     // After settle, the preview transform is cleared (the overlay is rebuilt at the
     // full resolution so it no longer needs the scale()).
     expect(textLayer.style.transform).toBe('');
+    expect(textLayer.style.width).toBe('100%');
+    expect(textLayer.style.height).toBe('100%');
     vi.useRealTimers();
     v.destroy();
   });

@@ -60,6 +60,27 @@ describe('DocxViewer IX9 zoom contract — byte-identical default', () => {
     const { v } = await mount();
     expect(v.getScale()).toBe(1);
   });
+
+  it('worker bitmap clamping preserves the requested logical CSS page size', async () => {
+    installDom();
+    const canvas = makeEl('canvas');
+    const engine = new FakeDocxEngine(1, PAGE, 'worker');
+    vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, {
+      width: 1200,
+      dpr: 2,
+      mode: 'worker',
+    });
+    await v.load('x.docx');
+    // The fake bitmap is only 600×800, modelling a backing store clamped below
+    // the requested 2400×3200 device pixels. Its CSS box must retain the
+    // requested 1200×1600 logical size rather than collapsing to bitmap/dpr.
+    expect(canvas.width).toBe(600);
+    expect(canvas.height).toBe(800);
+    expect(canvas.style.width).toBe('1200px');
+    expect(canvas.style.height).toBe('1600px');
+    v.destroy();
+  });
 });
 
 describe('DocxViewer IX9 zoom contract — setScale / steppers', () => {

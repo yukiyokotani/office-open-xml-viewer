@@ -143,6 +143,7 @@ function paraDoc(
   runs: DocxTextRun[],
   paraExtra: Partial<DocParagraph> = {},
   pageWidth = 400,
+  sectionExtra: Partial<SectionProps> = {},
 ): DocxDocumentModel {
   const p: DocParagraph = {
     alignment: 'left',
@@ -159,6 +160,7 @@ function paraDoc(
       pageWidth, pageHeight: 400,
       marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
       headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+      ...sectionExtra,
     } as SectionProps,
     body: [{ type: 'paragraph', ...p } as BodyElement],
     headers: { default: null, first: null, even: null },
@@ -173,9 +175,10 @@ async function render(
   runs: DocxTextRun[],
   paraExtra: Partial<DocParagraph> = {},
   pageWidth = 400,
+  sectionExtra: Partial<SectionProps> = {},
 ) {
   const { canvas, events } = makeRecordingCanvas();
-  await renderDocumentToCanvas(paraDoc(runs, paraExtra, pageWidth), canvas, 0, {
+  await renderDocumentToCanvas(paraDoc(runs, paraExtra, pageWidth, sectionExtra), canvas, 0, {
     dpr: 1,
     width: pageWidth, // scale = 1 (px per pt) so geometry is in pt-equivalent px
   });
@@ -345,6 +348,168 @@ describe('run border spans justification slack (§17.3.2.4 + §17.18.44 both)', 
 });
 
 describe('over-long word overflow-wrap (long URLs in a narrow column)', () => {
+  it('keeps an unwrapped hyperlink as one contextual draw', async () => {
+    const url = 'https://example.com/path/a-short-name.pdf';
+    const events = await render([
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 800);
+    const pieces = events
+      .filter((event): event is Extract<DrawEvent, { kind: 'fillText' }> => event.kind === 'fillText');
+    expect(pieces.map((event) => event.text)).toEqual([url]);
+  });
+
+  it('recognizes URL syntax across a formatting seam in the scheme and authority', async () => {
+    const url = 'https://example.com/path/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('lead '),
+      textRun('https', { isLink: true, hyperlink: url }),
+      textRun('://example.com/path/a-very-long-document-name.pdf', {
+        isLink: true,
+        hyperlink: url,
+        bold: true,
+      }),
+    ], {}, 480);
+    const pieces = events
+      .filter((event): event is Extract<DrawEvent, { kind: 'fillText' }> => event.kind === 'fillText')
+      .filter((event) => event.text !== 'lead ');
+    expect(pieces.map((event) => event.text).join('')).toBe(url);
+    expect(pieces[0]?.x).toBeCloseTo(80);
+    expect(pieces.map((event) => event.text).join('')).toContain('example.com');
+  });
+
+  it('uses a URL path boundary in the current line remainder', async () => {
+    const url = 'https://example.com/path/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('lead '),
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 480);
+    const texts = events.filter((event) => event.kind === 'fillText');
+    const urlPieces = texts.filter((event) => event.text !== 'lead ');
+
+    expect(urlPieces.map((event) => event.text).join('')).toBe(url);
+    // The 80px "lead " leaves exactly 400px: enough for the first complete
+    // path segment. Use that readable boundary instead of leaving a
+    // conspicuous remainder or splitting arbitrarily inside a host.
+    expect(urlPieces[0]?.x).toBeCloseTo(80);
+    expect(urlPieces[0]?.text).toBe('https://example.com/path/');
+    for (const piece of urlPieces) {
+      expect(piece.x + [...piece.text].length * 16).toBeLessThanOrEqual(480 + 1e-6);
+    }
+  });
+
+  it('keeps opening punctuation with a grapheme-safe prefix instead of overflowing the hyperlink', async () => {
+    const url = 'https://example.com/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('('),
+      textRun(url, { isLink: true, hyperlink: url }),
+      textRun(')'),
+    ], {}, 368);
+    const texts = events.filter((event) => event.kind === 'fillText');
+    const urlPieces = texts.filter((event) => event.text !== '(' && event.text !== ')');
+
+    expect(urlPieces.map((event) => event.text).join('')).toBe(url);
+    // UAX #14 LB14 keeps the first URL character with "(". That protected
+    // seam must not turn the complete hyperlink run into one over-wide draw.
+    expect(urlPieces[0]?.x).toBeCloseTo(16);
+    expect(urlPieces[0]?.text).toBe('https://example.com/a-');
+    expect(urlPieces.length).toBeGreaterThan(1);
+    for (const piece of urlPieces) {
+      expect(piece.x + [...piece.text].length * 16).toBeLessThanOrEqual(368 + 1e-6);
+    }
+  });
+
+  it('splits the real glued group when the hyperlink alone exactly fills the line', async () => {
+    const url = 'https://example.com/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('('),
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 352);
+    const pieces = events
+      .filter((event): event is Extract<DrawEvent, { kind: 'fillText' }> => event.kind === 'fillText')
+      .filter((event) => event.text !== '(');
+    expect(pieces.map((event) => event.text).join('')).toBe(url);
+    expect(pieces[0]?.x).toBeCloseTo(16);
+    expect(pieces[0]!.x + [...pieces[0]!.text].length * 16).toBeLessThanOrEqual(352);
+  });
+
+  it('moves a hyperlink when no readable URL boundary fits the current remainder', async () => {
+    const url = 'https://example.com/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('prefix '),
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 320);
+    const texts = events.filter((event) => event.kind === 'fillText');
+    const urlPieces = texts.filter((event) => event.text !== 'prefix ');
+
+    expect(urlPieces.map((event) => event.text).join('')).toBe(url);
+    expect(urlPieces[0]?.x).toBeCloseTo(0);
+  });
+
+  it('does not use the current remainder for an ordinary overlong token', async () => {
+    const word = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const events = await render([
+      textRun('lead '),
+      textRun(word),
+    ], {}, 160);
+    const texts = events.filter((event) => event.kind === 'fillText');
+    const wordPieces = texts.filter((event) => event.text !== 'lead ');
+
+    expect(wordPieces.map((event) => event.text).join('')).toBe(word);
+    expect(wordPieces[0]?.x).toBeCloseTo(0);
+  });
+
+  it('moves an overlong hyperlink when the current remainder cannot hold one grapheme', async () => {
+    const url = 'https://example.com/a-very-long-document-name.pdf';
+    const events = await render([
+      textRun('12345678 '), // 144px, leaving only 8px in the 152px band
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 152);
+    const texts = events.filter((event) => event.kind === 'fillText');
+    const urlPieces = texts.filter((event) => event.text !== '12345678 ');
+
+    expect(urlPieces.map((event) => event.text).join('')).toBe(url);
+    expect(urlPieces[0]?.x).toBeCloseTo(0);
+    for (const piece of urlPieces) {
+      expect(piece.x + [...piece.text].length * 16).toBeLessThanOrEqual(152 + 1e-6);
+    }
+  });
+
+  it('evaluates every URL boundary with negative character spacing', async () => {
+    const url = 'https://example.com/path/a-long-document-name.pdf';
+    const events = await render([
+      textRun('lead '),
+      textRun(url, { isLink: true, hyperlink: url, charSpacing: -2 }),
+    ], {}, 350);
+    const pieces = events
+      .filter((event): event is Extract<DrawEvent, { kind: 'fillText' }> => event.kind === 'fillText')
+      .filter((event) => event.text !== 'lead ');
+    expect(pieces.map((event) => event.text).join('')).toBe(url);
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces.every((piece) => piece.text.length > 0)).toBe(true);
+  });
+
+  it('evaluates URL boundaries against the active snapToChars Latin block', async () => {
+    const url = 'https://example.com/path/a-long-document-name.pdf';
+    const events = await render([
+      textRun('lead'),
+      textRun(url, { isLink: true, hyperlink: url }),
+    ], {}, 220, {
+      docGridType: 'snapToChars',
+      docGridLinePitch: 20,
+      docGridCharSpace: 4096,
+    });
+    const pieces = events
+      .filter((event): event is Extract<DrawEvent, { kind: 'fillText' }> => event.kind === 'fillText')
+      .filter((event) => event.text !== 'lead');
+
+    expect(pieces.map((event) => event.text).join('')).toBe(url);
+    expect(pieces.length).toBeGreaterThan(1);
+    // The leading "lead" run and this prefix share one Latin snap block.
+    // Evaluating the prefix as a standalone block would admit a different
+    // number of glyphs at the cell-rounding boundary.
+    expect(pieces[0]?.text).toBe('https://e');
+  });
+
   it('breaks a no-space token wider than the line at the character level', async () => {
     // pageWidth 400, margins 0, 16px/char ⇒ 25 chars per line. A 40-char URL with
     // no break opportunity must wrap (ECMA-376 prescribes no algorithm; Word

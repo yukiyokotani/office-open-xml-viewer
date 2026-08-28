@@ -336,6 +336,9 @@ export interface RenderCall {
    *  each page gets its OWN px width (uniform px-per-pt scale, §7). */
   width?: number;
   currentDate?: Date | number;
+  /** §17.13.5 — the tracked-change view flag the viewer passed (absent =
+   *  final view), so the option tests can pin the render-path threading. */
+  showTrackedChanges?: boolean;
   hasTextRunCallback?: boolean;
   /** The canvas element the viewer handed to `renderPage` (main mode). The
    *  flicker-free double-buffer settle renders into a SPARE canvas, so this lets
@@ -369,6 +372,10 @@ export class FakeDocxEngine {
   feedTextRuns?: DocxTextRunInfo[];
   comments: DocComment[] = [];
   commentAnchors: CommentAnchorRange[] = [];
+  private _layoutComplete = true;
+  private _layoutCompletion: Promise<void> = Promise.resolve();
+  private _resolveLayoutCompletion: (() => void) | null = null;
+  private _layoutFailure: unknown = undefined;
   constructor(
     private _pageCount: number,
     // Uniform-page convention: a single-element `_sizes` array means EVERY page
@@ -378,8 +385,50 @@ export class FakeDocxEngine {
     private _mode: 'main' | 'worker' = 'main',
     private deferred = false,
   ) {}
+  /** Grow (or shrink) the document, as progressive layout does when the
+   *  authoritative layout replaces the provisional prefix. */
+  setPageCount(pageCount: number): void {
+    this._pageCount = pageCount;
+  }
+  setLayoutComplete(layoutComplete: boolean): void {
+    if (!layoutComplete && this._layoutComplete) {
+      this._layoutCompletion = new Promise<void>((resolve) => {
+        this._resolveLayoutCompletion = resolve;
+      });
+    }
+    this._layoutComplete = layoutComplete;
+    this._layoutFailure = undefined;
+    if (layoutComplete) {
+      this._resolveLayoutCompletion?.();
+      this._resolveLayoutCompletion = null;
+    }
+  }
+  setLayoutFailure(error: unknown): void {
+    this._layoutComplete = false;
+    this._layoutFailure = error;
+    this._resolveLayoutCompletion?.();
+    this._resolveLayoutCompletion = null;
+    this._layoutCompletion = Promise.resolve();
+  }
+  /** Recorded {@link setLayoutView} calls — the viewer must move the document's
+   *  active layout variant when its tracked-changes view toggles, BEFORE it
+   *  reads any geometry from the new variant. */
+  layoutViews: Array<{ showTrackedChanges?: boolean; currentDate?: Date | number }> = [];
+
+  setLayoutView(view: { showTrackedChanges?: boolean; currentDate?: Date | number }): void {
+    this.layoutViews.push(view);
+  }
+
   get pageCount(): number {
     return this._pageCount;
+  }
+  get layoutComplete(): boolean {
+    return this._layoutComplete;
+  }
+  waitUntilLayoutComplete(): Promise<void> {
+    return this._layoutCompletion.then(() => {
+      if (this._layoutFailure !== undefined) throw this._layoutFailure;
+    });
   }
   /** Mirrors the real `DocxDocument.mode` fact (document.ts) — the exact fact the
    *  viewer constructor reads to decide the render path (main ⇒ renderPage,
@@ -429,6 +478,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        showTrackedChanges: opts?.showTrackedChanges,
         hasTextRunCallback: typeof opts?.onTextRun === 'function',
         canvas,
         resolve: () => resolve(),
@@ -454,6 +504,7 @@ export class FakeDocxEngine {
         page,
         width: opts?.width,
         currentDate: opts?.currentDate,
+        showTrackedChanges: opts?.showTrackedChanges,
         hasTextRunCallback: typeof opts?.onTextRun === 'function',
         resolve: () => resolve(bmp as unknown as ImageBitmap),
         reject,

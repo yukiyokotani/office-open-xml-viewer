@@ -80,6 +80,43 @@ describe('cssFontStack — serif/sans generic classification (core classifier)',
 });
 
 describe('buildFont — style encoded in a face name', () => {
+  it('selects a presentation-scoped embedded alias instead of the global authored family', () => {
+    const font = buildFont(false, false, 24, 'Deck Sans', {
+      themeMajorFont: null,
+      themeMinorFont: null,
+      embeddedFontAliases: new Map([['deck sans', '__ooxml_pptx_1_1']]),
+      embeddedFontAuthoredFamilies: new Map([['__ooxml_pptx_1_1', 'deck sans']]),
+      dpr: 1,
+    });
+    expect(font).toContain('"__ooxml_pptx_1_1"');
+    expect(font).not.toContain('"Deck Sans"');
+  });
+
+  it('selects the embedded alias after resolving a theme font reference', () => {
+    const font = buildFont(false, false, 24, '+mn-lt', {
+      themeMajorFont: null,
+      themeMinorFont: 'Deck Sans',
+      embeddedFontAliases: new Map([['deck sans', '__ooxml_pptx_2_1']]),
+      embeddedFontAuthoredFamilies: new Map([['__ooxml_pptx_2_1', 'deck sans']]),
+      dpr: 1,
+    });
+    expect(font).toContain('"__ooxml_pptx_2_1"');
+    expect(font).not.toContain('"Deck Sans"');
+  });
+
+  it('keeps the authored serif and substitute policy behind an embedded alias', () => {
+    const font = buildFont(false, false, 24, 'Cambria', {
+      themeMajorFont: null,
+      themeMinorFont: null,
+      embeddedFontAliases: new Map([['cambria', '__ooxml_pptx_3_1']]),
+      embeddedFontAuthoredFamilies: new Map([['__ooxml_pptx_3_1', 'cambria']]),
+      dpr: 1,
+    });
+    expect(font).toContain('"__ooxml_pptx_3_1"');
+    expect(font).toContain('"Caladea"');
+    expect(font.endsWith('serif')).toBe(true);
+  });
+
   it('preserves a Medium theme face when the browser falls back', () => {
     const font = buildFont(false, false, 48, 'Franklin Gothic Medium', {
       themeMajorFont: null,

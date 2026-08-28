@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { KinsokuRules } from '@silurus/ooxml-core';
 import { renderDocumentToCanvas } from './renderer.js';
 import {
   splitTextForLayout,
@@ -227,8 +228,8 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
   });
 
   it('keeps a comment-boundary noBreakHyphen run joined without coalescing model runs', () => {
-    const hyphenRun = textRun('-cd') as DocRun & { __noBreakBefore?: boolean };
-    hyphenRun.__noBreakBefore = true;
+    const hyphenRun = textRun('-cd') as DocRun & { noBreakBefore?: boolean };
+    hyphenRun.noBreakBefore = true;
     const segs = buildSegments(
       [textRun('lead '), textRun('ab'), hyphenRun],
       {} as LineLayoutEnvironment,
@@ -250,14 +251,14 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
   });
 
   it('keeps the following CT_R joined when noBreakHyphen ends its own run', () => {
-    const mergedLeft = textRun('ab-') as DocRun & { __noBreakAfter?: boolean };
-    mergedLeft.__noBreakAfter = true;
+    const mergedLeft = textRun('ab-') as DocRun & { noBreakAfter?: boolean };
+    mergedLeft.noBreakAfter = true;
     const separateHyphen = textRun('-') as DocRun & {
-      __noBreakBefore?: boolean;
-      __noBreakAfter?: boolean;
+      noBreakBefore?: boolean;
+      noBreakAfter?: boolean;
     };
-    separateHyphen.__noBreakBefore = true;
-    separateHyphen.__noBreakAfter = true;
+    separateHyphen.noBreakBefore = true;
+    separateHyphen.noBreakAfter = true;
     const formattedFollower = { ...textRun('cd'), bold: true } as DocRun;
 
     expect(buildSegments(
@@ -290,6 +291,160 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
     const lines = layoutLines(ctx, segs, 70, 0, 1);
     expect(lines.map((line) => line.segments.map((seg) => (seg as LayoutTextSeg).text)))
       .toEqual([['lead '], ['ab', '-', 'cd']]);
+  });
+
+  it.each([
+    ['CJK', '漢-字語'],
+    ['mixed CJK and SEA', '漢-字ไทย'],
+  ])('protects both edges of noBreakHyphen through %s split paths', (_name, text) => {
+    const run = textRun(text) as DocRun & {
+      noBreakRanges?: readonly Readonly<{ start: number; end: number }>[];
+    };
+    run.noBreakRanges = [{ start: 1, end: 2 }];
+    const segs = buildSegments([run], {} as LineLayoutEnvironment);
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 20, 0, 1);
+    const lineTexts = lines.map((line) => line.segments
+      .map((segment) => (segment as LayoutTextSeg).text)
+      .join(''));
+
+    expect(lineTexts.join('')).toBe(text);
+    expect(lineTexts[0]).toBe('漢-字');
+    expect(lineTexts.every((line) => !line.endsWith('漢') && !line.startsWith('-'))).toBe(true);
+    expect(lineTexts.every((line) => !line.endsWith('-') && !line.startsWith('字'))).toBe(true);
+  });
+
+  it.each([
+    ['CJK', '字語'],
+    ['mixed CJK and SEA', '字ไทย'],
+  ])('moves a cross-formatting noBreakHyphen %s group to a fresh line', (_name, followerText) => {
+    const hyphen = textRun('-') as DocRun & {
+      noBreakBefore?: boolean;
+      noBreakAfter?: boolean;
+      noBreakRanges?: readonly Readonly<{ start: number; end: number }>[];
+    };
+    hyphen.noBreakBefore = true;
+    hyphen.noBreakAfter = true;
+    hyphen.noBreakRanges = [{ start: 0, end: 1 }];
+    const follower = { ...textRun(followerText), bold: true } as DocRun;
+    const segs = buildSegments(
+      [textRun('lead '), textRun('ab'), hyphen, follower],
+      {} as LineLayoutEnvironment,
+    );
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, segs, 70, 0, 1);
+    const texts = lines.map((line) => line.segments
+      .map((segment) => (segment as LayoutTextSeg).text)
+      .join(''));
+
+    expect(texts[0]).toBe('lead ');
+    expect(texts.slice(1).join('')).toBe(`ab-${followerText}`);
+    expect(texts.some((line) => line.endsWith('ab') || line.startsWith('-'))).toBe(false);
+    expect(texts.some((line) => line.endsWith('-') || line.startsWith('字'))).toBe(false);
+  });
+
+  it.each([
+    ['CJK', 'A漢', undefined],
+    ['SEA', 'Aไทยไทย', [1, 4, 'Aไทยไทย'.length]],
+  ] as const)(
+    'keeps custom-kinsoku %s leaders with a cross-run noBreakHyphen group',
+    (_name, followingText, seaBreaks) => {
+      const segment = (
+        text: string,
+        extra: Partial<LayoutTextSeg> = {},
+      ): LayoutTextSeg => ({
+        text,
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        fontSize: 10,
+        color: null,
+        fontFamily: 'Times New Roman',
+        vertAlign: null,
+        measuredWidth: 0,
+        ...extra,
+      });
+      const customKinsoku: KinsokuRules = {
+        enabled: true,
+        lineStartForbidden: new Set(['A'.codePointAt(0)!]),
+        lineEndForbidden: new Set(),
+      };
+      const segs = [
+        segment('lead'),
+        segment('ab'),
+        segment('-', {
+          joinPrev: true,
+          hardJoinPrev: true,
+          noBreakRanges: [{ start: 0, end: 1 }],
+        }),
+        segment('字', { joinPrev: true, hardJoinPrev: true }),
+        segment(followingText, { seaBreaks }),
+      ];
+      const { canvas } = makeRecordingCanvas();
+      const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+      const lines = layoutLines(
+        ctx,
+        segs,
+        40,
+        0,
+        1,
+        [],
+        undefined,
+        {},
+        0,
+        customKinsoku,
+      );
+      const texts = lines.map((line) => line.segments
+        .map((item) => (item as LayoutTextSeg).text)
+        .join(''));
+
+      expect(texts.join('')).toBe(`leadab-字${followingText}`);
+      expect(texts).toContain('ab-字A');
+      expect(texts.some((line) => line.endsWith('ab') || line.startsWith('-'))).toBe(false);
+      expect(texts.some((line) => line.endsWith('-') || line.startsWith('字'))).toBe(false);
+      expect(texts.some((line) => line.startsWith('A'))).toBe(false);
+      if (_name === 'SEA') {
+        // Removing the custom-kinsoku leader must rebase the dictionary offsets
+        // from [1, 4, 7] to [3, 6]. Pin the actual reprocessed tail partitions,
+        // not only concatenated text, so a stale/intra-grapheme offset is visible.
+        expect(texts).toEqual(['lead', 'ab-字A', 'ไทย', 'ไทย']);
+      }
+    },
+  );
+
+  it('clears a consumed hard seam when pagination resumes inside its segment', () => {
+    const segment: LayoutTextSeg = {
+      text: '字語',
+      bold: false,
+      italic: false,
+      underline: false,
+      strikethrough: false,
+      fontSize: 10,
+      color: null,
+      fontFamily: 'Times New Roman',
+      vertAlign: null,
+      measuredWidth: 0,
+      joinPrev: true,
+      hardJoinPrev: true,
+      src: { segIndex: 0, charOffset: 0 },
+    };
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(
+      ctx, [segment], 20, 0, 1,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      { segIndex: 0, charOffset: 1 },
+    );
+    const resumed = lines.flatMap((line) => line.segments)
+      .find((item): item is LayoutTextSeg => 'text' in item);
+
+    expect(resumed?.text).toBe('語');
+    expect(resumed?.joinPrev).toBeUndefined();
+    expect(resumed?.hardJoinPrev).toBeUndefined();
   });
 
   // §17.3.3.29: a soft hyphen "shall have zero width" and "shall not change

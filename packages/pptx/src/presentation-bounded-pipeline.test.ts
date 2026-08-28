@@ -63,6 +63,7 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
     };
     const ordinary: PptxWorkerRequest[] = [];
     let ordinaryId = 100;
+    let releaseFontExtraction: (() => void) | undefined;
     const bootstrap = {
       slideCount: 2,
       slideWidth: 9144000,
@@ -72,6 +73,12 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
       minorFont: 'Aptos',
       hlinkColor: '0563C1',
       folHlinkColor: null,
+      embeddedFonts: [{
+        fontName: 'Deck Sans',
+        style: 'regular',
+        partPath: 'ppt/fonts/font1.fntdata',
+        contentType: 'application/x-font-ttf',
+      }],
       slides: [
         { index: 0, partName: 'ppt/slides/slide1.xml' },
         { index: 1, partName: 'ppt/slides/slide2.xml' },
@@ -108,7 +115,17 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
             generation: request.generation,
           };
         }
+        if (request.kind === 'extractFont') {
+          return new Promise((resolve) => {
+            releaseFontExtraction = () => resolve({
+              kind: 'fontExtracted',
+              id: request.id,
+              bytes: new Uint8Array([0, 1, 0, 0]).buffer,
+            });
+          });
+        }
         if (request.kind === 'finishPresentationPreflight') {
+          releaseFontExtraction?.();
           return { kind: 'presentationPreflightReady', id: request.id, preflight: compact };
         }
         throw new Error(`unexpected request ${request.kind}`);
@@ -136,6 +153,9 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
     expect(presentation.isHidden(1)).toBe(true);
     expect(presentation.getSlideIndexByPartName('ppt/slides/slide2.xml')).toBe(1);
     expect(ordinary.filter((request) => request.kind === 'openSlideSession')).toHaveLength(2);
+    expect(ordinary.findIndex((request) => request.kind === 'extractFont')).toBeLessThan(
+      ordinary.findIndex((request) => request.kind === 'openSlideSession'),
+    );
     expect(pullCommands.filter((command) => command.kind === 'ack')).toHaveLength(2);
 
     const repository = instance._slides as PptxSlideRepository;

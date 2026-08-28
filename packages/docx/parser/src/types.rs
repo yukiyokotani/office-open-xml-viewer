@@ -2265,6 +2265,15 @@ pub struct TextRun {
     /// run's addressable identity.
     #[serde(rename = "__noBreakAfter", skip_serializing_if = "std::ops::Not::not")]
     pub no_break_after: bool,
+    /// UTF-16 offsets immediately after authored `<w:noBreakHyphen/>` glyphs.
+    /// The glyph is serialized as U+002D for font compatibility, so layout
+    /// needs this parser-private provenance to distinguish it from an ordinary
+    /// hyphen-minus when considering compatibility break opportunities.
+    #[serde(
+        rename = "__noBreakHyphenOffsets",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub no_break_hyphen_offsets: Vec<usize>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,

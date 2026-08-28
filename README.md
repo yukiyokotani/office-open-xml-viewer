@@ -448,6 +448,73 @@ document.destroy(); // release it yourself when every pane is gone
 `PptxViewer` and `PptxScrollViewer` use `fromPresentation(...)`; `XlsxViewer`
 and `XlsxSheetViewer` use `fromWorkbook(...)`.
 
+### Progressive DOCX layout
+
+For a large DOCX file, set `progressiveLayout: true` to resolve `load()` when the
+opening pages are paintable while the same paginator continues in the background.
+It is available on `DocxViewer`, `DocxScrollViewer`, and `DocxDocument.load()` in
+both render modes. Pair it with `mode: 'worker'` when the remaining layout and
+paint work should also stay off the UI thread.
+
+```typescript
+import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const container = document.querySelector('#document') as HTMLElement;
+const pager = document.querySelector('#pager') as HTMLElement;
+
+const viewer = new DocxScrollViewer(container, {
+  progressiveLayout: true,
+  mode: 'worker',
+  onVisiblePageChange(pageIndex, availablePages, layoutComplete) {
+    pager.textContent =
+      `Page ${pageIndex + 1} of ${availablePages}${layoutComplete ? '' : '…'}`;
+    pager.setAttribute('aria-busy', String(!layoutComplete));
+  },
+});
+
+await viewer.load('/document.docx');
+
+// Print, export, and final-page-count UI need the converged layout.
+await viewer.waitUntilLayoutComplete();
+console.log('Final page count:', viewer.pageCount);
+```
+
+While `layoutComplete` is false, `pageCount` and the callback's `total` argument
+mean pages available so far, not the final total. The page callbacks fire again
+when that count grows, even if the visible page does not change. Await
+`waitUntilLayoutComplete()` before printing, exporting, or snapshotting a final count.
+In-document `NUMPAGES` fields are repainted with their authoritative value after
+pagination converges. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
+and [DOCX API reference](https://ooxml.silurus.dev/api/docx).
+
+### Progressive PPTX layout
+
+PPTX exposes the same progressive lifecycle on `PptxViewer`,
+`PptxScrollViewer`, and `PptxPresentation.load()`:
+
+```typescript
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const viewer = new PptxScrollViewer(container, {
+  progressiveLayout: true,
+  mode: 'worker',
+  onVisibleSlideChange(slideIndex, slideCount, layoutComplete) {
+    pager.textContent = `Slide ${slideIndex + 1} of ${slideCount}`;
+    pager.setAttribute('aria-busy', String(!layoutComplete));
+  },
+});
+
+await viewer.load('/presentation.pptx');
+await viewer.waitUntilLayoutComplete();
+```
+
+Unlike DOCX pagination, a PPTX bootstrap already provides the final slide list
+and uniform dimensions. `slideCount` and the ScrollViewer's scroll extent are
+therefore stable from first paint; `availableSlideCount` grows as the paintable
+opening prefix is prepared. Scrolling ahead shows a loading state without
+changing the scrollbar length. See the [PPTX progressive layout guide](https://ooxml.silurus.dev/pptx#progressive-layout)
+and [PPTX API reference](https://ooxml.silurus.dev/api/pptx).
+
 For presentations, `enableMediaPlayback: true` makes embedded audio and video
 interactive inside the real viewport plus `mediaOverscan` slides. Other mounted
 slides remain static and selectable, avoiding offscreen media blobs and
@@ -455,8 +522,10 @@ animation loops.
 
 Both viewers also expose `relayout()` (force a re-fit when the container resizes
 in a way a `ResizeObserver` cannot see — e.g. a late web-font load),
-`onVisiblePageChange` / `onVisibleSlideChange` (fires when the top-most visible
-page/slide changes), and `onError` (async per-page render failures are routed
+`onVisiblePageChange` (fires when the top-most visible page, provisional DOCX
+page count, or completion state changes), `onVisibleSlideChange` (fires when the
+top-most visible slide or PPTX completion state changes; its slide count is
+final from first paint), and `onError` (async per-page render failures are routed
 here instead of crashing the scroll loop). The parse/render knobs from the
 headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
 `maxZipEntryBytes` alias, `math`, `dpr`) are accepted too.
@@ -613,7 +682,7 @@ file without uploading it.
 | | Page-number formats (`w:pgNumType` restart / format §17.6.12; PAGE `\*` switches — decimal / roman / letter / hex / ordinal-dash / hebrew2 / koreanLegal, §17.18.59) | ✅ |
 | | Field date/time pictures (`TIME` / `DATE` field `\@` format, §17.16.5.72 / .16) | ✅ |
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
-| | Track changes (§17.13.5 `w:ins` / `w:del` / `w:moveFrom` / `w:moveTo`) — body-story revision records are available as data; rendering projects the accepted final state, with deletions and moved-away text hidden | ✅ |
+| | Track changes (§17.13.5 `w:ins` / `w:del` / `w:moveFrom` / `w:moveTo`) — the default render is the FINAL state (deletions and moved-away text hidden); the opt-in markup view (`showTrackedChanges`) draws author-coloured underline / strikethrough plus margin change bars, and body-story revision records are available as data | ✅ |
 | | Comments (§17.13.4) — opt-in margin balloons (`comments: true`): commented ranges tinted, threaded replies via `commentsExtended.xml`, resolved threads hidden, click-to-select stacking; also available as data (`doc.comments`, `doc.commentAnchorRanges()`) | ✅ |
 | | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments) | ✅ |
 | | Mail merge fields | ❌ Not planned |

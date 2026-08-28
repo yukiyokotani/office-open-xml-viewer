@@ -615,8 +615,53 @@ export const WORD_OVERLONG_TOKEN_EMERGENCY_BREAK = defineCompatibilityRule({
     kind: 'regression-test',
     reference: 'packages/docx/src/run-inline-formatting.test.ts#breaks a no-space token wider than the line at the character level',
   },
-  description: 'Emergency-break a non-CJK token that is wider than an empty line at grapheme-safe character boundaries so it remains inside the content band.',
+  description: 'Emergency-break an overlong token at grapheme-safe character boundaries on an empty line so the complete token remains inside the content band.',
 });
+
+export const WORD_EXTERNAL_LINK_SYNTAX_BREAKS = defineCompatibilityRule({
+  id: 'word-external-link-syntax-breaks',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'external-link-syntax-formatting-seam-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'Treat readable separators in the path and query of displayed external URLs as line-break opportunities, while keeping the scheme and authority intact and preserving authored no-break hyphens and grapheme clusters.',
+});
+
+/** Compatibility projection governed by {@link WORD_EXTERNAL_LINK_SYNTAX_BREAKS}.
+ * `graphemeBoundaries` and `authoredNoBreakOffsets` are UTF-16 offsets in the
+ * complete displayed link token, not in an individual formatting run. */
+export function wordExternalLinkSyntaxBreakOffsets(
+  text: string,
+  graphemeBoundaries: ReadonlySet<number>,
+  authoredNoBreakOffsets: ReadonlySet<number>,
+): readonly number[] {
+  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.exec(text);
+  if (!scheme) return [];
+  const authorityStart = scheme[0].length;
+  const authorityEndCandidate = text.slice(authorityStart).search(/[/?#]/u);
+  const authorityEnd = authorityEndCandidate < 0
+    ? text.length
+    : authorityStart + authorityEndCandidate;
+  const offsets: number[] = [];
+  for (let index = authorityEnd; index < text.length; index += 1) {
+    const character = text[index]!;
+    const offset = index + 1;
+    const readable =
+      (character === '/' && index > authorityEnd)
+      || character === '-'
+      || character === '?'
+      || character === '&';
+    if (
+      readable
+      && graphemeBoundaries.has(offset)
+      && !authoredNoBreakOffsets.has(offset)
+    ) offsets.push(offset);
+  }
+  return offsets;
+}
 
 export const WORD_RUN_VERTICAL_ALIGN_BASELINE_SHIFT = defineCompatibilityRule({
   id: 'word-run-vertical-align-baseline-shift',

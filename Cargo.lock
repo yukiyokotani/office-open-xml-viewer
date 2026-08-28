@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "ooxml-mcp-server"
-version = "0.82.1"
+version = "0.83.0"
 dependencies = [
  "anyhow",
  "docx-parser",

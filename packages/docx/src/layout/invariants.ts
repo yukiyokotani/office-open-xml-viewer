@@ -30,6 +30,7 @@ import type {
 } from './types.js';
 import { unionLayoutRects } from './rect-union.js';
 
+import { documentLayoutValidationEnabled } from './validation-policy.js';
 const LAYOUT_DIAGNOSTIC_CODE_MEMBERS = {
   FLOW_OVERLAP: true,
   BOTTOM_MARGIN_INVASION: true,
@@ -1038,7 +1039,16 @@ export function layoutFingerprint(layout: DocumentLayout): string {
 }
 
 function deepFreeze<T>(value: T, seen: WeakSet<object>): DeepReadonly<T> {
-  if (value === null || typeof value !== 'object') return value as DeepReadonly<T>;
+  if (value === null || typeof value !== 'object') {
+    // Non-finite geometry is fatal state (see docs/docx-layout-engine-redesign
+    // "Convergence and Errors"): the check rides the freeze walk that always
+    // runs, so no retained layout can seal a NaN even on the paths that skip
+    // the development-only plain-data pre-pass.
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new LayoutInvariantError('INVALID_GEOMETRY', 'retained layout contains a non-finite number');
+    }
+    return value as DeepReadonly<T>;
+  }
   if (seen.has(value)) return value as DeepReadonly<T>;
   seen.add(value);
   for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
@@ -1061,12 +1071,21 @@ export function deepFreezeDocumentLayout(layout: DocumentLayout): DeepReadonly<D
   if (frozenDocumentLayouts.has(layout)) {
     return layout as DeepReadonly<DocumentLayout>;
   }
-  assertPlainData(layout, 'layout');
+  // Freezing (and its fused non-finite check) is unconditional; the
+  // path-precise plain-data traversal that precedes it is a development-time
+  // diagnostic (see validation-policy.ts).
+  if (documentLayoutValidationEnabled()) assertPlainData(layout, 'layout');
   return freezeDocumentLayout(layout);
 }
 
 /** Validate the complete retained-layout contract and freeze the same accepted
- * graph without repeating the plain-data traversal. */
+ * graph without repeating the plain-data traversal.
+ *
+ * The invariant suite runs UNCONDITIONALLY: non-finite or negative geometry,
+ * invalid ownership, and broken layout invariants are fatal state per the
+ * layout engine's error contract, with no test/production split. The
+ * validation-policy switch gates only redundant path-precise diagnostics
+ * elsewhere — never the detection of fatal state. */
 export function assertAndDeepFreezeDocumentLayout(
   layout: DocumentLayout,
 ): DeepReadonly<DocumentLayout> {
