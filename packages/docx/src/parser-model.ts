@@ -128,6 +128,13 @@ export interface InternalRunSlotMetadata {
   langEastAsia?: string;
 }
 
+interface InternalNoBreakHyphenWire {
+  readonly __noBreakBefore?: boolean;
+  readonly __noBreakAfter?: boolean;
+  /** UTF-16 offsets immediately after the injected U+002D glyph. */
+  readonly __noBreakHyphenOffsets?: readonly number[];
+}
+
 /** Effective parser-owned run facts used by non-content glyphs such as list
  * markers and paragraph marks. Kept off the stable public document model. */
 export interface InternalRunFontFacts extends InternalRunSlotMetadata {
@@ -1528,10 +1535,23 @@ export function paragraphAcquisitionInput(
       const runTypographyInput = runTypographyAcquisitionInput(originalTextRun);
       const {
         __typographyAcquisition: _privateRunTypography,
+        __noBreakBefore: noBreakBefore,
+        __noBreakAfter: noBreakAfter,
+        __noBreakHyphenOffsets: noBreakHyphenOffsets,
         ...publicRun
-      } = run as typeof run & { __typographyAcquisition?: InternalRunTypographyWire };
+      } = run as typeof run & InternalNoBreakHyphenWire & {
+        __typographyAcquisition?: InternalRunTypographyWire;
+      };
+      const noBreakRanges = run.type === 'text'
+        ? noBreakHyphenOffsets
+          ?.filter((end) => Number.isInteger(end) && end > 0 && end <= run.text.length)
+          .map((end) => Object.freeze({ start: end - 1, end }))
+        : undefined;
       return Object.freeze({
         ...structuredClone(publicRun),
+        ...(noBreakBefore === true ? { noBreakBefore: true } : {}),
+        ...(noBreakAfter === true ? { noBreakAfter: true } : {}),
+        ...(noBreakRanges?.length ? { noBreakRanges: Object.freeze(noBreakRanges) } : {}),
         ...(runTypographyInput === undefined ? {} : { typographyInput: runTypographyInput }),
       }) as ParagraphAcquisitionRun;
     }

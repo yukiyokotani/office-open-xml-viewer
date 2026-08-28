@@ -1,22 +1,24 @@
+use ooxml_common::content_types::PackageContentTypes;
 use ooxml_common::depth::{
     parse_guarded_with_node_limit, xml_dom_complexity_exceeds, GuardedParseError,
 };
 use ooxml_common::json_measurement::measure_json;
-use ooxml_common::ns::is_r_ns;
+use ooxml_common::ns::{is_p_ns, is_r_ns};
 #[cfg(test)]
 use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::package_session::{
     PackageOperation, PackageSessionHandle, RetainedPackageOperation,
 };
 use ooxml_common::pull::insufficient_credit_error;
-use ooxml_common::rels::relationship_part_path;
+use ooxml_common::rels::{parse_rels as parse_opc_rels, relationship_part_path, TargetMode};
 use ooxml_common::resource::{
-    HardResourceLimitKind, ResourceUsage, HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES,
-    HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES, HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
-    HARD_MAX_PPTX_MARKDOWN_BYTES, HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES,
-    HARD_MAX_PPTX_SHARED_CACHE_ENTRIES, HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES,
-    HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES,
-    HARD_MAX_PPTX_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
+    HardResourceLimitKind, ResourceUsage, HARD_MAX_EMBEDDED_FONT_BYTES,
+    HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES, HARD_MAX_PPTX_BOOTSTRAP_PROJECTION_BYTES,
+    HARD_MAX_PPTX_BOOTSTRAP_SLIDES, HARD_MAX_PPTX_MARKDOWN_BYTES,
+    HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
+    HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
+    HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
+    HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
 };
 use std::collections::HashMap;
 #[cfg(test)]
@@ -264,10 +266,27 @@ pub fn extract_image(
     .map_err(|e| JsValue::from_str(&e))
 }
 
+/// Extract one font part referenced by `p:embeddedFontLst`.
+#[wasm_bindgen]
+pub fn extract_font(
+    data: &[u8],
+    path: &str,
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<Vec<u8>, JsValue> {
+    let zip = open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    zip.read_font_part(path).map_err(|e| JsValue::from_str(&e))
+}
+
 /// A stateful handle over an opened pptx archive.
 ///
 /// The free functions above (`parse_pptx` / `pptx_to_markdown` / `extract_media`
-/// / `extract_image`) each re-copy the whole file into WASM and re-scan the ZIP
+/// / `extract_image` / `extract_font`) each re-copy the whole file into WASM and re-scan the ZIP
 /// central directory on every call. A `PptxArchive` copies the bytes into WASM
 /// **once** (in `new`) and keeps the opened [`PptxZip`] session alive, so a `parse`
 /// followed by any number of `extract_media` / `extract_image` calls (the
@@ -424,7 +443,26 @@ struct PresentationBootstrap {
     minor_font: Option<String>,
     hlink_color: Option<String>,
     fol_hlink_color: Option<String>,
+    embedded_fonts: Vec<PptxEmbeddedFontRef>,
     slides: Vec<BootstrapSlide>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PptxEmbeddedFontRef {
+    font_name: String,
+    style: EmbeddedFontStyle,
+    part_path: String,
+    content_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum EmbeddedFontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
 }
 
 #[derive(serde::Serialize)]
@@ -446,6 +484,7 @@ struct PresentationBootstrapProjection<'a> {
     minor_font: Option<&'a str>,
     hlink_color: Option<&'a str>,
     fol_hlink_color: Option<&'a str>,
+    embedded_fonts: &'a [PptxEmbeddedFontRef],
     slides: &'a [BootstrapSlideProjection<'a>],
 }
 
@@ -472,6 +511,7 @@ fn serialize_presentation_bootstrap(
         minor_font: shared.theme.get("+mn-lt").map(String::as_str),
         hlink_color: shared.theme.get("hlink").map(String::as_str),
         fol_hlink_color: shared.theme.get("folHlink").map(String::as_str),
+        embedded_fonts: &shared.embedded_fonts,
         slides: &empty_slides,
     };
     let mut projected_json_bytes = measure_json(&base)?.json_bytes;
@@ -524,6 +564,7 @@ fn serialize_presentation_bootstrap(
         minor_font: shared.theme.get("+mn-lt").cloned(),
         hlink_color: shared.theme.get("hlink").cloned(),
         fol_hlink_color: shared.theme.get("folHlink").cloned(),
+        embedded_fonts: shared.embedded_fonts.clone(),
         slides,
     };
     let final_json_bytes = measure_json(&bootstrap)?.json_bytes;
@@ -646,6 +687,7 @@ impl PptxArchive {
                 minor_font: None,
                 hlink_color: None,
                 fol_hlink_color: None,
+                embedded_fonts: Vec::new(),
                 slides: vec![BootstrapSlide {
                     index: 0,
                     part_name: None,
@@ -941,6 +983,15 @@ impl PptxArchive {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Extract raw bytes for one font part retained by `p:embeddedFontLst`.
+    pub fn extract_font(&mut self, path: &str) -> Result<Vec<u8>, JsValue> {
+        let zip = self
+            .archive
+            .as_ref()
+            .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
+        zip.read_font_part(path).map_err(|e| JsValue::from_str(&e))
+    }
+
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
@@ -1050,6 +1101,18 @@ impl PptxZip {
     ) -> Result<Vec<u8>, String> {
         self.session
             .run_operation(operation_name, |operation| operation.read_bytes(path))
+    }
+
+    fn read_font_part(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.read_font_part_with_limit(path, HARD_MAX_EMBEDDED_FONT_BYTES)
+    }
+
+    fn read_font_part_with_limit(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+        let max_bytes = usize::try_from(max_bytes)
+            .map_err(|_| "embedded-font byte limit does not fit this target".to_string())?;
+        self.session.run_operation("extract-font", |operation| {
+            operation.read_bytes_bounded(path, max_bytes)
+        })
     }
 
     fn index_for_name(&self, path: &str) -> Option<()> {
@@ -1497,6 +1560,108 @@ fn find_internal_rel_target_by_types(
                 .filter(|rel_type| relationship_types.contains(&rel_type.as_str()))
                 .and_then(|_| attr(&node, "Target"))
         })
+}
+
+const FONT_RELATIONSHIP_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/font",
+];
+const PPTX_FONT_CONTENT_TYPES: &[&str] = &["application/x-font-ttf", "application/x-fontdata"];
+
+/// Project `p:embeddedFontLst` into compact, extraction-safe references.
+///
+/// ECMA-376 Part 1 §19.2.1.9-.10 associates a `p:font@typeface` (whose schema
+/// type is DrawingML `a:CT_TextFont`) with up to
+/// four style slots whose `r:id` resolves through presentation relationships.
+/// Part 1 §15.2.13 permits raw sfnt (`application/x-font-ttf`) and EOT
+/// (`application/x-fontdata`) Font parts. External, wrong-type, missing and
+/// unsupported relationships are ignored so malformed optional font metadata
+/// never prevents the presentation itself from opening.
+fn parse_embedded_font_refs(
+    pres_root: roxmltree::Node<'_, '_>,
+    rels_xml: &str,
+    zip: &mut PptxZip,
+) -> Vec<PptxEmbeddedFontRef> {
+    let Some(list) = pres_root.children().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "embeddedFontLst"
+            && is_p_ns(node.tag_name().namespace())
+    }) else {
+        return Vec::new();
+    };
+    let relationships = parse_opc_rels(rels_xml);
+    let content_types_node_limit =
+        u32::try_from(pptx_internal_limits().xml_dom_complexity).unwrap_or(u32::MAX);
+    let content_types = read_zip_str(zip, "[Content_Types].xml")
+        .ok()
+        .and_then(|xml| PackageContentTypes::parse_with_node_limit(&xml, content_types_node_limit))
+        .unwrap_or_default();
+
+    let mut refs = Vec::new();
+    for entry in list.children().filter(|node| {
+        node.is_element()
+            && node.tag_name().name() == "embeddedFont"
+            && is_p_ns(node.tag_name().namespace())
+    }) {
+        let Some(font_name) = entry
+            .children()
+            .find(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "font"
+                    && is_p_ns(node.tag_name().namespace())
+            })
+            .and_then(|font| attr(&font, "typeface"))
+            .filter(|name| !name.trim().is_empty())
+        else {
+            continue;
+        };
+
+        for (element_name, style) in [
+            ("regular", EmbeddedFontStyle::Regular),
+            ("bold", EmbeddedFontStyle::Bold),
+            ("italic", EmbeddedFontStyle::Italic),
+            ("boldItalic", EmbeddedFontStyle::BoldItalic),
+        ] {
+            let Some(relationship_id) = entry
+                .children()
+                .find(|node| {
+                    node.is_element()
+                        && node.tag_name().name() == element_name
+                        && is_p_ns(node.tag_name().namespace())
+                })
+                .and_then(|slot| attr_r(&slot, "id"))
+            else {
+                continue;
+            };
+            let Some(relationship) = relationships.get(&relationship_id) else {
+                continue;
+            };
+            if relationship.mode == TargetMode::External
+                || !relationship
+                    .relationship_type
+                    .as_deref()
+                    .is_some_and(|rel_type| FONT_RELATIONSHIP_TYPES.contains(&rel_type))
+            {
+                continue;
+            }
+            let part_path = resolve_path("ppt", &relationship.target);
+            let Some(content_type) = content_types.for_part(&part_path) else {
+                continue;
+            };
+            if !PPTX_FONT_CONTENT_TYPES.contains(&content_type)
+                || zip.index_for_name(&part_path).is_none()
+            {
+                continue;
+            }
+            refs.push(PptxEmbeddedFontRef {
+                font_name: font_name.clone(),
+                style,
+                part_path,
+                content_type: content_type.to_owned(),
+            });
+        }
+    }
+    refs
 }
 
 /// Resolve a relative path against a base directory inside the ZIP.
@@ -2449,6 +2614,7 @@ struct PresentationShared {
     slide_height: i64,
     slide_descriptors: Vec<SlideDescriptor>,
     pres_rels: HashMap<String, String>,
+    embedded_fonts: Vec<PptxEmbeddedFontRef>,
     theme: PptxTheme,
     comment_authors: Option<HashMap<String, String>>,
     comment_authors_path: Option<String>,
@@ -2526,6 +2692,7 @@ fn bootstrap_presentation(
     // --- ppt/_rels/presentation.xml.rels ---
     let pres_rels_xml = read_zip_str(zip, "ppt/_rels/presentation.xml.rels")?;
     let pres_rels = parse_rels(&pres_rels_xml);
+    let embedded_fonts = parse_embedded_font_refs(pres_root, &pres_rels_xml, zip);
 
     // --- Presentation-level theme colors ---
     // Used for the deck-wide defaults on `Presentation` (default text color,
@@ -2561,6 +2728,7 @@ fn bootstrap_presentation(
         slide_height,
         &slide_descriptors,
         &pres_rels,
+        &embedded_fonts,
         &theme,
         &pres_master_path,
         &comment_authors_path,
@@ -2602,6 +2770,7 @@ fn bootstrap_presentation(
         slide_height,
         slide_descriptors,
         pres_rels,
+        embedded_fonts,
         theme,
         comment_authors: None,
         comment_authors_path,
@@ -3186,6 +3355,157 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[test]
+    fn embedded_font_list_resolves_styles_relationships_and_content_types() {
+        let p_ns = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        let a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        let r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships";
+        let ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types";
+        let font_rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font";
+        let strict_font_rel = "http://purl.oclc.org/ooxml/officeDocument/relationships/font";
+
+        let presentation = format!(
+            r#"
+          <p:presentation xmlns:p="{p_ns}" xmlns:a="{a_ns}" xmlns:r="{r_ns}">
+            <p:embeddedFontLst>
+              <p:embeddedFont><p:font typeface="Deck Sans"/>
+                <p:regular r:id="rRegular"/><p:bold r:id="rBold"/>
+                <p:italic r:id="rItalic"/><p:boldItalic r:id="rBoldItalic"/>
+              </p:embeddedFont>
+              <p:embeddedFont><p:font typeface="External"/><p:regular r:id="rExternal"/></p:embeddedFont>
+              <p:embeddedFont><p:font typeface="Wrong Type"/><p:regular r:id="rImage"/></p:embeddedFont>
+              <p:embeddedFont><p:font typeface="Unsupported"/><p:regular r:id="rUnsupported"/></p:embeddedFont>
+              <p:embeddedFont><a:font typeface="Wrong Namespace"/><p:regular r:id="rWrongNamespace"/></p:embeddedFont>
+            </p:embeddedFontLst>
+            <p:sldIdLst/><p:sldSz cx="9144000" cy="6858000"/>
+          </p:presentation>"#
+        );
+        let relationships = format!(
+            r#"
+          <Relationships xmlns="{rel_ns}">
+            <Relationship Id="rRegular" Type="{font_rel}" Target="fonts/font1.fntdata"/>
+            <Relationship Id="rBold" Type="{font_rel}" Target="fonts/font2.bin"/>
+            <Relationship Id="rItalic" Type="{font_rel}" Target="/ppt/fonts/font3.eot"/>
+            <Relationship Id="rBoldItalic" Type="{strict_font_rel}" Target="fonts/font4.fntdata"/>
+            <Relationship Id="rExternal" Type="{font_rel}" Target="https://example.test/font.ttf" TargetMode="External"/>
+            <Relationship Id="rImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="fonts/image.ttf"/>
+            <Relationship Id="rUnsupported" Type="{font_rel}" Target="fonts/font5.woff"/>
+            <Relationship Id="rWrongNamespace" Type="{font_rel}" Target="fonts/font6.fntdata"/>
+          </Relationships>"#
+        );
+        let content_types = format!(
+            r#"
+          <Types xmlns="{ct_ns}">
+            <Default Extension="fntdata" ContentType="application/x-font-ttf"/>
+            <Default Extension="eot" ContentType="application/x-fontdata"/>
+            <Default Extension="woff" ContentType="font/woff"/>
+            <Override PartName="/ppt/fonts/font2.bin" ContentType="application/x-fontdata"/>
+          </Types>"#
+        );
+        let bytes = zip_with_parts(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("ppt/presentation.xml", presentation.as_bytes()),
+            ("ppt/_rels/presentation.xml.rels", relationships.as_bytes()),
+            ("ppt/fonts/font1.fntdata", b"regular"),
+            ("ppt/fonts/font2.bin", b"bold"),
+            ("ppt/fonts/font3.eot", b"italic"),
+            ("ppt/fonts/font4.fntdata", b"bold-italic"),
+            ("ppt/fonts/image.ttf", b"not-a-font-rel"),
+            ("ppt/fonts/font5.woff", b"unsupported"),
+            ("ppt/fonts/font6.fntdata", b"wrong-namespace"),
+        ]);
+        let mut zip = PptxZip::new(Cursor::new(bytes)).unwrap();
+        let shared = bootstrap_presentation(&mut zip).unwrap();
+
+        assert_eq!(
+            shared.embedded_fonts,
+            vec![
+                PptxEmbeddedFontRef {
+                    font_name: "Deck Sans".into(),
+                    style: EmbeddedFontStyle::Regular,
+                    part_path: "ppt/fonts/font1.fntdata".into(),
+                    content_type: "application/x-font-ttf".into()
+                },
+                PptxEmbeddedFontRef {
+                    font_name: "Deck Sans".into(),
+                    style: EmbeddedFontStyle::Bold,
+                    part_path: "ppt/fonts/font2.bin".into(),
+                    content_type: "application/x-fontdata".into()
+                },
+                PptxEmbeddedFontRef {
+                    font_name: "Deck Sans".into(),
+                    style: EmbeddedFontStyle::Italic,
+                    part_path: "ppt/fonts/font3.eot".into(),
+                    content_type: "application/x-fontdata".into()
+                },
+                PptxEmbeddedFontRef {
+                    font_name: "Deck Sans".into(),
+                    style: EmbeddedFontStyle::BoldItalic,
+                    part_path: "ppt/fonts/font4.fntdata".into(),
+                    content_type: "application/x-font-ttf".into()
+                },
+            ],
+        );
+        let reporter = zip.operation().unwrap().limit_reporter().unwrap();
+        let bootstrap = serialize_presentation_bootstrap(&shared, &reporter).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bootstrap).unwrap();
+        assert_eq!(json["embeddedFonts"][0]["fontName"], "Deck Sans");
+        assert_eq!(json["embeddedFonts"][3]["style"], "boldItalic");
+        assert_eq!(
+            json["embeddedFonts"][1]["contentType"],
+            "application/x-fontdata"
+        );
+    }
+
+    #[test]
+    fn embedded_font_extraction_applies_its_limit_before_materialization() {
+        let bytes = zip_with_parts(&[("ppt/fonts/font1.fntdata", b"12345")]);
+        let zip = PptxZip::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            zip.read_font_part_with_limit("ppt/fonts/font1.fntdata", 5)
+                .unwrap(),
+            b"12345"
+        );
+        assert!(zip
+            .read_font_part_with_limit("ppt/fonts/font1.fntdata", 4)
+            .unwrap_err()
+            .contains("optional-part byte limit"));
+        assert!(zip.assert_healthy().is_ok());
+    }
+
+    #[test]
+    fn strict_presentation_embedded_font_uses_p_font_element() {
+        let presentation = r#"
+          <p:presentation xmlns:p="http://purl.oclc.org/ooxml/presentationml/main"
+            xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships">
+            <p:embeddedFontLst><p:embeddedFont><p:font typeface="Strict Deck"/>
+              <p:regular r:id="rFont"/>
+            </p:embeddedFont></p:embeddedFontLst>
+            <p:sldIdLst/><p:sldSz cx="9144000" cy="6858000"/>
+          </p:presentation>"#;
+        let relationships = r#"
+          <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rFont"
+              Type="http://purl.oclc.org/ooxml/officeDocument/relationships/font"
+              Target="fonts/font1.fntdata"/>
+          </Relationships>"#;
+        let content_types = r#"
+          <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+            <Default Extension="fntdata" ContentType="application/x-font-ttf"/>
+          </Types>"#;
+        let bytes = zip_with_parts(&[
+            ("[Content_Types].xml", content_types.as_bytes()),
+            ("ppt/presentation.xml", presentation.as_bytes()),
+            ("ppt/_rels/presentation.xml.rels", relationships.as_bytes()),
+            ("ppt/fonts/font1.fntdata", b"font"),
+        ]);
+        let mut zip = PptxZip::new(Cursor::new(bytes)).unwrap();
+        let shared = bootstrap_presentation(&mut zip).unwrap();
+        assert_eq!(shared.embedded_fonts.len(), 1);
+        assert_eq!(shared.embedded_fonts[0].font_name, "Strict Deck");
     }
 
     // ECMA-376 §19.3.1.42 sldIdLst — each parsed slide is stamped with its
@@ -10128,6 +10448,7 @@ mod tests {
             shared.slide_height,
             &shared.slide_descriptors,
             &shared.pres_rels,
+            &shared.embedded_fonts,
             &shared.theme,
             &shared.pres_master_path,
             &shared.comment_authors_path,

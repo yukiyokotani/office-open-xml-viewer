@@ -18,6 +18,7 @@ import type {
   DrawingMLCollisionEntryPt,
   LayoutServices,
   LayoutNodeId,
+  PaintNode,
   ParagraphLayout,
   TableBorderInput,
   TableEdgeInputs,
@@ -82,6 +83,84 @@ export interface NestedFloatingTableOccurrence {
   readonly overlap: 'never' | 'overlap';
   readonly positioning: FloatingTablePositionInput;
   readonly acquiredTextOffsetPt?: Readonly<{ xPt: number; yPt: number }>;
+}
+
+function retainedNodeIsReusableAcrossPages(
+  node: PaintNode,
+  visited: Set<PaintNode>,
+): boolean {
+  if (visited.has(node)) return true;
+  visited.add(node);
+  if (node.kind === 'drawing') return node.anchorLayer === undefined;
+  if (node.kind === 'paragraph') {
+    return node.lines.every((line) => line.placements.every((placement) => (
+      placement.kind !== 'text' || placement.dependency !== 'page'
+    )))
+      && node.drawings.every((drawing) => (
+        retainedNodeIsReusableAcrossPages(drawing, visited)
+      ))
+      && node.textBoxes.every((textBox) => (
+        retainedNodeIsReusableAcrossPages(textBox, visited)
+      ));
+  }
+  if (node.kind === 'textbox' || node.kind === 'note') {
+    return node.story.blocks.every((block) => (
+      retainedNodeIsReusableAcrossPages(block, visited)
+    ));
+  }
+  return node.rows.every((row) => row.cells.every((cell) => (
+    cell.blocks.every((block) => (
+      retainedNodeIsReusableAcrossPages(block.layout, visited)
+    ))
+  )))
+    && (node.floatingTables ?? []).every((placement) => (
+      retainedNodeIsReusableAcrossPages(placement.child, visited)
+    ))
+    && (node.resolvedFloatingTables ?? []).every((placement) => (
+      retainedNodeIsReusableAcrossPages(placement.child, visited)
+    ));
+}
+
+/**
+ * Whether a retained acquisition can serve every page of a layout session
+ * unchanged at the same inline extent. Two classes of baked geometry vary by
+ * destination page:
+ *
+ * - PAGE-field (ECMA-376 §17.16.5.44) text. Blocks carrying it are flagged
+ *   `pageDependent` and re-acquired per destination page during pagination
+ *   (TableFragmentContext.reacquirePageDependentBlock), but only on paths that
+ *   provide that hook, so a reusable acquisition must not contain them.
+ * - Anchored drawings, whose reference frames (including page parity for
+ *   inside/outside alignment) are resolved against the acquisition-time page.
+ *
+ * The remaining folded inputs (note numbers, numbering markers, current date)
+ * are constant within one body layout session. Plain retained geometry stays
+ * table/cell-relative; the graph walk below rejects page/section-sensitive
+ * fields and anchors even when they are nested in a text-box story.
+ */
+function retainedTableAcquisitionGraphIsReusableAcrossPages(
+  acquisition: RetainedTableAcquisition,
+  visited: Set<PaintNode>,
+): boolean {
+  const rowsAreReusable = acquisition.input.rows.every((row) => (
+    row.cells.every((cell) => cell.blocks.every((block) => (
+      block.pageDependent !== true
+      && retainedNodeIsReusableAcrossPages(block.layout, visited)
+    )))
+  ));
+  return rowsAreReusable
+    && Object.values(acquisition.nestedById).every(
+      (nested) => retainedTableAcquisitionGraphIsReusableAcrossPages(nested, visited),
+    );
+}
+
+export function retainedTableAcquisitionIsReusableAcrossPages(
+  acquisition: RetainedTableAcquisition,
+): boolean {
+  return retainedTableAcquisitionGraphIsReusableAcrossPages(
+    acquisition,
+    new Set<PaintNode>(),
+  );
 }
 
 function nextRegularParagraphIndex(

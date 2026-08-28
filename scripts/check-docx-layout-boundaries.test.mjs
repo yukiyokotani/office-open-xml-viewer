@@ -32,6 +32,23 @@ function expectDiagnostic(root, diagnostic, message, ...args) {
   return result;
 }
 
+const canonicalBodyPaginator =
+  "import { assertAndDeepFreezeDocumentLayout } from './invariants.js';\n"
+  + 'export type PaginationSteps<T> = Generator<number, T, void>;\n'
+  + 'export function drainPagination(steps) {\n'
+  + '  let step = steps.next();\n'
+  + '  while (!step.done) step = steps.next();\n'
+  + '  return step.value;\n'
+  + '}\n'
+  + 'export function* paginateBodySteps(input, services, options) {\n'
+  + '  const layout = { pages: [], diagnostics: [], input, services, options };\n'
+  + '  yield 0;\n'
+  + '  return assertAndDeepFreezeDocumentLayout(layout);\n'
+  + '}\n'
+  + 'export function paginateBody(input, services, options) {\n'
+  + '  return drainPagination(paginateBodySteps(input, services, options));\n'
+  + '}\n';
+
 const canonicalRenderer = `
 import { layoutDocument } from './layout/document.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
@@ -84,8 +101,16 @@ export function createLayoutServices(input, context, localMetrics) {
 
 function initializeCanonicalFixture(prefix = 'docx-layout-boundary-canonical-') {
   const root = mkdtempSync(join(tmpdir(), prefix));
+  write(root, 'packages/docx/src/layout/validation-policy.ts',
+    'let enabled = false;\n'
+      + 'export function documentLayoutValidationEnabled() { return enabled; }\n'
+      + 'export function setDocumentLayoutValidation(next) { enabled = next; }\n');
   write(root, 'packages/docx/src/layout/plain-data.ts',
-    'export function snapshotPlainData(value) { return value; }\n');
+    "import { documentLayoutValidationEnabled } from './validation-policy.js';\n"
+      + 'export function snapshotPlainData(value) {\n'
+      + '  if (documentLayoutValidationEnabled()) assertPlainData(value);\n'
+      + '  return Object.freeze(value);\n'
+      + '}\n');
   write(root, 'packages/docx/src/layout/retained-geometry-translation.ts',
     "import type { PointPt } from './types.js';\nexport const translate = (point: PointPt) => point;\n");
   write(root, 'packages/docx/src/layout/occurrence-projection.ts',
@@ -187,12 +212,7 @@ function production(state, table, para, group) {
       + 'export type Destination = BodyOccurrenceDestination;\n');
   write(root, 'packages/docx/src/layout/invariants.ts',
     'export function assertAndDeepFreezeDocumentLayout(value) { return Object.freeze(value); }\n');
-  write(root, 'packages/docx/src/layout/body-paginator.ts',
-    "import { assertAndDeepFreezeDocumentLayout } from './invariants.js';\n"
-      + 'export function paginateBody(input, services, options) {\n'
-      + '  const layout = { pages: [], diagnostics: [], input, services, options };\n'
-      + '  return assertAndDeepFreezeDocumentLayout(layout);\n'
-      + '}\n');
+  write(root, 'packages/docx/src/layout/body-paginator.ts', canonicalBodyPaginator);
   write(root, 'packages/docx/src/layout/document.ts',
     "import { paginateBody } from './body-paginator.js';\n"
       + 'export function layoutDocument(input, services, options) {\n'
@@ -222,17 +242,50 @@ function production(state, table, para, group) {
       + '    buildLayout: (options) => layoutDocument(source, layoutServices, options) });\n'
       + '  return { layoutServices, layoutVariants: variants.store, defaultCurrentDateMs };\n'
       + '}\n');
+  write(root, 'packages/docx/src/render-worker-metadata.ts',
+    'export function projectRenderWorkerLayoutMeta(layout, source, review, options = {}) {\n'
+      + '  const hasComments = review.comments.length > 0;\n'
+      + '  const hasRevisions = review.revisions.length > 0;\n'
+      + '  const reviewIndex = hasComments || hasRevisions\n'
+      + '    ? reviewProjectionIndexForDocument(layout)\n'
+      + '    : undefined;\n'
+      + '  const reviewProjection = options.provisional && reviewIndex\n'
+      + '    ? { completedSourceKeys: reviewIndex.completedSourceKeys }\n'
+      + '    : undefined;\n'
+      + '  return {\n'
+      + '    pageCount: layout.pages.length,\n'
+      + '    pageSizes: layout.pages.map((page) => page.geometry),\n'
+      + '    bookmarkPages: [...buildBookmarkPageMap(layout)],\n'
+      + '    commentAnchorRanges: hasComments\n'
+      + '      ? collectLayoutSourceCommentRangesIfPresent(review.comments, source, reviewIndex!.renderedRunIndex, reviewProjection)\n'
+      + '      : [],\n'
+      + '    revisionAnchorRanges: hasRevisions\n'
+      + '      ? collectLayoutSourceRevisionRangesIfPresent(review.revisions, source, reviewIndex!.renderedRunIndex, reviewProjection)\n'
+      + '      : [],\n'
+      + '  };\n'
+      + '}\n'
+      + 'export function renderWorkerLayoutMeta(doc, review, currentDateMs, showTrackedChanges) {\n'
+      + '  const source = layoutSourceStoreOf(doc.layoutServices);\n'
+      + '  const layout = doc.layoutVariants.layoutFor(normalizeLayoutOptions(\n'
+      + '    currentDateMs, doc.defaultCurrentDateMs, showTrackedChanges));\n'
+      + '  return projectRenderWorkerLayoutMeta(layout, source, review);\n'
+      + '}\n');
   write(root, 'packages/docx/src/render-worker.ts',
     "import { renderLayoutSourceToCanvas } from './renderer.js';\n"
       + "import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';\n"
       + 'export function initializeWorker(source, layoutServices, req) {\n'
       + '  const doc = retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs);\n'
-      + '  const layout = doc.layoutVariants.defaultLayout;\n'
-      + '  const pageSizes = layout.pages.map((page) => page.geometry);\n'
-      + '  const meta = { pageCount: layout.pages.length,\n'
-      + '    pageSizes,\n'
-      + '    bookmarkPages: [...buildBookmarkPageMap(layout)] };\n'
+      + '  const layoutOptions = normalizeLayoutOptions(req.currentDateMs,\n'
+      + '    req.defaultCurrentDateMs, req.showTrackedChanges);\n'
+      + '  const layout = doc.layoutVariants.layoutFor(layoutOptions);\n'
+      + '  const reviewIndexInput = { comments: [], revisions: [] };\n'
+      + '  const meta = {\n'
+      + '    ...projectRenderWorkerLayoutMeta(layout, source, reviewIndexInput) };\n'
       + '  return { doc, meta };\n'
+      + '}\n'
+      + 'export function selectWorkerLayoutView(doc, reviewIndexInput, req) {\n'
+      + '  return renderWorkerLayoutMeta(\n'
+      + '    doc, reviewIndexInput, req.currentDateMs, req.showTrackedChanges);\n'
       + '}\n'
       + 'export function renderWorkerPage(doc, canvas, req, options) {\n'
       + '  const source = layoutSourceStoreOf(doc.layoutServices);\n'
@@ -727,6 +780,9 @@ test('occurrence projection accepts only translation and plain-data runtime depe
     ['dynamic nonliteral edge', 'occurrence-projection.ts', "const moduleName = './plain-data.js';\nexport const project = import(moduleName);\n"],
     ['decorated edge', 'occurrence-projection.ts', "import { snapshotPlainData } from './plain-data.js?raw';\nexport const project = snapshotPlainData;\n"],
     ['package edge', 'occurrence-projection.ts', "import value from 'measurement-service';\nexport const project = value;\n"],
+    ['policy layout edge', 'validation-policy.ts', "import { value } from '../paragraph-measure.js';\nexport const documentLayoutValidationEnabled = value;\n"],
+    ['policy projection edge', 'validation-policy.ts', "import { snapshotPlainData } from './plain-data.js';\nexport const documentLayoutValidationEnabled = snapshotPlainData;\n"],
+    ['policy consumer edge', 'occurrence-projection.ts', "import { documentLayoutValidationEnabled } from './validation-policy.js';\nexport const project = documentLayoutValidationEnabled;\n"],
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-occurrence-${name}-`);
     write(root, `packages/docx/src/layout/${path}`, source);
@@ -747,6 +803,7 @@ test('every occurrence-projection seam is mandatory', () => {
     'occurrence-projection.ts',
     'retained-geometry-translation.ts',
     'plain-data.ts',
+    'validation-policy.ts',
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-occurrence-missing-${name}-`);
     rmSync(join(root, 'packages/docx/src/layout', name));
@@ -1455,13 +1512,39 @@ test('test-only adapters stay excluded from production imports', () => {
 test('canonical producer must validate and deeply freeze its retained document layout', () => {
   for (const [name, source, diagnostic] of [
     ['second producer',
-      'export function paginateBody() { return {}; }\nexport function alternateBodyProducer() { return {}; }\n',
+      `${canonicalBodyPaginator}export function alternateBodyProducer() { return {}; }\n`,
+      'CANONICAL_LAYOUT_PRODUCER'],
+    ['eager route bypasses the generator',
+      canonicalBodyPaginator.replace(
+        'return drainPagination(paginateBodySteps(input, services, options));',
+        'return assertAndDeepFreezeDocumentLayout({ pages: [], diagnostics: [] });',
+      ),
+      'CANONICAL_LAYOUT_PRODUCER'],
+    ['eager route drains an impostor generator',
+      canonicalBodyPaginator.replace(
+        'drainPagination(paginateBodySteps(input, services, options))',
+        'drainPagination(alternatePaginationSteps(input, services, options))',
+      ),
+      'CANONICAL_LAYOUT_PRODUCER'],
+    ['stepless producer',
+      canonicalBodyPaginator
+        .replace('export function* paginateBodySteps', 'export function paginateBodySteps')
+        .replace('  yield 0;\n', ''),
+      'CANONICAL_LAYOUT_PRODUCER'],
+    ['missing drain seam',
+      canonicalBodyPaginator.replace('export function drainPagination', 'function drainPagination'),
       'CANONICAL_LAYOUT_PRODUCER'],
     ['missing validation',
-      'export function paginateBody() { const layout = { pages: [] }; return deepFreezeDocumentLayout(layout); }\n',
+      canonicalBodyPaginator.replace(
+        'return assertAndDeepFreezeDocumentLayout(layout);',
+        'return deepFreezeDocumentLayout(layout);',
+      ),
       'RETAINED_LAYOUT_IMMUTABILITY'],
     ['mutable return',
-      'export function paginateBody() { const layout = { pages: [] }; assertDocumentLayout(layout); return layout; }\n',
+      canonicalBodyPaginator.replace(
+        'return assertAndDeepFreezeDocumentLayout(layout);',
+        'assertAndDeepFreezeDocumentLayout(layout);\n  return layout;',
+      ),
       'RETAINED_LAYOUT_IMMUTABILITY'],
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-producer-${name}-`);
@@ -1545,6 +1628,18 @@ test('reports non-literal module edges from layout exactly', () => {
   write(root, 'packages/docx/src/layout/dynamic.ts',
     "const moduleName = './types.js';\nexport const load = () => import(moduleName);\n");
   expectDiagnostic(root, 'NON_LITERAL_LAYOUT_MODULE_EDGE', 'layout dynamic import', '--final');
+});
+
+test('benchmarks are development tooling, not audited production layout code', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-bench-');
+  write(root, 'packages/docx/src/parser-model.ts', 'export const model = 1;\n');
+  write(root, 'packages/docx/src/layout/layout.bench.ts',
+    "import { model } from '../parser-model.js';\nexport const benchModel = model;\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+
+  write(root, 'packages/docx/src/document.ts',
+    "import { benchModel } from './layout/layout.bench.js';\nexport const value = benchModel;\n");
+  expectDiagnostic(root, 'PRODUCTION_TEST_SUPPORT_IMPORT', 'production bench import', '--final');
 });
 
 test('production rejects both test and test-support module imports', () => {
@@ -1668,23 +1763,22 @@ test('the canonical body producer rejects runtime re-exports', () => {
 test('retained layout validation and freezing must wrap the returned value', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-immutability-identity-');
   write(root, 'packages/docx/src/layout/body-paginator.ts',
-    'export function paginateBody() {\n'
-      + '  const validated = { pages: [], diagnostics: [] };\n'
-      + '  const returned = { pages: [], diagnostics: [] };\n'
-      + '  assertAndDeepFreezeDocumentLayout(validated);\n'
-      + '  return returned;\n'
-      + '}\n');
+    canonicalBodyPaginator.replace(
+      '  return assertAndDeepFreezeDocumentLayout(layout);\n',
+      '  const returned = { pages: [], diagnostics: [] };\n'
+        + '  assertAndDeepFreezeDocumentLayout(layout);\n'
+        + '  return returned;\n',
+    ));
   expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'unvalidated returned value', '--final');
 });
 
 test('retained layout validation uses the reviewed invariants import', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-immutability-impostor-');
   write(root, 'packages/docx/src/layout/body-paginator.ts',
-    'function assertAndDeepFreezeDocumentLayout(value) { return Object.freeze(value); }\n'
-      + 'export function paginateBody() {\n'
-      + '  const layout = { pages: [], diagnostics: [] };\n'
-      + '  return assertAndDeepFreezeDocumentLayout(layout);\n'
-      + '}\n');
+    canonicalBodyPaginator.replace(
+      "import { assertAndDeepFreezeDocumentLayout } from './invariants.js';\n",
+      'function assertAndDeepFreezeDocumentLayout(value) { return Object.freeze(value); }\n',
+    ));
   expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'local impostor invariants', '--final');
 });
 
@@ -1828,17 +1922,32 @@ test('worker retention rejects declarations outside its exact ownership seam', (
   expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'extra worker declaration', '--final');
 });
 
-test('worker parse metadata comes from the retained default layout route', () => {
-  for (const [name, from, to] of [
-    ['foreign metadata layout', 'doc.layoutVariants.defaultLayout', 'foreignLayout'],
-    ['derived metadata layout', 'doc.layoutVariants.defaultLayout', 'layoutForMetadata(doc)'],
-    ['foreign metadata page count', 'pageCount: layout.pages.length', 'pageCount: foreignLayout.pages.length'],
-    ['foreign metadata page sizes', 'const pageSizes = layout.pages.map', 'const pageSizes = foreignLayout.pages.map'],
-    ['foreign metadata bookmarks', 'buildBookmarkPageMap(layout)', 'buildBookmarkPageMap(foreignLayout)'],
+test('worker parse metadata comes from the retained selected-variant route', () => {
+  for (const [name, file, from, to] of [
+    ['foreign metadata layout', 'render-worker.ts', 'doc.layoutVariants.layoutFor(layoutOptions)', 'foreignLayout'],
+    ['derived metadata layout', 'render-worker.ts', 'doc.layoutVariants.layoutFor(layoutOptions)', 'layoutForMetadata(doc)'],
+    // Reporting the DEFAULT variant is the specific regression this pin exists
+    // for: a tracked-changes or explicit-date load paginates differently, so
+    // default-variant metadata describes pages the worker will never paint.
+    ['default metadata layout', 'render-worker.ts', 'doc.layoutVariants.layoutFor(layoutOptions)', 'doc.layoutVariants.defaultLayout'],
+    ['foreign metadata variant', 'render-worker.ts', 'layoutFor(layoutOptions)', 'layoutFor(foreignOptions)'],
+    // The selected variant must come from the request's own view fields, not a
+    // fabricated one, or the worker paginates a view the host never asked for.
+    ['derived metadata variant', 'render-worker.ts', 'normalizeLayoutOptions(req.currentDateMs,', 'normalizeLayoutOptions(Date.now(),'],
+    ['dropped tracked-changes axis', 'render-worker.ts', 'req.defaultCurrentDateMs, req.showTrackedChanges)', 'req.defaultCurrentDateMs, false)'],
+    ['foreign initial projection', 'render-worker.ts', 'projectRenderWorkerLayoutMeta(layout, source, reviewIndexInput)', 'projectRenderWorkerLayoutMeta(foreignLayout, source, reviewIndexInput)'],
+    ['dropped runtime tracked axis', 'render-worker.ts', 'req.currentDateMs, req.showTrackedChanges)', 'req.currentDateMs, false)'],
+    ['foreign metadata page count', 'render-worker-metadata.ts', 'pageCount: layout.pages.length', 'pageCount: foreignLayout.pages.length'],
+    ['foreign metadata page sizes', 'render-worker-metadata.ts', 'pageSizes: layout.pages.map', 'pageSizes: foreignLayout.pages.map'],
+    ['foreign metadata bookmarks', 'render-worker-metadata.ts', 'buildBookmarkPageMap(layout)', 'buildBookmarkPageMap(foreignLayout)'],
+    ['foreign review projection index', 'render-worker-metadata.ts', 'reviewProjectionIndexForDocument(layout)', 'reviewProjectionIndexForDocument(foreignLayout)'],
+    ['unconditional comment projection', 'render-worker-metadata.ts', 'commentAnchorRanges: hasComments', 'commentAnchorRanges: true'],
+    ['foreign comment run index', 'render-worker-metadata.ts', 'reviewIndex!.renderedRunIndex', 'foreignReviewIndex.renderedRunIndex'],
+    ['foreign runtime metadata layout', 'render-worker-metadata.ts', 'doc.layoutVariants.layoutFor(normalizeLayoutOptions(', 'foreignLayoutFor(normalizeLayoutOptions('],
   ]) {
     const root = initializeCanonicalFixture(`docx-layout-boundary-worker-metadata-${name}-`);
-    const path = join(root, 'packages/docx/src/render-worker.ts');
-    write(root, 'packages/docx/src/render-worker.ts',
+    const path = join(root, `packages/docx/src/${file}`);
+    write(root, `packages/docx/src/${file}`,
       readFileSync(path, 'utf8').replace(from, to));
     expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', name, '--final');
   }

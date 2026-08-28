@@ -269,6 +269,29 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     expect(at1.length).toBeGreaterThan(3);
   });
 
+  it('reuses the retained external-link partition at every paint zoom', async () => {
+    const url = [
+      'https://example.test/path/a-long-document-name.pdf',
+      'more/path/with-separators-and-query.pdf?part=one&part=two',
+      'final/path/another-long-document-name.pdf',
+    ].join('/');
+    const paragraph = para(url);
+    Object.assign(paragraph.runs[0]!, {
+      isLink: true,
+      underline: true,
+      hyperlink: url,
+    });
+    const model = doc([paragraph as unknown as BodyElement]);
+    const { layout, services } = canonical(model);
+    expect(layout.pages.length).toBeGreaterThan(1);
+
+    const at1 = await partitionAtWidth(model, layout, services, 200);
+    const at05 = await partitionAtWidth(model, layout, services, 100);
+    expect(at05).toEqual(at1);
+    expect(at1.join('')).toBe(url);
+    expect(at1.length).toBeGreaterThan(3);
+  });
+
   it('CJK per-glyph wrap: same partition at scale 1 and scale 0.5', async () => {
     const text = 'あ'.repeat(240);
     const model = doc([para(text) as unknown as BodyElement]);
@@ -420,13 +443,19 @@ describe('zoom-invariant line breaking (Phase 4-1 B2 Stage 2)', () => {
     const text = Array.from({ length: 200 }, (_, i) => `w${i % 10}`).join(' ');
 
     // Same real content width (180pt) at two scales: scale-1 box 180, scale-0.75
-    // box 135, first-indent 0. A linear font would give the SAME line count; the
+    // box 135, first-indent 0. A linear font would give the SAME partitions; the
     // sub-linear font does not.
     const a = layoutLines(makeMeasureStubCtx(), [seg(text)], 180, 0, 1);
     const b = layoutLines(makeMeasureStubCtx(), [seg(text)], 135, 0, 0.75);
     expect(a.length).toBeGreaterThan(1);
-    // The partitions differ — different line count under the non-linear advance.
-    expect(b.length).not.toBe(a.length);
+    const partitions = (lines: typeof a) => lines.map((line) => line.segments
+      .filter((segment): segment is Extract<LayoutSeg, { text: string }> => 'text' in segment)
+      .map((segment) => segment.text)
+      .join(''));
+    // The exact partitions differ under the non-linear advance. They may happen
+    // to produce the same total line count after emergency wrapping consumes a
+    // preceding line remainder, so compare the retained line content directly.
+    expect(partitions(b)).not.toEqual(partitions(a));
   });
 
   it('an ANCHORED image in the paragraph adds no inline advance at any scale', async () => {

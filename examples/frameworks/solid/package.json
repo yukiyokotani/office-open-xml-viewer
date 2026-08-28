@@ -11,7 +11,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@silurus/ooxml": "^0.82.0",
+    "@silurus/ooxml": "^0.83.0",
     "solid-js": "^1.9.14"
   },
   "devDependencies": {

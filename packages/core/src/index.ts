@@ -82,6 +82,8 @@ export type {
   LoadOptions,
   OoxmlResourceLimit,
   OoxmlResourceLimits,
+  ProgressiveLayoutProgress,
+  ProgressiveLayoutPartial,
 } from './types/load-options';
 export type {
   OoxmlResourceMetrics,

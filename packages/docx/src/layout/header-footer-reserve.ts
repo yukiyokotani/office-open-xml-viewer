@@ -1,4 +1,4 @@
-import { convergeLayout, type LayoutIteration } from './convergence.js';
+import { convergeLayoutSteps, type LayoutIteration } from './convergence.js';
 import { stableFingerprint } from './fingerprint.js';
 
 export interface HeaderFooterReserve {
@@ -91,6 +91,31 @@ export function convergeHeaderFooterReserves<T>(input: Readonly<{
   requiresConvergence?: boolean;
   limit?: number;
 }>): HeaderFooterReserveIteration<T> {
+  const steps = convergeHeaderFooterReserveSteps<T, never>({
+    ...input,
+    repaginate: function* generatorRepaginate(reserves, current) {
+      return input.repaginate(reserves, current);
+    },
+  });
+  let next = steps.next();
+  while (!next.done) next = steps.next();
+  return next.value;
+}
+
+/**
+ * {@link convergeHeaderFooterReserves} whose repagination is suspendable.
+ *
+ * The seed pass is supplied already-computed by the caller (which is itself
+ * suspendable), so only the repagination needs to delegate here.
+ */
+export function* convergeHeaderFooterReserveSteps<T, Y>(input: Readonly<{
+  seed: T;
+  measure: (result: T) => readonly HeaderFooterReserve[];
+  repaginate: (reserves: readonly HeaderFooterReserve[], current: T) => Generator<Y, T, void>;
+  identity: (result: T) => unknown;
+  requiresConvergence?: boolean;
+  limit?: number;
+}>): Generator<Y, HeaderFooterReserveIteration<T>, void> {
   const iteration = (result: T): HeaderFooterReserveIteration<T> => {
     const reserves = Object.freeze(input.measure(result).map((reserve) => Object.freeze({ ...reserve })));
     return Object.freeze({
@@ -106,9 +131,11 @@ export function convergeHeaderFooterReserves<T>(input: Readonly<{
   if (!input.requiresConvergence && initial.reserves.every(
     (reserve) => reserve.top === 0 && reserve.bottom === 0,
   )) return initial;
-  return convergeLayout(
+  return yield* convergeLayoutSteps<HeaderFooterReserveIteration<T>, Y>(
     initial,
-    (current) => iteration(input.repaginate(current.reserves, current.result)),
+    function* reservePass(current) {
+      return iteration(yield* input.repaginate(current.reserves, current.result));
+    },
     input.limit ?? 16,
   );
 }

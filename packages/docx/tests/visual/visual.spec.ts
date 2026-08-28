@@ -140,8 +140,6 @@ test.describe('docx visual regression', () => {
           );
         }
 
-        await page.waitForTimeout(200);
-
         const dataUrl = await page.evaluate(() => {
           const canvas = document.querySelector('canvas') as HTMLCanvasElement;
           return canvas ? canvas.toDataURL('image/png') : null;
@@ -292,7 +290,6 @@ test.describe('private corpus self regression', () => {
           const message = await page.evaluate(() => document.body.dataset.errorMessage ?? '');
           throw new Error(`${stem} page ${pageIndex + 1}: ${message}`);
         }
-        await page.waitForTimeout(200);
       };
 
       await openPage(0);
@@ -307,7 +304,6 @@ test.describe('private corpus self regression', () => {
             }).renderDocxVrtPage;
             await render(index);
           }, pageIndex);
-          await page.waitForTimeout(200);
         }
         const dataUrl = await page.evaluate(() =>
           (document.querySelector('canvas') as HTMLCanvasElement | null)?.toDataURL('image/png'));

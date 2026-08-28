@@ -35,15 +35,20 @@ class FakePptxArchive {
       minorFont: null,
       hlinkColor: null,
       folHlinkColor: null,
+      embeddedFonts: [],
       slides: [],
     }));
   }
   close_presentation_session(): void {}
+  assert_healthy(): void {}
   extract_media(_p: string): Uint8Array {
     return new Uint8Array([1, 2, 3]);
   }
   extract_image(_p: string): Uint8Array {
     return new Uint8Array([4, 5, 6]);
+  }
+  extract_font(_p: string): Uint8Array {
+    return new Uint8Array([7, 8, 9]);
   }
   free(): void {}
 }
@@ -138,6 +143,17 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
     expect(parsed.id).toBe(3);
     // No `ready` handshake is emitted anymore (initPromise pattern replaces it).
     expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
+
+    fake.onmessage?.({
+      data: { kind: 'extractFont', id: 4, path: 'ppt/fonts/font1.fntdata' },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'fontExtracted',
+      id: 4,
+    })));
+    const extracted = fake.posted.find((message) =>
+      (message as { kind?: string }).kind === 'fontExtracted') as { bytes: ArrayBuffer };
+    expect(Array.from(new Uint8Array(extracted.bytes))).toEqual([7, 8, 9]);
   });
 
   it('rejects a second parse reserved while the first parse is still opening', async () => {

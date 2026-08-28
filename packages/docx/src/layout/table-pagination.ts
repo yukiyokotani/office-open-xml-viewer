@@ -13,6 +13,7 @@ import { sliceParagraphLayout } from './paragraph.js';
 import {
   layoutTable,
   measureTableCellBlockFlowHeightPt,
+  mergeEndRow,
   tableRowBoundaryFootprintsPt,
 } from './table.js';
 import { wordClipsOverPageCantSplitRow } from './table-compatibility.js';
@@ -254,6 +255,34 @@ function paginationRowTrackHeightForOccurrence(
   return paginationRowHeightForOccurrence(source, row, rowIndex, context);
 }
 
+/**
+ * The last source row that can influence the completed partial row's physical
+ * track. Only rows inside the transitive closure of the vertical-merge
+ * intervals overlapping the completed row matter: the deficit relocation in
+ * table.ts resolveRowHeights reads and grows heights strictly inside each
+ * owner's interval, so intervals disjoint from the completed row cannot reach
+ * its track. The window is closed transitively because an interval opening
+ * inside it may itself reach further down.
+ */
+export function completedPartialRowWindowEnd(
+  row: TableRowLayoutInput,
+  sourceRows: readonly TableRowLayoutInput[],
+  rowIndex: number,
+): number {
+  let windowEnd = rowIndex;
+  for (let scan = rowIndex; scan <= windowEnd && scan < sourceRows.length; scan += 1) {
+    const cells = scan === rowIndex ? row.cells : sourceRows[scan]!.cells;
+    for (const cell of cells) {
+      if (cell.verticalMerge !== 'restart') continue;
+      windowEnd = Math.max(
+        windowEnd,
+        mergeEndRow(sourceRows, scan, cell.columnStart, cell.columnSpan),
+      );
+    }
+  }
+  return windowEnd;
+}
+
 function completedPartialRowTrackHeight(
   source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
@@ -263,10 +292,18 @@ function completedPartialRowTrackHeight(
   // A merged owner's deficit is assigned across its complete continuation
   // interval. Resolve that interval once so the completed partial row is
   // charged its physical track, not the owner's full isolated content height.
+  // Only the merge window above can influence that track, plus the row right
+  // after it, whose top borders and cell spacing resolve the window's bottom
+  // boundary. Lay out that bounded window instead of the whole remaining
+  // table: with no merge it is two rows, so pagination no longer costs
+  // O(remaining rows) per completed partial row.
+  const sourceRows = source.input.rows;
+  const windowEnd = completedPartialRowWindowEnd(row, sourceRows, rowIndex);
+  const sliceEnd = Math.min(sourceRows.length, windowEnd + 2);
   const occurrence = layoutTable({
     ...source.input,
     id: `${source.input.id}:completed-partial:${context.page.occurrenceId}:${row.logicalRowIndex}`,
-    rows: [row, ...source.input.rows.slice(rowIndex + 1)],
+    rows: [row, ...sourceRows.slice(rowIndex + 1, sliceEnd)],
   }, context.placement, context.services).layout;
   return Math.max(0, occurrence.rows[0]?.heightPt ?? 0);
 }

@@ -88,6 +88,62 @@ export class LayoutVariantStore {
     });
   }
 
+  /**
+   * Deposit a layout built outside this store (by the asynchronous, sliced
+   * builder) under its options key, so every later synchronous `select` — the
+   * render path included — hits it instead of rebuilding.
+   *
+   * Retention follows the same one-non-default-variant policy as `select`, so
+   * priming cannot grow the cache beyond what building normally would.
+   */
+  prime(
+    options: LayoutOptions,
+    layout: DocumentLayout,
+  ): DeepReadonly<DocumentLayout> {
+    const normalized = Object.isFrozen(options) ? options : Object.freeze({ ...options });
+    const key = layoutOptionsKey(normalized, this.#services);
+    const existing = this.#variants.get(key);
+    if (existing) return existing;
+    return this.#store(key, layout);
+  }
+
+  /**
+   * Atomically replace one exact cached layout. Progressive pagination uses
+   * the retained return value from its previous publication as an ownership
+   * token: if another consumer evicted or rebuilt the same variant meanwhile,
+   * the stale session can no longer overwrite that newer authority.
+   *
+   * Passing `null` claims an absent key for the first publication. Returning
+   * `null` means ownership was not acquired or has been lost.
+   */
+  replaceIfCurrent(
+    options: LayoutOptions,
+    expected: DeepReadonly<DocumentLayout> | null,
+    layout: DocumentLayout,
+  ): DeepReadonly<DocumentLayout> | null {
+    const normalized = Object.isFrozen(options) ? options : Object.freeze({ ...options });
+    const key = layoutOptionsKey(normalized, this.#services);
+    if ((this.#variants.get(key) ?? null) !== expected) return null;
+    return this.#store(key, layout);
+  }
+
+  #store(key: string, layout: DocumentLayout): DeepReadonly<DocumentLayout> {
+    const frozen = deepFreezeDocumentLayout(layout);
+    if (key !== this.#defaultKey) {
+      if (this.#activeNonDefaultKey !== null && this.#activeNonDefaultKey !== key) {
+        this.#variants.delete(this.#activeNonDefaultKey);
+      }
+      this.#activeNonDefaultKey = key;
+    }
+    this.#variants.set(key, frozen);
+    return frozen;
+  }
+
+  /** Whether a layout for these options is already available synchronously. */
+  hasLayoutFor(options: LayoutOptions): boolean {
+    return this.#variants.has(layoutOptionsKey(options, this.#services));
+  }
+
   isDefault(options: LayoutOptions): boolean {
     return layoutOptionsKey(options, this.#services) === this.#defaultKey;
   }

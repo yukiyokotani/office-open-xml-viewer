@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as tableModule from './table.js';
 import type { RetainedTableAcquisition } from './table-acquisition.js';
 import {
+  completedPartialRowWindowEnd,
   startTableFragmentCursor,
   takeTableFragment,
   type TableFragmentContext,
@@ -229,6 +231,128 @@ function take(
 }
 
 describe('retained table pagination', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('charges a completed partial row from a bounded row window, not the whole suffix', () => {
+    const original = tableModule.layoutTable;
+    const completedPartialRowCounts: number[] = [];
+    vi.spyOn(tableModule, 'layoutTable').mockImplementation((input, ...rest) => {
+      if (input.id.includes(':completed-partial:')) {
+        completedPartialRowCounts.push(input.rows.length);
+      }
+      return original(input, ...rest);
+    });
+    // 100pt pages split the 120pt rows, so several pages complete a partial
+    // row with more rows following — the case that used to re-lay-out the
+    // whole remaining table (id suffix ':completed-partial:').
+    const source = acquisition(Array.from({ length: 6 }, (_, index) => row(index, 120, {
+      paragraph: paragraph(`p-${index}`, [40, 40, 40]),
+    })));
+    let cursor: ReturnType<typeof startTableFragmentCursor> | null = startTableFragmentCursor();
+    let guard = 0;
+    while (cursor) {
+      guard += 1;
+      if (guard > 20) throw new Error('table pagination did not make progress');
+      const result = take(source, 100, cursor);
+      cursor = result.nextCursor;
+    }
+
+    expect(completedPartialRowCounts.length).toBeGreaterThan(0);
+    // No vertical merge: only the completed row and the following row (whose
+    // top borders and spacing close its bottom boundary) are relevant.
+    expect(Math.max(...completedPartialRowCounts)).toBeLessThanOrEqual(2);
+  });
+
+  it('keeps the completed-partial window bounded in a table with a vMerge span', () => {
+    const original = tableModule.layoutTable;
+    const completedPartialRowCounts: number[] = [];
+    vi.spyOn(tableModule, 'layoutTable').mockImplementation((input, ...rest) => {
+      if (input.id.includes(':completed-partial:')) {
+        completedPartialRowCounts.push(input.rows.length);
+      }
+      return original(input, ...rest);
+    });
+    // The split plain row 0 completes on this page while a vMerge group sits
+    // later in the table; the span cannot influence row 0's track, so the
+    // completed-partial layout must stay within row 0's own window even
+    // though the old code laid out all four rows.
+    const source = acquisition([
+      row(0, 160, { paragraph: paragraph('split-row', [40, 40, 40, 40]) }),
+      row(1, 40, {
+        verticalMerge: 'restart',
+        paragraph: paragraph('merged-owner', [30, 30, 30, 30]),
+      }),
+      row(2, 40, { verticalMerge: 'continue' }),
+      row(3, 40),
+    ]);
+    const tailCursor = Object.freeze({
+      rowIndex: 0,
+      rowFragmentIndex: 1,
+      cells: Object.freeze([
+        Object.freeze({ blockIndex: 0, paragraphLineStart: 2, nestedCursor: null, nestedFragmentIndex: 0 }),
+      ]),
+    });
+
+    const result = take(source, 200, tailCursor, { freshPageHeightPt: 200 });
+
+    expect(result.fragment).not.toBeNull();
+    expect(completedPartialRowCounts).toEqual([2]);
+  });
+
+  describe('completedPartialRowWindowEnd', () => {
+    const mergedCell = (
+      logicalRowIndex: number,
+      columnStart: number,
+      verticalMerge: 'none' | 'restart' | 'continue',
+    ): TableCellLayoutInput => ({
+      id: `cell-${logicalRowIndex}-${columnStart}`,
+      source: { story: 'body', storyInstance: 'body', path: [0, logicalRowIndex, columnStart] },
+      columnStart, columnSpan: 1,
+      verticalMerge,
+      margins: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      vAlign: 'top' as const, borders: noBorders,
+      blocks: [],
+    });
+    const mergedRow = (
+      logicalRowIndex: number,
+      cells: readonly TableCellLayoutInput[],
+    ): TableRowLayoutInput => ({
+      ...row(logicalRowIndex, 40),
+      cells,
+    });
+
+    it('stays on the completed row when nothing is vertically merged', () => {
+      const rows = [row(0, 40), row(1, 40), row(2, 40)];
+      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(0);
+      expect(completedPartialRowWindowEnd(rows[1]!, rows, 1)).toBe(1);
+    });
+
+    it('covers the merge interval opened by the completed row', () => {
+      const rows = [
+        mergedRow(0, [mergedCell(0, 0, 'restart')]),
+        mergedRow(1, [mergedCell(1, 0, 'continue')]),
+        mergedRow(2, [mergedCell(2, 0, 'continue')]),
+        mergedRow(3, [mergedCell(3, 0, 'none')]),
+      ];
+      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(2);
+    });
+
+    it('closes transitively over intervals opening inside the window', () => {
+      const rows = [
+        mergedRow(0, [mergedCell(0, 0, 'restart'), mergedCell(0, 1, 'none')]),
+        mergedRow(1, [mergedCell(1, 0, 'continue'), mergedCell(1, 1, 'restart')]),
+        mergedRow(2, [mergedCell(2, 0, 'none'), mergedCell(2, 1, 'continue')]),
+        mergedRow(3, [mergedCell(3, 0, 'none'), mergedCell(3, 1, 'continue')]),
+        mergedRow(4, [mergedCell(4, 0, 'none'), mergedCell(4, 1, 'none')]),
+      ];
+      // The column-0 interval ends at row 1, but the column-1 interval opening
+      // at row 1 reaches row 3, so the window must extend to row 3.
+      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(3);
+    });
+  });
+
   it('keeps placed table geometry self-contained and clone-safe', () => {
     const layout = acquisition([row(0, 20)]).layout;
     const placement = Object.freeze({

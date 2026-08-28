@@ -153,8 +153,10 @@ export const ScrollViewer: LayoutStory = {
       overscan: 1,
       enableTextSelection: true,
       background: '#f5f5f5', // light desk behind/between pages (matches the ScrollView recipe)
-      onVisiblePageChange: (top, total) => {
-        status.textContent = `Page ${top + 1} / ${total}`;
+      onVisiblePageChange: (top, total, complete) => {
+        // The ellipsis marks a provisional total: under progressive layout the
+        // count grows until the whole document has been laid out.
+        status.textContent = `Page ${top + 1} / ${total}${complete ? '' : '…'}`;
       },
       onError: (e) => {
         status.textContent = `Error: ${e.message}`;
@@ -166,6 +168,67 @@ export const ScrollViewer: LayoutStory = {
       .load(SAMPLE_URL)
       .then(() => {
         status.textContent = `Loaded ${viewer.pageCount} pages`;
+      })
+      .catch((e: Error) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      });
+
+    return root;
+  },
+};
+
+let progressiveViewerInstance: DocxScrollViewer | null = null;
+
+export const ProgressiveScrollViewer: LayoutStory = {
+  name: 'DocxScrollViewer — progressive first paint',
+  render() {
+    progressiveViewerInstance?.destroy();
+    progressiveViewerInstance = null;
+
+    const root = document.createElement('div');
+    root.style.cssText = 'font-family:sans-serif;padding:16px;';
+    const heading = document.createElement('h3');
+    heading.textContent = 'DocxScrollViewer — progressive first paint';
+    heading.style.cssText = 'margin:0 0 8px;font-size:14px;';
+    root.appendChild(heading);
+    const note = document.createElement('p');
+    note.textContent =
+      'With progressiveLayout, load() resolves on the document\u2019s opening pages and the '
+      + 'rest is laid out in the background, so the page count starts small and grows. The '
+      + 'difference is only visible on a long document \u2014 a short one finishes before '
+      + 'there is anything to defer.';
+    note.style.cssText = 'margin:0 0 8px;font-size:12px;color:#555;max-width:60em;';
+    root.appendChild(note);
+    const status = makeStatus(root);
+
+    const container = document.createElement('div');
+    container.style.cssText = 'height:720px;border:1px solid #ccc;background:#f5f5f5;';
+    root.appendChild(container);
+
+    const started = performance.now();
+    const viewer = new DocxScrollViewer(container, {
+      gap: 16,
+      overscan: 1,
+      enableTextSelection: true,
+      background: '#f5f5f5',
+      progressiveLayout: true,
+      onError: (e) => {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = 'red';
+      },
+    });
+    progressiveViewerInstance = viewer;
+    viewer
+      .load(SAMPLE_URL)
+      .then(async () => {
+        const painted = Math.round(performance.now() - started);
+        status.textContent = `First paint after ${painted}ms with ${viewer.pageCount} page(s); laying out the rest\u2026`;
+        // pageCount is the pages available so far, not the document total, until
+        // layout completes.
+        await viewer.waitUntilLayoutComplete();
+        const settled = Math.round(performance.now() - started);
+        status.textContent = `First paint ${painted}ms \u2192 full layout ${settled}ms, ${viewer.pageCount} pages`;
       })
       .catch((e: Error) => {
         status.textContent = `Error: ${e.message}`;

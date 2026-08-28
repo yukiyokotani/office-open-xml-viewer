@@ -203,7 +203,7 @@ function cellRequiredHeight(
     + spacing.bottomPt;
 }
 
-function mergeEndRow(
+export function mergeEndRow(
   rows: readonly TableRowLayoutInput[],
   startRow: number,
   columnStart: number,

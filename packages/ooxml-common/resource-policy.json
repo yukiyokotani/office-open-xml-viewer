@@ -29,6 +29,7 @@
     "maxPptxCachedSlideProjectionBytes": 134217728,
     "maxRawPartCacheEntries": 64,
     "maxRawPartCacheBytes": 134217728,
+    "maxEmbeddedFontBytes": 31457280,
     "maxPptxMarkdownBytes": 67108864,
     "maxWorksheetRows": 100000,
     "maxWorksheetCells": 250000,

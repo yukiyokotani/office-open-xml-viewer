@@ -58,6 +58,7 @@ describe('PptxPresentation document-level resource poison', () => {
         minorFont: null,
         hlinkColor: null,
         folHlinkColor: null,
+        embeddedFonts: [],
         slides: [{
           index: 0,
           notes: null,
@@ -107,6 +108,7 @@ describe('PptxPresentation document-level resource poison', () => {
         minorFont: null,
         hlinkColor: null,
         folHlinkColor: null,
+        embeddedFonts: [],
         slides: [{ index: 0, notes: null, hidden: false, mediaElements: [] }],
         fontPreloadNames: [],
       },

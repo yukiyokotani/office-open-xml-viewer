@@ -895,9 +895,7 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
-export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate'>;
-export interface DocxPageCommentThreadsOptions extends CollectPageRunsOptions, ResolveDocxCommentThreadsOptions {
-}
+export type CollectPageRunsOptions = Pick<RenderPageOptions, 'width' | 'currentDate' | 'showTrackedChanges'>;
 export interface ColSpec {
     widthPt: number;
     spacePt: number;
@@ -925,14 +923,6 @@ export interface CommentAnchorRange {
     readonly endRunIndex: number;
     readonly reference: CommentAnchorPoint;
     readonly geometryFallback?: CommentAnchorGeometryFallback;
-}
-export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
-export interface DocxCommentHighlightRect {
-    readonly x: number;
-    readonly y: number;
-    readonly width: number;
-    readonly height: number;
-    readonly transform?: string;
 }
 export interface DocComment {
     id: string;
@@ -1066,6 +1056,14 @@ export interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
+export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
+export interface DocxCommentHighlightRect {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly transform?: string;
+}
 export interface DocxCommentMark {
     id: string;
     kind: 'rangeStart' | 'rangeEnd' | 'reference' | string;
@@ -1097,6 +1095,8 @@ export class DocxDocument {
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     toMarkdown(): Promise<string>;
     get pageCount(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     get mode(): 'main' | 'worker';
     get document(): DocxDocumentModel;
     get comments(): readonly Readonly<DocComment>[];
@@ -1105,6 +1105,10 @@ export class DocxDocument {
     revisionAnchorRanges(): readonly RevisionAnchorRange[];
     get footnotes(): DocNote[];
     get endnotes(): DocNote[];
+    setLayoutView(view?: Readonly<{
+        showTrackedChanges?: boolean;
+        currentDate?: Date | number;
+    }>): Promise<void>;
     getBookmarkPage(bookmarkName: string): number | undefined;
     pageSize(pageIndex: number): {
         widthPt: number;
@@ -1158,6 +1162,7 @@ export interface DocxElementContext {
 export interface DocxElementContextOptions {
     readonly maxTextCharacters?: number;
     readonly currentDate?: Date | number;
+    readonly showTrackedChanges?: boolean;
 }
 export type DocxHighlightColors = FindHighlightColors;
 export interface DocxHighlightMatch {
@@ -1166,6 +1171,8 @@ export interface DocxHighlightMatch {
 }
 export interface DocxMatchLocation {
     page: number;
+}
+export interface DocxPageCommentThreadsOptions extends CollectPageRunsOptions, ResolveDocxCommentThreadsOptions {
 }
 export interface DocxPagePoint {
     readonly xPt: number;
@@ -1182,6 +1189,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     constructor(container: HTMLElement, opts?: DocxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     relayout(): void;
     setScale(scale: number): void;
     getScale(): number;
@@ -1189,6 +1198,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     zoomOut(): void;
     fitWidth(): void;
     fitPage(): void;
+    setShowTrackedChanges(value: boolean): Promise<void>;
     scrollToPage(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
@@ -1214,6 +1224,8 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     paddingLeft?: number;
     paddingRight?: number;
     overscan?: number;
+    progressiveLayout?: boolean;
+    sliceLayout?: boolean;
     enableTextSelection?: boolean;
     comments?: boolean | DocxCommentsOptions;
     enableElementSelection?: boolean;
@@ -1226,7 +1238,7 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
     refitOnResize?: boolean;
     background?: string;
     pageShadow?: string | false;
-    onVisiblePageChange?: (topIndex: number, total: number) => void;
+    onVisiblePageChange?: (topIndex: number, total: number, layoutComplete: boolean) => void;
     onScaleChange?: (scale: number) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
     enableHyperlinks?: boolean;
@@ -1338,6 +1350,8 @@ export class DocxViewer implements ZoomableViewer {
     load(source: string | ArrayBuffer): Promise<void>;
     get pageCount(): number;
     get currentPage(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     get canvasElement(): HTMLCanvasElement;
     goToPage(index: number): Promise<void>;
     nextPage(): Promise<void>;
@@ -1355,6 +1369,7 @@ export class DocxViewer implements ZoomableViewer {
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
     destroy(): void;
+    setShowTrackedChanges(value: boolean): Promise<void>;
     private __privatePresence;
 }
 export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
@@ -1364,7 +1379,7 @@ export interface DocxViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>,
     onSelectionContextChange?: (context: DocxSelectionContext | null) => void;
     onContextMenu?: (event: ViewerContextMenuEvent<DocxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
-    onPageChange?: (index: number, total: number) => void;
+    onPageChange?: (index: number, total: number, layoutComplete: boolean) => void;
     zoomMin?: number;
     zoomMax?: number;
     onScaleChange?: (scale: number) => void;
@@ -1557,6 +1572,21 @@ export interface LineSpacing {
 export interface LoadOptions extends LoadOptions__emitterCollision1 {
     math?: MathRenderer;
     mode?: 'main' | 'worker';
+    sliceLayout?: boolean;
+    onLayoutProgress?: (progress: Readonly<ProgressiveLayoutProgress>) => void;
+    progressiveLayout?: boolean;
+    onLayoutComplete?: (error?: unknown) => void;
+    onLayoutPartial?: (progress: Readonly<ProgressiveLayoutPartial>) => void;
+    showTrackedChanges?: boolean;
+    currentDate?: Date | number;
+}
+interface ProgressiveLayoutPartial {
+    availableUnits: number;
+    totalUnits?: number;
+    exact: boolean;
+}
+interface ProgressiveLayoutProgress {
+    committedUnits: number;
 }
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
@@ -1879,13 +1909,12 @@ export interface RenderPageOptions {
     defaultTextColor?: string;
     onTextRun?: (run: DocxTextRunInfo) => void;
     currentDate?: Date | number;
+    showTrackedChanges?: boolean;
 }
 export type RenderPageToBitmapOptions = Omit<RenderPageOptions, 'onTextRun'> & {
     onTextRun?: (run: DocxTextRunInfo) => void;
 };
 export function resolveCommentAnchorRuns(anchor: Readonly<CommentAnchorRange>, runs: readonly Readonly<DocxTextRunInfo>[]): readonly Readonly<DocxTextRunInfo>[];
-export function resolveDocxCommentThreads(comments: readonly Readonly<DocComment>[], anchors: readonly Readonly<CommentAnchorRange>[], runs: readonly Readonly<DocxTextRunInfo>[], options?: ResolveDocxCommentThreadsOptions): readonly Readonly<ResolvedDocxCommentThread>[];
-export function resolveRevisionAnchorRuns(anchor: Readonly<RevisionAnchorRange>, runs: readonly Readonly<DocxTextRunInfo>[]): readonly Readonly<DocxTextRunInfo>[];
 export interface ResolvedDocxCommentAnchor {
     readonly anchor: Readonly<CommentAnchorRange>;
     readonly kind: DocxCommentAnchorKind;
@@ -1896,9 +1925,11 @@ export interface ResolvedDocxCommentThread {
     readonly replies: readonly Readonly<DocComment>[];
     readonly anchors: readonly Readonly<ResolvedDocxCommentAnchor>[];
 }
+export function resolveDocxCommentThreads(comments: readonly Readonly<DocComment>[], anchors: readonly Readonly<CommentAnchorRange>[], runs: readonly Readonly<DocxTextRunInfo>[], options?: ResolveDocxCommentThreadsOptions): readonly Readonly<ResolvedDocxCommentThread>[];
 export interface ResolveDocxCommentThreadsOptions {
     readonly includeResolved?: boolean;
 }
+export function resolveRevisionAnchorRuns(anchor: Readonly<RevisionAnchorRange>, runs: readonly Readonly<DocxTextRunInfo>[]): readonly Readonly<DocxTextRunInfo>[];
 export interface RevisionAnchorGeometryFallback {
     readonly source: Readonly<DocxStorySource>;
     readonly sourceRunIndex: number;

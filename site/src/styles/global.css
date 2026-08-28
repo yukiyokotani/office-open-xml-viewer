@@ -393,6 +393,14 @@ h1, h2, h3 { line-height: 1.08; letter-spacing: -0.035em; margin: 0; }
   display: flex; flex-direction: column; align-items: center; gap: 22px;
 }
 .demo-scroll .demo-page { width: 100%; max-width: 720px; height: auto; }
+.demo-scroll.demo-scroll-viewer {
+  position: relative;
+  display: block;
+  height: 560px;
+  padding: 0;
+  overflow: hidden;
+}
+.demo-scroll-viewer > .demo-status { position: absolute; inset: 0; z-index: 1; min-height: 0; }
 
 /* thumbnail grid demo */
 .demo-grid { padding: 22px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 18px; max-height: 560px; overflow-y: auto; }

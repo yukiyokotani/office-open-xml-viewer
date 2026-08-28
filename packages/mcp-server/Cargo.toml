@@ -1,6 +1,6 @@
 [package]
 name = "ooxml-mcp-server"
-version = "0.82.1"
+version = "0.83.0"
 edition = "2021"
 description = "MCP server exposing OOXML (xlsx/docx/pptx) parsers as AI-agent tools"
 license = "MIT"

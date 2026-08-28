@@ -3,6 +3,7 @@ import { sourceKey } from './layout/source-key.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocRevision, DocxStorySource, DocxTextRunInfo } from './types.js';
+import type { ReviewAnchorProjectionOptions } from './review-projection.js';
 
 export interface RevisionAnchorRange {
   /** Index into `DocxDocument.revisions`, preserving authored document order. */
@@ -208,9 +209,18 @@ export function collectLayoutSourceRevisionRangesIfPresent(
   revisions: readonly Readonly<DocRevision>[] | undefined,
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): RevisionAnchorRange[] {
   if ((revisions?.length ?? 0) === 0) return [];
-  return collectLayoutSourceRevisionRanges(revisions ?? [], source, renderedRunIndex);
+  const ranges = collectLayoutSourceRevisionRanges(revisions ?? [], source, renderedRunIndex);
+  const completed = options.completedSourceKeys;
+  if (completed === undefined) return ranges;
+  return ranges.filter((range) => {
+    const indices = renderedRunIndex.get(sourceKey(range.source));
+    const hasCoveredRun = indices !== undefined && [...indices].some((index) =>
+      index >= range.startRunIndex && index < range.endRunIndex);
+    return hasCoveredRun || completed.has(sourceKey(range.source));
+  });
 }
 
 /** Join one revision range to projected final-state text. Insertions and move

@@ -1,0 +1,105 @@
+---
+import { Code } from 'astro:components';
+import { codeThemes } from '../lib/code-theme';
+
+const progressiveExample = `import { DocxScrollViewer } from '@silurus/ooxml/docx';
+
+const container = document.querySelector('#document') as HTMLElement;
+const pager = document.querySelector('#pager') as HTMLElement;
+
+const viewer = new DocxScrollViewer(container, {
+  progressiveLayout: true,
+  mode: 'worker',
+  onVisiblePageChange(pageIndex, availablePages, layoutComplete) {
+    pager.textContent =
+      \`Page \${pageIndex + 1} of \${availablePages}\${layoutComplete ? '' : '…'}\`;
+    pager.setAttribute('aria-busy', String(!layoutComplete));
+  },
+});
+
+await viewer.load('/document.docx');
+
+// Print, export, and final-page-count UI need the converged layout.
+await viewer.waitUntilLayoutComplete();
+console.log('Final page count:', viewer.pageCount);`;
+---
+
+<section class="progressive-guide" id="progressive-layout" aria-labelledby="progressive-layout-title">
+  <header class="progressive-head">
+    <p class="eyebrow">Large documents</p>
+    <h2 id="progressive-layout-title">Show the opening pages before pagination finishes</h2>
+  </header>
+  <div class="progressive-body">
+    <div class="progressive-copy">
+      <p>
+        Set <code>progressiveLayout: true</code> on <code>DocxViewer</code>,
+        <code>DocxScrollViewer</code>, or <code>DocxDocument.load()</code>. For a large
+        document, <code>load()</code> resolves when the opening pages are paintable while the
+        same paginator continues in the background. This works in both render modes; worker
+        mode also keeps the remaining layout and paint work off the UI thread.
+      </p>
+      <div class="progressive-rules">
+        <article>
+          <h3>Totals are provisional</h3>
+          <p>
+            While <code>layoutComplete</code> is false, <code>pageCount</code> means pages
+            available so far, not the final total. Do not snapshot it when <code>load()</code>
+            resolves.
+          </p>
+        </article>
+        <article>
+          <h3>Subscribe or await</h3>
+          <p>
+            Use <code>onPageChange</code> or <code>onVisiblePageChange</code> for live navigation
+            UI. Await <code>waitUntilLayoutComplete()</code> before printing, exporting, or relying on
+            the authoritative total.
+          </p>
+        </article>
+        <article>
+          <h3>Page fields converge too</h3>
+          <p>
+            In-document <code>NUMPAGES</code> fields are repainted with the authoritative value
+            after pagination converges. Application-owned “Page X of Y” UI should use the
+            callback’s <code>layoutComplete</code> flag to mark provisional totals.
+          </p>
+        </article>
+      </div>
+    </div>
+    <div class="progressive-code">
+      <Code code={progressiveExample} lang="typescript" themes={codeThemes} defaultColor={false} />
+    </div>
+  </div>
+</section>
+
+<style>
+  .progressive-guide {
+    padding: 64px 0;
+    border-top: 1px solid var(--border);
+  }
+  .progressive-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 0.92fr);
+    gap: 40px;
+    margin-top: 28px;
+    align-items: start;
+  }
+  .eyebrow {
+    margin: 0 0 12px;
+    font: 600 10px var(--mono);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h2 { margin: 0; max-width: 19ch; font-size: clamp(26px, 3vw, 42px); line-height: 1.05; }
+  .progressive-copy > p { max-width: 66ch; margin: 0; color: var(--text-dim); line-height: 1.7; }
+  code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+  .progressive-rules { display: grid; gap: 18px; margin-top: 32px; }
+  .progressive-rules article { padding-left: 16px; border-left: 2px solid var(--border-bright); }
+  .progressive-rules h3 { margin: 0; font-size: 14px; }
+  .progressive-rules p { margin: 6px 0 0; color: var(--text-dim); font-size: 13px; line-height: 1.6; }
+  .progressive-code { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--code-bg); }
+  .progressive-code :global(pre) { margin: 0; padding: 22px; min-width: max-content; overflow-x: auto; background: var(--code-bg) !important; font-size: 12px; line-height: 1.65; }
+  @media (max-width: 900px) {
+    .progressive-body { grid-template-columns: 1fr; }
+  }
+</style>

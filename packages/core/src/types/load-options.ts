@@ -24,6 +24,26 @@ export interface OoxmlResourceLimits {
   maxArchiveEntries?: OoxmlResourceLimit;
 }
 
+/** Format-neutral progress reported while a progressive layout pass runs. */
+export interface ProgressiveLayoutProgress {
+  /**
+   * Units committed by the current pass (pages for DOCX, slides for PPTX).
+   * This is telemetry rather than a final count and may move backward when a
+   * converging layout pass restarts.
+   */
+  committedUnits: number;
+}
+
+/** Format-neutral publication of a newly paintable progressive prefix. */
+export interface ProgressiveLayoutPartial {
+  /** Units currently available to paint (pages for DOCX, slides for PPTX). */
+  availableUnits: number;
+  /** Final unit count when the format knows it before layout completes. */
+  totalUnits?: number;
+  /** Whether the publication is authoritative rather than provisional. */
+  exact: boolean;
+}
+
 /**
  * Common load-time options shared by the docx / pptx / xlsx
  * `Document.load` / `Presentation.load` / `Workbook.load` factories and their
@@ -129,13 +149,16 @@ export interface LoadOptions {
    */
   onResourceMetrics?: (metrics: OoxmlResourceMetrics) => void;
   /**
-   * Reject the parse request if the parser worker does not answer within this
-   * many milliseconds. Opt-in safety net for a wedged or crashed worker that
-   * would otherwise leave `load()` pending forever. **Default: unlimited** —
-   * parsing a large document with heavy embedded media can legitimately take
-   * tens of seconds, so no timeout is imposed unless you set one. A worker that
-   * throws or fails to load already rejects immediately regardless of this
-   * value; this bound only covers the "silent, never-responds" case.
+   * Opt-in worker liveness limit in milliseconds. For an ordinary load it is
+   * the response deadline for the parse request. When progressive DOCX/PPTX
+   * preparation runs in `mode: 'worker'`, it becomes a silence interval that is restarted by each layout
+   * progress or partial publication, so a busy worker is not timed out merely
+   * because the complete document takes longer. Silence before the first
+   * publication rejects `load()`; silence after `load()` has resolved leaves
+   * `layoutComplete` false and makes `waitUntilLayoutComplete()` reject (and is
+   * also delivered to the layout-completion/error callback when configured).
+   * **Default: unlimited.** A worker that throws or fails to load rejects
+   * immediately regardless of this value.
    */
   workerTimeoutMs?: number;
   /**

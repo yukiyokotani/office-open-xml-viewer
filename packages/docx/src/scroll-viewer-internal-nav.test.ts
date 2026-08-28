@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
+import { publishDocxLayout } from './document-layout-events.js';
 import { installDom, makeContainer, makeBorrowedDocxScrollViewer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 import type { DocxTextRunInfo } from './renderer';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
@@ -101,6 +102,25 @@ describe('DocxScrollViewer — internal-anchor click default (IX-nav)', () => {
     clickLink();
     expect(engine.bookmarkCalls).toContain('DoesNotExist'); // it TRIED to resolve
     expect(scrollHost.scrollTop).toBe(before); // ...but did not move
+    v.destroy();
+  });
+
+  it('waits for the authoritative bookmark projection during progressive layout', async () => {
+    const target: HyperlinkTarget = { kind: 'internal', ref: 'Later' };
+    const { engine, v, scrollHost, clickLink } = await setup(1, target);
+    const doc = engine.asDoc();
+    engine.setLayoutComplete(false);
+    const before = scrollHost.scrollTop;
+
+    clickLink();
+    expect(engine.bookmarkCalls).not.toContain('Later');
+
+    engine.bookmarkPages.set('Later', 2);
+    engine.setPageCount(3);
+    engine.setLayoutComplete(true);
+    publishDocxLayout(doc, { pageCount: 3, exact: true, complete: true });
+    await vi.waitFor(() => expect(engine.bookmarkCalls).toContain('Later'));
+    expect(scrollHost.scrollTop).toBeGreaterThan(before);
     v.destroy();
   });
 

@@ -6471,6 +6471,7 @@ fn parse_run_inner(
                         text,
                         no_break_before: false,
                         no_break_after: false,
+                        no_break_hyphen_offsets: Vec::new(),
                         bold,
                         italic,
                         underline,
@@ -6526,7 +6527,13 @@ fn parse_run_inner(
                                 && !preserve_next_comment_boundary
                                 && text_runs_mergeable(prev, &this) =>
                         {
+                            let base_utf16 = prev.text.encode_utf16().count();
                             prev.text.push_str(&this.text);
+                            prev.no_break_hyphen_offsets.extend(
+                                this.no_break_hyphen_offsets
+                                    .iter()
+                                    .map(|offset| base_utf16 + offset),
+                            );
                             // The protected pair is now internal to this text
                             // token; do not extend it to the token's later end.
                             prev.no_break_after = false;
@@ -6566,6 +6573,7 @@ fn parse_run_inner(
                         text: c.to_string(),
                         no_break_before: false,
                         no_break_after: false,
+                        no_break_hyphen_offsets: Vec::new(),
                         bold,
                         italic,
                         underline,
@@ -6628,6 +6636,7 @@ fn parse_run_inner(
                     text: "\t".to_string(),
                     no_break_before: false,
                     no_break_after: false,
+                    no_break_hyphen_offsets: Vec::new(),
                     bold,
                     italic,
                     underline,
@@ -6733,6 +6742,7 @@ fn parse_run_inner(
                     // boundary for every formatting/revision/comment reason.
                     no_break_before: true,
                     no_break_after: true,
+                    no_break_hyphen_offsets: vec![1],
                     bold,
                     italic,
                     underline,
@@ -6786,7 +6796,13 @@ fn parse_run_inner(
                     Some(DocRun::Text(prev))
                         if !preserve_next_comment_boundary && text_runs_mergeable(prev, &this) =>
                     {
+                        let base_utf16 = prev.text.encode_utf16().count();
                         prev.text.push_str(&this.text);
+                        prev.no_break_hyphen_offsets.extend(
+                            this.no_break_hyphen_offsets
+                                .iter()
+                                .map(|offset| base_utf16 + offset),
+                        );
                         prev.no_break_after = true;
                     }
                     _ => runs.push(DocRun::Text(Box::new(this))),
@@ -6958,6 +6974,7 @@ fn parse_run_inner(
                     text: id_str.clone(),
                     no_break_before: false,
                     no_break_after: false,
+                    no_break_hyphen_offsets: Vec::new(),
                     bold,
                     italic,
                     underline,
@@ -15152,6 +15169,14 @@ mod tests {
         // run's own font rather than risking tofu.
         assert!(joined.contains('\u{002D}'));
         assert!(!joined.contains('\u{2011}'));
+        let text = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Text(text) => Some(text.as_ref()),
+                _ => None,
+            })
+            .expect("text run");
+        assert_eq!(text.no_break_hyphen_offsets, vec![4]);
     }
 
     // §17.3.3.29 <w:softHyphen> — zero width and no glyph when not a break point.
@@ -15267,6 +15292,22 @@ mod tests {
             "the two noBreakHyphen run boundaries must merge into the single \
              surrounding text run, not remain separate breakable segments"
         );
+        let text = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Text(text) => Some(text.as_ref()),
+                _ => None,
+            })
+            .expect("merged text run");
+        assert_eq!(
+            text.no_break_hyphen_offsets,
+            text.text
+                .encode_utf16()
+                .enumerate()
+                .filter_map(|(index, unit)| (unit == b'-' as u16).then_some(index + 1))
+                .collect::<Vec<_>>(),
+            "both authored noBreakHyphen positions survive model coalescing",
+        );
     }
 
     // Negative case: a noBreakHyphen must NOT absorb into a neighbour that
@@ -15285,16 +15326,24 @@ mod tests {
             &base,
             &StyleMap::parse(""),
         );
-        let texts: Vec<(&str, bool, bool)> = runs
+        let texts: Vec<(&str, bool, bool, &[usize])> = runs
             .iter()
             .filter_map(|r| match r {
-                DocRun::Text(t) => Some((t.text.as_str(), t.bold, t.no_break_before)),
+                DocRun::Text(t) => Some((
+                    t.text.as_str(),
+                    t.bold,
+                    t.no_break_before,
+                    t.no_break_hyphen_offsets.as_slice(),
+                )),
                 _ => None,
             })
             .collect();
         assert_eq!(
             texts,
-            vec![("999", true, false), ("-99", false, true)],
+            vec![
+                ("999", true, false, &[][..]),
+                ("-99", false, true, &[1][..])
+            ],
             "a formatting difference must block the merge — the bold \"999\" \
              and the non-bold \"-99\" stay separate runs without becoming a \
              line-break opportunity"

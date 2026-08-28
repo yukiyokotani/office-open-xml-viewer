@@ -36,6 +36,74 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v083-progressive-viewing',
+    date: '2026-08-28',
+    label: 'Release note',
+    version: 'v0.83.0',
+    title: 'Open large Word and PowerPoint files sooner in v0.83.0',
+    summary: 'v0.83.0 can show the opening pages or slides sooner for large Word and PowerPoint files, speeds up large Word tables, and uses embedded PowerPoint fonts when available.',
+    audience: 'Applications that open larger DOCX or PPTX files, or need closer PowerPoint font fidelity. Existing viewer setup continues to work unchanged.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'Large Word documents and PowerPoint presentations can now become useful before all background preparation finishes. Progressive viewing is opt-in, so existing applications keep their current loading behavior.',
+        ],
+        bullets: [
+          'Show the opening pages of a DOCX file while the remaining pages are prepared.',
+          'Show the opening slide of a PPTX file while later slides are prepared, with a stable scrollbar from the first view.',
+          'Open documents with large Word tables faster and render PowerPoint text with embedded fonts when the presentation provides them.',
+        ],
+      },
+      {
+        title: 'Start viewing sooner',
+        paragraphs: [
+          'Enable progressiveLayout on a Word or PowerPoint Viewer when showing useful content quickly matters more than waiting for the entire document. It works with both the regular and worker rendering modes; worker mode also keeps more of the remaining work away from the application UI.',
+          'Word publishes pages as pagination advances. PowerPoint knows the final slide count at the start, so its scrollbar remains stable and slides that are not ready yet show a loading state.',
+          'Until Word pagination completes, pageCount means the pages available so far. PowerPoint slideCount is final from the first view, while availableSlideCount reports how many opening slides are ready.',
+        ],
+        examples: [
+          {
+            title: 'Enable progressive viewing',
+            code: `import { DocxScrollViewer } from '@silurus/ooxml/docx';
+import { PptxScrollViewer } from '@silurus/ooxml/pptx';
+
+const wordViewer = new DocxScrollViewer(wordContainer, {
+  progressiveLayout: true,
+});
+
+const slideViewer = new PptxScrollViewer(slideContainer, {
+  progressiveLayout: true,
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Rendering and review improvements',
+        paragraphs: [
+          'Documents with large Word tables avoid repeated pagination work, reducing the wait for the completed document.',
+          'Long web addresses in Word documents now wrap naturally within the page instead of leaving a large gap or being clipped at the edge.',
+          'PowerPoint can use fonts embedded in a presentation in both rendering modes. Text that extends beyond its shape also remains selectable.',
+          'Word can now display tracked changes with author-coloured underlines, strikethroughs and margin change bars using showTrackedChanges: true. The accepted-final view remains the default.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No migration is required. Progressive viewing and tracked-change markup are both opt-in, and existing Viewer options keep their previous defaults.',
+          'If an operation needs the completed document, such as printing, exporting or showing a final Word page count, await waitUntilLayoutComplete() first. Ordinary viewing can begin as soon as load() resolves.',
+        ],
+      },
+      {
+        title: 'Technical note',
+        paragraphs: [
+          'DOCX progressive layout resumes one pagination session instead of rebuilding earlier pages. PPTX prepares slides in order after an initial presentation bootstrap, which makes the final slide count and scroll extent available from first paint. Both formats share the same progressive callbacks and completion-waiting lifecycle. Worker mode reduces competition with the application UI; it does not guarantee a shorter total preparation time.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v082-review-comments',
     date: '2026-08-26',
     label: 'Release note',

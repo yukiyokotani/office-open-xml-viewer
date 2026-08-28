@@ -11,6 +11,7 @@ pub mod blip;
 pub mod bounded_xml;
 pub mod chart;
 pub mod color;
+pub mod content_types;
 pub mod custom_geometry;
 pub mod depth;
 pub mod drawing;

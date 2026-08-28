@@ -926,6 +926,52 @@ impl PackageOperation {
         Ok(bytes)
     }
 
+    /// Materialize one entry without ever retaining more than `max_bytes + 1`.
+    /// The validated central-directory size provides an allocation-free early
+    /// rejection; the limit+1 decoder read also defends against a corrupt stream
+    /// whose actual output exceeds that declaration. This is an optional-part
+    /// admission check, not a package-wide resource poison.
+    pub fn read_bytes_bounded(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        self.assert_active()?;
+        let declared_size = {
+            let session = self.handle.inner.borrow();
+            let index = session
+                .by_name
+                .get(path)
+                .copied()
+                .ok_or_else(|| format!("ZIP entry not found: {path}"))?;
+            session.entries[index].declared_size
+        };
+        if declared_size > max_bytes as u64 {
+            return Err(format!(
+                "ZIP entry exceeds optional-part byte limit ({path}): {declared_size} > {max_bytes}"
+            ));
+        }
+
+        let retained_cap = max_bytes
+            .checked_add(1)
+            .ok_or_else(|| "optional-part byte limit overflows this platform".to_string())?;
+        let mut stream = self.open_entry(path)?;
+        let mut bytes = Vec::with_capacity(declared_size.min(max_bytes as u64) as usize);
+        let mut scratch = [0u8; 8 * 1024];
+        while bytes.len() < retained_cap {
+            let wanted = (retained_cap - bytes.len()).min(scratch.len());
+            let count = stream
+                .read(&mut scratch[..wanted])
+                .map_err(|error| error.to_string())?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&scratch[..count]);
+        }
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "ZIP entry exceeds optional-part byte limit ({path}): more than {max_bytes} bytes"
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn read_string(&self, path: &str) -> Result<String, String> {
         String::from_utf8(self.read_bytes(path)?)
             .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))
@@ -1308,6 +1354,27 @@ mod tests {
             let reader = session.open_entry(operation, "word/document.xml").unwrap();
             assert_eq!(drain(&mut session, operation, reader, 5).unwrap(), body);
             assert_eq!(session.operation_inflated_bytes(operation), Some(26));
+        }
+    }
+
+    #[test]
+    fn bounded_materialization_rejects_before_retaining_an_oversized_optional_part() {
+        for compression in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let bytes = package(&[("ppt/fonts/font1.fntdata", b"12345", compression)]);
+            let handle =
+                PackageSessionHandle::open(bytes, OoxmlFormat::Pptx, Some(64), Some(64), None)
+                    .unwrap();
+            let operation = handle.begin_operation("extract-font").unwrap();
+            assert_eq!(
+                operation
+                    .read_bytes_bounded("ppt/fonts/font1.fntdata", 5)
+                    .unwrap(),
+                b"12345"
+            );
+            assert!(operation
+                .read_bytes_bounded("ppt/fonts/font1.fntdata", 4)
+                .unwrap_err()
+                .contains("optional-part byte limit"));
         }
     }
 

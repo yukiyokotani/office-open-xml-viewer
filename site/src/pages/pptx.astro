@@ -2,6 +2,7 @@
 import FormatPage from '../layouts/FormatPage.astro';
 import DemoBlock from '../components/DemoBlock.astro';
 import FormatCommentsDemo from '../components/FormatCommentsDemo.astro';
+import PptxProgressiveLayoutGuide from '../components/PptxProgressiveLayoutGuide.astro';
 import { pptxSnippets } from '../lib/demo-snippets';
 ---
 <FormatPage format="pptx" name="PPTX" ext=".pptx">
@@ -12,11 +13,12 @@ import { pptxSnippets } from '../lib/demo-snippets';
     code={pptxSnippets.demo}
   />
   <DemoBlock
-    format="pptx" kind="scroll" badge="Story · ScrollView"
+    format="pptx" kind="scroll" badge="Story · PptxScrollViewer"
     title="Scroll through every slide"
-    description="Drive the headless PptxPresentation engine to render each slide into its own canvas, stacked in a scroll container — no built-in viewer required."
+    description="Use PptxScrollViewer for a virtualized, ready-made slide stack. For a custom scrolling UI, combine PptxViewer with PptxPresentation and let your application own the container and navigation."
     code={pptxSnippets.scroll}
   />
+  <PptxProgressiveLayoutGuide />
   <DemoBlock
     format="pptx" kind="thumbnails" badge="Story · ThumbnailGrid"
     title="Thumbnail overview"

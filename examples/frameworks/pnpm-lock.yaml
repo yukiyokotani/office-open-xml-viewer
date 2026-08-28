@@ -11,8 +11,8 @@ importers:
   react:
     dependencies:
       '@silurus/ooxml':
-        specifier: ^0.82.0
-        version: 0.82.0
+        specifier: ^0.83.0
+        version: 0.83.0
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -39,8 +39,8 @@ importers:
   solid:
     dependencies:
       '@silurus/ooxml':
-        specifier: ^0.82.0
-        version: 0.82.0
+        specifier: ^0.83.0
+        version: 0.83.0
       solid-js:
         specifier: ^1.9.14
         version: 1.9.14
@@ -58,8 +58,8 @@ importers:
   svelte:
     dependencies:
       '@silurus/ooxml':
-        specifier: ^0.82.0
-        version: 0.82.0
+        specifier: ^0.83.0
+        version: 0.83.0
       svelte:
         specifier: ^5.56.8
         version: 5.56.8
@@ -80,8 +80,8 @@ importers:
   vue:
     dependencies:
       '@silurus/ooxml':
-        specifier: ^0.82.0
-        version: 0.82.0
+        specifier: ^0.83.0
+        version: 0.83.0
       vue:
         specifier: ^3.5.40
         version: 3.5.40(typescript@6.0.3)
@@ -294,8 +294,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@silurus/ooxml@0.82.0':
-    resolution: {integrity: sha512-9+drDf1gLDmgy1Dc/iy3mMrc8ZCVO5M/oTPwvHnUarNOenN4ATV30/mrS0Ug+2mWAiKl34LBjyICjhmtTmEBWA==}
+  '@silurus/ooxml@0.83.0':
+    resolution: {integrity: sha512-ovYCUQHRfZbWNQ1FRlKht19wk98GRiAWaM2Kkl5A3YjCs+tNquL78KdCoa09VG97HD19fv0DuqzHo8LdVYua6A==}
 
   '@sveltejs/acorn-typescript@1.0.11':
     resolution: {integrity: sha512-LFuZUkjJ9iF7JZye/aG5XM0SFcQ5VyL0oVX4WJ9dc0Va3R3s0OauX1BESVCb+YN/ol8TAfqGDDAQsTG627Y5kw==}
@@ -1012,7 +1012,7 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@silurus/ooxml@0.82.0': {}
+  '@silurus/ooxml@0.83.0': {}
 
   '@sveltejs/acorn-typescript@1.0.11(acorn@8.18.0)':
     dependencies:

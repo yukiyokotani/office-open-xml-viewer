@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { BodyElement, DocxDocumentModel, SectionProps } from './types.js';
+import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 import {
   attachDocumentLayoutVariants,
   selectDocumentLayoutPage,
@@ -19,6 +19,10 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { DocxDocument } from './document.js';
 import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';
+import {
+  projectRenderWorkerLayoutMeta,
+  renderWorkerLayoutMeta,
+} from './render-worker-metadata.js';
 import { stableFingerprint } from './layout/fingerprint.js';
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
@@ -29,6 +33,7 @@ import {
   DocumentPullWorker,
   MaterializedDocumentCursorArchive,
 } from './document-pull-worker.js';
+import { syntheticDocxModel } from './testing/synthetic-document.js';
 
 function services(): LayoutServices {
   return Object.freeze({
@@ -179,6 +184,86 @@ function metadataForDefaultLayout(
 }
 
 describe('render worker canonical layout parity', () => {
+  it('does not traverse page geometry when a publication has no review data', () => {
+    const layout = {
+      pages: [{
+        pageIndex: 0,
+        geometry: { widthPt: 612, heightPt: 792 },
+        bookmarkStarts: [],
+      }],
+      diagnostics: [],
+    } as unknown as DocumentLayout;
+    const meta = projectRenderWorkerLayoutMeta(
+      layout,
+      {} as ReturnType<typeof layoutSourceStore>,
+      { comments: [], revisions: [] },
+      { provisional: true },
+    );
+    expect(meta.commentAnchorRanges).toEqual([]);
+    expect(meta.revisionAnchorRanges).toEqual([]);
+  });
+
+  it('withholds future review anchors inside a split paragraph until its final fragment', () => {
+    const model = syntheticDocxModel('plain', { paragraphs: 1 });
+    const paragraph = model.body[0] as Extract<BodyElement, { type: 'paragraph' }>;
+    const baseRun = paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>;
+    paragraph.runs = [
+      // Keep the review anchor beyond the first page without making this
+      // metadata test depend on laying out an unnecessarily large document.
+      { ...baseRun, text: 'opening '.repeat(1_000) },
+      {
+        ...baseRun,
+        text: 'future review anchor',
+        revision: { kind: 'deletion', id: '84' },
+      },
+    ];
+    paragraph.commentMarks = [
+      { id: '42', kind: 'rangeStart', runIndex: 1 },
+      { id: '42', kind: 'rangeEnd', runIndex: 2 },
+      { id: '42', kind: 'reference', runIndex: 2 },
+    ];
+    model.comments = [{ id: '42', text: 'future comment' }];
+    model.revisions = [{ kind: 'deletion', id: '84', text: 'future revision' }];
+    const source = layoutSourceStore(model);
+    const layoutServices = createLayoutServices(source, { measureContext: measureContext() });
+    const full = layoutDocument(model, layoutServices, { currentDateMs: 0 });
+    expect(full.pages.length).toBeGreaterThan(1);
+    const prefix = { ...full, pages: full.pages.slice(0, 1) } as DocumentLayout;
+    const review = { comments: model.comments, revisions: model.revisions };
+
+    const provisional = projectRenderWorkerLayoutMeta(
+      prefix,
+      source,
+      review,
+      { provisional: true },
+    );
+    expect(provisional.commentAnchorRanges).toEqual([]);
+    expect(provisional.revisionAnchorRanges).toEqual([]);
+
+    const authoritative = projectRenderWorkerLayoutMeta(full, source, review);
+    expect(authoritative.commentAnchorRanges).toEqual([
+      expect.objectContaining({ commentId: '42' }),
+    ]);
+    expect(authoritative.revisionAnchorRanges).toEqual([
+      expect.objectContaining({ revisionIndex: 0, geometryFallback: expect.any(Object) }),
+    ]);
+  });
+
+  it('projects page metadata from the runtime-selected tracked-changes variant', () => {
+    const model = syntheticDocxModel('tracked', { paragraphs: 120 });
+    const source = layoutSourceStore(model);
+    const layoutServices = createLayoutServices(source, { measureContext: measureContext() });
+    const retained = retainRenderWorkerDocumentLayout(source, layoutServices, 0);
+    const review = { comments: model.comments ?? [], revisions: model.revisions ?? [] };
+
+    const finalMeta = renderWorkerLayoutMeta(retained, review, 0, false);
+    const markupMeta = renderWorkerLayoutMeta(retained, review, 0, true);
+
+    expect(markupMeta.pageCount).not.toBe(finalMeta.pageCount);
+    expect(markupMeta.pageSizes).toHaveLength(markupMeta.pageCount);
+    expect(finalMeta.pageSizes).toHaveLength(finalMeta.pageCount);
+  });
+
   it('exposes identical review metadata in main and worker modes', () => {
     const model = realModel();
     model.revisions = [{ kind: 'insertion', author: 'Reviewer', text: 'field' }];
@@ -285,6 +370,9 @@ describe('render worker canonical layout parity', () => {
         },
       },
     });
+    // Real instances always carry the layout runtime (the constructor attaches
+    // it); the active-view fill-in reads it on every render/collect call.
+    attachDocumentLayoutRuntime(document, 0);
 
     await expect(document.renderPageToBitmap(1, { currentDate: 20 })).resolves.toBe(bitmap);
     await expect(document.collectPageRuns(1, { currentDate: 20 })).resolves.toEqual([]);
@@ -529,6 +617,9 @@ describe('render worker canonical layout parity', () => {
     const collect = {
       type: 'collectRuns', id: 3, pageIndex: 0, opts: { currentDate: 20 },
     } satisfies RenderWorkerRequest;
+    const layoutMetaRequest = {
+      type: 'selectLayoutView', id: 6, currentDateMs: 20, showTrackedChanges: true,
+    } satisfies RenderWorkerRequest;
     const parsed = {
       type: 'parsedMeta', id: 1,
       meta: { pageCount: 1, revisions: [], comments: [], footnotes: [], endnotes: [], pageSizes: [], bookmarkPages: [] },
@@ -542,6 +633,42 @@ describe('render worker canonical layout parity', () => {
     } satisfies RenderWorkerResponse;
     const runsCollected = {
       type: 'runsCollected', id: 3, runs: [],
+    } satisfies RenderWorkerResponse;
+    const layoutMetaResponse = {
+      type: 'layoutViewSelected', id: 6,
+      meta: {
+        pageCount: 1,
+        pageSizes: [{ widthPt: 595, heightPt: 842 }],
+        bookmarkPages: [],
+        commentAnchorRanges: [],
+        revisionAnchorRanges: [],
+      },
+    } satisfies RenderWorkerResponse;
+    const progressiveParse = {
+      type: 'parse', id: 5, data: new ArrayBuffer(0), useGoogleFonts: false,
+      resourcePolicy: DEFAULT_OOXML_RESOURCE_LIMITS,
+      defaultCurrentDateMs: 10,
+      currentDateMs: 20,
+      showTrackedChanges: true,
+      progressiveLayout: true,
+    } satisfies RenderWorkerRequest;
+    // Uncorrelated pushes: `forId`, never `id`. The bridge resolves a pending
+    // request on the first response `correlate` matches, so an `id` here would
+    // settle the parse before the authoritative metadata exists.
+    const layoutPartial = {
+      type: 'layoutPartial', forId: 5,
+      partial: {
+        pageCount: 2,
+        pageSizes: [{ widthPt: 595, heightPt: 842 }, { widthPt: 595, heightPt: 842 }],
+        bookmarkPages: [],
+        commentAnchorRanges: [],
+        revisionAnchorRanges: [],
+        exact: false,
+        review: { revisions: [], comments: [], footnotes: [], endnotes: [] },
+      },
+    } satisfies RenderWorkerResponse;
+    const layoutProgress = {
+      type: 'layoutProgress', forId: 5, committedPages: 12,
     } satisfies RenderWorkerResponse;
     const error = {
       type: 'error', id: 4, message: 'unsupported transition',
@@ -558,12 +685,29 @@ describe('render worker canonical layout parity', () => {
     ]);
     expect(Object.keys(render).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
     expect(Object.keys(collect).sort()).toEqual(['id', 'opts', 'pageIndex', 'type']);
+    expect(Object.keys(layoutMetaRequest).sort()).toEqual([
+      'currentDateMs', 'id', 'showTrackedChanges', 'type',
+    ]);
     expect(Object.keys(parsed).sort()).toEqual(['id', 'meta', 'type']);
     expect(Object.keys(verticalFallback).sort()).toEqual([
       'generation', 'id', 'operationId', 'sessionId', 'type',
     ]);
     expect(Object.keys(pageRendered).sort()).toEqual(['bitmap', 'id', 'runs', 'type']);
     expect(Object.keys(runsCollected).sort()).toEqual(['id', 'runs', 'type']);
+    expect(Object.keys(layoutMetaResponse).sort()).toEqual(['id', 'meta', 'type']);
+    expect(Object.keys(progressiveParse).sort()).toEqual([
+      'currentDateMs', 'data', 'defaultCurrentDateMs', 'id', 'progressiveLayout',
+      'resourcePolicy', 'showTrackedChanges', 'type', 'useGoogleFonts',
+    ]);
+    expect(Object.keys(layoutPartial).sort()).toEqual(['forId', 'partial', 'type']);
+    expect(Object.keys(layoutPartial.partial).sort()).toEqual([
+      'bookmarkPages', 'commentAnchorRanges', 'exact', 'pageCount', 'pageSizes',
+      'review', 'revisionAnchorRanges',
+    ]);
+    expect(Object.keys(layoutProgress).sort()).toEqual(['committedPages', 'forId', 'type']);
+    // The push arms must not be correlatable, or they would settle the parse.
+    expect('id' in layoutPartial).toBe(false);
+    expect('id' in layoutProgress).toBe(false);
     expect(Object.keys(error).sort()).toEqual([
       'code',
       'errorName',

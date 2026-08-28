@@ -107,6 +107,7 @@ import {
   wordIdeographicSpaceLineEndAllowanceCount,
   wordUniformRunPositionPaintPt,
   wordUseFeLayoutParagraphMarkGridAdvancePx,
+  wordExternalLinkSyntaxBreakOffsets,
 } from './layout/line-compatibility.js';
 import { wordNeutralAttachesToActiveScript } from './layout/script-compatibility.js';
 
@@ -206,6 +207,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  not start a new line before a glued segment; it retracts the whole glued
    *  group instead, so a small-caps word never splits across lines. */
   joinPrev?: boolean;
+  /** Non-negotiable CT_R/noBreakHyphen seam. Unlike kinsoku/UAX glue, this
+   * remains atomic even when either side otherwise exposes CJK/SEA breaks. */
+  hardJoinPrev?: true;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
   /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark stamped on
@@ -227,6 +231,12 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
+  /** Markup-view revision decoration facts (set only when the layout variant
+   *  has `showTrackedChanges`): the revision kind plus the resolved stable
+   *  author colour. Read by the retained decoration planner to synthesize the
+   *  author-coloured underline (insertion/moveTo) or strikethrough
+   *  (deletion/moveFrom), per the `word-track-change-decoration` rule. */
+  trackChangesMarkup?: Readonly<{ kind: string; authorColor: string }>;
   /** ECMA-376 §17.3.2.30 `<w:rtl>` — run carries right-to-left characteristics.
    *  When true the segment's text is treated as a strong-RTL embedding in the
    *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
@@ -254,10 +264,18 @@ export interface LayoutTextSeg extends LayoutSegSource {
   textBoxVertical?: boolean;
   /** IX1 — the resolved hyperlink target of the originating run (ECMA-376
    *  §17.16.22 external `r:id` URL / §17.16.23 internal `w:anchor` bookmark),
-   *  computed once per run in `buildSegments`. Carried purely so the text-layer
-   *  overlay can build a clickable region; it does NOT affect measurement, line
-   *  breaking, or the drawn glyphs. Absent for a non-link run. */
+   *  computed once per run in `buildSegments`. The text-layer consumes it for
+   *  the clickable region; line layout also uses external-link syntax as a
+   *  preferred break opportunity for otherwise unbreakable URL text. Absent
+   *  for a non-link run. */
   hyperlink?: HyperlinkTarget;
+  /** Parser-independent UTF-16 ranges occupied by authored
+   * `<w:noBreakHyphen/>` glyphs. Neither edge is a legal line boundary. */
+  noBreakRanges?: readonly Readonly<{ start: number; end: number }>[];
+  /** Registered external-URL syntax breaks, as segment-local UTF-16 offsets. */
+  externalLinkBreakOffsets?: readonly number[];
+  /** This segment starts after a registered external-URL syntax break. */
+  externalLinkBreakBefore?: true;
   /** ECMA-376 §17.3.2.34 `<w:snapToGrid>` — false opts this run out of the
    *  section character grid without changing paragraph line-grid policy. */
   snapToCharacterGrid?: boolean;
@@ -657,6 +675,15 @@ export interface LineLayoutEnvironment {
   readonly displayPageNumber?: number;
   readonly pageNumberFormat?: NumberFormat;
   readonly currentDateMs?: number;
+  /** ECMA-376 §17.13.5 tracked-change view. `true` = markup view: revision
+   * content stays visible for author-coloured decoration. Absent/false =
+   * final view: deleted (`w:del`) and moved-away (`w:moveFrom`) runs produce
+   * no segments, so line breaking sees the accepted document state. */
+  readonly showTrackedChanges?: boolean;
+  /** Markup-view author → stable palette colour (layout/track-changes.ts
+   * first-appearance policy over the compatibility palette). Present only
+   * when the markup variant is being built. */
+  readonly revisionAuthorColor?: (author?: string) => string;
   readonly noteNumbers?: ReadonlyMap<string, number>;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
@@ -1187,6 +1214,76 @@ export function slicedPunctuationCompressions(
       end: compression.end - start,
       adjustmentPt: compression.adjustmentPt,
     }));
+  return sliced && sliced.length > 0 ? Object.freeze(sliced) : undefined;
+}
+
+function slicedNoBreakRanges(
+  seg: LayoutTextSeg,
+  start: number,
+  end: number,
+): LayoutTextSeg['noBreakRanges'] {
+  const sliced = seg.noBreakRanges
+    ?.filter((range) => range.start >= start && range.end <= end)
+    .map((range) => Object.freeze({
+      start: range.start - start,
+      end: range.end - start,
+    }));
+  return sliced && sliced.length > 0 ? Object.freeze(sliced) : undefined;
+}
+
+function protectedNoBreakOffsets(seg: LayoutTextSeg): ReadonlySet<number> {
+  return new Set(seg.noBreakRanges?.flatMap((range) => [range.start, range.end]) ?? []);
+}
+
+function legalTextSplitAtOrBefore(
+  seg: LayoutTextSeg,
+  proposed: number,
+  minimum = 0,
+): number {
+  const protectedOffsets = protectedNoBreakOffsets(seg);
+  return [0, ...graphemeClusterOffsets(seg.text), seg.text.length]
+    .filter((offset, index, all) => all.indexOf(offset) === index)
+    .filter((offset) => offset >= minimum && offset <= proposed && !protectedOffsets.has(offset))
+    .at(-1) ?? 0;
+}
+
+/** Smallest prefix that consumes a hard source seam. It includes the complete
+ * authored noBreakHyphen range plus the first following grapheme when both
+ * range edges live in this segment. */
+function hardJoinPrefixEnd(seg: LayoutTextSeg): number | undefined {
+  if (seg.hardJoinPrev !== true || seg.text.length === 0) return undefined;
+  const protectedOffsets = protectedNoBreakOffsets(seg);
+  const firstLegal = [
+    ...graphemeClusterOffsets(seg.text),
+    seg.text.length,
+  ].find((offset) => offset > 0 && !protectedOffsets.has(offset));
+  return firstLegal ?? seg.text.length;
+}
+
+/** Single authority for metadata whose UTF-16 coordinates are relative to a
+ * text segment. Every retained split path must use this projection. */
+function slicedTextMetadata(
+  seg: LayoutTextSeg,
+  start: number,
+  end: number,
+): Pick<LayoutTextSeg,
+  'punctuationCompressions' | 'noBreakRanges' | 'externalLinkBreakOffsets'
+> {
+  return {
+    punctuationCompressions: slicedPunctuationCompressions(seg, start, end),
+    noBreakRanges: slicedNoBreakRanges(seg, start, end),
+    externalLinkBreakOffsets: slicedExternalLinkBreakOffsets(seg, start, end),
+  };
+}
+
+function slicedExternalLinkBreakOffsets(
+  seg: LayoutTextSeg,
+  start: number,
+  end: number,
+): readonly number[] | undefined {
+  const sliced = seg.externalLinkBreakOffsets
+    ?.filter((offset) => offset > start && offset < end)
+    .map((offset) => offset - start);
   return sliced && sliced.length > 0 ? Object.freeze(sliced) : undefined;
 }
 
@@ -3117,11 +3214,14 @@ export function buildSegments(
         smallCaps: reduced,
         joinPrev: (
           (firstSeg && (
-            (r as DocxTextRun & { __noBreakBefore?: boolean }).__noBreakBefore === true
+            r.noBreakBefore === true
             || joinPreviousRun
           ))
           || gluePending
           || authoritativeSpan?.breakBefore === false
+        ) ? true : undefined,
+        hardJoinPrev: (
+          firstSeg && (r.noBreakBefore === true || joinPreviousRun)
         ) ? true : undefined,
         doubleStrikethrough: base.doubleStrikethrough ?? false,
         highlight: base.highlight ?? null,
@@ -3133,6 +3233,12 @@ export function buildSegments(
         border: r.border ?? null,
         ruby: firstSeg ? ruby : undefined,
         revision,
+        ...(revision && environment.showTrackedChanges === true ? {
+          trackChangesMarkup: {
+            kind: revision.kind,
+            authorColor: environment.revisionAuthorColor?.(revision.author) ?? '#C00000',
+          },
+        } : {}),
         rtl,
         digitsAsAN: digitsAsAN ? true : undefined,
         // §17.3.2.26 declared eastAsia axis — used by text-box line floors and
@@ -3143,7 +3249,8 @@ export function buildSegments(
         textBoxLineFloor: (r as DocxTextRun & { textBoxLineFloor?: boolean }).textBoxLineFloor,
         textBoxVertical: (r as DocxTextRun & { textBoxVertical?: boolean }).textBoxVertical,
         // IX1 — resolved hyperlink target of the originating run, for the
-        // text-layer clickable overlay. Does not affect layout or drawing.
+        // text-layer clickable overlay and URL-aware line-break opportunities.
+        // It does not change glyph measurement or drawing.
         hyperlink,
         snapToCharacterGrid: effectiveSnapToGrid !== false,
         // WD4 — run character metrics (§17.3.2.35 spacing / §17.3.2.43 w /
@@ -3277,20 +3384,23 @@ export function buildSegments(
 
   let joinNextVisibleText = false;
   for (const [runIndex, run] of runs.entries()) {
-    // ECMA-376 §17.13.5 final content projection: deleted (`w:del`,
+    // ECMA-376 §17.13.5 final view (the default): deleted (`w:del`,
     // §17.13.5.14) and moved-away (`w:moveFrom`, §17.13.5.22) content is not
     // part of the document's final state, so no segment is produced and line
-    // breaking/pagination see the accepted document state. Revision metadata
+    // breaking/pagination see the accepted document state. The markup view
+    // (`showTrackedChanges`) keeps every revision run visible so it can be
+    // decorated. Insertions/moveTo render in both views, and revision metadata
     // remains available through the parsed model for consumer-owned review UI.
     const runRevisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
     if (
-      runRevisionKind === 'deletion' || runRevisionKind === 'moveFrom'
+      environment.showTrackedChanges !== true
+      && (runRevisionKind === 'deletion' || runRevisionKind === 'moveFrom')
     ) {
       continue;
     }
     const joinFromPreviousNoBreakHyphen = joinNextVisibleText;
     joinNextVisibleText = run.type === 'text'
-      && (run as DocxTextRun & { __noBreakAfter?: boolean }).__noBreakAfter === true;
+      && (run as ParagraphTextBearingRun).noBreakAfter === true;
     const emittedStart = segs.length;
     if (run.type === 'text') {
       const t = run as unknown as DocxTextRun & { type: 'text' };
@@ -3518,6 +3628,130 @@ export function buildSegments(
     }
   }
 
+  // Project acquisition-owned no-break ranges through the display case
+  // transform and onto the single-font layout segments produced above.
+  for (const [runIndex, run] of runs.entries()) {
+    if (run.type !== 'text') continue;
+    const textRun = run as Extract<ParagraphTextBearingRun, { type: 'text' }>;
+    const sourceRanges = textRun.noBreakRanges;
+    if (!sourceRanges || sourceRanges.length === 0) continue;
+    const displayedRanges = sourceRanges.map((range) => {
+      const transformOffset = (offset: number) => {
+        const prefix = textRun.text.slice(0, offset);
+        return textRun.allCaps || textRun.smallCaps ? prefix.toUpperCase().length : prefix.length;
+      };
+      return { start: transformOffset(range.start), end: transformOffset(range.end) };
+    });
+    let displayedCursor = 0;
+    for (const candidate of segs) {
+      if (candidate.sourceRunIndex !== runIndex) continue;
+      if (!('text' in candidate)) {
+        if ('isTab' in candidate) displayedCursor += 1;
+        continue;
+      }
+      const segmentEnd = displayedCursor + candidate.text.length;
+      if (
+        displayedCursor > 0
+        && displayedRanges.some((range) =>
+          range.start === displayedCursor || range.end === displayedCursor)
+      ) {
+        candidate.joinPrev = true;
+        candidate.hardJoinPrev = true;
+      }
+      const local = displayedRanges
+        .filter((range) => range.start >= displayedCursor && range.end <= segmentEnd)
+        .map((range) => Object.freeze({
+          start: range.start - displayedCursor,
+          end: range.end - displayedCursor,
+        }));
+      if (local.length > 0) candidate.noBreakRanges = Object.freeze(local);
+      displayedCursor = segmentEnd;
+    }
+  }
+
+  // Project the registered `word-external-link-syntax-breaks` opportunities
+  // across the complete semantic link and all formatting seams first, then
+  // distribute them onto the existing segments.
+  // Segments stay intact unless a real overflow selects one of those offsets,
+  // preserving contextual shaping, decoration geometry, and paint identity on
+  // lines that do not wrap.
+  for (let groupStart = 0; groupStart < segs.length;) {
+    const first = segs[groupStart];
+    if (!('text' in first) || first.hyperlink?.kind !== 'external') {
+      groupStart += 1;
+      continue;
+    }
+    const target = first.hyperlink.url;
+    let groupEnd = groupStart;
+    const group: LayoutTextSeg[] = [];
+    while (groupEnd < segs.length) {
+      const candidate = segs[groupEnd];
+      if (
+        !('text' in candidate)
+        || candidate.hyperlink?.kind !== 'external'
+        || candidate.hyperlink.url !== target
+      ) break;
+      group.push(candidate);
+      groupEnd += 1;
+    }
+    const groupText = group.map((segment) => segment.text).join('');
+    const protectedOffsets = new Set<number>();
+    let cursor = 0;
+    for (const segment of group) {
+      for (const range of segment.noBreakRanges ?? []) {
+        const offsets = [range.start, range.end];
+        for (const offset of offsets) {
+          protectedOffsets.add(cursor + offset);
+        }
+      }
+      cursor += segment.text.length;
+    }
+    const legalOffsets = new Set<number>();
+    for (const match of groupText.matchAll(/\S+/gu)) {
+      const token = match[0];
+      const tokenStart = match.index;
+      const graphemeBoundaries = new Set(
+        graphemeClusterOffsets(token).map((offset) => tokenStart + offset),
+      );
+      const tokenProtected = new Set(
+        [...protectedOffsets]
+          .filter((offset) => offset > tokenStart && offset <= tokenStart + token.length)
+          .map((offset) => offset - tokenStart),
+      );
+      const tokenGraphemes = new Set(
+        [...graphemeBoundaries].map((offset) => offset - tokenStart),
+      );
+      for (const offset of wordExternalLinkSyntaxBreakOffsets(
+        token,
+        tokenGraphemes,
+        tokenProtected,
+      )) legalOffsets.add(tokenStart + offset);
+    }
+    if (legalOffsets.size === 0) {
+      groupStart = groupEnd;
+      continue;
+    }
+    cursor = 0;
+    for (let index = 0; index < group.length; index += 1) {
+      const segment = group[index]!;
+      const segmentStart = cursor;
+      const segmentEnd = segmentStart + segment.text.length;
+      const localBreaks = [...legalOffsets]
+        .filter((offset) => offset > segmentStart && offset < segmentEnd)
+        .map((offset) => offset - segmentStart)
+        .sort((a, b) => a - b);
+      if (localBreaks.length > 0) {
+        segment.externalLinkBreakOffsets = Object.freeze(localBreaks);
+      }
+      if (index > 0 && legalOffsets.has(segmentStart)) {
+        segment.joinPrev = undefined;
+        segment.externalLinkBreakBefore = true;
+      }
+      cursor = segmentEnd;
+    }
+    groupStart = groupEnd;
+  }
+
   if (environment.balanceSingleByteDoubleByteWidth) {
     // ECMA-376 §17.15.3.3 normatively requests a 1:2 SBCS/DBCS width balance,
     // but does not define how a proportional inter-word separator becomes a
@@ -3667,7 +3901,12 @@ export function buildSegments(
   // false means unsupported/deferred, never "break allowed".
   for (let i = 1; i < segs.length; i++) {
     const cur = segs[i];
-    if (!('text' in cur) || cur.joinPrev || cur.text.length === 0) continue;
+    if (
+      !('text' in cur)
+      || cur.joinPrev
+      || cur.externalLinkBreakBefore
+      || cur.text.length === 0
+    ) continue;
     const prev = segs[i - 1];
     if (!('text' in prev) || prev.text.length === 0) continue;
 
@@ -4507,7 +4746,9 @@ export function layoutLines(
     // layout kinsoku set (§17.15.1.58–.60) drops positions that would orphan a
     // forbidden char at a line head/tail, replacing the CJK path's retract.
     if ('text' in seg && containsSeaScript(seg.text)) {
-      seg.seaBreaks = seaMixedBreakOffsets(seg.text, { cjk: true, kinsoku });
+      const protectedOffsets = protectedNoBreakOffsets(seg);
+      seg.seaBreaks = seaMixedBreakOffsets(seg.text, { cjk: true, kinsoku })
+        .filter((offset) => !protectedOffsets.has(offset));
     }
     return seg;
   });
@@ -4530,11 +4771,12 @@ export function layoutLines(
                 text,
                 measuredWidth: 0,
                 src: { ...startBoundary },
-                punctuationCompressions: slicedPunctuationCompressions(
-                  first,
-                  startBoundary.charOffset,
-                  first.text.length,
-                ),
+                // A retained resume boundary has already consumed the source
+                // seam. Carrying either marker would invent new ownership at
+                // the start of this suffix.
+                joinPrev: undefined,
+                hardJoinPrev: undefined,
+                ...slicedTextMetadata(first, startBoundary.charOffset, first.text.length),
                 // Rebase the SEA break offsets onto the resumed (sliced) text so
                 // a paginated Thai paragraph still breaks at word boundaries.
                 seaBreaks: rebaseSeaBreaks(first.seaBreaks, startBoundary.charOffset),
@@ -4880,7 +5122,7 @@ export function layoutLines(
       ...RESET_SLICED_TEXT_MEASUREMENT,
       text: hangingText,
       measuredWidth: 0,
-      punctuationCompressions: slicedPunctuationCompressions(follower, 0, 1),
+      ...slicedTextMetadata(follower, 0, hangingText.length),
     };
     const followerBox = textSegmentBox(hangingSegment);
     hangingSegment.measuredWidth = followerBox.width;
@@ -4899,11 +5141,8 @@ export function layoutLines(
         text: remainder,
         measuredWidth: 0,
         joinPrev: undefined,
-        punctuationCompressions: slicedPunctuationCompressions(
-          follower,
-          hangingText.length,
-          follower.text.length,
-        ),
+        hardJoinPrev: undefined,
+        ...slicedTextMetadata(follower, hangingText.length, follower.text.length),
         src: follower.src
           ? {
               segIndex: follower.src.segIndex,
@@ -4997,6 +5236,225 @@ export function layoutLines(
       ? (wrapCtx?.paragraphMarkLineStartWidth ?? minLineStartWidth())
       : minLineStartWidth(),
   );
+
+  /**
+   * Return the widest grapheme-safe UTF-16 prefix that fits an emergency
+   * break band. This is the single authority used whether the overlong token
+   * starts on an empty line or consumes the useful remainder of the current
+   * line. Keeping both cases here prevents measurement and retained paint
+   * partitions from drifting apart.
+   */
+  const emergencyTextSplit = (
+    segment: LayoutTextSeg,
+    available: number,
+    forceAtLeastOne = true,
+  ): number => {
+    const protectedOffsets = protectedNoBreakOffsets(segment);
+    const graphemeOffsets = [
+      0,
+      ...graphemeClusterOffsets(segment.text),
+      segment.text.length,
+    ].filter((offset, index, all) => all.indexOf(offset) === index);
+    let split = 0;
+    if (available > 0) {
+      const monotoneAllocation = charSpacingDeltaPx(segment, scale) >= 0
+        && snapToCharsClass(segment, characterGrid) !== 'latin';
+      if (monotoneAllocation) {
+        setMeasureFont(buildFont(
+          segment.bold,
+          segment.italic,
+          effectiveFontPx(segment),
+          segment.fontFamily,
+          fontFamilyClasses,
+          segment.fontRoute,
+        ));
+        const prevKern = setSegKerning(segment);
+        try {
+          const fitted = fitCJKPrefix(
+            ctx,
+            segment.text,
+            available,
+            segmentCharacterGridDeltaPx(segment, characterGrid, scale),
+            charScaleFactor(segment),
+            charSpacingDeltaPx(segment, scale),
+            segment.verticalRun === true,
+            verticalGlyphMeasurement,
+            (prefix) => strAdvance(segment, prefix),
+          ).length;
+          split = graphemeOffsets
+            .filter((offset) => offset <= fitted && !protectedOffsets.has(offset))
+            .at(-1) ?? 0;
+        } finally {
+          restoreKerning(prevKern);
+        }
+      } else {
+        // Signed spacing and a Latin snap block can make prefix advances
+        // non-monotone. Evaluate every legal retained candidate against the
+        // exact prospective line block rather than binary-searching a
+        // standalone approximation.
+        for (const offset of graphemeOffsets) {
+          if (offset <= 0 || protectedOffsets.has(offset)) continue;
+          const natural = strNaturalAdvance(segment, segment.text.slice(0, offset));
+          if (prospectiveSnapAdvance(segment, natural) <= available + 1e-9) split = offset;
+        }
+      }
+    }
+    if (split <= 0 && forceAtLeastOne) {
+      split = graphemeOffsets.find((offset) => offset > 0 && !protectedOffsets.has(offset))
+        ?? segment.text.length;
+    }
+    // Preserve the existing JLReq/Word line-end hanging rule after switching
+    // the emergency splitter from code-point indexes to UTF-16 grapheme offsets.
+    while (segment.text.startsWith('\u3000', split)) split += 1;
+    return split;
+  };
+
+  /** Select the last semantic URL candidate that fits the prospective band.
+   * Every candidate is evaluated independently: signed character spacing can
+   * make prefix advances non-monotone, and snapToChars must include the current
+   * line's active script block rather than treating the prefix in isolation. */
+  const externalLinkSyntaxSplit = (
+    segment: LayoutTextSeg,
+    available: number,
+  ): number => {
+    if (!(available > 0) || !segment.externalLinkBreakOffsets?.length) return 0;
+    let selected = 0;
+    for (const offset of segment.externalLinkBreakOffsets) {
+      if (offset <= 0 || offset >= segment.text.length) continue;
+      const naturalAdvance = strNaturalAdvance(segment, segment.text.slice(0, offset));
+      const prospectiveAdvance = prospectiveSnapAdvance(segment, naturalAdvance);
+      if (prospectiveAdvance <= available + 1e-9) selected = offset;
+    }
+    return selected;
+  };
+
+  const queueEmergencyTail = (segment: LayoutTextSeg, split: number): void => {
+    queue.unshift({
+      ...segment,
+      ...RESET_SLICED_TEXT_MEASUREMENT,
+      text: segment.text.slice(split),
+      ...slicedTextMetadata(segment, split, segment.text.length),
+      seaBreaks: rebaseSeaBreaks(segment.seaBreaks, split),
+      measuredWidth: 0,
+      // The emergency split itself is now the legal line boundary. A source-
+      // boundary glue marker protects only the first retained prefix; carrying
+      // it onto the tail would make the next line overflow again.
+      joinPrev: undefined,
+      hardJoinPrev: undefined,
+      src: {
+        segIndex: segment.src!.segIndex,
+        charOffset: segment.src!.charOffset + split,
+      },
+    });
+  };
+
+  type CrossRunKinsokuRetraction =
+    | { readonly kind: 'none' }
+    | { readonly kind: 'blocked' }
+    | { readonly kind: 'retracted'; readonly tail: LayoutTextSeg };
+
+  /**
+   * Move a legal suffix of the current line ahead of a segment whose first
+   * glyph is forbidden at line start. This is the single cross-run 追い出し
+   * authority for both the CJK and SEA overflow paths.
+   *
+   * A source seam marked by `hardJoinPrev` is indivisible: moving the complete
+   * following segment would strand its owner on the previous line. Likewise,
+   * a split at either edge of an authored no-break range is not legal. When
+   * either constraint blocks retraction, the caller must keep the forbidden
+   * leader on the current line instead of weakening the authored constraint.
+   */
+  const retractCurrentLineForLeadingKinsoku = (
+    next: LayoutTextSeg,
+  ): CrossRunKinsokuRetraction => {
+    const firstCp = next.text.codePointAt(0);
+    const lastSeg = currentLine[currentLine.length - 1];
+    if (
+      firstCp === undefined
+      || !kinsoku.lineStartForbidden.has(firstCp)
+      || lastSeg === undefined
+      || !('text' in lastSeg)
+    ) {
+      return { kind: 'none' };
+    }
+
+    const lastText = lastSeg as LayoutTextSeg;
+    const chars = [...lastText.text];
+    const minKeep = currentLine.length > 1 ? 0 : 1;
+    const retractCount = crossRunKinsokuRetract(chars, kinsoku, minKeep);
+    if (retractCount <= 0) return { kind: 'none' };
+
+    const headText = chars.slice(0, chars.length - retractCount).join('');
+    const split = headText.length;
+    // Moving the whole segment would cut the hard source seam immediately
+    // before it. A protected no-break edge is equally indivisible.
+    if (
+      (split === 0 && lastText.hardJoinPrev === true)
+      || protectedNoBreakOffsets(lastText).has(split)
+    ) {
+      return { kind: 'blocked' };
+    }
+
+    const tailText = lastText.text.slice(split);
+    const tail: LayoutTextSeg = {
+      ...lastText,
+      ...RESET_SLICED_TEXT_MEASUREMENT,
+      text: tailText,
+      ...slicedTextMetadata(lastText, split, lastText.text.length),
+      measuredWidth: strAdvance(lastText, tailText, true),
+      // The retraction creates a real line boundary. The old source seam was
+      // either retained in `headText` or was soft; it must not be projected
+      // onto this newly-created suffix.
+      joinPrev: undefined,
+      hardJoinPrev: undefined,
+      src: {
+        segIndex: lastText.src!.segIndex,
+        charOffset: lastText.src!.charOffset + split,
+      },
+      seaBreaks: rebaseSeaBreaks(lastText.seaBreaks, split),
+    };
+
+    if (headText) {
+      const headW = strAdvance(lastText, headText);
+      currentWidth -= lastText.measuredWidth - headW;
+      currentLine[currentLine.length - 1] = {
+        ...lastText,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
+        text: headText,
+        measuredWidth: headW,
+        ...slicedTextMetadata(lastText, 0, split),
+      };
+    } else {
+      currentWidth -= lastText.measuredWidth;
+      currentLine.pop();
+    }
+    return { kind: 'retracted', tail };
+  };
+
+  /** Keep one otherwise-forbidden line-start grapheme with the current line.
+   * This is the only legal fallback when cross-run retraction would split an
+   * authored hard/no-break group. Reprocessing the tail repeats the rule for a
+   * sequence of forbidden leaders while guaranteeing grapheme-safe progress. */
+  const keepLeadingKinsokuWithCurrentLine = (
+    segment: LayoutTextSeg,
+    h: number,
+    asc: number,
+    desc: number,
+  ): boolean => {
+    const firstEnd = graphemeClusterOffsets(segment.text)[0] ?? segment.text.length;
+    if (firstEnd <= 0) return false;
+    const prefix = segment.text.slice(0, firstEnd);
+    const prefixWidth = strNaturalAdvance(segment, prefix);
+    addToLine({
+      ...segment,
+      ...RESET_SLICED_TEXT_MEASUREMENT,
+      text: prefix,
+      measuredWidth: prefixWidth,
+      ...slicedTextMetadata(segment, 0, firstEnd),
+    }, prefixWidth, h, asc, desc);
+    if (firstEnd < segment.text.length) queueEmergencyTail(segment, firstEnd);
+    return true;
+  };
 
   while (queue.length > 0) {
     const seg = queue.shift()!;
@@ -5274,11 +5732,7 @@ export function layoutLines(
         paragraphFinalIdeographicSpaceCount: undefined,
         paragraphFinalIdeographicSpaceTailStart: undefined,
         measuredWidth: 0,
-        punctuationCompressions: slicedPunctuationCompressions(
-          s,
-          0,
-          visibleBeforeParagraphFinalTail.length,
-        ),
+        ...slicedTextMetadata(s, 0, visibleBeforeParagraphFinalTail.length),
       };
       const trailingSegment: LayoutTextSeg = {
         ...s,
@@ -5286,13 +5740,10 @@ export function layoutLines(
         text: s.text.slice(visibleBeforeParagraphFinalTail.length),
         paragraphFinalIdeographicSpaceLocalCount,
         joinPrev: undefined,
+        hardJoinPrev: undefined,
         paragraphFinalIdeographicSpaceTailStart: true,
         measuredWidth: 0,
-        punctuationCompressions: slicedPunctuationCompressions(
-          s,
-          visibleBeforeParagraphFinalTail.length,
-          s.text.length,
-        ),
+        ...slicedTextMetadata(s, visibleBeforeParagraphFinalTail.length, s.text.length),
         src: s.src
           ? {
               segIndex: s.src.segIndex,
@@ -5436,10 +5887,16 @@ export function layoutLines(
       !s.joinPrev &&
       currentLine.length > 0 &&
       (queue[0] as LayoutTextSeg | undefined)?.joinPrev &&
-      !hasCJKBreakOpportunity(s.text) &&
+      (
+        (queue[0] as LayoutTextSeg | undefined)?.hardJoinPrev === true
+        || !hasCJKBreakOpportunity(s.text)
+      ) &&
       // A SEA (Thai/Lao/Khmer) lead with usable word breaks is NOT atomic — the
       // run splits at a dictionary boundary (issue #797), mirroring the CJK gate.
-      !(s.seaBreaks && s.seaBreaks.length > 0)
+      (
+        (queue[0] as LayoutTextSeg | undefined)?.hardJoinPrev === true
+        || !(s.seaBreaks && s.seaBreaks.length > 0)
+      )
     ) {
       let groupW = w;
       let groupTrail = trailingSpaceW;
@@ -5458,6 +5915,31 @@ export function layoutLines(
       };
       for (; groupEnd < queue.length && (queue[groupEnd] as LayoutTextSeg).joinPrev; groupEnd++) {
         const f = queue[groupEnd] as LayoutTextSeg;
+        const hardPrefixEnd = hardJoinPrefixEnd(f);
+        if (hardPrefixEnd !== undefined) {
+          const prefix = f.text.slice(0, hardPrefixEnd);
+          const prefixWidth = strAdvance(f, prefix);
+          groupW += prefixWidth;
+          advanceGroupBias(f, prefix);
+          noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
+          groupTrail = prefix.endsWith(' ')
+            ? prefixWidth - strAdvance(f, prefix.replace(/ +$/, ''))
+            : 0;
+          // A whole hard member can lead into another hard member. Otherwise
+          // the first legal boundary after the seam ends the atomic prefix.
+          if (hardPrefixEnd < f.text.length) break;
+          continue;
+        }
+        const firstExternalBreak = f.externalLinkBreakOffsets?.[0];
+        if (firstExternalBreak !== undefined) {
+          const prefix = f.text.slice(0, firstExternalBreak);
+          const prefixWidth = strAdvance(f, prefix);
+          groupW += prefixWidth;
+          advanceGroupBias(f, prefix);
+          noteMeasurementRoute(groupMeasurementRoutes, f, prefix);
+          groupTrail = 0;
+          break;
+        }
         // A CJK-BREAKABLE follower (e.g. "Roman" + "、あるいは…用いる。") is NOT
         // atomic: only its LEADING run of line-start-forbidden chars would orphan
         // at a line head (UAX#14 LB13 / §17.3.1.16); the rest splits at an
@@ -5606,7 +6088,11 @@ export function layoutLines(
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc, trailingSpaceW);
       appendQueuedIdeographicSpaceSegment(s);
-    } else if (hasCJKBreakOpportunity(s.text) && s.seaBreaks === undefined) {
+    } else if (
+      hasCJKBreakOpportunity(s.text)
+      && s.seaBreaks === undefined
+      && s.hardJoinPrev !== true
+    ) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail.
       // A segment that ALSO contains SEA (a mixed CJK+SEA `<w:cs/>` run) is routed
       // to the SEA branch below instead — its `seaBreaks` already merges the CJK
@@ -5616,8 +6102,6 @@ export function layoutLines(
       //  separate: it sums per-char advances, whereas this path uses substring
       //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
       const available = availW() - currentWidth;
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
-      const prevKern = setSegKerning(s);
       let rawPrefix = '';
       const maximumIdeographicSpaceHang = paragraphFinalIdeographicSpaceTail
         ? wordIdeographicSpaceLineEndAllowanceCount(
@@ -5625,21 +6109,31 @@ export function layoutLines(
             s.paragraphFinalIdeographicSpaceCount ?? 0,
           )
         : Number.POSITIVE_INFINITY;
-      try {
-        rawPrefix = available > 0 ? fitCJKPrefix(
-          ctx,
-          s.text,
-          available,
-          segmentCharacterGridDeltaPx(s, characterGrid, scale),
-          charScaleFactor(s),
-          charSpacingDeltaPx(s, scale),
-          s.verticalRun === true,
-          verticalGlyphMeasurement,
-          (prefix) => strAdvance(s, prefix),
-          maximumIdeographicSpaceHang,
-        ) : '';
-      } finally {
-        restoreKerning(prevKern);
+      if (available > 0) {
+        const nonMonotoneAllocation = charSpacingDeltaPx(s, scale) < 0
+          || snapToCharsClass(s, characterGrid) === 'latin';
+        if (nonMonotoneAllocation) {
+          rawPrefix = s.text.slice(0, emergencyTextSplit(s, available, false));
+        } else {
+          setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
+          const prevKern = setSegKerning(s);
+          try {
+            rawPrefix = fitCJKPrefix(
+              ctx,
+              s.text,
+              available,
+              segmentCharacterGridDeltaPx(s, characterGrid, scale),
+              charScaleFactor(s),
+              charSpacingDeltaPx(s, scale),
+              s.verticalRun === true,
+              verticalGlyphMeasurement,
+              (prefix) => strAdvance(s, prefix),
+              maximumIdeographicSpaceHang,
+            );
+          } finally {
+            restoreKerning(prevKern);
+          }
+        }
       }
       // Apply kinsoku to the break position: retract leftwards so the tail
       // never begins with a 行頭禁則 char and the head never ends with a
@@ -5661,14 +6155,16 @@ export function layoutLines(
         && wordIsOverflowPunctuation(allChars[rawSplit], s.eastAsiaLanguage)
           ? rawSplit + 1
           : null;
-      const split = extendThroughTrailingIdeographicSpaces(
+      const proposedSplit = extendThroughTrailingIdeographicSpaces(
         allChars,
         hangingSplit ?? kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, minSplit),
         paragraphFinalIdeographicSpaceTail && maximumIdeographicSpaceHang === 0
           ? 0
           : maximumIdeographicSpaceHang,
       );
-      const prefix = allChars.slice(0, split).join('');
+      const proposedPrefix = allChars.slice(0, proposedSplit).join('').length;
+      const protectedSplit = legalTextSplitAtOrBefore(s, proposedPrefix, minSplit > 0 ? 1 : 0);
+      const prefix = s.text.slice(0, protectedSplit);
       if (prefix.length > 0) {
         // Grid advance for the head piece — the same model as the line box / draw.
         const pw = strNaturalAdvance(s, prefix);
@@ -5677,7 +6173,7 @@ export function layoutLines(
           ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
+          ...slicedTextMetadata(s, 0, prefix.length),
         };
         addToLine(headSeg, pw, h, asc, desc);
         const tail = s.text.slice(prefix.length);
@@ -5686,11 +6182,7 @@ export function layoutLines(
             ...s,
             ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
-            punctuationCompressions: slicedPunctuationCompressions(
-              s,
-              prefix.length,
-              s.text.length,
-            ),
+            ...slicedTextMetadata(s, prefix.length, s.text.length),
             measuredWidth: 0,
             src: {
               segIndex: s.src!.segIndex,
@@ -5707,58 +6199,14 @@ export function layoutLines(
         // text segment down so they lead the next line ahead of `s` — cross-run
         // 追い出し (§17.3.1.16). See crossRunKinsokuRetract for the bounded,
         // re-validating, whitespace-guarded retraction count.
-        let retracted: LayoutTextSeg | null = null;
-        const sFirstCp = s.text.codePointAt(0);
-        const lastSeg = currentLine[currentLine.length - 1];
-        if (sFirstCp !== undefined && kinsoku.lineStartForbidden.has(sFirstCp) && 'text' in lastSeg) {
-          const lastText = lastSeg as LayoutTextSeg;
-          const chars = [...lastText.text];
-          const minKeep = currentLine.length > 1 ? 0 : 1;
-          const k = crossRunKinsokuRetract(chars, kinsoku, minKeep);
-          if (k > 0) {
-            const headText = chars.slice(0, chars.length - k).join('');
-            const tailText = chars.slice(chars.length - k).join('');
-            retracted = {
-              ...lastText,
-              ...RESET_SLICED_TEXT_MEASUREMENT,
-              text: tailText,
-              punctuationCompressions: slicedPunctuationCompressions(
-                lastText,
-                headText.length,
-                lastText.text.length,
-              ),
-              measuredWidth: strAdvance(lastText, tailText, true),
-              src: {
-                segIndex: lastText.src!.segIndex,
-                charOffset: lastText.src!.charOffset + headText.length,
-              },
-            };
-            if (headText) {
-              const headW = strAdvance(lastText, headText);
-              currentWidth -= lastText.measuredWidth - headW;
-              currentLine[currentLine.length - 1] = {
-                ...lastText,
-                ...RESET_SLICED_TEXT_MEASUREMENT,
-                text: headText,
-                measuredWidth: headW,
-                punctuationCompressions: slicedPunctuationCompressions(
-                  lastText,
-                  0,
-                  headText.length,
-                ),
-              };
-            } else {
-              // Whole last segment moves down. Line metrics (ascent/descent) are
-              // not recomputed; the retracted graphemes share the line's font in
-              // practice, so the flushed box height is unaffected.
-              currentWidth -= lastText.measuredWidth;
-              currentLine.pop();
-            }
-          }
+        const retraction = retractCurrentLineForLeadingKinsoku(s);
+        if (retraction.kind === 'blocked') {
+          keepLeadingKinsokuWithCurrentLine(s, h, asc, desc);
+          continue;
         }
-        flush(undefined, false, retracted?.src ?? s.src);
+        flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
         queue.unshift(s);
-        if (retracted) queue.unshift(retracted);
+        if (retraction.kind === 'retracted') queue.unshift(retraction.tail);
       } else {
         // Empty line and not even one char fits — force-fit one char to guarantee progress
         const forcedChars = [...s.text];
@@ -5774,7 +6222,10 @@ export function layoutLines(
                 : Number.POSITIVE_INFINITY,
             )
           : 0;
-        const firstChar = forcedChars.slice(0, forcedSplit).join('');
+        const forcedUtf16 = forcedChars.slice(0, forcedSplit).join('').length;
+        const legalForcedUtf16 = legalTextSplitAtOrBefore(s, forcedUtf16)
+          || emergencyTextSplit(s, availW(), true);
+        const firstChar = s.text.slice(0, legalForcedUtf16);
         if (firstChar) {
           const fw = strNaturalAdvance(s, firstChar);
           const headSeg: LayoutTextSeg = {
@@ -5782,7 +6233,7 @@ export function layoutLines(
             ...RESET_SLICED_TEXT_MEASUREMENT,
             text: firstChar,
             measuredWidth: fw,
-            punctuationCompressions: slicedPunctuationCompressions(s, 0, firstChar.length),
+            ...slicedTextMetadata(s, 0, firstChar.length),
           };
           addToLine(headSeg, fw, h, asc, desc);
           const tail = s.text.slice(firstChar.length);
@@ -5791,11 +6242,7 @@ export function layoutLines(
               ...s,
               ...RESET_SLICED_TEXT_MEASUREMENT,
               text: tail,
-              punctuationCompressions: slicedPunctuationCompressions(
-                s,
-                firstChar.length,
-                s.text.length,
-              ),
+              ...slicedTextMetadata(s, firstChar.length, s.text.length),
               measuredWidth: 0,
               src: {
                 segIndex: s.src!.segIndex,
@@ -5807,7 +6254,7 @@ export function layoutLines(
           }
         }
       }
-    } else if (s.seaBreaks !== undefined) {
+    } else if (s.seaBreaks !== undefined && s.hardJoinPrev !== true) {
       // No-inter-word-space line wrap: Thai/Lao/Khmer dictionary words (#797) or
       // Myanmar/Tibetan grapheme clusters (#961). This ONE segment is a whole run;
       // break it only at a member of `s.seaBreaks` — the UNION (#960) of the
@@ -5827,7 +6274,9 @@ export function layoutLines(
       // Grapheme-fill runs (Myanmar/Tibetan) have DENSE offsets (one per cluster),
       // so use the monotone binary-search fit — a per-line full scan would be O(n²)
       // down a long run. Dictionary runs keep the negative-spacing-safe full scan.
-      const monotone = isGraphemeFillText(s.text);
+      const monotone = isGraphemeFillText(s.text)
+        && charSpacingDeltaPx(s, scale) >= 0
+        && snapToCharsClass(s, characterGrid) !== 'latin';
       const split = fitSeaWordPrefix(s.text, s.seaBreaks, 0, available, measureSub, monotone);
       if (split > 0) {
         const prefix = s.text.slice(0, split);
@@ -5837,7 +6286,7 @@ export function layoutLines(
           ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
+          ...slicedTextMetadata(s, 0, prefix.length),
         }, pw, h, asc, desc);
         const tail = s.text.slice(split);
         if (tail) {
@@ -5845,11 +6294,7 @@ export function layoutLines(
             ...s,
             ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
-            punctuationCompressions: slicedPunctuationCompressions(
-              s,
-              split,
-              s.text.length,
-            ),
+            ...slicedTextMetadata(s, split, s.text.length),
             measuredWidth: 0,
             src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + split },
             seaBreaks: rebaseSeaBreaks(s.seaBreaks, split),
@@ -5863,56 +6308,14 @@ export function layoutLines(
         // segment-initial char), pull trailing graphemes of the current line's
         // last text segment down so they lead ahead of `s` — the same cross-run
         // 追い出し (§17.3.1.16) the CJK branch does.
-        let retracted: LayoutTextSeg | null = null;
-        const sFirstCp = s.text.codePointAt(0);
-        const lastSeg = currentLine[currentLine.length - 1];
-        if (sFirstCp !== undefined && kinsoku.lineStartForbidden.has(sFirstCp) && 'text' in lastSeg) {
-          const lastText = lastSeg as LayoutTextSeg;
-          const chars = [...lastText.text];
-          const minKeep = currentLine.length > 1 ? 0 : 1;
-          const k = crossRunKinsokuRetract(chars, kinsoku, minKeep);
-          if (k > 0) {
-            const headText = chars.slice(0, chars.length - k).join('');
-            const tailText = chars.slice(chars.length - k).join('');
-            retracted = {
-              ...lastText,
-              ...RESET_SLICED_TEXT_MEASUREMENT,
-              text: tailText,
-              punctuationCompressions: slicedPunctuationCompressions(
-                lastText,
-                headText.length,
-                lastText.text.length,
-              ),
-              measuredWidth: strAdvance(lastText, tailText, true),
-              src: {
-                segIndex: lastText.src!.segIndex,
-                charOffset: lastText.src!.charOffset + headText.length,
-              },
-              seaBreaks: rebaseSeaBreaks(lastText.seaBreaks, headText.length),
-            };
-            if (headText) {
-              const headW = strAdvance(lastText, headText);
-              currentWidth -= lastText.measuredWidth - headW;
-              currentLine[currentLine.length - 1] = {
-                ...lastText,
-                ...RESET_SLICED_TEXT_MEASUREMENT,
-                text: headText,
-                measuredWidth: headW,
-                punctuationCompressions: slicedPunctuationCompressions(
-                  lastText,
-                  0,
-                  headText.length,
-                ),
-              };
-            } else {
-              currentWidth -= lastText.measuredWidth;
-              currentLine.pop();
-            }
-          }
+        const retraction = retractCurrentLineForLeadingKinsoku(s);
+        if (retraction.kind === 'blocked') {
+          keepLeadingKinsokuWithCurrentLine(s, h, asc, desc);
+          continue;
         }
-        flush(undefined, false, retracted?.src ?? s.src);
+        flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
         queue.unshift(s);
-        if (retracted) queue.unshift(retracted);
+        if (retraction.kind === 'retracted') queue.unshift(retraction.tail);
       } else {
         // Empty line and the first dictionary word is wider than the whole
         // column: emergency GRAPHEME-safe split (a code-point split would tear a
@@ -5922,6 +6325,8 @@ export function layoutLines(
         const graphemes = graphemeClusterOffsets(firstWord);
         let gsplit = fitSeaWordPrefix(firstWord, graphemes, 0, available, measureSub, monotone);
         if (gsplit <= 0) gsplit = graphemes.length > 0 ? graphemes[0] : firstWord.length;
+        gsplit = legalTextSplitAtOrBefore(s, gsplit)
+          || emergencyTextSplit(s, available, true);
         const prefix = s.text.slice(0, gsplit);
         const pw = strNaturalAdvance(s, prefix);
         addToLine({
@@ -5929,7 +6334,7 @@ export function layoutLines(
           ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
+          ...slicedTextMetadata(s, 0, prefix.length),
         }, pw, h, asc, desc);
         const tail = s.text.slice(gsplit);
         if (tail) {
@@ -5937,11 +6342,7 @@ export function layoutLines(
             ...s,
             ...RESET_SLICED_TEXT_MEASUREMENT,
             text: tail,
-            punctuationCompressions: slicedPunctuationCompressions(
-              s,
-              gsplit,
-              s.text.length,
-            ),
+            ...slicedTextMetadata(s, gsplit, s.text.length),
             measuredWidth: 0,
             src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + gsplit },
             seaBreaks: rebaseSeaBreaks(s.seaBreaks, gsplit),
@@ -5953,33 +6354,7 @@ export function layoutLines(
       // than a full line, fit the widest character prefix (at least one
       // character), draw it, and re-queue the remainder. Segments are already
       // space-delimited, so this cannot bypass an ordinary space opportunity.
-      const available = availW();
-      setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses, s.fontRoute));
-      const prevKern = setSegKerning(s);
-      let fittedUtf16 = 0;
-      try {
-        fittedUtf16 = available > 0
-          ? fitCJKPrefix(
-              ctx,
-              s.text,
-              available,
-              segmentCharacterGridDeltaPx(s, characterGrid, scale),
-              charScaleFactor(s),
-              charSpacingDeltaPx(s, scale),
-              s.verticalRun === true,
-              verticalGlyphMeasurement,
-              (prefix) => strAdvance(s, prefix),
-            ).length
-          : 0;
-      } finally {
-        restoreKerning(prevKern);
-      }
-      const graphemeOffsets = [0, ...graphemeClusterOffsets(s.text), s.text.length];
-      let split = graphemeOffsets.filter((offset) => offset <= fittedUtf16).at(-1) ?? 0;
-      if (split <= 0) split = graphemeOffsets[1] ?? s.text.length;
-      // Preserve the existing JLReq/Word line-end hanging rule after switching
-      // the emergency splitter from code-point indexes to UTF-16 grapheme offsets.
-      while (s.text.startsWith('\u3000', split)) split += 1;
+      const split = externalLinkSyntaxSplit(s, availW()) || emergencyTextSplit(s, availW());
       if (split >= s.text.length) {
         // The visible glyphs actually fit (only a trailing space pushed it over the
         // fit test) — place the word whole.
@@ -5993,26 +6368,49 @@ export function layoutLines(
           ...RESET_SLICED_TEXT_MEASUREMENT,
           text: prefix,
           measuredWidth: pw,
-          punctuationCompressions: slicedPunctuationCompressions(s, 0, prefix.length),
+          ...slicedTextMetadata(s, 0, prefix.length),
         }, pw, h, asc, desc);
-        queue.unshift({
-          ...s,
-          ...RESET_SLICED_TEXT_MEASUREMENT,
-          text: s.text.slice(split),
-          punctuationCompressions: slicedPunctuationCompressions(
-            s,
-            split,
-            s.text.length,
-          ),
-          measuredWidth: 0,
-          src: {
-            segIndex: s.src!.segIndex,
-            charOffset: s.src!.charOffset + prefix.length,
-          },
-        });
+        queueEmergencyTail(s, split);
       }
     } else {
+      const semanticSplit = externalLinkSyntaxSplit(
+        s,
+        availW() + shrinkBudget - currentWidth,
+      );
+      if (semanticSplit > 0 && semanticSplit < s.text.length) {
+        const prefix = s.text.slice(0, semanticSplit);
+        const pw = strNaturalAdvance(s, prefix);
+        addToLine({
+          ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
+          text: prefix,
+          measuredWidth: pw,
+          ...slicedTextMetadata(s, 0, prefix.length),
+        }, pw, h, asc, desc);
+        queueEmergencyTail(s, semanticSplit);
+        continue;
+      }
       if (s.joinPrev) {
+        // LB14 and the other UAX glue rules prohibit a line boundary at this
+        // source seam. If the complete glued group is wider than the fresh
+        // line, split this member at the widest legal grapheme boundary that
+        // fits the actual remaining band. This bases the decision on the group
+        // advance, not on the follower's standalone width.
+        const remaining = availW() - currentWidth;
+        const split = emergencyTextSplit(s, remaining, true);
+        if ((remaining > 0 || s.hardJoinPrev === true) && split > 0 && split < s.text.length) {
+          const prefix = s.text.slice(0, split);
+          const pw = strNaturalAdvance(s, prefix);
+          addToLine({
+            ...s,
+            ...RESET_SLICED_TEXT_MEASUREMENT,
+            text: prefix,
+            measuredWidth: pw,
+            ...slicedTextMetadata(s, 0, prefix.length),
+          }, pw, h, asc, desc);
+          queueEmergencyTail(s, split);
+          continue;
+        }
         // A scalar span that continues the preceding grapheme (or another
         // explicitly glued piece) may overflow a pathological narrow line, but
         // it must never become a new line head and tear the cluster.

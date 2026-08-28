@@ -38,9 +38,10 @@ export function _resetFontRegistryForTests(): void {
 }
 
 /** Result of {@link retainFace}: the shared `FontFace` this caller now holds a
- *  reference to, and whether THIS call created it (so the caller knows it must
- *  force-`load()` the face — an already-shared face was loaded by its first
- *  holder). */
+ *  reference to, and whether THIS call created it. Loaders may use `isNew` to
+ *  avoid redundant work where their failure semantics permit it; loaders that
+ *  must observe an in-flight shared load can call idempotent `FontFace.load()`
+ *  for both new and reused registrations. */
 export interface RetainResult {
   face: FontFace;
   /** `true` when this retain created + added the face (first holder); `false`
@@ -52,11 +53,10 @@ export interface RetainResult {
  * Retain a shared FontFace for `sig` in `set`, bumping its refcount.
  *
  * - First holder of `sig` (in this set): `create()` builds the `FontFace`, it is
- *   added to the set, and `{ face, isNew: true }` is returned — the caller must
- *   force-`load()` it.
+ *   added to the set, and `{ face, isNew: true }` is returned.
  * - A later holder of the same `sig`: the existing shared face is reused, its
- *   refcount bumped, and `{ face, isNew: false }` returned — already loaded by
- *   the first holder, so the caller skips the load.
+ *   refcount bumped, and `{ face, isNew: false }` returned. The face may still
+ *   be loading if two holders registered concurrently.
  *
  * A signature whose registration lives in a DIFFERENT set (e.g. a stale
  * cross-context collision) is treated as absent: a fresh registration replaces

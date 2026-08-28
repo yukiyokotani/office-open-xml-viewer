@@ -7,6 +7,43 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.83.0 — 2026-08-28
+
+Minor release making large Word documents and PowerPoint presentations useful
+sooner, while improving Word review output and PowerPoint font fidelity.
+
+- **progressive Word and PowerPoint viewing:** add opt-in `progressiveLayout`
+  to the single-canvas Viewers, virtualized ScrollViewers, and document engines
+  in main and worker modes. Opening pages or slides can render while the rest of
+  the file is prepared, with a shared completion lifecycle and
+  `waitUntilLayoutComplete()` for operations that require the final layout.
+- **stable progressive interaction:** preserve the user's scroll position and
+  visible content while Word pagination grows, keep the final PowerPoint slide
+  count and scroll extent stable from first paint, and show loading states for
+  slides that are not ready yet.
+- **Word layout performance:** eliminate repeated acquisition and serialization
+  work in large documents, especially for tables spanning many pages, without
+  introducing a second or approximate pagination path.
+- **Word tracked changes:** add an opt-in `showTrackedChanges` markup view with
+  author-coloured underlines, strikethroughs, and margin change bars. The
+  accepted final state remains the default.
+- **PowerPoint fidelity and interaction:** use presentation-embedded fonts in
+  both rendering modes and keep overflowing slide text selectable outside its
+  authored shape bounds.
+- **Word correctness and viewer stability:** prevent empty continuous-section
+  transitions from skipping an authored page number, keep the visible page
+  anchored when zoom settles, and preserve a page's logical size when worker
+  bitmap resolution is constrained. Long web addresses now wrap within the
+  page instead of leaving unnatural gaps or being clipped at the edge.
+- **site and viewer polish:** preserve live viewers across browser back/forward
+  navigation, use worker-progressive DOCX and PPTX viewers in Try Yours, and
+  keep equations and other enabled optional renderers available there; also
+  avoid showing a default focus outline around the XLSX canvas.
+- **compatibility:** no existing option is removed or renamed, and progressive
+  layout and tracked-change markup remain opt-in. No source migration is
+  required. Presentations that contain embedded fonts now use them
+  automatically, improving fidelity for those files.
+
 ## 0.82.1 — 2026-08-26
 
 Compatible patch release improving Word and PowerPoint layout reliability,

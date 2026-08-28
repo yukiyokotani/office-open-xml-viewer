@@ -69,6 +69,7 @@ import {
 import { exactRetainedColumnBalanceTarget } from './column-balance-frontier.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
 import type { BodyFlowAllocation } from './section-flow-composition.js';
+import { attachTrackChangeBars } from './track-changes.js';
 import {
   isFirstSectionOwnedPage,
   sectionContentFirstAppearancePageIndices,
@@ -86,7 +87,7 @@ import {
 } from './section-compatibility.js';
 import { bodyOccurrenceKey } from './source-key.js';
 import {
-  convergeHeaderFooterReserves,
+  convergeHeaderFooterReserveSteps,
   headerFooterOverflowReservePt,
   reservedBodyInterval,
   selectedHeaderFooterStory,
@@ -114,7 +115,7 @@ import {
 import { LayoutInvariantError } from './diagnostics.js';
 import {
   ExactConvergenceError,
-  convergeExactState,
+  convergeExactStateSteps,
 } from './convergence.js';
 import { paginationFieldPageContexts } from './pagination-fields.js';
 
@@ -675,11 +676,25 @@ function locationAfter(
 
 function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySectionLayoutInput>): DocumentLayout {
   // Compatibility-owned continuous-section restart arithmetic anchors the
-  // incoming owner to its first appearance on the shared physical page.
+  // incoming owner to the first physical page that retains its body content.
+  // A transition-only empty region is capacity, not a numbering appearance.
   // Issue #804 locks the retained-layout and painted-footer observations together
   // in the continuous-section cases in page-number-field-render.test.ts.
   const contentFirstAppearance = sectionContentFirstAppearancePageIndices(
-    state.pages.map((draft) => draft.accumulator),
+    state.pages.map((draft) => ({
+      pageIndex: draft.accumulator.pageIndex,
+      sectionRegions: draft.accumulator.sectionRegions.map((region) => ({
+        sectionOccurrenceId: region.sectionOccurrenceId,
+        flowDomainIds: (region.columnIndexes
+          ?? region.section.columns.map((_, index) => index))
+          .map((columnIndex) => bodyFlowDomainId(
+            draft.accumulator.pageIndex,
+            region.id,
+            columnIndex,
+          )),
+      })),
+      contentFlowDomainIds: draft.accumulator.readingOrder.map((node) => node.flowDomainId),
+    })),
   );
   let displayNumber = 0;
   let priorOwner: string | null = null;
@@ -724,7 +739,82 @@ function finalize(state: BodyPaginationState, owners: ReadonlyMap<string, BodySe
   return layout;
 }
 
-function paginateBodyPass(
+/** One completed body-pagination pass. */
+export type BodyPaginationPassResult = Readonly<{
+  layout: DocumentLayout;
+  session: BodyLayoutSession;
+  allocations: readonly BodyFlowAllocation[];
+  footnoteReserveByPage: ReadonlyMap<number, number>;
+  footnoteLayoutsByPage: ReadonlyMap<number, readonly NoteLayout[]>;
+  terminalDiagnostic: LayoutDiagnostic | null;
+}>;
+
+interface BodyPaginationPassObserver {
+  shouldPublish(committedPages: number): boolean;
+  publish(pass: BodyPaginationPassResult, processedEntries: number): void;
+}
+
+/** Optional observer for paintable snapshots produced by the first canonical
+ * pagination pass. The generator itself continues from the same suspended
+ * state after every publication; no source prefix is replayed. */
+export interface BodyPaginationObserver {
+  onPages(layout: DocumentLayout, processedEntries: number): void;
+}
+
+function paginationPassResult(
+  state: BodyPaginationState,
+  owners: ReadonlyMap<string, BodySectionLayoutInput>,
+  session: BodyLayoutSession,
+  allocations: readonly BodyFlowAllocation[],
+  footnoteReserveByPage: ReadonlyMap<number, number>,
+  footnoteLayoutsByPage: ReadonlyMap<number, readonly NoteLayout[]>,
+  terminalDiagnostic: LayoutDiagnostic | null,
+): BodyPaginationPassResult {
+  const layout = finalize(state, owners);
+  const retainedPageIndexes = new Set(layout.pages.map((page) => page.pageIndex));
+  const retainedNodeIds = new Set(layout.pages.flatMap((page) => (
+    pageLayerNodes(page).map(({ node }) => node.id)
+  )));
+  return Object.freeze({
+    layout,
+    session,
+    allocations: Object.freeze(allocations.filter((allocation) => (
+      retainedNodeIds.has(allocation.nodeId)
+    ))),
+    footnoteReserveByPage: new Map([...footnoteReserveByPage]
+      .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex))),
+    footnoteLayoutsByPage: new Map([...footnoteLayoutsByPage]
+      .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex))),
+    terminalDiagnostic,
+  });
+}
+
+/**
+ * A pagination computation that can be driven one body entry at a time.
+ *
+ * Every pass in this module is written as a generator so that the SAME code can
+ * run to completion synchronously (`drainPagination`) or be spread across event-
+ * loop turns (`drainPaginationAsync` in `body-paginator-async.ts`). Suspending
+ * between body entries is safe because an entry boundary is the one point where
+ * the pass holds no half-applied state: the immutable `BodyPaginationState` has
+ * just been committed, and the kernel session's acquisition cursor sits between
+ * blocks. A generator — rather than hoisting the pass's locals into an explicit
+ * context object — keeps that state exactly where it already lives, so the
+ * resumable and non-resumable paths cannot drift apart.
+ *
+ * The yielded value is the number of pages committed so far, which is what
+ * progressive consumers watch.
+ */
+export type PaginationSteps<T> = Generator<number, T, void>;
+
+/** Run a pagination generator straight through, ignoring the step boundaries. */
+export function drainPagination<T>(steps: PaginationSteps<T>): T {
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+function* paginateBodyPassSteps(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
@@ -736,14 +826,8 @@ function paginateBodyPass(
     flowDomainId: string;
   }>> | null,
   balancePlan: BodyBalancePlan,
-): Readonly<{
-  layout: DocumentLayout;
-  session: BodyLayoutSession;
-  allocations: readonly BodyFlowAllocation[];
-  footnoteReserveByPage: ReadonlyMap<number, number>;
-  footnoteLayoutsByPage: ReadonlyMap<number, readonly NoteLayout[]>;
-  terminalDiagnostic: LayoutDiagnostic | null;
-}> {
+  observer?: BodyPaginationPassObserver,
+): PaginationSteps<BodyPaginationPassResult> {
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
   const owners = ownerMap(input);
@@ -960,6 +1044,23 @@ function paginateBodyPass(
   let terminalDiagnostic: LayoutDiagnostic | null = null;
 
   bodyEntries: for (let entryIndex = 0; entryIndex < input.sequence.length; entryIndex += 1) {
+    // Suspension point. `state.pages.length` is the committed page count, which
+    // is what a progressive driver reports; a synchronous driver discards it.
+    yield state.pages.length;
+    // Resume after the scheduler has had the chance to yield to the host. A
+    // first publication must never run in the same uninterrupted task as the
+    // layout work that produced it, otherwise the browser cannot paint it.
+    if (observer?.shouldPublish(state.pages.length)) {
+      observer.publish(paginationPassResult(
+        state,
+        owners,
+        session,
+        allocations,
+        footnoteReserveByPage,
+        footnoteLayoutsByPage,
+        terminalDiagnostic,
+      ), entryIndex);
+    }
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
       continue;
@@ -1534,25 +1635,15 @@ function paginateBodyPass(
       );
     }
   }
-  const layout = finalize(state, owners);
-  const retainedPageIndexes = new Set(layout.pages.map((page) => page.pageIndex));
-  const retainedNodeIds = new Set(layout.pages.flatMap((page) => (
-    pageLayerNodes(page).map(({ node }) => node.id)
-  )));
-  const retainedFootnoteReserves = new Map([...footnoteReserveByPage]
-    .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex)));
-  const retainedFootnoteLayouts = new Map([...footnoteLayoutsByPage]
-    .filter(([pageIndex]) => retainedPageIndexes.has(pageIndex)));
-  return Object.freeze({
-    layout,
+  return paginationPassResult(
+    state,
+    owners,
     session,
-    allocations: Object.freeze(allocations.filter((allocation) => (
-      retainedNodeIds.has(allocation.nodeId)
-    ))),
-    footnoteReserveByPage: retainedFootnoteReserves,
-    footnoteLayoutsByPage: retainedFootnoteLayouts,
+    allocations,
+    footnoteReserveByPage,
+    footnoteLayoutsByPage,
     terminalDiagnostic,
-  });
+  );
 }
 
 function headerFooterReserves(
@@ -2022,34 +2113,38 @@ function anchorPlanIdentity(plan: ReadonlyMap<string, unknown>): string {
   return JSON.stringify([...plan].sort(([left], [right]) => left.localeCompare(right)));
 }
 
-function paginateBodyWithAnchorConvergence(
+function* paginateBodyWithAnchorConvergenceSteps(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
   reserves: readonly HeaderFooterReserve[],
   balancePlan: BodyBalancePlan,
-) {
+  observer?: BodyPaginationPassObserver,
+): PaginationSteps<BodyPaginationPassResult> {
   const hasPageOwnedAnchors = input.sequence.some((entry) => (
     entry.kind === 'body-block'
     && entry.block.kind === 'paragraph'
     && (entry.block.pageOwnedAnchorOccurrenceIds?.length ?? 0) > 0
   ));
   if (!hasPageOwnedAnchors) {
-    return paginateBodyPass(input, services, options, reserves, null, balancePlan);
+    return yield* paginateBodyPassSteps(
+      input, services, options, reserves, null, balancePlan, observer,
+    );
   }
   try {
-    return convergeExactState({
-      step: (previous: Readonly<{
-        pass: ReturnType<typeof paginateBodyPass>;
-        plan: ReturnType<typeof pageAnchorDestinationPlan>;
-      }> | null) => {
-        const pass = paginateBodyPass(
+    return (yield* convergeExactStateSteps<Readonly<{
+      pass: BodyPaginationPassResult;
+      plan: ReturnType<typeof pageAnchorDestinationPlan>;
+    }>, number>({
+      step: function* anchorPass(previous) {
+        const pass = yield* paginateBodyPassSteps(
           input,
           services,
           options,
           reserves,
           previous?.plan ?? null,
           balancePlan,
+          previous === undefined ? observer : undefined,
         );
         return Object.freeze({
           pass,
@@ -2058,7 +2153,7 @@ function paginateBodyWithAnchorConvergence(
       },
       stateOf: (value) => anchorPlanIdentity(value.plan),
       limit: 16,
-    }).value.pass;
+    })).value.pass;
   } catch (error) {
     if (error instanceof ExactConvergenceError) {
       throw new LayoutInvariantError(
@@ -2112,19 +2207,21 @@ function sharedContinuousBoundaryPage(
   return null;
 }
 
-function paginateBodyWithColumnBalancing(
+function* paginateBodyWithColumnBalancingSteps(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
   reserves: readonly HeaderFooterReserve[],
-) {
+  observer?: BodyPaginationPassObserver,
+): PaginationSteps<BodyPaginationPassResult> {
   let plan: BodyBalancePlan = new Map();
-  let pass = paginateBodyWithAnchorConvergence(
+  let pass = yield* paginateBodyWithAnchorConvergenceSteps(
     input,
     services,
     options,
     reserves,
     plan,
+    observer,
   );
   if (pass.terminalDiagnostic !== null) return pass;
   for (const boundary of continuousBalanceBoundaries(input)) {
@@ -2148,7 +2245,7 @@ function paginateBodyWithColumnBalancing(
       targetPt,
     }));
     plan = nextPlan;
-    pass = paginateBodyWithAnchorConvergence(
+    pass = yield* paginateBodyWithAnchorConvergenceSteps(
       input,
       services,
       options,
@@ -2160,34 +2257,20 @@ function paginateBodyWithColumnBalancing(
   return pass;
 }
 
-export function paginateBody(
+/** Compose one retained pass through the same layout-to-paint boundary used by
+ * the authoritative result. A progressive snapshot omits document-end notes:
+ * their physical owner is unknowable until the terminal page exists. */
+function composeBodyPaginationResult(
+  pass: BodyPaginationPassResult,
   input: BodyLayoutInput,
-  services: LayoutServices,
+  owners: ReadonlyMap<string, BodySectionLayoutInput>,
   options: LayoutOptions,
+  includeDocumentEndnotes: boolean,
 ): DocumentLayout {
-  // Every convergence pass and its field-acquisition service views share this
-  // private memo, while a later variant/document pagination starts fresh.
-  services = createParagraphAcquisitionCacheServicesView(services);
-  const owners = ownerMap(input);
-  const seed = paginateBodyWithColumnBalancing(input, services, options, []);
-  const converged = convergeHeaderFooterReserves({
-    seed,
-    measure: (pass) => headerFooterReserves(pass, owners),
-    repaginate: (reserves, current) => {
-      const contexts = paginationFieldPageContexts(current.layout);
-      const iterationServices = createFieldAcquisitionServicesView(services, {
-        totalPages: current.layout.pages.length,
-        resolveDestinationPage: (pageIndex) => contexts[pageIndex],
-      });
-      return paginateBodyWithColumnBalancing(input, iterationServices, options, reserves);
-    },
-    identity: (pass) => paginationFieldPageContexts(pass.layout),
-    requiresConvergence: seed.session.hasPaginationFields,
-  }).result;
   const bodyComposed = composeCanonicalSectionFlow(
-    converged.layout,
-    converged.session,
-    converged.allocations,
+    pass.layout,
+    pass.session,
+    pass.allocations,
   );
   const noteLayoutSettings = input.noteLayoutSettings ?? Object.freeze({
     footnotePosition: 'pageBottom',
@@ -2195,9 +2278,9 @@ export function paginateBody(
   });
   const pageStories = composePageStories(
     bodyComposed,
-    converged.session,
+    pass.session,
     owners,
-    converged.footnoteLayoutsByPage,
+    pass.footnoteLayoutsByPage,
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
@@ -2209,17 +2292,19 @@ export function paginateBody(
         'pageBottom',
       )
     : pageStories;
-  const retainedEndnoteIds = new Set(bodyComposed.pages.flatMap((page) =>
-    page.layers.body.flatMap((node) => (
-      node.kind === 'paragraph' || node.kind === 'table'
-        ? endnoteIdsInRetainedSlice(node)
-        : []
-    ))));
+  const retainedEndnoteIds = includeDocumentEndnotes
+    ? new Set(bodyComposed.pages.flatMap((page) =>
+        page.layers.body.flatMap((node) => (
+          node.kind === 'paragraph' || node.kind === 'table'
+            ? endnoteIdsInRetainedSlice(node)
+            : []
+        ))))
+    : new Set<string>();
   const authoredEndnoteIds = (input.endnoteIds ?? [])
     .filter((id) => retainedEndnoteIds.has(id));
   const endnoteStories = composeDocumentEndnotes(
     composed,
-    converged.session,
+    pass.session,
     authoredEndnoteIds,
   );
   const withEndnotes = authoredEndnoteIds.length > 0
@@ -2231,12 +2316,9 @@ export function paginateBody(
         'docEnd',
       )
     : endnoteStories;
-  // Parser diagnostics are immutable source facts and must not participate in
-  // header/footer, anchor, or field-geometry convergence. Attach them exactly
-  // once to the final graph, before the ordinary invariant/freeze boundary.
   const sourceDiagnostics = [
     ...(input.parserDiagnostics ?? []),
-    ...(converged.terminalDiagnostic === null ? [] : [converged.terminalDiagnostic]),
+    ...(pass.terminalDiagnostic === null ? [] : [pass.terminalDiagnostic]),
   ];
   const withParserDiagnostics = sourceDiagnostics.length === 0
     ? withEndnotes
@@ -2251,5 +2333,97 @@ export function paginateBody(
     ...withParserDiagnostics,
     pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
   });
-  return assertAndDeepFreezeDocumentLayout(finalized) as DocumentLayout;
+  const withChangeBars = options.showTrackedChanges === true
+    ? attachTrackChangeBars(finalized)
+    : finalized;
+  return withChangeBars as DocumentLayout;
+}
+
+/**
+ * Lay out the whole body, suspendable between body entries.
+ *
+ * `paginateBody` drives this to completion synchronously; the async driver in
+ * `body-paginator-async.ts` spreads it across event-loop turns. Both run this
+ * one implementation, so a progressive layout cannot diverge from a blocking
+ * one.
+ */
+export function* paginateBodySteps(
+  input: BodyLayoutInput,
+  services: LayoutServices,
+  options: LayoutOptions,
+  observer?: BodyPaginationObserver,
+): PaginationSteps<DocumentLayout> {
+  // Every convergence pass and its field-acquisition service views share this
+  // private memo, while a later variant/document pagination starts fresh.
+  services = createParagraphAcquisitionCacheServicesView(services);
+  const owners = ownerMap(input);
+  let nextPublicationPages = 1;
+  let publicationFailed = false;
+  const passObserver: BodyPaginationPassObserver | undefined = observer
+    ? {
+        shouldPublish: (committedPages) => (
+          !publicationFailed && committedPages >= nextPublicationPages
+        ),
+        publish: (pass, processedEntries) => {
+          try {
+            const composed = composeBodyPaginationResult(pass, input, owners, options, false);
+            // The newest committed page still owns the live transition edge:
+            // section-region and page-final composition can change when the
+            // following page becomes committed. Keep one page as the checkpoint
+            // guard and publish only the stable prefix before it.
+            const publishable = Object.freeze({
+              ...composed,
+              pages: Object.freeze(composed.pages.slice(0, -1)),
+            }) as DocumentLayout;
+            if (publishable.pages.length > 0) {
+              observer.onPages(publishable, processedEntries);
+            }
+            nextPublicationPages = Math.max(
+              pass.layout.pages.length + 1,
+              pass.layout.pages.length * 2,
+            );
+          } catch {
+            // A provisional snapshot is best-effort. The same live pagination
+            // session remains authoritative and must be allowed to finish.
+            publicationFailed = true;
+          }
+        },
+      }
+    : undefined;
+  const seed = yield* paginateBodyWithColumnBalancingSteps(
+    input, services, options, [], passObserver,
+  );
+  const converged = (yield* convergeHeaderFooterReserveSteps<
+    BodyPaginationPassResult,
+    number
+  >({
+    seed,
+    measure: (pass) => headerFooterReserves(pass, owners),
+    repaginate: function* reserveRepagination(reserves, current) {
+      const contexts = paginationFieldPageContexts(current.layout);
+      const iterationServices = createFieldAcquisitionServicesView(services, {
+        totalPages: current.layout.pages.length,
+        resolveDestinationPage: (pageIndex) => contexts[pageIndex],
+      });
+      return yield* paginateBodyWithColumnBalancingSteps(
+        input,
+        iterationServices,
+        options,
+        reserves,
+      );
+    },
+    identity: (pass) => paginationFieldPageContexts(pass.layout),
+    requiresConvergence: seed.session.hasPaginationFields,
+  })).result;
+  return assertAndDeepFreezeDocumentLayout(
+    composeBodyPaginationResult(converged, input, owners, options, true),
+  ) as DocumentLayout;
+}
+
+export function paginateBody(
+  input: BodyLayoutInput,
+  services: LayoutServices,
+  options: LayoutOptions,
+): DocumentLayout {
+  return drainPagination(paginateBodySteps(input, services, options));
 }

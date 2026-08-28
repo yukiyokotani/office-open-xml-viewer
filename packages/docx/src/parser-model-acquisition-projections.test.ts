@@ -146,4 +146,27 @@ describe('parser-to-body-acquisition projection capability', () => {
       .paragraphAcquisitionInput(clonedParagraph, bodySource()).runs)
       .toEqual(acquired.runs);
   });
+
+  it('projects noBreakHyphen wire provenance into immutable parser-independent ranges', () => {
+    const inputParagraph = paragraph();
+    Object.assign(inputParagraph.runs[0]!, {
+      text: 'a-b',
+      __noBreakBefore: true,
+      __noBreakAfter: true,
+      __noBreakHyphenOffsets: [2],
+    });
+
+    const acquired = paragraphAcquisitionInput(inputParagraph, bodySource());
+    expect(acquired.runs[0]).toMatchObject({
+      text: 'a-b',
+      noBreakBefore: true,
+      noBreakAfter: true,
+      noBreakRanges: [{ start: 1, end: 2 }],
+    });
+    expect(acquired.runs[0]).not.toHaveProperty('__noBreakBefore');
+    expect(acquired.runs[0]).not.toHaveProperty('__noBreakAfter');
+    expect(acquired.runs[0]).not.toHaveProperty('__noBreakHyphenOffsets');
+    expect(Object.isFrozen((acquired.runs[0] as { noBreakRanges: readonly object[] }).noBreakRanges[0]))
+      .toBe(true);
+  });
 });

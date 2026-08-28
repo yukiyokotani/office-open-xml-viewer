@@ -104,8 +104,22 @@ import BrandIcon from '../components/BrandIcon.astro';
         panel.classList.remove('loading');
         stage.style.visibility = '';
         stageProgress.hidden = true;
-        status.textContent = `${count}rendered in ${ms} ms`;
+        status.textContent = res.finalUnits
+          ? `${count}available · opened in ${ms} ms`
+          : `${count}rendered in ${ms} ms`;
         status.hidden = false;
+        if (res.finalUnits) {
+          void res.finalUnits.then((units) => {
+            if (generation !== loadGeneration) return;
+            const finalMs = Math.round(performance.now() - t0);
+            const finalCount = `${units} ${res.unitLabel}${units === 1 ? '' : 's'} · `;
+            status.textContent = `${finalCount}rendered in ${finalMs} ms`;
+          }).catch((error) => {
+            if (generation !== loadGeneration || (error instanceof Error && error.name === 'AbortError')) return;
+            status.classList.add('error');
+            status.textContent = error instanceof Error ? error.message : String(error);
+          });
+        }
       } catch (e) {
         // A later selection owns the shared status/panel UI. The superseded load
         // has already destroyed its viewer in renderFile; it must not hide or

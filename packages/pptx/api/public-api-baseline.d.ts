@@ -988,7 +988,19 @@ export interface LineBreak {
 }
 export type LoadOptions = LoadOptions__emitterCollision1 & {
     mode?: 'main' | 'worker';
+    progressiveLayout?: boolean;
+    onLayoutProgress?: (progress: Readonly<ProgressiveLayoutProgress>) => void;
+    onLayoutPartial?: (progress: Readonly<ProgressiveLayoutPartial>) => void;
+    onLayoutComplete?: (error?: unknown) => void;
 };
+interface ProgressiveLayoutPartial {
+    availableUnits: number;
+    totalUnits?: number;
+    exact: boolean;
+}
+interface ProgressiveLayoutProgress {
+    committedUnits: number;
+}
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
     password?: string;
@@ -1428,6 +1440,9 @@ export interface PptxMatchLocation {
 export class PptxPresentation {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<PptxPresentation>;
     get slideCount(): number;
+    get availableSlideCount(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     get slideWidth(): number;
     get slideHeight(): number;
     get mode(): 'main' | 'worker';
@@ -1456,6 +1471,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     constructor(container: HTMLElement, opts?: PptxScrollViewerOptions);
     load(source: string | ArrayBuffer): Promise<void>;
     get slideCount(): number;
+    get availableSlideCount(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     relayout(): void;
     setScale(scale: number): void;
     getScale(): number;
@@ -1502,7 +1520,7 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
     refitOnResize?: boolean;
     background?: string;
     pageShadow?: string | false;
-    onVisibleSlideChange?: (topIndex: number, total: number) => void;
+    onVisibleSlideChange?: (topIndex: number, total: number, layoutComplete: boolean) => void;
     onScaleChange?: (scale: number) => void;
     onError?: (err: Error) => void;
     onHyperlinkClick?: (target: HyperlinkTarget) => void;
@@ -1565,6 +1583,9 @@ export class PptxViewer implements ZoomableViewer {
     get visibleSlideCount(): number;
     get slideIndex(): number;
     get slideCount(): number;
+    get availableSlideCount(): number;
+    get layoutComplete(): boolean;
+    waitUntilLayoutComplete(): Promise<void>;
     getNotes(slideIndex: number): string | null;
     get canvasElement(): HTMLCanvasElement;
     getScale(): number;
@@ -1583,7 +1604,7 @@ export class PptxViewer implements ZoomableViewer {
     private __privatePresence;
 }
 export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
-    onSlideChange?: (index: number, total: number) => void;
+    onSlideChange?: (index: number, total: number, layoutComplete: boolean) => void;
     onError?: (err: Error) => void;
     zoomMin?: number;
     zoomMax?: number;

@@ -24,6 +24,7 @@ import {
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalSection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
 import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
+import { createRevisionAuthorColorResolver } from './track-changes.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { measureTableIntrinsicWidths, resolveTableColumnWidths } from './table-columns.js';
@@ -34,7 +35,7 @@ import { measureParagraphIntrinsicWidths, measureTableCellIntrinsicWidths } from
 import { buildFont, fontClassesWithPitches, getDefaultFontSize, paragraphMarkLineHeight } from '../line-layout.js';
 import type { DocGridCtx } from '../line-layout.js';
 import { measureParagraph } from '../paragraph-measure.js';
-import { acquireRetainedTable, type RetainedTableAcquisition } from './table-acquisition.js';
+import { acquireRetainedTable, retainedTableAcquisitionIsReusableAcrossPages, type RetainedTableAcquisition } from './table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.js';
 import { layoutTable as layoutRetainedTableInput } from './table.js';
 import { startTableFragmentCursor, takeTableFragment, type PageDependentTableBlockRequest } from './table-pagination.js';
@@ -306,6 +307,7 @@ function buildMeasureState(
     },
     retainedTablesBySourceIndex: new Map<number, RetainedTableRecord>(),
     currentDateMs: layoutOptions?.currentDateMs,
+    showTrackedChanges: layoutOptions?.showTrackedChanges,
     kinsoku: layoutSettings.kinsoku,
     defaultTabPt: layoutSettings.defaultTabPt,
     // ECMA-376 §17.6.20 + §20.4.3.x (issue #988 ②, Codex review F1): for a
@@ -477,6 +479,13 @@ function buildConcreteBodyLayoutKernel(
         services,
         options,
       );
+      // Markup view only: resolve tracked-change author colours once per
+      // session from the main story's document run order (first-appearance
+      // policy, layout/track-changes.ts). The default final-view variant
+      // never builds or carries this.
+      if (options.showTrackedChanges === true) {
+        state.revisionAuthorColor = createRevisionAuthorColorResolver(source.blocks.body);
+      }
       const sourceFootnotes = source.blocks.footnotes;
       const sourceEndnotes = source.blocks.endnotes;
       const footnotesById = indexNotes(sourceFootnotes);
@@ -2144,7 +2153,13 @@ function paraGrid(para: ParagraphLayoutSource, state: BodyMeasurementContext): D
 }
 
 /** Resolve column widths once, acquire the retained table, and return its
- * authoritative row advances for one top-level body occurrence. */
+ * authoritative row advances for one top-level body occurrence. A table that
+ * continues onto another flow region is measured once per region; while the
+ * inline extent is unchanged the retained acquisition is identical for every
+ * destination page (page-varying geometry is excluded by
+ * retainedTableAcquisitionIsReusableAcrossPages), so reuse the record instead
+ * of re-walking and re-laying out every row — that made pagination cost
+ * O(flow-regions × rows). */
 function computeTablePtLayout(
   state: BodyAcquisitionState,
   table: TableLayoutSource,
@@ -2152,6 +2167,14 @@ function computeTablePtLayout(
   sourceIndex: number,
 ): { colWidthsPt: number[]; rowContentHeightsPt: number[]; rowHeightsPt: number[] } {
   const prior = state.retainedTablesBySourceIndex.get(sourceIndex);
+  if (prior?.contentWidthPt === contentWPt && prior.reusableAcrossPages) {
+    const priorRowHeightsPt = prior.acquisition.layout.rows.map((row) => row.advancePt);
+    return {
+      colWidthsPt: [...prior.acquisition.layout.columnWidthsPt],
+      rowContentHeightsPt: priorRowHeightsPt,
+      rowHeightsPt: priorRowHeightsPt,
+    };
+  }
   const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
   const dependencies = state.retainedTableAcquisition;
   const acquired = acquireRetainedTable(
@@ -2177,6 +2200,7 @@ function computeTablePtLayout(
     sourceIndex,
     acquisition: retained,
     contentWidthPt: contentWPt,
+    reusableAcrossPages: retainedTableAcquisitionIsReusableAcrossPages(retained),
     anchorYPt: state.y,
   }));
   const rowHeightsPt = retained.layout.rows.map((row) => row.advancePt);

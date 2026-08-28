@@ -592,6 +592,14 @@ export interface LineNumberPaintOperation {
   readonly textAlign: 'right';
 }
 
+/** Markup-view tracked-change margin bar (`word-track-change-bar`): a
+ * vertical rule centered in the left page margin beside a line that contains
+ * revision content. Attached only to markup-variant layouts; paint reads
+ * bounds only. */
+export interface ChangeBarLayout {
+  readonly bounds: LayoutRect;
+}
+
 /** ECMA-376 §17.6.8 retained line counter and its optional paint operation. */
 export interface LineNumberLayout {
   readonly lineIndex: number;
@@ -1023,6 +1031,10 @@ export interface LayoutPage {
   readonly pageBorder: PageBorderLayout | null;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
+  /** ECMA-376 §17.13.5 markup view only: one margin bar per line containing
+   * tracked-change content (`word-track-change-bar`). Absent in the default
+   * final view. */
+  readonly changeBars?: readonly ChangeBarLayout[];
 }
 
 export type LayoutDiagnosticCode =

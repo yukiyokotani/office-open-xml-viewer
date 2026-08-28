@@ -9,6 +9,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+let bootstrapEmbeddedFonts: unknown[] = [];
+let extractedFontCount = 0;
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
@@ -31,6 +33,7 @@ class FakePptxArchive {
       minorFont: null,
       hlinkColor: null,
       folHlinkColor: null,
+      embeddedFonts: bootstrapEmbeddedFonts,
       slides: [{ index: 0, partName: 'ppt/slides/slide1.xml' }],
     }));
   }
@@ -63,6 +66,10 @@ class FakePptxArchive {
   extract_image(): Uint8Array {
     return new Uint8Array([2]);
   }
+  extract_font(): Uint8Array {
+    extractedFontCount += 1;
+    return new Uint8Array([3]);
+  }
   free(): void {}
 }
 
@@ -77,6 +84,7 @@ interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
   posted: unknown[];
   postMessage: (msg: unknown, transfer?: Transferable[]) => void;
+  fonts?: FontFaceSet;
 }
 
 function installSelf(): FakeSelf {
@@ -101,6 +109,8 @@ async function loadRenderWorker(): Promise<FakeSelf> {
 
 beforeEach(() => {
   initMock.mockReset();
+  bootstrapEmbeddedFonts = [];
+  extractedFontCount = 0;
 });
 
 afterEach(() => {
@@ -149,6 +159,41 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', (
     ]);
 
     expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
+  });
+
+  it('loads embedded font parts into the worker FontFaceSet', async () => {
+    initMock.mockResolvedValue(undefined);
+    bootstrapEmbeddedFonts = [{
+      fontName: 'Worker Deck Font',
+      style: 'boldItalic',
+      partPath: 'ppt/fonts/font1.fntdata',
+      contentType: 'application/x-font-ttf',
+    }];
+    const added: Array<{ family: string; descriptors: FontFaceDescriptors; loadCalls: number }> = [];
+    class FakeFontFace {
+      loadCalls = 0;
+      constructor(public family: string, _source: ArrayBuffer, public descriptors: FontFaceDescriptors) {}
+      load() { this.loadCalls += 1; return Promise.resolve(this); }
+    }
+    vi.stubGlobal('FontFace', FakeFontFace);
+    const fake = await loadRenderWorker();
+    fake.fonts = {
+      add: (face: FontFace) => { added.push(face as unknown as typeof added[number]); },
+      ready: Promise.resolve(),
+    } as unknown as FontFaceSet;
+
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({
+      data: { kind: 'parse', id: 22, buffer: new ArrayBuffer(4), resourcePolicy },
+    } as MessageEvent);
+
+    await vi.waitFor(() => expect(added).toHaveLength(1));
+    expect(extractedFontCount).toBe(1);
+    expect(added[0]).toMatchObject({
+      family: expect.stringMatching(/^__ooxml_pptx_/),
+      descriptors: { weight: 'bold', style: 'italic' },
+      loadCalls: 1,
+    });
   });
 
   it('rejects a second parse reserved while the first render-worker parse is opening', async () => {

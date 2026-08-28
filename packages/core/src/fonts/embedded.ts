@@ -26,6 +26,7 @@
  */
 import { activeFontSet, withFontCeiling } from './preload.js';
 import { retainFace, releaseFaces, _resetFontRegistryForTests } from './font-registry.js';
+import { HARD_MAX_EMBEDDED_FONT_BYTES } from '../worker/resource-policy.generated.js';
 
 /** Test hook — clears the shared FontFace refcount registry (does NOT touch any
  *  FontFaceSet; tests install a fresh fake set per case). Re-exported here under
@@ -150,13 +151,13 @@ function contentSignature(family: string, weight: string, style: string, bytes: 
  */
 export async function registerEmbeddedFonts(
   faces: Iterable<EmbeddedFontFace>,
-  maxBytes = 30 * 1024 * 1024,
+  maxBytes = HARD_MAX_EMBEDDED_FONT_BYTES,
 ): Promise<FontFace[]> {
   const set = activeFontSet();
   if (!set || typeof FontFace === 'undefined') return [];
 
-  const held: FontFace[] = []; // faces this call references (deduped)
-  const toLoad: FontFace[] = []; // only the newly-added faces need a load()
+  const held: FontFace[] = []; // unique faces this call references
+  const retainedSignatures = new Set<string>();
   const failed: string[] = [];
   for (const face of faces) {
     try {
@@ -170,10 +171,15 @@ export async function registerEmbeddedFonts(
       // `embedded:` namespaces the signature so an embedded face can never share
       // a registry entry with a Google-Fonts face (a different keyspace).
       const sig = `embedded:${contentSignature(face.family, face.weight, face.style, data)}`;
+      // One package can legally point multiple slots at the same part. Retain a
+      // content-identical face only once per caller so release remains exactly
+      // balanced with the registry refcount.
+      if (retainedSignatures.has(sig)) continue;
+      retainedSignatures.add(sig);
 
       // Dedup + refcount via the shared registry: a byte-identical face already
       // in THIS set → reuse + bump refs; otherwise build + add it once.
-      const { face: ff, isNew } = retainFace(sig, set, () => {
+      const { face: ff } = retainFace(sig, set, () => {
         // Copy into a standalone ArrayBuffer: FontFace(source) reads the buffer,
         // and `data` may be a subarray view into a larger WASM/transfer buffer.
         const buf = data.buffer.slice(
@@ -188,22 +194,42 @@ export async function registerEmbeddedFonts(
         return created;
       });
       held.push(ff);
-      if (isNew) toLoad.push(ff); // only a freshly-added face needs a load()
     } catch {
       // Malformed fontKey / unreadable part: skip this face, keep the document.
       failed.push(face.family);
     }
   }
 
-  if (toLoad.length > 0) {
-    await withFontCeiling(
-      Promise.allSettled(toLoad.map((f) => f.load())).then((results) => {
-        results.forEach((res, i) => {
-          if (res.status === 'rejected') failed.push(toLoad[i].family);
-        });
-        return set.ready;
-      }),
+  let loaded = held;
+  if (held.length > 0) {
+    // FontFace.load() is idempotent. Calling it for reused faces also closes the
+    // concurrent-holder race: every caller observes the shared face's real load
+    // result instead of assuming that the first holder already succeeded.
+    const results = await withFontCeiling(
+      Promise.allSettled(held.map((font) => Promise.resolve().then(() => font.load()))),
     );
+    if (!Array.isArray(results)) {
+      // A wedged face reached the hard time ceiling. Do not advertise an
+      // indeterminate registration as usable or suppress a substitute font.
+      failed.push(...held.map((font) => font.family));
+      releaseFaces(held);
+      loaded = [];
+    } else {
+      loaded = [];
+      results.forEach((result, index) => {
+        const font = held[index];
+        if (result.status === 'fulfilled') {
+          loaded.push(font);
+        } else {
+          failed.push(font.family);
+          releaseFaces([font]);
+        }
+      });
+      // Loading the exact faces above is the readiness proof. This extra wait
+      // lets the FontFaceSet settle without making a wedged `ready` promise turn
+      // already-loaded faces back into failures.
+      await withFontCeiling(set.ready);
+    }
   }
 
   if (failed.length > 0) {
@@ -213,7 +239,7 @@ export async function registerEmbeddedFonts(
     );
   }
 
-  return held;
+  return loaded;
 }
 
 /**

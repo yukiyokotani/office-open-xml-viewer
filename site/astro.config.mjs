@@ -48,6 +48,12 @@ export default defineConfig({
         '@silurus/ooxml-core/internal/canvas-viewer-mechanics': fileURLToPath(
           new URL('../packages/core/src/internal/canvas-viewer-mechanics.ts', import.meta.url),
         ),
+        '@silurus/ooxml-core/internal/progressive-layout-lifecycle': fileURLToPath(
+          new URL('../packages/core/src/internal/progressive-layout-lifecycle.ts', import.meta.url),
+        ),
+        '@silurus/ooxml-core/internal/progressive-layout-observers': fileURLToPath(
+          new URL('../packages/core/src/internal/progressive-layout-observers.ts', import.meta.url),
+        ),
         '@silurus/ooxml-core/internal/chart-context': fileURLToPath(
           new URL('../packages/core/src/internal/chart-context.ts', import.meta.url),
         ),
