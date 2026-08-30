@@ -9,7 +9,6 @@ import {
 import {
   createCanvasElementOutlineLayer,
   CanvasViewerErrorRouter,
-  NativeTextSelectionDragRetainer,
   renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
@@ -350,7 +349,6 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _pendingLayoutPublication: DocxLayoutPublication | null = null;
   private _scrollListener: (() => void) | null = null;
   private _selectionChangeListener: (() => void) | null = null;
-  private readonly _selectionDragRetainer: NativeTextSelectionDragRetainer | null;
   private _selectionContextKey = 'null';
   private _elementClickListener: ((event: MouseEvent) => void) | null = null;
   private _contextMenuListener: ((event: MouseEvent) => void) | null = null;
@@ -545,9 +543,6 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._scrollHost.appendChild(this._spacer);
     this._wrapper.appendChild(this._scrollHost);
     this._container.appendChild(this._wrapper);
-    this._selectionDragRetainer = opts.enableTextSelection
-      ? new NativeTextSelectionDragRetainer(this._wrapper)
-      : null;
 
     if (this._commentsEnabled()) {
       void loadDocxCommentUiRuntime().then((commentUi) => {
@@ -3025,7 +3020,6 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
       this._selectionChangeListener = null;
     }
-    this._selectionDragRetainer?.destroy();
     this._elementHitGeneration++;
     if (this._elementClickListener) {
       this._scrollHost.removeEventListener('click', this._elementClickListener);

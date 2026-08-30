@@ -9,11 +9,9 @@ const DOCX_TERMINAL_TIMEOUT_MS = 25_000;
 
 type StoryId =
   | 'pptxviewer-examples--scroll-view'
-  | 'pptxviewer-examples--scroll-viewer'
   | 'pptxviewer-examples--thumbnail-grid'
   | 'pptxviewer-examples--master-detail'
   | 'docxviewer-examples--scroll-view'
-  | 'docxviewer-examples--scroll-viewer'
   | 'docxviewer-examples--thumbnail-grid'
   | 'docxviewer-examples--master-detail';
 
@@ -109,104 +107,7 @@ async function openStory(page: import('@playwright/test').Page, id: StoryId): Pr
   expect(res?.status(), `HTTP status for ${id}`).toBeLessThan(400);
 }
 
-async function expectTextDragSurvivesGap(
-  page: import('@playwright/test').Page,
-  format: 'docx' | 'pptx',
-): Promise<void> {
-  const probe = await page.evaluate((selectionFormat) => {
-    const selector = `[data-ooxml-selection-run="${selectionFormat}"]`;
-    const runs = [...document.querySelectorAll<HTMLElement>(selector)]
-      .map((run) => ({ run, rect: run.getBoundingClientRect() }))
-      .filter(({ rect }) =>
-        rect.width >= 20 && rect.height >= 4 && rect.bottom > 0 && rect.top < innerHeight &&
-        rect.right > 0 && rect.left < innerWidth)
-      .sort((a, b) => b.rect.width - a.rect.width);
-
-    for (const { run, rect } of runs) {
-      const y = rect.top + rect.height / 2;
-      const surface = run.closest<HTMLElement>('[data-ooxml-selection-surface]');
-      const surfaceRect = surface?.getBoundingClientRect();
-      if (!surfaceRect) continue;
-      const offsets = [4, 12, 24, 48];
-      const gapCandidates = offsets.flatMap((offset) => [
-        {
-          startX: rect.left + rect.width * 0.2,
-          textX: rect.left + rect.width * 0.75,
-          gapX: rect.right + offset,
-          gapY: y,
-        },
-        {
-          startX: rect.left + rect.width * 0.75,
-          textX: rect.left + rect.width * 0.2,
-          gapX: rect.left - offset,
-          gapY: y,
-        },
-        {
-          startX: rect.left + rect.width * 0.2,
-          textX: rect.left + rect.width * 0.75,
-          gapX: rect.left + rect.width * 0.75,
-          gapY: rect.bottom + offset,
-        },
-        {
-          startX: rect.left + rect.width * 0.2,
-          textX: rect.left + rect.width * 0.75,
-          gapX: rect.left + rect.width * 0.75,
-          gapY: rect.top - offset,
-        },
-      ]);
-      const gap = gapCandidates.find((candidate) =>
-        document.elementFromPoint(candidate.startX, y)?.closest(selector) === run &&
-        document.elementFromPoint(candidate.textX, y)?.closest(selector) === run &&
-        candidate.gapX > surfaceRect.left && candidate.gapX < surfaceRect.right &&
-        candidate.gapY > surfaceRect.top && candidate.gapY < surfaceRect.bottom &&
-        candidate.gapX > 0 && candidate.gapX < innerWidth &&
-        candidate.gapY > 0 && candidate.gapY < innerHeight &&
-        !document.elementFromPoint(candidate.gapX, candidate.gapY)
-          ?.closest('[data-ooxml-selection-surface]') &&
-        Array.from({ length: 12 }, (_, index) => {
-          const ratio = (index + 1) / 12;
-          return document.elementFromPoint(
-            candidate.textX + (candidate.gapX - candidate.textX) * ratio,
-            y + (candidate.gapY - y) * ratio,
-          )?.closest(selector);
-        }).every((hitRun) => hitRun === null || hitRun === run));
-      if (gap) return { ...gap, y };
-    }
-    return null;
-  }, format);
-
-  expect(probe, `${format} sample needs a visible text run with adjacent blank space`).not.toBeNull();
-  if (!probe) return;
-
-  await page.evaluate(() => window.getSelection()?.removeAllRanges());
-  await page.mouse.move(probe.startX, probe.y);
-  await page.mouse.down();
-  try {
-    await page.mouse.move(probe.textX, probe.y, { steps: 8 });
-    await expect.poll(async () =>
-      await page.evaluate(() => window.getSelection()?.toString() ?? '')).not.toBe('');
-    const onText = await page.evaluate(() => window.getSelection()?.toString() ?? '');
-
-    await page.mouse.move(probe.gapX, probe.gapY, { steps: 8 });
-    await page.waitForTimeout(50);
-    const overGap = await page.evaluate(() => window.getSelection()?.toString() ?? '');
-    expect(overGap, `${format} selection collapsed over blank canvas space`).not.toBe('');
-    expect(overGap).toContain(onText);
-
-    await page.mouse.up();
-    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe(overGap);
-  } finally {
-    await page.mouse.up().catch(() => undefined);
-  }
-}
-
 test.describe('Layouts smoke — pptx', () => {
-  test('PptxScrollViewer retains a text drag while the pointer crosses a gap', async ({ page }) => {
-    await openStory(page, 'pptxviewer-examples--scroll-viewer');
-    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
-    await expectTextDragSurvivesGap(page, 'pptx');
-  });
-
   test('ScrollView renders every slide', async ({ page }) => {
     await openStory(page, 'pptxviewer-examples--scroll-view');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
@@ -289,13 +190,6 @@ async function countInkedCanvases(page: import('@playwright/test').Page, total: 
 }
 
 test.describe('Layouts smoke — docx', () => {
-  test('DocxScrollViewer retains a text drag while the pointer crosses a gap', async ({ page }) => {
-    const browserErrors = captureBrowserErrors(page);
-    await openStory(page, 'docxviewer-examples--scroll-viewer');
-    await expectDocxLoaded(page, EXPECTED.docx, browserErrors);
-    await expectTextDragSurvivesGap(page, 'docx');
-  });
-
   test('ScrollView renders every page', async ({ page }) => {
     const browserErrors = captureBrowserErrors(page);
     await openStory(page, 'docxviewer-examples--scroll-view');
