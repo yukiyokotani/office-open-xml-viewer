@@ -29,6 +29,7 @@ import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  NativeTextSelectionDragRetainer,
   renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
@@ -204,6 +205,7 @@ export class PptxViewer implements ZoomableViewer {
   private readonly errorRouter: CanvasViewerErrorRouter;
   private destroyed = false;
   private selectionChangeListener: (() => void) | null = null;
+  private readonly selectionDragRetainer: NativeTextSelectionDragRetainer | null;
   private selectionContextKey = 'null';
   private elementClickListener: ((event: MouseEvent) => void) | null = null;
   private contextMenuListener: ((event: MouseEvent) => void) | null = null;
@@ -278,6 +280,9 @@ export class PptxViewer implements ZoomableViewer {
     this.textLayer = overlays.textLayer;
     this.highlightLayer = overlays.highlightLayer;
     this.elementLayer = overlays.elementLayer;
+    this.selectionDragRetainer = this.textLayer
+      ? new NativeTextSelectionDragRetainer(this.wrapper)
+      : null;
     this._loadingLayer = this.wrapper.ownerDocument.createElement('span');
     this._loadingLayer.style.cssText = [
       'position:absolute',
@@ -1184,6 +1189,7 @@ export class PptxViewer implements ZoomableViewer {
       this.wrapper.ownerDocument.removeEventListener('selectionchange', this.selectionChangeListener);
       this.selectionChangeListener = null;
     }
+    this.selectionDragRetainer?.destroy();
     this.elementHitGeneration++;
     if (this.elementClickListener) {
       this.wrapper.removeEventListener('click', this.elementClickListener);

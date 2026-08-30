@@ -17,6 +17,7 @@ import {
   CallerCanvasMount,
   CanvasOverlayHost,
   CanvasViewerErrorRouter,
+  NativeTextSelectionDragRetainer,
   renderCanvasElementOutline,
   resolveCanvasViewerMode,
   StaticCanvasRenderDispatcher,
@@ -152,6 +153,7 @@ export class DocxViewer implements ZoomableViewer {
   private readonly _errorRouter: CanvasViewerErrorRouter;
   private _destroyed = false;
   private _selectionChangeListener: (() => void) | null = null;
+  private readonly _selectionDragRetainer: NativeTextSelectionDragRetainer | null;
   private _selectionContextKey = 'null';
   private _elementContext: DocxElementContext | null = null;
   private _elementHitGeneration = 0;
@@ -220,6 +222,9 @@ export class DocxViewer implements ZoomableViewer {
     this._textLayer = overlays.textLayer;
     this._highlightLayer = overlays.highlightLayer;
     this._elementLayer = overlays.elementLayer;
+    this._selectionDragRetainer = this._textLayer
+      ? new NativeTextSelectionDragRetainer(this._wrapper)
+      : null;
     this._loadingLayer = this._wrapper.ownerDocument.createElement('div');
     this._loadingLayer.style.cssText = [
       'position:absolute',
@@ -725,6 +730,7 @@ export class DocxViewer implements ZoomableViewer {
       this._wrapper.ownerDocument.removeEventListener('selectionchange', this._selectionChangeListener);
       this._selectionChangeListener = null;
     }
+    this._selectionDragRetainer?.destroy();
     this._elementHitGeneration++;
     if (this._elementClickListener) {
       this._wrapper.removeEventListener('click', this._elementClickListener);
