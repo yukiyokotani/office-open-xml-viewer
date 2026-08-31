@@ -10,6 +10,7 @@ import {
   documentLayoutRuntimeOf,
 } from './layout/runtime-state.js';
 import { installStubCanvas, syntheticDocxModel } from './testing/synthetic-document.js';
+import { activeDocxLayoutViewOf } from './document-layout-view.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // `load({ currentDate, showTrackedChanges })` primes and records the variant
@@ -62,6 +63,27 @@ function documentWithActiveView(view: {
 
 beforeAll(() => {
   installStubCanvas();
+});
+
+describe('activeDocxLayoutViewOf', () => {
+  it('exposes the canonical active layout axes for borrowing viewers', () => {
+    const { doc } = documentWithActiveView({
+      currentDate: DATED,
+      showTrackedChanges: true,
+    });
+    expect(activeDocxLayoutViewOf(doc)).toEqual({
+      currentDate: DATED.getTime(),
+      showTrackedChanges: true,
+    });
+  });
+
+  it('reports the load-time default field date for the final view', () => {
+    const { doc } = documentWithActiveView({});
+    expect(activeDocxLayoutViewOf(doc)).toEqual({
+      currentDate: CURRENT_DATE_MS,
+      showTrackedChanges: false,
+    });
+  });
 });
 
 describe('omitted per-call options select the active load-time variant', () => {

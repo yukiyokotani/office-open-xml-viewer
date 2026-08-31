@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-node",
   "private": true,
-  "version": "0.83.0",
+  "version": "0.83.1",
   "description": "Node-side parsers for OOXML (docx/xlsx/pptx) using the workspace WASM artifacts — no browser DOM needed",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",

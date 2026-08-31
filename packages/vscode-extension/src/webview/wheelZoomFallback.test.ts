@@ -20,7 +20,8 @@ function fakeEvent(overrides: Partial<WheelZoomEvent> = {}): WheelZoomEvent {
   return {
     ctrlKey: true,
     metaKey: false,
-    deltaY: -10,
+    deltaY: -100,
+    deltaMode: 0,
     preventDefault: vi.fn(),
     ...overrides,
   };
@@ -41,7 +42,7 @@ describe('VS Code webview wheel-zoom fallback', () => {
     expect(viewer.getScale()).toBe(1);
 
     deferred?.();
-    expect(viewer.getScale()).toBeGreaterThan(1);
+    expect(viewer.getScale()).toBeCloseTo(1.1, 10);
   });
 
   it('does not zoom twice when the scroll viewer already handled the event', () => {
@@ -83,6 +84,22 @@ describe('VS Code webview wheel-zoom fallback', () => {
 
     deferred?.();
     expect(viewer.getScale()).toBeGreaterThan(1);
+  });
+
+  it('preserves line-mode normalization in the webview fallback', () => {
+    const viewer = fakeViewer();
+    let deferred: (() => void) | undefined;
+
+    captureUnhandledWheelZoom(
+      fakeEvent({ deltaY: -3, deltaMode: 1 }),
+      viewer,
+      (callback) => {
+        deferred = callback;
+      },
+    );
+    deferred?.();
+
+    expect(viewer.getScale()).toBeCloseTo(1.1, 10);
   });
 
   it('reports a synchronous viewer failure', () => {

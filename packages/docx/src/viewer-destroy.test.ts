@@ -112,6 +112,36 @@ describe('DocxViewer.destroy() — canvas reparent return', () => {
     expect(engine.destroyed).toBe(false);
   });
 
+  it('inherits the borrowed document\'s active layout view', async () => {
+    const { canvas } = mount();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    engine.layoutView = {
+      showTrackedChanges: true,
+      currentDate: 1_700_000_000_000,
+    };
+    const viewer = DocxViewer.fromDocument(
+      canvas as unknown as HTMLCanvasElement,
+      engine.asDoc(),
+    );
+
+    await viewer.goToPage(0);
+    expect(engine.renderCalls.at(-1)).toMatchObject({
+      showTrackedChanges: true,
+      currentDate: 1_700_000_000_000,
+    });
+
+    await viewer.setShowTrackedChanges(false);
+    expect(engine.layoutViews.at(-1)).toEqual({
+      showTrackedChanges: false,
+      currentDate: 1_700_000_000_000,
+    });
+    expect(engine.renderCalls.at(-1)).toMatchObject({
+      showTrackedChanges: false,
+      currentDate: 1_700_000_000_000,
+    });
+    viewer.destroy();
+  });
+
   it('rejects a borrowed mode conflict before reparenting the canvas', () => {
     const { parent, canvas } = mount();
     const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }], 'worker');

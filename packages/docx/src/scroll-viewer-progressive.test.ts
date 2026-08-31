@@ -338,7 +338,7 @@ describe('DocxScrollViewer — growing page count', () => {
 
     await viewer.setShowTrackedChanges(true);
     expect(engine.layoutViews).toEqual([
-      { showTrackedChanges: true, currentDate: undefined },
+      { showTrackedChanges: true, currentDate: 0 },
     ]);
     viewer.destroy();
   });

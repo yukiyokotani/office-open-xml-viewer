@@ -1,30 +1,60 @@
-/** Ctrl/⌘ + wheel (and trackpad pinch) zoom sensitivity. `deltaY` is multiplied
- *  by this before `exp()`. Purely an interaction-feel constant (no ECMA-376
- *  bearing); lower = gentler. */
-const ZOOM_WHEEL_SENSITIVITY = 0.01;
+/** Multiplicative scale change for one conventional wheel step. Purely an
+ * interaction-feel constant (no ECMA-376 bearing). */
+const ZOOM_FACTOR_PER_WHEEL_STEP = 1.1;
+
+/** WheelEvent delta units that amount to one zoom step. Pixel-mode trackpad
+ * events stay proportional up to this boundary; larger discrete mouse-wheel
+ * deltas are capped to one step per event. Line-mode browsers commonly emit
+ * three lines and page mode one page for the same physical wheel action. */
+const PIXELS_PER_WHEEL_STEP = 10;
+const LINES_PER_WHEEL_STEP = 3;
+const PAGES_PER_WHEEL_STEP = 1;
+
+function wheelSteps(deltaY: number, deltaMode: number): number {
+  let steps: number;
+  switch (deltaMode) {
+    case 1:
+      steps = deltaY / LINES_PER_WHEEL_STEP;
+      break;
+    case 2:
+      steps = deltaY / PAGES_PER_WHEEL_STEP;
+      break;
+    default:
+      steps = deltaY / PIXELS_PER_WHEEL_STEP;
+      break;
+  }
+  return Math.max(-1, Math.min(1, steps));
+}
 
 /**
- * New scale for one wheel/pinch zoom step. The step is *exponential* in
- * `deltaY` rather than a fixed increment, which fixes two problems with a
- * sign-only `scale ± 0.1`:
+ * New scale for a wheel/pinch zoom event. The step is *exponential* in a
+ * `deltaMode`-normalized and bounded wheel distance rather than a fixed per-event
+ * increment, which fixes three problems with a sign-only `scale ± 0.1`:
  *
  *  - A trackpad pinch arrives as a high-frequency stream of small-`deltaY`
  *    wheel events; a fixed per-event increment compounds across dozens of
  *    events per gesture and zooms wildly. Because `exp(-k·a)·exp(-k·b) =
- *    exp(-k·(a+b))`, the total zoom here depends only on the summed `deltaY`
- *    of the gesture, not on how many events the OS chops it into — so a pinch
- *    and a mouse wheel covering the same distance zoom by the same amount.
+ *    exp(-k·(a+b))`, fine-grained events combine according to the summed
+ *    gesture distance rather than the event count.
  *  - It is multiplicative, so a step feels proportional at every zoom level
  *    (the old additive `+0.1` was huge at 20% and tiny at 400%), and exactly
  *    symmetric: zooming in then out by the same delta returns to the start.
+ *  - Browsers report wheel deltas in pixels, lines, or pages. Normalizing
+ *    `deltaMode` and capping a single event gives each conventional mouse-wheel
+ *    step the same gentle 10% change instead of letting a common pixel delta of
+ *    100 jump by ~2.72×. Small trackpad deltas remain proportional.
  *
  * Negative `deltaY` (scroll up / pinch out) zooms in. The result is unclamped
  * and unsnapped; the caller clamps to its `[zoomMin, zoomMax]` range (and, for
  * XlsxViewer, snaps to whole percent). Shared by XlsxViewer and the two
  * continuous-scroll viewers (design §5.2).
  */
-export function zoomStepScale(currentScale: number, deltaY: number): number {
-  return currentScale * Math.exp(-deltaY * ZOOM_WHEEL_SENSITIVITY);
+export function zoomStepScale(
+  currentScale: number,
+  deltaY: number,
+  deltaMode: number = 0,
+): number {
+  return currentScale * Math.pow(ZOOM_FACTOR_PER_WHEEL_STEP, -wheelSteps(deltaY, deltaMode));
 }
 
 /** Clamp range for {@link anchoredZoomOffset}: the scroll offset must stay within

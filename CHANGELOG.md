@@ -7,6 +7,24 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.83.1 — 2026-08-30
+
+Compatible patch release adding native text selection inside PowerPoint tables
+and keeping shared Word viewer state coherent, with no integration changes.
+
+- **PowerPoint table text selection:** select and copy partial text inside table
+  cells through the existing transparent native-selection layer, including
+  tables whose graphic frames are rotated or flipped. Find results remain
+  bounded to individual cells instead of crossing cell boundaries.
+- **Word shared-document state:** keep `DocxViewer` and `DocxScrollViewer`
+  synchronized when multiple viewers borrow the same document and its tracked-
+  changes or field-date layout variant changes, including main and worker modes.
+- **release reliability:** make manual npm publication retries verify and reuse
+  an existing immutable version tag, with additional test scheduling headroom
+  reserved for explicit retries.
+- **compatibility:** no option, method, or existing selection behavior is
+  removed or renamed. No application migration is required from 0.83.0.
+
 ## 0.83.0 — 2026-08-28
 
 Minor release making large Word documents and PowerPoint presentations useful

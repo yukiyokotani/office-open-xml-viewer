@@ -1,5 +1,6 @@
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
+import { pptxRunFrameKey, pptxRunFrameTransform } from './run-frame-transform.js';
 
 function setSelectionData(element: HTMLElement, key: string, value?: string): void {
   if (element.dataset) {
@@ -59,14 +60,14 @@ export function buildPptxTextLayer(
   setSelectionData(layer, 'slideIndex', slideIndex === undefined ? undefined : String(slideIndex));
 
   // Group runs by shape (same shapeX/shapeY/rotation)
-  type ShapeKey = string;
-  const shapeMap = new Map<ShapeKey, { div: HTMLDivElement; x: number; y: number; w: number; h: number; rot: number }>();
+  const shapeMap = new Map<string, { div: HTMLDivElement; w: number; h: number }>();
 
   const ownerDocument = layer.ownerDocument ?? document;
   for (const [runIndex, run] of runs.entries()) {
-    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
-    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
-    if (!shapeMap.has(key)) {
+    const transform = pptxRunFrameTransform(run);
+    const key = pptxRunFrameKey(run, transform);
+    let shape = shapeMap.get(key);
+    if (!shape) {
       const div = ownerDocument.createElement('div');
       // The shape frame is placed as a % of the slide box so it tracks the
       // canvas's actual rendered size; its width/height are % too, so the child
@@ -81,15 +82,15 @@ export function buildPptxTextLayer(
         // not autofit. Match the canvas renderer by keeping those runs selectable;
         // the outer slide text layer still clips anything past the slide edge.
         `pointer-events:all;overflow:visible;`;
-      if (totalRot !== 0) {
+      if (transform) {
         div.style.transformOrigin = 'center center';
-        div.style.transform = `rotate(${totalRot}deg)`;
+        div.style.transform = transform;
       }
-      shapeMap.set(key, { div, x: run.shapeX, y: run.shapeY, w: run.shapeW, h: run.shapeH, rot: totalRot });
+      shape = { div, w: run.shapeW, h: run.shapeH };
+      shapeMap.set(key, shape);
       layer.appendChild(div);
     }
 
-    const shape = shapeMap.get(key)!;
     const span = ownerDocument.createElement('span');
     setSelectionData(span, 'ooxmlSelectionRun', 'pptx');
     setSelectionData(span, 'runIndex', String(runIndex));

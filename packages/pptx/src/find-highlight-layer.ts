@@ -21,6 +21,7 @@ import {
   type MatchRunSlice,
 } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
+import { pptxRunFrameKey, pptxRunFrameTransform } from './run-frame-transform.js';
 
 export interface PptxHighlightMatch {
   slices: MatchRunSlice[];
@@ -73,8 +74,8 @@ export function buildPptxHighlightLayer(
   // scale with it under the shape's rotate().
   const shapeMap = new Map<string, { div: HTMLDivElement; w: number; h: number }>();
   const shapeDiv = (run: PptxTextRunInfo): { div: HTMLDivElement; w: number; h: number } => {
-    const totalRot = run.rotation + (run.textBodyRotation ?? 0);
-    const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
+    const transform = pptxRunFrameTransform(run);
+    const key = pptxRunFrameKey(run, transform);
     let entry = shapeMap.get(key);
     if (!entry) {
       const div = document.createElement('div');
@@ -83,9 +84,9 @@ export function buildPptxHighlightLayer(
         `left:${overlayPercent(run.shapeX, cssWidth)};top:${overlayPercent(run.shapeY, cssHeight)};` +
         `width:${overlayPercent(run.shapeW, cssWidth)};height:${overlayPercent(run.shapeH, cssHeight)};` +
         `pointer-events:none;overflow:hidden;`;
-      if (totalRot !== 0) {
+      if (transform) {
         div.style.transformOrigin = 'center center';
-        div.style.transform = `rotate(${totalRot}deg)`;
+        div.style.transform = transform;
       }
       entry = { div, w: run.shapeW, h: run.shapeH };
       shapeMap.set(key, entry);

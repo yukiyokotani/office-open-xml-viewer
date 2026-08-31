@@ -6,6 +6,11 @@ import { WorkerBridge, type WorkerLike } from '@silurus/ooxml-core';
 import { DocxDocument } from './document';
 import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
 import { subscribeDocxLayout } from './document-layout-events.js';
+import {
+  selectDocxLayoutView,
+  subscribeDocxLayoutView,
+  type DocxLayoutViewPublication,
+} from './document-layout-view.js';
 import type {
   DocumentLayoutPartial,
   DocumentMeta,
@@ -444,6 +449,66 @@ describe('progressive pushes and request correlation', () => {
 });
 
 describe('worker layout-view metadata switch', () => {
+  it('publishes only the winning concurrent view after matching geometry is installed', async () => {
+    const resolvers: Array<(value: RenderWorkerResponse) => void> = [];
+    const document = Object.create(DocxDocument.prototype) as DocxDocument;
+    Object.assign(document, {
+      _mode: 'worker',
+      _document: null,
+      _source: null,
+      _meta: fullMeta(11),
+      _layoutViewGeneration: 0,
+      _bridge: {
+        request: () => new Promise<RenderWorkerResponse>((resolve) => resolvers.push(resolve)),
+      },
+    });
+    attachDocumentLayoutRuntime(document, 0);
+    documentLayoutRuntimeOf(document).activeLayoutOptions = {
+      currentDateMs: 0,
+      showTrackedChanges: false,
+    };
+    const publications: DocxLayoutViewPublication[] = [];
+    const unsubscribe = subscribeDocxLayoutView(
+      document,
+      (publication) => publications.push(publication),
+      vi.fn(),
+    );
+
+    const staleRequester = {};
+    const winningRequester = {};
+    const stale = selectDocxLayoutView(document, {
+      showTrackedChanges: true,
+      currentDate: 10,
+    }, staleRequester);
+    const winning = selectDocxLayoutView(document, {
+      showTrackedChanges: true,
+      currentDate: 20,
+    }, winningRequester);
+    expect(resolvers).toHaveLength(2);
+
+    resolvers[0]!({
+      type: 'layoutViewSelected',
+      id: 1,
+      meta: fullMeta(13),
+    } as RenderWorkerResponse);
+    await expect(stale).resolves.toBe(false);
+    expect(publications).toEqual([]);
+
+    resolvers[1]!({
+      type: 'layoutViewSelected',
+      id: 2,
+      meta: fullMeta(14),
+    } as RenderWorkerResponse);
+    await expect(winning).resolves.toBe(true);
+    expect(document.pageCount).toBe(14);
+    expect(publications).toEqual([{
+      view: { showTrackedChanges: true, currentDate: 20 },
+      generation: 1,
+      requester: winningRequester,
+    }]);
+    unsubscribe();
+  });
+
   it('keeps the old variant active until matching worker geometry is ready', async () => {
     let resolveMeta!: (value: RenderWorkerResponse) => void;
     const metaResponse = new Promise<RenderWorkerResponse>((resolve) => {

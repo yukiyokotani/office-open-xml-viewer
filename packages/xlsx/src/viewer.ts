@@ -4327,9 +4327,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     // Ctrl/⌘ + mouse wheel (and trackpad pinch, which the browser reports as a
     // ctrl-wheel) zooms the grid, matching Excel. preventDefault stops the
     // browser's own page zoom. A plain wheel still scrolls the grid natively.
-    // The step is exponential in deltaY (see zoomStepScale) so a trackpad
-    // pinch — a high-frequency stream of small-deltaY events — does not zoom
-    // away; the total zoom tracks the gesture distance, not the event count.
+    // The step is exponential in mode-normalized wheel distance (see
+    // zoomStepScale), so a trackpad pinch — a high-frequency stream of
+    // small-deltaY events — does not zoom away; the total zoom tracks the gesture
+    // distance, not the event count, while a mouse wheel remains a gentle 10%.
     this.surface.on(
       'wheel',
       (e: WheelEvent) => {
@@ -4363,7 +4364,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         const { x: ax, y: ay } = this.surface.localPoint(e.clientX, e.clientY);
         this._pendingZoomAnchor =
           Number.isFinite(ax) && Number.isFinite(ay) ? { x: ax, y: ay } : null;
-        this.setScale(zoomStepScale(this.viewport.scale, e.deltaY));
+        this.setScale(zoomStepScale(this.viewport.scale, e.deltaY, e.deltaMode));
       },
       { passive: false },
     );

@@ -550,7 +550,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         const ay = e.clientY - rect.top;
         this._pendingZoomAnchor =
           Number.isFinite(ax) && Number.isFinite(ay) ? { x: ax, y: ay } : null;
-        this.setScale(zoomStepScale(this._scale, e.deltaY));
+        this.setScale(zoomStepScale(this._scale, e.deltaY, e.deltaMode));
       };
       this._scrollHost.addEventListener('wheel', this._wheelListener as EventListener, {
         passive: false,

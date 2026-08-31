@@ -93,6 +93,10 @@ import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions, type LayoutOptions } from './layout/options.js';
 import type { LayoutVariantStore } from './layout/variant-store.js';
 import { publishDocxLayout } from './document-layout-events.js';
+import {
+  docxLayoutViewRequester,
+  publishDocxLayoutView,
+} from './document-layout-view.js';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, and the
@@ -1497,6 +1501,11 @@ export class DocxDocument {
   async setLayoutView(
     view: Readonly<{ showTrackedChanges?: boolean; currentDate?: Date | number }> = {},
   ): Promise<void> {
+    // Request ownership is explicit input metadata. It is captured before a
+    // worker request yields, stripped by normalization, and never serialized.
+    const requester = (view as Readonly<{
+      [docxLayoutViewRequester]?: object;
+    }>)[docxLayoutViewRequester];
     const runtime = documentLayoutRuntimeOf(this);
     const next = normalizeLayoutOptions(
       view.currentDate,
@@ -1522,6 +1531,7 @@ export class DocxDocument {
       runtime.activeLayoutOptions = next;
       this._meta = { ...this._meta, ...variant.meta };
       this._invalidateLayoutDerivedCaches();
+      publishDocxLayoutView(this, requester);
       return;
     }
 
@@ -1529,6 +1539,7 @@ export class DocxDocument {
     // Bookmark pages and the review anchor caches are derived from the
     // layout, so they belong to the variant that produced them.
     this._invalidateLayoutDerivedCaches();
+    publishDocxLayoutView(this, requester);
   }
 
   /** Lazily build (and cache) the `bookmarkName → page index` map from either

@@ -32,7 +32,8 @@ export class LayoutVariantStore {
   readonly #variants = new Map<string, DeepReadonly<DocumentLayout>>();
   readonly #defaultOptions: LayoutOptions;
   readonly #defaultKey: string;
-  #activeNonDefaultKey: string | null = null;
+  #activeNonDefaultDateMs: number | null = null;
+  readonly #activeNonDefaultKeys = new Set<string>();
 
   constructor(
     services: LayoutServices,
@@ -60,13 +61,10 @@ export class LayoutVariantStore {
     const key = layoutOptionsKey(normalized, this.#services);
     let layout = this.#variants.get(key);
     if (!layout) {
+      // Evict the previous explicit-date pair before constructing the next
+      // whole-document graph, keeping peak retained layout memory bounded.
+      this.#prepareRetention(key, normalized);
       layout = deepFreezeDocumentLayout(this.#build(normalized) as DocumentLayout);
-      if (key !== this.#defaultKey) {
-        if (this.#activeNonDefaultKey !== null && this.#activeNonDefaultKey !== key) {
-          this.#variants.delete(this.#activeNonDefaultKey);
-        }
-        this.#activeNonDefaultKey = key;
-      }
       this.#variants.set(key, layout);
     }
     return Object.freeze({ key, options: normalized, layout });
@@ -93,8 +91,8 @@ export class LayoutVariantStore {
    * builder) under its options key, so every later synchronous `select` — the
    * render path included — hits it instead of rebuilding.
    *
-   * Retention follows the same one-non-default-variant policy as `select`, so
-   * priming cannot grow the cache beyond what building normally would.
+   * Retention follows the same bounded explicit-date-pair policy as `select`,
+   * so priming cannot grow the cache beyond what building normally would.
    */
   prime(
     options: LayoutOptions,
@@ -104,7 +102,7 @@ export class LayoutVariantStore {
     const key = layoutOptionsKey(normalized, this.#services);
     const existing = this.#variants.get(key);
     if (existing) return existing;
-    return this.#store(key, layout);
+    return this.#store(key, normalized, layout);
   }
 
   /**
@@ -124,19 +122,32 @@ export class LayoutVariantStore {
     const normalized = Object.isFrozen(options) ? options : Object.freeze({ ...options });
     const key = layoutOptionsKey(normalized, this.#services);
     if ((this.#variants.get(key) ?? null) !== expected) return null;
-    return this.#store(key, layout);
+    return this.#store(key, normalized, layout);
   }
 
-  #store(key: string, layout: DocumentLayout): DeepReadonly<DocumentLayout> {
+  #store(
+    key: string,
+    options: LayoutOptions,
+    layout: DocumentLayout,
+  ): DeepReadonly<DocumentLayout> {
+    this.#prepareRetention(key, options);
     const frozen = deepFreezeDocumentLayout(layout);
-    if (key !== this.#defaultKey) {
-      if (this.#activeNonDefaultKey !== null && this.#activeNonDefaultKey !== key) {
-        this.#variants.delete(this.#activeNonDefaultKey);
-      }
-      this.#activeNonDefaultKey = key;
-    }
     this.#variants.set(key, frozen);
     return frozen;
+  }
+
+  /** Keep the permanent load-time default plus final/markup layouts for one
+   * explicit field date. A different date evicts that whole bounded pair. */
+  #prepareRetention(key: string, options: LayoutOptions): void {
+    if (key === this.#defaultKey) return;
+    if (this.#activeNonDefaultDateMs !== options.currentDateMs) {
+      for (const retainedKey of this.#activeNonDefaultKeys) {
+        this.#variants.delete(retainedKey);
+      }
+      this.#activeNonDefaultKeys.clear();
+      this.#activeNonDefaultDateMs = options.currentDateMs;
+    }
+    this.#activeNonDefaultKeys.add(key);
   }
 
   /** Whether a layout for these options is already available synchronously. */

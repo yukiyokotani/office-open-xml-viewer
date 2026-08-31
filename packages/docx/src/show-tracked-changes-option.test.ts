@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxViewer } from './viewer.js';
 import { DocxDocument } from './document.js';
+import { subscribeDocxLayoutView } from './document-layout-view.js';
 import {
   installDom,
   makeEl,
@@ -73,9 +74,114 @@ describe('DocxViewer — showTrackedChanges option', () => {
   });
 });
 
+describe.each(['main', 'worker'] as const)(
+  'DocxViewer — shared borrowed document (%s mode)',
+  (mode) => {
+    it('keeps geometry and paint on the document\'s post-construction active view', async () => {
+      installDom();
+      const engine = new FakeDocxEngine(2, PAGE, mode);
+      engine.layoutView = { showTrackedChanges: false, currentDate: 10 };
+      const viewers = [makeEl('canvas'), makeEl('canvas')].map((canvas) =>
+        DocxViewer.fromDocument(canvas as unknown as HTMLCanvasElement, engine.asDoc()));
+      await Promise.all(viewers.map((viewer) => viewer.goToPage(0)));
+
+      const calls = mode === 'worker' ? engine.bitmapCalls : engine.renderCalls;
+      const beforeExternalSwitch = calls.length;
+      await engine.setLayoutView({ showTrackedChanges: true, currentDate: 20 });
+      await Promise.resolve();
+
+      expect(calls.length).toBeGreaterThan(beforeExternalSwitch);
+      for (const call of calls.slice(beforeExternalSwitch)) {
+        expect(call.showTrackedChanges).toBe(true);
+        expect(call.currentDate).toBe(20);
+      }
+
+      const beforeViewerSwitch = calls.length;
+      await viewers[1]!.setShowTrackedChanges(false);
+      await Promise.resolve();
+
+      expect(calls.length).toBeGreaterThan(beforeViewerSwitch);
+      for (const call of calls.slice(beforeViewerSwitch)) {
+        expect(call.showTrackedChanges ?? false).toBe(false);
+        expect(call.currentDate).toBe(20);
+      }
+      for (const viewer of viewers) viewer.destroy();
+    });
+  },
+);
+
+describe('DocxViewer — layout-view publication ordering', () => {
+  it('rejects an older outer publication after a listener installs a newer view', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, PAGE);
+    engine.layoutView = { showTrackedChanges: false, currentDate: 0 };
+    const unsubscribe = subscribeDocxLayoutView(
+      engine.asDoc(),
+      (publication) => {
+        if (publication.view.currentDate === 10) {
+          engine.setLayoutView({ showTrackedChanges: true, currentDate: 20 });
+        }
+      },
+      vi.fn(),
+    );
+    const viewers = [makeEl('canvas'), makeEl('canvas')].map((canvas) =>
+      DocxViewer.fromDocument(canvas as unknown as HTMLCanvasElement, engine.asDoc()));
+    await Promise.all(viewers.map((viewer) => viewer.goToPage(0)));
+
+    const before = engine.renderCalls.length;
+    engine.setLayoutView({ showTrackedChanges: true, currentDate: 10 });
+    await Promise.resolve();
+
+    expect(engine.layoutView).toEqual({ showTrackedChanges: true, currentDate: 20 });
+    expect(engine.renderCalls.length).toBeGreaterThan(before);
+    for (const call of engine.renderCalls.slice(before)) {
+      expect(call.showTrackedChanges).toBe(true);
+      expect(call.currentDate).toBe(20);
+    }
+
+    unsubscribe();
+    for (const viewer of viewers) viewer.destroy();
+  });
+
+  it('awaits its owned repaint and preserves repaint rejection', async () => {
+    installDom();
+    const engine = new FakeDocxEngine(1, PAGE, 'main', true);
+    const onError = vi.fn();
+    const viewer = DocxViewer.fromDocument(
+      makeEl('canvas') as unknown as HTMLCanvasElement,
+      engine.asDoc(),
+      { onError },
+    );
+    const initial = viewer.goToPage(0);
+    engine.renderCalls.at(-1)!.resolve();
+    await initial;
+
+    let settled = false;
+    const beforeSwitch = engine.renderCalls.length;
+    const switching = viewer.setShowTrackedChanges(true).then(() => { settled = true; });
+    await vi.waitFor(() => expect(engine.renderCalls.length).toBe(beforeSwitch + 1));
+    expect(settled).toBe(false);
+    engine.renderCalls.at(-1)!.resolve();
+    await switching;
+    expect(settled).toBe(true);
+
+    const beforeFailure = engine.renderCalls.length;
+    const failing = viewer.setShowTrackedChanges(false);
+    await vi.waitFor(() => expect(engine.renderCalls.length).toBe(beforeFailure + 1));
+    engine.renderCalls.at(-1)!.reject(new Error('repaint failed'));
+    await expect(failing).rejects.toThrow('repaint failed');
+    expect(onError).not.toHaveBeenCalled();
+    viewer.destroy();
+  });
+});
+
 async function setupScroll(
   opts: Record<string, unknown> = {},
   mode: 'main' | 'worker' = 'main',
+  layoutView?: Readonly<{
+    showTrackedChanges: boolean;
+    currentDate: number;
+  }>,
 ) {
   installDom();
   const container = makeContainer(200, 400);
@@ -88,6 +194,10 @@ async function setupScroll(
     ],
     mode,
   );
+  engine.layoutView = layoutView ?? {
+    showTrackedChanges: opts.showTrackedChanges === true,
+    currentDate: typeof opts.currentDate === 'number' ? opts.currentDate : 0,
+  };
   const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
     document: engine.asDoc(),
     gap: 10,
@@ -107,6 +217,38 @@ async function setupScroll(
 }
 
 describe('DocxScrollViewer — showTrackedChanges option (main mode)', () => {
+  it('inherits an already-loaded document\'s active markup view', async () => {
+    const currentDate = 1_700_000_000_000;
+    const { v, engine } = await setupScroll(
+      {},
+      'main',
+      { showTrackedChanges: true, currentDate },
+    );
+    expect(engine.renderCalls.length).toBeGreaterThan(0);
+    for (const call of engine.renderCalls) {
+      expect(call.showTrackedChanges).toBe(true);
+      expect(call.currentDate).toBe(currentDate);
+    }
+
+    const before = engine.renderCalls.length;
+    await v.setShowTrackedChanges(false);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The first OFF is a real transition, not a stale-state no-op, and it keeps
+    // the borrowed document's other layout axis intact.
+    expect(engine.renderCalls.length).toBeGreaterThan(before);
+    expect(engine.layoutViews.at(-1)).toEqual({
+      showTrackedChanges: false,
+      currentDate,
+    });
+    for (const call of engine.renderCalls.slice(before)) {
+      expect(call.showTrackedChanges ?? false).toBe(false);
+      expect(call.currentDate).toBe(currentDate);
+    }
+    v.destroy();
+  });
+
   it('renders the final view by default', async () => {
     const { v, engine } = await setupScroll();
     expect(engine.renderCalls.length).toBeGreaterThan(0);
@@ -161,3 +303,58 @@ describe('DocxScrollViewer — showTrackedChanges in worker mode', () => {
     v.destroy();
   });
 });
+
+describe.each(['main', 'worker'] as const)(
+  'DocxScrollViewer — shared borrowed document (%s mode)',
+  (mode) => {
+    it('keeps every viewer on the document\'s post-construction active view', async () => {
+      installDom();
+      const engine = new FakeDocxEngine(
+        2,
+        [{ widthPt: 100, heightPt: 200 }],
+        mode,
+      );
+      engine.layoutView = { showTrackedChanges: false, currentDate: 10 };
+      const viewers = [makeContainer(200, 400), makeContainer(200, 400)].map((container) => {
+        const viewer = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
+          document: engine.asDoc(),
+          gap: 10,
+          overscan: 1,
+          paddingLeft: 0,
+          paddingRight: 0,
+        });
+        const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+        scrollHost.clientHeight = 400;
+        scrollHost.clientWidth = 200;
+        viewer.relayout();
+        return viewer;
+      });
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const calls = mode === 'worker' ? engine.bitmapCalls : engine.renderCalls;
+      const beforeExternalSwitch = calls.length;
+      await engine.setLayoutView({ showTrackedChanges: true, currentDate: 20 });
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(calls.length).toBeGreaterThan(beforeExternalSwitch);
+      for (const call of calls.slice(beforeExternalSwitch)) {
+        expect(call.showTrackedChanges).toBe(true);
+        expect(call.currentDate).toBe(20);
+      }
+
+      const beforeViewerSwitch = calls.length;
+      await viewers[1]!.setShowTrackedChanges(false);
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(calls.length).toBeGreaterThan(beforeViewerSwitch);
+      for (const call of calls.slice(beforeViewerSwitch)) {
+        expect(call.showTrackedChanges ?? false).toBe(false);
+        expect(call.currentDate).toBe(20);
+      }
+      for (const viewer of viewers) viewer.destroy();
+    });
+  },
+);

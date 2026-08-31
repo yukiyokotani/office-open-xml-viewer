@@ -4,6 +4,7 @@ export interface WheelZoomEvent {
   ctrlKey: boolean;
   metaKey: boolean;
   deltaY: number;
+  deltaMode: number;
   preventDefault(): void;
 }
 
@@ -28,7 +29,9 @@ export function captureUnhandledWheelZoom(
   defer(() => {
     if (viewer.getScale() !== initialScale) return;
     try {
-      Promise.resolve(viewer.setScale(zoomStepScale(initialScale, event.deltaY))).catch(onError);
+      Promise.resolve(
+        viewer.setScale(zoomStepScale(initialScale, event.deltaY, event.deltaMode)),
+      ).catch(onError);
     } catch (error) {
       onError?.(error);
     }
