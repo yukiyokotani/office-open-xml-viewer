@@ -33,6 +33,36 @@ interface PptxResolvedMatch {
   slices: TextMatch['slices'];
 }
 
+function sameSearchContainer(left: PptxTextRunInfo, right: PptxTextRunInfo): boolean {
+  const leftCell = left.tableCell;
+  const rightCell = right.tableCell;
+  if (!leftCell && !rightCell) return true;
+  if (!leftCell || !rightCell) return false;
+  return left.elementIndex === right.elementIndex &&
+    left.origin === right.origin &&
+    left.shapeId === right.shapeId &&
+    leftCell.row === rightCell.row &&
+    leftCell.column === rightCell.column;
+}
+
+/**
+ * The shared core index joins adjacent drawing runs, which is correct within a
+ * text body. Table cells are separate text containers, so reject only matches
+ * whose run slices cross such a boundary. Keeping one slide-wide index avoids
+ * per-cell indices and preserves the existing linear scan and run offsets.
+ */
+function matchStaysWithinSearchContainer(
+  runs: PptxTextRunInfo[],
+  slices: TextMatch['slices'],
+): boolean {
+  for (let index = 1; index < slices.length; index++) {
+    const left = runs[slices[index - 1].runIndex];
+    const right = runs[slices[index].runIndex];
+    if (!left || !right || !sameSearchContainer(left, right)) return false;
+  }
+  return true;
+}
+
 export class PptxFindController {
   private _slideRuns = new Map<number, PptxTextRunInfo[]>();
   private _matches: PptxResolvedMatch[] = [];
@@ -136,8 +166,9 @@ export class PptxFindController {
       const runs = committedRuns.get(slide) ?? [];
       const index = buildTextIndex(runs);
       for (const tm of findMatches(index, query, opts)) {
+        if (!matchStaysWithinSearchContainer(runs, tm.slices)) continue;
         const text = tm.slices
-          .map((s) => runs[s.runIndex].text.slice(s.start, s.end))
+          .map((slice) => runs[slice.runIndex].text.slice(slice.start, slice.end))
           .join('');
         matches.push({ slide, text, slices: tm.slices });
       }

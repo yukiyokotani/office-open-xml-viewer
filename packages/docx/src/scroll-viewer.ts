@@ -19,6 +19,12 @@ import { eventTargetsDataAttributeWithin } from '@silurus/ooxml-core/internal/do
 import type { ReadOnlyCommentMarginGeometry } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
 import { DocxDocument } from './document';
 import type { LoadOptions } from './document';
+import {
+  activeDocxLayoutViewOf,
+  selectDocxLayoutView,
+  subscribeDocxLayoutView,
+  type DocxLayoutViewPublication,
+} from './document-layout-view.js';
 import type { DocxTextRunInfo } from './renderer';
 import { buildDocxTextLayer } from './text-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
@@ -457,22 +463,34 @@ export class DocxScrollViewer implements ZoomableViewer {
    *  variant the viewer reads geometry from; toggle it with
    *  {@link setShowTrackedChanges}. */
   private _showTrackedChanges: boolean;
+  /** Canonical epoch milliseconds for the document-global field-date layout
+   * axis. Kept beside `_showTrackedChanges` because borrowed documents can
+   * change either axis after construction. */
+  private _currentDate: Date | number | undefined;
   private _layoutViewGeneration = 0;
+  private _layoutViewPublicationGeneration = 0;
 
   /**
    * Create a Scroll Viewer that borrows an already-loaded document.
    *
-   * The document's render mode is authoritative. The returned Viewer cannot
-   * load another source, and destroying it leaves the caller-owned document
-   * open. The initial virtual window is laid out during construction.
+   * The document's render mode and active layout view are authoritative. The
+   * returned Viewer cannot load another source, and destroying it leaves the
+   * caller-owned document open. The initial virtual window is laid out during
+   * construction.
    */
   static fromDocument(
     container: HTMLElement,
     document: DocxDocument,
     opts: Omit<DocxScrollViewerOptions, keyof LoadOptions> = {},
   ): Omit<DocxScrollViewer, 'load'> {
+    const layoutView = activeDocxLayoutViewOf(document);
     return new DocxScrollViewer(container, {
       ...opts,
+      // The caller-owned document has already selected these pagination axes.
+      // Seed the viewer from that authoritative state: LoadOptions are omitted
+      // from this factory's opts and its local defaults can therefore disagree.
+      currentDate: layoutView.currentDate,
+      showTrackedChanges: layoutView.showTrackedChanges,
       [borrowedDocumentOption]: document,
     } as InternalDocxScrollViewerOptions);
   }
@@ -493,6 +511,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._opts = opts;
     this._errorRouter = new CanvasViewerErrorRouter('DocxScrollViewer', opts.onError);
     this._showTrackedChanges = opts.showTrackedChanges === true;
+    this._currentDate = opts.currentDate;
     // `??` (not `||`): a caller's explicit `false` must disable the shadow, not
     // fall through to the default.
     this._pageShadow = opts.pageShadow ?? DEFAULT_PAGE_SHADOW;
@@ -582,7 +601,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         const ay = e.clientY - rect.top;
         this._pendingZoomAnchor =
           Number.isFinite(ax) && Number.isFinite(ay) ? { x: ax, y: ay } : null;
-        this.setScale(zoomStepScale(this._scale, e.deltaY));
+        this.setScale(zoomStepScale(this._scale, e.deltaY, e.deltaMode));
       };
       this._scrollHost.addEventListener('wheel', this._wheelListener as EventListener, {
         passive: false,
@@ -646,9 +665,9 @@ export class DocxScrollViewer implements ZoomableViewer {
         // final view while every render asks for the markup view, and the first
         // paint pays a full synchronous repagination.
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
-        ...(this._opts.currentDate === undefined
+        ...(this._currentDate === undefined
           ? {}
-          : { currentDate: this._opts.currentDate }),
+          : { currentDate: this._currentDate }),
         ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
         ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
         onLayoutProgress: this._opts.onLayoutProgress,
@@ -730,10 +749,16 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   private _bindLayoutDocument(doc: DocxDocument): void {
     this._unbindLayoutDocument();
+    this._layoutViewPublicationGeneration = 0;
     this._presentedPageCount = doc.pageCount;
     this._pendingLayoutPublication = null;
+    const unsubscribeView = subscribeDocxLayoutView(
+      doc,
+      (publication) => this._onLayoutViewPublication(doc, publication),
+      (error) => this._reportRenderError(error),
+    );
     let initial = true;
-    this._layoutUnsubscribe = subscribeDocxLayout(
+    const unsubscribeLayout = subscribeDocxLayout(
       doc,
       () => ({
         pageCount: doc.pageCount,
@@ -749,6 +774,10 @@ export class DocxScrollViewer implements ZoomableViewer {
       },
       (error) => this._reportRenderError(error),
     );
+    this._layoutUnsubscribe = () => {
+      unsubscribeLayout();
+      unsubscribeView();
+    };
   }
 
   private _unbindLayoutDocument(): void {
@@ -796,6 +825,29 @@ export class DocxScrollViewer implements ZoomableViewer {
     }
     this._pendingLayoutPublication = null;
     this._applyLayoutPublication(publication);
+  }
+
+  private _onLayoutViewPublication(
+    doc: DocxDocument,
+    publication: DocxLayoutViewPublication,
+  ): void {
+    if (
+      this._destroyed
+      || doc !== this._doc
+      || publication.generation <= this._layoutViewPublicationGeneration
+    ) return;
+    this._layoutViewPublicationGeneration = publication.generation;
+    if (publication.requester === this) return;
+    this._layoutViewGeneration++;
+    this._showTrackedChanges = publication.view.showTrackedChanges;
+    this._currentDate = publication.view.currentDate;
+    this._find.invalidate();
+    this._pendingLayoutPublication = null;
+    this._applyLayoutPublication({
+      pageCount: doc.pageCount,
+      exact: true,
+      complete: doc.layoutComplete,
+    });
   }
 
   /** Refresh only the empty review layers created with each comment-enabled
@@ -1426,7 +1478,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        currentDate: this._opts.currentDate,
+        currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun,
       });
@@ -1614,7 +1666,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         width: widthPx,
         dpr,
         defaultTextColor: this._opts.defaultTextColor,
-        currentDate: this._opts.currentDate,
+        currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         onTextRun: wantRuns ? (r) => runs.push(r) : undefined,
       });
@@ -2087,7 +2139,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       width: widthPx,
       dpr,
       defaultTextColor: this._opts.defaultTextColor,
-      currentDate: this._opts.currentDate,
+      currentDate: this._currentDate,
       ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
       onTextRun,
     })
@@ -2159,19 +2211,22 @@ export class DocxScrollViewer implements ZoomableViewer {
     const generation = ++this._layoutViewGeneration;
     const doc = this._doc;
     if (this._showTrackedChanges === value) {
-      await doc?.setLayoutView?.({
+      if (doc) await selectDocxLayoutView(doc, {
         showTrackedChanges: value,
-        currentDate: this._opts.currentDate,
-      });
+        currentDate: this._currentDate,
+      }, this);
       return;
     }
     // The markup view is a different retained layout with its own pagination,
     // so move the document's active variant before reading any geometry from
     // it — page count and page heights are about to change.
-    await doc?.setLayoutView?.({
-      showTrackedChanges: value,
-      currentDate: this._opts.currentDate,
-    });
+    const selected = doc
+      ? await selectDocxLayoutView(doc, {
+          showTrackedChanges: value,
+          currentDate: this._currentDate,
+        }, this)
+      : true;
+    if (!selected) return;
     if (this._destroyed || generation !== this._layoutViewGeneration || doc !== this._doc) return;
     this._showTrackedChanges = value;
     this._find.invalidate();
@@ -2322,7 +2377,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       if (!entry || entry.scale !== scale) {
         const runs = doc.collectPageRuns(page, {
           width: this._pageWidthPx(page),
-          currentDate: this._opts.currentDate,
+          currentDate: this._currentDate,
           ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         });
         entry = { scale, runs };
@@ -2488,7 +2543,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (!this._doc) return [];
     return this._doc.collectPageRuns(page, {
       width: this._pageWidthPx(page),
-      currentDate: this._opts.currentDate,
+      currentDate: this._currentDate,
       ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
     });
   }
@@ -2931,7 +2986,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         xPt: localX / rect.width * pageSize.widthPt,
         yPt: localY / rect.height * pageSize.heightPt,
       }, {
-        currentDate: this._opts.currentDate,
+        currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
         maxTextCharacters: MAX_DOCX_ELEMENT_TEXT_CHARACTERS,
       });

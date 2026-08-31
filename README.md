@@ -686,7 +686,7 @@ file without uploading it.
 | | Comments (§17.13.4) — opt-in margin balloons (`comments: true`): commented ranges tinted, threaded replies via `commentsExtended.xml`, resolved threads hidden, click-to-select stacking; also available as data (`doc.comments`, `doc.commentAnchorRanges()`) | ✅ |
 | | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments) | ✅ |
 | | Mail merge fields | ❌ Not planned |
-| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| **Interaction** | Text selection, including table-cell text (transparent overlay, native copy) | ✅ |
 | | Bounded read-only text/element context (`getSelectionContext()`, page/source locators, element selection, AI/MCP callback) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
@@ -849,7 +849,7 @@ file without uploading it.
 | **Theme** | Scheme colors (dk1/lt1/accent1–6) | ✅ |
 | | Font scheme (`+mj-lt`, `+mn-lt`) | ✅ |
 | | lumMod / lumOff / alpha transforms | ✅ |
-| **Interaction** | Text selection (transparent overlay, native copy) | ✅ |
+| **Interaction** | Text selection, including table-cell text (transparent overlay, native copy) | ✅ |
 | | Bounded text/element selection context (`getSelectionContext()`, element selection, master/layout/slide provenance, main + worker) | ✅ |
 | | Comments — opt-in slide-side cards (`comments: true`), authored target markers and highlights, replies and resolved state; also available per slide through the presentation model | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |

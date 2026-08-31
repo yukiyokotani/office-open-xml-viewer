@@ -59,11 +59,17 @@ describe('findHighlightOverlayStyle', () => {
  * zoom. The old handler ignored `deltaY` magnitude and added a fixed ±0.1 per
  * event, so a trackpad pinch — which fires a high-frequency stream of small
  * wheel events — zoomed far too fast. `zoomStepScale` makes the step
- * exponential in `deltaY`, so the *total* zoom over a gesture is
- * `exp(-k·Σ deltaY)` and depends only on the total scroll distance, not on how
- * many events the OS splits it into.
+ * exponential in a mode-normalized wheel distance, so one conventional wheel
+ * step is a precise 10% change while fine-grained trackpad events still combine
+ * smoothly.
  */
 describe('zoomStepScale (ctrl/pinch zoom)', () => {
+  it('maps pixel, line, and page wheel units to the same 10% conventional step', () => {
+    expect(zoomStepScale(1, -100, 0)).toBeCloseTo(1.1, 10);
+    expect(zoomStepScale(1, -3, 1)).toBeCloseTo(1.1, 10);
+    expect(zoomStepScale(1, -1, 2)).toBeCloseTo(1.1, 10);
+  });
+
   it('scrolling up / pinching out (deltaY < 0) zooms in', () => {
     expect(zoomStepScale(1, -10)).toBeGreaterThan(1);
   });

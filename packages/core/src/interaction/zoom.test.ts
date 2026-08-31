@@ -6,11 +6,31 @@ import { zoomStepScale, anchoredZoomOffset } from './zoom.js';
  * zoom. The old handler ignored `deltaY` magnitude and added a fixed ±0.1 per
  * event, so a trackpad pinch — which fires a high-frequency stream of small
  * wheel events — zoomed far too fast. `zoomStepScale` makes the step
- * exponential in `deltaY`, so the *total* zoom over a gesture is
- * `exp(-k·Σ deltaY)` and depends only on the total scroll distance, not on how
- * many events the OS splits it into.
+ * exponential in a mode-normalized wheel distance, so fine-grained trackpad
+ * input follows gesture distance while oversized discrete wheel events are
+ * bounded. One conventional wheel step is deliberately gentle (10%) so a mouse
+ * wheel remains adjustable instead of jumping across most of the zoom range.
  */
 describe('zoomStepScale (ctrl/pinch zoom)', () => {
+  it('maps one conventional pixel-mode wheel step to a 10% scale change', () => {
+    expect(zoomStepScale(1, -100, 0)).toBeCloseTo(1.1, 10);
+    expect(zoomStepScale(1, 100, 0)).toBeCloseTo(1 / 1.1, 10);
+  });
+
+  it('normalizes line- and page-mode wheel deltas to the same step', () => {
+    expect(zoomStepScale(1, -3, 1)).toBeCloseTo(1.1, 10);
+    expect(zoomStepScale(1, -1, 2)).toBeCloseTo(1.1, 10);
+  });
+
+  it('defaults to pixel mode for callers that omit deltaMode', () => {
+    expect(zoomStepScale(1, -100)).toBeCloseTo(1.1, 10);
+  });
+
+  it('caps an oversized discrete wheel event to one step', () => {
+    expect(zoomStepScale(1, -1000, 0)).toBeCloseTo(1.1, 10);
+    expect(zoomStepScale(1, 1000, 0)).toBeCloseTo(1 / 1.1, 10);
+  });
+
   it('scrolling up / pinching out (deltaY < 0) zooms in', () => {
     expect(zoomStepScale(1, -10)).toBeGreaterThan(1);
   });

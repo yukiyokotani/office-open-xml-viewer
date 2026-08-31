@@ -118,6 +118,35 @@ test.describe('Layouts smoke — pptx', () => {
     expect(await canvasHasInk(page, EXPECTED.pptx - 1)).toBe(true);
   });
 
+  test('ScrollView exposes table runs to native browser selection', async ({ page }) => {
+    await openStory(page, 'pptxviewer-examples--scroll-view');
+    await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));
+
+    const selected = await page.evaluate(() => {
+      const runs = [...document.querySelectorAll<HTMLElement>(
+        '[data-ooxml-selection-run="pptx"]',
+      )];
+      const start = runs.find((run) => run.textContent === 'Taxon');
+      const surface = start?.parentElement?.parentElement;
+      const end = surface
+        ? [...surface.querySelectorAll<HTMLElement>('[data-ooxml-selection-run="pptx"]')]
+            .find((run) => run.textContent === 'Birds')
+        : undefined;
+      if (!start?.firstChild || !end?.firstChild) return null;
+      const range = document.createRange();
+      range.setStart(start.firstChild, 2);
+      range.setEnd(end.firstChild, 3);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return selection?.toString() ?? null;
+    });
+
+    expect(selected).not.toBeNull();
+    expect(selected).toMatch(/^xon/);
+    expect(selected).toMatch(/Bir$/);
+  });
+
   test('ThumbnailGrid renders every slide', async ({ page }) => {
     await openStory(page, 'pptxviewer-examples--thumbnail-grid');
     await waitForLoaded(page, new RegExp(`Loaded ${EXPECTED.pptx} slides`));

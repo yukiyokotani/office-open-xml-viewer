@@ -1489,8 +1489,8 @@ describe('DocxScrollViewer — zoom (T4)', () => {
 
     // Ctrl+wheel (deltaY<0 = zoom in): scale increases, preventDefault called.
     const ctrlPrevent = vi.fn();
-    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
-    expect(v.scaleForTest()).toBeGreaterThan(before);
+    scrollHost.dispatch('wheel', { deltaY: -100, deltaMode: 0, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
+    expect(v.scaleForTest()).toBeCloseTo(before * 1.1, 10);
     expect(ctrlPrevent).toHaveBeenCalledTimes(1);
     v.destroy();
   });
@@ -1869,10 +1869,20 @@ describe('DocxScrollViewer — element context', () => {
     };
   }
 
-  async function setupElementContext(opts: ConstructorParameters<typeof DocxScrollViewer>[1]) {
+  async function setupElementContext(
+    opts: NonNullable<ConstructorParameters<typeof DocxScrollViewer>[1]> = {},
+  ) {
     installDom();
     const container = makeContainer(200, 400);
     const engine = new FakeDocxEngine(1, [{ widthPt: 100, heightPt: 200 }]);
+    if (opts.currentDate !== undefined || opts.showTrackedChanges !== undefined) {
+      engine.layoutView = {
+        showTrackedChanges: opts.showTrackedChanges === true,
+        currentDate: opts.currentDate instanceof Date
+          ? opts.currentDate.getTime()
+          : opts.currentDate ?? engine.layoutView.currentDate,
+      };
+    }
     engine.elementContext = elementContext();
     const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(), gap: 10, paddingLeft: 0, paddingRight: 0, ...opts,
@@ -1971,7 +1981,7 @@ describe('DocxScrollViewer — element context', () => {
     expect(mounted.engine.elementContextCalls).toEqual([{
       pageIndex: 0,
       point: { xPt: 50, yPt: 100 },
-      options: { currentDate, maxTextCharacters: 65_536 },
+      options: { currentDate: currentDate.getTime(), maxTextCharacters: 65_536 },
     }]);
     expect(mounted.v.getSelectionContext()).toMatchObject({
       format: 'docx', kind: 'element', elementType: 'chart',

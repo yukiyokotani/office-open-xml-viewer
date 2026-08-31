@@ -108,6 +108,30 @@ describe('buildPptxHighlightLayer', () => {
     expect(shapeDiv.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
+  it('composes frame flips with shape and text-body rotation', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({
+      text: 'abc', rotation: 30, textBodyRotation: 90, shapeFlipH: true,
+    })];
+    const matches: PptxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false },
+    ];
+
+    buildPptxHighlightLayer(
+      layer as unknown as HTMLDivElement,
+      runs,
+      matches,
+      100,
+      100,
+      measureForFont,
+    );
+
+    expect(layer.children[0].style.transform).toBe(
+      'rotate(30deg) scale(-1, 1) rotate(90deg)',
+    );
+  });
+
   it('groups boxes from the same shape under one div', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

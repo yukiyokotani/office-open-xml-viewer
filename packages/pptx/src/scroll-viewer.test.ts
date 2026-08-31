@@ -1291,8 +1291,8 @@ describe('PptxScrollViewer — zoom (T4)', () => {
   // deck), which the DEFAULT [0.1, 4] clamp then inflated by ~1000× on the first
   // Ctrl+wheel or resize (spacer 6,274px → 6,172,330px). With the dimensionless
   // scale, a real 16:9 deck's base fit lands INSIDE the default bounds and a wheel
-  // tick multiplies it by ~e, never explodes.
-  it('real 16:9 deck: base fit is inside [0.1, 4] (NOT clamped) and one wheel tick multiplies the spacer by ~e, not ~1000×', () => {
+  // tick applies one gentle 10% step, never explodes.
+  it('real 16:9 deck: base fit is inside [0.1, 4] and one wheel tick changes it by 10%, not ~1000×', () => {
     installDom();
     // A real PowerPoint 16:9 deck: 13.333in × 7.5in = 12,192,000 × 6,858,000 EMU.
     // Natural width px = 12,192,000 / 9525 = 1280. Container ~1200px.
@@ -1321,21 +1321,20 @@ describe('PptxScrollViewer — zoom (T4)', () => {
     const spacerBase = parseFloat(spacer.style.height);
     expect(spacerBase).toBeGreaterThan(0);
 
-    // One Ctrl+wheel tick up (deltaY −100): zoomStepScale multiplies by exp(1) ≈
-    // 2.71828, so 0.9375 × e ≈ 2.548 — still inside [0.1, 4], NOT clamped to 4.
-    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault() {} });
+    // One pixel-mode Ctrl+wheel tick up (deltaY −100) is one 10% zoom step.
+    scrollHost.dispatch('wheel', { deltaY: -100, deltaMode: 0, ctrlKey: true, metaKey: false, preventDefault() {} });
     const zoomed = v.scaleForTest();
-    expect(zoomed).toBeCloseTo(0.9375 * Math.E, 4); // ≈ 2.548, not the clamped 4
+    expect(zoomed).toBeCloseTo(0.9375 * 1.1, 6);
     expect(zoomed).toBeLessThan(4);
 
-    // The spacer grew by the scale ratio (≈ e), NOT by ~1000× (the old px-per-EMU
+    // The spacer grew by the scale ratio (≈ 1.1), NOT by ~1000× (the old px-per-EMU
     // clamp explosion). Slide height px ∝ _scale, so the spacer's slide-height
     // portion scales by (zoomed / base); with the fixed gap term the total ratio is
-    // very close to e. Bound it well below the old 1000× blowup.
+    // very close to 1.1. Bound it well below the old 1000× blowup.
     const spacerZoomed = parseFloat(spacer.style.height);
     const ratio = spacerZoomed / spacerBase;
-    expect(ratio).toBeGreaterThan(2.5); // grew ~e×
-    expect(ratio).toBeLessThan(3); // and NOT ~1000× (the pre-fix explosion)
+    expect(ratio).toBeGreaterThan(1.08);
+    expect(ratio).toBeLessThan(1.12);
 
     // setScale(999) still clamps hard to the default zoomMax 4.
     v.setScale(999);
@@ -1355,8 +1354,8 @@ describe('PptxScrollViewer — zoom (T4)', () => {
 
     // Ctrl+wheel (deltaY<0 = zoom in): scale increases, preventDefault called.
     const ctrlPrevent = vi.fn();
-    scrollHost.dispatch('wheel', { deltaY: -100, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
-    expect(v.scaleForTest()).toBeGreaterThan(before);
+    scrollHost.dispatch('wheel', { deltaY: -100, deltaMode: 0, ctrlKey: true, metaKey: false, preventDefault: ctrlPrevent });
+    expect(v.scaleForTest()).toBeCloseTo(before * 1.1, 10);
     expect(ctrlPrevent).toHaveBeenCalledTimes(1);
     v.destroy();
   });

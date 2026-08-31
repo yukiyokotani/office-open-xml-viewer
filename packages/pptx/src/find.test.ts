@@ -7,7 +7,7 @@ import type { PptxTextRunInfo } from './renderer';
  * slide's runs, matches across run boundaries, aggregates in document order
  * tagged `{ slide }`, and cycles the active match across slides.
  */
-function run(text: string): PptxTextRunInfo {
+function run(text: string, overrides: Partial<PptxTextRunInfo> = {}): PptxTextRunInfo {
   return {
     text,
     inShapeX: 0,
@@ -21,6 +21,7 @@ function run(text: string): PptxTextRunInfo {
     shapeW: 100,
     shapeH: 20,
     rotation: 0,
+    ...overrides,
   };
 }
 
@@ -45,6 +46,20 @@ describe('PptxFindController.find', () => {
     const matches = await c.find('Hello');
     expect(matches).toHaveLength(1);
     expect(matches[0].text).toBe('Hello');
+  });
+
+  it('matches across runs in one table cell but never across cell boundaries', async () => {
+    const sameCell = await controllerFor([[
+      run('Hel', { elementIndex: 0, tableCell: { row: 0, column: 0 } }),
+      run('lo', { elementIndex: 0, tableCell: { row: 0, column: 0 } }),
+    ]]).find('Hello');
+    expect(sameCell).toHaveLength(1);
+
+    const adjacentCells = await controllerFor([[
+      run('foo', { elementIndex: 0, tableCell: { row: 0, column: 0 } }),
+      run('bar', { elementIndex: 0, tableCell: { row: 0, column: 1 } }),
+    ]]).find('foobar');
+    expect(adjacentCells).toEqual([]);
   });
 
   it('is case-insensitive by default; caseSensitive honored', async () => {

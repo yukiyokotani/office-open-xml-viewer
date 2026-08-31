@@ -91,4 +91,52 @@ describe('LayoutVariantStore', () => {
     expect(store.layoutFor({ currentDateMs: 101 })).toBe(rebuiltFirst);
     expect(builds).toEqual([100, 101, 102, 101]);
   });
+
+  it('retains the final and markup pair for one explicit field date', () => {
+    const builds: string[] = [];
+    const store = new LayoutVariantStore(
+      services('text:a'),
+      { currentDateMs: 100 },
+      (options) => {
+        builds.push(`${options.currentDateMs}:${options.showTrackedChanges === true}`);
+        return emptyLayout();
+      },
+    );
+
+    const datedFinal = store.layoutFor({ currentDateMs: 101 });
+    const datedMarkup = store.layoutFor({ currentDateMs: 101, showTrackedChanges: true });
+    expect(store.layoutFor({ currentDateMs: 101 })).toBe(datedFinal);
+    expect(store.layoutFor({ currentDateMs: 101, showTrackedChanges: true })).toBe(datedMarkup);
+    expect(builds).toEqual(['101:false', '101:true']);
+
+    // Selecting another explicit date replaces the previous date's bounded
+    // pair instead of retaining unbounded field-date variants.
+    store.layoutFor({ currentDateMs: 102 });
+    expect(store.layoutFor({ currentDateMs: 101 })).not.toBe(datedFinal);
+    expect(builds).toEqual(['101:false', '101:true', '102:false', '101:false']);
+  });
+
+  it('evicts the old explicit-date pair before building the next date', () => {
+    let oldPairDuringBuild: [boolean, boolean] | undefined;
+    let store!: LayoutVariantStore;
+    store = new LayoutVariantStore(
+      services('text:a'),
+      { currentDateMs: 100 },
+      (options) => {
+        if (options.currentDateMs === 102) {
+          oldPairDuringBuild = [
+            store.hasLayoutFor({ currentDateMs: 101 }),
+            store.hasLayoutFor({ currentDateMs: 101, showTrackedChanges: true }),
+          ];
+        }
+        return emptyLayout();
+      },
+    );
+    store.layoutFor({ currentDateMs: 101 });
+    store.layoutFor({ currentDateMs: 101, showTrackedChanges: true });
+
+    store.layoutFor({ currentDateMs: 102 });
+
+    expect(oldPairDuringBuild).toEqual([false, false]);
+  });
 });
