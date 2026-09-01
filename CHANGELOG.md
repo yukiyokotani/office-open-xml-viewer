@@ -7,6 +7,55 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.84.1 — 2026-09-01
+
+Compatible patch release tightening the Word compatibility boundaries introduced
+in 0.84.0, with no integration changes.
+
+- **legacy text-box margins:** honor authored VML text-box insets even when a
+  document also contains the legacy automatic-inset marker, matching Word's
+  documented behavior.
+- **table row layout:** limit the observed Word page-break adjustment to the
+  verified paragraph cases and restore the previous behavior for other table
+  layouts.
+- **compatibility:** no option, method or existing default is removed or
+  renamed. No application migration is required from 0.84.0.
+
+## 0.84.0 — 2026-09-01
+
+Compatible minor release adding opt-in TIFF image rendering across Word, Excel
+and PowerPoint files.
+
+- **TIFF images:** render the supported uncompressed, 8-bit, chunky
+  process-CMYK TIFF 6.0 image class in DOCX, XLSX and PPTX, in both main and
+  worker modes. Unsupported TIFF classes fail closed without aborting the
+  surrounding document render.
+- **opt-in package boundary:** expose one shared `@silurus/ooxml/tiff` entry and
+  one `tiff` option across all three format viewers and document engines. The
+  implementation remains outside default main-mode format graphs when omitted.
+- **full-featured first-party viewers:** enable TIFF alongside the other
+  first-party optional renderers in Try Yours and the VS Code extension.
+- **Word layout fidelity:** preserve authored inner margins in legacy text
+  boxes, and keep a multi-cell table row together when the remaining page has
+  no legal break point shared by every unfinished cell.
+- **compatibility:** no existing option, method or default is removed or
+  renamed. Applications only need to import the new module when TIFF images are
+  required.
+
+## 0.83.2 — 2026-09-01
+
+Compatible patch release improving zoom controls and Word compatibility, with
+no integration changes.
+
+- **consistent zoom steps:** Ctrl/Command + mouse-wheel zoom now advances by
+  the same percentage steps as the viewer controls across Word, Excel and
+  PowerPoint, including the VS Code extension.
+- **Word legacy layout:** retain positioned VML content, its authored wrapping,
+  and field-result formatting more faithfully so older Word documents keep
+  their intended page composition.
+- **compatibility:** no option, method or existing default is removed or
+  renamed. No application migration is required from 0.83.1.
+
 ## 0.83.1 — 2026-08-30
 
 Compatible patch release adding native text selection inside PowerPoint tables

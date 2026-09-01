@@ -17,5 +17,6 @@ export function workerRenderDeps(
     threeD: renderers.threeD,
     regionMap: renderers.regionMap,
     chartEx: renderers.chartEx,
+    tiff: renderers.tiff,
   };
 }

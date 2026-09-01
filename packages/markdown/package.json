@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-markdown",
   "private": true,
-  "version": "0.83.1",
+  "version": "0.84.1",
   "description": "Internal workspace adapter for DOCX / XLSX / PPTX Markdown projection",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",

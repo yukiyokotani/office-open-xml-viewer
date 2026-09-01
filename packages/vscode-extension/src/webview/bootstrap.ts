@@ -26,7 +26,7 @@ import { svgExtents, type ZoomableViewer } from '@silurus/ooxml-core';
 import { loadAtContainerFit, loadAtNaturalScale } from './naturalScale';
 import { captureUnhandledWheelZoom } from './wheelZoomFallback';
 import { FindPopupController, type FindableViewer } from './findPopup';
-import { advancedChartRenderers } from './advancedChartRenderers';
+import { fullRenderers } from './advancedChartRenderers';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -188,7 +188,7 @@ window.addEventListener('message', async (event: MessageEvent) => {
 async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const viewer = new XlsxViewer(viewerContainer, {
     math,
-    ...advancedChartRenderers,
+    ...fullRenderers,
     useGoogleFonts,
     showZoomSlider: false,
     enableElementSelection: true,
@@ -227,7 +227,7 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const viewer = new DocxScrollViewer(viewerContainer, {
     math,
-    ...advancedChartRenderers,
+    ...fullRenderers,
     useGoogleFonts,
     progressiveLayout: true,
     enableTextSelection: true,
@@ -256,7 +256,7 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
   const viewer = new PptxScrollViewer(viewerContainer, {
     math,
-    ...advancedChartRenderers,
+    ...fullRenderers,
     useGoogleFonts,
     progressiveLayout: true,
     enableTextSelection: true,

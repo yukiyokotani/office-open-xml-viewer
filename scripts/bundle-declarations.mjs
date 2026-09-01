@@ -19,6 +19,7 @@ const entries = [
   'three-d',
   'region-map',
   'chart-ex',
+  'tiff',
   'node',
 ];
 const dist = path.resolve(process.cwd(), 'dist');

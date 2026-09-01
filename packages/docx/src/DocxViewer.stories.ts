@@ -5,6 +5,7 @@ import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
 import { chartEx } from '../../../src/chart-ex';
+import { tiff } from '../../../src/tiff';
 
 type Args = {
   width: number;
@@ -76,6 +77,7 @@ export function buildViewerUI(
     threeD,
     regionMap,
     chartEx,
+    tiff,
     ...extra,
   });
 

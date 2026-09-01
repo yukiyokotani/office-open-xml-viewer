@@ -118,6 +118,9 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in Microsoft ChartEx family renderer. Classic 2-D charts remain
         // part of every format entry.
         'chart-ex': resolve(__dirname, 'src/chart-ex.ts'),
+        // Opt-in TIFF 6.0 software decoder. Native raster users retain only the
+        // lightweight codec contract and header guard.
+        tiff: resolve(__dirname, 'src/tiff.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),

@@ -91,6 +91,28 @@ describe('getPosterBitmap — RB1 poster decode-bomb guard', () => {
     expect(createImageBitmapSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('downsamples the reported 109,571,670-pixel poster class to its display target', async () => {
+    const large = pngHeader(12_090, 9_063);
+    expect(12_090 * 9_063).toBe(109_571_670);
+    const fetchMedia = vi.fn(
+      async (_path: string) => new Blob([large as BlobPart], { type: 'image/png' }),
+    );
+    const resized = { width: 1280, height: 960, close() {} } as unknown as ImageBitmap;
+    createImageBitmapSpy.mockResolvedValueOnce(resized);
+
+    await expect(getPosterBitmap(
+      mediaEl(),
+      fetchMedia,
+      undefined,
+      undefined,
+      { targetWidthPx: 1280, targetHeightPx: 960 },
+    )).resolves.toBe(resized);
+    expect(createImageBitmapSpy).toHaveBeenCalledWith(expect.any(Blob), {
+      resizeWidth: 1280,
+      resizeQuality: 'high',
+    });
+  });
+
   it('leaves an unrecognized (non-raster) poster header to decode normally (fail-open)', async () => {
     // e.g. an SVG poster: not a recognized raster ⇒ not blocked by the sniff.
     const svg = '<svg xmlns="http://www.w3.org/2000/svg"/>';

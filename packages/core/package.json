@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-core",
   "private": true,
-  "version": "0.83.1",
+  "version": "0.84.1",
   "description": "Shared rendering primitives and types (internal workspace package of @silurus/ooxml)",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -44,6 +44,7 @@
     "./internal/comment-context": "./src/internal/comment-context.ts",
     "./internal/runtime-generation": "./src/internal/runtime-generation.ts",
     "./internal/three-d-renderer": "./src/chart/three-d-renderer.ts",
+    "./internal/tiff-renderer": "./src/image/tiff.ts",
     "./internal/virtual-scroll": "./src/internal/virtual-scroll.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",

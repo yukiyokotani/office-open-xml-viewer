@@ -15,6 +15,7 @@
   import { XlsxWorkbook } from '/src/index.ts';
   import { threeD } from '@ooxml-test-three-d-renderer';
   import { regionMap } from '@ooxml-test-region-map-renderer';
+  import { tiff } from '@ooxml-test-tiff-renderer';
 
   const params = new URLSearchParams(location.search);
   const file   = params.get('file') ?? 'demo/sample-1.xlsx';
@@ -34,7 +35,7 @@
   canvas.style.height = height + 'px';
 
   try {
-    const wb = await XlsxWorkbook.load('/' + file, { threeD, regionMap });
+    const wb = await XlsxWorkbook.load('/' + file, { threeD, regionMap, tiff });
     document.body.dataset.sheetCount = String(wb.sheetCount);
     const idx = Math.max(0, Math.min(sheet, wb.sheetNames.length - 1));
     await wb.renderViewport(canvas, idx, { row, col, rows, cols }, { width, height, dpr: 1 });

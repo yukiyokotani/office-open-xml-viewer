@@ -22,13 +22,28 @@ import { math } from '@silurus/ooxml/math';
 import { chartEx } from '@silurus/ooxml/chart-ex';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
+import { tiff } from '@silurus/ooxml/tiff';
 
 const viewer = new XlsxViewer(container, {
   math,
   chartEx,
   threeD,
   regionMap,
+  tiff,
 });`;
+
+const standaloneTiffExample = `import { tiff } from '@silurus/ooxml/tiff';
+
+const bytes = new Uint8Array(await file.arrayBuffer());
+const bitmap = await tiff.render(bytes);
+
+if (bitmap) {
+  const canvas = document.getElementById('preview') as HTMLCanvasElement;
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext('2d')?.drawImage(bitmap, 0, 0);
+  bitmap.close();
+}`;
 ---
 
 <Base
@@ -51,7 +66,7 @@ const viewer = new XlsxViewer(container, {
       <nav>
         <a href="#rendering-mode">Rendering mode</a>
         <a href="#ownership">Ownership</a>
-        <a href="#optional-renderers">Optional renderers</a>
+        <a href="#optional-renderers">Optional modules</a>
       </nav>
     </aside>
 
@@ -104,12 +119,22 @@ const viewer = new XlsxViewer(container, {
       </section>
 
       <section id="optional-renderers">
-        <p class="section-label">Optional renderers</p>
+        <p class="section-label">Optional modules</p>
         <h2>Add only the rendering modules a product needs.</h2>
         <p>
-          Equations, ChartEx, 3-D charts, and Region Maps use separate package entries and the same
-          Viewer options across DOCX, XLSX, and PPTX. Classic 2-D charts remain included with each
-          format.
+          Equations, ChartEx, 3-D charts, Region Maps, and TIFF images use separate package entries.
+          Import a module once and pass it to the Viewer or document engine. The same option works
+          across DOCX, XLSX, and PPTX, including main and worker rendering modes.
+        </p>
+        <p>
+          Omit a module when the product does not need that content. Its main-mode implementation
+          stays outside the ordinary format import graph, while built-in capabilities such as
+          classic 2-D charts remain available. The separately loaded render-worker asset is
+          self-contained so it can render enabled first-party modules without another download.
+        </p>
+        <p>
+          Try Yours and the VS Code extension enable every first-party optional module. Applications
+          built with the library choose their own set using the imports below.
         </p>
         <div class="code-card">
           <Code code={optionalRendererExample} lang="ts" themes={codeThemes} defaultColor={false} />
@@ -128,6 +153,17 @@ const viewer = new XlsxViewer(container, {
             </tbody>
           </table>
         </div>
+        <h3>A small TIFF reuse</h3>
+        <p>
+          The TIFF module exists to display images embedded in Office files; it is not a
+          general-purpose TIFF library. As a small by-product, applications can reuse it for a
+          simple preview of a standalone TIFF file when that file is in the currently supported
+          class. Unsupported TIFF variants return no bitmap.
+        </p>
+        <div class="code-card">
+          <Code code={standaloneTiffExample} lang="ts" themes={codeThemes} defaultColor={false} />
+        </div>
+        <p class="related"><a href="/bundle-size">Compare the current module sizes →</a></p>
       </section>
 
       <nav class="related-pages" aria-label="Related references">
@@ -154,6 +190,7 @@ const viewer = new XlsxViewer(container, {
   section + section { margin-top: 68px; padding-top: 60px; border-top: 1px solid var(--border); }
   .section-label { margin: 0; color: var(--accent); font: 700 11px var(--mono); text-transform: uppercase; letter-spacing: .09em; }
   h2 { max-width: 22ch; margin: 8px 0 16px; font-size: clamp(27px, 4vw, 38px); line-height: 1.12; letter-spacing: -.025em; }
+  h3 { margin: 30px 0 10px; font-size: 20px; letter-spacing: -.015em; }
   section > p:not(.section-label, .related) { max-width: 72ch; color: var(--text-dim); }
   code { font-family: var(--mono); font-size: .9em; color: var(--text); }
   .table-wrap { margin-top: 22px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }

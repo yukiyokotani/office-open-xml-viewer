@@ -36,6 +36,89 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v0841-word-layout-refinements',
+    date: '2026-09-01',
+    label: 'Release note',
+    version: 'v0.84.1',
+    title: 'Word layout refinements in v0.84.1',
+    summary: 'v0.84.1 improves legacy text-box spacing and keeps page-break behavior carefully limited to the Word documents it was designed for.',
+    audience: 'Applications that display DOCX files. Existing setup and viewer options continue to work unchanged.',
+    sections: [
+      {
+        title: 'More faithful, more focused',
+        kind: 'summary',
+        paragraphs: [
+          'Legacy Word text boxes now keep their authored inner spacing in an additional setting combination. Table rows also stay together at the verified Word page boundaries, while other table layouts keep their previous behavior.',
+        ],
+        bullets: [
+          'Preserve authored spacing in more legacy Word text boxes.',
+          'Keep the page-break adjustment limited to the verified cases.',
+          'Upgrade without changing application code.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No migration is required from v0.84.0. TIFF support and existing viewer integrations remain unchanged.',
+        ],
+      },
+    ],
+  },
+  {
+    slug: 'v084-tiff-images',
+    date: '2026-09-01',
+    label: 'Release note',
+    version: 'v0.84.0',
+    title: 'TIFF images in v0.84.0',
+    summary: 'v0.84.0 adds opt-in TIFF image display across Word, Excel and PowerPoint files. Try Yours and the VS Code extension include it automatically.',
+    audience: 'Applications that open DOCX, XLSX or PPTX files containing TIFF images. Existing viewers continue to work without source changes.',
+    sections: [
+      {
+        title: 'TIFF images across Office files',
+        kind: 'summary',
+        paragraphs: [
+          'Supported TIFF images can now appear in Word documents, Excel workbooks and PowerPoint presentations instead of being left blank. The same image support is available in regular and worker rendering modes.',
+        ],
+        bullets: [
+          'Use one shared TIFF module with DOCX, XLSX and PPTX viewers.',
+          'Keep TIFF code out of applications that do not need it.',
+          'Open TIFF-containing files without extra setup in Try Yours or the VS Code extension.',
+        ],
+      },
+      {
+        title: 'Choose the integration',
+        paragraphs: [
+          'Library applications opt in by importing tiff from @silurus/ooxml/tiff and passing it to the Viewer or document engine. The Production decisions page lists every optional module and shows the complete setup.',
+          'The official Try Yours experience and the VS Code extension enable all first-party optional renderers, including TIFF, so end users receive the full viewing feature set.',
+          'The TIFF module is built for images inside Office files, not as a general-purpose TIFF library. As a small by-product, it can also provide a simple preview of a supported standalone TIFF file.',
+        ],
+        examples: [
+          {
+            title: 'Enable TIFF images',
+            code: `import { DocxViewer } from '@silurus/ooxml/docx';
+import { tiff } from '@silurus/ooxml/tiff';
+
+const viewer = new DocxViewer(canvas, { tiff });
+await viewer.load(source);`,
+          },
+        ],
+      },
+      {
+        title: 'More faithful Word page layout',
+        paragraphs: [
+          'Word documents now preserve the intended inner margins of legacy text boxes and avoid separating parallel table-cell content when a row has no safe place to break on the current page.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No migration is required. Existing applications keep the same defaults, and applications that do not display TIFF images do not need to add the module.',
+          'The initial release supports a bounded set of TIFF images commonly embedded by Office. Unsupported TIFF variants are skipped without stopping the rest of the document from rendering.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v083-progressive-viewing',
     date: '2026-08-28',
     label: 'Release note',

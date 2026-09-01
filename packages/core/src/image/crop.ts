@@ -150,6 +150,32 @@ export function drawImageCropped(
   }
 }
 
+/**
+ * Required full-source raster resolution for a destination measured in device
+ * pixels. A positive `<a:srcRect>` crop magnifies a source slice to fill the
+ * destination, so the full decoded source needs proportionally more pixels;
+ * negative insets create transparent outsets and therefore need fewer.
+ *
+ * The result is a decode request, not an allocation promise. The decoder keeps
+ * the source aspect ratio and applies the shared decoded-surface ceiling.
+ */
+export function sourceRasterTargetSize(
+  destinationWidthPx: number,
+  destinationHeightPx: number,
+  srcRect?: SrcRect | null,
+): { width: number; height: number } | null {
+  if (!Number.isFinite(destinationWidthPx) || !Number.isFinite(destinationHeightPx)) return null;
+  if (!(destinationWidthPx > 0) || !(destinationHeightPx > 0)) return null;
+  const logicalWidth = srcRect ? 1 - srcRect.l - srcRect.r : 1;
+  const logicalHeight = srcRect ? 1 - srcRect.t - srcRect.b : 1;
+  if (!Number.isFinite(logicalWidth) || !Number.isFinite(logicalHeight)) return null;
+  if (!(logicalWidth > 0) || !(logicalHeight > 0) || !srcRectHasVisibleArea(srcRect)) return null;
+  return {
+    width: Math.ceil(destinationWidthPx / logicalWidth),
+    height: Math.ceil(destinationHeightPx / logicalHeight),
+  };
+}
+
 /** Raster target size (pt) for decoding an embedded image. A raster blip decodes
  *  at its native pixel grid, so its display box passes through. A metafile
  *  (WMF/EMF) with an `<a:srcRect>` crop must be rasterized at its FULL picture

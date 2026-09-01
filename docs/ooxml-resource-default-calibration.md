@@ -77,11 +77,27 @@ rejections. Setting a field to `null` disables only that public admission limit;
 internal non-configurable safety ceilings still apply.
 
 Decoded browser images use separate shared hard guards rather than additional
-public tuning parameters: 32 megapixels / 128 MiB RGBA for one raster, 128 MiB
-of decoded ownership per document cache or active render pass, and two
-simultaneous decodes per document. These values are deliberately conservative
-implementation ceilings. They prevent measured image amplification from being
-silently omitted or left to an uncontrolled allocation, but are not added to the
-archive counters and do not model canvas, GPU, decoder, or process overhead.
+public tuning parameters. A retained raster surface remains bounded to 32 Mi
+pixels / 128 MiB RGBA, decoded ownership remains bounded to 128 MiB per document
+cache or active render pass, and each document has at most two simultaneous
+decodes. When a PPTX source exceeds the retained-surface limits, target-aware
+paint paths derive the required full-source resolution from the effective canvas
+size, DPR, and DrawingML `srcRect`, then request a high-quality resized
+`ImageBitmap`; resolution-banded cache keys prevent a larger zoom from silently
+reusing an undersized decode. Sources already within the retained limits keep
+the browser's established native-decode path, preserving existing sampling.
+
+The encoded source grid has a separate 128 Mi-pixel ceiling (four times the
+retained-surface pixel budget). This admits high-resolution authored sources
+without retaining their full RGBA grid, while keeping a conventional full-frame
+decoder intermediate below 512 MiB and continuing to reject pathological image
+headers before decode. The HTML image APIs guarantee the resized output size,
+not a portable peak-decoder-memory bound, so the source ceiling remains active
+even for a tiny display target. A source without a bounded target retains the
+older 32 Mi-pixel admission behavior.
+
+These image values prevent measured amplification from being silently omitted
+or left to an unbounded retained allocation, but are not added to the archive
+counters and do not model canvas, GPU, decoder, or process overhead.
 Browser-managed SVG/vector storage is count-bounded separately; it cannot be
 reliably expressed as decoded RGBA bytes or explicitly closed by the library.

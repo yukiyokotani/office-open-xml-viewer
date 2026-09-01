@@ -4,7 +4,7 @@
  * public renderer interfaces. */
 const WORKER_RENDERER_MODULE_PROTOCOL = 'ooxml-worker-renderer-module/v1' as const;
 
-export type WorkerBuiltinRendererName = 'math' | 'threeD' | 'regionMap' | 'chartEx';
+export type WorkerBuiltinRendererName = 'math' | 'threeD' | 'regionMap' | 'chartEx' | 'tiff';
 
 interface WorkerBuiltinRendererDescriptorBase {
   readonly protocol: typeof WORKER_RENDERER_MODULE_PROTOCOL;
@@ -19,7 +19,7 @@ interface WorkerMathRendererDescriptor extends WorkerBuiltinRendererDescriptorBa
 }
 
 interface WorkerChartRendererDescriptor extends WorkerBuiltinRendererDescriptorBase {
-  readonly builtin: 'threeD' | 'regionMap' | 'chartEx';
+  readonly builtin: 'threeD' | 'regionMap' | 'chartEx' | 'tiff';
 }
 
 export type WorkerRendererDescriptor =
@@ -31,6 +31,7 @@ export interface WorkerRendererDescriptors {
   readonly threeD?: WorkerRendererDescriptor;
   readonly regionMap?: WorkerRendererDescriptor;
   readonly chartEx?: WorkerRendererDescriptor;
+  readonly tiff?: WorkerRendererDescriptor;
 }
 
 export interface WorkerRendererSources {
@@ -38,6 +39,7 @@ export interface WorkerRendererSources {
   readonly threeD?: object;
   readonly regionMap?: object;
   readonly chartEx?: object;
+  readonly tiff?: object;
 }
 
 const workerRendererRegistry = new WeakMap<object, WorkerRendererDescriptor>();
@@ -48,7 +50,7 @@ function createBuiltinWorkerRendererDescriptor(
   engineAssetUrl: string,
 ): WorkerMathRendererDescriptor;
 function createBuiltinWorkerRendererDescriptor(
-  builtin: 'threeD' | 'regionMap' | 'chartEx',
+  builtin: 'threeD' | 'regionMap' | 'chartEx' | 'tiff',
 ): WorkerChartRendererDescriptor;
 function createBuiltinWorkerRendererDescriptor(
   builtin: WorkerBuiltinRendererName,
@@ -72,7 +74,7 @@ export function registerBuiltinWorkerRenderer<T extends object>(
 ): T;
 export function registerBuiltinWorkerRenderer<T extends object>(
   renderer: T,
-  builtin: 'threeD' | 'regionMap' | 'chartEx',
+  builtin: 'threeD' | 'regionMap' | 'chartEx' | 'tiff',
 ): T;
 export function registerBuiltinWorkerRenderer<T extends object>(
   renderer: T,
@@ -95,7 +97,8 @@ export function assertWorkerRendererDescriptor(
   if (descriptor.builtin !== 'math'
     && descriptor.builtin !== 'threeD'
     && descriptor.builtin !== 'regionMap'
-    && descriptor.builtin !== 'chartEx') {
+    && descriptor.builtin !== 'chartEx'
+    && descriptor.builtin !== 'tiff') {
     throw new TypeError(`Unsupported built-in worker renderer: ${String(descriptor.builtin)}`);
   }
   if (descriptor.builtin === 'math' && typeof descriptor.engineAssetUrl !== 'string') {
@@ -114,11 +117,13 @@ export function workerRendererDescriptors(
   const threeD = sources.threeD ? workerRendererRegistry.get(sources.threeD) : undefined;
   const regionMap = sources.regionMap ? workerRendererRegistry.get(sources.regionMap) : undefined;
   const chartEx = sources.chartEx ? workerRendererRegistry.get(sources.chartEx) : undefined;
+  const tiff = sources.tiff ? workerRendererRegistry.get(sources.tiff) : undefined;
   const descriptors: WorkerRendererDescriptors = {
     ...(math ? { math } : {}),
     ...(threeD ? { threeD } : {}),
     ...(regionMap ? { regionMap } : {}),
     ...(chartEx ? { chartEx } : {}),
+    ...(tiff ? { tiff } : {}),
   };
   return Object.keys(descriptors).length > 0 ? Object.freeze(descriptors) : undefined;
 }

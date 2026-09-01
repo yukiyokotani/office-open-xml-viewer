@@ -29,6 +29,11 @@ describe('official-site API reference', () => {
           exportName: 'regionMap',
           contract: 'ChartRegionMapRenderer',
         },
+        {
+          entry: '@silurus/ooxml/tiff',
+          exportName: 'tiff',
+          contract: 'TiffRenderer',
+        },
       ]);
   });
 
@@ -42,6 +47,8 @@ describe('official-site API reference', () => {
           .toBe('ChartRegionMapRenderer');
         expect(options.find(({ name }) => name === 'chartEx')?.type, apiClass.name)
           .toBe('ChartExRenderer');
+        expect(options.find(({ name }) => name === 'tiff')?.type, apiClass.name)
+          .toBe('TiffRenderer');
       }
     }
   });
@@ -52,6 +59,7 @@ describe('official-site API reference', () => {
       expect(guidance, format).toContain('both modes');
       expect(guidance, format).toContain('Worker mode');
       expect(guidance, format).toContain('ChartEx');
+      expect(guidance, format).toContain('TIFF');
       for (const apiClass of classes) {
         const mode = apiClass.options?.find(({ name }) => name === 'mode');
         expect(mode?.def, apiClass.name).toBe("'main'");
@@ -60,6 +68,7 @@ describe('official-site API reference', () => {
         expect(mode?.desc, apiClass.name).toContain('larger');
         expect(mode?.desc, apiClass.name).toMatch(/built-in/i);
         expect(mode?.desc, apiClass.name).toContain('ChartEx');
+        expect(mode?.desc, apiClass.name).toContain('TIFF');
       }
     }
     expect(formatRenderModeGuidance.docx).toContain('automatically use main mode');

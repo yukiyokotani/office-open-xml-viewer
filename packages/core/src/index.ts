@@ -253,6 +253,7 @@ export {
   decodeRasterOrMetafile,
   type DecodeRasterOptions,
 } from './image/wmf';
+export type { TiffRenderer } from './image/tiff-contract';
 // Raster pixel-dimension budget + header sniff (decode-bomb guard, RB1). Shared
 // caps live in `./image/pixel-budget`; `decodeRasterOrMetafile` uses the sniff to
 // refuse an over-budget PNG/JPEG/GIF/BMP/WEBP before `createImageBitmap`.
@@ -260,7 +261,9 @@ export {
   MAX_CONCURRENT_IMAGE_DECODES,
   MAX_DECODED_IMAGE_BYTES,
   MAX_RASTER_DIMENSION,
+  MAX_RASTER_SOURCE_DIMENSION,
   MAX_RASTER_PIXELS,
+  MAX_RASTER_SOURCE_PIXELS,
   OoxmlDecodedImageLimitError,
   isOoxmlDecodedImageLimitError,
   type OoxmlDecodedImageLimitMetric,
@@ -268,6 +271,7 @@ export {
 export {
   sniffRasterDimensions,
   rasterExceedsBudget,
+  sourceRasterExceedsBudget,
   rasterHeaderExceedsBudget,
   type RasterDimensions,
 } from './image/raster-dimensions';
@@ -278,6 +282,7 @@ export {
   drawImageCropped,
   imageNaturalSize,
   metafileRasterSize,
+  sourceRasterTargetSize,
   type SrcRect,
 } from './image/crop';
 // Shared DrawingML duotone image effect (§20.1.8.23): recolour a decoded image

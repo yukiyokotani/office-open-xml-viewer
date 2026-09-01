@@ -29,6 +29,7 @@ import {
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
   type ChartExRenderer,
+  type TiffRenderer,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
@@ -270,6 +271,7 @@ export class PptxPresentation {
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
   private _chartEx: ChartExRenderer | undefined;
+  private _tiff: TiffRenderer | undefined;
 
   private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
     this._worker = worker;
@@ -385,6 +387,12 @@ export class PptxPresentation {
         );
       }
       pres._chartEx = mode === 'worker' ? undefined : opts.chartEx;
+      if (opts.tiff && mode === 'worker' && !rendererDescriptors?.tiff) {
+        console.warn(
+          "[ooxml] a custom TIFF codec cannot cross the worker boundary; TIFF images will be skipped in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
+        );
+      }
+      pres._tiff = mode === 'worker' ? undefined : opts.tiff;
       const progressive = opts.progressiveLayout
         ? {
             onProgress: opts.onLayoutProgress,
@@ -1039,6 +1047,7 @@ export class PptxPresentation {
             threeD: this._threeD,
             regionMap: this._regionMap,
             chartEx: this._chartEx,
+            tiff: this._tiff,
           },
           opts.onTextRun,
         );

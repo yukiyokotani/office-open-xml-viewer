@@ -74,6 +74,18 @@ export const WORD_OVER_PAGE_CANT_SPLIT_CLIP = defineCompatibilityRule({
   description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation.',
 });
 
+export const WORD_PARALLEL_PARAGRAPH_ROW_CUT = defineCompatibilityRule({
+  id: 'word-parallel-paragraph-row-cut',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'parallel-paragraph-row-cut-boundary-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
+  },
+  description: 'When a page cut crosses a row containing parallel paragraph content, Word emits no cell content unless every unfinished paragraph cell can reach at least its first legal line or block boundary in that page band. The observed rule does not cover nested-table child boundaries.',
+});
+
 export const WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION = defineCompatibilityRule({
   id: 'word-positioned-table-adjacency-exclusion',
   evidence: {
@@ -267,6 +279,14 @@ export function wordClipsOverPageCantSplitRow(input: Readonly<{
 }>): boolean {
   return input.compatibility === 'word'
     && input.availableHeightPt + input.epsilonPt >= input.freshPageHeightPt;
+}
+
+/** Compatibility projection governed by {@link WORD_PARALLEL_PARAGRAPH_ROW_CUT}. */
+export function wordRelocatesParallelParagraphRowCut(input: Readonly<{
+  compatibility: 'word' | 'standard';
+  hasUnfinishedParagraphWithoutProgress: boolean;
+}>): boolean {
+  return input.compatibility === 'word' && input.hasUnfinishedParagraphWithoutProgress;
 }
 
 export const WORD_TABLE_BORDER_STYLE_PRECEDENCE = Object.freeze([

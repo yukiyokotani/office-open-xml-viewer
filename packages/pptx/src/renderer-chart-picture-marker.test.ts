@@ -66,15 +66,17 @@ describe('PPTX chart picture-marker preload', () => {
       }],
     } as Slide;
     const fetchImage = vi.fn(async () => new Blob(['png'], { type: 'image/png' }));
+    const tiff = { render: vi.fn() };
 
     await renderSlide(canvas(), slide, 9_144_000, 6_858_000, {
-      width: 960, dpr: 1, fetchImage,
+      width: 960, dpr: 1, fetchImage, tiff,
     });
 
     expect(coreMocks.decode).toHaveBeenCalledTimes(1);
     expect(coreMocks.decode.mock.calls[0]?.slice(0, 4)).toEqual([
       'ppt/media/chart-marker.png', 'image/png', undefined, fetchImage,
     ]);
+    expect(coreMocks.decode.mock.calls[0]?.[4]).toMatchObject({ tiff });
     expect(coreMocks.renderChart).toHaveBeenCalledTimes(1);
     expect(coreMocks.resolved()).toBe(coreMocks.bitmap);
   });

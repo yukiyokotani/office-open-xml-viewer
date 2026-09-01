@@ -14,6 +14,7 @@ import {
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
   type ChartExRenderer,
+  type TiffRenderer,
   type SrcRect,
   type Duotone,
   type OffscreenFactory,
@@ -202,6 +203,7 @@ export async function decodeImageSource(
   duotone: Duotone | null = null,
   offscreenFactory?: OffscreenFactory,
   failClosedOnDuotoneFailure = false,
+  tiff?: TiffRenderer,
 ): Promise<CanvasImageSource | null> {
   const dataIsSvg = mimeType === 'image/svg+xml';
   // SVG pixels are not exposed to the shared bitmap effect pipeline. Without
@@ -219,6 +221,7 @@ export async function decodeImageSource(
       heightPt: sized.heightPt,
       offscreenFactory,
       failClosedOnDuotoneFailure,
+      tiff,
     });
   // Shared vector-vs-raster gate (see core preferVectorBlip). When it returns
   // true, `blip.svgImagePath` is narrowed to string.
@@ -280,6 +283,7 @@ export async function prefetchImages(
     cellScale?: number;
     freezeRows?: number;
     freezeCols?: number;
+    tiff?: TiffRenderer;
   },
 ): Promise<void> {
   // This map is only the synchronous lookup for the current frame. Never keep
@@ -385,6 +389,7 @@ export async function prefetchImages(
           ref.duotone,
           opts?.offscreenFactory,
           ref.failClosedOnDuotoneFailure ?? false,
+          opts?.tiff,
         );
         // Record the resolved drawable (INCLUDING a null for an unsupported
         // metafile, so the renderer skips a falsy source without a re-fetch).
@@ -409,6 +414,7 @@ export interface RenderDeps {
   threeD?: ChartThreeDRenderer;
   regionMap?: ChartRegionMapRenderer;
   chartEx?: ChartExRenderer;
+  tiff?: TiffRenderer;
 }
 
 const autoHeightProjectionCache = new WeakMap<Worksheet, Worksheet>();
@@ -506,6 +512,7 @@ async function renderWorksheetViewportLeased(
     cellScale: opts.cellScale,
     freezeRows: opts.freezeRows,
     freezeCols: opts.freezeCols,
+    tiff: deps.tiff,
   });
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,

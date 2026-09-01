@@ -32,9 +32,9 @@ function buildMinimalWmf(): Uint8Array {
 }
 
 /**
- * The path-keyed decoded-bitmap cache (sibling of getCachedSvgImageByPath):
- * pulls bytes via the injected `fetchImage(path, mime)` and caches the decode by
- * zip path, namespaced per document by the `fetchImage` closure identity.
+ * The decoded-bitmap cache (sibling of getCachedSvgImageByPath) pulls bytes via
+ * the injected `fetchImage(path, mime)` and caches by zip path plus any raster
+ * resolution band, namespaced per document by the closure identity.
  */
 describe('getCachedBitmapByPath', () => {
   beforeEach(() => {
@@ -59,6 +59,41 @@ describe('getCachedBitmapByPath', () => {
     expect(fetchImage).toHaveBeenCalledTimes(1);
     expect(fetchImage).toHaveBeenCalledWith(path, 'image/png');
     expect(globalThis.createImageBitmap as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys display-sized raster variants by stable resolution bands', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 12_000);
+    view.setUint32(20, 9_000);
+    const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
+    const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
+      width: options?.resizeWidth ?? 12_000,
+      height: options?.resizeHeight ?? 9_000,
+      close() {},
+    }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    const path = 'ppt/media/poster-resolution-bands.png';
+    const a = await getCachedBitmapByPath(path, 'image/png', fetchImage, {
+      targetWidthPx: 1000,
+      targetHeightPx: 750,
+    });
+    const sameBand = await getCachedBitmapByPath(path, 'image/png', fetchImage, {
+      targetWidthPx: 1010,
+      targetHeightPx: 758,
+    });
+    const larger = await getCachedBitmapByPath(path, 'image/png', fetchImage, {
+      targetWidthPx: 1400,
+      targetHeightPx: 1050,
+    });
+
+    expect(a).toBe(sameBand);
+    expect(larger).not.toBe(a);
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+    expect(cib).toHaveBeenCalledTimes(2);
   });
 
   it('namespaces the cache by fetchImage — two documents sharing a zip path decode independently', async () => {

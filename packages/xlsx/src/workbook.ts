@@ -14,6 +14,7 @@ import {
   type ChartThreeDRenderer,
   type ChartRegionMapRenderer,
   type ChartExRenderer,
+  type TiffRenderer,
   OoxmlResourceLimitError,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
@@ -146,6 +147,8 @@ export class XlsxWorkbook {
   private regionMap: ChartRegionMapRenderer | undefined;
   /** Optional Microsoft ChartEx renderer. */
   private chartEx: ChartExRenderer | undefined;
+  /** Optional TIFF codec. Worker mode reconstructs the built-in implementation. */
+  private tiff: TiffRenderer | undefined;
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   private googleFontNames: string[] = [];
@@ -285,6 +288,7 @@ export class XlsxWorkbook {
     this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
     this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
     this.chartEx = this._mode === 'worker' ? undefined : opts.chartEx;
+    this.tiff = this._mode === 'worker' ? undefined : opts.tiff;
     const rendererDescriptors = this._mode === 'worker'
       ? workerRendererDescriptors(opts)
       : undefined;
@@ -306,6 +310,11 @@ export class XlsxWorkbook {
     if (opts.chartEx && this._mode === 'worker' && !rendererDescriptors?.chartEx) {
       console.warn(
         "[ooxml] a custom ChartEx renderer cannot cross the worker boundary; ChartEx charts use the unsupported-chart placeholder in mode: 'worker'. Use the renderer from @silurus/ooxml/chart-ex.",
+      );
+    }
+    if (opts.tiff && this._mode === 'worker' && !rendererDescriptors?.tiff) {
+      console.warn(
+        "[ooxml] a custom TIFF codec cannot cross the worker boundary; TIFF images will be skipped in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
       );
     }
     // In worker mode the worker preloads fonts before its first render
@@ -778,6 +787,7 @@ export class XlsxWorkbook {
           threeD: this.threeD,
           regionMap: this.regionMap,
           chartEx: this.chartEx,
+          tiff: this.tiff,
         },
         target,
         viewport,

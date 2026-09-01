@@ -71,6 +71,7 @@ export type {
   ChartThreeDRenderer,
   ChartRegionMapRenderer,
   ChartExRenderer,
+  TiffRenderer,
   ChartExElementStyle,
   ChartLineDashSegment,
   ChartexHistogramBinning,

@@ -99,7 +99,33 @@ function row(
   };
 }
 
+function parallelRow(
+  logicalRowIndex: number,
+  cellLineHeightsPt: readonly (readonly number[])[],
+): TableRowLayoutInput {
+  return {
+    ...row(logicalRowIndex, []),
+    cells: cellLineHeightsPt.map((lineHeightsPt, cellIndex) => ({
+      id: `cell-${logicalRowIndex}-${cellIndex}`,
+      source: { story: 'body', storyInstance: 'body', path: [0, logicalRowIndex, cellIndex] },
+      columnStart: cellIndex,
+      columnSpan: 1,
+      verticalMerge: 'none',
+      margins: { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 },
+      vAlign: 'top',
+      borders: noBorders,
+      blocks: [{
+        layout: paragraph(`paragraph-${logicalRowIndex}-${cellIndex}`, lineHeightsPt),
+        sourceBlockIndex: 0,
+      }],
+    })),
+  };
+}
+
 function acquisition(rows: readonly TableRowLayoutInput[]): RetainedTableAcquisition {
+  const columnCount = Math.max(1, ...rows.map((item) => item.cells.reduce(
+    (max, cell) => Math.max(max, cell.columnStart + cell.columnSpan), 0,
+  )));
   const input: TableLayoutInput = {
     kind: 'table',
     id: 'table',
@@ -109,7 +135,7 @@ function acquisition(rows: readonly TableRowLayoutInput[]): RetainedTableAcquisi
     alignment: 'left',
     indentPt: 0,
     bidiVisual: false,
-    columnWidthsPt: [100],
+    columnWidthsPt: Array.from({ length: columnCount }, () => 100 / columnCount),
     borders: noBorders,
     rows,
   };
@@ -134,6 +160,7 @@ function paginate(
   source: RetainedTableAcquisition,
   firstPageHeightPt: number,
   freshPageHeightPt: number,
+  compatibility: 'word' | 'standard' = 'standard',
 ): readonly (TableFragmentLayout | null)[] {
   const pages: Array<TableFragmentLayout | null> = [];
   let cursor: TableFragmentCursor | null = startTableFragmentCursor();
@@ -156,7 +183,7 @@ function paginate(
         availableBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: availableHeightPt },
       },
       services: {} as LayoutServices,
-      compatibility: 'standard',
+      compatibility,
       page: {
         physicalPageIndex: pageIndex,
         displayPageNumber: pageIndex + 1,
@@ -246,6 +273,66 @@ describe('retained table pagination across pages', () => {
       [{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }],
       [{ kind: 'paragraph', blockIndex: 0, lineStart: 1, lineEnd: 2 }],
       [{ kind: 'paragraph', blockIndex: 0, lineStart: 2, lineEnd: 3 }],
+    ]);
+  });
+
+  it('relocates a parallel one-line row when no common legal cut fits the remaining band', () => {
+    // Word-verified: when only the shorter one-line cell fits, Word relocates
+    // both cells instead of emitting the short cell alone on the first page.
+    const source = acquisition([parallelRow(0, [[20], [30]])]);
+
+    const pages = paginate(source, 25, 100, 'word');
+
+    expect(pages[0]).toBeNull();
+    expect(sourceRows(pages)).toEqual([[0, 0]]);
+    expect(pages[1]?.rows[0]?.cells.map((cell) => cell.contentRanges)).toEqual([
+      [{ kind: 'whole', blockIndex: 0 }],
+      [{ kind: 'whole', blockIndex: 0 }],
+    ]);
+  });
+
+  it('still splits a parallel row when every unfinished cell reaches a legal cut', () => {
+    // Word-verified: both cells own a first-line boundary in the retained band,
+    // so the longer cell may continue while the shorter cell is complete.
+    const source = acquisition([parallelRow(0, [[20, 20, 20], [20]])]);
+
+    const pages = paginate(source, 25, 100, 'word');
+
+    expect(sourceRows(pages)).toEqual([[0, 0], [0, 1]]);
+    expect(pages[0]?.rows[0]?.cells.map((cell) => cell.contentRanges)).toEqual([
+      [{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }],
+      [{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }],
+    ]);
+    expect(pages[1]?.rows[0]?.cells.map((cell) => cell.contentRanges)).toEqual([
+      [{ kind: 'paragraph', blockIndex: 0, lineStart: 1, lineEnd: 3 }],
+      [],
+    ]);
+  });
+
+  it('relocates when one cell completes but another cannot reach its first boundary', () => {
+    // Word-verified: completing one multi-line cell is insufficient when the
+    // parallel cell's first indivisible line crosses the page cut.
+    const source = acquisition([parallelRow(0, [[10, 10], [30]])]);
+
+    const pages = paginate(source, 25, 100, 'word');
+
+    expect(pages[0]).toBeNull();
+    expect(sourceRows(pages)).toEqual([[0, 0]]);
+    expect(pages[1]?.rows[0]?.cells.map((cell) => cell.contentRanges)).toEqual([
+      [{ kind: 'whole', blockIndex: 0 }],
+      [{ kind: 'whole', blockIndex: 0 }],
+    ]);
+  });
+
+  it('does not apply the Word-observed common row cut in standard mode', () => {
+    const source = acquisition([parallelRow(0, [[20], [30]])]);
+
+    const pages = paginate(source, 25, 100, 'standard');
+
+    expect(sourceRows(pages)).toEqual([[0, 0], [0, 1]]);
+    expect(pages[0]?.rows[0]?.cells.map((cell) => cell.contentRanges)).toEqual([
+      [{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }],
+      [],
     ]);
   });
 

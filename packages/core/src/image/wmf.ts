@@ -39,10 +39,22 @@
 
 import { decodePackedDib, blitDibToCtx } from './dib.js';
 import { renderEmfToBitmap } from './emf.js';
-import { rasterExceedsBudget, sniffRasterDimensions } from './raster-dimensions.js';
-import { MAX_RASTER_PIXELS, OoxmlDecodedImageLimitError } from './pixel-budget.js';
+import {
+  rasterExceedsBudget,
+  sniffRasterDimensions,
+  sourceRasterExceedsBudget,
+  type RasterDimensions,
+} from './raster-dimensions.js';
+import {
+  MAX_RASTER_DIMENSION,
+  MAX_RASTER_PIXELS,
+  MAX_RASTER_SOURCE_DIMENSION,
+  MAX_RASTER_SOURCE_PIXELS,
+  OoxmlDecodedImageLimitError,
+} from './pixel-budget.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
 import { closeImageBitmapIfSupported } from './image-bitmap-lifecycle.js';
+import { isTiff, type TiffRenderer } from './tiff-contract.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
 const META = {
@@ -798,6 +810,68 @@ export interface DecodeRasterOptions {
    *  the HEURISTIC note on {@link playWmf}/deviceInteriorEdges). Default false =
    *  spec-clean (every edge drawn). docx opts IN when it re-points to core. */
   suppressBoundaryFrame?: boolean;
+  /** Optional TIFF codec. Omitted TIFF parts take the null-bitmap path. */
+  tiff?: TiffRenderer;
+  /** Desired width of the full source grid in retained device pixels. The
+   * decoder preserves source aspect ratio and never upscales. */
+  targetWidthPx?: number;
+  /** Desired height of the full source grid in retained device pixels. */
+  targetHeightPx?: number;
+}
+
+function decodeResizeOptions(
+  source: RasterDimensions,
+  targetWidthPx: number | undefined,
+  targetHeightPx: number | undefined,
+): ImageBitmapOptions | null {
+  // Preserve the browser's established native-decode + drawImage sampling for
+  // ordinary, already-safe sources. Target-sized decoding is the admission path
+  // for a source that cannot be retained natively, not a fidelity rewrite for
+  // every existing picture.
+  if (!rasterExceedsBudget(source)) return null;
+  if (typeof targetWidthPx !== 'number' || typeof targetHeightPx !== 'number') return null;
+  if (!Number.isFinite(targetWidthPx) || !Number.isFinite(targetHeightPx)) return null;
+  if (!(targetWidthPx > 0) || !(targetHeightPx > 0)) return null;
+  const requestedScale = Math.min(1, Math.max(
+    targetWidthPx / source.width,
+    targetHeightPx / source.height,
+  ));
+  let scale = requestedScale;
+  scale = Math.min(
+    scale,
+    MAX_RASTER_DIMENSION / source.width,
+    MAX_RASTER_DIMENSION / source.height,
+    Math.sqrt(MAX_RASTER_PIXELS / (source.width * source.height)),
+  );
+  if (!(scale < 1)) return null;
+  const resizeWidth = Math.max(1, Math.floor(source.width * scale));
+  // Specify one axis only. The HTML algorithm derives the other from the
+  // oriented source rectangle, preserving JPEG EXIF rotation/aspect instead of
+  // forcing coded-header W×H onto a 90°-oriented image.
+  return { resizeWidth, resizeQuality: 'high' };
+}
+
+function rasterLimitError(
+  dimensions: RasterDimensions,
+  dimensionLimit: number,
+  pixelLimit: number,
+): OoxmlDecodedImageLimitError {
+  const observedDimension = Math.max(dimensions.width, dimensions.height);
+  if (!Number.isFinite(observedDimension) || observedDimension > dimensionLimit) {
+    return new OoxmlDecodedImageLimitError(
+      'image-dimension',
+      dimensionLimit,
+      Number.isFinite(observedDimension) ? observedDimension : Number.MAX_SAFE_INTEGER,
+    );
+  }
+  const observedPixels = dimensions.width * dimensions.height;
+  return new OoxmlDecodedImageLimitError(
+    'image-pixels',
+    pixelLimit,
+    Number.isSafeInteger(observedPixels) && observedPixels >= 0
+      ? observedPixels
+      : Number.MAX_SAFE_INTEGER,
+  );
 }
 
 /**
@@ -816,7 +890,10 @@ export interface DecodeRasterOptions {
  *   - {@link isEmf} → rasterize via {@link ./emf.ts}#renderEmfToBitmap at
  *     {@link wmfRasterTarget}(widthPt, heightPt). An EMF that produces no
  *     geometry returns `null`.
- *   - otherwise → `createImageBitmap(blob)` (PNG/JPEG/GIF/BMP/WEBP…).
+ *   - {@link isTiff} → decode the supported TIFF 6.0 class through the shared
+ *     software rasterizer because browsers generally cannot decode TIFF.
+ *   - otherwise → `createImageBitmap(blob)`, with a bounded display-sized
+ *     decode when an over-budget source has a target (PNG/JPEG/GIF/BMP/WEBP…).
  *
  * Returns `null` (never throws on an unsupported metafile) so every caller can
  * treat the result like the existing "missing image" / null-bitmap path and
@@ -829,7 +906,14 @@ export async function decodeRasterOrMetafile(
   data: Blob,
   opts: DecodeRasterOptions = {},
 ): Promise<ImageBitmap | null> {
-  const { widthPt = 0, heightPt = 0, suppressBoundaryFrame = false } = opts;
+  const {
+    widthPt = 0,
+    heightPt = 0,
+    suppressBoundaryFrame = false,
+    tiff,
+    targetWidthPx,
+    targetHeightPx,
+  } = opts;
 
   // Sniff a header prefix, not the whole blob. `isEmf` reads bytes 40-43 (u32@40
   // == " EMF") and `isWmf` at most the 18-byte standard header, and the raster
@@ -857,19 +941,39 @@ export async function decodeRasterOrMetafile(
     );
   }
   // Decode-bomb guard: if the header declares a recognized raster (PNG/JPEG/GIF/
-  // BMP/WEBP) whose pixel dimensions exceed the shared budget, refuse it BEFORE
-  // `createImageBitmap` allocates a multi-GB surface. An unrecognized header
-  // cannot be rejected before decode, so the decoded dimensions are validated
-  // immediately afterwards and the surface is closed before it can be retained.
+  // BMP/WEBP/TIFF) whose pixel dimensions exceed the shared budget, refuse it
+  // before either a browser decoder or an injected codec can allocate a large
+  // surface. An unrecognized header is validated immediately after decode.
   const rasterDimensions = sniffRasterDimensions(head);
-  if (rasterDimensions && rasterExceedsBudget(rasterDimensions)) {
-    throw new OoxmlDecodedImageLimitError(
-      'image-pixels',
-      MAX_RASTER_PIXELS,
-      rasterDimensions.width * rasterDimensions.height,
+  if (rasterDimensions && sourceRasterExceedsBudget(rasterDimensions)) {
+    throw rasterLimitError(
+      rasterDimensions,
+      MAX_RASTER_SOURCE_DIMENSION,
+      MAX_RASTER_SOURCE_PIXELS,
     );
   }
-  return enforceDecodedBitmapBudget(await createImageBitmap(data));
+  const resizeOptions = rasterDimensions
+    ? decodeResizeOptions(rasterDimensions, targetWidthPx, targetHeightPx)
+    : null;
+  const tiffInput = isTiff(head);
+  if (rasterDimensions && rasterExceedsBudget(rasterDimensions) && (!resizeOptions || tiffInput)) {
+    throw rasterLimitError(
+      rasterDimensions,
+      MAX_RASTER_DIMENSION,
+      MAX_RASTER_PIXELS,
+    );
+  }
+  if (tiffInput) {
+    if (!tiff) return null;
+    return enforceDecodedBitmapBudget(
+      await tiff.render(new Uint8Array(await data.arrayBuffer())),
+    );
+  }
+  return enforceDecodedBitmapBudget(
+    resizeOptions
+      ? await createImageBitmap(data, resizeOptions)
+      : await createImageBitmap(data),
+  );
 }
 
 /** Validate at the decoder boundary so direct callers and the shared cache have
@@ -882,11 +986,10 @@ function enforceDecodedBitmapBudget(bitmap: ImageBitmap | null): ImageBitmap | n
   const height = Number(bitmap.height);
   if (!rasterExceedsBudget({ width, height })) return bitmap;
 
-  const pixels = width * height;
   closeImageBitmapIfSupported(bitmap);
-  throw new OoxmlDecodedImageLimitError(
-    'image-pixels',
+  throw rasterLimitError(
+    { width, height },
+    MAX_RASTER_DIMENSION,
     MAX_RASTER_PIXELS,
-    Number.isSafeInteger(pixels) && pixels >= 0 ? pixels : Number.MAX_SAFE_INTEGER,
   );
 }
