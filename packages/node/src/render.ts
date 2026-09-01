@@ -27,6 +27,9 @@ export interface NodeTextMetricsLike {
 /** DOM-free structural seam for the Node canvas 2D context. */
 export interface NodeCanvasContext2D {
   measureText(text: string): NodeTextMetricsLike;
+  /** Optional here for lightweight metric-only adapters; required by the
+   * image shim when it must materialize a resized fallback surface. */
+  drawImage?(image: NodeImageLike, dx: number, dy: number, dw: number, dh: number): void;
 }
 
 /** A subset of the Node-canvas API that the renderers actually need. The
@@ -49,8 +52,13 @@ export interface NodeImageLike {
 export interface NodeCanvasFactory {
   /** Create a blank canvas of the given pixel size. */
   createCanvas(width: number, height: number): NodeCanvasLike;
-  /** Decode a buffer (PNG/JPEG/etc.) into something the canvas can `drawImage`. */
-  loadImage(buffer: ArrayBuffer | Uint8Array): Promise<NodeImageLike>;
+  /** Decode a buffer (PNG/JPEG/etc.) into something the canvas can `drawImage`.
+   * Implementations should honor `target` in the decoder when possible; the
+   * shim falls back to a target-sized canvas when they return native pixels. */
+  loadImage(
+    buffer: ArrayBuffer | Uint8Array,
+    target?: Readonly<{ width?: number; height?: number }>,
+  ): Promise<NodeImageLike>;
 }
 
 /**
@@ -123,7 +131,10 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
   // recoloured offscreen surface back into an "ImageBitmap"). Widen the param so
   // the canvas branch is a real member and needs no double-cast.
   type CanvasLike = { getContext(id: '2d'): unknown };
-  g.createImageBitmap = async (source: Blob | ArrayBuffer | Uint8Array | CanvasLike) => {
+  g.createImageBitmap = async (
+    source: Blob | ArrayBuffer | Uint8Array | CanvasLike,
+    options?: ImageBitmapOptions,
+  ) => {
     // A canvas-like source is already a drawable image source in node-canvas —
     // return it directly. The surface IS the skia Canvas the factory made, so no
     // byte round-trip is needed (and skia has no `createImageBitmap(canvas)`).
@@ -138,7 +149,30 @@ export function installImageBitmapShim(factory: NodeCanvasFactory): () => void {
     } else {
       throw new Error('createImageBitmap shim: unsupported source type');
     }
-    return factory.loadImage(buf);
+    const resizeWidth = options?.resizeWidth;
+    const resizeHeight = options?.resizeHeight;
+    const target = typeof resizeWidth === 'number' && resizeWidth > 0
+      ? { width: resizeWidth }
+      : typeof resizeHeight === 'number' && resizeHeight > 0
+        ? { height: resizeHeight }
+        : undefined;
+    const image = await factory.loadImage(buf, target);
+    if (!target) return image;
+    if (target.width !== undefined && image.width === target.width) return image;
+    if (target.height !== undefined && image.height === target.height) return image;
+    const scale = target.width !== undefined
+      ? target.width / image.width
+      : typeof target.height === 'number'
+        ? target.height / image.height
+        : 1;
+    const width = Math.max(1, Math.round(image.width * scale));
+    const height = Math.max(1, Math.round(image.height * scale));
+    const surface = factory.createCanvas(width, height);
+    const context = surface.getContext('2d');
+    if (typeof context.drawImage !== 'function') return image;
+    context.drawImage(image, 0, 0, width, height);
+    (image as NodeImageLike & { close?: () => void }).close?.();
+    return surface;
   };
   return () => { g.createImageBitmap = prev as typeof globalThis.createImageBitmap; };
 }

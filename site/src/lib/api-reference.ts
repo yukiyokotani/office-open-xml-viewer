@@ -36,9 +36,9 @@ export interface OptionalRendererReference {
 }
 
 export const formatRenderModeGuidance: Readonly<Record<'docx' | 'xlsx' | 'pptx', string>> = {
-  docx: 'DOCX keeps page navigation, virtualized scrolling, selection, find, hyperlinks, equations, ChartEx, 3-D charts and Region Maps in both modes. Worker mode moves pagination and page paint away from the UI thread. Documents that require DOM OpenType vertical-glyph selection automatically use main mode; read the loaded document\'s mode to observe that fallback.',
-  xlsx: 'XLSX keeps sheet tabs, frozen panes, scrolling, selection, find, hyperlinks, equations, ChartEx, 3-D charts and Region Maps in both modes. Worker mode paints each requested sheet viewport away from the UI thread.',
-  pptx: 'PPTX keeps slide navigation, virtualized scrolling, selection, find, hyperlinks, media playback, equations, ChartEx, 3-D charts and Region Maps in both modes. Worker mode moves slide paint away from the UI thread; media controls and overlays remain interactive in the Viewer.',
+  docx: 'DOCX keeps page navigation, virtualized scrolling, selection, find, hyperlinks, equations, ChartEx, 3-D charts, Region Maps and the built-in TIFF codec in both modes. Worker mode moves pagination and page paint away from the UI thread. Documents that require DOM OpenType vertical-glyph selection automatically use main mode; read the loaded document\'s mode to observe that fallback.',
+  xlsx: 'XLSX keeps sheet tabs, frozen panes, scrolling, selection, find, hyperlinks, equations, ChartEx, 3-D charts, Region Maps and the built-in TIFF codec in both modes. Worker mode paints each requested sheet viewport away from the UI thread.',
+  pptx: 'PPTX keeps slide navigation, virtualized scrolling, selection, find, hyperlinks, media playback, equations, ChartEx, 3-D charts, Region Maps and the built-in TIFF codec in both modes. Worker mode moves slide paint away from the UI thread; media controls and overlays remain interactive in the Viewer.',
 };
 
 export const optionalRenderers: readonly OptionalRendererReference[] = [
@@ -70,6 +70,13 @@ export const optionalRenderers: readonly OptionalRendererReference[] = [
     contract: 'ChartRegionMapRenderer',
     desc: 'Renders supported country-level ChartEx maps without network access using a pinned public-domain Natural Earth asset. Cached provider identities and unsupported sub-country/view-specific layouts fail closed.',
   },
+  {
+    name: 'TIFF image codec',
+    entry: '@silurus/ooxml/tiff',
+    exportName: 'tiff',
+    contract: 'TiffRenderer',
+    desc: 'Decodes the supported TIFF 6.0 image class in DOCX, XLSX and PPTX. The current bounded codec accepts uncompressed, 8-bit, chunky process-CMYK strips; other TIFF classes fail closed without aborting the surrounding document render.',
+  },
 ];
 
 const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total / 4,096 entries', desc: 'Shared DOCX/XLSX/PPTX package budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part without charging repeat reads twice; maxArchiveEntries bounds central-directory entries before ZIP index allocation. Supply positive safe integers, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.', detailsHref: '/errors#ooxml-resource-limit-error', detailsLabel: 'Error fields' };
@@ -86,8 +93,9 @@ const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-
 const THREE_D = { name: 'threeD', type: 'ChartThreeDRenderer', def: 'undefined', desc: 'Opt-in model-space 3-D chart renderer. Import `threeD` from the separate `@silurus/ooxml/three-d` entry and inject it once. Omit it to use the canonical 2-D fallback and avoid loading or evaluating the mesh/camera implementation in main mode. The self-contained worker asset retains the worker-side implementation. It renders the view angle authored in OOXML in main and worker modes.', emphasis: 'Opt-in model-space 3-D chart renderer.' };
 const REGION_MAP = { name: 'regionMap', type: 'ChartRegionMapRenderer', def: 'undefined', desc: 'Opt-in offline ChartEx Region Map renderer using a pinned, public-domain Natural Earth country asset. Import `regionMap` from `@silurus/ooxml/region-map` and inject it once. Unsupported cached or sub-country views fail closed. The built-in renderer works in main and worker modes.', emphasis: 'Opt-in offline ChartEx Region Map renderer' };
 const CHART_EX = { name: 'chartEx', type: 'ChartExRenderer', def: 'undefined', desc: 'Opt-in renderer for Microsoft ChartEx (`cx:*`) chart families. Import `chartEx` from `@silurus/ooxml/chart-ex` and inject it once. Classic 2-D charts stay in the default format entries; ChartEx is opt-in. The built-in renderer works in main and worker modes.', emphasis: 'Classic 2-D charts stay in the default format entries; ChartEx is opt-in.' };
-const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for the smallest worker download, the lowest single-frame overhead or custom renderer objects; parsing still runs in a Worker, while Canvas rendering runs on the main thread. Use 'worker' when document layout and paint would compete with application UI responsiveness. It requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Built-in math, ChartEx, 3-D and Region Map renderers use the same options in both modes. In worker mode, use the bitmap render methods instead of methods that accept a Canvas.", emphasis: "Use 'worker' when document layout and paint would compete with application UI responsiveness." };
-const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for ordinary previews, the smallest worker download or custom renderer objects. Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI. Worker mode requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks and the built-in math, ChartEx, 3-D and Region Map renderers remain available in both modes.", emphasis: "Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI." };
+const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts uncompressed, 8-bit, chunky process-CMYK TIFF 6.0 parts. Omit it to keep the implementation out of ordinary format bundles; TIFF parts then fail closed without aborting the surrounding render. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
+const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for the smallest worker download, the lowest single-frame overhead or custom renderer objects; parsing still runs in a Worker, while Canvas rendering runs on the main thread. Use 'worker' when document layout and paint would compete with application UI responsiveness. It requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Built-in math, ChartEx, 3-D, Region Map and TIFF renderers use the same options in both modes. In worker mode, use the bitmap render methods instead of methods that accept a Canvas.", emphasis: "Use 'worker' when document layout and paint would compete with application UI responsiveness." };
+const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for ordinary previews, the smallest worker download or custom renderer objects. Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI. Worker mode requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks and the built-in math, ChartEx, 3-D, Region Map and TIFF renderers remain available in both modes.", emphasis: "Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI." };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
 const ON_SCALE_CHANGE = { name: 'onScaleChange', type: '(scale: number) => void', desc: 'Called when the zoom factor changes (setScale / fitWidth / fitPage / zoomIn / zoomOut), with the clamped factor (1 = 100%).' };
 const ON_HYPERLINK_CLICK = { name: 'onHyperlinkClick', type: '(target: HyperlinkTarget) => void', desc: "Called when a hyperlink is clicked. `target` is `{ kind: 'external', url }` or `{ kind: 'internal', ref, slideIndex? }`. When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run). External URLs are scheme-sanitized (http / https / mailto / tel only); internal targets resolve to a docx bookmark, pptx slide jump, or xlsx defined name / cell reference. XLSX switches sheets before scrolling the destination into view and uses the first cell of a range.", emphasis: 'When supplied, the callback fully owns the click (the default external-open / internal-navigation is not run).' };
@@ -252,6 +260,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         VIEWER_MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
         ZOOM_MIN_MAX,
@@ -288,7 +297,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening slide is paintable.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
@@ -346,6 +355,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         DPR,
         MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
@@ -396,6 +406,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         VIEWER_MODE,
         DOCX_PROGRESSIVE_LAYOUT,
         DOCX_SLICE_LAYOUT,
@@ -432,7 +443,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening pages are paintable while pagination continues in the background.' },
         { sig: 'get comments(): readonly Readonly<DocComment>[]', desc: 'Immutable detached comments and replies stored in the document.' },
@@ -489,6 +500,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         DPR,
         MODE,
         DOCX_PROGRESSIVE_LAYOUT,
@@ -545,6 +557,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -618,6 +631,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         THREE_D,
         REGION_MAP,
         CHART_EX,
+        TIFF,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -661,7 +675,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, MODE],
+      options: [GFONTS, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },

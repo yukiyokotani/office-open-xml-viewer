@@ -2,6 +2,7 @@ import type { MathRenderer } from '../math/mathjax';
 import type { ChartThreeDRenderer } from '../chart/three-d-contract';
 import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
 import type { ChartExRenderer } from '../chart/chart-ex-contract';
+import type { TiffRenderer } from '../image/tiff-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
@@ -195,4 +196,12 @@ export interface LoadOptions {
    * self-contained and includes its worker-side implementation.
    */
   chartEx?: ChartExRenderer;
+  /**
+   * Opt in to bounded TIFF 6.0 image decoding. Import `tiff` from the separate
+   * `@silurus/ooxml/tiff` entry and inject it once. The built-in codec accepts
+   * uncompressed, 8-bit, chunky process-CMYK strips; other TIFF classes fail
+   * closed. Omit it to keep the decoder out of ordinary format bundles; TIFF
+   * parts are then skipped without aborting the surrounding document render.
+   */
+  tiff?: TiffRenderer;
 }

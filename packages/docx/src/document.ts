@@ -359,6 +359,7 @@ export class DocxDocument {
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
   private _chartEx: ChartExRenderer | undefined;
+  private _tiff: import('@silurus/ooxml-core').TiffRenderer | undefined;
   private _worker: Worker;
   private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private readonly _rawParts = new BoundedRawPartCache({
@@ -540,6 +541,12 @@ export class DocxDocument {
         );
       }
       doc._chartEx = doc._mode === 'worker' ? undefined : opts.chartEx;
+      if (opts.tiff && doc._mode === 'worker' && !rendererDescriptors?.tiff) {
+        console.warn(
+          "[ooxml] a custom TIFF codec cannot cross the worker boundary; TIFF images will be skipped in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
+        );
+      }
+      doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
@@ -1649,6 +1656,7 @@ export class DocxDocument {
       threeD: this._threeD,
       regionMap: this._regionMap,
       chartEx: this._chartEx,
+      tiff: this._tiff,
     });
   }
 

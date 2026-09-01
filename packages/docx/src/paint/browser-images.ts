@@ -9,7 +9,7 @@ import {
   preferVectorBlip,
   releaseOwnedBitmap,
 } from '@silurus/ooxml-core';
-import type { Duotone } from '@silurus/ooxml-core';
+import type { Duotone, TiffRenderer } from '@silurus/ooxml-core';
 import type {
   DeepReadonly,
   ImagePaintResourceDescriptor,
@@ -78,11 +78,13 @@ export async function decodeRaster(
   heightPt = 0,
   duotone?: Duotone,
   failClosedOnDuotoneFailure = false,
+  tiff?: TiffRenderer,
 ): Promise<ImageBitmap | null> {
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
     widthPt,
     heightPt,
     suppressBoundaryFrame: true,
+    tiff,
   });
   if (!base) return null;
   if (!colorReplaceFrom && !duotone) return base;
@@ -165,6 +167,7 @@ function imageDecodeRequests(
 export async function preloadPaintImages(
   descriptors: readonly DeepReadonly<PaintResourceDescriptor>[],
   fetchImage: DocxFetchImage | undefined,
+  tiff?: TiffRenderer,
 ): Promise<Map<string, DecodedImage>> {
   if (!fetchImage) return new Map();
   const entries = await Promise.all(imageDecodeRequests(descriptors).map(async (request) => {
@@ -185,6 +188,8 @@ export async function preloadPaintImages(
               request.widthPt,
               request.heightPt,
               request.duotone,
+              false,
+              tiff,
             );
         if (!fallback) throw vectorError;
         image = fallback;
@@ -200,6 +205,8 @@ export async function preloadPaintImages(
         request.widthPt,
         request.heightPt,
         request.duotone,
+        false,
+        tiff,
       );
     }
     return image == null

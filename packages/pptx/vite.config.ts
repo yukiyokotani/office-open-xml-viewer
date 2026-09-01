@@ -17,6 +17,7 @@ export default defineConfig({
       '@ooxml-test-three-d-renderer': resolve(dirname, '../../src/three-d.ts'),
       '@ooxml-test-region-map-renderer': resolve(dirname, '../../src/region-map.ts'),
       '@ooxml-test-math-renderer': resolve(dirname, '../../src/math.ts'),
+      '@ooxml-test-tiff-renderer': resolve(dirname, '../../src/tiff.ts'),
     },
   },
   server: {

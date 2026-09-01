@@ -368,6 +368,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         threeD: renderers.threeD,
         regionMap: renderers.regionMap,
         chartEx: renderers.chartEx,
+        tiff: renderers.tiff,
       });
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,

@@ -76,7 +76,7 @@ pnpm add @silurus/ooxml
 > format-specific application graph. See the current production measurements on
 > the stable [Bundle size](https://ooxml.silurus.dev/bundle-size/) page. Import
 > only the format and optional renderer entries your application needs. In main
-> mode, MathJax, ChartEx, 3-D and Region Map implementations remain outside the
+> mode, MathJax, ChartEx, 3-D, Region Map and TIFF implementations remain outside the
 > graph unless imported; the separately loaded worker asset is self-contained.
 
 ---
@@ -176,17 +176,19 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
-### Optional chart renderers
+### Optional rendering modules
 
 Classic DrawingML 2-D chart families are included in every format entry.
 Microsoft ChartEx, model-space 3-D charts and offline country-level Region Maps
-are separate entries. Inject them once in the same load options object as
-`math`; omitting a renderer keeps it out of the ordinary render path. The
-built-in renderers work in both main and worker modes. Without `chartEx`,
+are separate entries. TIFF decoding is also a separate entry shared by DOCX,
+XLSX and PPTX. Inject the modules once in the same load options object as
+`math`; omitting one keeps its main-mode implementation out of the ordinary
+format graph. The built-in modules work in both main and worker modes. Without `chartEx`,
 ChartEx families show the standard unsupported-chart placeholder. Without
 `threeD`, 3-D chart groups
 fall back to their canonical 2-D family. Without `regionMap`, Region Maps show
-the standard unsupported-chart placeholder. The code-size boundary applies to
+the standard unsupported-chart placeholder. Without `tiff`, TIFF images are
+skipped while the surrounding document continues to render. The code-size boundary applies to
 the default main-mode application graph. The separately loaded render-worker
 asset stays self-contained for broad bundler compatibility and therefore
 contains its built-in optional renderer implementations.
@@ -196,12 +198,14 @@ import { XlsxViewer } from '@silurus/ooxml/xlsx';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
 import { chartEx } from '@silurus/ooxml/chart-ex';
+import { tiff } from '@silurus/ooxml/tiff';
 
 const container = document.getElementById('xlsx-container') as HTMLElement;
 const workbookViewer = new XlsxViewer(container, {
   threeD,
   regionMap,
   chartEx,
+  tiff,
   mode: 'worker',
 });
 await workbookViewer.load('/workbook-with-advanced-charts.xlsx');
@@ -214,6 +218,16 @@ sub-country/view-specific layouts that the bounded offline model cannot yet
 represent safely. The specification/Office evidence boundary for automatic
 chart behavior is documented in
 [Chart compatibility evidence and scope](docs/chart-compatibility-evidence.md).
+
+The initial TIFF codec accepts uncompressed, 8-bit, chunky process-CMYK TIFF
+6.0 images. Other TIFF classes fail closed without aborting the surrounding
+document render. It is not a general-purpose TIFF library, but as a small
+by-product the same `tiff.render()` method can provide a simple preview of a
+supported standalone TIFF file. Try Yours and the VS Code extension enable
+every first-party optional module; library applications can choose only the entries they need.
+See [Production decisions](https://ooxml.silurus.dev/production/) for the full
+module list and [Bundle size](https://ooxml.silurus.dev/bundle-size/) for current
+measurements.
 
 ### Off-main-thread rendering
 
@@ -673,9 +687,11 @@ file without uploading it.
 | | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Text boxes / drawing shapes (inline and anchored `wps:wsp` / `wps:txbx`, including solid, gradient, and image fills; `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
 | | WMF **and EMF** metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player: window→viewport mapping (MS-EMF map modes, world transform), pens/brushes, poly/rect/ellipse, text-out, path clipping, and embedded DIB blits | ✅ |
+| | Legacy VML content — positioned shapes, text boxes, image previews, and authored text wrapping | ✅ |
 | | OLE embedded objects (`w:object` — the baked VML `v:imagedata` preview is drawn; the embedded app is not run) | ✅ |
 | **Advanced** | Footnotes — reference markers + bottom-of-page bodies with separator rule, numbered (`w:footnoteReference` / `w:footnoteRef`, §17.11) | ✅ |
 | | Endnotes — reference markers + bodies at document end (`w:endnoteReference`, §17.11) | ✅ |
@@ -725,6 +741,7 @@ file without uploading it.
 | | Hidden rows / columns | ✅ |
 | | Row / column outline grouping (`outlineLevel` / `collapsed` §18.3.1.73 / .13, `<outlinePr>` — gutter brackets, +/− collapse, numbered level buttons; view-only) | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
 | | OLE embedded objects (`<oleObjects>` — the legacy VML `v:imagedata` preview keyed by `oleObject@shapeId` is drawn; an image-typed `objectPr` target is preferred when present, and the embedded app is not run) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
@@ -772,6 +789,7 @@ file without uploading it.
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, PNG fallback) | ✅ |
 | | Groups (`grpSp`) with nested transforms | ✅ |
 | | Connectors (`cxnSp`) | ✅ |

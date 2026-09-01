@@ -75,6 +75,7 @@ pub fn mime_from_ext(path: &str) -> &'static str {
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
+        "tif" | "tiff" => "image/tiff",
         // Windows Metafile / Enhanced Metafile. Office embeds these for charts
         // and diagrams; the renderer rasterizes WMF via a minimal player and
         // skips EMF (a follow-up). The conventional MIME types per IANA / Windows.
@@ -368,6 +369,8 @@ mod tests {
         assert_eq!(mime_from_ext("a/b/image1.PNG"), "image/png");
         assert_eq!(mime_from_ext("x.jpeg"), "image/jpeg");
         assert_eq!(mime_from_ext("x.webp"), "image/webp");
+        assert_eq!(mime_from_ext("x.tif"), "image/tiff");
+        assert_eq!(mime_from_ext("x.TIFF"), "image/tiff");
         assert_eq!(mime_from_ext("noext"), "application/octet-stream");
     }
 

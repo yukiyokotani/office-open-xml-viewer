@@ -1,7 +1,8 @@
 // Decoded-bitmap cache for raster / metafile blips shared by the docx, pptx and
 // xlsx renderers, for the lazy byte-on-demand image pipeline. The sibling of
-// `svg-image-by-path.ts`: same path-keyed, per-document (per-`fetchImage`)
-// shape, but the drawable here is an `ImageBitmap` (GPU-backed) decoded via the
+// `svg-image-by-path.ts`: same per-document (per-`fetchImage`) shape, keyed by
+// path plus any raster resolution band, but the drawable here is an
+// `ImageBitmap` (GPU-backed) decoded via the
 // shared `decodeRasterOrMetafile` rather than an `<img>`. Decoding an inlined
 // base64 image to an ImageBitmap is expensive, and the same picture is otherwise
 // re-decoded on every render (each scroll / resize / interaction / page revisit);
@@ -42,6 +43,7 @@ import {
   MAX_DECODED_IMAGE_BYTES,
   OoxmlDecodedImageLimitError,
 } from './pixel-budget.js';
+import type { TiffRenderer } from './tiff-contract.js';
 
 type FetchImage = (path: string, mime: string) => Promise<Blob>;
 export type DecodedBitmapCacheOwner = object;
@@ -232,11 +234,11 @@ export function deferBitmapCloseWhileLeased(
   promise.then((b) => closeBitmapOnce(b)).catch(() => {});
 }
 
-/** Options for {@link getCachedBitmapByPath}. `widthPt`/`heightPt` are the
- *  picture's intended draw size in points and only affect metafile raster
- *  sharpness (a raster blip ignores them), so the path alone keys the cache.
- *  `suppressBoundaryFrame` is the docx-only WMF window/device-boundary edge
- *  suppression (spec-clean default OFF; pptx/xlsx leave it unset). */
+/** Options for {@link getCachedBitmapByPath}. `widthPt`/`heightPt` size a
+ * metafile raster; `targetWidthPx`/`targetHeightPx` select a display-resolution
+ * variant for ordinary rasters. `suppressBoundaryFrame` is the docx-only WMF
+ * window/device-boundary edge suppression (spec-clean default OFF;
+ * pptx/xlsx leave it unset). */
 export interface CachedBitmapOptions {
   /** Intended draw width in points; sizes any metafile raster target. */
   widthPt?: number;
@@ -245,6 +247,44 @@ export interface CachedBitmapOptions {
   /** Enable the docx cosmetic window/device-frame suppression heuristic. Default
    *  false = spec-clean. Only docx opts in. */
   suppressBoundaryFrame?: boolean;
+  /** Optional TIFF codec retained by the owning document. */
+  tiff?: TiffRenderer;
+  /** Desired width of the full raster source in device pixels. Requests are
+   * quantized into stable bands so nearby zoom levels reuse one decode. */
+  targetWidthPx?: number;
+  /** Desired height of the full raster source in device pixels. */
+  targetHeightPx?: number;
+}
+
+const SMALL_RASTER_TARGET_MAX = 64;
+const RASTER_TARGET_QUANTUM = 64;
+
+function rasterTargetBand(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !(value > 0)) return undefined;
+  const rounded = Math.ceil(value);
+  if (rounded <= SMALL_RASTER_TARGET_MAX) {
+    return 2 ** Math.ceil(Math.log2(rounded));
+  }
+  return Math.ceil(rounded / RASTER_TARGET_QUANTUM) * RASTER_TARGET_QUANTUM;
+}
+
+function normalizedBitmapOptions(opts: CachedBitmapOptions): CachedBitmapOptions {
+  return {
+    ...opts,
+    targetWidthPx: rasterTargetBand(opts.targetWidthPx),
+    targetHeightPx: rasterTargetBand(opts.targetHeightPx),
+  };
+}
+
+/** Stable base key shared by the base and derived decoded-surface caches. */
+export function cachedBitmapVariantKey(
+  imagePath: string,
+  opts: CachedBitmapOptions = {},
+): string {
+  const width = rasterTargetBand(opts.targetWidthPx);
+  const height = rasterTargetBand(opts.targetHeightPx);
+  const pathKey = `${imagePath.length}:${imagePath}`;
+  return width && height ? `raster:${pathKey}:${width}x${height}` : `native:${pathKey}`;
 }
 
 interface ProducedBitmap {
@@ -392,10 +432,18 @@ export function getCachedBitmapByPath(
   fetchImage: FetchImage,
   opts: CachedBitmapOptions = {},
 ): Promise<ImageBitmap | null> {
-  const { widthPt = 0, heightPt = 0, suppressBoundaryFrame = false } = opts;
+  const normalized = normalizedBitmapOptions(opts);
+  const {
+    widthPt = 0,
+    heightPt = 0,
+    suppressBoundaryFrame = false,
+    tiff,
+    targetWidthPx,
+    targetHeightPx,
+  } = normalized;
   return getCachedDecodedBitmap(
     BASE_CACHE_NAMESPACE,
-    imagePath,
+    cachedBitmapVariantKey(imagePath, normalized),
     fetchImage,
     async () => {
       const blob = await fetchImage(imagePath, mimeType);
@@ -403,6 +451,9 @@ export function getCachedBitmapByPath(
         widthPt,
         heightPt,
         suppressBoundaryFrame,
+        tiff,
+        targetWidthPx,
+        targetHeightPx,
       });
       return { bitmap, owned: true };
     },
@@ -420,7 +471,8 @@ export function peekCachedBitmapByPath(
   imagePath: string,
   fetchImage: FetchImage,
 ): ImageBitmap | null | undefined {
-  return bitmapCacheByFetch.get(fetchImage)?.entries.get(`${BASE_CACHE_PREFIX}${imagePath}`)?.bitmap;
+  return bitmapCacheByFetch.get(fetchImage)?.entries
+    .get(`${BASE_CACHE_PREFIX}${cachedBitmapVariantKey(imagePath)}`)?.bitmap;
 }
 
 /**

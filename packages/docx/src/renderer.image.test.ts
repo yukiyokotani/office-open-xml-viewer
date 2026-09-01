@@ -58,6 +58,28 @@ describe('docx lazy image bytes', () => {
     expect((globalThis.createImageBitmap as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
   });
 
+  it('threads the opt-in TIFF codec through the DOCX image path', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+    const bitmap = { width: 8, height: 4, close() {} } as unknown as ImageBitmap;
+    const render = vi.fn(async () => bitmap);
+    const fetchImage = vi.fn(async () => new Blob([bytes as BlobPart], { type: 'image/tiff' }));
+
+    await expect(decodeRaster(
+      'word/media/image1.tiff',
+      'image/tiff',
+      undefined,
+      fetchImage,
+      0,
+      0,
+      undefined,
+      false,
+      { render },
+    )).resolves.toBe(bitmap);
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(globalThis.createImageBitmap).not.toHaveBeenCalled();
+  });
+
   it('preloadImages keys by imagePath and decodes each distinct key exactly once', async () => {
     const fetchImage = vi.fn(
       async (path: string, mime: string) => new Blob([new Uint8Array([path.length])], { type: mime }),

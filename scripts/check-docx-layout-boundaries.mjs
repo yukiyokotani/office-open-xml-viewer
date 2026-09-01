@@ -142,8 +142,8 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['recolorSvg', 'value'],
     ['renderChart', 'value'],
     ['withDrawingMLShapeTransform', 'value'],
-    // Optional chart renderers are paint-only capabilities threaded into the
-    // existing shared chart painter. Their erased contracts do not expose
+    // Optional renderers and image codecs are paint-only capabilities threaded
+    // into existing shared painters. Their erased contracts do not expose
     // layout acquisition or permit a renderer back-edge.
     ['ChartThreeDRenderer', 'type'],
     ['ChartRegionMapRenderer', 'type'],
@@ -151,6 +151,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['ChartImageLookup', 'type'],
     ['Duotone', 'type'],
     ['MathRenderer', 'type'],
+    ['TiffRenderer', 'type'],
   ])],
 ]);
 

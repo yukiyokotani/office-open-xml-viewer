@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { installOffscreenCanvasShim, installImageBitmapShim } from './render';
 import type { NodeCanvasFactory } from './render';
 import { loadSkiaForTests } from './test-imports';
@@ -18,6 +18,36 @@ const factory: NodeCanvasFactory = {
 };
 
 const g = globalThis as unknown as { OffscreenCanvas?: unknown };
+
+describe('installImageBitmapShim display-sized decode', () => {
+  it('forwards the target to the codec and resizes a native-sized fallback surface', async () => {
+    const drawImage = vi.fn();
+    const resizedSurface = {
+      width: 1280,
+      height: 960,
+      getContext: () => ({ measureText: () => ({ width: 0 }), drawImage }),
+    };
+    const sourceImage = { width: 12_090, height: 9_063 };
+    const loadImage = vi.fn(async () => sourceImage);
+    const fallbackFactory: NodeCanvasFactory = {
+      createCanvas: vi.fn(() => resizedSurface),
+      loadImage,
+    };
+    const restore = installImageBitmapShim(fallbackFactory);
+    try {
+      const bitmap = await createImageBitmap(new Blob(['encoded']), {
+        resizeWidth: 1280,
+        resizeHeight: 960,
+        resizeQuality: 'high',
+      });
+      expect(loadImage).toHaveBeenCalledWith(expect.any(ArrayBuffer), { width: 1280 });
+      expect(drawImage).toHaveBeenCalledWith(sourceImage, 0, 0, 1280, 960);
+      expect(bitmap).toBe(resizedSurface);
+    } finally {
+      restore();
+    }
+  });
+});
 
 describe.skipIf(!skia)('installOffscreenCanvasShim', () => {
   afterEach(() => {

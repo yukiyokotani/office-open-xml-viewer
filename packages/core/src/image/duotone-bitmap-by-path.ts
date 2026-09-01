@@ -5,6 +5,7 @@
 
 import {
   dropCachedDerivedBitmapNamespace,
+  cachedBitmapVariantKey,
   getCachedBitmapByPath,
   getCachedDerivedBitmap,
   type CachedBitmapOptions,
@@ -69,7 +70,10 @@ export async function getCachedDuotoneBitmapByPath(
   if (!duotone || !base) return base;
   // Strict and compatibility callers must not share a derived cache entry: a
   // compatibility pass-through must never make a later strict lookup succeed.
-  const key = `${duotoneCacheKey(imagePath, duotone)}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
+  const key = `${duotoneCacheKey(
+    cachedBitmapVariantKey(imagePath, bitmapOpts),
+    duotone,
+  )}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
   return getCachedDerivedBitmap(
     DUOTONE_CACHE_NAMESPACE,
     key,

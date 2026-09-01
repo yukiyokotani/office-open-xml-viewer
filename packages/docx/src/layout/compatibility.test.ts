@@ -139,6 +139,7 @@ import {
   WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE,
   WORD_OMITTED_ROW_HEIGHT_RULE_AT_LEAST,
   WORD_OVER_PAGE_CANT_SPLIT_CLIP,
+  WORD_PARALLEL_PARAGRAPH_ROW_CUT,
   WORD_POSITIONED_TABLE_ADJACENCY_EXCLUSION,
   WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
   WORD_TABLE_BORDER_LAYER_CASCADE,
@@ -155,6 +156,7 @@ import {
   wordAuthoredAutoRowHeightUsesFloor,
   wordAuthoredBorderParticipates,
   wordClipsOverPageCantSplitRow,
+  wordRelocatesParallelParagraphRowCut,
   wordDropsTrailingStructuralCellMarker,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
@@ -289,6 +291,28 @@ describe('Word table AutoFit observations', () => {
     })).toBe(false);
     expect(wordAutofitEmptyParagraphHasNoIntrinsicContent({
       runs: [], numbering: { numId: 1, level: 0 } as never,
+    })).toBe(false);
+  });
+});
+
+describe('Word table row-cut observations', () => {
+  it('limits the parallel paragraph boundary rule to Word compatibility mode', () => {
+    expect(WORD_PARALLEL_PARAGRAPH_ROW_CUT.evidence).toEqual({
+      kind: 'office-observation',
+      syntheticFixtureId: 'parallel-paragraph-row-cut-boundary-matrix',
+      application: 'Microsoft Word',
+      version: '16.111.1',
+      platform: 'macOS 26.5.2',
+    });
+    expect(WORD_PARALLEL_PARAGRAPH_ROW_CUT.description)
+      .not.toMatch(/sample|private|\.docx|\.pdf/i);
+    expect(wordRelocatesParallelParagraphRowCut({
+      compatibility: 'word',
+      hasUnfinishedParagraphWithoutProgress: true,
+    })).toBe(true);
+    expect(wordRelocatesParallelParagraphRowCut({
+      compatibility: 'standard',
+      hasUnfinishedParagraphWithoutProgress: true,
     })).toBe(false);
   });
 });

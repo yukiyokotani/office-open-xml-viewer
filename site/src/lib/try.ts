@@ -16,10 +16,11 @@ import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
 import { chartEx } from '../../../src/chart-ex';
+import { tiff } from '../../../src/tiff';
 
 // Opt-in OMML equation engine — enabled here so user-supplied docx/pptx with
 // equations render. (In the published library this is `@silurus/ooxml/math`.)
-const advancedChartRenderers = { threeD, regionMap, chartEx };
+const fullRenderers = { threeD, regionMap, chartEx, tiff };
 
 const VIEWER_GAP = 26;
 const MIN_SCALE = 0.5;
@@ -89,7 +90,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       showZoomSlider: true,
       comments: true,
       math,
-      ...advancedChartRenderers,
+      ...fullRenderers,
     });
     try {
       await viewer.load(buffer);
@@ -123,7 +124,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       // scrolls through slides that are still becoming available.
       mode: 'worker',
       progressiveLayout: true,
-      ...advancedChartRenderers,
+      ...fullRenderers,
     };
     const viewer = new PptxScrollViewer(host, viewerOptions);
     // Do not force an absolute scale here. ScrollViewer derives its initial
@@ -178,7 +179,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     // remains responsive while later pages are still being prepared.
     mode: 'worker',
     progressiveLayout: true,
-    ...advancedChartRenderers,
+    ...fullRenderers,
   };
   const viewer = new DocxScrollViewer(host, viewerOptions);
   // As with PPTX, the viewer-owned width fit is the initial zoom contract for
@@ -243,14 +244,14 @@ export function prewarmEngines(): void {
     void PptxPresentation.load(sample('sample-1.pptx'), {
       useGoogleFonts: false,
       mode: 'main',
-      ...advancedChartRenderers,
+      ...fullRenderers,
     })
       .then((d) => d.destroy())
       .catch(() => {});
     void DocxDocument.load(sample('sample-1.docx'), {
       useGoogleFonts: false,
       mode: 'main',
-      ...advancedChartRenderers,
+      ...fullRenderers,
     })
       .then((d) => d.destroy())
       .catch(() => {});
@@ -260,7 +261,7 @@ export function prewarmEngines(): void {
     const v = new XlsxViewer(host, {
       useGoogleFonts: false,
       mode: 'main',
-      ...advancedChartRenderers,
+      ...fullRenderers,
     });
     void v.load(sample('sample-1.xlsx')).then(() => v.destroy()).catch(() => v.destroy());
   };

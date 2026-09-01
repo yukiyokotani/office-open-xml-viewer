@@ -2,9 +2,15 @@ import { describe, it, expect } from 'vitest';
 import {
   sniffRasterDimensions,
   rasterExceedsBudget,
+  sourceRasterExceedsBudget,
   rasterHeaderExceedsBudget,
 } from './raster-dimensions.js';
-import { MAX_RASTER_DIMENSION, MAX_RASTER_PIXELS } from './pixel-budget.js';
+import {
+  MAX_RASTER_DIMENSION,
+  MAX_RASTER_PIXELS,
+  MAX_RASTER_SOURCE_DIMENSION,
+  MAX_RASTER_SOURCE_PIXELS,
+} from './pixel-budget.js';
 
 // ── Raster header dimension sniff + budget (RB1 decode-bomb guard) ───────────
 //
@@ -183,6 +189,25 @@ function jpegMalformedSegLen(): Uint8Array {
   return b;
 }
 
+function tiffHeader(w: number, h: number, byteOrder: 'little' | 'big'): Uint8Array {
+  const little = byteOrder === 'little';
+  const bytes = new Uint8Array(38);
+  const view = new DataView(bytes.buffer);
+  bytes.set(little ? [0x49, 0x49] : [0x4d, 0x4d], 0);
+  view.setUint16(2, 42, little);
+  view.setUint32(4, 8, little);
+  view.setUint16(8, 2, little);
+  view.setUint16(10, 256, little);
+  view.setUint16(12, 4, little);
+  view.setUint32(14, 1, little);
+  view.setUint32(18, w, little);
+  view.setUint16(22, 257, little);
+  view.setUint16(24, 4, little);
+  view.setUint32(26, 1, little);
+  view.setUint32(30, h, little);
+  return bytes;
+}
+
 describe('sniffRasterDimensions — reads declared pixel dimensions from the header', () => {
   it('reads PNG IHDR dimensions', () => {
     expect(sniffRasterDimensions(pngHeader(1920, 1080))).toEqual({ width: 1920, height: 1080 });
@@ -223,6 +248,13 @@ describe('sniffRasterDimensions — reads declared pixel dimensions from the hea
     expect(sniffRasterDimensions(jpegHeader(3264, 2448, 400))).toEqual({
       width: 3264,
       height: 2448,
+    });
+  });
+
+  it.each(['little', 'big'] as const)('reads TIFF IFD dimensions (%s endian)', (byteOrder) => {
+    expect(sniffRasterDimensions(tiffHeader(776, 31, byteOrder))).toEqual({
+      width: 776,
+      height: 31,
     });
   });
 
@@ -323,5 +355,32 @@ describe('rasterHeaderExceedsBudget — end-to-end neutralization of decode bomb
   it('does NOT flag an unrecognized header (fail-open — the caller decodes normally)', () => {
     expect(rasterHeaderExceedsBudget(new Uint8Array([0xde, 0xad, 0xbe, 0xef]))).toBe(false);
     expect(rasterHeaderExceedsBudget(new TextEncoder().encode('<svg/>'))).toBe(false);
+  });
+});
+
+describe('sourceRasterExceedsBudget — encoded-source hard ceiling', () => {
+  it('admits the reported 109,571,670-pixel poster class for bounded display decode', () => {
+    const dimensions = { width: 12_090, height: 9_063 };
+    expect(dimensions.width * dimensions.height).toBe(109_571_670);
+    expect(dimensions.width * dimensions.height).toBeGreaterThan(MAX_RASTER_PIXELS);
+    expect(sourceRasterExceedsBudget(dimensions)).toBe(false);
+  });
+
+  it('rejects source grids beyond the separate 128-Mi-pixel hard ceiling', () => {
+    expect(sourceRasterExceedsBudget({ width: 30_000, height: 30_000 })).toBe(true);
+    expect(30_000 * 30_000).toBeGreaterThan(MAX_RASTER_SOURCE_PIXELS);
+  });
+
+  it('allows a source axis above the retained-canvas limit when resizing can bound it', () => {
+    expect(40_000).toBeGreaterThan(MAX_RASTER_DIMENSION);
+    expect(40_000).toBeLessThan(MAX_RASTER_SOURCE_DIMENSION);
+    expect(sourceRasterExceedsBudget({ width: 40_000, height: 2_000 })).toBe(false);
+  });
+
+  it('rejects a source axis beyond the separate encoded-source limit', () => {
+    expect(sourceRasterExceedsBudget({
+      width: MAX_RASTER_SOURCE_DIMENSION + 1,
+      height: 1,
+    })).toBe(true);
   });
 });

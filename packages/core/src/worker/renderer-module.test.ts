@@ -61,6 +61,7 @@ describe('worker renderer module descriptors', () => {
       threeD: registerBuiltinWorkerRenderer({}, 'threeD'),
       regionMap: registerBuiltinWorkerRenderer({}, 'regionMap'),
       chartEx: registerBuiltinWorkerRenderer({}, 'chartEx'),
+      tiff: registerBuiltinWorkerRenderer({}, 'tiff'),
     };
 
     const loaded = await loadWorkerRenderers(workerRendererDescriptors(sources));
@@ -69,6 +70,7 @@ describe('worker renderer module descriptors', () => {
     expect(typeof loaded.threeD?.render).toBe('function');
     expect(typeof loaded.regionMap?.render).toBe('function');
     expect(typeof loaded.chartEx?.render).toBe('function');
+    expect(typeof loaded.tiff?.render).toBe('function');
   });
 
   it('carries the consumer-resolved math asset URL without exposing it on the renderer', () => {

@@ -330,6 +330,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
           threeD: renderers.threeD,
           regionMap: renderers.regionMap,
           chartEx: renderers.chartEx,
+          tiff: renderers.tiff,
         }, (run) => runs.push(run));
         return { bitmap: canvas.transferToImageBitmap(), runs };
       });
@@ -357,6 +358,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
           threeD: renderers.threeD,
           regionMap: renderers.regionMap,
           chartEx: renderers.chartEx,
+          tiff: renderers.tiff,
         }, (run) => runs.push(run));
         return runs;
       });

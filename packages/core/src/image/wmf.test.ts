@@ -882,6 +882,232 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps an in-budget raster on the native decode path when a target is supplied', async () => {
+    const fake = { width: 1920, height: 1080, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => fake);
+    vi.stubGlobal('createImageBitmap', cib);
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 1920);
+    view.setUint32(20, 1080);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 960,
+      targetHeightPx: 540,
+    })).resolves.toBe(fake);
+    expect(cib).toHaveBeenCalledWith(blob);
+  });
+
+  it('downsamples a legitimate over-32MP raster to the requested display resolution', async () => {
+    const sourceWidth = 12_000;
+    const sourceHeight = 9_000; // 108 MP: legitimate poster / camera output.
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const put = (o: number, v: number) => {
+      png[o] = (v >>> 24) & 0xff;
+      png[o + 1] = (v >>> 16) & 0xff;
+      png[o + 2] = (v >>> 8) & 0xff;
+      png[o + 3] = v & 0xff;
+    };
+    put(16, sourceWidth);
+    put(20, sourceHeight);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const resized = { width: 1_200, height: 900, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => resized);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 1_200,
+      targetHeightPx: 900,
+    })).resolves.toBe(resized);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 1_200,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('downsamples a panoramic source wider than the retained-canvas axis limit', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 40_000);
+    view.setUint32(20, 2_000);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const resized = { width: 4_000, height: 200, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => resized);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 4_000,
+      targetHeightPx: 200,
+    })).resolves.toBe(resized);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 4_000,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('uses the largest safe surface when the display request asks for native resolution', async () => {
+    const sourceWidth = 12_000;
+    const sourceHeight = 9_000;
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, sourceWidth);
+    view.setUint32(20, sourceHeight);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const safeScale = Math.sqrt((1 << 25) / (sourceWidth * sourceHeight));
+    const resizeWidth = Math.floor(sourceWidth * safeScale);
+    const resized = {
+      width: resizeWidth,
+      height: Math.floor(sourceHeight * safeScale),
+      close() {},
+    } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => resized);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: sourceWidth,
+      targetHeightPx: sourceHeight,
+    })).resolves.toBe(resized);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('still rejects an over-32MP raster when no bounded display target is known', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 12_000);
+    view.setUint32(20, 9_000);
+    const cib = vi.fn();
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(new Blob([png as BlobPart], { type: 'image/png' })))
+      .rejects.toMatchObject({
+        code: 'ooxml-decoded-image-limit',
+        metric: 'image-pixels',
+        observed: 12_000 * 9_000,
+      });
+    expect(cib).not.toHaveBeenCalled();
+  });
+
+  it('keeps the encoded-source hard ceiling even when a tiny display target is requested', async () => {
+    const bomb = new Uint8Array(26);
+    bomb.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    bomb.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(bomb.buffer);
+    view.setUint32(16, 30_000);
+    view.setUint32(20, 30_000);
+    const cib = vi.fn();
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([bomb as BlobPart], { type: 'image/png' }),
+      { targetWidthPx: 300, targetHeightPx: 300 },
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      observed: 30_000 * 30_000,
+    });
+    expect(cib).not.toHaveBeenCalled();
+  });
+
+  it('reports a source-axis crossing as a dimension limit with truthful values', async () => {
+    const bomb = new Uint8Array(26);
+    bomb.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    bomb.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(bomb.buffer);
+    view.setUint32(16, 70_000);
+    view.setUint32(20, 1);
+    const cib = vi.fn();
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([bomb as BlobPart], { type: 'image/png' }),
+      { targetWidthPx: 700, targetHeightPx: 1 },
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-dimension',
+      limit: 65_535,
+      observed: 70_000,
+    });
+    expect(cib).not.toHaveBeenCalled();
+  });
+
+  it('reports a retained-axis crossing separately when no downsample target is supplied', async () => {
+    const panoramic = new Uint8Array(26);
+    panoramic.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    panoramic.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(panoramic.buffer);
+    view.setUint32(16, 40_000);
+    view.setUint32(20, 1);
+    const cib = vi.fn();
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([panoramic as BlobPart], { type: 'image/png' }),
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-dimension',
+      limit: 32_767,
+      observed: 40_000,
+    });
+    expect(cib).not.toHaveBeenCalled();
+  });
+
+  it('a TIFF is skipped without the opt-in codec and decoded when supplied', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+    const blob = new Blob([bytes as BlobPart], { type: 'image/tiff' });
+    const browserDecode = vi.fn();
+    vi.stubGlobal('createImageBitmap', browserDecode);
+
+    await expect(decodeRasterOrMetafile(blob)).resolves.toBeNull();
+    expect(browserDecode).not.toHaveBeenCalled();
+
+    const bitmap = { width: 8, height: 4, close() {} } as unknown as ImageBitmap;
+    const render = vi.fn(async (input: Uint8Array) => {
+      expect(Array.from(input)).toEqual(Array.from(bytes));
+      return bitmap;
+    });
+    await expect(decodeRasterOrMetafile(blob, { tiff: { render } })).resolves.toBe(bitmap);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(browserDecode).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized TIFF before invoking an injected codec', async () => {
+    const bytes = new Uint8Array(38);
+    const view = new DataView(bytes.buffer);
+    bytes.set([0x49, 0x49], 0);
+    view.setUint16(2, 42, true);
+    view.setUint32(4, 8, true);
+    view.setUint16(8, 2, true);
+    view.setUint16(10, 256, true);
+    view.setUint16(12, 4, true);
+    view.setUint32(14, 1, true);
+    view.setUint32(18, 12_000, true);
+    view.setUint16(22, 257, true);
+    view.setUint16(24, 4, true);
+    view.setUint32(26, 1, true);
+    view.setUint32(30, 9_000, true);
+    const render = vi.fn();
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([bytes as BlobPart], { type: 'image/tiff' }),
+      { tiff: { render }, targetWidthPx: 320, targetHeightPx: 200 },
+    )).rejects.toMatchObject({ code: 'ooxml-decoded-image-limit' });
+    expect(render).not.toHaveBeenCalled();
+  });
+
   it('closes and rejects an oversized decode when the header was unrecognized', async () => {
     const close = vi.fn();
     vi.stubGlobal(

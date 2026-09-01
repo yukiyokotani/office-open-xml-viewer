@@ -5207,6 +5207,9 @@ struct FieldFrame {
     instruction: String,
     /// Formatting from the first instrText run — used as the field's display format.
     fmt: Option<RunFmt>,
+    /// Formatting from the first non-empty cached-result run. ECMA-376
+    /// §17.16.4.3 requires `\* MERGEFORMAT` updates to reuse this structure.
+    result_fmt: Option<RunFmt>,
     /// Fallback text captured between `separate` and `end`.
     fallback: String,
     /// True when we recompute this field (PAGE/NUMPAGES) and swallow its cached result.
@@ -5671,7 +5674,15 @@ fn handle_run_in_para(
             "end" => {
                 if let Some(frame) = field.stack.pop() {
                     if frame.substitute && !frame.legacy_checkbox_nested {
-                        let fmt = frame.fmt.clone().unwrap_or_else(|| base_run.clone());
+                        let fmt = if has_mergeformat_switch(&frame.instruction) {
+                            frame
+                                .result_fmt
+                                .clone()
+                                .or_else(|| frame.fmt.clone())
+                                .unwrap_or_else(|| base_run.clone())
+                        } else {
+                            frame.fmt.clone().unwrap_or_else(|| base_run.clone())
+                        };
                         let fallback = frame.legacy_checkbox_checked.map_or_else(
                             || frame.fallback.clone(),
                             |checked| {
@@ -5745,8 +5756,20 @@ fn handle_run_in_para(
                 swallowed.push_str(t);
             }
         }
+        let cached_result_fmt = if swallowed.is_empty() {
+            None
+        } else {
+            let mut fmt = base_run.clone();
+            if let Some(rpr) = child_w(r_node, "rPr") {
+                apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+            }
+            Some(fmt)
+        };
         if let Some(frame) = field.top_mut() {
             frame.fallback.push_str(&swallowed);
+            if frame.result_fmt.is_none() {
+                frame.result_fmt = cached_result_fmt;
+            }
         }
         return;
     }
@@ -6155,6 +6178,18 @@ fn classify_field(instr: &str) -> String {
         "FORMCHECKBOX" => "checkbox".to_string(),
         _ => "other".to_string(),
     }
+}
+
+fn has_mergeformat_switch(instr: &str) -> bool {
+    let mut tokens = instr.split_whitespace();
+    let mut previous = tokens.next();
+    for token in tokens {
+        if previous == Some("\\*") && token.eq_ignore_ascii_case("MERGEFORMAT") {
+            return true;
+        }
+        previous = Some(token);
+    }
+    false
 }
 
 /// True when `a` and `b` would render identically but for their `text`
@@ -7083,7 +7118,12 @@ fn parse_run_inner(
                 } else if let Some(shp) = parse_vml_pict(
                     style_map, num_map, child, theme, media_map, chart_map, rel_map, depth,
                 ) {
-                    runs.push(DocRun::Shape(Box::new(shp)));
+                    let anchored = shp.anchor_acquisition.is_some();
+                    let mut pict_runs = vec![DocRun::Shape(Box::new(shp))];
+                    if anchored {
+                        attach_anchor_host_metrics(&mut pict_runs);
+                    }
+                    runs.extend(pict_runs);
                 }
             }
             "object" => {
@@ -10530,9 +10570,14 @@ fn parse_vml_pict(
     // Body blocks from <v:textbox><w:txbxContent>. VML and WPS share the same
     // CT_TxbxContent parser/wire; textPath still suppresses only the legacy
     // body-text paint projection, not preservation of authored content.
-    let text_box_content_node = shape
+    let text_box_node = shape
         .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent");
+        .find(|n| n.is_element() && n.tag_name().name() == "textbox");
+    let text_box_content_node = text_box_node.and_then(|text_box| {
+        text_box
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+    });
     let (text_box_content, parsed_legacy_blocks) = match text_box_content_node {
         Some(content) if text_path.is_some() => {
             // Before B2, a VML textPath suppressed txbxContent before parsing,
@@ -10591,6 +10636,13 @@ fn parse_vml_pict(
         .and_then(|value| value.trim().parse::<f64>().ok())
         .map(|value| vec![Some(value * 100000.0 / 21600.0)])
         .unwrap_or_default();
+    let anchor = vml_css_str(style, "position")
+        .is_some_and(|value| value.eq_ignore_ascii_case("absolute"))
+        && vml_word_has_complete_anchor_reference(shape, style);
+    let anchor_acquisition =
+        anchor.then(|| vml_word_anchor_acquisition(shape, style, width_pt, height_pt));
+    let [text_inset_l, text_inset_t, text_inset_r, text_inset_b] =
+        vml_textbox_insets(text_box_node);
 
     Some(ShapeRun {
         inline: false,
@@ -10621,14 +10673,14 @@ fn parse_vml_pict(
         flip_h,
         flip_v,
         text_path,
-        // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
         text_box_content,
         text_anchor: None,
-        text_inset_l: 91440.0 / 12700.0,
-        text_inset_t: 45720.0 / 12700.0,
-        text_inset_r: 91440.0 / 12700.0,
-        text_inset_b: 45720.0 / 12700.0,
+        text_inset_l,
+        text_inset_t,
+        text_inset_r,
+        text_inset_b,
+        anchor_acquisition,
         ..Default::default()
     })
 }
@@ -10905,6 +10957,62 @@ fn parse_vml_length_pt(value: &str) -> Option<f64> {
     number.trim().parse::<f64>().ok().map(|n| n * scale)
 }
 
+fn parse_vml_textbox_inset(raw: &str, defaults: [f64; 4]) -> Option<[f64; 4]> {
+    fn push_value(result: &mut [f64; 4], index: &mut usize, part: &str) -> Option<()> {
+        if *index >= result.len() {
+            return None;
+        }
+        result[*index] = parse_vml_length_pt(part).filter(|value| value.is_finite())?;
+        *index += 1;
+        Some(())
+    }
+
+    let mut result = defaults;
+    let mut index = 0;
+
+    if raw.contains(',') {
+        for comma_part in raw.split(',') {
+            let mut found_value = false;
+            for part in comma_part.split_ascii_whitespace() {
+                found_value = true;
+                push_value(&mut result, &mut index, part)?;
+            }
+            if !found_value {
+                if index >= result.len() {
+                    return None;
+                }
+                index += 1;
+            }
+        }
+    } else {
+        for part in raw.split_ascii_whitespace() {
+            push_value(&mut result, &mut index, part)?;
+        }
+    }
+    Some(result)
+}
+
+/// ECMA-376 Part 4 §19.1.2.22 `v:textbox@inset` names the physical left,
+/// top, right, and bottom text margins. Values may be comma- or space-separated;
+/// omitted components retain their normative 0.1in/0.05in defaults.
+/// [MS-OE376] §2.1.1713(f),(i) records that Word always uses the authored
+/// `inset` and does not support `insetmode`, so the DOCX parser deliberately
+/// ignores `o:insetmode` instead of inventing auto-calculated margins.
+fn vml_textbox_insets(text_box: Option<roxmltree::Node>) -> [f64; 4] {
+    const DEFAULTS: [f64; 4] = [7.2, 3.6, 7.2, 3.6];
+    let Some(text_box) = text_box else {
+        return DEFAULTS;
+    };
+    let Some(raw) = text_box
+        .attributes()
+        .find(|attribute| attribute.name() == "inset")
+        .map(|attribute| attribute.value())
+    else {
+        return DEFAULTS;
+    };
+    parse_vml_textbox_inset(raw, DEFAULTS).unwrap_or(DEFAULTS)
+}
+
 /// Parse VML's `x,y` point-pair grammar used by `<v:line from/to>`.
 fn parse_vml_point_pt(value: &str) -> Option<(f64, f64)> {
     let mut parts = value.split(',');
@@ -11057,6 +11165,26 @@ fn vml_word_anchor_reference(shape: roxmltree::Node, style: &str, axis: &str) ->
     }
 }
 
+/// Whether the VML object explicitly identifies both coordinate spaces needed
+/// by retained layout. ECMA-376 Part 4 §19.1.2.19 defines `text` defaults, but
+/// MS-OE376 §2.1.1692(i-j) records that Word requires both relative properties
+/// to be authored. Older binary-origin documents can omit them anyway; those
+/// shapes stay on the legacy compatibility path because manufacturing the
+/// defaults changes their anchor-line behavior and pagination.
+fn vml_word_has_complete_anchor_reference(shape: roxmltree::Node, style: &str) -> bool {
+    let wrap = shape
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "wrap");
+    let has_axis = |style_property: &str, wrap_attribute: &str| {
+        vml_css_str(style, style_property).is_some()
+            || wrap
+                .and_then(|node| node.attribute(wrap_attribute))
+                .is_some()
+    };
+    has_axis("mso-position-horizontal-relative", "anchorx")
+        && has_axis("mso-position-vertical-relative", "anchory")
+}
+
 fn vml_word_anchor_choice(style: &str, axis: &str) -> AnchorAxisChoiceWire {
     let (position_property, percent_property, leading_property, margin_property) =
         if axis == "horizontal" {
@@ -11074,15 +11202,28 @@ fn vml_word_anchor_choice(style: &str, axis: &str) -> AnchorAxisChoiceWire {
                 "margin-top",
             )
         };
+    let authored_offset = || {
+        // Part 4 §19.1.2.19 defines the two authored numeric components;
+        // MS-OE376 §2.1.1692(ee-ff) says Office combines each pair. Its note
+        // (r) is in tension with current Word output for the exact
+        // `mso-position-*:absolute` token: Word retains the combined value as
+        // the page/margin offset rather than moving the object to the relative
+        // frame origin. Keep that compatibility interpretation restricted to
+        // this numeric offset branch; align and percent values never enter it.
+        let leading = vml_css_length_pt(style, leading_property).unwrap_or(0.0);
+        let margin = vml_css_length_pt(style, margin_property).unwrap_or(0.0);
+        leading + margin
+    };
     if let Some(raw) = vml_css_str(style, position_property) {
         let aligned = match raw {
             "left" | "right" | "center" | "top" | "bottom" | "inside" | "outside" => {
                 Some(raw.to_string())
             }
-            // MS-OE376 §2.1.1692(r,bbbb): the authored left/top and margin
-            // offsets are ignored whenever mso-position-* is present. The
-            // `absolute` value therefore selects the relative-frame origin.
-            "absolute" => return AnchorAxisChoiceWire::Offset { value_pt: 0.0 },
+            "absolute" => {
+                return AnchorAxisChoiceWire::Offset {
+                    value_pt: authored_offset(),
+                }
+            }
             _ => return AnchorAxisChoiceWire::Invalid,
         };
         if let Some(value) = aligned {
@@ -11101,13 +11242,8 @@ fn vml_word_anchor_choice(style: &str, axis: &str) -> AnchorAxisChoiceWire {
             .unwrap_or(AnchorAxisChoiceWire::Invalid);
     }
 
-    // MS-OE376 §2.1.1692(ee-ff): when neither mso-position-* nor its percent
-    // counterpart is authored, Word combines left+margin-left and
-    // top+margin-top. Missing terms use the ECMA-376 default zero.
-    let leading = vml_css_length_pt(style, leading_property).unwrap_or(0.0);
-    let margin = vml_css_length_pt(style, margin_property).unwrap_or(0.0);
     AnchorAxisChoiceWire::Offset {
-        value_pt: leading + margin,
+        value_pt: authored_offset(),
     }
 }
 
@@ -11115,15 +11251,22 @@ fn vml_word_anchor_wrap(shape: roxmltree::Node, style: &str) -> AnchorWrapWire {
     let wrap = shape
         .children()
         .find(|child| child.is_element() && child.tag_name().name() == "wrap");
-    let authored = wrap
-        .and_then(|node| node.attribute("type"))
-        .or_else(|| vml_css_str(style, "mso-wrap-style"));
-    let kind = match authored.unwrap_or("square") {
-        "none" => AnchorWrapKindWire::None,
-        "square" => AnchorWrapKindWire::Square,
-        "tight" => AnchorWrapKindWire::Tight,
-        "through" => AnchorWrapKindWire::Through,
-        "topAndBottom" => AnchorWrapKindWire::TopAndBottom,
+    let authored = wrap.and_then(|node| {
+        node.attribute("type")
+            .or_else(|| vml_css_str(style, "mso-wrap-style"))
+    });
+    // Part 4 §19.3.2.6 is explicit: omitting `<w10:wrap>` means that no text
+    // wrapping is performed. When the element exists but omits `type`, Word's
+    // persisted `mso-wrap-style` supplies the value; otherwise its established
+    // VML default is square.
+    let effective = wrap.map(|_| authored.unwrap_or("square"));
+    let kind = match effective {
+        None => AnchorWrapKindWire::None,
+        Some("none") => AnchorWrapKindWire::None,
+        Some("square") => AnchorWrapKindWire::Square,
+        Some("tight") => AnchorWrapKindWire::Tight,
+        Some("through") => AnchorWrapKindWire::Through,
+        Some("topAndBottom") => AnchorWrapKindWire::TopAndBottom,
         _ => AnchorWrapKindWire::Invalid,
     };
     let side = wrap
@@ -11142,7 +11285,13 @@ fn vml_word_anchor_wrap(shape: roxmltree::Node, style: &str) -> AnchorWrapWire {
         kind,
         authored_kinds: authored
             .map(|value| vec![format!("vml:{value}")])
-            .unwrap_or_else(|| vec!["vml:square-default".to_string()]),
+            .unwrap_or_else(|| {
+                vec![if wrap.is_some() {
+                    "vml:square-default".to_string()
+                } else {
+                    "vml:wrap-omitted".to_string()
+                }]
+            }),
         side,
         distances: vml_word_wrap_distances(style),
         ..Default::default()
@@ -14364,6 +14513,58 @@ mod tests {
                 .any(|r| matches!(r, DocRun::Text(t) if t.text == "2019")),
             "cached result swallowed, not rendered as text"
         );
+    }
+
+    /// §17.16.4.3 MERGEFORMAT updates a field by replacing the cached result
+    /// text while retaining its existing run structure and formatting. A
+    /// NUMPAGES instruction run commonly has no explicit size even though its
+    /// cached result does; recomputation must therefore keep the result run's
+    /// size instead of falling back to the document default.
+    #[test]
+    fn complex_numpages_mergeformat_preserves_cached_result_run_size() {
+        let runs = parse_para(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:instrText xml:space="preserve"> NUMPAGES \* MERGEFORMAT </w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+               <w:r><w:rPr><w:sz w:val="13"/><w:szCs w:val="13"/></w:rPr><w:t>2</w:t></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let field = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Field(field) => Some(field.as_ref()),
+                _ => None,
+            })
+            .expect("NUMPAGES field run");
+
+        assert_eq!(field.field_type, "numPages");
+        assert_eq!(field.fallback_text, "2");
+        assert_eq!(field.font_size, 6.5);
+        assert_eq!(field.font_size_cs, Some(6.5));
+    }
+
+    #[test]
+    fn complex_numpages_without_mergeformat_keeps_instruction_format() {
+        let runs = parse_para(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:instrText>NUMPAGES</w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+               <w:r><w:rPr><w:sz w:val="13"/></w:rPr><w:t>2</w:t></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let field = runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Field(field) => Some(field.as_ref()),
+                _ => None,
+            })
+            .expect("NUMPAGES field run");
+
+        assert_eq!(field.font_size, 10.0);
     }
 
     #[test]
@@ -23533,6 +23734,85 @@ mod txbx_block_wire_tests {
     }
 
     #[test]
+    fn vml_textbox_preserves_authored_physical_edge_insets() {
+        let xml = r##"<w:pict
+                  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:v="urn:schemas-microsoft-com:vml">
+                  <v:shape id="tb1" type="#_x0000_t202"
+                      style="position:relative;width:200pt;height:100pt">
+                    <v:textbox inset="12mm,5mm,0,"><w:txbxContent>
+                      <w:p><w:r><w:t>Inset text</w:t></w:r></w:p>
+                    </w:txbxContent></v:textbox>
+                  </v:shape>
+                </w:pict>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let mut num_map = NumberingMap::default();
+        let shape = parse_vml_pict(
+            &StyleMap::default(),
+            &mut num_map,
+            document.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            DepthGuard::root(),
+        )
+        .expect("VML shape");
+
+        assert!((shape.text_inset_l - 12.0 * 72.0 / 25.4).abs() < 1e-9);
+        assert!((shape.text_inset_t - 5.0 * 72.0 / 25.4).abs() < 1e-9);
+        assert_eq!(shape.text_inset_r, 0.0);
+        assert_eq!(
+            shape.text_inset_b, 3.6,
+            "ECMA-376 Part 4 §19.1.2.22: a missing component uses its default",
+        );
+    }
+
+    #[test]
+    fn vml_textbox_accepts_space_separated_insets() {
+        let xml = r##"<v:shape xmlns:v="urn:schemas-microsoft-com:vml">
+                    <v:textbox inset="1pt 2pt 3pt 4pt"/>
+                  </v:shape>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let shape = document.root_element();
+        let text_box = shape
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "textbox");
+
+        assert_eq!(vml_textbox_insets(text_box), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn vml_textbox_uses_authored_insets_when_insetmode_is_auto() {
+        let xml = r##"<v:shape xmlns:v="urn:schemas-microsoft-com:vml"
+                    xmlns:o="urn:schemas-microsoft-com:office:office"
+                    o:insetmode="auto">
+                    <v:textbox inset="1pt,2pt,3pt,4pt" o:insetmode="auto"/>
+                  </v:shape>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let shape = document.root_element();
+        let text_box = shape
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "textbox");
+
+        assert_eq!(vml_textbox_insets(text_box), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn vml_textbox_accepts_mixed_comma_and_space_separators() {
+        let xml = r##"<v:shape xmlns:v="urn:schemas-microsoft-com:vml">
+                    <v:textbox inset="1pt 2pt, 3pt,4pt"/>
+                  </v:shape>"##;
+        let document = roxmltree::Document::parse(xml).expect("VML fixture");
+        let shape = document.root_element();
+        let text_box = shape
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "textbox");
+
+        assert_eq!(vml_textbox_insets(text_box), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn exhausted_depth_retains_an_explicit_container_marker() {
         let body = parse_wps_text_body(
             r#"<w:p><w:r><w:t>Too deep</w:t></w:r></w:p>"#,
@@ -26663,6 +26943,84 @@ mod vml_pict_tests {
         assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
     }
 
+    /// Part 4 §19.3.2.6: a floating VML object with square wrapping reserves
+    /// its rectangular extents from surrounding WordprocessingML text. The
+    /// complete anchor facts must be retained for text-box shapes just as they
+    /// are for VML imagedata pictures; otherwise layout paints the box but never
+    /// registers its wrap exclusion.
+    #[test]
+    fn absolute_vml_textbox_retains_square_wrap_anchor_acquisition() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="contact" type="#_x0000_t202"
+                  style="position:absolute;margin-left:388.05pt;margin-top:362.9pt;width:155.9pt;height:400pt;mso-position-horizontal:absolute;mso-position-horizontal-relative:page;mso-position-vertical:absolute;mso-position-vertical-relative:page;mso-wrap-style:square">
+                  <v:textbox><w:txbxContent><w:p><w:r><w:t>Contact</w:t></w:r></w:p></w:txbxContent></v:textbox>
+                  <w10:wrap type="square" anchorx="page" anchory="page"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let runs = all_runs(&body, &HashMap::new());
+        let [DocRun::AnchorHost(host), DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("floating VML text box must retain one anchor host: {runs:?}");
+        };
+        let acquisition = shape
+            .anchor_acquisition
+            .as_ref()
+            .expect("absolute VML text box anchor acquisition");
+        assert_eq!(
+            host.anchor_occurrence_id.as_deref(),
+            Some(acquisition.occurrence_id.as_str()),
+        );
+        assert_eq!(
+            acquisition.horizontal.relative_from.as_deref(),
+            Some("page")
+        );
+        assert_eq!(acquisition.vertical.relative_from.as_deref(), Some("page"));
+        assert!(matches!(
+            acquisition.horizontal.choice,
+            AnchorAxisChoiceWire::Offset { value_pt } if (value_pt - 388.05).abs() < 1e-6
+        ));
+        assert!(matches!(
+            acquisition.vertical.choice,
+            AnchorAxisChoiceWire::Offset { value_pt } if (value_pt - 362.9).abs() < 1e-6
+        ));
+        assert_eq!(acquisition.wrap.kind, AnchorWrapKindWire::Square);
+        assert_eq!(acquisition.wrap.side.as_deref(), Some("bothSides"));
+        assert_eq!(acquisition.wrap.distances.left_pt, Some(9.0));
+        assert_eq!(acquisition.wrap.distances.right_pt, Some(9.0));
+        assert_eq!(acquisition.behavior.allow_overlap, Some(true));
+    }
+
+    /// MS-OE376 §2.1.1692(i-j) requires Word to persist both relative
+    /// coordinate spaces. Some binary-origin compatibility documents omit
+    /// them; retained layout must not invent those facts because the legacy
+    /// anchor-line interpretation is observably different.
+    #[test]
+    fn absolute_vml_textbox_without_relative_spaces_stays_on_legacy_path() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="legacy" type="#_x0000_t202"
+                  style="position:absolute;margin-left:6in;margin-top:-41.2pt;width:91pt;height:75.5pt">
+                  <v:textbox><w:txbxContent><w:p><w:r><w:t>Logo</w:t></w:r></w:p></w:txbxContent></v:textbox>
+                  <w10:wrap type="square"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+
+        let runs = all_runs(&body, &HashMap::new());
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("incomplete VML coordinates must stay on the legacy path: {runs:?}");
+        };
+        assert!(shape.anchor_acquisition.is_none());
+    }
+
     /// Part 4 §19.1.2.19/§19.1.2.21: the shape instance overrides its
     /// referenced shapetype, while the instance's child stroke overrides the
     /// instance attributes. Stroke weight defaults to 1pt and a unitless value
@@ -26941,11 +27299,11 @@ mod vml_pict_tests {
         assert_eq!(acquisition.vertical.relative_from.as_deref(), Some("line"));
         assert!(matches!(
             acquisition.horizontal.choice,
-            AnchorAxisChoiceWire::Offset { value_pt: 0.0 }
+            AnchorAxisChoiceWire::Offset { value_pt } if (value_pt - 5.0).abs() < 1e-6
         ));
         assert!(matches!(
             acquisition.vertical.choice,
-            AnchorAxisChoiceWire::Offset { value_pt: 0.0 }
+            AnchorAxisChoiceWire::Offset { value_pt } if (value_pt - 12.0).abs() < 1e-6
         ));
         assert_eq!(acquisition.behavior.behind_doc, Some(true));
         assert_eq!(
@@ -26965,7 +27323,7 @@ mod vml_pict_tests {
             r##"<w:document{ns}><w:body>
               <w:p><w:r><w:pict>
                 <v:shape id="s1" type="#_x0000_t75"
-                  style="position:absolute;left:2pt;margin-left:3pt;top:5pt;margin-top:7pt;width:40pt;height:20pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page">
+                  style="position:absolute;left:2pt;margin-left:3pt;top:5pt;margin-top:7pt;width:40pt;height:20pt;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;mso-wrap-style:square">
                   <v:imagedata r:id="rIdImg"/>
                 </v:shape>
               </w:pict></w:r></w:p>
@@ -26987,6 +27345,11 @@ mod vml_pict_tests {
             acquisition.vertical.choice,
             AnchorAxisChoiceWire::Offset { value_pt: 12.0 }
         ));
+        assert_eq!(acquisition.wrap.kind, AnchorWrapKindWire::None);
+        assert_eq!(
+            acquisition.wrap.authored_kinds,
+            vec!["vml:wrap-omitted".to_string()]
+        );
     }
 
     /// A bare `<w:pict>` imagedata with a dangling `r:id` (not in the media map)

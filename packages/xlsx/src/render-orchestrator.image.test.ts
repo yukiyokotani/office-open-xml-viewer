@@ -411,6 +411,32 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(createImageBitmap).toHaveBeenCalledTimes(1);
   });
 
+  it('threads the opt-in TIFF codec through the XLSX image path', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+    const bitmap = new FakeBitmap('image/tiff') as unknown as ImageBitmap;
+    const render = vi.fn(async () => bitmap);
+    const browserDecode = vi.fn();
+    vi.stubGlobal('createImageBitmap', browserDecode);
+    const fetchImage = vi.fn(async () => new Blob([bytes as BlobPart], { type: 'image/tiff' }));
+
+    await expect(decodeImageSource(
+      'xl/media/image1.tiff',
+      'image/tiff',
+      undefined,
+      fetchImage,
+      0,
+      0,
+      null,
+      null,
+      undefined,
+      false,
+      { render },
+    )).resolves.toBe(bitmap);
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(browserDecode).not.toHaveBeenCalled();
+  });
+
   it('decodeImageSource forces the raster (not the SVG vector) when the picture is cropped', async () => {
     // A cropped picture (a non-null `srcRect`) with an svgBlip vector original
     // must decode the RASTER fallback: the renderer's `<a:srcRect>` crop math

@@ -4,6 +4,7 @@ import {
   drawImageCropped,
   imageNaturalSize,
   metafileRasterSize,
+  sourceRasterTargetSize,
   srcRectHasVisibleArea,
 } from './crop';
 
@@ -133,5 +134,26 @@ describe('metafileRasterSize', () => {
     const narrow = metafileRasterSize('image/wmf', { l: 0.499, t: 0, r: 0.5, b: 0 }, 80, 50);
     expect(narrow?.widthPt).toBeCloseTo(80 / 0.001, 6);
     expect(narrow?.heightPt).toBe(50);
+  });
+});
+
+describe('sourceRasterTargetSize', () => {
+  it('uses the destination device-pixel box for an uncropped raster', () => {
+    expect(sourceRasterTargetSize(1200, 900)).toEqual({ width: 1200, height: 900 });
+  });
+
+  it('requests enough full-source pixels for a cropped slice to fill the destination', () => {
+    expect(sourceRasterTargetSize(1200, 900, { l: 0.25, t: 0.1, r: 0.25, b: 0.1 }))
+      .toEqual({ width: 2400, height: 1125 });
+  });
+
+  it('accounts for negative crop outsets without over-decoding transparent margins', () => {
+    expect(sourceRasterTargetSize(1200, 900, { l: -0.1, t: 0, r: -0.1, b: 0 }))
+      .toEqual({ width: 1000, height: 900 });
+  });
+
+  it('rejects non-visible and non-finite crop targets', () => {
+    expect(sourceRasterTargetSize(1200, 900, { l: 0.6, t: 0, r: 0.6, b: 0 })).toBeNull();
+    expect(sourceRasterTargetSize(Number.NaN, 900)).toBeNull();
   });
 });

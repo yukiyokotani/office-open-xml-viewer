@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -87,6 +87,13 @@ for (const name of sharedOoxmlTypes) {
     );
   }
 }
+
+const tiffExports = moduleExports(files.at(-1));
+assert.deepEqual(
+  [...tiffExports.keys()].sort(),
+  ['TiffRenderer', 'tiff'],
+  'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
+);
 
 process.stdout.write(
   'Published declaration entries compile; root namespace exports and shared OOXML contracts match.\n',

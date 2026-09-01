@@ -193,7 +193,7 @@ try {
     <section id="decoded-image-limit-error" class="error-section error-detail">
       <p class="error-kicker">Raster image safety</p>
       <h2><code>OoxmlDecodedImageLimitError</code></h2>
-      <p><code>error.code</code> is <code>ooxml-decoded-image-limit</code>. Inspect <code>metric</code>, <code>limit</code> and <code>observed</code>. The metric is <code>image-pixels</code> or <code>active-decoded-bytes</code>.</p>
+      <p><code>error.code</code> is <code>ooxml-decoded-image-limit</code>. Inspect <code>metric</code>, <code>limit</code> and <code>observed</code>. The metric is <code>image-dimension</code>, <code>image-pixels</code> or <code>active-decoded-bytes</code>. For target-aware PPTX painting, the image metrics can describe either the retained output-surface ceiling or the separate encoded-source hard ceiling; <code>limit</code> identifies which boundary was crossed.</p>
       <p class="note"><strong>This limit is not configurable.</strong> It prevents dangerous decoded surfaces before or during image work. A browser or device may still impose a lower image or Canvas limit, so ordinary decode failures can occur below this ceiling.</p>
     </section>
 

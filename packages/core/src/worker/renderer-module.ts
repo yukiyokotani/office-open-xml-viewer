@@ -2,6 +2,7 @@ import type { ChartRegionMapRenderer } from '../chart/region-map-contract.js';
 import type { ChartThreeDRenderer } from '../chart/three-d-contract.js';
 import type { ChartExRenderer } from '../chart/chart-ex-contract.js';
 import type { MathRenderer } from '../math/mathjax.js';
+import type { TiffRenderer } from '../image/tiff-contract.js';
 import {
   assertWorkerRendererDescriptor,
   type WorkerRendererDescriptor,
@@ -13,6 +14,7 @@ export interface LoadedWorkerRenderers {
   readonly threeD?: ChartThreeDRenderer;
   readonly regionMap?: ChartRegionMapRenderer;
   readonly chartEx?: ChartExRenderer;
+  readonly tiff?: TiffRenderer;
 }
 
 /** Import a renderer's named export in the calling realm (normally a render
@@ -47,6 +49,10 @@ async function loadBuiltinRenderer(descriptor: WorkerRendererDescriptor): Promis
       const renderer = await import('../chart/chart-ex-renderer.js');
       return Object.freeze({ render: renderer.renderChartExChart });
     }
+    case 'tiff': {
+      const renderer = await import('../image/tiff.js');
+      return Object.freeze({ render: renderer.renderTiffToBitmap });
+    }
   }
 }
 
@@ -71,11 +77,12 @@ function requireRendererMethods<T extends object>(
 export async function loadWorkerRenderers(
   descriptors: WorkerRendererDescriptors | undefined,
 ): Promise<LoadedWorkerRenderers> {
-  const [math, threeD, regionMap, chartEx] = await Promise.all([
+  const [math, threeD, regionMap, chartEx, tiff] = await Promise.all([
     descriptors?.math ? loadWorkerRenderer(descriptors.math) : undefined,
     descriptors?.threeD ? loadWorkerRenderer(descriptors.threeD) : undefined,
     descriptors?.regionMap ? loadWorkerRenderer(descriptors.regionMap) : undefined,
     descriptors?.chartEx ? loadWorkerRenderer(descriptors.chartEx) : undefined,
+    descriptors?.tiff ? loadWorkerRenderer(descriptors.tiff) : undefined,
   ]);
   return Object.freeze({
     ...(math ? {
@@ -97,6 +104,9 @@ export async function loadWorkerRenderers(
     } : {}),
     ...(chartEx ? {
       chartEx: requireRendererMethods<ChartExRenderer>('chartEx', chartEx, ['render']),
+    } : {}),
+    ...(tiff ? {
+      tiff: requireRendererMethods<TiffRenderer>('tiff', tiff, ['render']),
     } : {}),
   });
 }

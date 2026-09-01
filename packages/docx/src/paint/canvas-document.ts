@@ -13,7 +13,7 @@ import {
   preferVectorBlip,
 } from '@silurus/ooxml-core';
 import type { Duotone } from '@silurus/ooxml-core';
-import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer } from '@silurus/ooxml-core';
+import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, TiffRenderer } from '@silurus/ooxml-core';
 import type {
   DocumentLayout,
   LayoutPage,
@@ -53,6 +53,7 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly threeD?: ChartThreeDRenderer;
   readonly regionMap?: ChartRegionMapRenderer;
   readonly chartEx?: ChartExRenderer;
+  readonly tiff?: TiffRenderer;
 }
 
 /** Per-canvas cancellation token: only the newest asynchronous image preload
@@ -179,7 +180,7 @@ export async function renderSelectedDocumentPage<TTextRun>(
 
     let images;
     try {
-      images = await preloadPaintImages(options.registry.descriptors, options.fetchImage);
+      images = await preloadPaintImages(options.registry.descriptors, options.fetchImage, options.tiff);
     } catch (error) {
       if (superseded()) return;
       throw error;
@@ -209,7 +210,7 @@ export async function renderSelectedDocumentPage<TTextRun>(
             ? fill.duotone ? Promise.resolve(null) : getCachedSvgImageByPath(fill.imagePath, fetchImage)
             : decodeRaster(
                 fill.imagePath, fill.mimeType, undefined, fetchImage as DocxFetchImage,
-                raster.widthPt, raster.heightPt, fill.duotone, true,
+                raster.widthPt, raster.heightPt, fill.duotone, true, options.tiff,
               );
           let image: CanvasImageSource | null;
           if (!fill.duotone && preferVectorBlip(fill)) {

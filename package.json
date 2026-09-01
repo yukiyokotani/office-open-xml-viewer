@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml",
-  "version": "0.83.1",
+  "version": "0.84.1",
   "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -78,6 +78,11 @@
       "import": "./dist/chart-ex.mjs",
       "default": "./dist/chart-ex.mjs"
     },
+    "./tiff": {
+      "types": "./dist/types/tiff.d.ts",
+      "import": "./dist/tiff.mjs",
+      "default": "./dist/tiff.mjs"
+    },
     "./node": {
       "types": "./dist/types/node.d.ts",
       "import": "./dist/node.mjs",
@@ -111,6 +116,7 @@
     "check:optional-three-d": "node scripts/check-optional-three-d.mjs dist",
     "check:optional-region-map": "node scripts/check-optional-region-map.mjs dist",
     "check:optional-chart-ex": "node scripts/check-optional-chart-ex.mjs dist",
+    "check:optional-tiff": "node scripts/check-optional-tiff.mjs dist",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",
