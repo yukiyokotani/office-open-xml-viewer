@@ -5,6 +5,7 @@
 
 import type { ChartDataLabelOverride, ChartDecorationLineStyle, ChartDisplayUnits, ChartLabelBox, ChartLegendEntryOverride, ChartManualLayout, ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, ChartStockUpDownBarStyle, ChartStyleRole, ChartTextBox, ChartTextRun, ChartTrendline, SecondaryValueAxis } from '../types/chart';
 import type { Fill } from '../types/common';
+import { providerFontFamily } from '../fonts/provider.js';
 import {
   chartImageFillSource,
   chartImageFillPaintWorkUpperBound,
@@ -240,7 +241,32 @@ export function chartFontFamily(
 ): string {
   const themeFace = role === 'major' ? chart.themeMajorFontLatin : chart.themeMinorFontLatin;
   const face = resolveThemeFontRef(chart, elementFace) ?? themeFace;
-  return face ? `"${face}", Calibri, Arial, sans-serif` : 'sans-serif';
+  if (!face) return 'sans-serif';
+  const provider = providerFontFamily(chart.providerFontRoutes, face);
+  return `"${face}", ${provider ? `"${provider}", ` : ''}Calibri, Arial, sans-serif`;
+}
+
+/** Every concrete authored family carried by the canonical chart model. */
+export function chartFontFamilies(chart: ChartModel): string[] {
+  const families = new Set<string>();
+  const seen = new Set<object>();
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || seen.has(value as object)) return;
+    seen.add(value as object);
+    for (const [key, child] of Object.entries(value)) {
+      if (
+        typeof child === 'string' &&
+        (key === 'fontFace' || key.endsWith('FontFace') || key === 'themeMajorFontLatin' || key === 'themeMinorFontLatin') &&
+        child.trim() && !child.startsWith('+')
+      ) {
+        families.add(child.trim());
+      } else if (typeof child === 'object') {
+        visit(child);
+      }
+    }
+  };
+  visit(chart);
+  return [...families];
 }
 
 export function chartFontCss(
@@ -1165,7 +1191,7 @@ function legendEntryTextStyle(
   if (!override) return base;
   const face = resolveThemeFontRef(chart, override.fontFace) ?? override.fontFace;
   return {
-    fontFamily: face ? `"${face}", Calibri, Arial, sans-serif` : base.fontFamily,
+    fontFamily: face ? chartFontFamily(chart, face, 'minor') : base.fontFamily,
     color: override.fontColor ? `#${override.fontColor}` : base.color,
     bold: override.fontBold ?? base.bold,
     sizePx: chartTextFontSizePx(override.fontSizeHpt, ptToPx) ?? base.sizePx,

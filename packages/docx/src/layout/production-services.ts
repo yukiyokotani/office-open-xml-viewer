@@ -1,5 +1,5 @@
 import { canvasFontString } from '@silurus/ooxml-core';
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { FontFamilyRoutes, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
@@ -43,6 +43,7 @@ export interface ProductionLayoutServiceOptions {
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
   readonly googleFaces?: readonly LoadedFontFaceRecord[];
+  readonly providerRoutes?: FontFamilyRoutes;
 }
 
 export function createProductionLayoutServices(
@@ -97,6 +98,9 @@ export function createProductionLayoutServices(
       style,
     }] : [];
   });
+  for (const [requestedFamily, resolvedFamily] of Object.entries(options.providerRoutes ?? {})) {
+    inventory.push({ requestedFamily, resolvedFamily, source: 'provider' });
+  }
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
     inventory.push({
       requestedFamily: metric.requestedFamily ?? requestedFamily,

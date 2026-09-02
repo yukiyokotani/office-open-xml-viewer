@@ -137,6 +137,19 @@ export {
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
 export { preloadGoogleFonts, unloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+export {
+  FontProvider,
+  FontProviderSession,
+  providerFontFamily,
+  registerResolvedFonts,
+  type FontAsset,
+  type FontAssetSource,
+  type FontFailure,
+  type FontFamilyRoutes,
+  type FontResolveOptions,
+  type ResolvedFontFace,
+  type ResolvedFonts,
+} from './fonts/provider';
 // Embedded-font registration: docx `.odttf` (§17.8.1 obfuscated) + pptx
 // `.fntdata` (raw sfnt) faces turned into FontFace objects in the active set.
 export {
@@ -173,7 +186,7 @@ export {
   symbolTextToUnicodeSegments,
   type SymbolTextSegment,
 } from './fonts/symbol-font';
-export { renderChart } from './chart/renderer';
+export { chartFontFamilies, renderChart } from './chart/renderer';
 export { formatLocalizedExcelShortDate } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';
 export {

@@ -4,6 +4,7 @@ import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
 import type { ChartExRenderer } from '../chart/chart-ex-contract';
 import type { TiffRenderer } from '../image/tiff-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
+import type { FontFailure, FontProvider } from '../fonts/provider.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
 export type OoxmlResourceLimit = number | null;
@@ -56,6 +57,15 @@ export interface ProgressiveLayoutPartial {
  */
 export interface LoadOptions {
   /**
+   * Resolve application-owned web fonts before layout and rendering. The
+   * provider runs on the main thread in both rendering modes; fetched bytes are
+   * transferred to the render worker when needed. Cannot be combined with
+   * `useGoogleFonts`.
+   */
+  fontProvider?: FontProvider;
+  /** Provider failure behavior. Defaults to a warning and local fallback. */
+  fontFailure?: FontFailure;
+  /**
    * Opt in to loading webfont substitutes from Google Fonts
    * (`fonts.googleapis.com`). Default `false` — the canvas falls back to
    * locally available fonts.
@@ -63,7 +73,7 @@ export interface LoadOptions {
    * When enabled, end-user IP / User-Agent is sent to Google, which may
    * have privacy / GDPR implications for your application. To avoid the
    * third-party request, host the substitutes yourself and reference them
-   * via `@font-face` in your application CSS.
+   * with `fontProvider`.
    */
   useGoogleFonts?: boolean;
   /**

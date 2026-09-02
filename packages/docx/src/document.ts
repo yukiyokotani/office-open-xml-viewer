@@ -2,6 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  FontProviderSession,
   releaseOwnedBitmap,
   unloadGoogleFonts,
   unloadLocalFontMetrics,
@@ -20,6 +21,7 @@ import {
   type ChartRegionMapRenderer,
   type ChartExRenderer,
   type OoxmlResourceMetrics,
+  type FontFamilyRoutes,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -33,6 +35,8 @@ import {
   readLatestOoxmlResourceMetrics,
   PULL_SESSION_PROTOCOL,
   respondToWorkerSvgDecodeRequest,
+  FontProviderHost,
+  isWorkerFontRequest,
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
@@ -43,7 +47,7 @@ import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerRespons
 import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxFontProviderNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import {
@@ -382,6 +386,9 @@ export class DocxDocument {
   private _googleFontFaces: FontFace[] = [];
   /** Exact local faces used for version-adaptive Office line metrics. */
   private _localMetricFontFaces: FontFace[] = [];
+  private readonly _fontSession: FontProviderSession | null;
+  private readonly _fontHost: FontProviderHost | null;
+  private _fontRoutes: FontFamilyRoutes = {};
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -394,10 +401,17 @@ export class DocxDocument {
     mode: 'main' | 'worker',
     defaultCurrentDateMs: number,
     wasmUrlOverride?: string | URL,
+    fontSession: FontProviderSession | null = null,
   ) {
     this._worker = worker;
     this._mode = mode;
     attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
+    this._fontSession = fontSession;
+    this._fontHost = fontSession
+      ? new FontProviderHost(fontSession, (message, transfer) => (
+          worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+        )(message, transfer))
+      : null;
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) =>
         'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
@@ -408,7 +422,13 @@ export class DocxDocument {
       // Progressive layout pushes carry `forId` rather than `id`, so `correlate`
       // above returns undefined for them and they arrive here instead of
       // resolving the still-pending `parse`. That is the whole mechanism.
-      onUnsolicited: (res) => this._onWorkerLayoutPush(res),
+      onUnsolicited: (res) => {
+        if (isWorkerFontRequest(res)) {
+          void this._fontHost?.accept(res);
+          return;
+        }
+        this._onWorkerLayoutPush(res);
+      },
       toError: (res) => {
         if ('protocol' in res || res.type !== 'error') return undefined;
         // Reconstruct every shared typed error first (resource quota, decoded
@@ -436,6 +456,9 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    if (opts.fontProvider && opts.useGoogleFonts) {
+      throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
+    }
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
@@ -475,7 +498,10 @@ export class DocxDocument {
     const workerProgressive = mode === 'worker' && !!opts.progressiveLayout;
     let doc: DocxDocument | undefined;
     try {
-      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+      const fontSession = opts.fontProvider
+        ? new FontProviderSession(opts.fontProvider, opts.fontFailure)
+        : null;
+      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl, fontSession);
       doc._metrics = metrics;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
@@ -513,6 +539,7 @@ export class DocxDocument {
               settled: false,
             }
           : undefined,
+        mode === 'worker' ? !!opts.fontProvider : false,
       );
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
@@ -566,6 +593,10 @@ export class DocxDocument {
           (p) => loadingDocument.getFontBytes(p),
         );
       }
+      if (doc._mode === 'main' && doc._fontSession && doc._document) {
+        const resolved = await doc._fontSession.ensure(docxFontProviderNames(doc._document));
+        doc._fontRoutes = resolved.routes;
+      }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
       if (doc._mode === 'main' && doc._document) {
         localMetrics = await loadDocxLocalFontMetrics(doc._document);
@@ -587,6 +618,7 @@ export class DocxDocument {
           useGoogleFonts: !!opts.useGoogleFonts,
           embeddedFaces: doc._embeddedFontFaces,
           googleFaces: doc._googleFontFaces,
+          providerRoutes: doc._fontRoutes,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
         });
@@ -788,12 +820,14 @@ export class DocxDocument {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: WorkerProgressiveLoad,
+    useFontProvider = false,
   ): Promise<void> {
     if (progressive) {
       await this._parseProgressively(
         buffer,
         resourcePolicy,
         useGoogleFonts,
+        useFontProvider,
         timeoutMs,
         onUsage,
         renderers,
@@ -804,7 +838,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, useFontProvider, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1088,6 +1122,7 @@ export class DocxDocument {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -1105,6 +1140,7 @@ export class DocxDocument {
           data: buffer,
           resourcePolicy,
           useGoogleFonts,
+          useFontProvider,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
           renderers,
@@ -1219,6 +1255,8 @@ export class DocxDocument {
       unloadLocalFontMetrics(this._localMetricFontFaces);
       this._localMetricFontFaces = [];
     }
+    this._fontSession?.destroy();
+    this._fontRoutes = {};
     // Release both image owners keyed by this document's stable loader: the
     // shared decoded owner (base + derived colour surfaces) and the SVG lookup
     // owner. SVG object URLs are revoked immediately after decode; dropping its
@@ -1665,6 +1703,7 @@ export class DocxDocument {
       regionMap: this._regionMap,
       chartEx: this._chartEx,
       tiff: this._tiff,
+      providerFontRoutes: this._fontRoutes,
     });
   }
 

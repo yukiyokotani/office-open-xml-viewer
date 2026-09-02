@@ -2,6 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  FontProviderSession,
   unloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
@@ -17,6 +18,7 @@ import {
   type TiffRenderer,
   OoxmlResourceLimitError,
   type OoxmlResourceMetrics,
+  type FontFamilyRoutes,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -32,6 +34,8 @@ import {
   HARD_MAX_RAW_PART_CACHE_BYTES,
   HARD_MAX_RAW_PART_CACHE_ENTRIES,
   respondToWorkerSvgDecodeRequest,
+  FontProviderHost,
+  isWorkerFontRequest,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
@@ -39,6 +43,12 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
+import {
+  applyWorkbookFontRoutes,
+  applyWorksheetFontRoutes,
+  xlsxFontProviderNames,
+  xlsxWorksheetFontProviderNames,
+} from './provider-fonts.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -155,6 +165,10 @@ export class XlsxWorkbook {
   private googleFontNames: string[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   private fontsDestroyed = false;
+  private readonly fontSession: FontProviderSession | null;
+  private readonly fontHost: FontProviderHost | null;
+  private fontRoutes: FontFamilyRoutes = {};
+  private providerFontNames: string[] = [];
   private _mode: 'main' | 'worker' = 'main';
   private generation = 0;
   private archiveOperationTail: Promise<void> = Promise.resolve();
@@ -168,9 +182,20 @@ export class XlsxWorkbook {
    * later public operation on the same workbook instance. */
   private resourceFailure: OoxmlResourceLimitError | null = null;
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
+  private constructor(
+    worker: Worker,
+    mode: 'main' | 'worker',
+    wasmUrlOverride?: string | URL,
+    fontSession: FontProviderSession | null = null,
+  ) {
     this.worker = worker;
     this._mode = mode;
+    this.fontSession = fontSession;
+    this.fontHost = fontSession
+      ? new FontProviderHost(fontSession, (message, transfer) => (
+          worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+        )(message, transfer))
+      : null;
     this.bridge = new WorkerBridge<
       WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
     >(this.worker, {
@@ -186,6 +211,10 @@ export class XlsxWorkbook {
       toError: (res) =>
         'type' in res && res.type === 'error' ? deserializeWorkerError(res) : undefined,
       onUnsolicited: (res) => {
+        if (isWorkerFontRequest(res)) {
+          void this.fontHost?.accept(res);
+          return;
+        }
         respondToWorkerSvgDecodeRequest(
           (message, transfer) => (
             this.worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
@@ -209,6 +238,9 @@ export class XlsxWorkbook {
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
+    if (opts.fontProvider && opts.useGoogleFonts) {
+      throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
+    }
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
@@ -251,7 +283,10 @@ export class XlsxWorkbook {
         : new InlineWorker();
     let wb: XlsxWorkbook | undefined;
     try {
-      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      const fontSession = opts.fontProvider
+        ? new FontProviderSession(opts.fontProvider, opts.fontFailure)
+        : null;
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, fontSession);
       wb.metrics = metrics;
       await wb._load(
         buffer,
@@ -342,6 +377,7 @@ export class XlsxWorkbook {
               data: workerData,
               resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
+              useFontProvider: !!opts.fontProvider,
               renderers: rendererDescriptors,
             } satisfies RenderWorkerRequest)
           : ({
@@ -368,6 +404,13 @@ export class XlsxWorkbook {
       ) as ParsedWorkbook;
     }
     this.ensureWorksheetPullClient();
+    if (this.fontSession && this.parsedWorkbook) {
+      this.providerFontNames = xlsxFontProviderNames(this.parsedWorkbook);
+      const target = typeof document !== 'undefined' ? document.fonts : null;
+      const resolved = await this.fontSession.ensure(this.providerFontNames, target);
+      this.fontRoutes = resolved.routes;
+      applyWorkbookFontRoutes(this.parsedWorkbook, this.fontRoutes);
+    }
     // #773: a workbook-level degradation (a present-but-corrupt shared part such
     // as `xl/sharedStrings.xml`, which blanks every string cell across all sheets)
     // still opens the workbook, but must not be SILENT. Surface it once at load —
@@ -391,7 +434,11 @@ export class XlsxWorkbook {
   }
 
   private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
-    if (this.googleFontNames.length === 0 || this.fontsDestroyed) return () => undefined;
+    if (this.fontsDestroyed) return () => undefined;
+    if (this.fontSession && this.providerFontNames.length > 0) {
+      await this.fontSession.ensure(this.providerFontNames, fontSet);
+    }
+    if (this.googleFontNames.length === 0) return () => undefined;
     let retained = this.retainedFontSets.get(fontSet);
     if (retained) {
       retained.refs++;
@@ -577,9 +624,19 @@ export class XlsxWorkbook {
       if (!terminal || !nextCacheUsage) {
         throw new Error(`XLSX worksheet ${sheetIndex} did not produce a terminal model`);
       }
+      if (this.fontSession) {
+        const names = xlsxWorksheetFontProviderNames(terminal);
+        if (names.length > 0) {
+          const target = typeof document !== 'undefined' ? document.fonts : null;
+          const resolved = await this.fontSession.ensure(names, target);
+          this.providerFontNames = [...new Set([...this.providerFontNames, ...names])];
+          this.fontRoutes = { ...this.fontRoutes, ...resolved.routes };
+        }
+      }
       // The coordinator has ACKed the accepted terminal before it completes.
       // Only now commit Browser-retained cache ownership/accounting.
       this.retainedSheetUsage = nextCacheUsage;
+      applyWorksheetFontRoutes(terminal, this.fontRoutes);
       this.sheetCache.set(sheetIndex, terminal);
       return terminal;
     } catch (error) {
@@ -918,6 +975,9 @@ export class XlsxWorkbook {
     }
     this.retainedFontSets.clear();
     this.googleFontNames = [];
+    this.fontSession?.destroy();
+    this.fontRoutes = {};
+    this.providerFontNames = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);

@@ -15,6 +15,7 @@ import {
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
+  type FontFamilyRoutes,
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
@@ -29,13 +30,15 @@ import {
   isWorkerSvgDecodeResponse,
   postOwnedImageBitmap,
   WorkerSvgDecodeClient,
+  FontProviderClient,
+  isWorkerFontResponse,
   type LoadedWorkerRenderers,
   type PullSessionResponse,
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxFontProviderNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type {
@@ -92,6 +95,7 @@ let doc: RetainedRenderWorkerDocumentLayout | null = null;
 /** Compact model-derived inputs needed to re-project variant-specific review
  * anchor geometry. The complete parser/public model is not retained. */
 let reviewIndexInput: RenderWorkerReviewIndexInput | null = null;
+let providerFontRoutes: FontFamilyRoutes = {};
 /** Cancels a still-running progressive drain when a new `parse` supersedes it.
  *  The host's `destroy()` terminates the worker outright, so this covers only
  *  the re-parse path — where the worker survives and would otherwise keep
@@ -117,6 +121,7 @@ const post = (
   transfer?: Transferable[],
 ) => rawPost(msg, transfer);
 const svgDecodeClient = new WorkerSvgDecodeClient(rawPost);
+const fontProvider = new FontProviderClient(rawPost);
 
 /** In-worker image-byte loader (twin of pptx's render-worker `getImage`). The
  *  renderer's `fetchImage` routes here in worker mode, so image bytes are
@@ -133,6 +138,10 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
   const req = e.data;
+  if (isWorkerFontResponse(req)) {
+    await fontProvider.accept(req);
+    return;
+  }
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);
     return;
@@ -173,6 +182,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       fallbackPull = null;
       doc = null;
       reviewIndexInput = null;
+      providerFontRoutes = {};
+      fontProvider.reset();
       if (localMetricFontFaces.length > 0) {
         unloadLocalFontMetrics(localMetricFontFaces);
         localMetricFontFaces = [];
@@ -253,6 +264,12 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           DOCX_GOOGLE_FONTS,
         );
       }
+      if (req.useFontProvider) {
+        providerFontRoutes = await fontProvider.resolve(
+          docxFontProviderNames(model),
+          documentGeneration,
+        );
+      }
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
@@ -274,6 +291,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         useGoogleFonts: !!req.useGoogleFonts,
         embeddedFaces,
         googleFaces,
+        providerRoutes: providerFontRoutes,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
       });
@@ -382,6 +400,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         regionMap: renderers.regionMap,
         chartEx: renderers.chartEx,
         tiff: renderers.tiff,
+        providerFontRoutes,
       });
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,

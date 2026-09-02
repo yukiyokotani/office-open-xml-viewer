@@ -8,6 +8,7 @@ import type {
   ChartSeries,
 } from '../types/chart.js';
 import type { Fill } from '../types/common.js';
+import { providerFontFamily } from '../fonts/provider.js';
 import { chartImageFillSource, paintChartImageFill } from './image-fill.js';
 import { paintChartThreeDSurfacePicture } from './three-d-surface-picture.js';
 import {
@@ -144,7 +145,7 @@ function threeDLegendTextStyle(
   const bold = override?.fontBold ?? chart.legendFontBold ?? false;
   return {
     fontPx,
-    font: `${bold ? 'bold ' : ''}${fontPx}px ${fontFamily(face)}`,
+    font: `${bold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, face)}`,
     color: override?.fontColor
       ? `#${override.fontColor}`
       : chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959',
@@ -663,9 +664,12 @@ function meshMaterialFactor(
   return Math.max(0.78, Math.min(1, 0.78 + 0.24 * lambert));
 }
 
-const fontFamily = (face: string | null | undefined): string => {
+const fontFamily = (
+  face: string | null | undefined,
+  provider?: string,
+): string => {
   const safe = face && !face.startsWith('+') ? face.replace(/["\\]/g, '') : 'Arial';
-  return `"${safe}"`;
+  return `"${safe}"${provider ? `, "${provider}"` : ''}`;
 };
 
 const chartFontFamily = (
@@ -677,7 +681,7 @@ const chartFontFamily = (
     ? chart.themeMajorFontLatin
     : face?.startsWith('+mn-') ? chart.themeMinorFontLatin : face;
   const resolved = reference ?? (role === 'major' ? chart.themeMajorFontLatin : chart.themeMinorFontLatin);
-  return fontFamily(resolved);
+  return fontFamily(resolved, providerFontFamily(chart.providerFontRoutes, resolved));
 };
 
 function polygon(ctx: CanvasRenderingContext2D, points: readonly Point[]): void {
@@ -1540,7 +1544,7 @@ function titleAndPlot(
 ): { plot: ChartRect; legend: ChartRect | null; legendMeasure: ThreeDLegendMeasure } {
   const band = cartesianTitleBand(chart, rect.h, ptToPx);
   if (chart.title) {
-    ctx.font = `${chart.titleFontBold === false ? '' : 'bold '}${band.fontPx}px ${fontFamily(chart.titleFontFace)}`;
+    ctx.font = `${chart.titleFontBold === false ? '' : 'bold '}${band.fontPx}px ${chartFontFamily(chart, chart.titleFontFace, 'major')}`;
     ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#111111';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
@@ -4055,7 +4059,7 @@ function renderCartesian(
   const valueLabelGeometry = edgeGeometry('value', chart.valAxisTickLabelPos);
   const categoryLabelGeometry = edgeGeometry('category', chart.catAxisTickLabelPos);
   const valueFontPx = chartTextFontSizePx(chart.valAxisFontSizeHpt, ptToPx) ?? 9 * ptToPx;
-  ctx.font = `${chart.valAxisFontItalic ? 'italic ' : ''}${chart.valAxisFontBold ? 'bold ' : ''}${valueFontPx}px ${fontFamily(chart.valAxisFontFace)}`;
+  ctx.font = `${chart.valAxisFontItalic ? 'italic ' : ''}${chart.valAxisFontBold ? 'bold ' : ''}${valueFontPx}px ${chartFontFamily(chart, chart.valAxisFontFace)}`;
   ctx.fillStyle = chart.valAxisFontColor ? `#${chart.valAxisFontColor}` : '#595959';
   ctx.textAlign = horizontal ? 'center' : 'right';
   ctx.textBaseline = horizontal ? 'top' : 'middle';
@@ -4096,7 +4100,7 @@ function renderCartesian(
     }
   }
   const categoryFontPx = chartTextFontSizePx(chart.catAxisFontSizeHpt, ptToPx) ?? 9 * ptToPx;
-  ctx.font = `${chart.catAxisFontItalic ? 'italic ' : ''}${chart.catAxisFontBold ? 'bold ' : ''}${categoryFontPx}px ${fontFamily(chart.catAxisFontFace)}`;
+  ctx.font = `${chart.catAxisFontItalic ? 'italic ' : ''}${chart.catAxisFontBold ? 'bold ' : ''}${categoryFontPx}px ${chartFontFamily(chart, chart.catAxisFontFace)}`;
   ctx.fillStyle = chart.catAxisFontColor ? `#${chart.catAxisFontColor}` : '#595959';
   if (!chart.catAxisHidden && chart.catAxisTickLabelPos !== 'none') {
     const labelOffset = categoryLabelOffsetPx(

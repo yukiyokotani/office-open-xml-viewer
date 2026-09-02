@@ -29,6 +29,12 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
     ).toBe(true);
   }
 
+  const fontProviderRequests = await page.evaluate(() => (
+    window as typeof window & { fontProviderRequests?: string[][] }
+  ).fontProviderRequests);
+  expect(fontProviderRequests?.length).toBeGreaterThanOrEqual(3);
+  expect(fontProviderRequests?.every((families) => families.length > 0)).toBe(true);
+
   for (const id of ['docx-chart-ex', 'xlsx-chart-ex', 'pptx-chart-ex']) {
     const coloredInk = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
       const context = canvas.getContext('2d');

@@ -546,6 +546,26 @@ describe('production layout service integration', () => {
     expect(substituted.diagnostics[0]?.message).toMatch(/implementation-dependent/i);
   });
 
+  it('routes every weight and style through the provider alias after the authored family', () => {
+    const services = createLayoutServices(model(), {
+      measureContext: measureContext(),
+      providerRoutes: { 'authored sans': '__private_authored_sans' },
+    });
+    const shaped = services.text.shape({
+      text: 'x', fontSizePt: 10, weight: 700, style: 'italic',
+      fonts: { ascii: 'Authored Sans' },
+    });
+
+    expect(shaped.spans[0]?.font).toMatchObject({
+      source: 'provider',
+      resolvedFamily: '__private_authored_sans',
+      weight: 700,
+      style: 'italic',
+    });
+    expect(shaped.spans[0]?.font.route.familyList)
+      .toBe('"Authored Sans", "__private_authored_sans", sans-serif');
+  });
+
   it('requires loaded status and an exact family/weight/style match for every face', () => {
     const doc = model({
       embeddedFonts: [

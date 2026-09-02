@@ -15,6 +15,7 @@ import {
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
+  type FontFamilyRoutes,
 } from '@silurus/ooxml-core';
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
@@ -29,6 +30,8 @@ import {
   isWorkerSvgDecodeResponse,
   postOwnedImageBitmap,
   WorkerSvgDecodeClient,
+  FontProviderClient,
+  isWorkerFontResponse,
   type LoadedWorkerRenderers,
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
@@ -72,6 +75,7 @@ let presentationState: PresentationLifecycleState = 'empty';
 let fontsLoaded: Promise<unknown> = Promise.resolve();
 let embeddedFontAliases: ReadonlyMap<string, string> = new Map();
 let embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
+let providerFontRoutes: FontFamilyRoutes = {};
 let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
 let renderers: LoadedWorkerRenderers = {};
 const rawParts = new BoundedRawPartCache({
@@ -98,6 +102,7 @@ const rawPost = (message: unknown, transfer?: Transferable[]) =>
   (self.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer);
 const post = (message: RenderWorkerResponse, transfer?: Transferable[]) => rawPost(message, transfer);
 const svgDecodeClient = new WorkerSvgDecodeClient(rawPost);
+const fontProvider = new FontProviderClient(rawPost);
 
 function requirePreflight(): PresentationPreflight {
   if (preflight) return preflight;
@@ -165,6 +170,8 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   fontsLoaded = Promise.resolve();
   embeddedFontAliases = new Map();
   embeddedFontAuthoredFamilies = new Map();
+  providerFontRoutes = {};
+  fontProvider.reset();
   resourceUsage = undefined;
   renderers = await loadWorkerRenderers(request.renderers);
 
@@ -192,6 +199,12 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       const embedded = await embeddedFontsLoaded;
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
+      if (request.useFontProvider) {
+        providerFontRoutes = {
+          ...providerFontRoutes,
+          ...await fontProvider.resolve(preflightBuilder!.currentFontProviderNames, generation),
+        };
+      }
       if (!request.useGoogleFonts) return;
       const requested = excludeEmbeddedFontFamilies(
         preflightBuilder!.currentFontPreloadNames,
@@ -217,6 +230,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
         availableSlides: availableSlideCount,
         slide,
         fontPreloadNames: preflightBuilder.currentFontPreloadNames,
+        fontProviderNames: preflightBuilder.currentFontProviderNames,
         usage: resourceUsage,
       });
       await hostAcknowledgement;
@@ -236,6 +250,12 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       const embedded = await embeddedFontsLoaded;
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
+      if (request.useFontProvider) {
+        providerFontRoutes = await fontProvider.resolve(
+          preflight.fontProviderNames ?? [],
+          generation,
+        );
+      }
       if (!request.useGoogleFonts) return embedded.faces;
       const substitutes = await preloadGoogleFonts(
         excludeEmbeddedFontFamilies(preflight.fontPreloadNames, embedded.aliases),
@@ -285,6 +305,10 @@ function executeArchiveFromNew(
 
 self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecodeResponse>) => {
   const request = event.data;
+  if (isWorkerFontResponse(request)) {
+    await fontProvider.accept(request);
+    return;
+  }
   if (isWorkerSvgDecodeResponse(request)) {
     svgDecodeClient.accept(request);
     return;
@@ -340,6 +364,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           hlinkColor: compact.hlinkColor,
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
+          providerFontRoutes,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -372,6 +397,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           hlinkColor: compact.hlinkColor,
           embeddedFontAliases,
           embeddedFontAuthoredFamilies,
+          providerFontRoutes,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,

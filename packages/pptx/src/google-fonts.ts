@@ -1,5 +1,6 @@
 import {
   classifyCjkFont,
+  chartFontFamilies,
   GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
   type FontPreloadEntry,
@@ -95,12 +96,18 @@ export class PptxFontPreloadAccumulator {
             for (const family of textBodyFontFamilies(cell.textBody)) this.families.add(family);
           }
         }
+      } else if (el.type === 'chart') {
+        for (const family of chartFontFamilies(el.chart)) this.families.add(family);
       }
     }
   }
 
   names(): (string | null)[] {
     return [...this.families, ...this.scripts.names()];
+  }
+
+  providerNames(): string[] {
+    return [...this.families];
   }
 
   withSlide(slide: Slide): PptxFontPreloadAccumulator {

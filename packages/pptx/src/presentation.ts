@@ -13,6 +13,7 @@ import {
 } from './slide-nav';
 import {
   preloadGoogleFonts,
+  FontProviderSession,
   releaseOwnedBitmap,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
@@ -33,6 +34,7 @@ import {
   type TiffRenderer,
   type ImageResourceOptions,
   type OoxmlResourceMetrics,
+  type FontFamilyRoutes,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -48,6 +50,8 @@ import {
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
   respondToWorkerSvgDecodeRequest,
+  FontProviderHost,
+  isWorkerFontRequest,
   type NormalizedOoxmlResourcePolicy,
   type PullSessionResponse,
   type WorkerRendererDescriptors,
@@ -263,6 +267,9 @@ export class PptxPresentation {
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
+  private readonly _fontSession: FontProviderSession | null;
+  private readonly _fontHost: FontProviderHost | null;
+  private _fontRoutes: FontFamilyRoutes = {};
   private _destroyed = false;
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
@@ -280,9 +287,20 @@ export class PptxPresentation {
   private _chartEx: ChartExRenderer | undefined;
   private _tiff: TiffRenderer | undefined;
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
+  private constructor(
+    worker: Worker,
+    mode: 'main' | 'worker',
+    wasmUrlOverride?: string | URL,
+    fontSession: FontProviderSession | null = null,
+  ) {
     this._worker = worker;
     this._mode = mode;
+    this._fontSession = fontSession;
+    this._fontHost = fontSession
+      ? new FontProviderHost(fontSession, (message, transfer) => (
+          worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+        )(message, transfer))
+      : null;
     this._bridge = new WorkerBridge<
       PptxWorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
     >(this._worker, {
@@ -300,7 +318,13 @@ export class PptxPresentation {
         !('protocol' in msg) && msg.kind === 'error'
           ? deserializeWorkerError(msg)
           : undefined,
-      onUnsolicited: (msg) => this._onWorkerLayoutPush(msg),
+      onUnsolicited: (msg) => {
+        if (isWorkerFontRequest(msg)) {
+          void this._fontHost?.accept(msg);
+          return;
+        }
+        this._onWorkerLayoutPush(msg);
+      },
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -329,6 +353,9 @@ export class PptxPresentation {
     source: string | ArrayBuffer,
     opts: LoadOptions = {},
   ): Promise<PptxPresentation> {
+    if (opts.fontProvider && opts.useGoogleFonts) {
+      throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
+    }
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
@@ -368,7 +395,10 @@ export class PptxPresentation {
     const rendererDescriptors = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
     let pres: PptxPresentation | undefined;
     try {
-      pres = new PptxPresentation(worker, mode, opts.wasmUrl);
+      const fontSession = opts.fontProvider
+        ? new FontProviderSession(opts.fontProvider, opts.fontFailure)
+        : null;
+      pres = new PptxPresentation(worker, mode, opts.wasmUrl, fontSession);
       pres._metrics = metrics;
       if (opts.math && mode === 'worker' && !rendererDescriptors?.math) {
         console.warn(
@@ -419,6 +449,7 @@ export class PptxPresentation {
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
         progressive,
+        !!opts.fontProvider,
       );
       metrics.checkpoint('presentation preflight ready');
       if (mode === 'main' && opts.useGoogleFonts && pres._preflight && !progressive) {
@@ -429,6 +460,10 @@ export class PptxPresentation {
           ),
           PPTX_GOOGLE_FONTS,
         );
+      }
+      if (mode === 'main' && pres._fontSession && pres._preflight && !progressive) {
+        const resolved = await pres._fontSession.ensure(pres._preflight.fontProviderNames ?? []);
+        pres._fontRoutes = resolved.routes;
       }
       metrics.succeed({ slides: pres.slideCount });
       return pres;
@@ -451,16 +486,17 @@ export class PptxPresentation {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: ProgressiveLoad,
+    useFontProvider = false,
   ): Promise<void> {
     if (progressive) {
       this._progressive = progressive;
       if (this._mode === 'worker') {
         await this._parseWorkerProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, renderers, progressive,
+          buffer, resourcePolicy, useGoogleFonts, useFontProvider, timeoutMs, onUsage, renderers, progressive,
         );
       } else {
         await this._parseMainProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, progressive,
+          buffer, resourcePolicy, useGoogleFonts, useFontProvider, timeoutMs, onUsage, progressive,
         );
       }
       return;
@@ -468,7 +504,7 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers } satisfies RenderWorkerRequest)
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, useFontProvider, renderers } satisfies RenderWorkerRequest)
           : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
@@ -558,6 +594,7 @@ export class PptxPresentation {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     progressive: ProgressiveLoad,
@@ -599,6 +636,10 @@ export class PptxPresentation {
     const loadedGoogleFonts = new Set<string>();
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
+      if (useFontProvider && this._fontSession) {
+        const resolved = await this._fontSession.ensure(builder.currentFontProviderNames);
+        this._fontRoutes = { ...this._fontRoutes, ...resolved.routes };
+      }
       if (!useGoogleFonts) return;
       const requested = excludeEmbeddedFontFamilies(
         builder.currentFontPreloadNames,
@@ -636,6 +677,7 @@ export class PptxPresentation {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -646,7 +688,7 @@ export class PptxPresentation {
       (id) => {
         this._parseRequestId = id;
         return {
-          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers,
+          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, useFontProvider, renderers,
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },
@@ -726,6 +768,7 @@ export class PptxPresentation {
           ...bootstrap,
           slides: [...prior, response.slide],
           fontPreloadNames: response.fontPreloadNames,
+          fontProviderNames: response.fontProviderNames ?? [],
         }),
         this._progressive,
       );
@@ -1052,6 +1095,7 @@ export class PptxPresentation {
             hlinkColor: compact.hlinkColor,
             embeddedFontAliases: this._embeddedFontAliases,
             embeddedFontAuthoredFamilies: this._embeddedFontAuthoredFamilies,
+            providerFontRoutes: this._fontRoutes,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1437,6 +1481,8 @@ export class PptxPresentation {
     }
     this._embeddedFontAliases = new Map();
     this._embeddedFontAuthoredFamilies = new Map();
+    this._fontSession?.destroy();
+    this._fontRoutes = {};
     // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured
     // rasters, and SVG object URLs promptly; all three caches are keyed by
     // `_fetchImage`.

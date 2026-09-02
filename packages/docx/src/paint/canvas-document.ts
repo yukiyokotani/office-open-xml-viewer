@@ -14,7 +14,7 @@ import {
   getCachedSvgImageByPath,
   preferVectorBlip,
 } from '@silurus/ooxml-core';
-import type { Duotone, ImageResourceOptions } from '@silurus/ooxml-core';
+import type { Duotone, FontFamilyRoutes, ImageResourceOptions } from '@silurus/ooxml-core';
 import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, TiffRenderer } from '@silurus/ooxml-core';
 import type {
   ChartPaintResourceDescriptor,
@@ -68,6 +68,7 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly chartEx?: ChartExRenderer;
   readonly tiff?: TiffRenderer;
   readonly imageResources?: ImageResourceOptions;
+  readonly providerFontRoutes?: FontFamilyRoutes;
 }
 
 /** Per-canvas cancellation token: only the newest asynchronous image preload
@@ -430,12 +431,13 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
     });
     const resources = createCanvasPaintResourcePainter(
       session,
-      options.threeD || options.regionMap || options.chartEx || chartImages.size > 0
+      options.threeD || options.regionMap || options.chartEx || chartImages.size > 0 || options.providerFontRoutes
         ? createCanonicalCanvasPaintResourceHandlers(
             options.threeD,
             options.regionMap,
             fill => chartImages.get(chartImageFillKey(fill)),
             options.chartEx,
+            options.providerFontRoutes,
           )
         : canonicalCanvasPaintResourceHandlers,
     );

@@ -1,5 +1,6 @@
 import {
   classifyCjkFont,
+  chartFontFamilies,
   scriptPreloadNamesForText,
   GOOGLE_FONT_SUBSTITUTES,
   SCRIPT_GOOGLE_FONTS,
@@ -8,7 +9,7 @@ import {
 import type {
   DocxDocumentModel,
 } from './types.js';
-import { docxRenderedTextUsages } from './document-content.js';
+import { docxRenderedCharts, docxRenderedTextUsages } from './document-content.js';
 
 /** Theme-referenced typefaces commonly used by DOCX templates.
  *
@@ -52,4 +53,19 @@ export function docxFontPreloadNames(
     doc.minorFont,
     ...scriptPreloadNamesForText(docxTextRuns(doc), cjkLang),
   ];
+}
+
+/** Authored families offered to an application font provider. Google-only
+ * script fallback names deliberately stay in {@link docxFontPreloadNames}. */
+export function docxFontProviderNames(doc: DocxDocumentModel): string[] {
+  const names = new Set<string>();
+  if (doc.majorFont) names.add(doc.majorFont);
+  if (doc.minorFont) names.add(doc.minorFont);
+  for (const usage of docxRenderedTextUsages(doc)) {
+    for (const family of usage.fontFamilies) if (family) names.add(family);
+  }
+  for (const chart of docxRenderedCharts(doc)) {
+    for (const family of chartFontFamilies(chart)) names.add(family);
+  }
+  return [...names];
 }

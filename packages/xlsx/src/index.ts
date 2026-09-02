@@ -4,6 +4,16 @@ export {
   type RenderViewportToBitmapOptions,
 } from './workbook.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
+export {
+  FontProvider,
+  FontProviderSession,
+  type FontAsset,
+  type FontAssetSource,
+  type FontFailure,
+  type FontResolveOptions,
+  type ResolvedFontFace,
+  type ResolvedFonts,
+} from '@silurus/ooxml-core';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
 export type {

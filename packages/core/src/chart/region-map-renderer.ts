@@ -9,6 +9,7 @@ import { chartTitleBand, resolveManualLayoutRect } from './layout.js';
 import { paintLegendFrame } from './legend-frame.js';
 import { paintPlotAreaFrame } from './plot-area-frame.js';
 import { formatChartValWithCode } from './chart-number-format.js';
+import { chartFontFamily } from './renderer.js';
 import {
   NATURAL_EARTH_110M,
   type RegionMapFeature,
@@ -279,8 +280,8 @@ function drawTitle(
   topPad: number,
 ): void {
   if (!chart.title && !chart.titlePresent) return;
-  const family = chart.titleFontFace || chart.themeMajorFontLatin || 'sans-serif';
-  ctx.font = `${chart.titleFontBold ?? true ? 'bold ' : ''}${fontPx}px ${JSON.stringify(family)}`;
+  const family = chartFontFamily(chart, chart.titleFontFace, 'major');
+  ctx.font = `${chart.titleFontBold ?? true ? 'bold ' : ''}${fontPx}px ${family}`;
   ctx.fillStyle = chart.titleFontColor ? `#${chart.titleFontColor}` : '#333333';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -299,7 +300,7 @@ function drawLegend(
 ): void {
   const name = chart.series[0]?.name ?? '';
   const fontPx = Math.max(8, (chart.legendFontSizeHpt ?? 900) / 100 * ptToPx);
-  ctx.font = `${chart.legendFontBold ? 'bold ' : ''}${fontPx}px ${JSON.stringify(chart.legendFontFace || chart.themeMinorFontLatin || 'sans-serif')}`;
+  ctx.font = `${chart.legendFontBold ? 'bold ' : ''}${fontPx}px ${chartFontFamily(chart, chart.legendFontFace, 'minor')}`;
   ctx.fillStyle = chart.legendFontColor ? `#${chart.legendFontColor}` : '#595959';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -462,7 +463,7 @@ export function renderRegionMapChart(
   }
 
   if (map.regionLabelLayout && map.regionLabelLayout !== 'none') {
-    ctx.font = `${Math.max(7, (chart.dataLabelFontSizeHpt ?? 800) / 100 * ptToPx)}px ${JSON.stringify(chart.dataLabelFontFace || chart.themeMinorFontLatin || 'sans-serif')}`;
+    ctx.font = `${Math.max(7, (chart.dataLabelFontSizeHpt ?? 800) / 100 * ptToPx)}px ${chartFontFamily(chart, chart.dataLabelFontFace, 'minor')}`;
     ctx.fillStyle = chart.dataLabelFontColor ? `#${chart.dataLabelFontColor}` : '#404040';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
