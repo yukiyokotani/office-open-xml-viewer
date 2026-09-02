@@ -26,8 +26,12 @@ import {
   resourcePolicyForWasm,
   serializeWorkerError,
   loadWorkerRenderers,
+  isWorkerSvgDecodeResponse,
+  postOwnedImageBitmap,
+  WorkerSvgDecodeClient,
   type LoadedWorkerRenderers,
   type PullSessionResponse,
+  type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
@@ -104,11 +108,15 @@ const rawParts = new BoundedRawPartCache({
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
 });
 
+const rawPost = (
+  msg: unknown,
+  transfer?: Transferable[],
+) => (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
 const post = (
   msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
   transfer?: Transferable[],
-) =>
-  (self.postMessage as (m: unknown, t?: Transferable[]) => void)(msg, transfer);
+) => rawPost(msg, transfer);
+const svgDecodeClient = new WorkerSvgDecodeClient(rawPost);
 
 /** In-worker image-byte loader (twin of pptx's render-worker `getImage`). The
  *  renderer's `fetchImage` routes here in worker mode, so image bytes are
@@ -123,8 +131,12 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
   });
 }
 
-self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
+self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
   const req = e.data;
+  if (isWorkerSvgDecodeResponse(req)) {
+    svgDecodeClient.accept(req);
+    return;
+  }
   if (isDocumentPullCommand(req)) {
     try {
       if (!fallbackPull) throw new Error('DOCX vertical fallback session is not open');
@@ -363,6 +375,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       await renderLayoutSourceToCanvas(source, canvas, req.pageIndex, {
         ...req.opts,
         fetchImage: getImage,
+        svgDecoder: svgDecodeClient.decode,
         layoutServices: doc.layoutServices,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
         threeD: renderers.threeD,
@@ -375,7 +388,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
       });
       const bitmap = canvas.transferToImageBitmap();
-      post({ type: 'pageRendered', id, bitmap, runs }, [bitmap]);
+      postOwnedImageBitmap(post, { type: 'pageRendered', id, bitmap, runs });
       return;
     }
     if (req.type === 'collectRuns') {

@@ -884,6 +884,7 @@ export interface ChartTrendline {
     lineHidden?: boolean | null;
 }
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
+export type DecodedImageBudgetStrategy = 'adaptive' | 'strict';
 export interface DimOptions {
     color: string;
     opacity: number;
@@ -967,7 +968,12 @@ export interface ImageFill {
     alpha?: number;
     duotone?: Duotone;
 }
+export interface ImageResourceOptions {
+    decodedByteBudget?: number;
+    strategy?: DecodedImageBudgetStrategy;
+}
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
+export function isTiffDecodeError(error: unknown): error is TiffDecodeError;
 export interface LegendManualLayout {
     xMode?: string;
     yMode?: string;
@@ -1490,7 +1496,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width' | 'dpr'>, LoadOptions {
+export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width' | 'dpr' | 'imageResources'>, LoadOptions {
     width?: number;
     gap?: number;
     paddingTop?: number;
@@ -1602,7 +1608,7 @@ export class PptxViewer implements ZoomableViewer {
     destroy(): void;
     private __privatePresence;
 }
-export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
+export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' | 'imageResources'>, LoadOptions {
     onSlideChange?: (index: number, total: number, layoutComplete: boolean) => void;
     onError?: (err: Error) => void;
     zoomMin?: number;
@@ -1662,6 +1668,7 @@ export interface RenderOptions {
     width?: number;
     defaultTextColor?: string | null;
     dpr?: number;
+    imageResources?: ImageResourceOptions;
     majorFont?: string | null;
     minorFont?: string | null;
     hlinkColor?: string | null;
@@ -1673,6 +1680,7 @@ export function renderSlide(canvas: HTMLCanvasElement | OffscreenCanvas, slide: 
 export interface RenderSlideOptions {
     width?: number;
     dpr?: number;
+    imageResources?: ImageResourceOptions;
     onTextRun?: TextRunCallback;
     skipMediaControls?: boolean;
     dim?: DimOptions;
@@ -1680,6 +1688,7 @@ export interface RenderSlideOptions {
 export interface RenderSlideToBitmapOptions {
     width?: number;
     dpr?: number;
+    imageResources?: ImageResourceOptions;
     dim?: DimOptions;
     onTextRun?: TextRunCallback;
 }
@@ -1965,8 +1974,17 @@ export interface TextSelectionContextOptions {
     readonly maxTextCharacters?: number;
     readonly maxRunLocators?: number;
 }
+export class TiffDecodeError extends Error {
+    readonly code: 'ooxml-tiff-decode';
+    constructor(message: string, options?: ErrorOptions);
+}
 export interface TiffRenderer {
-    render(bytes: Uint8Array): Promise<ImageBitmap | null>;
+    render(bytes: Uint8Array, options?: Readonly<TiffRenderOptions>): Promise<ImageBitmap | null>;
+}
+export interface TiffRenderOptions {
+    targetWidthPx?: number;
+    targetHeightPx?: number;
+    maxRetainedPixels?: number;
 }
 export interface TileInfo {
     tx?: number;

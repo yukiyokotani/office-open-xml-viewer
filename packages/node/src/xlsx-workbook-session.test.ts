@@ -23,6 +23,23 @@ afterAll(async () => {
 });
 
 describe('Node bounded XLSX workbook session', () => {
+  it('keeps the degraded-container diagnostic when archive usage is unavailable', async () => {
+    const workbook = await openXlsxWorkbook(new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
+    try {
+      expect(workbook.resourceUsage).toBeUndefined();
+      expect(workbook.workbookIndex.workbook.parseError)
+        .toContain('(zip container): ZIP central directory preflight failed');
+
+      let terminalError: string | undefined;
+      for await (const chunk of workbook.worksheetRows(0)) {
+        if (chunk.kind === 'finished') terminalError = chunk.worksheet.parseError;
+      }
+      expect(terminalError).toContain('(zip container): ZIP central directory preflight failed');
+    } finally {
+      await workbook.close();
+    }
+  });
+
   it('opens one workbook and streams worksheets sequentially from the retained archive', async () => {
     const free = vi.spyOn(archivePrototype(), 'free');
     try {

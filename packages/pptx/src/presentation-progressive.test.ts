@@ -82,6 +82,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
       mediaElements: [],
     }));
     let requestOptions: { timeoutMs?: number | false } | undefined;
+    let renderRequest: Extract<RenderWorkerRequest, { kind: 'renderSlide' }> | undefined;
     const protocolOrder: string[] = [];
     const bridge = {
       request: (
@@ -96,6 +97,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
           return finalResponse.promise;
         }
         if (request.kind === 'renderSlide') {
+          renderRequest = request;
           protocolOrder.push('renderSlide');
           return Promise.resolve({
             kind: 'slideRendered', id: request.id, bitmap: {} as ImageBitmap, runs: [],
@@ -157,7 +159,13 @@ describe('PptxPresentation progressive layout lifecycle', () => {
       fontPreloadNames: [],
     });
     await parsing;
-    await presentation.renderSlideToBitmap(0);
+    await presentation.renderSlideToBitmap(0, {
+      imageResources: { decodedByteBudget: 64 * 1024 * 1024, strategy: 'strict' },
+    });
+    expect(renderRequest?.imageResources).toEqual({
+      decodedByteBudget: 64 * 1024 * 1024,
+      strategy: 'strict',
+    });
     await vi.waitFor(() => expect(bridge.post).toHaveBeenCalledTimes(1));
     expect(protocolOrder).toEqual(['renderSlide', 'continuePresentationPreflight']);
     await vi.advanceTimersByTimeAsync(40);

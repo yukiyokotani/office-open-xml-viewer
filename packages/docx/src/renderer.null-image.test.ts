@@ -136,6 +136,10 @@ describe('docx undrawable blip (null base bitmap) is skipped, never crashes', ()
       vi.fn(async () => ({ width: 2, height: 2, close: () => {} }) as unknown as ImageBitmap),
     );
     fetchImage.mockClear();
+    // The late-rejection test waits for the call started by that test. Source
+    // inspection adds an await before bitmap resolution, so cumulative calls
+    // from earlier cases must not make the readiness assertion pass early.
+    vi.mocked(getCachedBitmapByPath).mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
 

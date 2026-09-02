@@ -91,7 +91,7 @@ for (const name of sharedOoxmlTypes) {
 const tiffExports = moduleExports(files.at(-1));
 assert.deepEqual(
   [...tiffExports.keys()].sort(),
-  ['TiffRenderer', 'tiff'],
+  ['TiffDecodeError', 'TiffRenderOptions', 'TiffRenderer', 'isTiffDecodeError', 'tiff'],
   'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
 );
 

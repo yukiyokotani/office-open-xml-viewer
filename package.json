@@ -105,7 +105,7 @@
     "vrt:private:snapshot": "pnpm -r --workspace-concurrency=1 --if-present vrt:private:snapshot",
     "vrt:fidelity": "pnpm -r --workspace-concurrency=1 vrt:fidelity",
     "vrt:worker": "pnpm --workspace-concurrency=1 --filter @silurus/ooxml-pptx --filter @silurus/ooxml-docx --filter @silurus/ooxml-xlsx vrt:worker",
-    "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts",
+    "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts raster-decode",
     "test:site-runtime": "playwright test --config tests/site-dist/playwright.config.ts",
     "test": "vitest run && node --test tests/visual/private-corpus.test.mjs",
     "bench:layout": "vitest bench --run packages/docx/src/layout/layout.bench.ts",

@@ -9,4 +9,9 @@ export const tiff: TiffRenderer = registerBuiltinWorkerRenderer({
   render: renderTiffToBitmap,
 }, 'tiff');
 
-export type { TiffRenderer } from '../packages/core/src/image/tiff-contract.js';
+export {
+  TiffDecodeError,
+  isTiffDecodeError,
+  type TiffRenderer,
+  type TiffRenderOptions,
+} from '../packages/core/src/image/tiff-contract.js';

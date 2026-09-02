@@ -10,6 +10,7 @@ import {
   type PullSessionCommand,
 } from '@silurus/ooxml-core/worker';
 import type { WorkerRequest, WorkerResponse } from './types.js';
+import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
@@ -102,15 +103,15 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       // JsValue>). wasm-bindgen hands back a fresh Uint8Array that owns its
       // buffer, so forward it to main as a transferable — no clone, no decode
       // here. The single decode + JSON.parse happens on main.
-      const json = host.run(() => {
-        const archive = new XlsxArchive(bytes, maxEntry, maxTotal, maxEntries);
-        host.setArchive(archive);
-        return archive.parse();
-      });
+      const { workbook: json, usage } = readXlsxArchiveBootstrap(
+        () => host.run(() => {
+          const archive = new XlsxArchive(bytes, maxEntry, maxTotal, maxEntries);
+          host.setArchive(archive);
+          return archive.parse();
+        }),
+        () => host.run(() => host.archive!.resource_usage()),
+      );
       const workbookJson = json.buffer as ArrayBuffer;
-      const usage = host.run(() => decodeOoxmlResourceUsage(
-        host.archive!.resource_usage(),
-      ));
       const res: WorkerResponse = { type: 'parsed', id, workbookJson, usage };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,

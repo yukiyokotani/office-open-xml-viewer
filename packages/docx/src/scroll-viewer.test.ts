@@ -513,6 +513,10 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
     );
     await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
     expect((viewer as unknown as { _commentMarginExtent(): number })._commentMarginExtent()).toBe(0);
+    const scrollHost = container.children[0]!.children[0]!;
+    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = page.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(margin.style.display).toBe('none');
     viewer.destroy();
   });
 
@@ -1670,7 +1674,12 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
     const loadSpy = vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
-    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10, password: 'secret' });
+    const tiff = { render: vi.fn(async () => null) };
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      gap: 10,
+      password: 'secret',
+      tiff,
+    });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
@@ -1678,7 +1687,7 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     expect(loadSpy).toHaveBeenCalledTimes(1);
     expect(loadSpy).toHaveBeenCalledWith(
       'sample.docx',
-      expect.objectContaining({ password: 'secret' }),
+      expect.objectContaining({ password: 'secret', tiff }),
     );
     // Layout happened: slots mounted and the spacer was sized.
     expect(v.mountedPageIndicesForTest().length).toBeGreaterThan(0);

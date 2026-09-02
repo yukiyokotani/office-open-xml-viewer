@@ -10,7 +10,7 @@ use crate::theme::{
 };
 use crate::types::*;
 use crate::{attr, attr_f64, attr_i64, attr_r, child, parse_preflighted_pptx_xml};
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone};
+use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect};
 use ooxml_common::color::ThemeResolver;
 use std::collections::HashMap;
 
@@ -273,6 +273,7 @@ fn parse_blip_fill_with_color_resolver<
         return Some(Fill::Image {
             image_path,
             mime_type,
+            src_rect: parse_src_rect(blip_fill),
             fill_rect: None,
             tile: Some(parse_tile(tile_node)),
             alpha,
@@ -283,6 +284,7 @@ fn parse_blip_fill_with_color_resolver<
     Some(Fill::Image {
         image_path,
         mime_type,
+        src_rect: parse_src_rect(blip_fill),
         fill_rect,
         tile: None,
         alpha,

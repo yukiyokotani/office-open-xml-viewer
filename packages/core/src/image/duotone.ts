@@ -16,6 +16,8 @@
 // renderers and works on both OffscreenCanvas (browser/worker) and node-canvas
 // (skia) via the shared 2D context surface.
 
+import { decodedBitmapTargetResizeOptions } from './raster-target.js';
+
 /** A duotone effect resolved to its two endpoint colours. Both are 6-char
  *  uppercase hex WITHOUT a leading `#` (the form the Rust parsers emit). `clr1`
  *  is the dark endpoint (luminance 0), `clr2` the light endpoint (luminance 1),
@@ -136,6 +138,10 @@ export async function applyDuotone(
     width: number;
     height: number;
     offscreenFactory?: OffscreenFactory;
+    /** Optional final display target. The source is always recoloured at the
+     * authored pixel grid; resizing occurs only while baking the result. */
+    targetWidthPx?: number;
+    targetHeightPx?: number;
   },
 ): Promise<CanvasImageSource> {
   const { width, height } = opts;
@@ -156,5 +162,13 @@ export async function applyDuotone(
   }
   duotoneImageData(data, duotone.clr1, duotone.clr2);
   ctx.putImageData(data, 0, 0);
-  return createImageBitmap(surface);
+  const resizeOptions = decodedBitmapTargetResizeOptions(
+    width,
+    height,
+    opts.targetWidthPx,
+    opts.targetHeightPx,
+  );
+  return resizeOptions
+    ? createImageBitmap(surface, resizeOptions)
+    : createImageBitmap(surface);
 }

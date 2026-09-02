@@ -10,10 +10,15 @@ export default defineConfig({
   testDir: './tests/visual',
   testMatch: '**/*.spec.ts',
   fullyParallel: false,
-  reporter: [
-    ['list'],
-    ['html', { outputFolder: 'tests/visual/report', open: 'never' }],
-  ],
+  // The private corpus already persists exact PNG artifacts. Avoid the HTML
+  // reporter there: large main/worker runs can keep its teardown alive after
+  // every test has completed.
+  reporter: privateCorpus
+    ? [['list']]
+    : [
+        ['list'],
+        ['html', { outputFolder: 'tests/visual/report', open: 'never' }],
+      ],
   use: {
     baseURL: `http://127.0.0.1:${vrtPort}`,
     actionTimeout: 30_000,
@@ -23,6 +28,11 @@ export default defineConfig({
       name: 'chrome',
       use: {
         channel: 'chrome',
+        // Keep exact-pixel VRT independent of GPU driver scheduling and
+        // antialiasing differences between otherwise identical Chrome runs.
+        launchOptions: {
+          args: ['--disable-gpu'],
+        },
         deviceScaleFactor: 1,
         viewport: { width: 1280, height: 720 },
       },

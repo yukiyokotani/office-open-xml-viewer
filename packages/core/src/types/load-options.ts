@@ -199,9 +199,11 @@ export interface LoadOptions {
   /**
    * Opt in to bounded TIFF 6.0 image decoding. Import `tiff` from the separate
    * `@silurus/ooxml/tiff` entry and inject it once. The built-in codec accepts
-   * uncompressed, 8-bit, chunky process-CMYK strips; other TIFF classes fail
-   * closed. Omit it to keep the decoder out of ordinary format bundles; TIFF
-   * parts are then skipped without aborting the surrounding document render.
+   * stripped bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK images, plus
+   * CCITT Group 4 bilevel images. Unsupported, malformed, or codec-less TIFF
+   * parts report a diagnostic `TiffDecodeError` through the render error path;
+   * they are not silently omitted. The built-in codec works in main and worker
+   * modes.
    */
   tiff?: TiffRenderer;
 }

@@ -187,8 +187,9 @@ format graph. The built-in modules work in both main and worker modes. Without `
 ChartEx families show the standard unsupported-chart placeholder. Without
 `threeD`, 3-D chart groups
 fall back to their canonical 2-D family. Without `regionMap`, Region Maps show
-the standard unsupported-chart placeholder. Without `tiff`, TIFF images are
-skipped while the surrounding document continues to render. The code-size boundary applies to
+the standard unsupported-chart placeholder. Without `tiff`, recognized TIFF
+parts report a render error instead of relying on the browser decoder or being
+silently omitted. The code-size boundary applies to
 the default main-mode application graph. The separately loaded render-worker
 asset stays self-contained for broad bundler compatibility and therefore
 contains its built-in optional renderer implementations.
@@ -219,11 +220,15 @@ represent safely. The specification/Office evidence boundary for automatic
 chart behavior is documented in
 [Chart compatibility evidence and scope](docs/chart-compatibility-evidence.md).
 
-The initial TIFF codec accepts uncompressed, 8-bit, chunky process-CMYK TIFF
-6.0 images. Other TIFF classes fail closed without aborting the surrounding
-document render. It is not a general-purpose TIFF library, but as a small
+The bounded TIFF 6.0 codec decodes the first IFD/page of stripped, top-left
+images in the uncompressed bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK
+classes, plus 1-bit CCITT Group 4. Unsupported or malformed first-page classes
+fail with a diagnostic render error. It is not a general-purpose TIFF library,
+but as a small
 by-product the same `tiff.render()` method can provide a simple preview of a
-supported standalone TIFF file. Try Yours and the VS Code extension enable
+supported standalone TIFF file. Its optional `TiffRenderOptions` argument can
+request a bounded display-sized bitmap; the Office viewers supply those targets
+automatically for layout-backed image paints. Try Yours and the VS Code extension enable
 every first-party optional module; library applications can choose only the entries they need.
 See [Production decisions](https://ooxml.silurus.dev/production/) for the full
 module list and [Bundle size](https://ooxml.silurus.dev/bundle-size/) for current
@@ -687,7 +692,7 @@ file without uploading it.
 | | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
-| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Text boxes / drawing shapes (inline and anchored `wps:wsp` / `wps:txbx`, including solid, gradient, and image fills; `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
 | | WMF **and EMF** metafile images (legacy vector, incl. inside text boxes) — rasterized via a built-in player: window→viewport mapping (MS-EMF map modes, world transform), pens/brushes, poly/rect/ellipse, text-out, path clipping, and embedded DIB blits | ✅ |
@@ -741,7 +746,7 @@ file without uploading it.
 | | Hidden rows / columns | ✅ |
 | | Row / column outline grouping (`outlineLevel` / `collapsed` §18.3.1.73 / .13, `<outlinePr>` — gutter brackets, +/− collapse, numbered level buttons; view-only) | ✅ |
 | **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
-| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | OLE embedded objects (`<oleObjects>` — the legacy VML `v:imagedata` preview keyed by `oleObject@shapeId` is drawn; an image-typed `objectPr` target is preferred when present, and the embedded app is not run) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Drawing shapes / text boxes (`xdr:sp`, `xdr:txBody` — 186 preset geometries via the shared engine, with `avLst` adjust handles) | ✅ |
@@ -789,7 +794,7 @@ file without uploading it.
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`) | ✅ |
-| | TIFF images (opt-in `@silurus/ooxml/tiff`; uncompressed 8-bit process-CMYK) | ✅ |
+| | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, PNG fallback) | ✅ |
 | | Groups (`grpSp`) with nested transforms | ✅ |
 | | Connectors (`cxnSp`) | ✅ |
@@ -952,6 +957,9 @@ Stable failures can be narrowed without parsing message strings:
   (`code === 'ooxml-decoded-image-limit'`) — a raster crossed an image pixel or
   active decoded-byte ceiling. Its `metric`, `limit`, and `observed` properties
   are stable.
+- `TiffDecodeError` (`code === 'ooxml-tiff-decode'`) — a recognized TIFF part
+  has no configured codec, is malformed, or uses a class the configured codec
+  does not support. Its message is diagnostic rather than a stable subtype.
 - An otherwise ordinary `Error` may carry `code === 'parser-crashed'` for a
   recognized WASM trap. This does not mean “OOM”: panic, allocation failure,
   stack overflow, and other traps can be indistinguishable at the current WASM
@@ -967,6 +975,7 @@ import {
   OoxmlDecodedImageLimitError,
   OoxmlError,
   OoxmlResourceLimitError,
+  TiffDecodeError,
 } from '@silurus/ooxml/docx';
 
 const viewer = new DocxViewer(canvas, {
@@ -977,6 +986,8 @@ const viewer = new DocxViewer(canvas, {
       showTooLargeMessage({ limit, observed });
     } else if (error instanceof OoxmlDecodedImageLimitError) {
       showImageTooLargeMessage(error);
+    } else if (error instanceof TiffDecodeError) {
+      showUnsupportedImageMessage();
     } else if (error instanceof OoxmlError) {
       handleContainerError(error.code);
     } else {
@@ -1035,7 +1046,16 @@ try {
 
   The report is content-free by construction: it does not include source URLs, filenames, package paths, document text, passwords, or raw error messages. It still contains document-derived sizes, counts, and timings, so applications remain responsible for consent, retention, and telemetry policy. The initial browser callback covers the underlying document/workbook/presentation factory and does not wait for a Viewer's first canvas paint; use `getResourceMetrics()` for the latest observed package counters. Bounded Node sessions accept both `onResourceMetrics` and `debug`. DOCX/PPTX report successful terminal metrics when their one-pass stream completes or the session is explicitly closed; XLSX reports success when the reusable workbook session is explicitly closed. Open-time and session-operation failures report immediately.
 
-  Image decoding has separate, non-configurable browser safety ceilings shared by all three formats: at most 32 megapixels (128 MiB RGBA) for one raster, 128 MiB of decoded raster ownership per document cache or live render pass, and two simultaneous decodes per document. Crossing a measurable image ceiling rejects with `OoxmlDecodedImageLimitError` (`code === 'ooxml-decoded-image-limit'`) instead of silently omitting the image. These are hard implementation guards rather than public tuning knobs because browser/GPU overhead is not portable enough for an application-supplied byte value to mean the same thing across devices.
+  Image decoding uses a separate adaptive resource policy shared by all three formats. Target-resizable rasters—browser-decodable formats and TIFF when its optional codec is configured—keep their native decode while the complete visible paint fits the default 128 MiB decoded budget and the per-surface ceilings, preserving established output. When native ownership would cross either boundary, the renderer decodes those rasters at the current canvas/DPR requirement instead of retaining source pixels the paint cannot show. If even those display targets exceed the aggregate budget, it applies one uniform quality reduction across them; a later zoom requests a sharper cache variant. Image-bearing paints for the same loaded document are serialized so overlapping paints cannot each consume the full budget, while the admitted paint still runs up to two decodes concurrently. Formats or sources that cannot be decoder-resized remain on their format-specific path under the hard surface ceilings. Applications with a known environment can override the aggregate budget on Viewer or per-render options:
+  ```ts
+  new PptxViewer(canvas, {
+    imageResources: {
+      decodedByteBudget: 256 * 1024 * 1024,
+      strategy: 'adaptive', // or 'strict' to reject instead of reducing quality
+    },
+  });
+  ```
+  `decodedByteBudget` accepts a positive safe integer from 4 bytes through 512 MiB. This configures planned and retained decoded RGBA ownership; it does not measure browser decoder intermediates or disable the encoded-source, per-axis, or per-surface hard safety ceilings. A strict aggregate crossing or any hard-ceiling crossing rejects with `OoxmlDecodedImageLimitError` (`code === 'ooxml-decoded-image-limit'`) instead of silently omitting the image.
 
   The package counters and raster-image guards are deterministic admission limits, not exact JavaScript/WASM process-memory accounting. XML trees, document models, canvas backing stores, browser decoder overhead, renderer state, and browser-managed SVG/vector parse or decoded storage can still require several times the measured input. SVG has no portable decoded-byte measure or explicit browser release primitive; the library count-bounds its cache and revokes owned object URLs, but cannot charge it as RGBA bytes. The defaults therefore reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 

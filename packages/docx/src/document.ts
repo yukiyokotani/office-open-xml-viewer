@@ -2,6 +2,7 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
+  releaseOwnedBitmap,
   unloadGoogleFonts,
   unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
@@ -31,6 +32,7 @@ import {
   OoxmlResourceMetricsSession,
   readLatestOoxmlResourceMetrics,
   PULL_SESSION_PROTOCOL,
+  respondToWorkerSvgDecodeRequest,
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
@@ -543,7 +545,7 @@ export class DocxDocument {
       doc._chartEx = doc._mode === 'worker' ? undefined : opts.chartEx;
       if (opts.tiff && doc._mode === 'worker' && !rendererDescriptors?.tiff) {
         console.warn(
-          "[ooxml] a custom TIFF codec cannot cross the worker boundary; TIFF images will be skipped in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
+          "[ooxml] a custom TIFF codec cannot cross the worker boundary; recognized TIFF images will report a render error in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
         );
       }
       doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
@@ -849,6 +851,12 @@ export class DocxDocument {
    * load this document has already moved past.
    */
   private _onWorkerLayoutPush(res: WorkerResponse | RenderWorkerResponse): void {
+    if (respondToWorkerSvgDecodeRequest(
+      (message, transfer) => (
+        this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+      )(message, transfer),
+      res,
+    )) return;
     if (!('forId' in res) || res.forId !== this._parseRequestId) return;
     // Any push proves the worker is alive and working, which is the only thing
     // the watchdog is asking about.
@@ -1691,7 +1699,12 @@ export class DocxDocument {
         (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
       );
       const rendered = res as Extract<RenderWorkerResponse, { type: 'pageRendered' }>;
-      if (onTextRun) for (const r of rendered.runs) onTextRun(r);
+      try {
+        if (onTextRun) for (const r of rendered.runs) onTextRun(r);
+      } catch (error) {
+        releaseOwnedBitmap(rendered.bitmap);
+        throw error;
+      }
       return rendered.bitmap;
     }
     const off = new OffscreenCanvas(1, 1);

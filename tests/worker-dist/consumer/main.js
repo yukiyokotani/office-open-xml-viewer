@@ -54,6 +54,14 @@ try {
   paint('pptx', await pptx.renderSlideToBitmap(0, { width: 360, dpr: 1 }));
   pptx.destroy();
 
+  const textPptx = await PptxPresentation.load(
+    await bytes('/consumer/text.pptx'),
+    { mode: 'worker', useGoogleFonts: false },
+  );
+  paint('pptx-text', await textPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
+  window.pptxTextRuns = await textPptx.collectSlideRuns(0, 640);
+  textPptx.destroy();
+
   const chartExDocx = await DocxDocument.load(
     await bytes('/consumer/chart-ex.docx'),
     { mode: 'worker', ...renderers },

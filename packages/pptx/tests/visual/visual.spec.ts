@@ -8,6 +8,17 @@ import {
   verifyPrivateItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
 
+test.afterEach(async ({ page }) => {
+  await page.evaluate(() => {
+    const destroy = (globalThis as unknown as {
+      destroyPptxVrt?: () => void;
+    }).destroyPptxVrt;
+    destroy?.();
+  }).catch(() => {
+    // Navigation or a load failure may already have disposed the page.
+  });
+});
+
 // ── Test targets ──────────────────────────────────────────────────────────────
 // Add entries here to include additional PPTX files.
 // Each entry needs:

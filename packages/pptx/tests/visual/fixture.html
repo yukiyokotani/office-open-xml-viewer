@@ -50,6 +50,14 @@
         console.error('[fixture] error:', err);
       },
     });
+    let destroyed = false;
+    const destroy = () => {
+      if (destroyed) return;
+      destroyed = true;
+      viewer.destroy();
+    };
+    window.destroyPptxVrt = destroy;
+    window.addEventListener('pagehide', destroy, { once: true });
 
     try {
       const resp = await fetch(`/${pptxName}.pptx`);

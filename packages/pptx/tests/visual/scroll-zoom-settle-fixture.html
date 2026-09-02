@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; }
+    #host { width: 900px; height: 620px; }
+  </style>
+</head>
+<body>
+  <div id="host"></div>
+  <script type="module">
+    import { PptxScrollViewer } from '/src/index.ts';
+
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const response = await fetch('/demo/sample-1.pptx');
+      if (!response.ok) throw new Error(`fetch demo/sample-1.pptx -> ${response.status}`);
+      const maximumZoom = new URLSearchParams(location.search).has('maximum');
+      const options = {
+        mode: 'worker',
+        enableTextSelection: true,
+        enableZoom: true,
+        enableMediaPlayback: maximumZoom,
+        mediaOverscan: 1,
+        comments: maximumZoom,
+        progressiveLayout: maximumZoom,
+        overscan: maximumZoom ? 0 : 1,
+        gap: 16,
+      };
+      const viewer = new PptxScrollViewer(document.getElementById('host'), options);
+      await viewer.load(await response.arrayBuffer());
+      if (maximumZoom) {
+        await viewer.waitUntilLayoutComplete();
+        options.overscan = viewer.slideCount;
+        viewer.relayout();
+      }
+      viewer.scrollToSlide(4);
+      await frame();
+      await frame();
+
+      if (maximumZoom) {
+        const scrollHost = document.querySelector('#host > div > div');
+        const rect = scrollHost.getBoundingClientRect();
+        while (viewer.getScale() < 4) {
+          scrollHost.dispatchEvent(new WheelEvent('wheel', {
+            bubbles: true,
+            cancelable: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            ctrlKey: true,
+            deltaY: -100,
+            deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          }));
+        }
+      } else {
+        viewer.setScale(viewer.getScale() * 2);
+      }
+      await frame();
+      const scrollHost = document.querySelector('#host > div > div');
+      const measure = () => {
+        const viewport = scrollHost.getBoundingClientRect();
+        const centerY = viewport.top + viewport.height / 2;
+        const slide = [...scrollHost.children].find((element) => {
+          if (!element.hasAttribute('data-slide-index')) return false;
+          const rect = element.getBoundingClientRect();
+          return rect.top <= centerY && rect.bottom >= centerY;
+        });
+        const canvas = slide?.querySelector('canvas');
+        const slideRect = slide?.getBoundingClientRect();
+        const canvasRect = canvas?.getBoundingClientRect();
+        return {
+          left: scrollHost.scrollLeft,
+          top: scrollHost.scrollTop,
+          width: scrollHost.scrollWidth,
+          height: scrollHost.scrollHeight,
+          slideWidth: slideRect?.width ?? 0,
+          slideHeight: slideRect?.height ?? 0,
+          canvasWidth: canvasRect?.width ?? 0,
+          canvasHeight: canvasRect?.height ?? 0,
+          canvasBufferWidth: canvas?.width ?? 0,
+          canvasBufferHeight: canvas?.height ?? 0,
+          scale: viewer.getScale(),
+        };
+      };
+      const preview = measure();
+      const previewSlide = [...scrollHost.children].find((element) => {
+        if (!element.hasAttribute('data-slide-index')) return false;
+        const viewport = scrollHost.getBoundingClientRect();
+        const rect = element.getBoundingClientRect();
+        const centerY = viewport.top + viewport.height / 2;
+        return rect.top <= centerY && rect.bottom >= centerY;
+      });
+      const previewCanvas = previewSlide?.querySelector('canvas');
+      if (maximumZoom) {
+        const settleDeadline = performance.now() + 15_000;
+        while (previewCanvas?.isConnected && performance.now() < settleDeadline) await frame();
+        if (previewCanvas?.isConnected) throw new Error('timed out waiting for settled canvas swap');
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      await frame();
+      await frame();
+      document.body.dataset.result = JSON.stringify({ preview, settled: measure() });
+      document.body.dataset.status = 'ready';
+      window.addEventListener('pagehide', () => viewer.destroy(), { once: true });
+    } catch (error) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  </script>
+</body>
+</html>

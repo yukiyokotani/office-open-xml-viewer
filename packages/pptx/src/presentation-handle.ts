@@ -32,10 +32,10 @@ export interface PresentationHandle {
 }
 
 export interface PresentOptions {
-  /** Display width in CSS pixels (same value used to render the base slide). */
+  /** Logical slide width in CSS pixels (same value used to render the base slide). */
   width: number;
-  /** Device pixel ratio used when sizing the canvas backing store. */
-  dpr: number;
+  /** Logical slide height in CSS pixels (independent of backing-store clamping). */
+  height: number;
   /** Slide width in EMU (from Presentation.slideWidth). */
   slideWidthEmu: number;
   /** Retrieve the raw media bytes for the given zip path. */
@@ -183,10 +183,19 @@ export async function createPresentationHandle(
   let hoveredState: MediaState | null = null;
 
   const drawFrame = () => {
-    ctx.setTransform(opts.dpr, 0, 0, opts.dpr, 0, 0);
-    const cssW = canvas.width / opts.dpr;
-    const cssH = canvas.height / opts.dpr;
-    ctx.drawImage(base, 0, 0, canvas.width, canvas.height, 0, 0, cssW, cssH);
+    // The backing store may be smaller than `logical size × requested DPR`
+    // after the shared canvas-area guard clamps an extreme zoom. Derive the
+    // effective raster scale from the dimensions that were actually allocated;
+    // the requested DPR is no longer an authoritative coordinate transform.
+    ctx.setTransform(
+      canvas.width / opts.width,
+      0,
+      0,
+      canvas.height / opts.height,
+      0,
+      0,
+    );
+    ctx.drawImage(base, 0, 0, canvas.width, canvas.height, 0, 0, opts.width, opts.height);
 
     for (const s of states) {
       const media = s.media;
@@ -244,11 +253,9 @@ export async function createPresentationHandle(
 
   const toLocal = (clientX: number, clientY: number) => {
     const bb = canvas.getBoundingClientRect();
-    const cssW = canvas.width / opts.dpr;
-    const cssH = canvas.height / opts.dpr;
     return {
-      x: ((clientX - bb.left) / bb.width) * cssW,
-      y: ((clientY - bb.top) / bb.height) * cssH,
+      x: ((clientX - bb.left) / bb.width) * opts.width,
+      y: ((clientY - bb.top) / bb.height) * opts.height,
     };
   };
 

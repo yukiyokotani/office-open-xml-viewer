@@ -365,6 +365,48 @@ pub(crate) enum ShapeKind {
     Sp,
 }
 
+/// Return a text-property solid fill only when it appears in the
+/// `CT_TextCharacterProperties` sequence position defined by ECMA-376
+/// §21.1.2.3.9 / dml-main.xsd. The fill choice precedes effects, highlight,
+/// underline properties and the latin/ea/cs font children. PowerPoint ignores
+/// an out-of-order fill (a pattern emitted by some non-Office producers), so a
+/// name-only descendant lookup would invent formatting Office does not apply.
+pub(crate) fn text_property_solid_fill<'a, 'input>(
+    properties: roxmltree::Node<'a, 'input>,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    let sequence_rank = |name: &str| -> Option<u8> {
+        match name {
+            "ln" => Some(0),
+            "noFill" | "solidFill" | "gradFill" | "blipFill" | "pattFill" | "grpFill" => Some(1),
+            "effectLst" | "effectDag" => Some(2),
+            "highlight" => Some(3),
+            "uLnTx" | "uLn" => Some(4),
+            "uFillTx" | "uFill" => Some(5),
+            "latin" => Some(6),
+            "ea" => Some(7),
+            "cs" => Some(8),
+            "sym" => Some(9),
+            "hlinkClick" => Some(10),
+            "hlinkMouseOver" => Some(11),
+            "rtl" => Some(12),
+            "extLst" => Some(13),
+            _ => None,
+        }
+    };
+    let mut highest_preceding_rank = 0_u8;
+    for node in properties.children().filter(|node| node.is_element()) {
+        let name = node.tag_name().name();
+        let Some(rank) = sequence_rank(name) else {
+            continue;
+        };
+        if name == "solidFill" {
+            return (highest_preceding_rank <= rank).then_some(node);
+        }
+        highest_preceding_rank = highest_preceding_rank.max(rank);
+    }
+    None
+}
+
 // Carries the resolved master/layout/placeholder inheritance context (theme,
 // rels, inherited font size, default alignment/spacing, level styles) that text
 // runs need; these are inheritance inputs, not an arbitrary parameter bag.
@@ -931,7 +973,7 @@ pub(crate) fn parse_paragraph(
     let def_rpr = p_pr.and_then(|n| child(n, "defRPr"));
     let def_font_size = def_rpr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
     let def_color = def_rpr
-        .and_then(|n| child(n, "solidFill"))
+        .and_then(text_property_solid_fill)
         .and_then(|n| parse_color_node(n, theme));
     let def_bold = def_rpr
         .and_then(|n| attr(&n, "b"))
@@ -974,7 +1016,7 @@ pub(crate) fn parse_paragraph(
                 let r_pr = child(node, "rPr");
                 let font_size = r_pr.and_then(|n| attr_f64(&n, "sz")).map(|v| v / 100.0);
                 let color = r_pr
-                    .and_then(|n| child(n, "solidFill"))
+                    .and_then(text_property_solid_fill)
                     .and_then(|n| parse_color_node(n, theme));
                 let bold = r_pr
                     .and_then(|n| attr(&n, "b"))
@@ -1330,11 +1372,11 @@ fn parse_run_with_reflection(
         .map(|v| v / 100.0);
 
     let color = r_pr
-        .and_then(|n| child(n, "solidFill"))
+        .and_then(text_property_solid_fill)
         .and_then(|n| parse_color_node(n, theme))
         .or_else(|| {
             def_rpr
-                .and_then(|n| child(n, "solidFill"))
+                .and_then(text_property_solid_fill)
                 .and_then(|n| parse_color_node(n, theme))
         });
 

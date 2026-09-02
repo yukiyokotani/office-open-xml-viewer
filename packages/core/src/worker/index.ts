@@ -35,6 +35,7 @@ export {
   type PullSessionInsufficientCreditDetails,
 } from './pull-credit-error.js';
 export { exactTransferableArrayBuffer } from './transfer.js';
+export { postOwnedImageBitmap } from './owned-image-bitmap-transfer.js';
 export {
   assertWorkerRendererDescriptor,
   workerRendererDescriptors,
@@ -95,6 +96,18 @@ export {
   HARD_MAX_XLSX_WORKSHEET_ROWS,
 } from './resource-policy.generated.js';
 export { disposeRejectedLoad } from './rejected-load.js';
+export {
+  WorkerSvgDecodeClient,
+  boundedSvgRasterSize,
+  decodeSvgBlobOnMainThread,
+  isWorkerSvgDecodeRequest,
+  isWorkerSvgDecodeResponse,
+  respondToWorkerSvgDecodeRequest,
+  type SvgBlobDecoder,
+  type SvgDecodeTarget,
+  type WorkerSvgDecodeRequest,
+  type WorkerSvgDecodeResponse,
+} from './svg-decode-bridge.js';
 export {
   BoundedPullSession,
   DEFAULT_PULL_CANCEL_GRACE_MS,

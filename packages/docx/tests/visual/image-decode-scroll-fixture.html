@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DOCX synthetic image decode acceptance</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    .viewer-host { width: 640px; height: 480px; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    import { DocxScrollViewer } from '/src/index.ts';
+    import { tiff } from '@ooxml-test-tiff-renderer';
+
+    const COLOR_TOLERANCE = 8;
+    const PAGE_RENDER_TIMEOUT_MS = 20_000;
+
+    const errorRecord = (error) => ({
+      name: typeof error?.name === 'string' ? error.name : 'Error',
+      message: typeof error?.message === 'string' ? error.message : String(error),
+      ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+      ...(typeof error?.metric === 'string' ? { metric: error.metric } : {}),
+    });
+
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+    const nearestPixel = (source, expected) => {
+      if (source.width < 1 || source.height < 1) return null;
+      const copy = document.createElement('canvas');
+      copy.width = source.width;
+      copy.height = source.height;
+      const context = copy.getContext('2d', { willReadFrequently: true });
+      if (!context) return null;
+      context.drawImage(source, 0, 0);
+      const pixels = context.getImageData(0, 0, copy.width, copy.height).data;
+      let best = null;
+      for (let y = 0; y < copy.height; y += 2) {
+        for (let x = 0; x < copy.width; x += 2) {
+          const offset = (y * copy.width + x) * 4;
+          const pixel = [
+            pixels[offset],
+            pixels[offset + 1],
+            pixels[offset + 2],
+            pixels[offset + 3],
+          ];
+          const maxChannelDelta = Math.max(
+            ...pixel.map((channel, index) => Math.abs(channel - expected[index])),
+          );
+          if (!best || maxChannelDelta < best.maxChannelDelta) {
+            best = { pixel, maxChannelDelta };
+            if (maxChannelDelta === 0) return best;
+          }
+        }
+      }
+      return best;
+    };
+
+    const waitForPageColor = async (host, viewer, index, expectation) => {
+      viewer.scrollToPage(index);
+      const deadline = performance.now() + PAGE_RENDER_TIMEOUT_MS;
+      let closest = null;
+      while (performance.now() < deadline) {
+        await nextFrame();
+        // The virtualized viewer mounts adjacent overscan slots. Inspect only
+        // the slot assigned to the requested page so a matching colour on a
+        // neighbour can never satisfy this page's acceptance assertion.
+        const slot = viewer._slots.get(index);
+        const canvas = slot?.renderedPage === index ? slot.canvas : null;
+        if (!canvas || !host.contains(canvas)) continue;
+        const candidate = nearestPixel(canvas, expectation.rgba);
+        if (candidate && (!closest || candidate.maxChannelDelta < closest.maxChannelDelta)) {
+          closest = { ...candidate, canvas };
+        }
+        if (closest?.maxChannelDelta <= COLOR_TOLERANCE) {
+          return {
+            id: expectation.id,
+            index,
+            pixel: closest.pixel,
+            maxChannelDelta: closest.maxChannelDelta,
+            canvasWidth: closest.canvas.width,
+            canvasHeight: closest.canvas.height,
+            mountedPages: viewer.mountedPageIndicesForTest(),
+          };
+        }
+      }
+      const detail = closest
+        ? `closest pixel ${closest.pixel.join(',')} (delta ${closest.maxChannelDelta})`
+        : 'no readable canvas';
+      throw new Error(`page ${index + 1} (${expectation.id}) did not paint: ${detail}`);
+    };
+
+    const runMode = async (bytes, mode, expectations) => {
+      const host = document.createElement('div');
+      host.className = 'viewer-host';
+      document.body.appendChild(host);
+      const errors = [];
+      const viewer = new DocxScrollViewer(host, {
+        mode,
+        tiff,
+        dpr: 1,
+        gap: 12,
+        progressiveLayout: true,
+        useGoogleFonts: false,
+        onError: (error) => errors.push(errorRecord(error)),
+      });
+      try {
+        await viewer.load(bytes.slice().buffer);
+        await viewer.waitUntilLayoutComplete();
+        if (viewer._mode !== mode) {
+          throw new Error(`requested ${mode} mode resolved to ${viewer._mode}`);
+        }
+        const pages = [];
+        for (let index = 0; index < expectations.length; index += 1) {
+          pages.push(await waitForPageColor(host, viewer, index, expectations[index]));
+        }
+        await nextFrame();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return {
+          mode: viewer._mode,
+          pageCount: viewer.pageCount,
+          layoutComplete: viewer.layoutComplete,
+          errors,
+          pages,
+        };
+      } finally {
+        viewer.destroy();
+        host.remove();
+      }
+    };
+
+    window.runSyntheticImageAcceptance = async (base64, expectations) => {
+      const binary = atob(base64);
+      const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+      const main = await runMode(bytes, 'main', expectations);
+      const worker = await runMode(bytes, 'worker', expectations);
+      return { main, worker };
+    };
+
+    document.body.dataset.status = 'ready';
+  </script>
+</body>
+</html>

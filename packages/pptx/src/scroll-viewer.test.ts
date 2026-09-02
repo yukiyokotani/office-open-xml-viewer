@@ -332,6 +332,10 @@ describe('PptxScrollViewer — opt-in comment cards', () => {
       { comments: { connectors: {} } },
     );
     expect((viewer as unknown as { _commentMarginExtent(): number })._commentMarginExtent()).toBe(0);
+    const scrollHost = container.children[0]!.children[0]!;
+    const slide = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = slide.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    expect(margin.style.display).toBe('none');
     viewer.destroy();
   });
 
@@ -1419,7 +1423,12 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     // self-loaded (non-borrowed) viewer is not left blank (I-2).
     const engine = new FakePptxEngine(10, SLIDE_W_EMU, SLIDE_H_EMU);
     const loadSpy = vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
-    const v = new PptxScrollViewer(container as unknown as HTMLElement, { gap: 10, password: 'secret' });
+    const tiff = { render: vi.fn(async () => null) };
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      gap: 10,
+      password: 'secret',
+      tiff,
+    });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
@@ -1427,7 +1436,7 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     expect(loadSpy).toHaveBeenCalledTimes(1);
     expect(loadSpy).toHaveBeenCalledWith(
       'sample.pptx',
-      expect.objectContaining({ password: 'secret' }),
+      expect.objectContaining({ password: 'secret', tiff }),
     );
     // Layout happened: slots mounted and the spacer was sized.
     expect(v.mountedSlideIndicesForTest().length).toBeGreaterThan(0);
@@ -3044,7 +3053,7 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     }
   });
 
-  it('CSS preview: text layer gets a transform: scale(ratio) matching newScale / renderedScale', async () => {
+  it('CSS preview: text layer scales from its committed box so transformed overlays cannot inflate the scroll extent', async () => {
     const { v, scrollHost, engine } = setup(20, { enableTextSelection: true });
     engine.feedTextRuns = [
       {
@@ -3071,6 +3080,14 @@ describe('PptxScrollViewer — flicker-free zoom (T8)', () => {
     v.setScale(v.scaleForTest() * 2);
     expect(textLayer.style.transform).toBe('scale(2)');
     expect(textLayer.style.transformOrigin).toBe('0 0');
+    // The wrapper has already grown to 400x240. A width/height:100% overlay
+    // transformed by 2 would expose an 800x480 overflow box. When the worker
+    // settle clears that transform, the scroll range shrinks and the browser
+    // clamps scrollLeft/scrollTop toward the top-left. Keep the committed
+    // 200x120 overlay box during the preview so its transformed extent is
+    // exactly the new slide box.
+    expect(textLayer.style.width).toBe('200px');
+    expect(textLayer.style.height).toBe('120px');
     v.destroy();
   });
 

@@ -500,6 +500,8 @@ export interface RenderOptions {
   width?: number;
   defaultTextColor?: string | null;
   dpr?: number;
+  /** Adaptive decoded-raster memory policy shared by all OOXML renderers. */
+  imageResources?: import('../image/adaptive-image-budget.js').ImageResourceOptions;
   majorFont?: string | null;
   minorFont?: string | null;
   /** Theme hyperlink colour (hex 6 chars). Used to colour hyperlink runs without an explicit colour. */

@@ -26,17 +26,21 @@ describe('DocxViewer.load() — no orphaned engine on re-load (SC20)', () => {
     const { canvas } = mount();
     const first = new FakeDocxEngine(2, A4);
     const second = new FakeDocxEngine(2, A4);
+    const tiff = { render: vi.fn(async () => null) };
     const loadSpy = vi
       .spyOn(DocxDocument, 'load')
       .mockResolvedValueOnce(first.asDoc())
       .mockResolvedValueOnce(second.asDoc());
 
-    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, {
+      password: 'secret',
+      tiff,
+    });
     await v.load('one.docx');
     expect(loadSpy).toHaveBeenNthCalledWith(
       1,
       'one.docx',
-      expect.objectContaining({ password: 'secret' }),
+      expect.objectContaining({ password: 'secret', tiff }),
     );
     expect(first.destroyed).toBe(false);
 

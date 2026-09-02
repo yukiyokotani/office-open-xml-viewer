@@ -82,9 +82,10 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
     expect(b.destroy).toHaveBeenCalledTimes(1);
   });
 
-  it('forwards the opt-in ChartEx renderer to the workbook load', async () => {
+  it('forwards opt-in renderers to the workbook load', async () => {
     const chartEx = { render: vi.fn() };
-    const { v } = build({ chartEx });
+    const tiff = { render: vi.fn(async () => null) };
+    const { v } = build({ chartEx, tiff });
     const loaded = fakeWorkbook();
     const loadSpy = vi.spyOn(XlsxWorkbook, 'load').mockResolvedValueOnce(loaded.wb);
 
@@ -92,7 +93,7 @@ describe('XlsxViewer.load() — no orphaned workbook on re-load (SC20)', () => {
 
     expect(loadSpy).toHaveBeenCalledWith(
       'chartex.xlsx',
-      expect.objectContaining({ chartEx }),
+      expect.objectContaining({ chartEx, tiff }),
     );
     v.destroy();
   });

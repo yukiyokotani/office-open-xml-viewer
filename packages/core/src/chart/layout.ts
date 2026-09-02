@@ -128,6 +128,7 @@ export interface ChartFrame {
   legendBands: ChartLegendBands;
   axisTitles: ChartAxisTitleBands;
   plotRect: ChartPlotRect;
+  plotAreaManualLayoutApplied: boolean;
   center: { cx: number; cy: number };
 }
 
@@ -686,6 +687,7 @@ export function computeChartFrame(
     ph = h - pad.t - pad.b;
   }
 
+  let plotAreaManualLayoutApplied = false;
   const pml = params.honorPlotAreaManualLayout ? chart.plotAreaManualLayout : null;
   if (pml) {
     const inset = pml.layoutTarget === 'inner'
@@ -709,6 +711,7 @@ export function computeChartFrame(
       py0 = resolved.y + inset.t;
       pw = resolved.w - inset.l - inset.r;
       ph = resolved.h - inset.t - inset.b;
+      plotAreaManualLayoutApplied = true;
     }
   }
 
@@ -718,6 +721,7 @@ export function computeChartFrame(
     legendBands,
     axisTitles,
     plotRect: { px0, py0, pw, ph },
+    plotAreaManualLayoutApplied,
     center: { cx: px0 + pw / 2, cy: py0 + ph / 2 },
   };
 }

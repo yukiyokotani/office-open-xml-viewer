@@ -41,7 +41,8 @@
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/pptx_parser.js",
     "vrt": "VRT_MODE=regression playwright test --config playwright.config.ts",
     "vrt:snapshot": "VRT_SNAPSHOT=1 playwright test --config playwright.config.ts",
-    "vrt:private": "VRT_PRIVATE_CORPUS=1 VRT_MODE=regression playwright test --config playwright.config.ts --grep 'private corpus self regression'",
+    "vrt:private": "VRT_PRIVATE_CORPUS=1 VRT_MODE=regression playwright test --config playwright.config.ts --grep 'private corpus (self regression|worker parity)'",
+    "vrt:private:worker": "VRT_PRIVATE_WORKER_PARITY=1 playwright test --config playwright.config.ts --grep 'private corpus worker parity'",
     "vrt:private:snapshot": "VRT_PRIVATE_CORPUS=1 VRT_SNAPSHOT=1 playwright test --config playwright.config.ts --grep 'private corpus self regression'",
     "vrt:fidelity": "VRT_MODE=fidelity playwright test --config playwright.config.ts",
     "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence"

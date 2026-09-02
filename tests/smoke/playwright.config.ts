@@ -2,6 +2,10 @@ import { defineConfig, devices } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const SMOKE_PORT = Number(process.env.OOXML_SMOKE_PORT ?? 6007);
+if (!Number.isInteger(SMOKE_PORT) || SMOKE_PORT < 1 || SMOKE_PORT > 65_535) {
+  throw new Error(`invalid OOXML_SMOKE_PORT: ${process.env.OOXML_SMOKE_PORT}`);
+}
 
 export default defineConfig({
   testDir: '.',
@@ -9,7 +13,7 @@ export default defineConfig({
   fullyParallel: false,
   reporter: [['list']],
   use: {
-    baseURL: 'http://localhost:6007',
+    baseURL: `http://localhost:${SMOKE_PORT}`,
     actionTimeout: 30_000,
   },
   // The smoke assertion is canvasHasInk (a count of non-white pixels), which is
@@ -45,9 +49,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm exec storybook dev --port 6007 --no-open',
+    command: `pnpm exec storybook dev --port ${SMOKE_PORT} --no-open`,
     cwd: REPOSITORY_ROOT,
-    url: 'http://localhost:6007/iframe.html',
+    url: `http://localhost:${SMOKE_PORT}/iframe.html`,
     // Locally, reuse a Storybook already serving on 6007; in CI always boot a
     // fresh one so the run never binds to a stale/unrelated server.
     reuseExistingServer: !process.env.CI,

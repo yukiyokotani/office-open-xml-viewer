@@ -34,10 +34,14 @@
 
       const renderers = { math, threeD, regionMap };
       const main = await PptxPresentation.load(buf.slice(0), { useGoogleFonts: true, ...renderers });
-      paint('main-canvas', await main.renderSlideToBitmap(slide, { width, dpr }));
-
       const wk = await PptxPresentation.load(buf.slice(0), { mode: 'worker', useGoogleFonts: true, ...renderers });
-      paint('worker-canvas', await wk.renderSlideToBitmap(slide, { width, dpr }));
+      const renderBoth = async (slideIndex) => {
+        paint('main-canvas', await main.renderSlideToBitmap(slideIndex, { width, dpr }));
+        paint('worker-canvas', await wk.renderSlideToBitmap(slideIndex, { width, dpr }));
+      };
+      await renderBoth(slide);
+      window.renderPptxWorkerVrtSlide = renderBoth;
+      document.body.dataset.slideCount = String(main.slideCount);
 
       // IX-nav: the slide part-name → index map must be identical in main and
       // worker mode (worker rides `partNames` through the meta). Probe every
@@ -53,8 +57,15 @@
       document.body.dataset.navMain = JSON.stringify(probe(main));
       document.body.dataset.navWorker = JSON.stringify(probe(wk));
 
-      main.destroy();
-      wk.destroy();
+      let destroyed = false;
+      const destroy = () => {
+        if (destroyed) return;
+        destroyed = true;
+        main.destroy();
+        wk.destroy();
+      };
+      window.destroyPptxWorkerVrt = destroy;
+      window.addEventListener('pagehide', destroy, { once: true });
 
       document.body.dataset.status = 'ready';
     } catch (err) {

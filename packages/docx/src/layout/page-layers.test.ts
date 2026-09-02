@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildPageLayers } from './page-layers.js';
 import type {
+  DrawingPaintCommand,
   DrawingLayout,
   LayoutRect,
   PagePaintDrawingEntry,
@@ -296,8 +297,40 @@ describe('buildPageLayers', () => {
     });
 
     expect(buildPageLayers([{ layer: 'body', node: ordinary }]).capabilities)
-      .toEqual({ requiresElementBackedVerticalGlyphPaint: false });
+      .toEqual({ requiresElementBackedVerticalGlyphPaint: false, resourceKeys: [] });
     expect(buildPageLayers([{ layer: 'body', node: vertical }]).capabilities)
-      .toEqual({ requiresElementBackedVerticalGlyphPaint: true });
+      .toEqual({ requiresElementBackedVerticalGlyphPaint: true, resourceKeys: [] });
+  });
+
+  it('retains exactly the resource keys reachable from the immutable page graph', () => {
+    const inline = Object.freeze({
+      ...paragraph('p1', 'body'),
+      resources: Object.freeze([
+        Object.freeze({
+          kind: 'image',
+          resourceKey: 'image:inline',
+          intrinsicSize: Object.freeze({ widthPt: 10, heightPt: 10 }),
+        }),
+      ]),
+      drawings: Object.freeze([Object.freeze({
+        ...drawing('drawing', false, 1, 1),
+        commands: Object.freeze([
+          Object.freeze({
+            kind: 'resource',
+            resourceKey: 'chart:drawing',
+            resourceKind: 'chart',
+            rect: bounds,
+          }),
+          Object.freeze({
+            kind: 'drawingml-image-fill',
+            resourceKey: 'image:shape-fill',
+            plan: Object.freeze({}),
+          }) as unknown as DrawingPaintCommand,
+        ]),
+      })]),
+    }) as ParagraphLayout;
+
+    expect(buildPageLayers([{ layer: 'body', node: inline }]).capabilities.resourceKeys)
+      .toEqual(['image:inline', 'chart:drawing', 'image:shape-fill']);
   });
 });

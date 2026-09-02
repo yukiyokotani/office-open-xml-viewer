@@ -78,6 +78,152 @@ describe('getCachedDuotoneBitmapByPath', () => {
     dropBitmapCacheByPath(fetchImage);
   });
 
+  it('applies duotone on the authored grid before display-target resampling', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const pngView = new DataView(png.buffer);
+    pngView.setUint32(16, 2);
+    pngView.setUint32(20, 2);
+    const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
+    const surfaces: Array<{ width: number; height: number }> = [];
+    const factory = ((width: number, height: number) => {
+      surfaces.push({ width, height });
+      return {
+        width,
+        height,
+        getContext: () => ({
+          drawImage() {},
+          getImageData: () => ({
+            data: new Uint8ClampedArray(width * height * 4).fill(255),
+            width,
+            height,
+          }),
+          putImageData() {},
+        }),
+      };
+    }) as unknown as OffscreenFactory;
+    const createBitmap = vi.fn(async (
+      source: Blob | { width: number; height: number },
+      options?: ImageBitmapOptions,
+    ) => ({
+      width: options?.resizeWidth ?? (source instanceof Blob ? 2 : source.width),
+      height: options?.resizeWidth ?? (source instanceof Blob ? 2 : source.height),
+      close() {},
+    }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', createBitmap);
+    const path = 'ppt/media/duotone-effect-order.png';
+
+    const result = await getCachedDuotoneBitmapByPath(
+      path,
+      'image/png',
+      { clr1: '000000', clr2: 'FFFFFF' },
+      fetchImage,
+      {
+        targetWidthPx: 1,
+        targetHeightPx: 1,
+        offscreenFactory: factory,
+      },
+    );
+
+    expect(surfaces).toEqual([{ width: 2, height: 2 }]);
+    expect(result).toMatchObject({ width: 1, height: 1 });
+    expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
+    expect(createBitmap).toHaveBeenNthCalledWith(2, expect.anything(), {
+      resizeWidth: 1,
+      resizeQuality: 'high',
+    });
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('keys post-effect display variants independently while base variants evolve', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const pngView = new DataView(png.buffer);
+    pngView.setUint32(16, 300);
+    pngView.setUint32(20, 300);
+    const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
+    let derivedIndex = 0;
+    vi.stubGlobal('createImageBitmap', vi.fn(async (
+      source: Blob | { width: number; height: number },
+      options?: ImageBitmapOptions,
+    ) => source instanceof Blob
+      ? ({
+          width: options?.resizeWidth ?? 300,
+          height: options?.resizeWidth ?? 300,
+          close() {},
+        } as unknown as ImageBitmap)
+      : ({
+          width: options?.resizeWidth ?? source.width,
+          height: options?.resizeWidth ?? source.height,
+          derivedIndex: derivedIndex++,
+          close() {},
+        } as unknown as ImageBitmap)));
+    const factory = ((width: number, height: number) => ({
+      width,
+      height,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: () => ({
+          data: new Uint8ClampedArray(width * height * 4),
+          width,
+          height,
+        }),
+        putImageData() {},
+      }),
+    })) as unknown as OffscreenFactory;
+    const path = 'ppt/media/duotone-variant-race.png';
+    const maxRetainedPixels = 1 << 23;
+    const duotone = { clr1: '000000', clr2: 'FFFFFF' };
+
+    await getCachedBitmapByPath(path, 'image/png', fetchImage, {
+      targetWidthPx: 100,
+      targetHeightPx: 100,
+      maxRetainedPixels,
+    });
+    const smallDerivedPromise = getCachedDuotoneBitmapByPath(
+      path,
+      'image/png',
+      duotone,
+      fetchImage,
+      {
+        targetWidthPx: 80,
+        targetHeightPx: 30,
+        maxRetainedPixels,
+        offscreenFactory: factory,
+      },
+    );
+    const largeBasePromise = getCachedBitmapByPath(path, 'image/png', fetchImage, {
+      targetWidthPx: 200,
+      targetHeightPx: 40,
+      maxRetainedPixels,
+    });
+    const [smallDerived, largeBase] = await Promise.all([smallDerivedPromise, largeBasePromise]);
+    const largeDerived = await getCachedDuotoneBitmapByPath(
+      path,
+      'image/png',
+      duotone,
+      fetchImage,
+      {
+        targetWidthPx: 200,
+        targetHeightPx: 40,
+        maxRetainedPixels,
+        offscreenFactory: factory,
+      },
+    );
+
+    expect(smallDerived).toMatchObject({ width: 80, height: 80 });
+    expect(largeBase).toMatchObject({ width: 200, height: 200 });
+    expect(largeDerived).toMatchObject({ width: 200, height: 200 });
+    expect(largeDerived).not.toBe(smallDerived);
+
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   it('passes through to the base cache (no recolour) when duotone is null', async () => {
     const path = 'ppt/media/duo-passthrough-b.png';
     const baseBitmap = { width: 2, height: 2, close() {} } as unknown as ImageBitmap;
@@ -123,6 +269,47 @@ describe('getCachedDuotoneBitmapByPath', () => {
     dropBitmapCacheByPath(fetchImage);
   });
 
+  it('rejects before decode when the required duotone base exceeds its working-set budget', async () => {
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    png.set([0x49, 0x48, 0x44, 0x52], 12);
+    new DataView(png.buffer).setUint32(16, 12_000);
+    new DataView(png.buffer).setUint32(20, 9_000);
+    const created: Array<{ width: number; height: number }> = [];
+    vi.stubGlobal('createImageBitmap', vi.fn(async (source: Blob | { width: number; height: number }, options?: ImageBitmapOptions) => {
+      const width = source instanceof Blob ? options?.resizeWidth ?? 12_000 : source.width;
+      const height = source instanceof Blob ? Math.floor(width * 0.75) : source.height;
+      const bitmap = { width, height, close() {} } as unknown as ImageBitmap;
+      created.push({ width, height });
+      return bitmap;
+    }));
+    const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
+    const factory = ((width: number, height: number) => ({
+      width,
+      height,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: () => ({ data: new Uint8ClampedArray([255, 255, 255, 255]), width: 1, height: 1 }),
+        putImageData() {},
+      }),
+    })) as unknown as OffscreenFactory;
+    await expect(getCachedDuotoneBitmapByPath(
+      'ppt/media/poster.png',
+      'image/png',
+      { clr1: '000000', clr2: 'FFFFFF' },
+      fetchImage,
+      { targetWidthPx: 1_200, targetHeightPx: 900, offscreenFactory: factory },
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      limit: 8_388_608,
+      observed: 12_000 * 9_000,
+    });
+    expect(created).toEqual([]);
+    dropDuotoneBitmapCache(fetchImage);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   it('duotoneCacheKey suffixes the path with both colours only when a duotone is set', () => {
     expect(duotoneCacheKey('word/media/image1.png')).toBe('word/media/image1.png');
     expect(duotoneCacheKey('word/media/image1.png', null)).toBe('word/media/image1.png');
@@ -151,6 +338,66 @@ describe('getCachedDuotoneBitmapByPath', () => {
 
     dropDuotoneBitmapCache(fetchImage);
     dropBitmapCacheByPath(fetchImage);
+  });
+
+  it.each([
+    [
+      'an unavailable effect surface',
+      (() => null) as unknown as OffscreenFactory,
+    ],
+    [
+      'unavailable pixel readback',
+      ((width: number, height: number) => ({
+        width,
+        height,
+        getContext: () => ({
+          drawImage() {},
+          getImageData() { throw new Error('readback unavailable'); },
+          putImageData() {},
+        }),
+      })) as unknown as OffscreenFactory,
+    ],
+  ])('resamples the current source after %s while strict callers fail closed', async (_name, factory) => {
+    const baseClose = vi.fn();
+    const resizedClose = vi.fn();
+    const base = { width: 4, height: 2, close: baseClose } as unknown as ImageBitmap;
+    const resized = { width: 2, height: 1, close: resizedClose } as unknown as ImageBitmap;
+    const createBitmap = vi.fn(async (source: Blob | ImageBitmap) => (
+      source instanceof Blob ? base : resized
+    ));
+    vi.stubGlobal('createImageBitmap', createBitmap);
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+    const path = `ppt/media/duotone-fallback-${_name}.png`;
+    const duotone = { clr1: '000000', clr2: 'FFFFFF' };
+    const options = {
+      targetWidthPx: 2,
+      targetHeightPx: 1,
+      offscreenFactory: factory,
+    };
+
+    await expect(getCachedDuotoneBitmapByPath(
+      path, 'image/png', duotone, fetchImage, options,
+    )).resolves.toBe(resized);
+    await expect(getCachedDuotoneBitmapByPath(
+      path, 'image/png', duotone, fetchImage,
+      { ...options, failClosedOnDuotoneFailure: true },
+    )).resolves.toBeNull();
+
+    expect(createBitmap).toHaveBeenCalledTimes(2);
+    expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
+    expect(createBitmap).toHaveBeenNthCalledWith(2, base, {
+      resizeWidth: 2,
+      resizeQuality: 'high',
+    });
+
+    dropDuotoneBitmapCache(fetchImage);
+    await Promise.resolve();
+    expect(resizedClose).toHaveBeenCalledOnce();
+    expect(baseClose).not.toHaveBeenCalled();
+    dropBitmapCacheByPath(fetchImage);
+    await Promise.resolve();
+    expect(baseClose).toHaveBeenCalledOnce();
   });
 
   // ── Second-layer × base-eviction interaction ────────────────────────────────
@@ -213,16 +460,23 @@ describe('getCachedDuotoneBitmapByPath', () => {
     );
     const duotone = { clr1: '000000', clr2: 'DAB6BA' };
     const path = 'ppt/media/duo-double-close.png';
+    let markEffectStarted!: () => void;
+    const effectStarted = new Promise<void>((resolve) => { markEffectStarted = resolve; });
+    const unavailableFactory = (() => {
+      markEffectStarted();
+      return null;
+    }) as unknown as OffscreenFactory;
 
     const release = acquireBitmapCacheLease(fetchImage);
     // Settle the base first so the duotone wrapper reaches its second-layer
     // entry creation promptly.
     await getCachedBitmapByPath(path, 'image/png', fetchImage);
-    const p = getCachedDuotoneBitmapByPath(path, 'image/png', duotone, fetchImage, {});
-    // Nudge one microtask so the second-layer entry may exist (created after the
-    // base await) but its pass-through self-evict may not have run, then drop
-    // BOTH caches while leased.
-    await Promise.resolve();
+    const p = getCachedDuotoneBitmapByPath(path, 'image/png', duotone, fetchImage, {
+      offscreenFactory: unavailableFactory,
+    });
+    // Wait until the derived producer is running, which proves its entry was
+    // inserted with a current epoch before either drop occurs.
+    await effectStarted;
     dropDuotoneBitmapCache(fetchImage);
     dropBitmapCacheByPath(fetchImage);
     await p;
@@ -230,5 +484,76 @@ describe('getCachedDuotoneBitmapByPath', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(closes.length).toBe(1);
+  });
+
+  it('does not recreate a duotone entry when a full drop wins after the base resolves', async () => {
+    let finishBase!: (bitmap: ImageBitmap) => void;
+    const baseClose = vi.fn();
+    const derivedClose = vi.fn();
+    const base = { width: 2, height: 2, close: baseClose } as unknown as ImageBitmap;
+    const derived = { width: 2, height: 2, close: derivedClose } as unknown as ImageBitmap;
+    const cib = vi.fn()
+      .mockImplementationOnce(() => new Promise<ImageBitmap>((resolve) => { finishBase = resolve; }))
+      .mockResolvedValueOnce(derived);
+    vi.stubGlobal('createImageBitmap', cib);
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+    const release = acquireBitmapCacheLease(fetchImage);
+    const pending = getCachedDuotoneBitmapByPath(
+      'ppt/media/duo-owner-drop-race.png',
+      'image/png',
+      { clr1: '000000', clr2: 'FFFFFF' },
+      fetchImage,
+      { offscreenFactory: recordingFactory({}) },
+    );
+    await vi.waitFor(() => expect(cib).toHaveBeenCalledOnce());
+    const rejected = expect(pending).rejects.toThrow(/cache.*dropped/i);
+
+    // Resolve the base and tear down in the same task, before the wrapper's
+    // continuation can insert its derived entry.
+    finishBase(base);
+    dropBitmapCacheByPath(fetchImage);
+    await rejected;
+
+    expect(cib).toHaveBeenCalledOnce();
+    expect(derivedClose).not.toHaveBeenCalled();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(baseClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not recreate a duotone entry when its namespace is dropped after the base resolves', async () => {
+    let finishBase!: (bitmap: ImageBitmap) => void;
+    const baseClose = vi.fn();
+    const derivedClose = vi.fn();
+    const base = { width: 2, height: 2, close: baseClose } as unknown as ImageBitmap;
+    const derived = { width: 2, height: 2, close: derivedClose } as unknown as ImageBitmap;
+    const cib = vi.fn()
+      .mockImplementationOnce(() => new Promise<ImageBitmap>((resolve) => { finishBase = resolve; }))
+      .mockResolvedValueOnce(derived);
+    vi.stubGlobal('createImageBitmap', cib);
+    const fetchImage = vi.fn(async (_path: string, mime: string) =>
+      new Blob([new Uint8Array([1])], { type: mime }));
+    const release = acquireBitmapCacheLease(fetchImage);
+    const pending = getCachedDuotoneBitmapByPath(
+      'ppt/media/duo-namespace-drop-race.png',
+      'image/png',
+      { clr1: '000000', clr2: 'FFFFFF' },
+      fetchImage,
+      { offscreenFactory: recordingFactory({}) },
+    );
+    await vi.waitFor(() => expect(cib).toHaveBeenCalledOnce());
+    const rejected = expect(pending).rejects.toThrow(/cache.*dropped/i);
+
+    finishBase(base);
+    dropDuotoneBitmapCache(fetchImage);
+    await rejected;
+
+    expect(cib).toHaveBeenCalledOnce();
+    expect(derivedClose).not.toHaveBeenCalled();
+    release();
+    dropBitmapCacheByPath(fetchImage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(baseClose).toHaveBeenCalledOnce();
   });
 });
