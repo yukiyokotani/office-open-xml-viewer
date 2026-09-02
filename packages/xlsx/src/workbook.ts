@@ -1,9 +1,8 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
-  preloadGoogleFonts,
   FontProviderSession,
-  unloadGoogleFonts,
+  GoogleFontsProvider,
   WorkerBridge,
   defaultDpr,
   dropDecodedBitmapCache,
@@ -41,14 +40,16 @@ import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-pa
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import {
+  xlsxFontPreloadNames,
+  xlsxFontProviderNames,
+  xlsxWorksheetFontProviderNames,
+} from './font-plan.js';
 import { formatCellValue } from './number-format.js';
 import {
   applyWorkbookFontRoutes,
   applyWorksheetFontRoutes,
-  xlsxFontProviderNames,
-  xlsxWorksheetFontProviderNames,
-} from './provider-fonts.js';
+} from './font-routes.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -94,12 +95,6 @@ export const retainXlsxViewerFonts = Symbol('retain-xlsx-viewer-fonts');
 export const prepareXlsxViewerRowHeights = Symbol('prepare-xlsx-viewer-row-heights');
 /** @internal Release worker-side viewer projection cache entries. */
 export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
-
-interface RetainedFontSet {
-  refs: number;
-  faces: FontFace[] | null;
-  readonly loading: Promise<FontFace[]>;
-}
 
 /** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
@@ -160,10 +155,6 @@ export class XlsxWorkbook {
   private chartEx: ChartExRenderer | undefined;
   /** Optional TIFF codec. Worker mode reconstructs the built-in implementation. */
   private tiff: TiffRenderer | undefined;
-  /** Web-font registrations are per FontFaceSet. Same-origin child windows have
-   * their own set even when they share this workbook instance. */
-  private googleFontNames: string[] = [];
-  private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   private fontsDestroyed = false;
   private readonly fontSession: FontProviderSession | null;
   private readonly fontHost: FontProviderHost | null;
@@ -283,8 +274,11 @@ export class XlsxWorkbook {
         : new InlineWorker();
     let wb: XlsxWorkbook | undefined;
     try {
-      const fontSession = opts.fontProvider
-        ? new FontProviderSession(opts.fontProvider, opts.fontFailure)
+      const fontSession = opts.fontProvider || opts.useGoogleFonts
+        ? new FontProviderSession(
+            opts.fontProvider ?? new GoogleFontsProvider(),
+            opts.fontProvider ? opts.fontFailure : 'fallback',
+          )
         : null;
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, fontSession);
       wb.metrics = metrics;
@@ -320,6 +314,7 @@ export class XlsxWorkbook {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
   ): Promise<void> {
+    const googleFonts = !!opts.useGoogleFonts || opts.fontProvider instanceof GoogleFontsProvider;
     this.resourceFailure = null;
     this.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
     this.sheetCache.clear();
@@ -376,8 +371,8 @@ export class XlsxWorkbook {
               id,
               data: workerData,
               resourcePolicy,
-              useGoogleFonts: !!opts.useGoogleFonts,
-              useFontProvider: !!opts.fontProvider,
+              useGoogleFonts: googleFonts,
+              useFontProvider: !!this.fontSession,
               renderers: rendererDescriptors,
             } satisfies RenderWorkerRequest)
           : ({
@@ -405,9 +400,12 @@ export class XlsxWorkbook {
     }
     this.ensureWorksheetPullClient();
     if (this.fontSession && this.parsedWorkbook) {
-      this.providerFontNames = xlsxFontProviderNames(this.parsedWorkbook);
+      this.providerFontNames = googleFonts
+        ? [...xlsxFontPreloadNames(this.parsedWorkbook)]
+        : xlsxFontProviderNames(this.parsedWorkbook);
       const target = typeof document !== 'undefined' ? document.fonts : null;
       const resolved = await this.fontSession.ensure(this.providerFontNames, target);
+      if (target) this.fontSession.retain(target);
       this.fontRoutes = resolved.routes;
       applyWorkbookFontRoutes(this.parsedWorkbook, this.fontRoutes);
     }
@@ -421,49 +419,15 @@ export class XlsxWorkbook {
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
-    if (opts.useGoogleFonts) {
-      // The composite viewer computes hit/scroll/overlay geometry on the main
-      // realm even when paint runs in a worker. Register the same fallback
-      // faces in both realms before any worksheet geometry snapshot is made so
-      // ECMA-376 MDW is identical across paint and interaction.
-      this.googleFontNames = [...xlsxFontPreloadNames(this.parsedWorkbook)];
-      if (typeof document !== 'undefined' && document.fonts) {
-        await this.retainFontsInSet(document.fonts);
-      }
-    }
   }
 
   private async retainFontsInSet(fontSet: FontFaceSet): Promise<() => void> {
     if (this.fontsDestroyed) return () => undefined;
     if (this.fontSession && this.providerFontNames.length > 0) {
       await this.fontSession.ensure(this.providerFontNames, fontSet);
+      return this.fontSession.retain(fontSet);
     }
-    if (this.googleFontNames.length === 0) return () => undefined;
-    let retained = this.retainedFontSets.get(fontSet);
-    if (retained) {
-      retained.refs++;
-    } else {
-      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet);
-      retained = { refs: 1, faces: null, loading };
-      this.retainedFontSets.set(fontSet, retained);
-      loading.then((faces) => {
-        retained!.faces = faces;
-        if (this.fontsDestroyed) unloadGoogleFonts(faces);
-      });
-    }
-    await retained.loading;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const current = this.retainedFontSets.get(fontSet);
-      if (current !== retained) return;
-      current.refs--;
-      if (current.refs > 0) return;
-      this.retainedFontSets.delete(fontSet);
-      if (current.faces) unloadGoogleFonts(current.faces);
-      else current.loading.then(unloadGoogleFonts);
-    };
+    return () => undefined;
   }
 
   /** @internal Retain required faces in the document that owns a viewer canvas. */
@@ -968,13 +932,6 @@ export class XlsxWorkbook {
     this.sheetCache.clear();
     this.sheetLoads.clear();
     this.fontsDestroyed = true;
-    for (const retained of this.retainedFontSets.values()) {
-      if (retained.faces) unloadGoogleFonts(retained.faces);
-      // An in-flight registration observes fontsDestroyed in its own completion
-      // callback and releases exactly once when the faces become available.
-    }
-    this.retainedFontSets.clear();
-    this.googleFontNames = [];
     this.fontSession?.destroy();
     this.fontRoutes = {};
     this.providerFontNames = [];

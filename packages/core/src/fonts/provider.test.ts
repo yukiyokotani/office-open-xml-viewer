@@ -20,7 +20,7 @@ class TestProvider extends FontProvider {
   );
 }
 
-function installFonts() {
+function installFonts(fail = false, waitForLoad?: () => Promise<void>) {
   const added: FakeFace[] = [];
   const deleted: FakeFace[] = [];
   class FakeFace {
@@ -31,6 +31,8 @@ function installFonts() {
       readonly descriptors: FontFaceDescriptors = {},
     ) {}
     async load(): Promise<this> {
+      if (fail) throw new Error('invalid font');
+      await waitForLoad?.();
       this.status = 'loaded';
       return this;
     }
@@ -88,6 +90,33 @@ describe('FontProviderSession', () => {
     expect(added).toHaveLength(2);
   });
 
+  it('deduplicates concurrent registration and releases its only hold', async () => {
+    let loadCount = 0;
+    let finishLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => { finishLoad = resolve; });
+    const { fonts, added, deleted } = installFonts(
+      false,
+      async () => {
+        loadCount += 1;
+        await loadGate;
+      },
+    );
+    const session = new FontProviderSession(new TestProvider());
+
+    const first = session.ensure(['Calibri'], fonts);
+    await vi.waitFor(() => expect(loadCount).toBe(1));
+    const second = session.ensure(['calibri'], fonts);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const concurrentLoads = loadCount;
+    finishLoad();
+    await Promise.all([first, second]);
+    session.destroy();
+
+    expect(concurrentLoads).toBe(1);
+    expect(added).toHaveLength(1);
+    expect(deleted).toEqual(added);
+  });
+
   it('returns independent worker buffers and releases registered faces', async () => {
     const { fonts, added, deleted } = installFonts();
     const session = new FontProviderSession(new TestProvider());
@@ -99,6 +128,19 @@ describe('FontProviderSession', () => {
     expect(new Uint8Array(added[0].source as ArrayBuffer)[0]).toBe(1);
 
     session.destroy();
+    expect(deleted).toEqual(added);
+  });
+
+  it('releases a viewer FontFaceSet after its last holder', async () => {
+    const { fonts, added, deleted } = installFonts();
+    const session = new FontProviderSession(new TestProvider());
+    await session.ensure(['Calibri'], fonts);
+    const releaseFirst = session.retain(fonts);
+    const releaseSecond = session.retain(fonts);
+
+    releaseFirst();
+    expect(deleted).toEqual([]);
+    releaseSecond();
     expect(deleted).toEqual(added);
   });
 
@@ -115,5 +157,17 @@ describe('FontProviderSession', () => {
 
     await expect(new FontProviderSession(new EmptyProvider(), 'error').ensure(['Missing']))
       .rejects.toThrow('Missing');
+  });
+
+  it('does not route main-thread layout to a face that failed to load', async () => {
+    const { fonts, added, deleted } = installFonts(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const resolved = await new FontProviderSession(new TestProvider()).ensure(['Calibri'], fonts);
+
+    expect(resolved.routes).toEqual({});
+    expect(added).toHaveLength(1);
+    expect(deleted).toEqual(added);
+    expect(warn).toHaveBeenCalledOnce();
   });
 });

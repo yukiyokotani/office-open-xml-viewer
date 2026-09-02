@@ -2,6 +2,7 @@ export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './view
 export {
   FontProvider,
   FontProviderSession,
+  GoogleFontsProvider,
   type FontAsset,
   type FontAssetSource,
   type FontFailure,

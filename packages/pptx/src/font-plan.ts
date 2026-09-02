@@ -1,30 +1,10 @@
 import {
   classifyCjkFont,
   chartFontFamilies,
-  GOOGLE_FONT_SUBSTITUTES,
-  SCRIPT_GOOGLE_FONTS,
-  type FontPreloadEntry,
   type TextBody,
 } from '@silurus/ooxml-core';
 import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import type { Presentation, Slide, SlideElement } from './types';
-
-/** Theme-referenced typefaces commonly used by PPTX templates. Keys are
- *  lower-cased family names.
- *
- *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri /
- *  Calibri Light → Carlito, Cambria / Cambria Math → Caladea), the popular free
- *  web fonts and the Arabic Noto fallbacks — shared with docx/xlsx; the
- *  renderer puts each substitute into the canvas font stack so a missing Office
- *  font degrades to a same-width webfont instead of a wider system serif/sans.
- *  {@link SCRIPT_GOOGLE_FONTS} adds the CJK / Cyrillic / Thai / Devanagari /
- *  Hebrew Noto faces (CJK ordered by document language). Both load only when
- *  `useGoogleFonts` is on — no binaries ship in the bundle. PPTX currently has
- *  no format-specific additions. */
-export const PPTX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  ...GOOGLE_FONT_SUBSTITUTES,
-  ...SCRIPT_GOOGLE_FONTS,
-};
 
 /** Yield every painted text string in a text body (paragraph runs). */
 function* textBodyRuns(body: TextBody | null | undefined): Generator<string> {

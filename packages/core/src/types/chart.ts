@@ -728,7 +728,7 @@ export interface ChartDataTable {
 
 export interface ChartModel {
   /** @internal Application font fallbacks prepared for this document. */
-  providerFontRoutes?: Readonly<Record<string, string>>;
+  providerFontRoutes?: import('../fonts/provider.js').FontFamilyRoutes;
   chartType: ChartType;
   title: string | null;
   /** Formatted DrawingML runs for a legacy chart title. `title` remains the

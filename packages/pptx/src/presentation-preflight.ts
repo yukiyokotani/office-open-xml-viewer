@@ -7,7 +7,7 @@ import {
   measureStructuralJson,
 } from '@silurus/ooxml-core/internal/resource-measurement';
 import { HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES } from '@silurus/ooxml-core/worker';
-import { PptxFontPreloadAccumulator } from './google-fonts';
+import { PptxFontPreloadAccumulator } from './font-plan';
 import type {
   MediaElement,
   PptxComment,

@@ -235,9 +235,10 @@ const w = (q: string) =>
 
 /**
  * Lower-cased Noto family name → Google Fonts CSS URL for every script face the
- * renderers may reference. Merged into each package's `*_GOOGLE_FONTS` map so a
- * single source of truth defines the URLs. `loadFamily` is omitted because
- * Google Fonts serves these under the same family name we request.
+ * renderers may reference. {@link GoogleFontsProvider} combines this with its
+ * Office-substitution registry. Format packages only discover the names to
+ * resolve. `loadFamily` is omitted because Google Fonts serves these under the
+ * same family name we request.
  */
 export const SCRIPT_GOOGLE_FONTS: Record<string, { url: string; loadFamily?: string }> = {
   // CJK — sans + serif per language.
@@ -312,9 +313,9 @@ export const SCRIPT_PRELOAD_NAMES: string[] = [
  * emitted (the renderer may pick either depending on the run's serif-ness). When
  * multiple CJK languages appear (e.g. Hangul + Kana), each contributes its pair.
  *
- * Note the Arabic names are NOT keys of {@link SCRIPT_GOOGLE_FONTS} — they live
- * in each package's own `*_GOOGLE_FONTS` map (which also spreads SCRIPT_GOOGLE_FONTS),
- * mirroring the unconditional Arabic preload entries the callers already queue.
+ * Note the Arabic names are NOT keys of {@link SCRIPT_GOOGLE_FONTS}; they are
+ * Office-substitution entries owned by {@link GoogleFontsProvider}, mirroring
+ * the unconditional Arabic preload names callers already queue.
  *
  * The result is a deduplicated, deterministically-ordered array, so the
  * main-thread `load()` and the render worker — given the same parsed model —

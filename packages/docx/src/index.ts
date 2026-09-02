@@ -9,6 +9,7 @@ export { DocxViewer, type DocxViewerOptions } from './viewer';
 export {
   FontProvider,
   FontProviderSession,
+  GoogleFontsProvider,
   type FontAsset,
   type FontAssetSource,
   type FontFailure,

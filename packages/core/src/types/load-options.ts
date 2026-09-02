@@ -66,9 +66,9 @@ export interface LoadOptions {
   /** Provider failure behavior. Defaults to a warning and local fallback. */
   fontFailure?: FontFailure;
   /**
-   * Opt in to loading webfont substitutes from Google Fonts
-   * (`fonts.googleapis.com`). Default `false` — the canvas falls back to
-   * locally available fonts.
+   * Use the built-in Google Fonts provider. This backward-compatible shorthand
+   * runs through the same main-thread and worker path as `fontProvider`.
+   * Default `false` — the canvas falls back to locally available fonts.
    *
    * When enabled, end-user IP / User-Agent is sent to Google, which may
    * have privacy / GDPR implications for your application. To avoid the

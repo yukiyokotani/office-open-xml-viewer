@@ -12,10 +12,9 @@ import {
   type SlidePartNames,
 } from './slide-nav';
 import {
-  preloadGoogleFonts,
   FontProviderSession,
+  GoogleFontsProvider,
   releaseOwnedBitmap,
-  unloadGoogleFonts,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -59,7 +58,6 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
 import {
   findPreflightMimeType,
   normalizePresentationBootstrap,
@@ -257,12 +255,6 @@ export class PptxPresentation {
     maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
     maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
   });
-  /** Google-Fonts `FontFace` objects this deck preloaded into `document.fonts`
-   *  (main mode only — in worker mode the worker owns them and terminates with
-   *  its own FontFaceSet). Released in {@link destroy} so they do not leak into
-   *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
-   *  core, so a web font shared with another open deck survives until both go). */
-  private _googleFontFaces: FontFace[] = [];
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
@@ -356,6 +348,7 @@ export class PptxPresentation {
     if (opts.fontProvider && opts.useGoogleFonts) {
       throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
     }
+    const googleFonts = !!opts.useGoogleFonts || opts.fontProvider instanceof GoogleFontsProvider;
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
@@ -395,8 +388,11 @@ export class PptxPresentation {
     const rendererDescriptors = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
     let pres: PptxPresentation | undefined;
     try {
-      const fontSession = opts.fontProvider
-        ? new FontProviderSession(opts.fontProvider, opts.fontFailure)
+      const fontSession = opts.fontProvider || opts.useGoogleFonts
+        ? new FontProviderSession(
+            opts.fontProvider ?? new GoogleFontsProvider(),
+            opts.fontProvider ? opts.fontFailure : 'fallback',
+          )
         : null;
       pres = new PptxPresentation(worker, mode, opts.wasmUrl, fontSession);
       pres._metrics = metrics;
@@ -444,25 +440,21 @@ export class PptxPresentation {
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        !!opts.useGoogleFonts,
+        googleFonts,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
         progressive,
-        !!opts.fontProvider,
+        !!fontSession,
       );
       metrics.checkpoint('presentation preflight ready');
-      if (mode === 'main' && opts.useGoogleFonts && pres._preflight && !progressive) {
-        pres._googleFontFaces = await preloadGoogleFonts(
-          excludeEmbeddedFontFamilies(
-            pres._preflight.fontPreloadNames,
-            pres._embeddedFontAliases,
-          ),
-          PPTX_GOOGLE_FONTS,
-        );
-      }
       if (mode === 'main' && pres._fontSession && pres._preflight && !progressive) {
-        const resolved = await pres._fontSession.ensure(pres._preflight.fontProviderNames ?? []);
+        const names = googleFonts
+          ? pres._preflight.fontPreloadNames
+          : pres._preflight.fontProviderNames ?? [];
+        const resolved = await pres._fontSession.ensure(
+          excludeEmbeddedFontFamilies(names, pres._embeddedFontAliases),
+        );
         pres._fontRoutes = resolved.routes;
       }
       metrics.succeed({ slides: pres.slideCount });
@@ -633,21 +625,17 @@ export class PptxPresentation {
       },
     });
     const builder = new PresentationPreflightBuilder(bootstrap);
-    const loadedGoogleFonts = new Set<string>();
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
       if (useFontProvider && this._fontSession) {
-        const resolved = await this._fontSession.ensure(builder.currentFontProviderNames);
+        const names = useGoogleFonts
+          ? builder.currentFontPreloadNames
+          : builder.currentFontProviderNames;
+        const resolved = await this._fontSession.ensure(
+          excludeEmbeddedFontFamilies(names, this._embeddedFontAliases),
+        );
         this._fontRoutes = { ...this._fontRoutes, ...resolved.routes };
       }
-      if (!useGoogleFonts) return;
-      const requested = excludeEmbeddedFontFamilies(
-        builder.currentFontPreloadNames,
-        this._embeddedFontAliases,
-      ).filter((name): name is string => !!name && !loadedGoogleFonts.has(name));
-      if (requested.length === 0) return;
-      for (const name of requested) loadedGoogleFonts.add(name);
-      this._googleFontFaces.push(...await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS));
     };
     const full = (async () => {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
@@ -1467,14 +1455,6 @@ export class PptxPresentation {
     this._resourceFailure = null;
     this._slidePartIndex = null;
     this._rawParts.clear();
-    // Release the Google-Fonts substitutes this deck preloaded into the shared
-    // FontFaceSet (main mode). Refcounted in core: a web font also used by another
-    // open deck stays until that one is destroyed too. Without this, every opened
-    // deck left its Google FontFace objects in `document.fonts` forever (SPA leak).
-    if (this._googleFontFaces.length > 0) {
-      unloadGoogleFonts(this._googleFontFaces);
-      this._googleFontFaces = [];
-    }
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];

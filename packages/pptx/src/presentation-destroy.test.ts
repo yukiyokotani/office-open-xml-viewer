@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   WorkerBridge,
-  preloadGoogleFonts,
+  FontProviderSession,
+  GoogleFontsProvider,
   registerEmbeddedFonts,
   type WorkerLike,
-  type FontPreloadEntry,
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
@@ -79,14 +79,12 @@ function installFontFaceSet(): { added: FakeFace[] } {
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  G.fetch = async (input: RequestInfo | URL) => String(input).includes('fonts.googleapis')
+    ? new Response(CSS)
+    : new Response(new Uint8Array([1, 2, 3]));
   delete G.self;
   return { added };
 }
-const MAP: Record<string, FontPreloadEntry> = {
-  calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
-};
-
 describe('PptxPresentation.destroy() — rejects in-flight worker requests', () => {
   function makePresentation() {
     const worker = new SilentWorker();
@@ -97,7 +95,6 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     instance._bridge = bridge;
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
-    instance._googleFontFaces = [];
     instance._embeddedFontFaces = [];
     instance._layoutWaiters = new Set();
     instance._layoutLifecycle = new ProgressiveLayoutLifecycle();
@@ -234,22 +231,18 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     expect(SilentWorker.instances).toHaveLength(0);
   });
 
-  // Wiring guard: destroy() must actually release the Google-Fonts substitutes
-  // the deck preloaded into the shared FontFaceSet. The other tests set
-  // `_googleFontFaces = []`, so they never exercise the unload branch — a dropped
-  // call (or a wrong field name) would go unnoticed. Preload a real face through
-  // core, hand it to the deck, then assert destroy() removes it and clears the array.
+  // Google fonts use the same session-owned cleanup as private providers.
   it('destroy() releases the deck’s Google fonts from the FontFaceSet', async () => {
     const { added } = installFontFaceSet();
-    const held = await preloadGoogleFonts(['Calibri'], MAP);
+    const session = new FontProviderSession(new GoogleFontsProvider());
+    await session.ensure(['Calibri']);
     expect(added).toHaveLength(1); // the web font is in the shared set
 
     const { pres } = makePresentation();
-    (pres as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces = held;
+    (pres as unknown as { _fontSession: FontProviderSession })._fontSession = session;
     pres.destroy();
 
     expect(added).toHaveLength(0); // face left the set
-    expect((pres as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
   });
 
   it('destroy() releases the deck’s embedded fonts from the FontFaceSet', async () => {

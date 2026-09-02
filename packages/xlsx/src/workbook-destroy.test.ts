@@ -2,11 +2,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
   WorkerBridge,
-  preloadGoogleFonts,
+  FontProviderSession,
+  GoogleFontsProvider,
   getCachedBitmapByPath,
   getCachedDuotoneBitmapByPath,
   type WorkerLike,
-  type FontPreloadEntry,
   type OffscreenFactory,
 } from '@silurus/ooxml-core';
 import { XlsxWorkbook, retainXlsxViewerFonts } from './workbook.js';
@@ -64,11 +64,12 @@ afterEach(() => {
 });
 
 const CSS = `@font-face { font-family: 'Carlito'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/carlito/y.woff2) format('woff2'); }`;
+const CALADEA_CSS = `@font-face { font-family: 'Caladea'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/caladea/y.woff2) format('woff2'); }`;
 interface FakeFace { family: string }
 function installFontFaceSet(): { added: FakeFace[] } {
   const added: FakeFace[] = [];
   class FakeFontFace {
-    constructor(public family: string, public source: string, public descriptors?: object) {}
+    constructor(public family: string, public source: string | ArrayBuffer, public descriptors?: object) {}
     load(): Promise<FakeFontFace> { return Promise.resolve(this); }
   }
   const set = {
@@ -79,14 +80,12 @@ function installFontFaceSet(): { added: FakeFace[] } {
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  G.fetch = async (input: RequestInfo | URL) => String(input).includes('fonts.googleapis')
+    ? new Response(CSS)
+    : new Response(new Uint8Array([1, 2, 3]));
   delete G.self;
   return { added };
 }
-const MAP: Record<string, FontPreloadEntry> = {
-  calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
-};
-
 describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
   function makeWorkbook() {
     const worker = new SilentWorker();
@@ -99,8 +98,6 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     instance.sheetCache = new Map();
     instance.sheetLoads = new Map();
     instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
-    instance.googleFontNames = [];
-    instance.retainedFontSets = new Map();
     instance.fontsDestroyed = false;
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { wb: instance as unknown as DestroyProbe, bridge, worker };
@@ -181,39 +178,58 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     expect(SilentWorker.instances).toHaveLength(0);
   });
 
-  // Wiring guard: destroy() must actually release the Google-Fonts substitutes
-  // retained in the workbook's per-document FontFaceSet registry.
+  // Google fonts use the same session-owned cleanup as private providers.
   it('destroy() releases the workbook’s Google fonts from the FontFaceSet', async () => {
     const { added } = installFontFaceSet();
-    const held = await preloadGoogleFonts(['Calibri'], MAP);
+    const session = new FontProviderSession(new GoogleFontsProvider());
+    await session.ensure(['Calibri']);
     expect(added).toHaveLength(1);
 
     const { wb } = makeWorkbook();
-    const retainedFontSets = (wb as unknown as {
-      retainedFontSets: Map<FontFaceSet, { refs: number; faces: FontFace[]; loading: Promise<FontFace[]> }>;
-    }).retainedFontSets;
-    const fontSet = (G.document as { fonts: FontFaceSet }).fonts;
-    retainedFontSets.set(fontSet, { refs: 1, faces: held, loading: Promise.resolve(held) });
+    (wb as unknown as { fontSession: FontProviderSession }).fontSession = session;
     wb.destroy();
 
     expect(added).toHaveLength(0);
-    expect(retainedFontSets.size).toBe(0);
+  });
+
+  it('releases a viewer-owned FontFaceSet before workbook destruction', async () => {
+    const { added } = installFontFaceSet();
+    const { wb } = makeWorkbook();
+    (wb as unknown as { fontSession: FontProviderSession }).fontSession =
+      new FontProviderSession(new GoogleFontsProvider());
+    (wb as unknown as { providerFontNames: string[] }).providerFontNames = ['Calibri'];
+
+    const release = await (wb as unknown as XlsxWorkbook)[retainXlsxViewerFonts](
+      G.document as Document,
+    );
+    expect(added).toHaveLength(1);
+
+    release();
+    expect(added).toHaveLength(0);
+    wb.destroy();
   });
 
   it('an in-flight destroy releases once and preserves another workbook holder', async () => {
     const { added } = installFontFaceSet();
-    let resolveFetch!: (response: { ok: boolean; text(): Promise<string> }) => void;
-    G.fetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    let resolveFetch!: (response: Response) => void;
+    G.fetch = vi.fn((input: RequestInfo | URL) => String(input).includes('fonts.googleapis')
+      ? new Promise<Response>((resolve) => { resolveFetch = resolve; })
+      : Promise.resolve(new Response(new Uint8Array([1, 2, 3]))));
     const first = makeWorkbook().wb as unknown as XlsxWorkbook;
     const second = makeWorkbook().wb as unknown as XlsxWorkbook;
-    (first as unknown as { googleFontNames: string[] }).googleFontNames = ['Cambria'];
-    (second as unknown as { googleFontNames: string[] }).googleFontNames = ['Cambria'];
+    (first as unknown as { fontSession: FontProviderSession }).fontSession =
+      new FontProviderSession(new GoogleFontsProvider());
+    (second as unknown as { fontSession: FontProviderSession }).fontSession =
+      new FontProviderSession(new GoogleFontsProvider());
+    (first as unknown as { providerFontNames: string[] }).providerFontNames = ['Cambria'];
+    (second as unknown as { providerFontNames: string[] }).providerFontNames = ['Cambria'];
     const targetDocument = G.document as Document;
 
     const firstRetain = first[retainXlsxViewerFonts](targetDocument);
     const secondRetain = second[retainXlsxViewerFonts](targetDocument);
+    await Promise.resolve();
     first.destroy();
-    resolveFetch({ ok: true, text: async () => CSS });
+    resolveFetch(new Response(CALADEA_CSS));
     const [releaseFirst] = await Promise.all([firstRetain, secondRetain]);
     releaseFirst(); // stale viewer completion after workbook teardown: no-op
 
@@ -242,8 +258,6 @@ describe('XlsxWorkbook.destroy() — drops the shared image caches (GPU-leak gua
     instance.sheetCache = new Map();
     instance.sheetLoads = new Map();
     instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
-    instance.googleFontNames = [];
-    instance.retainedFontSets = new Map();
     instance.fontsDestroyed = false;
     instance._fetchImage = fetchImage;
     return instance as unknown as DestroyProbe;

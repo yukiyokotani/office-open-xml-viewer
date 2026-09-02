@@ -924,10 +924,41 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
+export interface FontAsset {
+    readonly family: string;
+    readonly source: FontAssetSource;
+    readonly descriptors?: FontFaceDescriptors;
+}
+export type FontAssetSource = Readonly<{
+    url: string | URL;
+}> | Readonly<{
+    data: ArrayBuffer;
+}>;
+export type FontFailure = 'fallback' | 'error';
+type FontFamilyRoutes = Readonly<Record<string, string | Readonly<{
+    family: string;
+    source: 'provider' | 'google' | 'substitute';
+}>>>;
+export abstract class FontProvider {
+    abstract resolve(families: readonly string[], options: Readonly<FontResolveOptions>): Promise<readonly FontAsset[]>;
+}
+export class FontProviderSession {
+    constructor(provider: FontProvider, failure?: FontFailure);
+    get strict(): boolean;
+    ensure(values: Iterable<string | null | undefined>, target?: FontFaceSet | null): Promise<ResolvedFonts>;
+    destroy(): void;
+    private __privatePresence;
+}
+export interface FontResolveOptions {
+    readonly signal: AbortSignal;
+}
 export interface Glow {
     color: string;
     alpha: number;
     radius: number;
+}
+export class GoogleFontsProvider extends FontProvider {
+    resolve(families: readonly string[], { signal }: Readonly<FontResolveOptions>): Promise<readonly FontAsset[]>;
 }
 export interface GradientFill {
     fillType: 'gradient';
@@ -1001,6 +1032,8 @@ export type LoadOptions = LoadOptions__emitterCollision1 & {
     onLayoutComplete?: (error?: unknown) => void;
 };
 interface LoadOptions__emitterCollision1 {
+    fontProvider?: FontProvider;
+    fontFailure?: FontFailure;
     useGoogleFonts?: boolean;
     password?: string;
     wasmUrl?: string | URL;
@@ -1691,6 +1724,16 @@ export interface RenderSlideToBitmapOptions {
     imageResources?: ImageResourceOptions;
     dim?: DimOptions;
     onTextRun?: TextRunCallback;
+}
+export interface ResolvedFontFace {
+    readonly family: string;
+    readonly alias: string;
+    readonly data: ArrayBuffer;
+    readonly descriptors: FontFaceDescriptors;
+}
+export interface ResolvedFonts {
+    readonly routes: FontFamilyRoutes;
+    readonly faces: readonly ResolvedFontFace[];
 }
 export interface Rot3d {
     lat: number;

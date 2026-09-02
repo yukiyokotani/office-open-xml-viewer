@@ -45,12 +45,10 @@ export function createLayoutServices(
   input: DocxDocumentModel | LayoutSourceStore,
   options: {
     readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-    readonly useGoogleFonts?: boolean;
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     readonly embeddedFaces?: readonly FontFace[];
-    readonly googleFaces?: readonly FontFace[];
     readonly providerRoutes?: FontFamilyRoutes;
   } = {},
 ): LayoutServices {

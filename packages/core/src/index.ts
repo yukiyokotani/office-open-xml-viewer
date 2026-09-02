@@ -136,11 +136,13 @@ export {
   type AgileEncryptionDescriptor,
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
-export { preloadGoogleFonts, unloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+export { preloadGoogleFonts, unloadGoogleFonts, type FontPreloadEntry } from './fonts/google-css';
+export { GoogleFontsProvider } from './fonts/google-provider';
 export {
   FontProvider,
   FontProviderSession,
   providerFontFamily,
+  providerFontSource,
   registerResolvedFonts,
   type FontAsset,
   type FontAssetSource,
@@ -158,10 +160,8 @@ export {
   deobfuscateOdttf,
   type EmbeddedFontFace,
 } from './fonts/embedded';
-// Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
-// Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
-// spreads this into its own map; script-fallback Noto faces live in
-// SCRIPT_GOOGLE_FONTS below.
+// Legacy low-level Google Fonts registries. The built-in GoogleFontsProvider
+// owns these internally; they remain exported for source compatibility.
 export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 export {

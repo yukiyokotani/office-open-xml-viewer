@@ -7,7 +7,7 @@ import {
   assertPresentationPreflightProjectionBytes,
   normalizePresentationBootstrap,
 } from './presentation-preflight';
-import { pptxFontPreloadNames } from './google-fonts';
+import { pptxFontPreloadNames } from './font-plan';
 import type { Presentation, Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol';
 

@@ -10,7 +10,6 @@
 import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
-  preloadGoogleFonts,
   unloadLocalFontMetrics,
   WasmParserHost,
   dropDecodedBitmapCache,
@@ -38,7 +37,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames, docxFontProviderNames } from './google-fonts';
+import { docxFontPreloadNames, docxFontProviderNames } from './font-plan';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type {
@@ -255,18 +254,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         comments: model.comments ?? [],
         revisions: model.revisions ?? [],
       };
-      let googleFaces: FontFace[] = [];
-      if (req.useGoogleFonts) {
-        // Pagination measures text, so fonts must land before canonical layout —
-        // same ordering the main-mode load() guarantees.
-        googleFaces = await preloadGoogleFonts(
-          docxFontPreloadNames(model),
-          DOCX_GOOGLE_FONTS,
-        );
-      }
       if (req.useFontProvider) {
         providerFontRoutes = await fontProvider.resolve(
-          docxFontProviderNames(model),
+          req.useGoogleFonts
+            ? docxFontPreloadNames(model).filter((name): name is string => !!name)
+            : docxFontProviderNames(model),
           documentGeneration,
         );
       }
@@ -288,9 +280,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         : undefined;
       const layoutServices = createLayoutServices(source, {
         localMetrics: localMetrics.metrics,
-        useGoogleFonts: !!req.useGoogleFonts,
         embeddedFaces,
-        googleFaces,
         providerRoutes: providerFontRoutes,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,
@@ -400,7 +390,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         regionMap: renderers.regionMap,
         chartEx: renderers.chartEx,
         tiff: renderers.tiff,
-        providerFontRoutes,
       });
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,

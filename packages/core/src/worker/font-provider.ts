@@ -1,5 +1,6 @@
 import {
   FontProviderSession,
+  providerFontFamily,
   registerResolvedFonts,
   type FontFamilyRoutes,
   type ResolvedFonts,
@@ -143,12 +144,14 @@ export class FontProviderClient {
       return true;
     }
     const resolved = value.resolved ?? { routes: {}, faces: [] };
-    const freshAliases = new Set(
-      Object.values(resolved.routes).filter((alias) => !this.aliases.has(alias)),
-    );
+    const freshAliases = new Set(Object.values(resolved.routes)
+      .map((route) => typeof route === 'string' ? route : route.family)
+      .filter((alias) => !this.aliases.has(alias)));
     const fresh = {
       routes: Object.fromEntries(
-        Object.entries(resolved.routes).filter(([, alias]) => freshAliases.has(alias)),
+        Object.entries(resolved.routes).filter(([, route]) => (
+          freshAliases.has(typeof route === 'string' ? route : route.family)
+        )),
       ),
       faces: resolved.faces.filter((face) => freshAliases.has(face.alias)),
     } satisfies ResolvedFonts;
@@ -165,11 +168,16 @@ export class FontProviderClient {
       return true;
     }
     this.faces.push(...loaded.faces);
-    for (const alias of Object.values(loaded.routes)) this.aliases.add(alias);
+    for (const route of Object.values(loaded.routes)) {
+      this.aliases.add(typeof route === 'string' ? route : route.family);
+    }
     this.routes = {
       ...this.routes,
       ...Object.fromEntries(
-        Object.entries(resolved.routes).filter(([, alias]) => this.aliases.has(alias)),
+        Object.entries(resolved.routes).filter(([family]) => {
+          const alias = providerFontFamily(resolved.routes, family);
+          return alias ? this.aliases.has(alias) : false;
+        }),
       ),
     };
     pending.resolve({ ...this.routes });

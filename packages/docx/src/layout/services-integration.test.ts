@@ -12,7 +12,7 @@ import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-mode
 import type { TextLayoutService } from './text.js';
 import { mathResourceKey } from './resources.js';
 import { layoutSourceStore } from '../layout-source-model-adapter.js';
-import { privateResourceLookupOf } from './runtime-state.js';
+import { paintResourceRegistryOf, privateResourceLookupOf } from './runtime-state.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
 
@@ -517,7 +517,7 @@ describe('production layout service integration', () => {
     );
   });
 
-  it('inventories only successfully registered faces and labels Office replacements as substitutions', () => {
+  it('inventories only successfully resolved routes and preserves substitution diagnostics', () => {
     const doc = model({
       majorFont: 'Calibri',
       embeddedFonts: [{ fontName: 'Broken Embedded', partPath: 'word/fonts/missing.odttf', fontKey: '', style: 'regular' }],
@@ -525,8 +525,6 @@ describe('production layout service integration', () => {
     const failed = createLayoutServices(doc, {
       measureContext: measureContext(),
       embeddedFaces: [],
-      googleFaces: [],
-      useGoogleFonts: true,
     });
     const missingEmbedded = failed.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Broken Embedded' } });
     const missingGoogle = failed.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' } });
@@ -534,12 +532,12 @@ describe('production layout service integration', () => {
     expect(missingEmbedded.diagnostics).toEqual([]);
     expect(missingGoogle.spans[0]?.font.source).toBe('native');
 
-    const carlito = { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' } as FontFace;
     const loaded = createLayoutServices(doc, {
       measureContext: measureContext(),
       embeddedFaces: [],
-      googleFaces: [carlito],
-      useGoogleFonts: true,
+      providerRoutes: {
+        calibri: { family: 'Carlito', source: 'substitute' },
+      },
     });
     const substituted = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' } });
     expect(substituted.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito' });
@@ -564,6 +562,32 @@ describe('production layout service integration', () => {
     });
     expect(shaped.spans[0]?.font.route.familyList)
       .toBe('"Authored Sans", "__private_authored_sans", sans-serif');
+  });
+
+  it('retains provider routes in chart resources before paint', () => {
+    const chart = {
+      chartType: 'line',
+      categories: ['A'],
+      series: [{ values: [1] }],
+    };
+    const doc = model({
+      body: [{
+        type: 'paragraph',
+        runs: [{ type: 'chart', chart, widthPt: 100, heightPt: 60 }],
+      }] as DocxDocumentModel['body'],
+    });
+    const routes = { 'authored sans': '__private_authored_sans' };
+
+    const services = createLayoutServices(doc, {
+      measureContext: measureContext(),
+      providerRoutes: routes,
+    });
+    const resource = paintResourceRegistryOf(services).descriptors
+      .find((descriptor) => descriptor.kind === 'chart');
+
+    expect(resource?.kind).toBe('chart');
+    if (resource?.kind !== 'chart') throw new Error('expected chart resource');
+    expect(resource.model.providerFontRoutes).toEqual(routes);
   });
 
   it('requires loaded status and an exact family/weight/style match for every face', () => {
@@ -698,7 +722,6 @@ describe('production layout service integration', () => {
     const options = {
       measureContext: measureContext(),
       embeddedFaces: [embedded],
-      googleFaces: [] as FontFace[],
       localMetrics: { authored: { family: '__local_authored', lineHeightRatio: 1.25 } },
     };
     const main = createLayoutServices(model(), options);

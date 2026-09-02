@@ -120,7 +120,6 @@ export function createCanonicalCanvasPaintResourceHandlers(
   regionMap?: ChartRegionMapRenderer,
   chartImageLookup?: ChartImageLookup,
   chartEx?: ChartExRenderer,
-  providerFontRoutes?: import('@silurus/ooxml-core').FontFamilyRoutes,
 ): CanvasPaintResourceHandlers {
   return Object.freeze({
   image(resource, bounds, ctx) {
@@ -131,12 +130,7 @@ export function createCanonicalCanvasPaintResourceHandlers(
     // keeps chart font/line point sizes in that same space instead of scaling twice.
     renderChart(
       ctx as CanvasRenderingContext2D,
-      providerFontRoutes
-        ? {
-            ...(resource.descriptor.model as import('@silurus/ooxml-core').ChartModel),
-            providerFontRoutes,
-          }
-        : resource.descriptor.model as import('@silurus/ooxml-core').ChartModel,
+      resource.descriptor.model as import('@silurus/ooxml-core').ChartModel,
       { x: bounds.xPt, y: bounds.yPt, w: bounds.widthPt, h: bounds.heightPt },
       1,
       0,

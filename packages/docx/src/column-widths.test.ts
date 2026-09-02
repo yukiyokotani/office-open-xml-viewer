@@ -180,10 +180,9 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       section: {}, body: [], headers: {}, footers: {}, majorFont: 'Calibri',
     } as unknown as DocxDocumentModel;
     const services = createLayoutServices(doc, {
-      useGoogleFonts: true,
-      googleFaces: [{
-        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
-      } as FontFace],
+      providerRoutes: {
+        calibri: { family: 'Carlito', source: 'substitute' },
+      },
       measureContext: ctx,
     });
     const run = {
@@ -305,11 +304,10 @@ describe('resolveColumnWidths — a tblW=auto table sizes to tcW/content, ignori
       section: {}, body: [], headers: {}, footers: {}, majorFont: 'Calibri',
     } as unknown as DocxDocumentModel;
     const services = createLayoutServices(doc, {
-      useGoogleFonts: true,
-      googleFaces: [
-        { family: 'Carlito', weight: '400', style: 'normal', status: 'loaded' },
-        { family: 'Caladea', weight: '400', style: 'normal', status: 'loaded' },
-      ] as FontFace[],
+      providerRoutes: {
+        calibri: { family: 'Carlito', source: 'substitute' },
+        cambria: { family: 'Caladea', source: 'substitute' },
+      },
       measureContext: ctx,
     });
     const textRun = (text: string, family: string): DocParagraph['runs'][number] => ({

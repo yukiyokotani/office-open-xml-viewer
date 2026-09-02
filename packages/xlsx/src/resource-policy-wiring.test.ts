@@ -12,8 +12,6 @@ describe('XlsxWorkbook resource-policy wiring', () => {
     instance.sheetLoads = new Map();
     instance.imageCache = new Map();
     instance.rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
-    instance.googleFontNames = [];
-    instance.retainedFontSets = new Map();
     instance.fontsDestroyed = false;
     const bridge = {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {

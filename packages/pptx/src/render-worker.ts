@@ -1,6 +1,5 @@
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
 import {
   findPreflightMimeType,
   PresentationPreflightBuilder,
@@ -10,7 +9,6 @@ import { PptxSlideRepository } from './slide-repository';
 import { loadPptxSlideFromCursor, readPptxSlideCursorUsage } from './slide-cursor-operation';
 import { SlidePullWorker } from './slide-pull-worker';
 import {
-  preloadGoogleFonts,
   decodeDataUrl,
   WasmParserHost,
   dropDecodedBitmapCache,
@@ -194,24 +192,23 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
     loadSlide,
   });
   if (request.progressiveLayout) {
-    const loadedGoogleFonts = new Set<string>();
     const ensureFonts = async (): Promise<void> => {
       const embedded = await embeddedFontsLoaded;
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
       if (request.useFontProvider) {
+        const names = request.useGoogleFonts
+          ? preflightBuilder!.currentFontPreloadNames
+          : preflightBuilder!.currentFontProviderNames;
         providerFontRoutes = {
           ...providerFontRoutes,
-          ...await fontProvider.resolve(preflightBuilder!.currentFontProviderNames, generation),
+          ...await fontProvider.resolve(
+            excludeEmbeddedFontFamilies(names, embedded.aliases)
+              .filter((name): name is string => !!name),
+            generation,
+          ),
         };
       }
-      if (!request.useGoogleFonts) return;
-      const requested = excludeEmbeddedFontFamilies(
-        preflightBuilder!.currentFontPreloadNames,
-        embedded.aliases,
-      ).filter((name): name is string => !!name && !loadedGoogleFonts.has(name));
-      for (const name of requested) loadedGoogleFonts.add(name);
-      if (requested.length) await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS);
     };
     for (let index = 0; index < bootstrap.slideCount; index += 1) {
       await slides.withSlide(index, () => undefined);
@@ -251,17 +248,16 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       embeddedFontAliases = embedded.aliases;
       embeddedFontAuthoredFamilies = embedded.authoredFamilies;
       if (request.useFontProvider) {
+        const names = request.useGoogleFonts
+          ? preflight.fontPreloadNames
+          : preflight.fontProviderNames ?? [];
         providerFontRoutes = await fontProvider.resolve(
-          preflight.fontProviderNames ?? [],
+          excludeEmbeddedFontFamilies(names, embedded.aliases)
+            .filter((name): name is string => !!name),
           generation,
         );
       }
-      if (!request.useGoogleFonts) return embedded.faces;
-      const substitutes = await preloadGoogleFonts(
-        excludeEmbeddedFontFamilies(preflight.fontPreloadNames, embedded.aliases),
-        PPTX_GOOGLE_FONTS,
-      );
-      return [...embedded.faces, ...substitutes];
+      return embedded.faces;
     })();
   }
   return preflight;

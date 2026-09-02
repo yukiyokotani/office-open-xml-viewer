@@ -1,6 +1,5 @@
-import { canvasFontString } from '@silurus/ooxml-core';
+import { canvasFontString, providerFontFamily, providerFontSource } from '@silurus/ooxml-core';
 import type { FontFamilyRoutes, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
-import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
 import { createFontResolver, type FontInventoryFace } from './font-service.js';
@@ -14,6 +13,7 @@ import {
   mathResourceKey,
   type MathLayoutResource,
 } from './resources.js';
+import { createPaintResourceRegistry } from './paint-resources.js';
 import {
   attachPaintResourceRegistry,
   attachPrivateResourceLookup,
@@ -36,13 +36,11 @@ export interface LoadedFontFaceRecord {
 
 export interface ProductionLayoutServiceOptions {
   readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-  readonly useGoogleFonts?: boolean;
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
-  readonly googleFaces?: readonly LoadedFontFaceRecord[];
   readonly providerRoutes?: FontFamilyRoutes;
 }
 
@@ -98,8 +96,10 @@ export function createProductionLayoutServices(
       style,
     }] : [];
   });
-  for (const [requestedFamily, resolvedFamily] of Object.entries(options.providerRoutes ?? {})) {
-    inventory.push({ requestedFamily, resolvedFamily, source: 'provider' });
+  for (const requestedFamily of Object.keys(options.providerRoutes ?? {})) {
+    const resolvedFamily = providerFontFamily(options.providerRoutes, requestedFamily);
+    const source = providerFontSource(options.providerRoutes, requestedFamily);
+    if (resolvedFamily && source) inventory.push({ requestedFamily, resolvedFamily, source });
   }
   for (const [requestedFamily, metric] of Object.entries(localMetrics)) {
     inventory.push({
@@ -109,31 +109,6 @@ export function createProductionLayoutServices(
       weight: metric.weight ?? 400,
       style: metric.style ?? 'normal',
     });
-  }
-  if (options.useGoogleFonts) {
-    const successfulGoogle = loadedFaces(options.googleFaces ?? []);
-    const seen = new Set<string>();
-    for (const name of source.fonts.preloadNames) {
-      if (!name) continue;
-      const key = name.toLocaleLowerCase('en-US');
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const entry = DOCX_GOOGLE_FONTS[key];
-      const resolvedFamily = entry?.loadFamily ?? name;
-      if (!entry) continue;
-      for (const loaded of successfulGoogle.filter(
-        (face) => face.family === normalizedFaceFamily(resolvedFamily),
-      )) {
-        inventory.push({
-          requestedFamily: name,
-          resolvedFamily: loaded.displayFamily,
-          source: normalizedFaceFamily(resolvedFamily) === normalizedFaceFamily(name)
-            ? 'google' : 'substitute',
-          weight: loaded.weight,
-          style: loaded.style,
-        });
-      }
-    }
   }
   const context = options.measureContext;
   const routedFontFamilies = [...new Set([
@@ -254,7 +229,16 @@ export function createProductionLayoutServices(
   );
   attachPaintResourceRegistry(
     services,
-    source.paintResources,
+    options.providerRoutes && Object.keys(options.providerRoutes).length > 0
+      ? createPaintResourceRegistry(source.paintResources.descriptors.map((descriptor) => (
+          descriptor.kind === 'chart'
+            ? {
+                ...descriptor,
+                model: { ...descriptor.model, providerFontRoutes: options.providerRoutes },
+              }
+            : descriptor
+        )))
+      : source.paintResources,
   );
   attachVerticalGlyphMeasurementService(services, options.verticalGlyphMeasurement);
   return services;

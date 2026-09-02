@@ -12,7 +12,6 @@
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
   decodeDataUrl,
-  preloadGoogleFonts,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -37,7 +36,11 @@ import {
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { workerRenderDeps } from './worker-render-deps.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import {
+  xlsxFontPreloadNames,
+  xlsxFontProviderNames,
+  xlsxWorksheetFontProviderNames,
+} from './font-plan.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
@@ -53,9 +56,7 @@ import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-wo
 import {
   applyWorkbookFontRoutes,
   applyWorksheetFontRoutes,
-  xlsxFontProviderNames,
-  xlsxWorksheetFontProviderNames,
-} from './provider-fonts.js';
+} from './font-routes.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -71,11 +72,6 @@ const host = new WasmParserHost<XlsxArchive>(init, {
 });
 let workbook: ParsedWorkbook | null = null;
 let renderers: LoadedWorkerRenderers = {};
-/** Settled before any render when `useGoogleFonts` was requested. The resolved
- *  value (the preloaded FontFace[]) is unused here: the worker owns its own
- *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
- *  release — only the sequencing (fonts landed before first paint) matters. */
-let fontsLoaded: Promise<unknown> = Promise.resolve();
 let providerFontRoutes: FontFamilyRoutes = {};
 let providerEnabled = false;
 let generation = 0;
@@ -225,7 +221,6 @@ self.onmessage = async (e: MessageEvent<
       providerFontRoutes = {};
       providerEnabled = !!req.useFontProvider;
       generation += 1;
-      fontsLoaded = Promise.resolve();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
@@ -255,24 +250,18 @@ self.onmessage = async (e: MessageEvent<
       workbook = bootstrap.workbook;
       if (req.useFontProvider) {
         providerFontRoutes = await fontProvider.resolve(
-          xlsxFontProviderNames(workbook),
+          req.useGoogleFonts
+            ? [...xlsxFontPreloadNames(workbook)]
+            : xlsxFontProviderNames(workbook),
           generation,
         );
         applyWorkbookFontRoutes(workbook, providerFontRoutes);
-      }
-      if (req.useGoogleFonts) {
-        // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
-        // every styled font name, plus the generic Arabic fallbacks. Fonts must
-        // land before rendering (which measures text), so we keep the promise
-        // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
       }
       post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
       return;
     }
     if (req.type === 'renderViewport') {
       if (!workbook) throw new Error('Workbook not loaded');
-      await fontsLoaded;
       const { inheritSheetRenderCache, markAutoRowHeightsPrepared } = await rendererModule;
       const { renderWorksheetViewport } = await orchestratorModule;
       const ws = sheetCache.get(req.sheetIndex);

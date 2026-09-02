@@ -25,9 +25,38 @@ export abstract class FontProvider {
     families: readonly string[],
     options: Readonly<FontResolveOptions>,
   ): Promise<readonly FontAsset[]>;
+
+  /** @internal Family used for FontFace registration. Application providers
+   * stay isolated by default; built-in providers may preserve a public family. */
+  registrationFamily(_family: string, isolatedFamily: string): string {
+    return isolatedFamily;
+  }
+
+  /** @internal Describes a non-private route without leaking provider-specific
+   * lookup policy into the format packages. */
+  registrationSource(
+    _family: string,
+    _registeredFamily: string,
+  ): 'provider' | 'google' | 'substitute' {
+    return 'provider';
+  }
+
+  /** @internal Registry identity for one resolved face. Private providers stay
+   * document-scoped; a built-in provider may opt into safe cross-document reuse. */
+  registrationKey(
+    _family: string,
+    _registeredFamily: string,
+    _asset: FontAsset,
+    isolatedKey: string,
+  ): string {
+    return isolatedKey;
+  }
 }
 
-export type FontFamilyRoutes = Readonly<Record<string, string>>;
+export type FontFamilyRoutes = Readonly<Record<string, string | Readonly<{
+  family: string;
+  source: 'provider' | 'google' | 'substitute';
+}>>>;
 
 export interface ResolvedFontFace {
   readonly family: string;
@@ -109,16 +138,30 @@ export function providerFontFamily(
   routes: FontFamilyRoutes | undefined,
   family: string | null | undefined,
 ): string | undefined {
-  return family ? routes?.[normalizedFamily(family)] : undefined;
+  if (!family) return undefined;
+  const route = routes?.[normalizedFamily(family)];
+  return typeof route === 'string' ? route : route?.family;
+}
+
+/** Look up how a provider route was resolved. Plain routes are private-provider routes. */
+export function providerFontSource(
+  routes: FontFamilyRoutes | undefined,
+  family: string | null | undefined,
+): 'provider' | 'google' | 'substitute' | undefined {
+  if (!family) return undefined;
+  const route = routes?.[normalizedFamily(family)];
+  return typeof route === 'string' ? 'provider' : route?.source;
 }
 
 interface StoredFace extends ResolvedFontFace {
   readonly key: string;
+  readonly registrationKey: string;
 }
 
 interface SetRegistration {
   readonly keys: Set<string>;
   readonly faces: FontFace[];
+  refs: number;
 }
 
 /** One document's provider resolution, byte ownership, and FontFace registrations. */
@@ -183,7 +226,8 @@ export class FontProviderSession {
         byFamily.set(key, [...(byFamily.get(key) ?? []), asset]);
       }
       for (const [key, name] of missing) {
-        const alias = `__ooxml_provider_${this.id}_${safeFamily(key)}`;
+        const isolatedAlias = `__ooxml_provider_${this.id}_${safeFamily(key)}`;
+        const alias = this.provider.registrationFamily(name, isolatedAlias);
         const stored: StoredFace[] = [];
         for (const [index, asset] of (byFamily.get(key) ?? []).entries()) {
           try {
@@ -200,6 +244,12 @@ export class FontProviderSession {
             storedBytes += data.byteLength;
             stored.push({
               key: `${key}:${index}`,
+              registrationKey: this.provider.registrationKey(
+                name,
+                alias,
+                asset,
+                `provider:${this.id}:${key}:${index}`,
+              ),
               family: name,
               alias,
               data,
@@ -216,55 +266,97 @@ export class FontProviderSession {
         this.families.set(key, { name, alias, faces: stored });
       }
     };
-    const pending = this.tail.then(run);
+    let available: ReadonlySet<string> | undefined;
+    const pending = this.tail.then(async () => {
+      await run();
+      available = target ? await this.register(target, requested.keys()) : undefined;
+    });
     this.tail = pending.catch(() => undefined);
     try {
       await pending;
-      if (target) await this.register(target, requested.keys());
+      return this.snapshot(requested.keys(), available);
     } catch (error) {
       if (this.failure === 'error') throw error;
       console.warn(`[ooxml] font provider failed; using local fallback: ${error instanceof Error ? error.message : String(error)}`);
+      return this.snapshot([]);
     }
-    return this.snapshot(requested.keys());
   }
 
-  private async register(target: FontFaceSet, keys: Iterable<string>): Promise<void> {
+  private async register(target: FontFaceSet, keys: Iterable<string>): Promise<ReadonlySet<string>> {
     if (typeof FontFace === 'undefined') {
       if (this.failure === 'error') throw new Error('FontFace is unavailable');
-      return;
+      return new Set();
     }
-    const registration = this.registrations.get(target) ?? { keys: new Set<string>(), faces: [] };
+    const registration = this.registrations.get(target) ?? {
+      keys: new Set<string>(),
+      faces: [],
+      refs: 0,
+    };
     this.registrations.set(target, registration);
-    const added: FontFace[] = [];
+    const added: Array<{ key: string; face: FontFace }> = [];
     for (const key of keys) {
       for (const stored of this.families.get(key)?.faces ?? []) {
-        if (registration.keys.has(stored.key)) continue;
-        const signature = `provider:${this.id}:${stored.key}`;
-        const { face } = retainFace(signature, target, () => {
+        if (registration.keys.has(stored.registrationKey)) continue;
+        const { face } = retainFace(stored.registrationKey, target, () => {
           const created = new FontFace(stored.alias, stored.data.slice(0), stored.descriptors);
           target.add(created);
           return created;
         });
-        registration.keys.add(stored.key);
-        registration.faces.push(face);
-        added.push(face);
+        added.push({ key: stored.registrationKey, face });
       }
     }
-    const loaded = await withFontCeiling(Promise.allSettled(added.map((face) => face.load())));
-    if (!Array.isArray(loaded) || loaded.some((result) => result.status === 'rejected')) {
+    const loaded = await withFontCeiling(Promise.allSettled(added.map(({ face }) => face.load())));
+    const results = Array.isArray(loaded) ? loaded : added.map(() => ({ status: 'rejected' as const }));
+    for (const [index, item] of added.entries()) {
+      if (results[index]?.status === 'fulfilled') {
+        registration.keys.add(item.key);
+        registration.faces.push(item.face);
+      } else {
+        releaseFaces([item.face]);
+      }
+    }
+    if (results.some((result) => result.status === 'rejected')) {
       if (this.failure === 'error') throw new Error('font provider face failed to load');
       console.warn('[ooxml] a font provider face failed to load; using local fallback');
     }
+    return registration.keys;
   }
 
-  private snapshot(keys: Iterable<string>): ResolvedFonts {
-    const routes: Record<string, string> = {};
+  /** @internal Retain one registered FontFaceSet for a viewer lifetime. */
+  retain(target: FontFaceSet): () => void {
+    const registration = this.registrations.get(target);
+    if (!registration || this.destroyed) return () => undefined;
+    registration.refs += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.registrations.get(target);
+      if (current !== registration) return;
+      current.refs -= 1;
+      if (current.refs > 0) return;
+      releaseFaces(current.faces);
+      this.registrations.delete(target);
+    };
+  }
+
+  private snapshot(keys: Iterable<string>, available?: ReadonlySet<string>): ResolvedFonts {
+    const routes: Record<string, FontFamilyRoutes[string]> = {};
     const faces: ResolvedFontFace[] = [];
+    const seenFaces = new Set<string>();
     for (const key of keys) {
       const family = this.families.get(key);
-      if (!family || family.faces.length === 0) continue;
-      routes[key] = family.alias;
-      for (const face of family.faces) {
+      const familyFaces = family?.faces.filter((face) => (
+        available === undefined || available.has(face.registrationKey)
+      )) ?? [];
+      if (!family || familyFaces.length === 0) continue;
+      const source = this.provider.registrationSource(family.name, family.alias);
+      routes[key] = source === 'provider'
+        ? family.alias
+        : { family: family.alias, source };
+      for (const face of familyFaces) {
+        if (seenFaces.has(face.registrationKey)) continue;
+        seenFaces.add(face.registrationKey);
         faces.push({ ...face, data: face.data.slice(0) });
       }
     }
@@ -313,7 +405,9 @@ export async function registerResolvedFonts(
   const goodAliases = new Set(good.map((face) => face.family.replace(/^['"]|['"]$/g, '')));
   return {
     routes: Object.fromEntries(
-      Object.entries(resolved.routes).filter(([, alias]) => goodAliases.has(alias)),
+      Object.entries(resolved.routes).filter(([, route]) => (
+        goodAliases.has(typeof route === 'string' ? route : route.family)
+      )),
     ),
     faces: good,
   };

@@ -2,28 +2,11 @@ import {
   classifyCjkFont,
   chartFontFamilies,
   scriptPreloadNamesForText,
-  GOOGLE_FONT_SUBSTITUTES,
-  SCRIPT_GOOGLE_FONTS,
-  type FontPreloadEntry,
 } from '@silurus/ooxml-core';
 import type {
   DocxDocumentModel,
 } from './types.js';
 import { docxRenderedCharts, docxRenderedTextUsages } from './document-content.js';
-
-/** Theme-referenced typefaces commonly used by DOCX templates.
- *
- *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
- *  Carlito, Cambria → Caladea), the popular free web fonts and the Arabic Noto
- *  fallbacks — shared with pptx/xlsx. {@link SCRIPT_GOOGLE_FONTS} adds the
- *  CJK (KR/SC/TC/JP) / Cyrillic / Thai / Devanagari / Hebrew Noto faces the
- *  renderer appends to the font chain (CJK ordered by document language). Both
- *  load only when `useGoogleFonts` is on — no binaries ship in the bundle. DOCX
- *  currently has no format-specific additions. */
-export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  ...GOOGLE_FONT_SUBSTITUTES,
-  ...SCRIPT_GOOGLE_FONTS,
-};
 
 function* docxTextRuns(doc: DocxDocumentModel): Generator<string> {
   for (const usage of docxRenderedTextUsages(doc)) yield usage.text;

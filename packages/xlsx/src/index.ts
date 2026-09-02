@@ -7,6 +7,7 @@ export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
 export {
   FontProvider,
   FontProviderSession,
+  GoogleFontsProvider,
   type FontAsset,
   type FontAssetSource,
   type FontFailure,
