@@ -36,6 +36,7 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
+import { resolveSharedStrings } from './shared-strings.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
@@ -47,6 +48,7 @@ import {
   assertWorksheetModelUsage,
   completeWorksheetUsage,
   measureRows,
+  measureWorksheet,
   type WorksheetCacheUsage,
   type WorksheetModelUsage,
 } from './worksheet-resource-limits.js';
@@ -107,12 +109,14 @@ export interface LoadOptions extends CoreLoadOptions {
   mode?: 'main' | 'worker';
 }
 
+type WorkbookBridge = WorkerBridge<
+  WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
+>;
+
 export class XlsxWorkbook {
   private metrics: OoxmlResourceMetricsSession | null = null;
-  private worker: Worker;
-  private bridge: WorkerBridge<
-    WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
-  >;
+  private bridge: WorkbookBridge | null = null;
+  private modelBacked = false;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
   /** One materialization per sheet at a time. This becomes the ownership seam
@@ -168,12 +172,16 @@ export class XlsxWorkbook {
    * later public operation on the same workbook instance. */
   private resourceFailure: OoxmlResourceLimitError | null = null;
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
-    this.worker = worker;
+  private constructor(
+    worker: Worker | null,
+    mode: 'main' | 'worker',
+    wasmUrlOverride?: string | URL,
+  ) {
     this._mode = mode;
+    if (!worker) return;
     this.bridge = new WorkerBridge<
       WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
-    >(this.worker, {
+    >(worker, {
       correlate: (res) =>
         'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
           ? res.requestId
@@ -188,7 +196,7 @@ export class XlsxWorkbook {
       onUnsolicited: (res) => {
         respondToWorkerSvgDecodeRequest(
           (message, transfer) => (
-            this.worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+            worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
           )(message, transfer),
           res,
         );
@@ -205,6 +213,66 @@ export class XlsxWorkbook {
    *  to select direct-canvas or worker-bitmap rendering without probing. */
   get mode(): 'main' | 'worker' {
     return this._mode;
+  }
+
+  /**
+   * Create a main-thread workbook from already-materialized render models.
+   *
+   * This path does not create a Worker, initialize WASM, or read an OOXML
+   * archive. `worksheets` must be parallel to `model.workbook.sheets` and are
+   * installed by reference. Shared-string cells are resolved in place before
+   * resource admission; callers must not otherwise mutate either input while
+   * the workbook is in use. Archive-only operations such as image extraction
+   * and Markdown projection are unavailable.
+   */
+  static fromModel(model: ParsedWorkbook, worksheets: readonly Worksheet[]): XlsxWorkbook {
+    const sheets = model.workbook.sheets;
+    if (sheets.length !== worksheets.length) {
+      throw new Error(
+        `Workbook metadata has ${sheets.length} ${sheets.length === 1 ? 'sheet' : 'sheets'} ` +
+        `but ${worksheets.length} worksheet models were supplied`,
+      );
+    }
+
+    const cache = new Map<number, Worksheet>();
+    let retained: WorksheetCacheUsage = {
+      rows: 0,
+      cells: 0,
+      ownedUtf8Bytes: 0,
+      jsonBytes: 0,
+    };
+    worksheets.forEach((worksheet, index) => {
+      const metadata = sheets[index]!;
+      if (worksheet.name !== metadata.name) {
+        throw new Error(
+          `Worksheet ${index} is named "${worksheet.name}" but workbook metadata names it "${metadata.name}"`,
+        );
+      }
+      resolveSharedStrings(worksheet, model.sharedStrings);
+      const measured = measureWorksheet(worksheet);
+      assertWorksheetModelUsage(measured, 'from-model', undefined);
+      assertWorksheetJsonBytes(measured.jsonBytes, 'from-model', undefined);
+      retained = addWorksheetCacheUsage(retained, measured);
+      assertWorksheetCacheUsage(retained, 'from-model', undefined);
+      cache.set(index, worksheet);
+    });
+
+    const workbook = new XlsxWorkbook(null, 'main');
+    workbook.modelBacked = true;
+    workbook.parsedWorkbook = model;
+    workbook.sheetCache = cache;
+    workbook.retainedSheetUsage = retained;
+    const resourceOptions = normalizeLoadResourceOptions({});
+    workbook.metrics = new OoxmlResourceMetricsSession({
+      enabled: true,
+      format: 'xlsx',
+      mode: 'main',
+      policy: resourceOptions.policy,
+      emitToConsole: false,
+    });
+    workbook.metrics.checkpoint('model ready');
+    workbook.metrics.succeed({ sheets: worksheets.length });
+    return workbook;
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
@@ -285,6 +353,7 @@ export class XlsxWorkbook {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
   ): Promise<void> {
+    const bridge = this.requireBridge();
     this.resourceFailure = null;
     this.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
     this.sheetCache.clear();
@@ -333,7 +402,7 @@ export class XlsxWorkbook {
     // the resolved ZIP is literally the caller's buffer. URL and decrypted
     // buffers are library-owned and can transfer directly without a peak copy.
     const workerData = preserveCallerBuffer ? data.slice(0) : data;
-    const parsed = await this.bridge.request(
+    const parsed = await bridge.request(
       (id) =>
         this._mode === 'worker'
           ? ({
@@ -493,8 +562,13 @@ export class XlsxWorkbook {
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     const metrics = this.metrics;
     if (!metrics) throw new Error('Workbook not loaded');
+    if (this.modelBacked) {
+      const report = metrics.current();
+      if (!report) throw new Error('OOXML resource metrics are not ready');
+      return report;
+    }
     return readLatestOoxmlResourceMetrics(metrics, async (timeoutMs) => {
-      const response = await this.bridge.request(
+      const response = await this.requireBridge().request(
         (id) => ({ type: 'resourceUsage', id }) satisfies WorkerRequest,
         undefined,
         { timeoutMs },
@@ -593,11 +667,11 @@ export class XlsxWorkbook {
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     this.worksheetPullClient = new XlsxWorksheetPullClient({
       generation: this.generation || 1,
-      transport: this.bridge.transport(isXlsxWorksheetPullResponse),
+      transport: this.requireBridge().transport(isXlsxWorksheetPullResponse),
       sharedStrings: this.parsedWorkbook.sharedStrings,
       timeoutMs: this.workerTimeoutMs,
       open: async (sheetIndex, sheetName, identity, timeoutMs) => {
-        await this.bridge.request(
+        await this.requireBridge().request(
           (id) => ({ type: 'openSheetSession', id, sheetIndex, sheetName, ...identity }),
           undefined,
           { timeoutMs },
@@ -656,7 +730,7 @@ export class XlsxWorkbook {
   }
 
   private requestImage(imagePath: string, mimeType: string): Promise<Blob> {
-    return this.bridge
+    return this.requireBridge()
       .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
       .then((res) => {
         const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
@@ -681,7 +755,7 @@ export class XlsxWorkbook {
    */
   async toMarkdown(): Promise<string> {
     this.assertResourceHealthy();
-    const res = await this.runArchiveOperation(() => this.bridge.request(
+    const res = await this.runArchiveOperation(() => this.requireBridge().request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
     ));
     return (res as Extract<WorkerResponse, { type: 'markdownRendered' }>).markdown;
@@ -836,7 +910,7 @@ export class XlsxWorkbook {
         throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
       const res = await this.withWorksheetArchiveOperation(sheetIndex, () =>
-        this.bridge.request(
+        this.requireBridge().request(
           (id) => ({
             type: 'renderViewport',
             id,
@@ -857,7 +931,9 @@ export class XlsxWorkbook {
   /** @internal Drop projections owned by a destroyed viewer. */
   [releaseXlsxViewerProjection](projectionId: number): void {
     if (this._mode !== 'worker') return;
-    this.bridge.post({ type: 'releaseViewProjection', projectionId } satisfies RenderWorkerRequest);
+    this.requireBridge().post(
+      { type: 'releaseViewProjection', projectionId } satisfies RenderWorkerRequest,
+    );
   }
 
   private withWorksheetArchiveOperation<T>(
@@ -906,7 +982,8 @@ export class XlsxWorkbook {
     this.generation = (this.generation ?? 1) + 1;
     void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
     this.worksheetPullClient = null;
-    this.bridge.terminate();
+    this.bridge?.terminate();
+    this.bridge = null;
     this.parsedWorkbook = null;
     this.sheetCache.clear();
     this.sheetLoads.clear();
@@ -928,5 +1005,12 @@ export class XlsxWorkbook {
 
   private assertResourceHealthy(): void {
     if (this.resourceFailure) throw this.resourceFailure;
+  }
+
+  private requireBridge(): WorkbookBridge {
+    if (!this.bridge) {
+      throw new Error('This operation requires an active archive-backed workbook');
+    }
+    return this.bridge;
   }
 }

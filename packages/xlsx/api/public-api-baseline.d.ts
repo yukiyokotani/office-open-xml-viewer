@@ -2245,6 +2245,7 @@ export interface XlsxViewportOffset {
 }
 export class XlsxWorkbook {
     get mode(): 'main' | 'worker';
+    static fromModel(model: ParsedWorkbook, worksheets: readonly Worksheet[]): XlsxWorkbook;
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<XlsxWorkbook>;
     get sheetNames(): string[];
     get sheetCount(): number;
