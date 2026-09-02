@@ -23,12 +23,19 @@
       </div>
     </div>
     <p class="rg-caveat">
-      Raster decode is also guarded uniformly: 32 MP per retained surface, 128 MiB of decoded
-      ownership per document cache or render pass, and two concurrent decodes. Target-aware
-      PPTX paint paths downsample sources above the retained-surface limits to the actual canvas/DPR requirement;
-      the encoded source grid retains a separate 128 Mi-pixel hard ceiling so a tiny display request
-      cannot bypass decode-bomb protection. These are deterministic admission guards—not exact
-      JavaScript, WASM, canvas or GPU accounting—so they limit measured decode work but cannot
+      Raster decode is also governed uniformly. Target-resizable rasters (browser formats and TIFF
+      when its optional codec is configured) keep their
+      native decode while a complete paint fits the hard surface ceilings and the default
+      <strong>128 MiB decoded budget</strong>. When native ownership would cross a boundary, they decode
+      at the current canvas/DPR requirement; if those display targets still exceed the budget,
+      adaptive mode lowers them by one quality ratio instead of rejecting the document. Image-bearing paints for one
+      document are serialized so overlapping paints cannot each consume the full budget, while the admitted paint still decodes up to
+      two images concurrently. Applications can configure <code>imageResources.decodedByteBudget</code>
+      up to 512 MiB or select <code>strategy: 'strict'</code>. The encoded source grid, per-axis and
+      per-surface ceilings remain non-disableable, and non-resizable sources remain subject to
+      those hard ceilings, so a tiny display request cannot bypass decode-bomb
+      protection. These are deterministic admission guards—not exact
+      JavaScript, WASM, canvas or GPU accounting—so they bound planned and retained RGBA surfaces but cannot
       guarantee that every device avoids OOM.
       Browser-managed SVG/vector storage has no portable decoded-byte metric; its cache is
       count-bounded and owned object URLs are revoked, but it is outside the RGBA counter.
@@ -40,6 +47,10 @@
     maxArchiveEntryBytes: <span class="num">128</span> * <span class="num">1024</span> * <span class="num">1024</span>,
     maxTotalInflatedBytes: <span class="num">256</span> * <span class="num">1024</span> * <span class="num">1024</span>,
     maxArchiveEntries: <span class="num">4096</span>,
+  {'}'},
+  imageResources: {'{'}
+    decodedByteBudget: <span class="num">128</span> * <span class="num">1024</span> * <span class="num">1024</span>,
+    strategy: <span class="str">'adaptive'</span>,
   {'}'},
   onResourceMetrics(metrics) {'{'}
     analytics.record(<span class="str">'ooxml-resource-usage'</span>, metrics);

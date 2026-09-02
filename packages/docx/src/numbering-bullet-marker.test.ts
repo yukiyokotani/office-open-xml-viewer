@@ -159,12 +159,13 @@ describe('symbol/wingdings glyph bullet markers (§17.9.6 rPr + §17.3.2.26 rFon
 
 describe('picture bullet marker (§17.9.9 lvlPicBulletId → §17.9.20 numPicBullet)', () => {
   beforeEach(() => {
-    // createImageBitmap doesn't exist in node; stub it to a 4×4 sentinel bitmap
+    // createImageBitmap doesn't exist in node; stub the GIF's inspected 1×1
+    // decoded grid so retained-surface safety checks observe browser behavior.
     // (size is irrelevant — the draw box is driven by the §17.9.20 pt size, not
     // the bitmap's intrinsic pixels).
     vi.stubGlobal(
       'createImageBitmap',
-      vi.fn(async (_src: unknown) => ({ width: 4, height: 4, close: () => {} }) as unknown as ImageBitmap),
+      vi.fn(async (_src: unknown) => ({ width: 1, height: 1, close: () => {} }) as unknown as ImageBitmap),
     );
   });
   afterEach(() => vi.unstubAllGlobals());

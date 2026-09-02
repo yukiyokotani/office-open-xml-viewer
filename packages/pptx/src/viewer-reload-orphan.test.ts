@@ -30,17 +30,21 @@ describe('PptxViewer.load() — no orphaned engine on re-load (SC20)', () => {
     const { canvas } = mount();
     const first = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
     const second = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const tiff = { render: vi.fn(async () => null) };
     const loadSpy = vi
       .spyOn(PptxPresentation, 'load')
       .mockResolvedValueOnce(first.asPres())
       .mockResolvedValueOnce(second.asPres());
 
-    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
+      password: 'secret',
+      tiff,
+    });
     await v.load('one.pptx');
     expect(loadSpy).toHaveBeenNthCalledWith(
       1,
       'one.pptx',
-      expect.objectContaining({ password: 'secret' }),
+      expect.objectContaining({ password: 'secret', tiff }),
     );
     expect(first.destroyed).toBe(false); // still current after first load
 

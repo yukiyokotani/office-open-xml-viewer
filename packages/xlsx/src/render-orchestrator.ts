@@ -4,10 +4,16 @@ import {
   clampCanvasSize,
   getCachedSvgImageByPath,
   getCachedDuotoneBitmapByPath,
-  acquireBitmapCacheLease,
+  inspectCachedRasterSource,
+  isDecodeTargetResizableRasterFormat,
+  withBitmapCacheLease,
+  normalizeImageResourceOptions,
+  planDecodedImageTargets,
   preferVectorBlip,
   metafileRasterSize,
+  sourceRasterTargetSize,
   isOoxmlDecodedImageLimitError,
+  isTiffDecodeError,
   EMU_PER_PT,
   EMU_PER_PX,
   type MathRenderer,
@@ -18,9 +24,14 @@ import {
   type SrcRect,
   type Duotone,
   type OffscreenFactory,
+  type SvgBlobDecoder,
+  type ImageResourceOptions,
   chartImageFillKey,
-  collectChartMarkerImageFills,
-  collectChartMarkerImageFillsForCharts,
+  chartImageFillUsageSize,
+  collectChartImageFillUsages,
+  collectChartImageFillUsagesForCharts,
+  type ChartImageFillUsage,
+  type ChartImageFillUsageSize,
 } from '@silurus/ooxml-core';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions } from './types.js';
 import {
@@ -78,6 +89,70 @@ interface ImageRef {
   /** Chart marker effects are authored paint. If the pixel pipeline cannot
    * apply them, omit the marker instead of substituting the original image. */
   failClosedOnDuotoneFailure?: boolean;
+  targetWidthPx?: number;
+  targetHeightPx?: number;
+  /** Set only for browser-resizable rasters admitted by the shared plan. */
+  plannedPixelLimit?: number;
+}
+
+function maxDefined(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+}
+
+/** Merge crop constraints for one shared decoded source. The horizontal and
+ * vertical inset pairs can come from different placements: choosing the
+ * smallest visible fraction on each axis yields a full-source raster at least
+ * as large as every individual placement requires. A zero-inset object remains
+ * non-null when any placement is cropped, so vector preference stays disabled. */
+function conservativeSrcRect(
+  left: SrcRect | null | undefined,
+  right: SrcRect | null | undefined,
+): SrcRect | null {
+  if (!left && !right) return null;
+  const leftWidth = left ? 1 - left.l - left.r : 1;
+  const rightWidth = right ? 1 - right.l - right.r : 1;
+  const horizontal = rightWidth < leftWidth ? right : left;
+  const leftHeight = left ? 1 - left.t - left.b : 1;
+  const rightHeight = right ? 1 - right.t - right.b : 1;
+  const vertical = rightHeight < leftHeight ? right : left;
+  return {
+    l: horizontal?.l ?? 0,
+    r: horizontal?.r ?? 0,
+    t: vertical?.t ?? 0,
+    b: vertical?.b ?? 0,
+  };
+}
+
+function mergedSvgImagePath(
+  left: string | undefined,
+  right: string | undefined,
+): string | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  // Conflicting vector twins cannot safely share either path; use the common
+  // raster source instead.
+  return left === right ? left : undefined;
+}
+
+function mergeImageRef(left: ImageRef, right: ImageRef): ImageRef {
+  return {
+    ...left,
+    svgImagePath: mergedSvgImagePath(left.svgImagePath, right.svgImagePath),
+    widthPt: maxDefined(left.widthPt, right.widthPt),
+    heightPt: maxDefined(left.heightPt, right.heightPt),
+    srcRect: conservativeSrcRect(left.srcRect, right.srcRect),
+    failClosedOnDuotoneFailure:
+      left.failClosedOnDuotoneFailure || right.failClosedOnDuotoneFailure || undefined,
+    targetWidthPx: maxDefined(left.targetWidthPx, right.targetWidthPx),
+    targetHeightPx: maxDefined(left.targetHeightPx, right.targetHeightPx),
+  };
+}
+
+function setImageRef(refs: Map<string, ImageRef>, key: string, ref: ImageRef): void {
+  const prior = refs.get(key);
+  refs.set(key, prior ? mergeImageRef(prior, ref) : ref);
 }
 
 interface CellAnchorRange {
@@ -92,6 +167,27 @@ interface CellAnchorRange {
   editAs?: string;
   nativeExtCx?: number;
   nativeExtCy?: number;
+}
+
+function anchorDisplaySize(
+  anchor: CellAnchorRange,
+  ws: Worksheet,
+  geometry: GridGeometry | undefined,
+  scale: number,
+): { width: number; height: number } | null {
+  const axes = geometry ?? getGridGeometryForWorksheet(ws);
+  const { col, row } = axes.axesAtScale(scale);
+  const marker = (axis: GridAxisGeometry, index: number, offset: number) =>
+    axis.offsetOf(index + 1) + (offset * scale) / EMU_PER_PX;
+  const fromX = marker(col, anchor.fromCol, anchor.fromColOff);
+  const fromY = marker(row, anchor.fromRow, anchor.fromRowOff);
+  const toX = usesNativeOneCellExtent(anchor)
+    ? fromX + ((anchor.nativeExtCx as number) * scale) / EMU_PER_PX
+    : marker(col, anchor.toCol, anchor.toColOff);
+  const toY = usesNativeOneCellExtent(anchor)
+    ? fromY + ((anchor.nativeExtCy as number) * scale) / EMU_PER_PX
+    : marker(row, anchor.toRow, anchor.toRowOff);
+  return toX > fromX && toY > fromY ? { width: toX - fromX, height: toY - fromY } : null;
 }
 
 function anchorMayIntersectViewport(
@@ -204,6 +300,9 @@ export async function decodeImageSource(
   offscreenFactory?: OffscreenFactory,
   failClosedOnDuotoneFailure = false,
   tiff?: TiffRenderer,
+  target?: Readonly<{ targetWidthPx: number; targetHeightPx: number }>,
+  svgDecoder?: SvgBlobDecoder,
+  plannedPixelLimit?: number,
 ): Promise<CanvasImageSource | null> {
   const dataIsSvg = mimeType === 'image/svg+xml';
   // SVG pixels are not exposed to the shared bitmap effect pipeline. Without
@@ -211,8 +310,8 @@ export async function decodeImageSource(
   if (dataIsSvg && duotone) return null;
   // A cropped metafile must rasterize at its FULL picture frame, not the visible
   // sub-rect, so the fractional crop lands correctly; raster blips and uncropped
-  // metafiles pass the box through unchanged. The shared base cache is path-keyed
-  // ("first size wins"), matching pptx/docx.
+  // metafiles pass the box through unchanged. The shared base cache retains
+  // exact required-resolution variants and reuses a larger sufficient one.
   const sized = metafileRasterSize(mimeType, srcRect, widthPt, heightPt);
   if (!sized) return null;
   const decodeRaster = (): Promise<ImageBitmap | null> =>
@@ -222,6 +321,8 @@ export async function decodeImageSource(
       offscreenFactory,
       failClosedOnDuotoneFailure,
       tiff,
+      ...(target ?? {}),
+      ...(plannedPixelLimit ? { maxRetainedPixels: plannedPixelLimit } : {}),
     });
   // Shared vector-vs-raster gate (see core preferVectorBlip). When it returns
   // true, `blip.svgImagePath` is narrowed to string.
@@ -234,15 +335,29 @@ export async function decodeImageSource(
     // duotone applies only to the raster fallback — an SVG vector original has no
     // readable pixel grid (matches docx/pptx).
     try {
-      return await getCachedSvgImageByPath(blip.svgImagePath, fetchImage);
+      return await getCachedSvgImageByPath(blip.svgImagePath, fetchImage, {
+        ...target,
+        maxRetainedPixels: plannedPixelLimit,
+        workerDecoder: svgDecoder,
+      });
     } catch {
-      return dataIsSvg ? getCachedSvgImageByPath(imagePath, fetchImage) : decodeRaster();
+      return dataIsSvg
+        ? getCachedSvgImageByPath(imagePath, fetchImage, {
+            ...target,
+            maxRetainedPixels: plannedPixelLimit,
+            workerDecoder: svgDecoder,
+          })
+        : decodeRaster();
     }
   }
   if (dataIsSvg) {
     // svg-only picture with no separate `svgImagePath` field (defensive): the
     // raster decoder (createImageBitmap) can't rasterize SVG.
-    return getCachedSvgImageByPath(imagePath, fetchImage);
+    return getCachedSvgImageByPath(imagePath, fetchImage, {
+      ...target,
+      maxRetainedPixels: plannedPixelLimit,
+      workerDecoder: svgDecoder,
+    });
   }
   return decodeRaster();
 }
@@ -266,8 +381,9 @@ export async function decodeImageSource(
  *  `null` for an unsupported metafile (true EMF / geometry-less WMF) lets the
  *  renderer skip a falsy source without a re-fetch.
  *
- *  A no-op when `fetchImage` is absent (no byte source). Per-image failures are
- *  swallowed so one broken picture doesn't sink the grid. */
+ *  A no-op when `fetchImage` is absent (no byte source). Ordinary per-image
+ *  failures are swallowed so one broken picture doesn't sink the grid; decoded
+ *  image quota and recognized-TIFF codec diagnostics remain actionable. */
 export async function prefetchImages(
   ws: Worksheet,
   imageCache: Map<string, CanvasImageSource | null>,
@@ -284,6 +400,9 @@ export async function prefetchImages(
     freezeRows?: number;
     freezeCols?: number;
     tiff?: TiffRenderer;
+    effectiveDpr?: number;
+    svgDecoder?: SvgBlobDecoder;
+    imageResources?: ImageResourceOptions;
   },
 ): Promise<void> {
   // This map is only the synchronous lookup for the current frame. Never keep
@@ -314,7 +433,7 @@ export async function prefetchImages(
       )) continue;
       // Key by (path + duotone colours) so a recoloured picture is looked up
       // separately from the raw blip (§20.1.8.23).
-      refs.set(imageCacheKey(img.imagePath, img.duotone), {
+      setImageRef(refs, imageCacheKey(img.imagePath, img.duotone), {
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         svgImagePath: img.svgImagePath,
@@ -325,6 +444,17 @@ export async function prefetchImages(
         // and, for a metafile, the full-frame raster size.
         srcRect: img.srcRect ?? null,
         duotone: img.duotone ?? null,
+        ...(() => {
+          const display = anchorDisplaySize(img, ws, geometry, opts?.cellScale ?? 1);
+          const target = display && opts?.effectiveDpr
+            ? sourceRasterTargetSize(
+                display.width * opts.effectiveDpr,
+                display.height * opts.effectiveDpr,
+                img.srcRect,
+              )
+            : null;
+          return target ? { targetWidthPx: target.width, targetHeightPx: target.height } : {};
+        })(),
       });
     }
   }
@@ -339,7 +469,7 @@ export async function prefetchImages(
       )) continue;
       for (const shape of grp.shapes) {
         if (shape.geom.type === 'image') {
-          refs.set(imageCacheKey(shape.geom.imagePath, shape.geom.duotone), {
+          setImageRef(refs, imageCacheKey(shape.geom.imagePath, shape.geom.duotone), {
             imagePath: shape.geom.imagePath,
             mimeType: shape.geom.mimeType,
             svgImagePath: shape.geom.svgImagePath,
@@ -350,27 +480,193 @@ export async function prefetchImages(
             // and, for a metafile, the full-frame raster size.
             srcRect: shape.geom.srcRect ?? null,
             duotone: shape.geom.duotone ?? null,
+            ...(() => {
+              const display = anchorDisplaySize(grp, ws, geometry, opts?.cellScale ?? 1);
+              const target = display && opts?.effectiveDpr
+                ? sourceRasterTargetSize(
+                    display.width * shape.w * opts.effectiveDpr,
+                    display.height * shape.h * opts.effectiveDpr,
+                    shape.geom.srcRect,
+                  )
+                : null;
+              return target ? { targetWidthPx: target.width, targetHeightPx: target.height } : {};
+            })(),
           });
         }
       }
     }
   }
-  const visibleChartModels = (ws.charts ?? [])
-    .filter(chart => anchorMayIntersectViewport(chart, ws, opts?.viewport, geometry, frame))
-    .map(chart => chart.chart);
-  for (const fill of collectChartMarkerImageFillsForCharts(visibleChartModels)) {
-      refs.set(chartImageFillKey(fill), {
-        imagePath: fill.imagePath,
-        mimeType: fill.mimeType,
-        svgImagePath: fill.svgImagePath,
-        widthPt: 72,
-        heightPt: 72,
-        srcRect: fill.srcRect ?? null,
-        duotone: fill.duotone ?? null,
-        failClosedOnDuotoneFailure: true,
+  const charts = ws.charts ?? [];
+  const chartGeometry = charts.length > 0
+    ? geometry ?? getGridGeometryForWorksheet(ws)
+    : geometry;
+  const chartDescriptors: Array<{
+    chart: Worksheet['charts'][number];
+    frame: Parameters<typeof chartImageFillUsageSize>[1];
+    usages: Array<{
+      usage: ChartImageFillUsage;
+      size: ChartImageFillUsageSize;
+    }>;
+  }> = [];
+  for (const chart of charts) {
+    if (!anchorMayIntersectViewport(
+      chart,
+      ws,
+      opts?.viewport,
+      chartGeometry,
+      frame,
+    )) continue;
+    const display = anchorDisplaySize(chart, ws, chartGeometry, opts?.cellScale ?? 1);
+    if (!display
+      || !Number.isFinite(display.width)
+      || !Number.isFinite(display.height)
+      || display.width <= 0
+      || display.height <= 0) continue;
+    const usages = collectChartImageFillUsages(chart.chart);
+    const frameWidthPt = display.width * (EMU_PER_PX / EMU_PER_PT);
+    const frameHeightPt = display.height * (EMU_PER_PX / EMU_PER_PT);
+    const targetWidthPx = opts?.effectiveDpr !== undefined
+      ? display.width * opts.effectiveDpr
+      : undefined;
+    const targetHeightPx = opts?.effectiveDpr !== undefined
+      ? display.height * opts.effectiveDpr
+      : undefined;
+    const chartFrame = {
+      widthPt: frameWidthPt,
+      heightPt: frameHeightPt,
+      targetWidthPx,
+      targetHeightPx,
+    };
+    const sizedUsages: Array<{
+      usage: ChartImageFillUsage;
+      size: ChartImageFillUsageSize;
+    }> = [];
+    let sizesAreValid = true;
+    for (const usage of usages) {
+      const size = chartImageFillUsageSize(usage, chartFrame);
+      if (!size) {
+        sizesAreValid = false;
+        break;
+      }
+      sizedUsages.push({ usage, size });
+    }
+    if (!sizesAreValid) continue;
+    chartDescriptors.push({ chart, frame: chartFrame, usages: sizedUsages });
+  }
+  const allowedChartUsages = collectChartImageFillUsagesForCharts(
+    chartDescriptors.map(({ chart }) => chart.chart),
+    (usage, chartIndex) => chartImageFillUsageSize(
+      usage,
+      chartDescriptors[chartIndex]!.frame,
+    ) != null,
+  );
+  const chartEntries = new Map<string, {
+    fill: ReturnType<typeof collectChartImageFillUsages>[number]['fill'];
+    widthPt: number;
+    heightPt: number;
+    targetWidthPx?: number;
+    targetHeightPx?: number;
+    preserveNaturalSize: boolean;
+    hasSourceCrop: boolean;
+  }>();
+  for (const usage of allowedChartUsages) {
+    const { fill } = usage;
+    const key = chartImageFillKey(fill);
+    chartEntries.set(key, {
+      fill,
+      widthPt: 0,
+      heightPt: 0,
+      preserveNaturalSize: usage.preserveNaturalSize,
+      hasSourceCrop: usage.hasSourceCrop,
+    });
+  }
+  for (const descriptor of chartDescriptors) {
+    for (const { usage, size } of descriptor.usages) {
+      const { fill } = usage;
+      const key = chartImageFillKey(fill);
+      const prior = chartEntries.get(key);
+      if (!prior) continue;
+      const preserveNaturalSize = prior.preserveNaturalSize || usage.preserveNaturalSize;
+      // A chart picture can paint a marker, plot area, wall, or floor. The
+      // chart anchor is the smallest format-derived upper bound common to all
+      // consumers. Core usage factors retain every same-chart crop and
+      // stretch fillRect before identical sources are deduplicated.
+      chartEntries.set(key, {
+        ...prior,
+        widthPt: Math.max(prior.widthPt, size.widthPt),
+        heightPt: Math.max(prior.heightPt, size.heightPt),
+        targetWidthPx: preserveNaturalSize
+          ? undefined
+          : Math.max(prior.targetWidthPx ?? 0, size.targetWidthPx ?? 0) || undefined,
+        targetHeightPx: preserveNaturalSize
+          ? undefined
+          : Math.max(prior.targetHeightPx ?? 0, size.targetHeightPx ?? 0) || undefined,
+        preserveNaturalSize,
+        hasSourceCrop: prior.hasSourceCrop || usage.hasSourceCrop,
       });
+    }
+  }
+  for (const [key, entry] of chartEntries) {
+    const { fill, widthPt, heightPt, targetWidthPx, targetHeightPx, hasSourceCrop } = entry;
+    setImageRef(refs, key, {
+      imagePath: fill.imagePath,
+      mimeType: fill.mimeType,
+      svgImagePath: fill.svgImagePath,
+      widthPt,
+      heightPt,
+      // A zero-inset sentinel forces the raster SVG twin without applying crop
+      // twice: widthPt/heightPt already contain the post-crop metafile maxima.
+      srcRect: hasSourceCrop ? { l: 0, t: 0, r: 0, b: 0 } : null,
+      duotone: fill.duotone ?? null,
+      failClosedOnDuotoneFailure: true,
+      ...(targetWidthPx && targetHeightPx
+        ? { targetWidthPx, targetHeightPx }
+        : {}),
+    });
   }
   if (refs.size === 0) return;
+  const policy = normalizeImageResourceOptions(opts?.imageResources);
+  const demands = (await Promise.all([...refs].map(async ([key, ref]) => {
+    if (!ref.targetWidthPx || !ref.targetHeightPx
+      || ref.mimeType === 'image/svg+xml' || ref.duotone) return null;
+    const usesVector = !ref.duotone && preferVectorBlip({
+      svgImagePath: ref.svgImagePath,
+      srcRect: ref.srcRect,
+    });
+    if (usesVector) return null;
+    const inspection = await inspectCachedRasterSource(
+      ref.imagePath,
+      ref.mimeType,
+      fetch,
+    ).catch(() => null);
+    if (!inspection?.dimensions
+      || !isDecodeTargetResizableRasterFormat(inspection.format, opts?.tiff !== undefined)) return null;
+    return {
+      key,
+      targetWidthPx: ref.targetWidthPx,
+      targetHeightPx: ref.targetHeightPx,
+      sourceWidthPx: inspection.dimensions.width,
+      sourceHeightPx: inspection.dimensions.height,
+      retainedSurfaceCount: 1,
+    };
+  }))).filter((demand): demand is NonNullable<typeof demand> => demand !== null);
+  const plan = planDecodedImageTargets(demands, policy);
+  for (const [key, ref] of refs) {
+    const usesVector = ref.mimeType === 'image/svg+xml' || (!ref.duotone
+      && preferVectorBlip({
+        svgImagePath: ref.svgImagePath,
+        srcRect: ref.srcRect,
+      }));
+    // SVG rasterization remains display-targeted. Raster/metafile effects,
+    // natural-size fills, and formats not admitted by the shared planner keep
+    // their authored source grid; forwarding the raw geometry target would
+    // silently turn a semantic exclusion into an unplanned downsample.
+    if (usesVector) continue;
+    const target = plan.targets.get(key);
+    ref.targetWidthPx = target?.width;
+    ref.targetHeightPx = target?.height;
+    ref.plannedPixelLimit = target?.retainedPixels;
+  }
   await Promise.all(
     [...refs.entries()].map(async ([key, ref]) => {
       try {
@@ -390,12 +686,17 @@ export async function prefetchImages(
           opts?.offscreenFactory,
           ref.failClosedOnDuotoneFailure ?? false,
           opts?.tiff,
+          ref.targetWidthPx && ref.targetHeightPx
+            ? { targetWidthPx: ref.targetWidthPx, targetHeightPx: ref.targetHeightPx }
+            : undefined,
+          opts?.svgDecoder,
+          ref.plannedPixelLimit,
         );
         // Record the resolved drawable (INCLUDING a null for an unsupported
         // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
       } catch (error) {
-        if (isOoxmlDecodedImageLimitError(error)) throw error;
+        if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
         // Transient failure: DELETE any prior lookup entry rather than leaving
         // it. A prior entry is re-resolved precisely because its shared-cache
         // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
@@ -450,26 +751,30 @@ export function worksheetWithAutoRowHeights(
  *  equations, size the target, draw. Shared verbatim by the main-thread
  *  XlsxWorkbook and the render worker.
  *
- *  The whole pass (prefetch → synchronous draw) runs under a core render-pass
- *  lease ({@link acquireBitmapCacheLease}): the shared bitmap cache is
- *  LRU-bounded, so a pass resolving more images than the cap — or a concurrent
- *  pass on the same workbook — would otherwise evict AND GPU-close bitmaps this
- *  pass's lookup map still references before the draw runs. Under the lease the
- *  eviction still removes the cache entry (size stays bounded; the next pass
- *  re-decodes), but the close is deferred until the lease is released after the
- *  draw, so drawImage never receives a closed bitmap. */
+ *  The whole pass (prefetch → synchronous draw) runs under the core document
+ *  admission queue and render-pass lease ({@link withBitmapCacheLease}). This
+ *  keeps concurrent image-bearing paints for one workbook from each consuming
+ *  the full budget. The shared cache remains LRU-bounded; evictions remove cache
+ *  entries immediately but defer GPU close until the active paint releases its
+ *  lease, so drawImage never receives a closed bitmap. */
 export async function renderWorksheetViewport(
   deps: RenderDeps,
   target: HTMLCanvasElement | OffscreenCanvas,
   viewport: ViewportRange,
   opts: RenderViewportOptions = {},
+  svgDecoder?: SvgBlobDecoder,
 ): Promise<void> {
-  const releaseLease = opts.fetchImage ? acquireBitmapCacheLease(opts.fetchImage) : undefined;
-  try {
-    await renderWorksheetViewportLeased(deps, target, viewport, opts);
-  } finally {
-    releaseLease?.();
-  }
+  const paint = () => renderWorksheetViewportLeased(deps, target, viewport, opts, svgDecoder);
+  const hasDecodedImages = (deps.ws.images?.length ?? 0) > 0
+    || (deps.ws.shapeGroups?.some(group => (
+      group.shapes.some(shape => shape.geom.type === 'image')
+    )) ?? false)
+    || collectChartImageFillUsagesForCharts(
+      (deps.ws.charts ?? []).map(chart => chart.chart),
+    ).length > 0;
+  return opts.fetchImage && hasDecodedImages
+    ? withBitmapCacheLease(opts.fetchImage, opts.imageResources, paint)
+    : paint();
 }
 
 /** {@link renderWorksheetViewport}'s body, verbatim; runs under the caller's
@@ -479,7 +784,9 @@ async function renderWorksheetViewportLeased(
   target: HTMLCanvasElement | OffscreenCanvas,
   viewport: ViewportRange,
   opts: RenderViewportOptions = {},
+  svgDecoder?: SvgBlobDecoder,
 ): Promise<void> {
+  if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
@@ -488,6 +795,9 @@ async function renderWorksheetViewportLeased(
   const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
   const width = opts.width ?? rawW;
   const height = opts.height ?? rawH;
+  const dpr = opts.dpr ?? defaultDpr();
+  const clamped = clampCanvasSize(width * dpr, height * dpr);
+  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
   // Frame-local synchronous lookup only. Core owns decoded reuse/eviction;
   // retaining this map across frames would accumulate stale closed references.
   const imageCache = new Map<string, CanvasImageSource | null>();
@@ -513,6 +823,9 @@ async function renderWorksheetViewportLeased(
     freezeRows: opts.freezeRows,
     freezeCols: opts.freezeCols,
     tiff: deps.tiff,
+    effectiveDpr,
+    svgDecoder,
+    imageResources: opts.imageResources,
   });
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
@@ -531,7 +844,6 @@ async function renderWorksheetViewportLeased(
   if ((opts as GuardedRenderViewportOptions)[XLSX_RENDER_COMMIT_GUARD]?.() === false) return;
 
   // ── Step 2: Resize + draw, all synchronous from here.
-  const dpr = opts.dpr ?? defaultDpr();
   // Resize only when the backing store dimensions actually change. Assigning
   // canvas.width/height re-allocates (and clears) the GPU backing store, so on a
   // steady-state scroll/zoom stream — where width/height/dpr are unchanged frame
@@ -546,8 +858,6 @@ async function renderWorksheetViewportLeased(
   // axes by one factor (≤ 1) so the aspect ratio is kept; we fold that factor
   // into the effective dpr, keep the CSS box at the requested size, and the
   // browser stretches the (slightly lower-res) backing store to fill it.
-  const clamped = clampCanvasSize(width * dpr, height * dpr);
-  const effectiveDpr = clamped.clamped ? dpr * clamped.scale : dpr;
   const bw = clamped.width;
   const bh = clamped.height;
   if (target.width !== bw) target.width = bw;

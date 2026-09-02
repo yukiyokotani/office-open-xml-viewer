@@ -322,6 +322,43 @@ function retainedNodeRequiresElementBackedVerticalGlyphPaint(
   ));
 }
 
+function collectRetainedNodeResourceKeys(
+  node: PaintNode,
+  keys: Set<string>,
+  seen: Set<PaintNode>,
+): void {
+  if (seen.has(node)) return;
+  seen.add(node);
+  if (node.kind === 'drawing') {
+    for (const command of node.commands) {
+      if (command.kind === 'resource' || command.kind === 'drawingml-image-fill') {
+        keys.add(command.resourceKey);
+      }
+    }
+    return;
+  }
+  if (node.kind === 'paragraph') {
+    for (const resource of node.resources) keys.add(resource.resourceKey);
+    for (const drawing of node.drawings) collectRetainedNodeResourceKeys(drawing, keys, seen);
+    for (const textBox of node.textBoxes) collectRetainedNodeResourceKeys(textBox, keys, seen);
+    return;
+  }
+  if (node.kind === 'textbox' || node.kind === 'note') {
+    for (const block of node.story.blocks) collectRetainedNodeResourceKeys(block, keys, seen);
+    return;
+  }
+  for (const row of node.rows) {
+    for (const cell of row.cells) {
+      for (const block of cell.blocks) {
+        collectRetainedNodeResourceKeys(block.layout, keys, seen);
+      }
+    }
+  }
+  for (const placement of node.resolvedFloatingTables ?? []) {
+    collectRetainedNodeResourceKeys(placement.child, keys, seen);
+  }
+}
+
 /** Build the final immutable page paint plan. ECMA-376 §20.4.2.3 ordering is
  * applied only within an equivalent story stacking context; cross-story order
  * remains the explicit root order unless a separately registered compatibility
@@ -353,6 +390,11 @@ export function buildPageLayers(entries: readonly PageLayerNode[]): PageLayers {
     index = end;
   }
   const seen = new Set<PaintNode>();
+  const resourceKeys = new Set<string>();
+  const resourceSeen = new Set<PaintNode>();
+  for (const { node } of roots) {
+    collectRetainedNodeResourceKeys(node, resourceKeys, resourceSeen);
+  }
   return Object.freeze({
     roots,
     paintOrder: Object.freeze(paintOrder),
@@ -360,6 +402,7 @@ export function buildPageLayers(entries: readonly PageLayerNode[]): PageLayers {
       requiresElementBackedVerticalGlyphPaint: roots.some(({ node }) => (
         retainedNodeRequiresElementBackedVerticalGlyphPaint(node, seen)
       )),
+      resourceKeys: Object.freeze([...resourceKeys]),
     }),
     background: Object.freeze(nodes.get('background')!),
     behindText: Object.freeze(nodes.get('behindText')!),

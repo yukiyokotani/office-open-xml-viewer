@@ -106,11 +106,48 @@ interface TileGeometry extends ChartImageTileMetrics {
   repetitions: number;
 }
 
+interface ChartImageTileStaticMetrics {
+  alignment: string;
+  tx: number;
+  ty: number;
+  sx: number;
+  sy: number;
+  dpi: number;
+  flipX: boolean;
+  flipY: boolean;
+}
+
 /** EG_FillModeProperties is a choice with no schema default. Exactly one
  * authored mode must be present; omitting it must not invent stretch. */
 function imageFillModeIsPaintable(fill: ImageFill): boolean {
   return (fill.tile != null) !== (fill.stretch === true)
     && srcRectHasVisibleArea(fill.srcRect);
+}
+
+/** Validate the authored facts needed to derive tile geometry before an image
+ * has been decoded. Hosts use the same predicate when deciding whether a tiled
+ * occurrence really requires native source dimensions. */
+function chartImageTileStaticMetrics(fill: ImageFill): ChartImageTileStaticMetrics | null {
+  const tile = fill.tile;
+  if (!tile) return null;
+  const { algn, tx, ty, sx, sy } = tile;
+  const flip = tile.flip ?? 'none';
+  const dpi = fill.dpi;
+  if (!algn || !TILE_ALIGNMENTS.has(algn) || !TILE_FLIPS.has(flip)
+    || !Number.isFinite(tx) || !Number.isFinite(ty)
+    || !(dpi != null && Number.isFinite(dpi) && dpi > 0)
+    || !(Number.isFinite(sx) && (sx as number) > 0)
+    || !(Number.isFinite(sy) && (sy as number) > 0)) return null;
+  return {
+    alignment: algn,
+    tx: tx as number,
+    ty: ty as number,
+    sx: sx as number,
+    sy: sy as number,
+    dpi,
+    flipX: flip === 'x' || flip === 'xy',
+    flipY: flip === 'y' || flip === 'xy',
+  };
 }
 
 /** Return the synchronously preloaded source for a validated chart image fill.
@@ -127,35 +164,28 @@ export function chartImageTileMetrics(
   image: CanvasImageSource,
   ptToPx = PT_TO_PX,
 ): ChartImageTileMetrics | null {
-  const tile = fill.tile;
   // CT_TileInfoProperties@flip defaults to none. Its remaining placement
   // attributes and CT_BlipFillProperties@dpi have no usable schema default.
   // Do not invent Office compatibility semantics when those facts are absent.
   // A zero dpi requests embedded image metadata, which Canvas image sources do
   // not expose, so that case also remains fail-closed.
-  if (!tile) return null;
-  const { algn, tx, ty, sx, sy } = tile;
-  const flip = tile.flip ?? 'none';
-  if (!algn || !TILE_ALIGNMENTS.has(algn) || !TILE_FLIPS.has(flip)
-    || !Number.isFinite(tx) || !Number.isFinite(ty)
-    || !(fill.dpi != null && Number.isFinite(fill.dpi) && fill.dpi > 0)
-    || !(Number.isFinite(sx) && (sx as number) > 0)
-    || !(Number.isFinite(sy) && (sy as number) > 0)) return null;
+  const authored = chartImageTileStaticMetrics(fill);
+  if (!authored) return null;
   const natural = imageNaturalSize(image);
   if (!(Number.isFinite(natural.w) && natural.w > 0)
     || !(Number.isFinite(natural.h) && natural.h > 0)) return null;
-  const cssPixelsPerImagePixel = 96 / fill.dpi * (ptToPx / PT_TO_PX);
-  const tileW = natural.w * (sx as number) * cssPixelsPerImagePixel;
-  const tileH = natural.h * (sy as number) * cssPixelsPerImagePixel;
+  const cssPixelsPerImagePixel = 96 / authored.dpi * (ptToPx / PT_TO_PX);
+  const tileW = natural.w * authored.sx * cssPixelsPerImagePixel;
+  const tileH = natural.h * authored.sy * cssPixelsPerImagePixel;
   if (!(tileW > 0) || !(tileH > 0)) return null;
   return {
-    alignment: algn,
+    alignment: authored.alignment,
     tileW,
     tileH,
-    offsetX: (tx as number) / EMU_PER_PT * ptToPx,
-    offsetY: (ty as number) / EMU_PER_PT * ptToPx,
-    flipX: flip === 'x' || flip === 'xy',
-    flipY: flip === 'y' || flip === 'xy',
+    offsetX: authored.tx / EMU_PER_PT * ptToPx,
+    offsetY: authored.ty / EMU_PER_PT * ptToPx,
+    flipX: authored.flipX,
+    flipY: authored.flipY,
   };
 }
 
@@ -231,32 +261,181 @@ export function chartImageFillPaintWorkUpperBound(
   return geometry ? Math.min(geometry.repetitions, MAX_CHART_IMAGE_FILL_TILES) : 0;
 }
 
+/** Per-source facts retained from every reachable chart picture-fill
+ * occurrence before identical decoded sources are deduplicated. Frame-relative
+ * factors let DOCX/PPTX/XLSX hosts apply their own display scale and DPR. */
+export interface ChartImageFillUsage {
+  /** Stable representative carrying the source path, MIME, SVG twin and effects. */
+  readonly fill: ImageFill;
+  /** A statically valid `<a:tile>` occurrence needs native decoded dimensions. */
+  readonly preserveNaturalSize: boolean;
+  /** Any authored `<a:srcRect>` occurrence forces the raster SVG fallback. */
+  readonly hasSourceCrop: boolean;
+  /** Largest stretched destination/source ratio on each axis. */
+  readonly targetWidthFactor: number;
+  readonly targetHeightFactor: number;
+  /** Largest post-crop full metafile-frame ratio on each axis. */
+  readonly metafileWidthFactor: number;
+  readonly metafileHeightFactor: number;
+}
+
+export interface ChartImageFillUsageSize {
+  readonly widthPt: number;
+  readonly heightPt: number;
+  readonly targetWidthPx?: number;
+  readonly targetHeightPx?: number;
+}
+
+type ChartImageFillOccurrence = Omit<ChartImageFillUsage, 'fill'>;
+
+function isPositiveFiniteFactor(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+/** Apply one validated usage to a host chart frame without allowing finite
+ * inputs whose products overflow (or underflow to zero) to become an absent
+ * decode target. Hosts use this before aggregate source gating. */
+export function chartImageFillUsageSize(
+  usage: ChartImageFillUsage,
+  frame: Readonly<{
+    widthPt: number;
+    heightPt: number;
+    targetWidthPx?: number;
+    targetHeightPx?: number;
+  }>,
+): ChartImageFillUsageSize | null {
+  if (!isPositiveFiniteFactor(frame.widthPt)
+    || !isPositiveFiniteFactor(frame.heightPt)
+    || !isPositiveFiniteFactor(usage.metafileWidthFactor)
+    || !isPositiveFiniteFactor(usage.metafileHeightFactor)
+    || !Number.isFinite(usage.targetWidthFactor) || usage.targetWidthFactor < 0
+    || !Number.isFinite(usage.targetHeightFactor) || usage.targetHeightFactor < 0) return null;
+  const widthPt = frame.widthPt * usage.metafileWidthFactor;
+  const heightPt = frame.heightPt * usage.metafileHeightFactor;
+  if (!isPositiveFiniteFactor(widthPt) || !isPositiveFiniteFactor(heightPt)) return null;
+  const targetFrameWidthPx = frame.targetWidthPx;
+  const targetFrameHeightPx = frame.targetHeightPx;
+  const hasTargetWidth = targetFrameWidthPx != null;
+  const hasTargetHeight = targetFrameHeightPx != null;
+  if (hasTargetWidth !== hasTargetHeight) return null;
+  if (targetFrameWidthPx == null || targetFrameHeightPx == null) return { widthPt, heightPt };
+  if (!isPositiveFiniteFactor(targetFrameWidthPx)
+    || !isPositiveFiniteFactor(targetFrameHeightPx)) return null;
+  const rawTargetWidthPx = targetFrameWidthPx * usage.targetWidthFactor;
+  const rawTargetHeightPx = targetFrameHeightPx * usage.targetHeightFactor;
+  if (!Number.isFinite(rawTargetWidthPx) || rawTargetWidthPx < 0
+    || (usage.targetWidthFactor > 0 && rawTargetWidthPx === 0)
+    || !Number.isFinite(rawTargetHeightPx) || rawTargetHeightPx < 0
+    || (usage.targetHeightFactor > 0 && rawTargetHeightPx === 0)) return null;
+  const targetWidthPx = Math.ceil(rawTargetWidthPx);
+  const targetHeightPx = Math.ceil(rawTargetHeightPx);
+  if (!Number.isFinite(targetWidthPx) || !Number.isFinite(targetHeightPx)) return null;
+  return { widthPt, heightPt, targetWidthPx, targetHeightPx };
+}
+
+function chartImageFillOccurrence(fill: ImageFill): ChartImageFillOccurrence | null {
+  if (!imageFillModeIsPaintable(fill)) return null;
+  const logicalWidth = fill.srcRect ? 1 - fill.srcRect.l - fill.srcRect.r : 1;
+  const logicalHeight = fill.srcRect ? 1 - fill.srcRect.t - fill.srcRect.b : 1;
+  if (!(Number.isFinite(logicalWidth) && logicalWidth > 0)
+    || !(Number.isFinite(logicalHeight) && logicalHeight > 0)) return null;
+  const hasSourceCrop = fill.srcRect != null;
+  if (fill.tile) {
+    if (!chartImageTileStaticMetrics(fill)) return null;
+    const metafileWidthFactor = 1 / logicalWidth;
+    const metafileHeightFactor = 1 / logicalHeight;
+    if (!isPositiveFiniteFactor(metafileWidthFactor)
+      || !isPositiveFiniteFactor(metafileHeightFactor)) return null;
+    return {
+      preserveNaturalSize: true,
+      hasSourceCrop,
+      targetWidthFactor: 0,
+      targetHeightFactor: 0,
+      metafileWidthFactor,
+      metafileHeightFactor,
+    };
+  }
+  const rect = fill.fillRect;
+  const left = rect?.l ?? 0;
+  const top = rect?.t ?? 0;
+  const right = rect?.r ?? 0;
+  const bottom = rect?.b ?? 0;
+  if (![left, top, right, bottom].every(Number.isFinite)) return null;
+  const destinationWidth = 1 - left - right;
+  const destinationHeight = 1 - top - bottom;
+  if (!isPositiveFiniteFactor(destinationWidth)
+    || !isPositiveFiniteFactor(destinationHeight)) return null;
+  const widthFactor = destinationWidth / logicalWidth;
+  const heightFactor = destinationHeight / logicalHeight;
+  if (!isPositiveFiniteFactor(widthFactor)
+    || !isPositiveFiniteFactor(heightFactor)) return null;
+  return {
+    preserveNaturalSize: false,
+    hasSourceCrop,
+    targetWidthFactor: widthFactor,
+    targetHeightFactor: heightFactor,
+    metafileWidthFactor: widthFactor,
+    metafileHeightFactor: heightFactor,
+  };
+}
+
+function mergeChartImageFillUsages(
+  left: ChartImageFillUsage,
+  right: ChartImageFillUsage,
+): ChartImageFillUsage {
+  return {
+    fill: left.fill,
+    preserveNaturalSize: left.preserveNaturalSize || right.preserveNaturalSize,
+    hasSourceCrop: left.hasSourceCrop || right.hasSourceCrop,
+    targetWidthFactor: Math.max(left.targetWidthFactor, right.targetWidthFactor),
+    targetHeightFactor: Math.max(left.targetHeightFactor, right.targetHeightFactor),
+    metafileWidthFactor: Math.max(left.metafileWidthFactor, right.metafileWidthFactor),
+    metafileHeightFactor: Math.max(left.metafileHeightFactor, right.metafileHeightFactor),
+  };
+}
+
 /** Unique picture fills reachable by marker consumers. Family suppression,
  * point validity and direct precedence match the painters so hosts never fetch
  * images for markers that cannot be drawn. */
 interface ChartMarkerImageFillResult {
-  fills: ImageFill[];
+  usages: ChartImageFillUsage[];
   sourceLimitExceeded: boolean;
+  usageRejected: boolean;
 }
 
-function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageFillResult {
+function collectChartMarkerImageFillResult(
+  chart: ChartModel,
+  acceptUsage?: (usage: ChartImageFillUsage) => boolean,
+): ChartMarkerImageFillResult {
   const sourceCount = sourceChartStructureCount(chart);
   if (sourceCount > MAX_CANVAS_CHART_POINTS) {
-    return { fills: [], sourceLimitExceeded: false };
+    return { usages: [], sourceLimitExceeded: false, usageRejected: false };
   }
-  const fills = new Map<string, ImageFill>();
+  const usages = new Map<string, ChartImageFillUsage>();
   let sourceLimitExceeded = false;
+  let usageRejected = false;
   const add = (fill: unknown) => {
+    if (usageRejected) return;
     if (!fill || typeof fill !== 'object' || (fill as ImageFill).fillType !== 'image') return;
     const image = fill as ImageFill;
-    if (!imageFillModeIsPaintable(image)) return;
+    const occurrence = chartImageFillOccurrence(image);
+    if (!occurrence) return;
     const key = chartImageFillKey(image);
-    if (fills.has(key)) return;
-    if (fills.size >= MAX_CHART_MARKER_IMAGE_SOURCES) {
+    const usage: ChartImageFillUsage = { fill: image, ...occurrence };
+    if (acceptUsage && !acceptUsage(usage)) {
+      usageRejected = true;
+      return;
+    }
+    const prior = usages.get(key);
+    if (prior) {
+      usages.set(key, mergeChartImageFillUsages(prior, usage));
+      return;
+    }
+    if (usages.size >= MAX_CHART_MARKER_IMAGE_SOURCES) {
       sourceLimitExceeded = true;
       return;
     }
-    fills.set(key, image);
+    usages.set(key, usage);
   };
   const selectedStylePaint = (
     style: ChartExElementStyle | null | undefined,
@@ -476,33 +655,56 @@ function collectChartMarkerImageFillResult(chart: ChartModel): ChartMarkerImageF
     if (linked) add(linked);
   }
   return {
-    fills: sourceLimitExceeded ? [] : [...fills.values()],
+    usages: sourceLimitExceeded || usageRejected ? [] : [...usages.values()],
     sourceLimitExceeded,
+    usageRejected,
   };
 }
 
+export function collectChartImageFillUsages(chart: ChartModel): ChartImageFillUsage[] {
+  return collectChartMarkerImageFillResult(chart).usages;
+}
+
 export function collectChartMarkerImageFills(chart: ChartModel): ImageFill[] {
-  return collectChartMarkerImageFillResult(chart).fills;
+  return collectChartImageFillUsages(chart).map(usage => usage.fill);
 }
 
 /** Collect chart picture fills for one host render pass. Hosts retain the decoded
  * sources until that page/slide/viewport paint completes, so the count ceiling
  * applies to the aggregate rather than independently to each chart. */
+export function collectChartImageFillUsagesForCharts(
+  charts: readonly ChartModel[],
+  acceptUsage?: (usage: ChartImageFillUsage, chartIndex: number) => boolean,
+): ChartImageFillUsage[] {
+  const usages = new Map<string, ChartImageFillUsage>();
+  for (let chartIndex = 0; chartIndex < charts.length; chartIndex++) {
+    const chart = charts[chartIndex]!;
+    const result = collectChartMarkerImageFillResult(
+      chart,
+      acceptUsage ? usage => acceptUsage(usage, chartIndex) : undefined,
+    );
+    // Host frame validation rejects the whole owning chart before either its
+    // per-chart source ceiling or the aggregate ceiling can suppress peers.
+    if (result.usageRejected) continue;
+    if (result.sourceLimitExceeded) return [];
+    for (const usage of result.usages) {
+      const key = chartImageFillKey(usage.fill);
+      const prior = usages.get(key);
+      if (prior) {
+        usages.set(key, mergeChartImageFillUsages(prior, usage));
+        continue;
+      }
+      if (usages.size >= MAX_CHART_MARKER_IMAGE_SOURCES) return [];
+      usages.set(key, usage);
+    }
+  }
+  return [...usages.values()];
+}
+
 export function collectChartMarkerImageFillsForCharts(
   charts: readonly ChartModel[],
 ): ImageFill[] {
-  const fills = new Map<string, ImageFill>();
-  for (const chart of charts) {
-    const result = collectChartMarkerImageFillResult(chart);
-    if (result.sourceLimitExceeded) return [];
-    for (const fill of result.fills) {
-      const key = chartImageFillKey(fill);
-      if (fills.has(key)) continue;
-      if (fills.size >= MAX_CHART_MARKER_IMAGE_SOURCES) return [];
-      fills.set(key, fill);
-    }
-  }
-  return [...fills.values()];
+  return collectChartImageFillUsagesForCharts(charts).map(usage => usage.fill);
 }
 
 export function paintChartImageFill(

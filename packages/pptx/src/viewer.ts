@@ -63,7 +63,7 @@ export type HiddenSlideMode = 'show' | 'skip' | 'dim';
 /** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
 const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
 
-export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr'>, LoadOptions {
+export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' | 'imageResources'>, LoadOptions {
   /** Called when a slide finishes rendering or progressive availability changes. */
   onSlideChange?: (index: number, total: number, layoutComplete: boolean) => void;
   /**
@@ -354,6 +354,7 @@ export class PptxViewer implements ZoomableViewer {
         threeD: this.opts.threeD,
         regionMap: this.opts.regionMap,
         chartEx: this.opts.chartEx,
+        tiff: this.opts.tiff,
         mode: this._mode,
         progressiveLayout: this.opts.progressiveLayout,
         onLayoutProgress: this.opts.onLayoutProgress,
@@ -669,6 +670,7 @@ export class PptxViewer implements ZoomableViewer {
         const handle = await engine.presentSlide(this.canvas, slide, {
           width: targetWidth,
           dpr,
+          imageResources: this.opts.imageResources,
           dim,
           onTextRun,
           onError: (error) => {
@@ -686,7 +688,7 @@ export class PptxViewer implements ZoomableViewer {
           this.canvas,
           slide,
           'worker',
-          { width: targetWidth, dpr, dim, onTextRun },
+          { width: targetWidth, dpr, imageResources: this.opts.imageResources, dim, onTextRun },
         );
         if (!this.renderDispatcher.commitBitmap(generation, bmp)) return;
       } else {
@@ -695,7 +697,7 @@ export class PptxViewer implements ZoomableViewer {
           this.canvas,
           slide,
           'main',
-          { width: targetWidth, dpr, onTextRun, dim },
+          { width: targetWidth, dpr, imageResources: this.opts.imageResources, onTextRun, dim },
         );
         if (!this.renderDispatcher.isCurrent(generation)) return;
       }

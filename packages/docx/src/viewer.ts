@@ -296,6 +296,7 @@ export class DocxViewer implements ZoomableViewer {
         threeD: this._opts.threeD,
         regionMap: this._opts.regionMap,
         chartEx: this._opts.chartEx,
+        tiff: this._opts.tiff,
         mode: this._mode,
         ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
         ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
@@ -780,6 +781,7 @@ export class DocxViewer implements ZoomableViewer {
     const renderOptions = {
       width: renderWidth,
       dpr: this._opts.dpr,
+      imageResources: this._opts.imageResources,
       defaultTextColor: this._opts.defaultTextColor,
       currentDate: this._opts.currentDate,
       showTrackedChanges: this._opts.showTrackedChanges,

@@ -103,6 +103,28 @@ describe('getCachedSvgImageByPath', () => {
     expect(fetchImage).toHaveBeenCalledWith('worker.svg', 'image/svg+xml');
   });
 
+  it('uses the Window decode bridge at the requested display size in a worker', async () => {
+    vi.stubGlobal('Image', undefined);
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+      throw new Error('Chromium workers cannot decode this SVG Blob');
+    }));
+    const bitmap = { width: 640, height: 360, close() {} } as unknown as ImageBitmap;
+    const workerDecoder = vi.fn(async () => bitmap);
+    const fetchImage = vi.fn(async () => new Blob(['<svg/>'], { type: 'image/svg+xml' }));
+
+    const result = await getCachedSvgImageByPath('worker-bridged.svg', fetchImage, {
+      targetWidthPx: 640,
+      targetHeightPx: 360,
+      workerDecoder,
+    });
+
+    expect(result).toBe(bitmap);
+    expect(workerDecoder).toHaveBeenCalledWith(expect.any(Blob), {
+      targetWidthPx: 640,
+      targetHeightPx: 360,
+    });
+  });
+
   it('admits at most two concurrent SVG fetch/decode operations per document', async () => {
     vi.stubGlobal('URL', { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} });
     class FakeImg { onload: (() => void) | null = null; onerror: (() => void) | null = null;

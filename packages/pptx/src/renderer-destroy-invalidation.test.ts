@@ -53,8 +53,7 @@ describe('PPTX main-render target invalidation', () => {
       dpr: 1,
       fetchImage: vi.fn(async () => new Blob()),
     });
-    await Promise.resolve();
-    expect(bitmapDecode.decode).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(bitmapDecode.decode).toHaveBeenCalledOnce());
 
     invalidatePptxRenderTarget(canvas);
     calls.length = 0; // models CallerCanvasMount restoring the original bitmap

@@ -165,6 +165,14 @@ fn stroke(color: &str) -> Stroke {
     }
 }
 
+fn double_stroke(color: &str) -> Stroke {
+    Stroke {
+        width: 38100,
+        cmpd: Some("dbl".to_owned()),
+        ..stroke(color)
+    }
+}
+
 // Built-in presets predate the lossless thirteen-role model. Keep their
 // declarative definitions compact while mapping each legacy shorthand onto the
 // exact CT_TablePartStyle member now used by XML-backed styles.
@@ -208,6 +216,9 @@ macro_rules! set_table_style_field {
     }};
     ($style:ident, first_row_border_b, $value:expr) => {
         $style.first_row.borders.bottom = TableLineStyle::from_stroke($value)
+    };
+    ($style:ident, last_row_border_t, $value:expr) => {
+        $style.last_row.borders.top = TableLineStyle::from_stroke($value)
     };
     ($style:ident, whole_text, $value:expr) => {
         $style.whole_tbl.text = $value
@@ -326,6 +337,7 @@ fn medium_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         .or_else(|| dk1(theme))
         .unwrap_or_else(|| "000000".into());
     let lt = lt1(theme).unwrap_or_else(|| "FFFFFF".into());
+    let dk = dk1(theme).unwrap_or_else(|| "000000".into());
     let border = Some(stroke(&a));
     let band1h_color = apply_transforms(&a, &[("tint", 20000)]);
     table_style! {
@@ -336,6 +348,29 @@ fn medium_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
         whole_outer_h: border.clone(),
         whole_outer_v: border,
         whole_inside_h: Some(stroke(&a)),
+        last_row_border_t: Some(double_stroke(&a)),
+        whole_text: TableTextStyle {
+            color: Some(dk.clone()),
+            ..Default::default()
+        },
+        first_row_text: TableTextStyle {
+            color: Some(lt),
+            bold: Some(true),
+            ..Default::default()
+        },
+        last_row_text: TableTextStyle {
+            color: Some(dk.clone()),
+            bold: Some(true),
+            ..Default::default()
+        },
+        first_col_text: TableTextStyle {
+            bold: Some(true),
+            ..Default::default()
+        },
+        last_col_text: TableTextStyle {
+            bold: Some(true),
+            ..Default::default()
+        },
     }
 }
 
@@ -955,5 +990,37 @@ mod tests {
         assert_eq!(style.last_row.text.bold, Some(true));
         assert_eq!(style.first_col.text.bold, Some(true));
         assert_eq!(style.last_col.text.bold, Some(true));
+    }
+
+    /// Built-in Medium Style 1 is not serialized into tableStyles.xml. An
+    /// Office-produced flag matrix shows regular whole-table text, bold text on
+    /// flagged header/total/first-column/last-column parts, light header text,
+    /// and a compound double separator above a flagged total row.
+    #[test]
+    fn medium_style_1_accent_1_carries_text_and_total_row_formatting() {
+        let theme = HashMap::from([
+            ("accent1".to_owned(), "1D6FA8".to_owned()),
+            ("lt1".to_owned(), "F9F9F9".to_owned()),
+            ("dk1".to_owned(), "10263F".to_owned()),
+        ]);
+        let style = lookup_builtin_table_style("{B301B821-A1FF-4177-AEE7-76D212191A09}", &theme)
+            .expect("known PowerPoint table style");
+
+        assert_eq!(style.whole_tbl.text.color.as_deref(), Some("10263F"));
+        assert_eq!(style.whole_tbl.text.bold, None);
+        assert_eq!(style.first_row.text.color.as_deref(), Some("F9F9F9"));
+        assert_eq!(style.first_row.text.bold, Some(true));
+        assert_eq!(style.last_row.text.color.as_deref(), Some("10263F"));
+        assert_eq!(style.last_row.text.bold, Some(true));
+        assert_eq!(style.first_col.text.color, None);
+        assert_eq!(style.first_col.text.bold, Some(true));
+        assert_eq!(style.last_col.text.color, None);
+        assert_eq!(style.last_col.text.bold, Some(true));
+        let TableLineStyle::Stroke(total_separator) = &style.last_row.borders.top else {
+            panic!("last-row top separator");
+        };
+        assert_eq!(total_separator.color, "1D6FA8");
+        assert_eq!(total_separator.width, 38_100);
+        assert_eq!(total_separator.cmpd.as_deref(), Some("dbl"));
     }
 }

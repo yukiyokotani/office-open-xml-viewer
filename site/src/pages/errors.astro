@@ -25,6 +25,7 @@ const handlerExample = `import {
   OoxmlDecodedImageLimitError,
   OoxmlError,
   OoxmlResourceLimitError,
+  TiffDecodeError,
 } from '@silurus/ooxml/docx';
 
 export function previewErrorMessage(error: unknown): string {
@@ -44,6 +45,9 @@ export function previewErrorMessage(error: unknown): string {
   }
   if (error instanceof OoxmlDecodedImageLimitError) {
     return 'This file contains an image that is too large to preview.';
+  }
+  if (error instanceof TiffDecodeError) {
+    return 'This file contains a TIFF image that cannot be previewed.';
   }
   return 'This file could not be previewed.';
 }
@@ -132,7 +136,8 @@ try {
           <tbody>
             <tr><td><a href="#ooxml-error"><code>OoxmlError</code></a></td><td>The container is encrypted, legacy or not OOXML.</td><td>Ask for a password, request conversion, or reject the file according to <code>error.code</code>.</td></tr>
             <tr><td><a href="#ooxml-resource-limit-error"><code>OoxmlResourceLimitError</code></a></td><td>A measured package or format resource crossed a limit.</td><td>Show “too large or complex to preview.” Only suggest changing configuration when <code>configurable</code> is <code>true</code>.</td></tr>
-            <tr><td><a href="#decoded-image-limit-error"><code>OoxmlDecodedImageLimitError</code></a></td><td>An embedded raster image crossed a non-configurable decode safety ceiling.</td><td>Explain that the document contains an image that is too large to preview.</td></tr>
+            <tr><td><a href="#decoded-image-limit-error"><code>OoxmlDecodedImageLimitError</code></a></td><td>Decoded raster demand crossed the configured aggregate budget or a hard decode safety ceiling.</td><td>For an aggregate crossing, lower the display scale or adjust <code>imageResources</code>; for a hard source crossing, explain that the image is too large to preview.</td></tr>
+            <tr><td><a href="#tiff-decode-error"><code>TiffDecodeError</code></a></td><td>A recognized TIFF part has no codec, is malformed, or uses an unsupported class.</td><td>Explain that the document contains a TIFF image that cannot be previewed.</td></tr>
             <tr><td><a href="#parser-crashed"><code>code === 'parser-crashed'</code></a></td><td>The WebAssembly parser trapped; the exact underlying cause is unavailable.</td><td>Show a generic processing failure, retain diagnostics, and do not label it as OOM.</td></tr>
             <tr><td><a href="#untyped-errors">Fallback</a></td><td>A network, browser, configuration, rendering, worker or media failure without a stable typed code.</td><td>Show a generic failure and report the original error. Do not parse its message.</td></tr>
           </tbody>
@@ -193,8 +198,15 @@ try {
     <section id="decoded-image-limit-error" class="error-section error-detail">
       <p class="error-kicker">Raster image safety</p>
       <h2><code>OoxmlDecodedImageLimitError</code></h2>
-      <p><code>error.code</code> is <code>ooxml-decoded-image-limit</code>. Inspect <code>metric</code>, <code>limit</code> and <code>observed</code>. The metric is <code>image-dimension</code>, <code>image-pixels</code> or <code>active-decoded-bytes</code>. For target-aware PPTX painting, the image metrics can describe either the retained output-surface ceiling or the separate encoded-source hard ceiling; <code>limit</code> identifies which boundary was crossed.</p>
-      <p class="note"><strong>This limit is not configurable.</strong> It prevents dangerous decoded surfaces before or during image work. A browser or device may still impose a lower image or Canvas limit, so ordinary decode failures can occur below this ceiling.</p>
+      <p><code>error.code</code> is <code>ooxml-decoded-image-limit</code>. Inspect <code>metric</code>, <code>limit</code> and <code>observed</code>. The metric is <code>image-dimension</code>, <code>image-pixels</code> or <code>active-decoded-bytes</code>. DOCX, XLSX and PPTX preserve native decoding for target-resizable rasters (browser formats and TIFF with its optional codec) while a complete paint fits. When native ownership crosses an aggregate or per-surface boundary, they use the visible canvas/DPR target; adaptive mode reduces those targets uniformly if the paint is still over budget, while strict mode preserves them and reports an aggregate crossing.</p>
+      <p class="note"><strong>Only the aggregate decoded budget is configurable.</strong> Set <code>imageResources.decodedByteBudget</code> between 4 bytes and 512 MiB. Encoded-source, per-axis and per-surface hard ceilings remain non-disableable. A browser or device may still impose a lower image or Canvas limit, so ordinary decode failures can occur below these boundaries.</p>
+    </section>
+
+    <section id="tiff-decode-error" class="error-section error-detail">
+      <p class="error-kicker">TIFF compatibility</p>
+      <h2><code>TiffDecodeError</code></h2>
+      <p><code>error.code</code> is <code>ooxml-tiff-decode</code>. It identifies a recognized TIFF part that cannot be decoded because the optional codec was not supplied, the input is malformed, the TIFF class is unsupported, or bitmap handoff failed.</p>
+      <p class="note">The message is diagnostic text, not a stable subtype. Use the exported class or <code>code</code> for control flow and show one product-level unsupported-image message.</p>
     </section>
 
     <section id="parser-crashed" class="error-section error-detail">

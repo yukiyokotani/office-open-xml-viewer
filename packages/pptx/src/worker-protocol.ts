@@ -102,6 +102,7 @@ export type RenderWorkerRequest =
       slideIndex: number;
       width: number;
       dpr: number;
+      imageResources?: import('@silurus/ooxml-core').ImageResourceOptions;
       skipMediaControls?: boolean;
       dim?: DimOptions;
     }

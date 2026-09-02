@@ -14,9 +14,11 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 // after applyStroke sets strokeStyle + lineWidth), then read the shared line.
 
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
+interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[] } {
+function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[] } {
   const strokes: StrokeSeg[] = [];
+  const fills: FillRect[] = [];
   let cur = { x: 0, y: 0 };
   let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
   let lineWidth = 1;
@@ -38,7 +40,11 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     stroke() {
       if (pending) strokes.push({ ...pending, width: lineWidth, color: String(strokeStyle) });
     },
-    fill() {}, fillRect() {}, strokeRect() {}, clearRect() {}, clip() {}, rect() {},
+    fill() {},
+    fillRect(x: number, y: number, width: number, height: number) {
+      fills.push({ x, y, width, height, color: String(this.fillStyle) });
+    },
+    strokeRect() {}, clearRect() {}, clip() {}, rect() {},
     scale() {}, translate() {}, rotate() {}, setTransform() {}, transform() {}, resetTransform() {},
     setLineDash() {}, getLineDash() { return []; },
     drawImage() {}, arc() {}, arcTo() {}, ellipse() {},
@@ -54,7 +60,7 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     letterSpacing: '0px',
     globalCompositeOperation: 'source-over' as GlobalCompositeOperation,
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes, fills };
 }
 
 const EMU = 12700; // 1 pt
@@ -93,6 +99,18 @@ function render(t: TableElement): StrokeSeg[] {
   const { ctx, strokes } = makeRecordingCtx();
   renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
   return strokes;
+}
+
+function renderRecording(t: TableElement): { strokes: StrokeSeg[]; fills: FillRect[] } {
+  const recording = makeRecordingCtx();
+  renderTable(
+    recording.ctx,
+    t,
+    SCALE,
+    undefined,
+    { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+  );
+  return recording;
 }
 
 function verticalAt(strokes: StrokeSeg[], x: number): StrokeSeg[] {
@@ -246,6 +264,19 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(verticalAt(strokes, 60)).toHaveLength(1);  // outer right
     expect(horizontalAt(strokes, 0)).toHaveLength(1); // outer top
     expect(horizontalAt(strokes, 20)).toHaveLength(1);// outer bottom
+  });
+
+  it('paints cmpd=dbl table borders as two separated rails', () => {
+    const recording = renderRecording(tableOf([
+      [cell({ borderB: ln({ width: 3 * EMU, color: '1D6FA8', cmpd: 'dbl' }) })],
+    ], [COL]));
+
+    expect(horizontalAt(recording.strokes, 20)).toHaveLength(0);
+    const rails = recording.fills.filter((fill) => fill.color === rgba('1D6FA8'));
+    expect(rails).toEqual([
+      { x: 0, y: 19, width: 60, height: 1, color: rgba('1D6FA8') },
+      { x: 0, y: 21, width: 60, height: 1, color: rgba('1D6FA8') },
+    ]);
   });
 
   it('gridSpan: a horizontally-merged cell spans the shared vertical line region', () => {

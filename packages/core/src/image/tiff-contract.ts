@@ -1,7 +1,55 @@
+/** Target and retained-surface constraints for the optional TIFF codec. */
+export interface TiffRenderOptions {
+  /** Desired width of the full source raster in device pixels. */
+  targetWidthPx?: number;
+  /** Desired height of the full source raster in device pixels. */
+  targetHeightPx?: number;
+  /** Maximum retained RGBA pixels available to this decode. */
+  maxRetainedPixels?: number;
+}
+
+/** A recognized TIFF image that cannot be decoded by the configured codec. */
+export class TiffDecodeError extends Error {
+  readonly code = 'ooxml-tiff-decode' as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'TiffDecodeError';
+    Object.setPrototypeOf(this, TiffDecodeError.prototype);
+  }
+}
+
+/** Snapshot the only caller-controlled TIFF diagnostic field used on the wire. */
+export function getTiffDecodeErrorDetails(
+  error: unknown,
+): Readonly<{ message: string }> | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  try {
+    const candidate = error as { readonly code?: unknown; readonly message?: unknown };
+    const code = candidate.code;
+    const message = candidate.message;
+    return code === 'ooxml-tiff-decode' && typeof message === 'string'
+      ? { message }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Narrow TIFF failures on either side of a worker boundary. */
+export function isTiffDecodeError(error: unknown): error is TiffDecodeError {
+  if (!getTiffDecodeErrorDetails(error)) return false;
+  try {
+    return typeof (error as { readonly name?: unknown }).name === 'string';
+  } catch {
+    return false;
+  }
+}
+
 /** Optional TIFF codec contract shared by DOCX, XLSX and PPTX. */
 export interface TiffRenderer {
   /** Decode one complete classic-TIFF part into a browser-owned bitmap. */
-  render(bytes: Uint8Array): Promise<ImageBitmap | null>;
+  render(bytes: Uint8Array, options?: Readonly<TiffRenderOptions>): Promise<ImageBitmap | null>;
 }
 
 /** Content-sniff classic TIFF byte order + version, independent of MIME. */

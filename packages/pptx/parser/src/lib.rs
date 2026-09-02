@@ -3134,6 +3134,7 @@ fn produce_slide_unit_with_journal(
         let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
             parse_layout(
                 lx,
+                &bundle.master_placeholder_types,
                 &bundle.master_font_sizes,
                 &bundle.master_font_families,
                 &bundle.master_level_font_sizes,
@@ -3903,6 +3904,7 @@ mod tests {
         let fill = Fill::Image {
             image_path: "ppt/media/image2.jpeg".to_owned(),
             mime_type: "image/jpeg".to_owned(),
+            src_rect: None,
             fill_rect: None,
             tile: None,
             alpha: None,
@@ -4742,6 +4744,26 @@ mod tests {
         assert!(!r_n.strikethrough && !r_n.strike_double);
     }
 
+    /// CT_TextCharacterProperties is a sequence: the EG_TextRunProperties fill
+    /// choice precedes latin/ea/cs. PowerPoint ignores a solidFill serialized
+    /// after those font children instead of accepting the out-of-order value.
+    /// A valid fill in its schema position must continue to resolve normally.
+    #[test]
+    fn test_parse_run_ignores_out_of_order_text_fill() {
+        let valid = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><solidFill><schemeClr val="accent1"/></solidFill><latin typeface="Aptos"/><ea typeface=""/><cs typeface=""/></rPr><t>valid</t></r>"#;
+        let invalid = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><latin typeface="Aptos"/><ea typeface=""/><cs typeface=""/><solidFill><schemeClr val="accent1"/></solidFill></rPr><t>invalid</t></r>"#;
+        let theme = HashMap::from([("accent1".to_owned(), "1D6FA8".to_owned())]);
+        let rels = HashMap::new();
+
+        let valid_doc = roxmltree::Document::parse(valid).unwrap();
+        let valid_run = parse_run(valid_doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(valid_run.color.as_deref(), Some("1D6FA8"));
+
+        let invalid_doc = roxmltree::Document::parse(invalid).unwrap();
+        let invalid_run = parse_run(invalid_doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(invalid_run.color, None);
+    }
+
     /// ECMA-376 §21.1.2.3.9; ST_TextCapsType §20.1.10.64 — cap="all" /
     /// "small" are passed through;
     /// cap="none" or omitted yields None so the field stays absent in JSON.
@@ -4810,7 +4832,7 @@ mod tests {
     /// ECMA-376 §20.1.8.14 + §20.1.8.58 + §20.1.8.30 — a `bgPr > blipFill`
     /// with a `stretch > fillRect` (incl. negative overscan edges) parses into
     /// `Fill::Image` carrying the resolved zip path + mime, the fractional
-    /// fillRect, and the alphaModFix alpha. Mirrors sample-12 slide1's background.
+    /// source crop, fillRect, and alphaModFix alpha.
     #[test]
     fn test_parse_background_blip_fill_stretch() {
         let xml = r#"<p:cSld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -4819,6 +4841,7 @@ mod tests {
             <p:bg><p:bgPr>
                 <a:blipFill>
                     <a:blip r:embed="rId2"><a:alphaModFix amt="80000"/></a:blip>
+                    <a:srcRect l="25000" r="10000"/>
                     <a:stretch><a:fillRect t="-9000" b="-9000"/></a:stretch>
                 </a:blipFill>
                 <a:effectLst/>
@@ -4836,6 +4859,7 @@ mod tests {
             Fill::Image {
                 image_path,
                 mime_type,
+                src_rect,
                 fill_rect,
                 tile,
                 alpha,
@@ -4843,6 +4867,9 @@ mod tests {
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");
+                let sr = src_rect.expect("srcRect should be present");
+                assert!((sr.l - 0.25).abs() < 1e-9, "l={}", sr.l);
+                assert!((sr.r - 0.1).abs() < 1e-9, "r={}", sr.r);
                 let fr = fill_rect.expect("fillRect should be present");
                 assert!((fr.t - (-0.09)).abs() < 1e-9, "t={}", fr.t);
                 assert!((fr.b - (-0.09)).abs() < 1e-9, "b={}", fr.b);
@@ -6184,6 +6211,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &master_indents,
             &HashMap::new(),
             &HashMap::new(),
@@ -6255,6 +6283,7 @@ mod tests {
             let mut zip = PptxZip::new(cursor).unwrap();
             parse_layout(
                 layout,
+                &HashMap::new(),
                 &m_f64,
                 &m_str,
                 &m_lfs,

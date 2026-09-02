@@ -1,6 +1,5 @@
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import {
-  decodeOoxmlResourceUsage,
   normalizeLoadResourceOptions,
   OoxmlResourceMetricsSession,
   parseResourceLimitError,
@@ -12,6 +11,7 @@ import {
   type WasmModuleRuntime,
 } from '@silurus/ooxml-core/internal/wasm-runtime-generation';
 import type { ParsedWorkbook } from '../types.js';
+import { readXlsxArchiveBootstrap } from './archive-bootstrap.js';
 // @ts-ignore wasm-pack generated module has no declaration entry
 import * as xlsxWasm from '../wasm/xlsx_parser.js';
 
@@ -101,10 +101,10 @@ export async function acquireXlsxNodeSession(
     );
     throwIfAborted(options.signal);
     const archive = handle.proxy;
-    const workbookIndex = JSON.parse(
-      new TextDecoder().decode(archive.parse()),
-    ) as ParsedWorkbook;
-    const usage = decodeUsage(archive.resource_usage());
+    const { workbook: workbookIndex, usage } = readXlsxArchiveBootstrap(
+      () => JSON.parse(new TextDecoder().decode(archive.parse())) as ParsedWorkbook,
+      () => archive.resource_usage(),
+    );
     metrics.observeUsage(usage);
     metrics.checkpoint('workbook index ready');
     return {
@@ -119,15 +119,6 @@ export async function acquireXlsxNodeSession(
     const normalized = parseResourceLimitError(error) ?? error;
     metrics.fail(normalized);
     throw normalized;
-  }
-}
-
-function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined {
-  try {
-    return decodeOoxmlResourceUsage(bytes);
-  } catch (error) {
-    if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
-    throw error;
   }
 }
 

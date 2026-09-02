@@ -13,6 +13,7 @@ import {
 } from './slide-nav';
 import {
   preloadGoogleFonts,
+  releaseOwnedBitmap,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
   WorkerBridge,
@@ -30,6 +31,7 @@ import {
   type ChartRegionMapRenderer,
   type ChartExRenderer,
   type TiffRenderer,
+  type ImageResourceOptions,
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
@@ -45,6 +47,7 @@ import {
   readLatestOoxmlResourceMetrics,
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
+  respondToWorkerSvgDecodeRequest,
   type NormalizedOoxmlResourcePolicy,
   type PullSessionResponse,
   type WorkerRendererDescriptors,
@@ -152,6 +155,8 @@ export interface RenderSlideToBitmapOptions {
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio (workers have none). */
   dpr?: number;
+  /** Adaptive decoded-raster memory policy for this render pass. */
+  imageResources?: ImageResourceOptions;
   /**
    * Skip the static media play-badge so a live overlay can draw its own
    * controls. Used internally by {@link PptxPresentation.presentSlide}.
@@ -176,6 +181,8 @@ export interface RenderSlideOptions {
   width?: number;
   /** Device pixel ratio. Defaults to window.devicePixelRatio or 1. */
   dpr?: number;
+  /** Adaptive decoded-raster memory policy for this render pass. */
+  imageResources?: ImageResourceOptions;
   /** Called for each rendered text segment. Used to build a transparent text selection overlay. */
   onTextRun?: TextRunCallback;
   /**
@@ -389,7 +396,7 @@ export class PptxPresentation {
       pres._chartEx = mode === 'worker' ? undefined : opts.chartEx;
       if (opts.tiff && mode === 'worker' && !rendererDescriptors?.tiff) {
         console.warn(
-          "[ooxml] a custom TIFF codec cannot cross the worker boundary; TIFF images will be skipped in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
+          "[ooxml] a custom TIFF codec cannot cross the worker boundary; recognized TIFF images will report a render error in mode: 'worker'. Use the codec from @silurus/ooxml/tiff.",
         );
       }
       pres._tiff = mode === 'worker' ? undefined : opts.tiff;
@@ -692,6 +699,12 @@ export class PptxPresentation {
   private _onWorkerLayoutPush(
     response: PptxWorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>,
   ): void {
+    if (respondToWorkerSvgDecodeRequest(
+      (message, transfer) => (
+        this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+      )(message, transfer),
+      response,
+    )) return;
     if (
       !('kind' in response) ||
       response.kind !== 'presentationLayoutPartial' ||
@@ -1048,6 +1061,7 @@ export class PptxPresentation {
             regionMap: this._regionMap,
             chartEx: this._chartEx,
             tiff: this._tiff,
+            imageResources: opts.imageResources,
           },
           opts.onTextRun,
         );
@@ -1078,18 +1092,33 @@ export class PptxPresentation {
       const dpr = opts.dpr ?? defaultDpr();
       if (this._mode === 'worker') {
         const res = await this._bridge.request(
-          (id) => ({ kind: 'renderSlide', id, slideIndex, width, dpr, skipMediaControls: opts.skipMediaControls, dim: opts.dim }) satisfies RenderWorkerRequest,
+          (id) => ({
+            kind: 'renderSlide',
+            id,
+            slideIndex,
+            width,
+            dpr,
+            imageResources: opts.imageResources,
+            skipMediaControls: opts.skipMediaControls,
+            dim: opts.dim,
+          }) satisfies RenderWorkerRequest,
         );
         const rendered = res as Extract<RenderWorkerResponse, { kind: 'slideRendered' }>;
         // IX6 — replay the worker's run geometry to the caller's collector so the
         // selection / find overlay is built on the same path as main mode.
-        if (opts.onTextRun) for (const r of rendered.runs) opts.onTextRun(r);
+        try {
+          if (opts.onTextRun) for (const r of rendered.runs) opts.onTextRun(r);
+        } catch (error) {
+          releaseOwnedBitmap(rendered.bitmap);
+          throw error;
+        }
         return rendered.bitmap;
       }
       const off = new OffscreenCanvas(1, 1);
       await this.renderSlide(off, slideIndex, {
         width,
         dpr,
+        imageResources: opts.imageResources,
         skipMediaControls: opts.skipMediaControls,
         dim: opts.dim,
         onTextRun: opts.onTextRun,
@@ -1310,43 +1339,59 @@ export class PptxPresentation {
       if (!this._preflight) {
         throw new Error('Presentation not loaded');
       }
-    const dpr = opts.dpr ?? defaultDpr();
-    const width = opts.width ?? (canvas.offsetWidth || 960);
+      const dpr = opts.dpr ?? defaultDpr();
+      const width = opts.width ?? (canvas.offsetWidth || 960);
+      // `width` is the logical CSS-pixel contract. The renderer may clamp the
+      // physical backing store when `width × dpr` exceeds the canvas-area budget;
+      // that reduced bitmap resolution must never shrink the on-screen slide.
+      // Keep logical layout and physical raster size as separate quantities.
+      const logicalHeight = this.slideWidth > 0
+        ? (width * this.slideHeight) / this.slideWidth
+        : 0;
+      canvas.style.width = `${Math.round(width)}px`;
+      canvas.style.height = `${Math.round(logicalHeight)}px`;
+      if (!canvas.style.display) canvas.style.display = 'block';
 
-    const drawBase =
-      this._mode === 'worker'
-        ? async () => {
-            // Whole slide rendered off-thread; the handle snapshots this paint
-            // into its own base copy, so the bitmap can be closed right after.
-            // IX6 — the run geometry rides back beside the bitmap, so a media
-            // slide is as selectable/searchable in worker mode as in main mode.
-            const bmp = await this.renderSlideToBitmap(slideIndex, { width, dpr, skipMediaControls: true, dim: opts.dim, onTextRun: opts.onTextRun });
-            canvas.width = bmp.width;
-            canvas.height = bmp.height;
-            // Set only the CSS width and let height follow the intrinsic aspect
-            // ratio — mirrors the main renderer (renderer.ts), which avoids an
-            // explicit style.height that could fight the ratio.
-            canvas.style.width = `${Math.round(bmp.width / dpr)}px`;
-            if (!canvas.style.display) canvas.style.display = 'block';
-            const ctx = canvas.getContext('2d');
-            if (!ctx) throw new Error('2D context not available');
-            ctx.drawImage(bmp, 0, 0);
-            bmp.close();
-          }
-        : () =>
-            this.renderSlide(canvas, slideIndex, {
-              width,
-              dpr,
-              skipMediaControls: true,
-              dim: opts.dim,
-              onTextRun: opts.onTextRun,
-            });
+      const drawBase =
+        this._mode === 'worker'
+          ? async () => {
+              // Whole slide rendered off-thread; the handle snapshots this paint
+              // into its own base copy, so the bitmap can be closed right after.
+              // IX6 — the run geometry rides back beside the bitmap, so a media
+              // slide is as selectable/searchable in worker mode as in main mode.
+              const bmp = await this.renderSlideToBitmap(slideIndex, {
+                width,
+                dpr,
+                imageResources: opts.imageResources,
+                skipMediaControls: true,
+                dim: opts.dim,
+                onTextRun: opts.onTextRun,
+              });
+              try {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) throw new Error('2D context not available');
+                ctx.drawImage(bmp, 0, 0);
+              } finally {
+                releaseOwnedBitmap(bmp);
+              }
+            }
+          : () =>
+              this.renderSlide(canvas, slideIndex, {
+                width,
+                dpr,
+                imageResources: opts.imageResources,
+                skipMediaControls: true,
+                dim: opts.dim,
+                onTextRun: opts.onTextRun,
+              });
 
-    const mediaElements = this._preflight.slides[slideIndex]?.mediaElements ?? [];
+      const mediaElements = this._preflight.slides[slideIndex]?.mediaElements ?? [];
 
       return await createPresentationHandle(canvas, mediaElements, {
         width,
-        dpr,
+        height: logicalHeight,
         slideWidthEmu: this.slideWidth,
         fetchMedia: this._fetchMedia,
         fetchImage: this._fetchImage,

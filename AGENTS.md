@@ -159,6 +159,51 @@ text runs, paragraph properties, themes, fills, effects, and shape presets.
 - Cross-package fixes may touch `core` / `ooxml-common` and multiple packages in
   one PR when that is the coherent unit of work.
 
+## Mandatory Adversarial Review
+
+Before declaring an OOXML feature or bug fix complete, perform an adversarial
+review of the final diff. This review is required even when focused tests and VRT
+already pass. Record the conclusion and any material evidence in the task handoff
+or PR description; do not silently waive an unresolved item.
+
+- **Specification fidelity:** Verify the implementation against the applicable
+  ECMA-376 / ISO-29500 rule and Microsoft extension notes. Distinguish normative
+  behavior, documented Office extensions, and implementation policy such as
+  resource governance. Do not claim specification support from sample output
+  alone.
+- **No unexplained heuristics:** Search for sample-specific branches, magic
+  thresholds, empirical scale factors, path/name checks, and renderer guesses.
+  Remove them or justify them under the OOXML Implementation Policy. A passing
+  VRT is not evidence that a heuristic is correct.
+- **Bounded inference for implicit behavior:** When Word, Excel, or PowerPoint
+  behavior is not fully specified, base the inference on sufficiently varied,
+  Office-produced tests that exercise boundaries and counterexamples—not one
+  private sample. State the observed behavior, the tested range, and the limits
+  of the compatibility claim. Keep the implementation scope no broader than the
+  evidence supports, and obtain user approval before adding a compatibility
+  heuristic.
+- **Performance and resource safety:** Review asymptotic work, allocation size,
+  decoded and retained memory, cache ownership/eviction, concurrency, worker
+  transfer cost, repeated parsing or decoding, hot paths, and failure cleanup.
+  Reject unbounded fan-out or whole-document work when visible/page-local work is
+  sufficient. Add budget, concurrency, cache, or stress tests where the risk is
+  material.
+- **Module boundaries and single responsibility:** Confirm that shared OOXML
+  concepts and pure rendering/resource primitives live in `ooxml-common` or
+  `core`, while DOCX, XLSX, and PPTX keep only format-specific parsing, layout,
+  orchestration, and painting. Check for duplicated policy, false abstractions,
+  package cycles, and classes/functions that mix unrelated responsibilities.
+- **Cross-format wiring:** For every shared capability, explicitly inspect DOCX,
+  XLSX, and PPTX integration points. Verify the relevant parser/model, public
+  options, viewer, renderer, cache/loader, worker protocol, error propagation,
+  documentation, and tests for each applicable format. If one format is
+  intentionally excluded, document the format-level reason.
+- **Regression evidence:** Run focused behavioral tests plus the broadest
+  proportionate cross-package checks. For renderer changes, use the previous
+  renderer as the self-VRT oracle and keep Office-reference fidelity evaluation
+  separate. Investigate every unexplained difference; do not weaken comparison
+  thresholds merely to make the review pass.
+
 ## Private Samples and Storybook
 
 Private Office samples and local-only sample stories are gitignored and must not

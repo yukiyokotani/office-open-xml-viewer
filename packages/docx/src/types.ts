@@ -1690,6 +1690,9 @@ export interface RenderPageOptions {
   width?: number;
   dpr?: number;
   defaultTextColor?: string;
+  /** Decoded-raster budget. Adaptive mode lowers only image resolution rather
+   *  than rejecting the whole page when its image working set is too large. */
+  imageResources?: import('@silurus/ooxml-core').ImageResourceOptions;
   /** Called for each rendered text segment. Used to build a transparent text
    *  selection overlay. On a vertical (§17.6.20 tbRl) page `x`/`y` are the
    *  PHYSICAL top-left and `transform` is the CSS rotation the overlay span

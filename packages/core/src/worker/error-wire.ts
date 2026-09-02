@@ -10,8 +10,10 @@ import {
 } from '../errors/ooxml-error.js';
 import {
   OoxmlDecodedImageLimitError,
+  getOoxmlDecodedImageLimitDetails,
   type OoxmlDecodedImageLimitMetric,
 } from '../image/pixel-budget.js';
+import { TiffDecodeError, getTiffDecodeErrorDetails } from '../image/tiff-contract.js';
 import {
   PullSessionInsufficientCreditError,
   isPullSessionInsufficientCreditDetails,
@@ -236,16 +238,26 @@ export function parseResourceLimitError(error: unknown): OoxmlResourceLimitError
 }
 
 function serializeWorkerErrorUnchecked(error: unknown): WorkerErrorPayload {
-  if (error instanceof OoxmlDecodedImageLimitError) {
+  const decodedImage = getOoxmlDecodedImageLimitDetails(error);
+  if (decodedImage) {
+    const canonical = new OoxmlDecodedImageLimitError(
+      decodedImage.metric,
+      decodedImage.limit,
+      decodedImage.observed,
+    );
     return {
-      message: error.message,
-      errorName: error.name,
-      code: error.code,
-      decodedImage: {
-        metric: error.metric,
-        limit: error.limit,
-        observed: error.observed,
-      },
+      message: canonical.message,
+      errorName: canonical.name,
+      code: canonical.code,
+      decodedImage,
+    };
+  }
+  const tiff = getTiffDecodeErrorDetails(error);
+  if (tiff) {
+    return {
+      message: tiff.message,
+      errorName: 'TiffDecodeError',
+      code: 'ooxml-tiff-decode',
     };
   }
   const insufficientCredit = parsePullSessionInsufficientCreditError(error);
@@ -324,45 +336,102 @@ const OOXML_ERROR_CODES = new Set<OoxmlErrorCode>([
   'not-ooxml',
 ]);
 
-/** Reconstruct a real Error subclass after a payload crosses a worker boundary. */
-export function deserializeWorkerError(payload: WorkerErrorPayload): Error {
-  if (
-    payload.code === 'ooxml-decoded-image-limit'
-    && payload.decodedImage
-    && (payload.decodedImage.metric === 'image-pixels'
-      || payload.decodedImage.metric === 'active-decoded-bytes')
-    && isNonNegativeSafeInteger(payload.decodedImage.limit)
-    && isNonNegativeSafeInteger(payload.decodedImage.observed)
-    && payload.decodedImage.observed > payload.decodedImage.limit
-  ) {
+const DECODED_IMAGE_LIMIT_METRICS = {
+  'image-dimension': true,
+  'image-pixels': true,
+  'active-decoded-bytes': true,
+} satisfies Record<OoxmlDecodedImageLimitMetric, true>;
+
+function isDecodedImageLimitMetric(value: unknown): value is OoxmlDecodedImageLimitMetric {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(DECODED_IMAGE_LIMIT_METRICS, value);
+}
+
+function decodedImageLimitDetailsFromWire(
+  code: string | undefined,
+  value: unknown,
+): Readonly<{
+  metric: OoxmlDecodedImageLimitMetric;
+  limit: number;
+  observed: number;
+}> | undefined {
+  if (code !== 'ooxml-decoded-image-limit' || !value || typeof value !== 'object') {
+    return undefined;
+  }
+  const candidate = value as {
+    readonly metric?: unknown;
+    readonly limit?: unknown;
+    readonly observed?: unknown;
+  };
+  const metric = candidate.metric;
+  const limit = candidate.limit;
+  const observed = candidate.observed;
+  if (!isDecodedImageLimitMetric(metric)
+    || !isNonNegativeSafeInteger(limit)
+    || !isNonNegativeSafeInteger(observed)
+    || observed <= limit) return undefined;
+  return { metric, limit, observed };
+}
+
+function deserializeWorkerErrorUnchecked(payload: WorkerErrorPayload): Error {
+  // Snapshot every top-level discriminant once. Apart from containing hostile
+  // accessors, this prevents a mutable Proxy from passing one branch's checks
+  // and then supplying different values to its constructor.
+  const rawMessage = payload.message as unknown;
+  const rawErrorName = payload.errorName as unknown;
+  const rawCode = payload.code as unknown;
+  const decodedImagePayload = payload.decodedImage as unknown;
+  const insufficientCreditPayload = payload.insufficientCredit as unknown;
+  const resourceLimitPayload = payload.resourceLimit as unknown;
+  const message = typeof rawMessage === 'string'
+    ? rawMessage
+    : 'Worker operation failed with an invalid error payload';
+  const errorName = isBoundedText(rawErrorName, MAX_IDENTIFIER_LENGTH)
+    ? rawErrorName
+    : undefined;
+  const code = typeof rawCode === 'string' ? rawCode : undefined;
+  const decodedImage = decodedImageLimitDetailsFromWire(code, decodedImagePayload);
+  if (decodedImage) {
     return new OoxmlDecodedImageLimitError(
-      payload.decodedImage.metric,
-      payload.decodedImage.limit,
-      payload.decodedImage.observed,
+      decodedImage.metric,
+      decodedImage.limit,
+      decodedImage.observed,
     );
   }
-  if (
-    payload.code === 'ooxml-insufficient-credit'
-    && isPullSessionInsufficientCreditDetails(payload.insufficientCredit)
-  ) {
-    return new PullSessionInsufficientCreditError(payload.insufficientCredit);
+  if (code === 'ooxml-tiff-decode') {
+    return new TiffDecodeError(message);
   }
   if (
-    payload.code === 'ooxml-resource-limit' &&
-    isResourceLimitDetails(payload.resourceLimit)
+    code === 'ooxml-insufficient-credit'
+    && isPullSessionInsufficientCreditDetails(insufficientCreditPayload)
   ) {
-    return new OoxmlResourceLimitError(payload.message, payload.resourceLimit);
+    return new PullSessionInsufficientCreditError(insufficientCreditPayload);
   }
-  if (payload.code && OOXML_ERROR_CODES.has(payload.code as OoxmlErrorCode)) {
-    return new OoxmlError(payload.code as OoxmlErrorCode, payload.message);
+  if (
+    code === 'ooxml-resource-limit' &&
+    isResourceLimitDetails(resourceLimitPayload)
+  ) {
+    return new OoxmlResourceLimitError(message, resourceLimitPayload);
+  }
+  if (code && OOXML_ERROR_CODES.has(code as OoxmlErrorCode)) {
+    return new OoxmlError(code as OoxmlErrorCode, message);
   }
   const error =
-    payload.errorName === 'TypeError'
-      ? new TypeError(payload.message)
-      : payload.errorName === 'RangeError'
-        ? new RangeError(payload.message)
-        : new Error(payload.message);
-  if (payload.errorName) error.name = payload.errorName;
-  if (payload.code !== undefined) Object.assign(error, { code: payload.code });
+    errorName === 'TypeError'
+      ? new TypeError(message)
+      : errorName === 'RangeError'
+        ? new RangeError(message)
+        : new Error(message);
+  if (errorName) error.name = errorName;
+  if (code !== undefined) Object.assign(error, { code });
   return error;
+}
+
+/** Reconstruct a real Error subclass after a payload crosses a worker boundary. */
+export function deserializeWorkerError(payload: WorkerErrorPayload): Error {
+  try {
+    return deserializeWorkerErrorUnchecked(payload);
+  } catch {
+    return new Error('Worker operation failed with an unreadable error payload');
+  }
 }

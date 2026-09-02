@@ -14,14 +14,6 @@
 export const MAX_RASTER_DIMENSION = 32767;
 
 /**
- * Hard ceiling for one axis of an encoded raster passed to a resizing decoder.
- * This is separate from {@link MAX_RASTER_DIMENSION}: an authored source may be
- * wider than a browser canvas while its retained, display-sized result is not.
- * 65535 also matches the largest dimension representable by baseline JPEG SOF.
- */
-export const MAX_RASTER_SOURCE_DIMENSION = 65535;
-
-/**
  * Pixel budget for one decoded raster: 32 MP (2^25 px). A decoded surface is
  * `width × height × 4` bytes of RGBA, so this bounds one bitmap to 128 MiB.
  * A crafted 60000×60000 header (~3.6e9 px → ~14 GB RGBA)
@@ -42,8 +34,24 @@ export const MAX_RASTER_PIXELS = 1 << 25; // 33_554_432 px = 32 MP / 128 MiB RGB
  */
 export const MAX_RASTER_SOURCE_PIXELS = 1 << 27;
 
+/**
+ * Derived source-axis ceiling. A positive grid within the source-pixel budget
+ * cannot exceed this value on either axis, so this adds no format-specific
+ * magic number (in particular, JPEG's 16-bit SOF bound is not imposed on PNG
+ * or TIFF). It keeps error classification and unsafe-number checks explicit.
+ */
+export const MAX_RASTER_SOURCE_DIMENSION = MAX_RASTER_SOURCE_PIXELS;
+
 /** Maximum decoded RGBA ownership retained or leased per document. */
 export const MAX_DECODED_IMAGE_BYTES = MAX_RASTER_PIXELS * 4;
+
+/**
+ * Non-disableable aggregate ceiling for caller-configured decoded-image
+ * budgets. The ordinary 128 MiB value above is the adaptive default; trusted
+ * desktop integrations may raise it, but never beyond the same 512 MiB RGBA
+ * envelope used to bound an encoded source grid before browser decoding.
+ */
+export const HARD_MAX_DECODED_IMAGE_BYTES = MAX_RASTER_SOURCE_PIXELS * 4;
 
 /** Keep simultaneous browser decoders bounded even before exact pixels exist. */
 export const MAX_CONCURRENT_IMAGE_DECODES = 2;
@@ -52,6 +60,22 @@ export type OoxmlDecodedImageLimitMetric =
   | 'image-dimension'
   | 'image-pixels'
   | 'active-decoded-bytes';
+
+export interface OoxmlDecodedImageLimitDetails {
+  readonly metric: OoxmlDecodedImageLimitMetric;
+  readonly limit: number;
+  readonly observed: number;
+}
+
+function isDecodedImageLimitMetric(value: unknown): value is OoxmlDecodedImageLimitMetric {
+  return value === 'image-dimension'
+    || value === 'image-pixels'
+    || value === 'active-decoded-bytes';
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
 
 /** Catchable hard-quota crossing for decoded image surfaces. */
 export class OoxmlDecodedImageLimitError extends RangeError {
@@ -68,10 +92,50 @@ export class OoxmlDecodedImageLimitError extends RangeError {
   }
 }
 
+/**
+ * Snapshot a decoded-image quota crossing from this or another bundled core
+ * realm. Every caller-controlled property read stays inside the guard so a
+ * hostile Proxy or accessor cannot escape, and only clone-safe scalar fields
+ * leave this boundary.
+ */
+export function getOoxmlDecodedImageLimitDetails(
+  error: unknown,
+): OoxmlDecodedImageLimitDetails | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  try {
+    const candidate = error as {
+      readonly code?: unknown;
+      readonly metric?: unknown;
+      readonly limit?: unknown;
+      readonly observed?: unknown;
+    };
+    const code = candidate.code;
+    const metric = candidate.metric;
+    const limit = candidate.limit;
+    const observed = candidate.observed;
+    if (
+      code !== 'ooxml-decoded-image-limit'
+      || !isDecodedImageLimitMetric(metric)
+      || !isNonNegativeSafeInteger(limit)
+      || !isNonNegativeSafeInteger(observed)
+      || observed <= limit
+    ) {
+      return undefined;
+    }
+    return { metric, limit, observed };
+  } catch {
+    return undefined;
+  }
+}
+
 export function isOoxmlDecodedImageLimitError(
   error: unknown,
 ): error is OoxmlDecodedImageLimitError {
-  return error instanceof OoxmlDecodedImageLimitError
-    || (!!error && typeof error === 'object'
-      && (error as { code?: unknown }).code === 'ooxml-decoded-image-limit');
+  if (!getOoxmlDecodedImageLimitDetails(error)) return false;
+  try {
+    const candidate = error as { readonly name?: unknown; readonly message?: unknown };
+    return typeof candidate.name === 'string' && typeof candidate.message === 'string';
+  } catch {
+    return false;
+  }
 }

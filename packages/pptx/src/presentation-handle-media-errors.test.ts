@@ -77,6 +77,9 @@ function makeCanvas(ctx = makeContext()) {
     }),
     setPointerCapture: vi.fn(),
     releasePointerCapture: vi.fn(),
+    dispatch(type: string, event: Event) {
+      for (const listener of listeners.get(type) ?? []) listener(event);
+    },
   };
 }
 
@@ -132,7 +135,7 @@ function installDom(media = makeMedia()) {
 function options(overrides: Partial<PresentOptions> = {}): PresentOptions {
   return {
     width: 960,
-    dpr: 1,
+    height: 540,
     slideWidthEmu: 9_144_000,
     fetchMedia: vi.fn(async () => new Blob(['media'], { type: 'audio/mpeg' })),
     fetchImage: vi.fn(),
@@ -150,6 +153,43 @@ afterEach(() => {
 });
 
 describe('presentation media failure reporting', () => {
+  it('keeps overlay drawing and hit testing in logical slide coordinates when the backing store is clamped', async () => {
+    const { media } = installDom();
+    const canvasContext = makeContext();
+    const canvas = makeCanvas(canvasContext);
+    canvas.width = 1_000;
+    canvas.height = 500;
+    canvas.getBoundingClientRect.mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 2_000,
+      height: 1_000,
+    });
+    const rightSideMedia = {
+      ...mediaElement('video'),
+      x: 7_315_200,
+      y: 1_828_800,
+    };
+
+    const handle = await createPresentationHandle(
+      canvas as unknown as HTMLCanvasElement,
+      [rightSideMedia],
+      options({ width: 2_000, height: 1_000 }),
+    );
+
+    // Requested DPR would have been 2, but the allocated buffer represents
+    // only 0.5 physical pixels per logical pixel after clamping.
+    expect(canvasContext.setTransform).toHaveBeenCalledWith(0.5, 0, 0, 0.5, 0, 0);
+    canvas.dispatch('pointerdown', {
+      clientX: 1_700,
+      clientY: 450,
+      pointerId: 1,
+      preventDefault: vi.fn(),
+    } as unknown as PointerEvent);
+    expect(media.play).toHaveBeenCalledTimes(1);
+    handle.destroy();
+  });
+
   it('rejects initial fetchMedia failures without also calling onError', async () => {
     installDom();
     const onError = vi.fn();

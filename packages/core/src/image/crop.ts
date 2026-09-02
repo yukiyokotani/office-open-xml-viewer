@@ -1,9 +1,9 @@
 // Shared `<a:srcRect>` source-rectangle crop (ECMA-376 §20.1.8.55) for the docx,
 // pptx and xlsx renderers. The crop is a fraction of the image's NATIVE pixel
-// grid, so the only per-renderer concern is decoding the image at full source
-// size first — for a metafile that means rasterizing the whole picture FRAME
-// (see `metafileRasterSize`), since the player maps the EMF/WMF frame onto the
-// raster and the crop is relative to that frame. Centralised here so all three
+// grid. Browser rasters may use a display-sized grid because the same fractional
+// mapping is preserved under axis-wise resampling; metafiles must rasterize the
+// whole picture FRAME (see `metafileRasterSize`) because their player maps that
+// authored frame onto the output before the crop. Centralised here so all three
 // renderers crop identically (previously triplicated, and metafiles diverged).
 
 import { isMetafileMime } from './wmf';
@@ -156,8 +156,9 @@ export function drawImageCropped(
  * destination, so the full decoded source needs proportionally more pixels;
  * negative insets create transparent outsets and therefore need fewer.
  *
- * The result is a decode request, not an allocation promise. The decoder keeps
- * the source aspect ratio and applies the shared decoded-surface ceiling.
+ * The result is a decode request, not an allocation promise. The decoder maps
+ * the full source grid to both requested axes (the same resampling the final
+ * destination draw would otherwise perform) and applies the shared ceiling.
  */
 export function sourceRasterTargetSize(
   destinationWidthPx: number,
@@ -176,8 +177,8 @@ export function sourceRasterTargetSize(
   };
 }
 
-/** Raster target size (pt) for decoding an embedded image. A raster blip decodes
- *  at its native pixel grid, so its display box passes through. A metafile
+/** Raster target size (pt) for decoding an embedded image. A browser raster's
+ *  retained pixel target is handled separately, so its point box passes through. A metafile
  *  (WMF/EMF) with an `<a:srcRect>` crop must be rasterized at its FULL picture
  *  frame, not the visible sub-rectangle — the player maps the frame onto the
  *  raster (see `playEmf`), and the crop is relative to that frame. Scale the box

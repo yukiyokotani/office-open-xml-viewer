@@ -184,6 +184,7 @@ describe('official-site API reference', () => {
         expect(onError?.desc, apiClass.name).toContain('the same failure is never delivered twice');
         expect(onError?.desc, apiClass.name).toContain('OoxmlResourceLimitError');
         expect(onError?.desc, apiClass.name).toContain('OoxmlDecodedImageLimitError');
+        expect(onError?.desc, apiClass.name).toContain('TiffDecodeError');
         expect(onError?.desc, apiClass.name).toContain('message text is not a stable discriminator');
         expect(onError?.detailsHref, apiClass.name).toBe('/errors#delivery');
       }

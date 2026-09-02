@@ -1090,6 +1090,9 @@ export interface XlsxRenderViewportOptions {
   width?: number;
   height?: number;
   dpr?: number;
+  /** Decoded-raster budget shared with DOCX/PPTX. Adaptive mode lowers image
+   *  resolution instead of rejecting the whole worksheet frame. */
+  imageResources?: import('@silurus/ooxml-core').ImageResourceOptions;
   defaultFontFamily?: string;
   defaultFontSize?: number;
   scrollOffsetX?: number;

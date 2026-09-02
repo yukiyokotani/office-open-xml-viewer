@@ -148,6 +148,69 @@ function jpegHeader(w: number, h: number, padApp0 = 0): Uint8Array {
   return b;
 }
 
+function exifOrientationPayload(
+  orientation: number,
+  byteOrder: 'little' | 'big' = 'little',
+  ifdRelativeOffset = 8,
+): Uint8Array {
+  const little = byteOrder === 'little';
+  const exif = new Uint8Array(6 + ifdRelativeOffset + 2 + 12 + 4);
+  exif.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0); // "Exif\0\0"
+  exif.set(little ? [0x49, 0x49] : [0x4d, 0x4d], 6);
+  const view = new DataView(exif.buffer);
+  view.setUint16(8, 42, little);
+  view.setUint32(10, ifdRelativeOffset, little);
+  const ifdOffset = 6 + ifdRelativeOffset;
+  view.setUint16(ifdOffset, 1, little); // one IFD entry
+  view.setUint16(ifdOffset + 2, 0x0112, little); // Orientation
+  view.setUint16(ifdOffset + 4, 3, little); // SHORT
+  view.setUint32(ifdOffset + 6, 1, little);
+  view.setUint16(ifdOffset + 10, orientation, little);
+  return exif;
+}
+
+function jpegSofSegment(w: number, h: number): Uint8Array {
+  const sof = new Uint8Array(9);
+  sof.set([0xff, 0xc0, 0x00, 0x07, 0x08], 0);
+  putBeU16(sof, 5, h);
+  putBeU16(sof, 7, w);
+  return sof;
+}
+
+function jpegApp1Segment(payload: Uint8Array): Uint8Array {
+  const segment = new Uint8Array(4 + payload.length);
+  segment.set([0xff, 0xe1], 0);
+  putBeU16(segment, 2, payload.length + 2);
+  segment.set(payload, 4);
+  return segment;
+}
+
+function jpegFromSegments(...segments: Uint8Array[]): Uint8Array {
+  const length = 2 + segments.reduce((total, segment) => total + segment.length, 0);
+  const bytes = new Uint8Array(length);
+  bytes.set([0xff, 0xd8], 0);
+  let offset = 2;
+  for (const segment of segments) {
+    bytes.set(segment, offset);
+    offset += segment.length;
+  }
+  return bytes;
+}
+
+/** A JPEG with a minimal EXIF APP1 orientation before SOF0. */
+function jpegWithExifOrientation(
+  w: number,
+  h: number,
+  orientation: number,
+  byteOrder: 'little' | 'big' = 'little',
+  ifdRelativeOffset = 8,
+): Uint8Array {
+  return jpegFromSegments(
+    jpegApp1Segment(exifOrientationPayload(orientation, byteOrder, ifdRelativeOffset)),
+    jpegSofSegment(w, h),
+  );
+}
+
 /**
  * A JPEG with a DHT (0xFFC4) segment *before* the SOF0. DHT shares the 0xC0..0xCF
  * range with SOF markers but is NOT a frame; the walker must skip it (using its
@@ -249,6 +312,115 @@ describe('sniffRasterDimensions — reads declared pixel dimensions from the hea
       width: 3264,
       height: 2448,
     });
+  });
+
+  it.each([5, 6, 7, 8])('swaps JPEG dimensions for EXIF orientation %i', (orientation) => {
+    expect(sniffRasterDimensions(jpegWithExifOrientation(400, 100, orientation))).toEqual({
+      width: 100,
+      height: 400,
+    });
+  });
+
+  it.each([1, 2, 3, 4])('keeps JPEG dimensions for EXIF orientation %i', (orientation) => {
+    expect(sniffRasterDimensions(jpegWithExifOrientation(400, 100, orientation))).toEqual({
+      width: 400,
+      height: 100,
+    });
+  });
+
+  it('reads big-endian EXIF at a non-default IFD offset', () => {
+    expect(sniffRasterDimensions(jpegWithExifOrientation(400, 100, 8, 'big', 16))).toEqual({
+      width: 100,
+      height: 400,
+    });
+  });
+
+  it('applies the first valid EXIF orientation even when it follows SOF', () => {
+    const xmp = jpegApp1Segment(new TextEncoder().encode('http://ns.adobe.com/xap/1.0/'));
+    const bytes = jpegFromSegments(
+      xmp,
+      jpegSofSegment(400, 100),
+      jpegApp1Segment(exifOrientationPayload(6)),
+      new Uint8Array([0xff, 0xda]),
+    );
+    expect(sniffRasterDimensions(bytes)).toEqual({ width: 100, height: 400 });
+  });
+
+  it('does not inspect EXIF-looking bytes after Start-Of-Scan', () => {
+    const bytes = jpegFromSegments(
+      jpegSofSegment(400, 100),
+      new Uint8Array([0xff, 0xda]),
+      jpegApp1Segment(exifOrientationPayload(6)),
+    );
+    expect(sniffRasterDimensions(bytes)).toEqual({ width: 400, height: 100 });
+  });
+
+  it.each([0, 9])('ignores invalid EXIF orientation %i', (orientation) => {
+    expect(sniffRasterDimensions(jpegWithExifOrientation(400, 100, orientation))).toEqual({
+      width: 400,
+      height: 100,
+    });
+  });
+
+  it('treats the first EXIF APP1 as authoritative even when its orientation is invalid', () => {
+    const bytes = jpegFromSegments(
+      jpegApp1Segment(exifOrientationPayload(0)),
+      jpegApp1Segment(exifOrientationPayload(6)),
+      jpegSofSegment(400, 100),
+    );
+    expect(sniffRasterDimensions(bytes)).toEqual({ width: 400, height: 100 });
+  });
+
+  it('uses a later valid Orientation entry within the authoritative EXIF IFD', () => {
+    const exif = new Uint8Array(44);
+    exif.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00, 0x49, 0x49], 0);
+    const view = new DataView(exif.buffer);
+    view.setUint16(8, 42, true);
+    view.setUint32(10, 8, true);
+    view.setUint16(14, 2, true);
+    for (const [offset, orientation] of [[16, 0], [28, 6]] as const) {
+      view.setUint16(offset, 0x0112, true);
+      view.setUint16(offset + 2, 3, true);
+      view.setUint32(offset + 4, 1, true);
+      view.setUint16(offset + 8, orientation, true);
+    }
+    expect(sniffRasterDimensions(jpegFromSegments(
+      jpegApp1Segment(exif),
+      jpegSofSegment(400, 100),
+    ))).toEqual({ width: 100, height: 400 });
+  });
+
+  it('uses a complete Orientation entry when the declared EXIF table is truncated later', () => {
+    const exif = exifOrientationPayload(6).subarray(0, 28);
+    new DataView(exif.buffer, exif.byteOffset, exif.byteLength).setUint16(14, 2, true);
+    expect(sniffRasterDimensions(jpegFromSegments(
+      jpegApp1Segment(exif),
+      jpegSofSegment(400, 100),
+    ))).toEqual({ width: 100, height: 400 });
+  });
+
+  it('does not recover a malformed first EXIF IFD from a later EXIF APP1', () => {
+    const malformed = exifOrientationPayload(6);
+    new DataView(malformed.buffer).setUint32(10, 0xffff, true);
+    const bytes = jpegFromSegments(
+      jpegApp1Segment(malformed),
+      jpegApp1Segment(exifOrientationPayload(6)),
+      jpegSofSegment(400, 100),
+    );
+    expect(sniffRasterDimensions(bytes)).toEqual({ width: 400, height: 100 });
+  });
+
+  it('ignores a truncated or out-of-range EXIF IFD', () => {
+    const outOfRange = exifOrientationPayload(6);
+    new DataView(outOfRange.buffer).setUint32(10, 0xffff, true);
+    expect(sniffRasterDimensions(jpegFromSegments(
+      jpegApp1Segment(outOfRange),
+      jpegSofSegment(400, 100),
+    ))).toEqual({ width: 400, height: 100 });
+    expect(sniffRasterDimensions(jpegFromSegments(
+      jpegApp1Segment(exifOrientationPayload(6).subarray(0, 15)),
+      jpegSofSegment(400, 100),
+    ))).toEqual({ width: 400, height: 100 });
   });
 
   it.each(['little', 'big'] as const)('reads TIFF IFD dimensions (%s endian)', (byteOrder) => {
@@ -377,10 +549,8 @@ describe('sourceRasterExceedsBudget — encoded-source hard ceiling', () => {
     expect(sourceRasterExceedsBudget({ width: 40_000, height: 2_000 })).toBe(false);
   });
 
-  it('rejects a source axis beyond the separate encoded-source limit', () => {
-    expect(sourceRasterExceedsBudget({
-      width: MAX_RASTER_SOURCE_DIMENSION + 1,
-      height: 1,
-    })).toBe(true);
+  it('does not impose JPEG\'s 16-bit axis limit on other raster formats', () => {
+    expect(MAX_RASTER_SOURCE_DIMENSION).toBe(MAX_RASTER_SOURCE_PIXELS);
+    expect(sourceRasterExceedsBudget({ width: 100_000, height: 1_000 })).toBe(false);
   });
 });

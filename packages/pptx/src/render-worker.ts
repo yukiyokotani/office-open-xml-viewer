@@ -1,5 +1,5 @@
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
-import { renderSlideWithEmbeddedFonts, type PptxTextRunInfo } from './renderer';
+import type { PptxTextRunInfo } from './renderer';
 import { PPTX_GOOGLE_FONTS } from './google-fonts';
 import {
   findPreflightMimeType,
@@ -26,7 +26,11 @@ import {
   resourcePolicyForWasm,
   serializeWorkerError,
   loadWorkerRenderers,
+  isWorkerSvgDecodeResponse,
+  postOwnedImageBitmap,
+  WorkerSvgDecodeClient,
   type LoadedWorkerRenderers,
+  type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type {
@@ -74,6 +78,12 @@ const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
 });
+// Keep the renderer behind an explicit module boundary. The production worker
+// is flattened into one self-contained asset, and a static function import can
+// otherwise be hoisted past the initializers of shared DrawingML dependencies
+// that are also reached by optional renderers. Awaiting the module preserves ESM
+// initialization order before any text metrics use those shared unit constants.
+const rendererModule = import('./renderer');
 
 function reservePresentationParse(): void {
   if (presentationState !== 'empty') {
@@ -84,8 +94,10 @@ function reservePresentationParse(): void {
   presentationState = 'opening';
 }
 
-const post = (message: RenderWorkerResponse, transfer?: Transferable[]) =>
+const rawPost = (message: unknown, transfer?: Transferable[]) =>
   (self.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer);
+const post = (message: RenderWorkerResponse, transfer?: Transferable[]) => rawPost(message, transfer);
+const svgDecodeClient = new WorkerSvgDecodeClient(rawPost);
 
 function requirePreflight(): PresentationPreflight {
   if (preflight) return preflight;
@@ -271,8 +283,12 @@ function executeArchiveFromNew(
   });
 }
 
-self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
+self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecodeResponse>) => {
   const request = event.data;
+  if (isWorkerSvgDecodeResponse(request)) {
+    svgDecodeClient.accept(request);
+    return;
+  }
   if (request.kind === 'init') {
     host.setWasmInput(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
     return;
@@ -311,11 +327,13 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
       const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         await fontsLoaded;
+        const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
+          imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -324,6 +342,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
           embeddedFontAuthoredFamilies,
           fetchMedia: getMedia,
           fetchImage: getImage,
+          svgDecoder: svgDecodeClient.decode,
           skipMediaControls: request.skipMediaControls,
           dim: request.dim,
           math: renderers.math,
@@ -334,7 +353,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
         }, (run) => runs.push(run));
         return { bitmap: canvas.transferToImageBitmap(), runs };
       });
-      post({ kind: 'slideRendered', id: request.id, bitmap, runs }, [bitmap]);
+      postOwnedImageBitmap(post, { kind: 'slideRendered', id: request.id, bitmap, runs });
       return;
     }
 
@@ -342,6 +361,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
       const runs = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         await fontsLoaded;
+        const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
@@ -354,6 +374,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest>) => {
           embeddedFontAuthoredFamilies,
           fetchMedia: getMedia,
           fetchImage: getImage,
+          svgDecoder: svgDecodeClient.decode,
           math: renderers.math,
           threeD: renderers.threeD,
           regionMap: renderers.regionMap,

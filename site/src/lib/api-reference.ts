@@ -75,11 +75,12 @@ export const optionalRenderers: readonly OptionalRendererReference[] = [
     entry: '@silurus/ooxml/tiff',
     exportName: 'tiff',
     contract: 'TiffRenderer',
-    desc: 'Decodes the supported TIFF 6.0 image class in DOCX, XLSX and PPTX. The current bounded codec accepts uncompressed, 8-bit, chunky process-CMYK strips; other TIFF classes fail closed without aborting the surrounding document render.',
+    desc: 'Decodes bounded stripped TIFF 6.0 images in DOCX, XLSX and PPTX. Supported classes are uncompressed bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK, plus 1-bit CCITT Group 4. Unsupported or malformed classes produce a diagnostic render error.',
   },
 ];
 
 const RESOURCE_LIMITS = { name: 'resourceLimits', type: 'OoxmlResourceLimits', def: '128 MiB per entry / 256 MiB distinct total / 4,096 entries', desc: 'Shared DOCX/XLSX/PPTX package budgets. maxArchiveEntryBytes caps each package part; maxTotalInflatedBytes counts the largest amount read from every distinct part without charging repeat reads twice; maxArchiveEntries bounds central-directory entries before ZIP index allocation. Supply positive safe integers, or null to disable one configurable budget (internal hard ceilings remain). Violations reject with OoxmlResourceLimitError. These deterministic counters reduce OOM risk but do not measure or guarantee peak memory.', emphasis: 'Violations reject with OoxmlResourceLimitError.', detailsHref: '/errors#ooxml-resource-limit-error', detailsLabel: 'Error fields' };
+const IMAGE_RESOURCES = { name: 'imageResources', type: 'ImageResourceOptions', def: "{ decodedByteBudget: 128 MiB, strategy: 'adaptive' }", desc: "Decoded-raster policy shared by DOCX, XLSX and PPTX paints. Target-resizable rasters (browser formats and TIFF with its optional codec) preserve native decoding while the complete paint fits. When native ownership would cross an aggregate or per-surface boundary, the renderer uses the current display/DPR target; adaptive mode applies one uniform quality reduction if those targets still exceed decodedByteBudget. A later zoom requests a sharper cache variant. Set strategy: 'strict' to preserve requested targets and receive OoxmlDecodedImageLimitError on an aggregate crossing. The budget accepts 4 bytes through 512 MiB; non-resizable sources and encoded-source, per-axis and per-surface hard safety ceilings remain non-disableable.", emphasis: 'Target-resizable rasters (browser formats and TIFF with its optional codec) preserve native decoding while the complete paint fits.', detailsHref: '/errors#decoded-image-limit-error', detailsLabel: 'Safety boundaries' };
 const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlResourceMetrics) => void', desc: 'Receives the content-free initial-load report used by the debug card, without enabling console output. It reports the configured public policy, timing checkpoints, format/mode, success or typed failure discriminants, source bytes, and observed archive counters when available. It does not wait for a Viewer\'s first paint. On success, call getResourceMetrics() on the engine or Viewer for a fresh snapshot after lazy package work. Callback exceptions never change load results.', emphasis: 'Receives the content-free initial-load report used by the debug card, without enabling console output.' };
 const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
@@ -93,7 +94,7 @@ const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-
 const THREE_D = { name: 'threeD', type: 'ChartThreeDRenderer', def: 'undefined', desc: 'Opt-in model-space 3-D chart renderer. Import `threeD` from the separate `@silurus/ooxml/three-d` entry and inject it once. Omit it to use the canonical 2-D fallback and avoid loading or evaluating the mesh/camera implementation in main mode. The self-contained worker asset retains the worker-side implementation. It renders the view angle authored in OOXML in main and worker modes.', emphasis: 'Opt-in model-space 3-D chart renderer.' };
 const REGION_MAP = { name: 'regionMap', type: 'ChartRegionMapRenderer', def: 'undefined', desc: 'Opt-in offline ChartEx Region Map renderer using a pinned, public-domain Natural Earth country asset. Import `regionMap` from `@silurus/ooxml/region-map` and inject it once. Unsupported cached or sub-country views fail closed. The built-in renderer works in main and worker modes.', emphasis: 'Opt-in offline ChartEx Region Map renderer' };
 const CHART_EX = { name: 'chartEx', type: 'ChartExRenderer', def: 'undefined', desc: 'Opt-in renderer for Microsoft ChartEx (`cx:*`) chart families. Import `chartEx` from `@silurus/ooxml/chart-ex` and inject it once. Classic 2-D charts stay in the default format entries; ChartEx is opt-in. The built-in renderer works in main and worker modes.', emphasis: 'Classic 2-D charts stay in the default format entries; ChartEx is opt-in.' };
-const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts uncompressed, 8-bit, chunky process-CMYK TIFF 6.0 parts. Omit it to keep the implementation out of ordinary format bundles; TIFF parts then fail closed without aborting the surrounding render. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
+const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts stripped TIFF 6.0 bilevel, grayscale, RGB, RGBA and process-CMYK images, plus CCITT Group 4 bilevel images. Omit it to keep the implementation out of ordinary format bundles; recognized TIFF parts then report a diagnostic render error instead of being silently omitted. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for the smallest worker download, the lowest single-frame overhead or custom renderer objects; parsing still runs in a Worker, while Canvas rendering runs on the main thread. Use 'worker' when document layout and paint would compete with application UI responsiveness. It requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Built-in math, ChartEx, 3-D, Region Map and TIFF renderers use the same options in both modes. In worker mode, use the bitmap render methods instead of methods that accept a Canvas.", emphasis: "Use 'worker' when document layout and paint would compete with application UI responsiveness." };
 const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for ordinary previews, the smallest worker download or custom renderer objects. Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI. Worker mode requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks and the built-in math, ChartEx, 3-D, Region Map and TIFF renderers remain available in both modes.", emphasis: "Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI." };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
@@ -109,7 +110,7 @@ const CONTEXT_MENU = (contextType: string): ApiOption => ({
 const VIEWER_ON_ERROR = {
   name: 'onError',
   type: '(err: Error) => void',
-  desc: 'Receives Viewer-managed failures that have no directly awaitable result, such as virtualized rendering or embedded-media playback. load(), navigation, and other awaitable operations reject their own Promise whether or not this callback is supplied; the same failure is never delivered twice. Background failures are logged with console.error when the callback is omitted. Narrow stable cases with OoxmlError, OoxmlResourceLimitError or OoxmlDecodedImageLimitError; other failures remain Error values and message text is not a stable discriminator.',
+  desc: 'Receives Viewer-managed failures that have no directly awaitable result, such as virtualized rendering or embedded-media playback. load(), navigation, and other awaitable operations reject their own Promise whether or not this callback is supplied; the same failure is never delivered twice. Background failures are logged with console.error when the callback is omitted. Narrow stable cases with OoxmlError, OoxmlResourceLimitError, OoxmlDecodedImageLimitError or TiffDecodeError; other failures remain Error values and message text is not a stable discriminator.',
   emphasis: 'the same failure is never delivered twice.',
   detailsHref: '/errors#delivery',
   detailsLabel: 'Error reference',
@@ -254,6 +255,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash. A partial so it stays in sync if DimOptions gains a field.' },
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         MATH,
@@ -349,6 +351,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         PASSWORD,
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         MATH,
@@ -400,6 +403,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FIND_HIGHLIGHT_COLORS,
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         MATH,
@@ -494,6 +498,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         PASSWORD,
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         MATH,
@@ -551,6 +556,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         PASSWORD,
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         MATH,
@@ -624,6 +630,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         WASM_URL,
         ZIP,
         RESOURCE_LIMITS,
+        IMAGE_RESOURCES,
         RESOURCE_METRICS,
         DEBUG,
         WORKER_TIMEOUT,

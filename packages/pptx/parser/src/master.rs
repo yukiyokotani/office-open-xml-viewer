@@ -16,7 +16,8 @@ use crate::text::{
     empty_level_bullets, extract_level_bullets, extract_level_font_sizes, extract_level_indents,
     extract_lvl1_font_size, has_any_level_bullet, has_any_level_indent, has_any_level_size,
     merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
-    read_level_font_sizes, read_level_indents, LevelBullets, LevelFontSizes, LevelIndents,
+    read_level_font_sizes, read_level_indents, text_property_solid_fill, BuMarker, LevelBullets,
+    LevelFontSizes, LevelIndents,
 };
 use crate::theme::{
     bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
@@ -39,6 +40,10 @@ use std::collections::HashMap;
 #[derive(Default, Clone, serde::Serialize)]
 pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx: HashMap<u32, Transform>,
+    /// Effective placeholder type declared by a layout slot. A slide
+    /// placeholder may omit @type while retaining @idx; the matching layout
+    /// type then precedes the CT_Placeholder schema default (`obj`).
+    pub(crate) by_idx_placeholder_type: HashMap<u32, String>,
     pub(crate) by_type: HashMap<String, Transform>,
     /// Fallback transforms from slide master (by ph_type), used when layout has no xfrm
     pub(crate) master_by_type: HashMap<String, Transform>,
@@ -46,11 +51,16 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx_font_size: HashMap<u32, f64>,
     /// Default font size (pt) per placeholder type, from layout/master lstStyle
     pub(crate) by_type_font_size: HashMap<String, f64>,
+    /// Master-only font sizes retained separately so an idx-bearing slide
+    /// placeholder that has no matching layout slot can still inherit the
+    /// master without borrowing an unrelated layout sibling of the same type.
+    pub(crate) by_type_master_font_size: HashMap<String, f64>,
     /// Default Latin typeface per placeholder idx/type, inherited from the
     /// layout placeholder's lstStyle and then the master txStyles. Theme font
     /// tokens such as +mj-lt are resolved before storage.
     pub(crate) by_idx_font_family: HashMap<u32, String>,
     pub(crate) by_type_font_family: HashMap<String, String>,
+    pub(crate) by_type_master_font_family: HashMap<String, String>,
     /// Per-list-level default font sizes (pt) per placeholder idx — index 0..=8
     /// maps to lvl1pPr..lvl9pPr (ECMA-376 §21.1.2.4). Lets nested bullets shrink
     /// per level (e.g. body 28pt → lvl2 24pt → lvl3 20pt) instead of all using
@@ -58,6 +68,7 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx_level_sizes: HashMap<u32, LevelFontSizes>,
     /// Per-list-level default font sizes (pt) per placeholder type.
     pub(crate) by_type_level_sizes: HashMap<String, LevelFontSizes>,
+    pub(crate) by_type_master_level_sizes: HashMap<String, LevelFontSizes>,
     /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) per
     /// placeholder idx — what a paragraph with no own `marL`/`marR`/`indent`
     /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.13),
@@ -65,11 +76,13 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx_level_indents: HashMap<u32, LevelIndents>,
     /// Per-list-level paragraph indents per placeholder type.
     pub(crate) by_type_level_indents: HashMap<String, LevelIndents>,
+    pub(crate) by_type_master_level_indents: HashMap<String, LevelIndents>,
     /// Per-list-level inherited bullet (buChar/buAutoNum/buNone) per placeholder
     /// idx — what a paragraph with no explicit bullet inherits (ECMA-376 §19.7.10).
     pub(crate) by_idx_level_bullets: HashMap<u32, LevelBullets>,
     /// Per-list-level inherited bullet per placeholder type.
     pub(crate) by_type_level_bullets: HashMap<String, LevelBullets>,
+    pub(crate) by_type_master_level_bullets: HashMap<String, LevelBullets>,
     /// Default bold per placeholder type, from layout lstStyle defRPr b attribute
     pub(crate) by_type_bold: HashMap<String, bool>,
     /// Default italic per placeholder type, from layout lstStyle defRPr i attribute
@@ -249,10 +262,21 @@ impl LayoutPlaceholders {
     }
 
     /// Look up the inherited default font size for a placeholder (layout then master fallback).
-    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
+    /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_font_size(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
         if let Some(i) = ph_idx {
-            return self.by_idx_font_size.get(&i).copied();
+            return self.by_idx_font_size.get(&i).copied().or_else(|| {
+                self.by_type_master_font_size
+                    .get(ph_type)
+                    .copied()
+                    .or_else(|| {
+                        if ph_type == "obj" {
+                            self.by_type_master_font_size.get("").copied()
+                        } else {
+                            None
+                        }
+                    })
+            });
         }
         self.by_type_font_size.get(ph_type).copied().or_else(|| {
             if ph_type == "body" {
@@ -265,7 +289,18 @@ impl LayoutPlaceholders {
 
     pub(crate) fn lookup_font_family(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
         if let Some(i) = ph_idx {
-            return self.by_idx_font_family.get(&i).cloned();
+            return self.by_idx_font_family.get(&i).cloned().or_else(|| {
+                self.by_type_master_font_family
+                    .get(ph_type)
+                    .cloned()
+                    .or_else(|| {
+                        if ph_type == "obj" {
+                            self.by_type_master_font_family.get("").cloned()
+                        } else {
+                            None
+                        }
+                    })
+            });
         }
         self.by_type_font_family.get(ph_type).cloned().or_else(|| {
             if ph_type == "body" {
@@ -289,6 +324,14 @@ impl LayoutPlaceholders {
                 .by_idx_level_sizes
                 .get(&i)
                 .copied()
+                .or_else(|| self.by_type_master_level_sizes.get(ph_type).copied())
+                .or_else(|| {
+                    if ph_type == "obj" {
+                        self.by_type_master_level_sizes.get("").copied()
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or([None; 9]);
         }
         self.by_type_level_sizes
@@ -313,6 +356,14 @@ impl LayoutPlaceholders {
                 .by_idx_level_indents
                 .get(&i)
                 .copied()
+                .or_else(|| self.by_type_master_level_indents.get(ph_type).copied())
+                .or_else(|| {
+                    if ph_type == "obj" {
+                        self.by_type_master_level_indents.get("").copied()
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default();
         }
         self.by_type_level_indents
@@ -336,6 +387,14 @@ impl LayoutPlaceholders {
                 .by_idx_level_bullets
                 .get(&i)
                 .cloned()
+                .or_else(|| self.by_type_master_level_bullets.get(ph_type).cloned())
+                .or_else(|| {
+                    if ph_type == "obj" {
+                        self.by_type_master_level_bullets.get("").cloned()
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_else(empty_level_bullets);
         }
         self.by_type_level_bullets
@@ -532,7 +591,7 @@ impl LayoutPlaceholders {
     /// Look up inherited blipFill from the layout placeholder spPr. Used when a slide
     /// references a picture placeholder (e.g. ph type="pic") without its own blipFill —
     /// the image defined on the layout's matching placeholder should render through.
-    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
+    /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_blip_fill(
         &self,
         ph_type: &str,
@@ -545,7 +604,7 @@ impl LayoutPlaceholders {
     }
 
     /// Look up inherited stroke from the layout placeholder spPr > ln.
-    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
+    /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_stroke(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<Stroke> {
         if let Some(i) = ph_idx {
             return self.by_idx_stroke.get(&i).cloned();
@@ -561,7 +620,7 @@ impl LayoutPlaceholders {
 
     /// Look up all picture-affecting shape properties from the same placeholder
     /// slot as an inherited blipFill. Explicit idx matching remains strict per
-    /// §19.7.16, exactly like fill, geometry, stroke and blipFill.
+    /// §19.3.1.36, exactly like fill, geometry, stroke and blipFill.
     pub(crate) fn lookup_picture_properties(
         &self,
         ph_type: &str,
@@ -599,7 +658,7 @@ impl LayoutPlaceholders {
 
     /// Look up inherited default text color for this placeholder (layout then master fallback).
     ///
-    /// The *layout* tier is idx-strict per ECMA-376 §19.7.16: when the slide-level
+    /// The *layout* tier is idx-strict per ECMA-376 §19.3.1.36: when the slide-level
     /// placeholder carries an explicit `idx`, a layout colour is inherited only from the
     /// layout shape with the SAME idx — never a sibling body placeholder at a different
     /// idx (which would leak an unrelated region's colour).
@@ -649,7 +708,7 @@ impl LayoutPlaceholders {
     /// Used when the slide-level shape leaves `<p:spPr>` empty (or with no fill
     /// elements) and is bound to a placeholder.
     ///
-    /// ECMA-376 §19.7.16 (placeholder inheritance) is asymmetric: when the
+    /// ECMA-376 §19.3.1.36 (placeholder inheritance) is asymmetric: when the
     /// slide-level shape declares `<p:ph idx="N">` it is bound to *that*
     /// specific layout slot — the only valid inheritance source is the layout
     /// shape with idx=N. Falling back to `by_type_fill` here would let a
@@ -698,7 +757,7 @@ impl LayoutPlaceholders {
     }
 
     /// Look up inherited line spacing (spcPct val, e.g. 90000 = 90%) for this placeholder.
-    /// Idx-strict per ECMA-376 §19.7.16 (see `lookup_fill`'s rationale).
+    /// Idx-strict per ECMA-376 §19.3.1.36 (see `lookup_fill`'s rationale).
     pub(crate) fn lookup_line_spacing(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<f64> {
         if let Some(i) = ph_idx {
             return self.by_idx_line_spacing.get(&i).copied();
@@ -874,8 +933,53 @@ pub(crate) fn parse_master_font_sizes(root: roxmltree::Node<'_, '_>) -> HashMap<
                 }
             }
         }
+    } else {
+        // CT_SlideMaster permits txStyles to be omitted. In that case current
+        // PowerPoint supplies its application-level placeholder defaults:
+        // titles at 44 pt, body/subtitle placeholders at 28 pt, and object
+        // placeholders at 18 pt. Scope these
+        // compatibility defaults to presentation placeholders only; ordinary
+        // text boxes continue through their own authored/theme cascade.
+        for ph_type in ["title", "ctrTitle"] {
+            map.entry(ph_type.to_owned()).or_insert(44.0);
+        }
+        for ph_type in ["body", "subTitle"] {
+            map.entry(ph_type.to_owned()).or_insert(28.0);
+        }
+        for ph_type in ["obj", ""] {
+            map.entry(ph_type.to_owned()).or_insert(18.0);
+        }
     }
 
+    map
+}
+
+/// Effective placeholder types declared by the master, keyed by @idx. Layout
+/// placeholders may omit @type while retaining the same index; ECMA-376's
+/// placeholder inheritance then uses the master slot before applying the
+/// CT_Placeholder schema default.
+pub(crate) fn parse_master_placeholder_types(
+    root: roxmltree::Node<'_, '_>,
+) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|node| child(node, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "sp")
+        {
+            let Some(ph) = sp
+                .descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "ph")
+            else {
+                continue;
+            };
+            let Some(idx) = attr(&ph, "idx").and_then(|value| value.parse().ok()) else {
+                continue;
+            };
+            map.entry(idx)
+                .or_insert_with(|| attr(&ph, "type").unwrap_or_else(|| "obj".to_owned()));
+        }
+    }
     map
 }
 
@@ -1028,6 +1132,17 @@ pub(crate) fn parse_master_level_indents(
                 }
             }
         }
+    } else {
+        // Office application defaults observed with an omitted txStyles tier:
+        // level-1 body/subtitle paragraphs use an 18 pt hanging gutter. Only
+        // this observed boundary is synthesized; object/content placeholders
+        // and deeper levels remain unstyled.
+        let mut level_one: LevelIndents = Default::default();
+        level_one[0].mar_l = Some(228_600);
+        level_one[0].indent = Some(-228_600);
+        for ph_type in ["body", "subTitle"] {
+            map.entry(ph_type.to_owned()).or_insert(level_one);
+        }
     }
 
     map
@@ -1104,6 +1219,17 @@ pub(crate) fn parse_master_level_bullets(
                     }
                 }
             }
+        }
+    } else {
+        // Office application defaults observed with an omitted txStyles tier:
+        // level-1 body/subtitle paragraphs use a round bullet. Keep every
+        // decoration group inherited so marker colour/size/typeface follows
+        // the resolved text, and do not extrapolate to object/deeper levels.
+        let mut level_one = empty_level_bullets();
+        level_one[0].marker = Some(BuMarker::Char("•".to_owned()));
+        for ph_type in ["body", "subTitle"] {
+            map.entry(ph_type.to_owned())
+                .or_insert_with(|| level_one.clone());
         }
     }
 
@@ -1201,7 +1327,7 @@ pub(crate) fn parse_master_txstyle_color(
                     .and_then(|tb| child(tb, "lstStyle"))
                     .and_then(|ls| child(ls, "lvl1pPr"))
                     .and_then(|lp| child(lp, "defRPr"))
-                    .and_then(|rp| child(rp, "solidFill"))
+                    .and_then(text_property_solid_fill)
                     .and_then(|sf| parse_color_node(sf, theme))
                 {
                     map.entry(ph_type).or_insert(color);
@@ -1217,7 +1343,7 @@ pub(crate) fn parse_master_txstyle_color(
             if let Some(color) = child(tx_styles, style_name)
                 .and_then(|sn| child(sn, "lvl1pPr"))
                 .and_then(|lp| child(lp, "defRPr"))
-                .and_then(|rp| child(rp, "solidFill"))
+                .and_then(text_property_solid_fill)
                 .and_then(|sf| parse_color_node(sf, theme))
             {
                 for ph_type in *ph_types {
@@ -1304,6 +1430,7 @@ pub(crate) fn parse_master_transforms(root: roxmltree::Node<'_, '_>) -> HashMap<
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_layout_placeholders(
     root: roxmltree::Node<'_, '_>,
+    master_placeholder_types: &HashMap<u32, String>,
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
@@ -1324,6 +1451,11 @@ pub(crate) fn parse_layout_placeholders(
     let theme = theme_source.colors();
     let mut lph = LayoutPlaceholders {
         master_by_type: master_transforms.clone(),
+        by_type_master_font_size: master_font_sizes.clone(),
+        by_type_master_font_family: master_font_families.clone(),
+        by_type_master_level_sizes: master_level_font_sizes.clone(),
+        by_type_master_level_indents: master_level_indents.clone(),
+        by_type_master_level_bullets: master_level_bullets.clone(),
         by_type_master_alignment: master_alignments.clone(),
         by_type_master_ea_ln_brk: master_ea_ln_brk.clone(),
         by_type_master_space_before: master_space_before.clone(),
@@ -1407,7 +1539,7 @@ pub(crate) fn parse_layout_placeholders(
             .and_then(|rp| child(rp, "effectLst"))
             .and_then(parse_reflection);
         let layout_color: Option<String> = layout_def_rpr
-            .and_then(|rp| child(rp, "solidFill"))
+            .and_then(text_property_solid_fill)
             .and_then(|sf| parse_color_node(sf, theme));
         let layout_alignment: Option<String> = layout_lvl1_ppr
             .and_then(|lp| attr(&lp, "algn"))
@@ -1488,10 +1620,27 @@ pub(crate) fn parse_layout_placeholders(
         });
 
         if let Some(ph) = ph_node {
-            let ph_type = attr(&ph, "type").unwrap_or_default();
+            // Keep an omitted type on the internal empty-key cascade so it can
+            // inherit an equally typeless master placeholder's authored
+            // lstStyle. The effective semantic type surfaced to a slide is
+            // still the CT_Placeholder default (`obj`).
             let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
+            let authored_ph_type = attr(&ph, "type");
+            let inherited_ph_type = ph_idx
+                .and_then(|idx| master_placeholder_types.get(&idx))
+                .cloned();
+            let ph_type = authored_ph_type
+                .clone()
+                .or_else(|| inherited_ph_type.clone())
+                .unwrap_or_default();
+            let effective_ph_type = authored_ph_type
+                .or(inherited_ph_type)
+                .unwrap_or_else(|| "obj".to_owned());
 
             if let Some(idx) = ph_idx {
+                lph.by_idx_placeholder_type
+                    .entry(idx)
+                    .or_insert(effective_ph_type);
                 if let Some(ref t) = t_opt {
                     lph.by_idx.entry(idx).or_insert_with(|| t.clone());
                 }
@@ -1783,6 +1932,7 @@ pub(crate) fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_layout(
     layout_xml: &str,
+    master_placeholder_types: &HashMap<u32, String>,
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
@@ -1811,6 +1961,7 @@ pub(crate) fn parse_layout(
 
     let placeholders = parse_layout_placeholders(
         root,
+        master_placeholder_types,
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
@@ -1877,6 +2028,7 @@ pub(crate) struct ParsedMaster {
     /// (see `parse_slide`), so these frozen-against-master-theme elements are used
     /// only by the common no-override slides.
     pub(crate) master_decorative: Vec<SlideElement>,
+    pub(crate) master_placeholder_types: HashMap<u32, String>,
     pub(crate) master_font_sizes: HashMap<String, f64>,
     pub(crate) master_font_families: HashMap<String, String>,
     pub(crate) master_level_font_sizes: HashMap<String, LevelFontSizes>,
@@ -1996,6 +2148,9 @@ pub(crate) fn build_master_bundle(
         parse_background(c_sld, &theme, &mut resolve)
     });
 
+    let master_placeholder_types = master_root
+        .map(parse_master_placeholder_types)
+        .unwrap_or_default();
     let master_font_sizes = master_root.map(parse_master_font_sizes).unwrap_or_default();
     let master_font_families = master_root
         .map(|root| parse_master_font_families(root, &theme))
@@ -2049,6 +2204,7 @@ pub(crate) fn build_master_bundle(
         master_smartart_drawings,
         master_bg,
         master_decorative,
+        master_placeholder_types,
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
@@ -2082,7 +2238,11 @@ mod placeholder_geometry_tests {
         PptxZip::new(cursor).unwrap()
     }
 
-    fn parse_layout_geometry(layout_shape: &str) -> LayoutPlaceholders {
+    fn parse_layout_with_master(
+        layout_shape: &str,
+        master_placeholder_types: &HashMap<u32, String>,
+        master_font_sizes: &HashMap<String, f64>,
+    ) -> LayoutPlaceholders {
         let xml = format!(
             r#"<p:sldLayout
                   xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -2094,7 +2254,8 @@ mod placeholder_geometry_tests {
         let mut zip = empty_zip();
         parse_layout_placeholders(
             doc.root_element(),
-            &HashMap::<String, f64>::new(),
+            master_placeholder_types,
+            master_font_sizes,
             &HashMap::<String, String>::new(),
             &HashMap::<String, LevelFontSizes>::new(),
             &HashMap::<String, LevelIndents>::new(),
@@ -2111,6 +2272,10 @@ mod placeholder_geometry_tests {
             &HashMap::new(),
             &mut zip,
         )
+    }
+
+    fn parse_layout_geometry(layout_shape: &str) -> LayoutPlaceholders {
+        parse_layout_with_master(layout_shape, &HashMap::new(), &HashMap::new())
     }
 
     fn parse_slide_shape(shape: &str, placeholders: &LayoutPlaceholders) -> ShapeElement {
@@ -2133,6 +2298,144 @@ mod placeholder_geometry_tests {
             &mut zip,
         )
         .unwrap()
+    }
+
+    /// ECMA-376 makes p:txStyles optional on a slide master. PowerPoint still
+    /// applies its presentation placeholder defaults when that authored tier is
+    /// absent. The values below are bounded to an Office-produced matrix that
+    /// distinguishes title, body/subtitle, and object placeholders. These are
+    /// application defaults, not fabricated defaults for ordinary text boxes.
+    #[test]
+    fn master_without_tx_styles_uses_powerpoint_placeholder_font_defaults() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+
+        let sizes = parse_master_font_sizes(doc.root_element());
+        assert_eq!(sizes.get("title"), Some(&44.0));
+        assert_eq!(sizes.get("ctrTitle"), Some(&44.0));
+        assert_eq!(sizes.get("body"), Some(&28.0));
+        assert_eq!(sizes.get("subTitle"), Some(&28.0));
+        assert_eq!(sizes.get("obj"), Some(&18.0));
+        assert_eq!(sizes.get(""), Some(&18.0));
+        assert_eq!(sizes.get("dt"), None);
+    }
+
+    #[test]
+    fn omitted_placeholder_type_uses_schema_default_obj() {
+        let shape = parse_slide_shape(
+            r#"<p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/>
+                 <p:nvPr><p:ph idx="3"/></p:nvPr></p:nvSpPr>
+               <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+               <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>content</a:t></a:r></a:p></p:txBody>"#,
+            &LayoutPlaceholders::default(),
+        );
+
+        assert_eq!(shape.placeholder_type.as_deref(), Some("obj"));
+    }
+
+    #[test]
+    fn omitted_placeholder_type_inherits_matching_layout_slot_type() {
+        let placeholders = LayoutPlaceholders {
+            by_idx_placeholder_type: HashMap::from([(3, "body".to_owned())]),
+            ..LayoutPlaceholders::default()
+        };
+        let shape = parse_slide_shape(
+            r#"<p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/>
+                 <p:nvPr><p:ph idx="3"/></p:nvPr></p:nvSpPr>
+               <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+               <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>content</a:t></a:r></a:p></p:txBody>"#,
+            &placeholders,
+        );
+
+        assert_eq!(shape.placeholder_type.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn typeless_layout_slot_inherits_master_idx_type_and_its_text_style() {
+        let master_xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld>
+        </p:sldMaster>"#;
+        let master_doc = roxmltree::Document::parse(master_xml).unwrap();
+        let master_types = parse_master_placeholder_types(master_doc.root_element());
+        let master_sizes = HashMap::from([("body".to_owned(), 28.0)]);
+        let placeholders = parse_layout_with_master(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/>
+                 <p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+               <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#,
+            &master_types,
+            &master_sizes,
+        );
+        let shape = parse_slide_shape(
+            r#"<p:nvSpPr><p:cNvPr id="3" name="Content"/><p:cNvSpPr/>
+                 <p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+               <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>content</a:t></a:r></a:p></p:txBody>"#,
+            &placeholders,
+        );
+
+        assert_eq!(shape.placeholder_type.as_deref(), Some("body"));
+        assert_eq!(shape.text_body.unwrap().default_font_size, Some(28.0));
+    }
+
+    #[test]
+    fn missing_tx_styles_supply_only_observed_level_one_body_list_defaults() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let indents = parse_master_level_indents(doc.root_element());
+        let mut zip = empty_zip();
+        let bullets = parse_master_level_bullets(
+            doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "ppt/slideMasters",
+            &mut zip,
+        );
+
+        assert_eq!(indents["body"][0].mar_l, Some(228_600));
+        assert_eq!(indents["body"][0].indent, Some(-228_600));
+        assert_eq!(indents["subTitle"][0].mar_l, Some(228_600));
+        assert!(!indents.contains_key("obj"));
+        match bullets["body"][0].resolve() {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            other => panic!("expected implicit body bullet, got {other:?}"),
+        }
+        match bullets["subTitle"][0].resolve() {
+            Bullet::Char { ch, .. } => assert_eq!(ch, "•"),
+            other => panic!("expected implicit subtitle bullet, got {other:?}"),
+        }
+        assert!(!bullets.contains_key("obj"));
+    }
+
+    #[test]
+    fn authored_master_tx_styles_override_powerpoint_placeholder_defaults() {
+        let xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles>
+            <p:titleStyle><a:lvl1pPr><a:defRPr sz="3600"/></a:lvl1pPr></p:titleStyle>
+            <p:bodyStyle><a:lvl1pPr><a:defRPr sz="2400"/></a:lvl1pPr></p:bodyStyle>
+            <p:otherStyle><a:lvl1pPr><a:defRPr sz="1200"/></a:lvl1pPr></p:otherStyle>
+          </p:txStyles>
+        </p:sldMaster>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+
+        let sizes = parse_master_font_sizes(doc.root_element());
+
+        assert_eq!(sizes.get("title"), Some(&36.0));
+        assert_eq!(sizes.get("body"), Some(&24.0));
+        assert_eq!(sizes.get("dt"), Some(&12.0));
     }
 
     #[test]
@@ -2197,6 +2500,7 @@ mod placeholder_geometry_tests {
 
         let placeholders = parse_layout_placeholders(
             doc.root_element(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),

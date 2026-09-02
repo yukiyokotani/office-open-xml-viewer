@@ -1,5 +1,6 @@
 import {
   composeAffine,
+  quarterTurnAffine,
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
@@ -14,6 +15,7 @@ import type {
   PaintNode,
   ParagraphLayout,
   PointPt,
+  RasterPaintOccurrence,
   ResourcePlacement,
   SourceRef,
   TableLayout,
@@ -69,6 +71,7 @@ interface ProjectionContext {
   readonly collectTextRunSources: boolean;
   readonly collectCompletedParagraphSources: boolean;
   readonly collectDrawings: boolean;
+  readonly collectRasterPaintOccurrences: boolean;
   readonly drawingEntries: ReadonlyMap<string, PagePaintDrawingEntry>;
   readonly rootPointToPage: ReadonlyMap<string, Matrix2DData>;
   readonly rootPaintOrder: ReadonlyMap<string, number>;
@@ -80,6 +83,8 @@ interface ProjectionContext {
   readonly completedParagraphSources: Set<string>;
   readonly drawings: DrawingGeometry[];
   readonly inlineResources: InlineResourceGeometry[];
+  readonly rasterPaintOccurrences: RasterPaintOccurrence[];
+  readonly emittedRasterDrawings: Set<string>;
   drawingSourceOrder: number;
 }
 
@@ -89,6 +94,7 @@ interface NodeProjection {
   readonly rootNodeId: string;
   readonly paintOrderIndex: number;
   readonly clips: readonly ElementClipGeometry[];
+  readonly textBoxVerticalMode?: NonNullable<TextBoxLayout['verticalMode']>;
 }
 
 const IDENTITY_AFFINE = Object.freeze({
@@ -96,6 +102,83 @@ const IDENTITY_AFFINE = Object.freeze({
 }) satisfies Matrix2DData;
 
 const EMPTY_CLIPS = Object.freeze([]) satisfies readonly ElementClipGeometry[];
+
+const CLOCKWISE_QUARTER_TURN = quarterTurnAffine(1);
+const COUNTER_CLOCKWISE_QUARTER_TURN = quarterTurnAffine(-1);
+
+function appendRasterPaintOccurrence(
+  context: ProjectionContext,
+  resourceKey: string,
+  resourceKind: 'image' | 'chart' | 'picture-bullet',
+  bounds: LayoutRect,
+  pointToPage: Matrix2DData,
+  options: Readonly<{
+    orientation?: 'upright-physical';
+    textBoxVerticalMode?: NonNullable<TextBoxLayout['verticalMode']>;
+  }> = {},
+): void {
+  if (!context.collectRasterPaintOccurrences) return;
+  let matrix = pointToPage;
+  let localWidthPt = bounds.widthPt;
+  let localHeightPt = bounds.heightPt;
+  if (options.textBoxVerticalMode) {
+    matrix = composeAffine(
+      matrix,
+      options.textBoxVerticalMode === 'vert270'
+        ? CLOCKWISE_QUARTER_TURN
+        : COUNTER_CLOCKWISE_QUARTER_TURN,
+    );
+    [localWidthPt, localHeightPt] = [localHeightPt, localWidthPt];
+  }
+  if (options.orientation === 'upright-physical') {
+    matrix = composeAffine(matrix, COUNTER_CLOCKWISE_QUARTER_TURN);
+    [localWidthPt, localHeightPt] = [localHeightPt, localWidthPt];
+  }
+  const widthPt = localWidthPt * Math.hypot(matrix.a, matrix.b);
+  const heightPt = localHeightPt * Math.hypot(matrix.c, matrix.d);
+  // The painters do no visible work for a non-positive destination. Invalid
+  // retained numbers are caught by the document-layout invariant boundary.
+  if (!Number.isFinite(widthPt) || !Number.isFinite(heightPt)
+    || !(widthPt > 0) || !(heightPt > 0)) return;
+  context.rasterPaintOccurrences.push(Object.freeze({
+    resourceKey,
+    resourceKind,
+    widthPt,
+    heightPt,
+  }));
+}
+
+function collectDrawingRasterPaintOccurrences(
+  drawing: DrawingLayout,
+  projection: NodeProjection,
+  context: ProjectionContext,
+): void {
+  if (!context.collectRasterPaintOccurrences
+    || context.emittedRasterDrawings.has(drawing.id)) return;
+  context.emittedRasterDrawings.add(drawing.id);
+  for (const command of drawing.commands) {
+    if (command.kind === 'resource' && command.resourceKind !== 'math') {
+      appendRasterPaintOccurrence(
+        context,
+        command.resourceKey,
+        command.resourceKind,
+        command.rect,
+        projection.pointToPage,
+        { orientation: command.orientation },
+      );
+      continue;
+    }
+    if (command.kind !== 'drawingml-image-fill') continue;
+    const { x, y, w, h } = command.plan.rect;
+    const fillRect = command.fillRect ?? { l: 0, t: 0, r: 0, b: 0 };
+    appendRasterPaintOccurrence(context, command.resourceKey, 'image', {
+      xPt: x + fillRect.l * w,
+      yPt: y + fillRect.t * h,
+      widthPt: w * (1 - fillRect.l - fillRect.r),
+      heightPt: h * (1 - fillRect.t - fillRect.b),
+    }, projection.pointToPage);
+  }
+}
 
 function pageRegionsByDomain(
   page: LayoutPage,
@@ -212,6 +295,7 @@ function visitTextBox(
   const transformedProjection: NodeProjection = {
     ...projection,
     pointToPage: composeAffine(projection.pointToPage, textBox.transform),
+    textBoxVerticalMode: textBox.verticalMode ?? projection.textBoxVerticalMode,
   };
   const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
   for (const block of textBox.story.blocks) {
@@ -227,6 +311,7 @@ function visitDrawing(
 ): void {
   const textBoxes = drawingTextBoxes(textBoxesById, drawing);
   const ownedProjection = drawingOwnedContentProjection(drawing, projection, context);
+  collectDrawingRasterPaintOccurrences(drawing, ownedProjection, context);
   if (context.collectDrawings && !context.emittedDrawings.has(drawing.id)) {
     context.emittedDrawings.add(drawing.id);
     context.drawings.push(Object.freeze({
@@ -319,6 +404,24 @@ function visitParagraph(
             indices.add(placement.sourceRunIndex);
           }
         }
+      }
+    }
+  }
+  if (context.collectRasterPaintOccurrences) {
+    for (const line of paragraph.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind !== 'resource' || placement.resourceKind === 'math') continue;
+        appendRasterPaintOccurrence(
+          context,
+          placement.resourceKey,
+          placement.resourceKind,
+          placement.bounds,
+          paragraphProjection.pointToPage,
+          {
+            orientation: placement.orientation,
+            textBoxVerticalMode: paragraphProjection.textBoxVerticalMode,
+          },
+        );
       }
     }
   }
@@ -465,6 +568,7 @@ function pageGeometryIndex(
     collectTextRunSources: boolean;
     collectCompletedParagraphSources?: boolean;
     collectDrawings: boolean;
+    collectRasterPaintOccurrences?: boolean;
   }>,
 ): ProjectionContext {
   const page = layout.pages[pageIndex];
@@ -486,6 +590,7 @@ function pageGeometryIndex(
   const context: ProjectionContext = {
     ...options,
     collectCompletedParagraphSources: options.collectCompletedParagraphSources === true,
+    collectRasterPaintOccurrences: options.collectRasterPaintOccurrences === true,
     drawingEntries,
     rootPointToPage,
     rootPaintOrder,
@@ -497,9 +602,14 @@ function pageGeometryIndex(
     completedParagraphSources: new Set(),
     drawings: [],
     inlineResources: [],
+    rasterPaintOccurrences: [],
+    emittedRasterDrawings: new Set(),
     drawingSourceOrder: 0,
   };
-  for (const nodeId of page.readingOrder) {
+  const rootOrder = context.collectRasterPaintOccurrences
+    ? page.layers.roots.map(({ node }) => node.id)
+    : page.readingOrder;
+  for (const nodeId of rootOrder) {
     const root = roots.get(nodeId);
     if (!root) throw new Error(`Reading-order node ${nodeId} is not a page root`);
     const pointToPage = rootPointToPage.get(nodeId);
@@ -630,4 +740,20 @@ export function elementGeometryForPage(
   elements.sort((left, right) => left.paintOrderIndex - right.paintOrderIndex ||
     left.sourceOrder - right.sourceOrder);
   return Object.freeze(elements);
+}
+
+/** Raster-backed resources that the completed page paint plan can reach. This
+ * uses the same canonical projection as selection geometry, including page,
+ * table, text-box, and anchored-drawing transforms, but intentionally ignores
+ * clips so decode resolution remains conservative. */
+export function rasterPaintOccurrencesForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+): readonly RasterPaintOccurrence[] {
+  return Object.freeze(pageGeometryIndex(layout, pageIndex, {
+    collectTextRuns: false,
+    collectTextRunSources: false,
+    collectDrawings: false,
+    collectRasterPaintOccurrences: true,
+  }).rasterPaintOccurrences);
 }

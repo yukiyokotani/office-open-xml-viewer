@@ -14,6 +14,7 @@ describe('public error documentation', () => {
     expect(errorPage).toContain('id="ooxml-error"');
     expect(errorPage).toContain('id="ooxml-resource-limit-error"');
     expect(errorPage).toContain('id="decoded-image-limit-error"');
+    expect(errorPage).toContain('id="tiff-decode-error"');
     expect(errorPage).toContain('id="parser-crashed"');
     expect(errorPage).toContain('never the message text');
   });
@@ -29,6 +30,7 @@ describe('public error documentation', () => {
     expect(errorPage).toContain('If <code>configurable</code> is false');
     expect(errorPage).toContain('The compressed upload size cannot predict the inflated size.');
     expect(errorPage).toContain('Rust panic, allocation failure, stack overflow');
+    expect(errorPage).toContain('<code>TiffDecodeError</code>');
   });
 
   it('makes the callback-versus-Promise behavior explicit in the README', () => {

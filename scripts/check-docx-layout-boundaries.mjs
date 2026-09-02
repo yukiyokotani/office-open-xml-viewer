@@ -99,11 +99,15 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['acquireBitmapCacheLease', 'value'],
     ['applyDuotone', 'value'],
     ['autoContrastColor', 'value'],
+    ['captureDecodedBitmapCacheEpoch', 'value'],
     ['canvasFontString', 'value'],
     ['clampCanvasSize', 'value'],
     // Chart picture-marker discovery and lookup warm the document-owned image
     // cache before measurement-free chart paint. They expose no layout API.
     ['chartImageFillKey', 'value'],
+    ['chartImageFillUsageSize', 'value'],
+    ['collectChartImageFillUsages', 'value'],
+    ['collectChartImageFillUsagesForCharts', 'value'],
     ['collectChartMarkerImageFills', 'value'],
     ['collectChartMarkerImageFillsForCharts', 'value'],
     // DrawingML silhouette clipping is shared paint behavior used by
@@ -119,10 +123,18 @@ const SHARED_PAINT_IMPORTS = new Map([
     // Shared decoded-surface ownership is a paint resource concern. DOCX may
     // create/drop derived clrChange/duotone surfaces without importing layout.
     ['dropCachedDerivedBitmapNamespace', 'value'],
+    ['decodedBitmapTargetResizeOptions', 'value'],
+    ['duotoneImageData', 'value'],
     ['getCachedBitmapByPath', 'value'],
     ['getCachedDerivedBitmap', 'value'],
     ['getCachedSvgImageByPath', 'value'],
+    // Header inspection reuses the document-owned byte profile to decide
+    // whether browser target-resize is available. Both predicates remain
+    // paint-resource admission and cannot affect acquired layout geometry.
+    ['inspectCachedRasterSource', 'value'],
+    ['isDecodeTargetResizableRasterFormat', 'value'],
     ['isOoxmlDecodedImageLimitError', 'value'],
+    ['isTiffDecodeError', 'value'],
     ['HyperlinkTarget', 'type'],
     ['imageNaturalSize', 'value'],
     ['isHTMLCanvas', 'value'],
@@ -131,10 +143,21 @@ const SHARED_PAINT_IMPORTS = new Map([
     // resulting CanvasImageSource keyed by the immutable resource record.
     ['rasterizeMathSvg', 'value'],
     ['metafileRasterSize', 'value'],
+    // Paint-time image admission uses the completed layout box and effective
+    // DPR to choose a retained decode. These resource-policy primitives neither
+    // measure nor feed geometry back into DocumentLayout.
+    ['MAX_RASTER_PIXELS', 'value'],
+    // Decoded-image policy is shared across all format painters. DOCX supplies
+    // immutable paint demands and consumes the returned target plan; neither
+    // operation may feed measurement or pagination.
+    ['normalizeImageResourceOptions', 'value'],
+    ['planDecodedImageTargets', 'value'],
     ['paintDrawingMLShape', 'value'],
     ['withVertFeature', 'value'],
     ['preferVectorBlip', 'value'],
     ['releaseOwnedBitmap', 'value'],
+    ['resolvedCachedBitmapVariantKey', 'value'],
+    ['sourceRasterTargetSize', 'value'],
     ['PT_TO_PX', 'value'],
     // Shared fill resolution keeps gradient/no-fill semantics identical across
     // DOCX, PPTX, and XLSX painters; paint may consume it but not layout APIs.
@@ -142,6 +165,9 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['recolorSvg', 'value'],
     ['renderChart', 'value'],
     ['withDrawingMLShapeTransform', 'value'],
+    // Serial admission and bitmap pinning are document-owned paint-resource
+    // lifecycle concerns, not layout acquisition.
+    ['withBitmapCacheLease', 'value'],
     // Optional renderers and image codecs are paint-only capabilities threaded
     // into existing shared painters. Their erased contracts do not expose
     // layout acquisition or permit a renderer back-edge.
@@ -150,6 +176,7 @@ const SHARED_PAINT_IMPORTS = new Map([
     ['ChartExRenderer', 'type'],
     ['ChartImageLookup', 'type'],
     ['Duotone', 'type'],
+    ['ImageResourceOptions', 'type'],
     ['MathRenderer', 'type'],
     ['TiffRenderer', 'type'],
   ])],

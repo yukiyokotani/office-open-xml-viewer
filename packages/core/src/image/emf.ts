@@ -50,7 +50,7 @@
 // and any unrecognized iType.
 //
 // Shared across the docx, pptx and xlsx renderers via
-// {@link ./wmf.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
+// {@link ./raster-or-metafile.ts}#decodeRasterOrMetafile, which sniffs the bytes and routes
 // true EMF here.
 
 import { decodeDib, blitDibToCtx, type DecodedDib } from './dib.js';

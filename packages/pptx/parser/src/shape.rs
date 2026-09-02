@@ -894,10 +894,7 @@ pub(crate) fn parse_shape(
     let ph_node = sp_node
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "ph");
-    let ph_type = ph_node
-        .as_ref()
-        .and_then(|n| attr(n, "type"))
-        .unwrap_or_else(|| "body".into());
+    let explicit_ph_type = ph_node.as_ref().and_then(|n| attr(n, "type"));
     let ph_idx: Option<u32> = ph_node
         .as_ref()
         .and_then(|n| attr(n, "idx"))
@@ -906,13 +903,17 @@ pub(crate) fn parse_shape(
         // sentinel. It is not a real layout slot; treating it as an authored
         // idx suppresses the normal type/bodyStyle fallback.
         .filter(|idx| *idx != u32::MAX);
+    let ph_type = explicit_ph_type
+        .clone()
+        .or_else(|| ph_idx.and_then(|idx| lph.by_idx_placeholder_type.get(&idx).cloned()))
+        // CT_Placeholder @type defaults to "obj" (ECMA-376 pml.xsd), after
+        // inheritance from the matching layout slot has been considered.
+        .unwrap_or_else(|| "obj".into());
     // Surface the explicit ph @type / @idx (when present) on the ShapeElement
-    // JSON. We keep `ph_type` defaulted to "body" for the internal lookup
+    // JSON. We keep `ph_type` defaulted to the schema's "obj" for lookup
     // path, but only emit the `placeholder_type` field when a real `<p:ph>`
     // node was found.
-    let placeholder_type_out: Option<String> = ph_node
-        .as_ref()
-        .map(|n| attr(n, "type").unwrap_or_else(|| "body".into()));
+    let placeholder_type_out: Option<String> = ph_node.as_ref().map(|_| ph_type.clone());
     let cnv = read_cnv_pr(sp_node, rels);
 
     // --- Transform: slide xfrm OR layout fallback ---

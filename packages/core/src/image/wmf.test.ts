@@ -6,8 +6,9 @@ import {
   playWmf,
   renderWmfToBitmap,
   wmfRasterTarget,
-  decodeRasterOrMetafile,
 } from './wmf.js';
+import { decodeRasterOrMetafile } from './raster-or-metafile.js';
+import { TiffDecodeError } from './tiff-contract.js';
 
 // ── WMF (Windows Metafile) player unit tests ────────────────────────────────
 // The renderer falls back to this player for `.wmf`/`.emf` blips the browser
@@ -882,8 +883,8 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps an in-budget raster on the native decode path when a target is supplied', async () => {
-    const fake = { width: 1920, height: 1080, close() {} } as unknown as ImageBitmap;
+  it('downsamples an in-budget raster when both display target axes are smaller', async () => {
+    const fake = { width: 960, height: 540, close() {} } as unknown as ImageBitmap;
     const cib = vi.fn(async () => fake);
     vi.stubGlobal('createImageBitmap', cib);
     const png = new Uint8Array(26);
@@ -898,7 +899,10 @@ describe('decodeRasterOrMetafile', () => {
       targetWidthPx: 960,
       targetHeightPx: 540,
     })).resolves.toBe(fake);
-    expect(cib).toHaveBeenCalledWith(blob);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 960,
+      resizeQuality: 'high',
+    });
   });
 
   it('downsamples a legitimate over-32MP raster to the requested display resolution', async () => {
@@ -930,6 +934,241 @@ describe('decodeRasterOrMetafile', () => {
     });
   });
 
+  it('rounds an aspect-preserving decode up to cover both integer target axes', async () => {
+    const sourceWidth = 12_090;
+    const sourceHeight = 9_063;
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, sourceWidth);
+    view.setUint32(20, sourceHeight);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
+      const width = options?.resizeWidth ?? sourceWidth;
+      return {
+        width,
+        height: Math.ceil(sourceHeight * width / sourceWidth),
+        close() {},
+      } as unknown as ImageBitmap;
+    });
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 960,
+      targetHeightPx: 720,
+    })).resolves.toMatchObject({ width: 961, height: 721 });
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 961,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('does not overshoot an exact integer browser target through floating-point roundoff', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 25);
+    view.setUint32(20, 25);
+    const bitmap = { width: 7, height: 7, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => bitmap);
+    vi.stubGlobal('createImageBitmap', cib);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 7,
+      targetHeightPx: 7,
+      maxRetainedPixels: 49,
+    })).resolves.toBe(bitmap);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 7,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('closes and rejects a decoder result that ignores a restricted retained-surface limit', async () => {
+    const sourceWidth = 10_000;
+    const sourceHeight = 1_000;
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, sourceWidth);
+    view.setUint32(20, sourceHeight);
+    const close = vi.fn();
+    const ignoredResize = { width: sourceWidth, height: sourceHeight, close } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ignoredResize));
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([png as BlobPart], { type: 'image/png' }),
+      {
+        targetWidthPx: 1_000,
+        targetHeightPx: 100,
+        maxRetainedPixels: 1 << 23,
+      },
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      limit: 1 << 23,
+      observed: sourceWidth * sourceHeight,
+    });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('streams JPEG metadata until SOF instead of failing open after 64 KiB', async () => {
+    const appLength = 65_535;
+    const jpeg = new Uint8Array(2 + 2 + appLength + 2 + 17);
+    let offset = 0;
+    jpeg.set([0xff, 0xd8], offset); offset += 2; // SOI
+    jpeg.set([0xff, 0xe1, 0xff, 0xff], offset); offset += 4; // APP1 incl. u16 length
+    offset += appLength - 2; // payload; SOF now lies beyond byte 65536
+    jpeg.set([0xff, 0xc0, 0x00, 0x11, 0x08, 0x23, 0x28, 0x2e, 0xe0], offset);
+    const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
+    const resized = { width: 1_200, height: 900, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => resized);
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 1_200,
+      targetHeightPx: 900,
+    })).resolves.toBe(resized);
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 1_200,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('keeps streamed JPEG EXIF orientation in the retained-surface decode plan', async () => {
+    const exif = new Uint8Array(32);
+    exif.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
+    exif.set([0x49, 0x49], 6);
+    const exifView = new DataView(exif.buffer);
+    exifView.setUint16(8, 42, true);
+    exifView.setUint32(10, 8, true);
+    exifView.setUint16(14, 1, true);
+    exifView.setUint16(16, 0x0112, true);
+    exifView.setUint16(18, 3, true);
+    exifView.setUint32(20, 1, true);
+    exifView.setUint16(24, 6, true); // coded 400x100 becomes browser-oriented 100x400
+
+    const longAppPayload = 65_533;
+    const jpeg = new Uint8Array(
+      2 + (2 + 2 + exif.length) + (2 + 2 + longAppPayload) + 2 + 17,
+    );
+    let offset = 0;
+    jpeg.set([0xff, 0xd8], offset); offset += 2;
+    jpeg.set([0xff, 0xe1], offset); offset += 2;
+    jpeg.set([0x00, exif.length + 2], offset); offset += 2;
+    jpeg.set(exif, offset); offset += exif.length;
+    jpeg.set([0xff, 0xe2, 0xff, 0xff], offset); offset += 4;
+    offset += longAppPayload;
+    jpeg.set([0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x01, 0x90], offset);
+
+    const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
+    const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
+      const width = options?.resizeWidth ?? 100;
+      return { width, height: width * 4, close() {} } as unknown as ImageBitmap;
+    });
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 25,
+      targetHeightPx: 25,
+      maxRetainedPixels: 2_500,
+    })).resolves.toMatchObject({ width: 25, height: 100 });
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 25,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('keeps the first streamed EXIF APP1 authoritative when its orientation is invalid', async () => {
+    const exif = new Uint8Array(32);
+    exif.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00, 0x49, 0x49], 0);
+    const exifView = new DataView(exif.buffer);
+    exifView.setUint16(8, 42, true);
+    exifView.setUint32(10, 8, true);
+    exifView.setUint16(14, 1, true);
+    exifView.setUint16(16, 0x0112, true);
+    exifView.setUint16(18, 3, true);
+    exifView.setUint32(20, 1, true);
+    exifView.setUint16(24, 0, true);
+    const laterExif = exif.slice();
+    new DataView(laterExif.buffer).setUint16(24, 6, true);
+    const jpeg = new Uint8Array(2 + (4 + exif.length) + (4 + laterExif.length) + 9 + 2);
+    let offset = 0;
+    jpeg.set([0xff, 0xd8, 0xff, 0xe1, 0x00, exif.length + 2], offset); offset += 6;
+    jpeg.set(exif, offset); offset += exif.length;
+    jpeg.set([0xff, 0xe1, 0x00, laterExif.length + 2], offset); offset += 4;
+    jpeg.set(laterExif, offset); offset += laterExif.length;
+    jpeg.set([0xff, 0xc0, 0x00, 0x07, 0x08, 0x00, 0x64, 0x01, 0x90], offset); offset += 9;
+    jpeg.set([0xff, 0xda], offset);
+    const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
+    const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
+      const width = options?.resizeWidth ?? 400;
+      return { width, height: width / 4, close() {} } as unknown as ImageBitmap;
+    });
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 25,
+      targetHeightPx: 25,
+      maxRetainedPixels: 2_500,
+    })).resolves.toMatchObject({ width: 100, height: 25 });
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 100,
+      resizeQuality: 'high',
+    });
+  });
+
+  it('finds browser-applied EXIF orientation after SOF and beyond the prefix', async () => {
+    const exif = new Uint8Array(32);
+    exif.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
+    exif.set([0x49, 0x49], 6);
+    const exifView = new DataView(exif.buffer);
+    exifView.setUint16(8, 42, true);
+    exifView.setUint32(10, 8, true);
+    exifView.setUint16(14, 1, true);
+    exifView.setUint16(16, 0x0112, true);
+    exifView.setUint16(18, 3, true);
+    exifView.setUint32(20, 1, true);
+    exifView.setUint16(24, 6, true);
+
+    const longAppPayload = 65_533;
+    const sofPayload = new Uint8Array(15);
+    sofPayload.set([0x08, 0x00, 0x64, 0x01, 0x90]); // coded 400x100
+    const jpeg = new Uint8Array(
+      2 + (2 + 2 + sofPayload.length) + (2 + 2 + longAppPayload)
+      + (2 + 2 + exif.length) + 2,
+    );
+    let offset = 0;
+    jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11], offset); offset += 6;
+    jpeg.set(sofPayload, offset); offset += sofPayload.length;
+    jpeg.set([0xff, 0xe2, 0xff, 0xff], offset); offset += 4;
+    offset += longAppPayload;
+    jpeg.set([0xff, 0xe1, 0x00, exif.length + 2], offset); offset += 4;
+    jpeg.set(exif, offset); offset += exif.length;
+    jpeg.set([0xff, 0xda], offset); // stop metadata inspection at the first scan
+
+    const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
+    const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
+      const width = options?.resizeWidth ?? 100;
+      return { width, height: width * 4, close() {} } as unknown as ImageBitmap;
+    });
+    vi.stubGlobal('createImageBitmap', cib);
+
+    await expect(decodeRasterOrMetafile(blob, {
+      targetWidthPx: 25,
+      targetHeightPx: 25,
+      maxRetainedPixels: 2_500,
+    })).resolves.toMatchObject({ width: 25, height: 100 });
+    expect(cib).toHaveBeenCalledWith(blob, {
+      resizeWidth: 25,
+      resizeQuality: 'high',
+    });
+  });
+
   it('downsamples a panoramic source wider than the retained-canvas axis limit', async () => {
     const png = new Uint8Array(26);
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
@@ -952,7 +1191,7 @@ describe('decodeRasterOrMetafile', () => {
     });
   });
 
-  it('uses the largest safe surface when the display request asks for native resolution', async () => {
+  it('rejects before decode when the genuinely required target exceeds the pixel limit', async () => {
     const sourceWidth = 12_000;
     const sourceHeight = 9_000;
     const png = new Uint8Array(26);
@@ -962,24 +1201,19 @@ describe('decodeRasterOrMetafile', () => {
     view.setUint32(16, sourceWidth);
     view.setUint32(20, sourceHeight);
     const blob = new Blob([png as BlobPart], { type: 'image/png' });
-    const safeScale = Math.sqrt((1 << 25) / (sourceWidth * sourceHeight));
-    const resizeWidth = Math.floor(sourceWidth * safeScale);
-    const resized = {
-      width: resizeWidth,
-      height: Math.floor(sourceHeight * safeScale),
-      close() {},
-    } as unknown as ImageBitmap;
-    const cib = vi.fn(async () => resized);
+    const cib = vi.fn();
     vi.stubGlobal('createImageBitmap', cib);
 
     await expect(decodeRasterOrMetafile(blob, {
       targetWidthPx: sourceWidth,
       targetHeightPx: sourceHeight,
-    })).resolves.toBe(resized);
-    expect(cib).toHaveBeenCalledWith(blob, {
-      resizeWidth,
-      resizeQuality: 'high',
+    })).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      limit: 1 << 25,
+      observed: sourceWidth * sourceHeight,
     });
+    expect(cib).not.toHaveBeenCalled();
   });
 
   it('still rejects an over-32MP raster when no bounded display target is known', async () => {
@@ -1022,26 +1256,25 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).not.toHaveBeenCalled();
   });
 
-  it('reports a source-axis crossing as a dimension limit with truthful values', async () => {
+  it('admits a non-JPEG source axis above 65,535 when total pixels and output are bounded', async () => {
     const bomb = new Uint8Array(26);
     bomb.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
     bomb.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
     const view = new DataView(bomb.buffer);
-    view.setUint32(16, 70_000);
-    view.setUint32(20, 1);
-    const cib = vi.fn();
+    view.setUint32(16, 100_000);
+    view.setUint32(20, 1_000);
+    const bitmap = { width: 1_000, height: 10, close() {} } as unknown as ImageBitmap;
+    const cib = vi.fn(async () => bitmap);
     vi.stubGlobal('createImageBitmap', cib);
 
     await expect(decodeRasterOrMetafile(
       new Blob([bomb as BlobPart], { type: 'image/png' }),
-      { targetWidthPx: 700, targetHeightPx: 1 },
-    )).rejects.toMatchObject({
-      code: 'ooxml-decoded-image-limit',
-      metric: 'image-dimension',
-      limit: 65_535,
-      observed: 70_000,
+      { targetWidthPx: 1_000, targetHeightPx: 10 },
+    )).resolves.toBe(bitmap);
+    expect(cib).toHaveBeenCalledWith(expect.any(Blob), {
+      resizeWidth: 1_000,
+      resizeQuality: 'high',
     });
-    expect(cib).not.toHaveBeenCalled();
   });
 
   it('reports a retained-axis crossing separately when no downsample target is supplied', async () => {
@@ -1065,26 +1298,121 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).not.toHaveBeenCalled();
   });
 
-  it('a TIFF is skipped without the opt-in codec and decoded when supplied', async () => {
+  it('a recognized TIFF fails clearly without a codec or when its codec returns null', async () => {
     const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
     const blob = new Blob([bytes as BlobPart], { type: 'image/tiff' });
     const browserDecode = vi.fn();
     vi.stubGlobal('createImageBitmap', browserDecode);
 
-    await expect(decodeRasterOrMetafile(blob)).resolves.toBeNull();
+    await expect(decodeRasterOrMetafile(blob)).rejects.toMatchObject({
+      name: 'TiffDecodeError',
+      code: 'ooxml-tiff-decode',
+      message: expect.stringMatching(/TIFF.*codec/i),
+    });
     expect(browserDecode).not.toHaveBeenCalled();
 
-    const bitmap = { width: 8, height: 4, close() {} } as unknown as ImageBitmap;
-    const render = vi.fn(async (input: Uint8Array) => {
-      expect(Array.from(input)).toEqual(Array.from(bytes));
-      return bitmap;
-    });
-    await expect(decodeRasterOrMetafile(blob, { tiff: { render } })).resolves.toBe(bitmap);
-    expect(render).toHaveBeenCalledTimes(1);
+    const emptyRender = vi.fn(async () => null);
+    await expect(decodeRasterOrMetafile(blob, { tiff: { render: emptyRender } }))
+      .rejects.toBeInstanceOf(TiffDecodeError);
+    expect(emptyRender).toHaveBeenCalledOnce();
     expect(browserDecode).not.toHaveBeenCalled();
   });
 
-  it('rejects an oversized TIFF before invoking an injected codec', async () => {
+  it('wraps an arbitrary custom TIFF codec failure with a diagnostic TIFF error', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+    const cause = new Error('custom codec internals');
+    const render = vi.fn(async () => { throw cause; });
+
+    const promise = decodeRasterOrMetafile(
+      new Blob([bytes as BlobPart], { type: 'application/octet-stream' }),
+      { tiff: { render } },
+    );
+    await expect(promise).rejects.toMatchObject({
+      name: 'TiffDecodeError',
+      code: 'ooxml-tiff-decode',
+      cause,
+    });
+  });
+
+  it('preserves a decoded-image quota error from another TIFF codec realm', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
+    const foreignQuota = {
+      name: 'OoxmlDecodedImageLimitError',
+      message: 'OOXML decoded image limit exceeded: image-pixels 50 > 49',
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      limit: 49,
+      observed: 50,
+    };
+    const render = vi.fn(async () => { throw foreignQuota; });
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([bytes as BlobPart], { type: 'application/octet-stream' }),
+      { tiff: { render } },
+    )).rejects.toBe(foreignQuota);
+  });
+
+  it('routes a MIME-identified unsupported TIFF container through the codec path', async () => {
+    const bigTiffHeader = new Uint8Array([0x49, 0x49, 0x2b, 0x00, 8, 0, 0, 0]);
+    const browserDecode = vi.fn();
+    const render = vi.fn(async () => null);
+    vi.stubGlobal('createImageBitmap', browserDecode);
+
+    await expect(decodeRasterOrMetafile(
+      new Blob([bigTiffHeader as BlobPart], { type: 'image/tiff' }),
+      { tiff: { render } },
+    )).rejects.toBeInstanceOf(TiffDecodeError);
+    expect(render).toHaveBeenCalledOnce();
+    expect(browserDecode).not.toHaveBeenCalled();
+  });
+
+  it('decodes a TIFF through the opt-in codec and forwards its retained target', async () => {
+    const bytes = new Uint8Array(38);
+    const view = new DataView(bytes.buffer);
+    bytes.set([0x49, 0x49], 0);
+    view.setUint16(2, 42, true);
+    view.setUint32(4, 8, true);
+    view.setUint16(8, 2, true);
+    view.setUint16(10, 256, true);
+    view.setUint16(12, 4, true);
+    view.setUint32(14, 1, true);
+    view.setUint32(18, 4_249, true);
+    view.setUint16(22, 257, true);
+    view.setUint16(24, 4, true);
+    view.setUint32(26, 1, true);
+    view.setUint32(30, 6_137, true);
+    const blob = new Blob([bytes as BlobPart], { type: 'image/tiff' });
+    const browserDecode = vi.fn();
+    vi.stubGlobal('createImageBitmap', browserDecode);
+
+    const bitmap = { width: 320, height: 463, close() {} } as unknown as ImageBitmap;
+    const render = vi.fn(async (
+      input: Uint8Array,
+      options?: Readonly<{
+        targetWidthPx?: number;
+        targetHeightPx?: number;
+        maxRetainedPixels?: number;
+      }>,
+    ) => {
+      expect(Array.from(input)).toEqual(Array.from(bytes));
+      return bitmap;
+    });
+    await expect(decodeRasterOrMetafile(blob, {
+      tiff: { render },
+      targetWidthPx: 320,
+      targetHeightPx: 200,
+      maxRetainedPixels: 1 << 23,
+    })).resolves.toBe(bitmap);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render).toHaveBeenCalledWith(bytes, {
+      targetWidthPx: 320,
+      targetHeightPx: 200,
+      maxRetainedPixels: 1 << 23,
+    });
+    expect(browserDecode).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized required TIFF target before invoking an injected codec', async () => {
     const bytes = new Uint8Array(38);
     const view = new DataView(bytes.buffer);
     bytes.set([0x49, 0x49], 0);
@@ -1103,8 +1431,12 @@ describe('decodeRasterOrMetafile', () => {
 
     await expect(decodeRasterOrMetafile(
       new Blob([bytes as BlobPart], { type: 'image/tiff' }),
-      { tiff: { render }, targetWidthPx: 320, targetHeightPx: 200 },
-    )).rejects.toMatchObject({ code: 'ooxml-decoded-image-limit' });
+      { tiff: { render }, targetWidthPx: 12_000, targetHeightPx: 9_000 },
+    )).rejects.toMatchObject({
+      code: 'ooxml-decoded-image-limit',
+      metric: 'image-pixels',
+      observed: 12_000 * 9_000,
+    });
     expect(render).not.toHaveBeenCalled();
   });
 

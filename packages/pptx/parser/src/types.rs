@@ -818,6 +818,10 @@ pub(crate) enum Fill {
         image_path: String,
         /// MIME type of the blip at `image_path` (e.g. `image/png`).
         mime_type: String,
+        /// `<a:srcRect>` (§20.1.8.55) source-image crop. Unlike `fill_rect`,
+        /// this applies before either stretch or tile placement.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        src_rect: Option<SrcRect>,
         /// `<a:stretch><a:fillRect>` (§20.1.8.30 CT_RelativeRect). Edge insets
         /// as fractions of the fill region; negative values overscan past the
         /// bounding box. `None` when stretch has no fillRect (= full box) or

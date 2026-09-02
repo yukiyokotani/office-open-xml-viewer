@@ -660,6 +660,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         threeD: this._opts.threeD,
         regionMap: this._opts.regionMap,
         chartEx: this._opts.chartEx,
+        tiff: this._opts.tiff,
         mode: this._mode,
         // The variant the viewer will render. Without these, load builds the
         // final view while every render asks for the markup view, and the first
@@ -986,6 +987,9 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   private _syncCommentMarginGeometry(margin: HTMLDivElement | null): void {
     if (!margin) return;
+    // Empty absolutely positioned review cards otherwise enlarge scrollWidth
+    // even though no displayable comment contributes a declared margin extent.
+    margin.style.display = this._hasCommentMargin() ? '' : 'none';
     const zoom = this._commentZoom();
     const offset = `calc(100% + ${COMMENT_MARGIN_GAP_PX * zoom}px)`;
     margin.style.left = this._commentSide() === 'right' ? offset : '';
@@ -1477,6 +1481,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       render = renderDocxFocusedPage(this._doc, slot.canvas, i, 'main', {
         width: widthPx, // this page's own px width → uniform px-per-pt scale (§7)
         dpr,
+        imageResources: this._opts.imageResources,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
@@ -1665,6 +1670,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       const bmp = await renderDocxFocusedPage(this._doc!, slot.canvas, i, 'worker', {
         width: widthPx,
         dpr,
+        imageResources: this._opts.imageResources,
         defaultTextColor: this._opts.defaultTextColor,
         currentDate: this._currentDate,
         ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
@@ -2138,6 +2144,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     renderDocxFocusedPage(this._doc, spare, i, 'main', {
       width: widthPx,
       dpr,
+      imageResources: this._opts.imageResources,
       defaultTextColor: this._opts.defaultTextColor,
       currentDate: this._currentDate,
       ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
@@ -2585,6 +2592,7 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   private _redrawSlotComments(page: number, slot: PageSlot): void {
     if (!this._doc || !slot.commentTintLayer) return;
+    this._syncCommentMarginGeometry(slot.commentMargin);
     const commentUi = this._commentUi;
     if (!commentUi) {
       slot.commentTintLayer.replaceChildren();

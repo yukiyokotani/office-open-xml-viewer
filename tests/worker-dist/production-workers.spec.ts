@@ -4,7 +4,7 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
   await page.goto(url);
   await expect(page.locator('body')).toHaveAttribute('data-status', 'ready', { timeout: 60_000 });
 
-  for (const id of ['docx', 'math', 'xlsx', 'pptx']) {
+  for (const id of ['docx', 'math', 'xlsx', 'pptx', 'pptx-text']) {
     const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
       const context = canvas.getContext('2d');
       if (!context) return 0;
@@ -16,6 +16,17 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
       return count;
     });
     expect(ink, `${id} worker bitmap should contain ink`).toBeGreaterThan(100);
+  }
+
+  const pptxTextRuns = await page.evaluate(() => (
+    window as typeof window & { pptxTextRuns?: Array<Record<string, unknown>> }
+  ).pptxTextRuns);
+  expect(pptxTextRuns).toHaveLength(1);
+  for (const field of ['inShapeX', 'inShapeY', 'w', 'h', 'fontSize']) {
+    expect(
+      Number.isFinite(pptxTextRuns?.[0]?.[field]),
+      `PPTX worker text run ${field} should be finite`,
+    ).toBe(true);
   }
 
   for (const id of ['docx-chart-ex', 'xlsx-chart-ex', 'pptx-chart-ex']) {

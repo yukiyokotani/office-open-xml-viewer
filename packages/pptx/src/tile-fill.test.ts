@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { tileAnchorOffset } from './renderer';
+import { tileAnchorOffset, tileSourceExtent } from './renderer';
 
 /**
  * ECMA-376 §20.1.8.58 (CT_TileInfoProperties) `algn` + §20.1.8.41
@@ -41,5 +41,17 @@ describe('tileAnchorOffset — §20.1.8.41 ST_RectAlignment', () => {
     // §20.1.8.58 gives no schema default; PowerPoint treats absent/unknown as
     // tl, which the parser already normalises to "tl".
     expect(tileAnchorOffset('???', W, H, TW, TH)).toEqual({ ax: 0, ay: 0 });
+  });
+});
+
+describe('tile source rectangle — §20.1.8.55', () => {
+  it('duplicates the cropped logical window at its cropped native extent', () => {
+    expect(tileSourceExtent(800, 600, { l: 0.25, t: 0.1, r: 0.15, b: 0.2 }))
+      .toEqual({ width: 480, height: 420 });
+  });
+
+  it('retains negative source outsets as transparent tile extent', () => {
+    expect(tileSourceExtent(800, 600, { l: -0.1, t: 0, r: -0.15, b: 0 }))
+      .toEqual({ width: 1_000, height: 600 });
   });
 });

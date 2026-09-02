@@ -11656,6 +11656,7 @@ function renderRadarChart(
     legendSideReserveFrac: 0.22,
     legendReserve: leg,
     radialGapFrac: 0.02,
+    honorPlotAreaManualLayout: true,
   });
   const titleFontPx = frame.title.fontPx;
   drawChartTitleForLayout(ctx, chart, x, y, w, h, y + frame.title.topPad, titleFontPx);
@@ -11666,7 +11667,20 @@ function renderRadarChart(
   );
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
-  const rd  = Math.min(pw, ph) * 0.38;
+  // An explicitly sized `layoutTarget="inner"` rectangle defines the data
+  // region itself (ECMA-376 §21.2.2.88), so the outer radar ring is the
+  // largest circle inscribed in it. Automatic, position-only, and outer
+  // layouts keep the existing label reserve.
+  const manualLayout = chart.plotAreaManualLayout;
+  const hasExplicitInnerSize = manualLayout?.layoutTarget === 'inner'
+    && manualLayout.w != null
+    && manualLayout.h != null
+    && Number.isFinite(manualLayout.w)
+    && Number.isFinite(manualLayout.h)
+    && frame.plotAreaManualLayoutApplied;
+  const rd = hasExplicitInnerSize
+    ? Math.min(pw, ph) / 2
+    : Math.min(pw, ph) * 0.38;
 
   let dataMin = Infinity;
   let dataMax = -Infinity;

@@ -883,11 +883,13 @@ test('every reviewed atomic core paint binding remains explicitly allowed', () =
   const valueBindings = [
     'autoContrastColor',
     'canvasFontString',
+    'captureDecodedBitmapCacheEpoch',
     'crispOffset',
     'deferBitmapCloseWhileLeased',
     'drawImageCropped',
     'doubleRailGeometry',
     'fillDoubleBorder',
+    'isTiffDecodeError',
     'paintDrawingMLShape',
     'resolveFill',
     'renderChart',

@@ -44,7 +44,8 @@ function leI32(b: Uint8Array, o: number): number {
   return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) | 0;
 }
 
-/** Pixel dimensions sniffed from an image header. */
+/** Decoder-natural pixel dimensions sniffed from image metadata. JPEG axes
+ * include a valid EXIF orientation found before the first scan. */
 export interface RasterDimensions {
   width: number;
   height: number;
@@ -59,7 +60,9 @@ export interface RasterDimensions {
  * GIF, BMP and WebP; JPEG's dimensions live in a later SOF marker, so for JPEG a
  * larger prefix (a few hundred bytes typically, ideally the whole file) yields a
  * result while a short prefix returns `null` (fail-open: not recognized ⇒ not
- * blocked). Never throws.
+ * blocked). JPEG orientations 5–8 swap the coded SOF axes to match the browser's
+ * natural bitmap dimensions when the relevant EXIF APP1 bytes are present.
+ * Never throws.
  */
 export function sniffRasterDimensions(head: Uint8Array): RasterDimensions | null {
   const n = head.length;
@@ -197,9 +200,65 @@ function sniffWebp(b: Uint8Array): RasterDimensions | null {
   return null;
 }
 
+/** Whether an APP1 payload is the EXIF segment authoritative to the browser. */
+export function isJpegExifPayload(payload: Uint8Array): boolean {
+  return payload.length >= 6
+    && payload[0] === 0x45 // E
+    && payload[1] === 0x78 // x
+    && payload[2] === 0x69 // i
+    && payload[3] === 0x66 // f
+    && payload[4] === 0x00
+    && payload[5] === 0x00;
+}
+
+/** Read the EXIF orientation from an APP1 payload (after its JPEG length field). */
+export function sniffJpegExifOrientation(payload: Uint8Array): number | null {
+  // APP1 EXIF payload: "Exif\0\0", followed by a TIFF header whose offsets are
+  // relative to the start of that header. Orientation is IFD0 tag 0x0112.
+  if (payload.length < 14 || !isJpegExifPayload(payload)) return null;
+
+  const tiffOffset = 6;
+  const little = payload[tiffOffset] === 0x49 && payload[tiffOffset + 1] === 0x49;
+  const big = payload[tiffOffset] === 0x4d && payload[tiffOffset + 1] === 0x4d;
+  if (!little && !big) return null;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  if (view.getUint16(tiffOffset + 2, little) !== 42) return null;
+  const ifdRelativeOffset = view.getUint32(tiffOffset + 4, little);
+  const ifdOffset = tiffOffset + ifdRelativeOffset;
+  if (ifdRelativeOffset < 8 || ifdOffset + 2 > payload.length) return null;
+  const entryCount = view.getUint16(ifdOffset, little);
+  const entriesOffset = ifdOffset + 2;
+  const readableEntryCount = Math.min(
+    entryCount,
+    Math.floor((payload.length - entriesOffset) / 12),
+  );
+  for (let index = 0; index < readableEntryCount; index++) {
+    const entryOffset = entriesOffset + index * 12;
+    if (view.getUint16(entryOffset, little) !== 0x0112) continue;
+    if (view.getUint16(entryOffset + 2, little) !== 3) continue; // SHORT
+    if (view.getUint32(entryOffset + 4, little) !== 1) continue;
+    const orientation = view.getUint16(entryOffset + 8, little);
+    if (orientation >= 1 && orientation <= 8) return orientation;
+  }
+  return null;
+}
+
+/** Apply the axis swap performed by browser decoders for EXIF orientations 5–8. */
+export function orientJpegDimensions(
+  dimensions: RasterDimensions,
+  orientation: number | null,
+): RasterDimensions {
+  return orientation !== null && orientation >= 5 && orientation <= 8
+    ? { width: dimensions.height, height: dimensions.width }
+    : dimensions;
+}
+
 function sniffJpegSof(b: Uint8Array): RasterDimensions | null {
   const n = b.length;
   let i = 2; // past SOI (FFD8)
+  let orientation: number | null = null;
+  let sawExif = false;
+  let dimensions: RasterDimensions | null = null;
   while (i + 1 < n) {
     // Markers are 0xFF followed by a non-0x00, non-0xFF type byte. Fill bytes
     // (0xFF 0xFF) and stuffed 0x00 are skipped by advancing one byte.
@@ -219,9 +278,10 @@ function sniffJpegSof(b: Uint8Array): RasterDimensions | null {
       i += 2;
       continue;
     }
-    if (marker === 0xd9) {
-      // EOI — no frame found.
-      return null;
+    if (marker === 0xd9 || marker === 0xda) {
+      // Browser-applied EXIF metadata precedes the first scan, but it may
+      // legally follow SOF. Stop only at Start-Of-Scan or End-Of-Image.
+      return dimensions ? orientJpegDimensions(dimensions, orientation) : null;
     }
     // All other markers carry a 2-byte big-endian segment length (including the
     // length field itself). Need the length bytes.
@@ -232,16 +292,27 @@ function sniffJpegSof(b: Uint8Array): RasterDimensions | null {
       marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
     if (isSof) {
       // Payload: [precision u8][height u16][width u16] at i+4.
-      if (i + 8 >= n) return null;
+      if (segLen < 7 || i + 8 >= n) return null;
       const height = beU16(b, i + 5);
       const width = beU16(b, i + 7);
-      return { width, height };
+      dimensions ??= { width, height };
     }
     // Skip this segment: 2 (marker) + segLen (length field + payload).
     if (segLen < 2) return null; // malformed
-    i += 2 + segLen;
+    const segmentEnd = i + 2 + segLen;
+    if (segmentEnd > n) {
+      return dimensions ? orientJpegDimensions(dimensions, orientation) : null;
+    }
+    if (marker === 0xe1 && !sawExif) {
+      const payload = b.subarray(i + 4, segmentEnd);
+      if (isJpegExifPayload(payload)) {
+        sawExif = true;
+        orientation = sniffJpegExifOrientation(payload);
+      }
+    }
+    i = segmentEnd;
   }
-  return null;
+  return dimensions ? orientJpegDimensions(dimensions, orientation) : null;
 }
 
 /**

@@ -158,7 +158,7 @@ if (bitmap) {
           The TIFF module exists to display images embedded in Office files; it is not a
           general-purpose TIFF library. As a small by-product, applications can reuse it for a
           simple preview of a standalone TIFF file when that file is in the currently supported
-          class. Unsupported TIFF variants return no bitmap.
+          class. Unsupported or malformed TIFF variants reject with a diagnostic error.
         </p>
         <div class="code-card">
           <Code code={standaloneTiffExample} lang="ts" themes={codeThemes} defaultColor={false} />

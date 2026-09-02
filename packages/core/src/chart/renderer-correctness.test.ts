@@ -29,6 +29,9 @@ import { BOX_WHISKER_SLOT_GUTTER_FRACTION } from './box-whisker.js';
 import {
   chartImageFillKey,
   chartImageFillPaintWork,
+  chartImageFillUsageSize,
+  collectChartImageFillUsages,
+  collectChartImageFillUsagesForCharts,
   collectChartMarkerImageFills,
   collectChartMarkerImageFillsForCharts,
 } from './image-fill.js';
@@ -73,6 +76,170 @@ it('prefetches and paints direct chart-space and plot-area picture fills', () =>
   renderChartCore(rec.ctx, model, RECT, 1, 0, testThreeD, undefined, () => bitmap);
   expect(rec.drawImages).toHaveLength(2);
   expect(rec.drawImages.every(call => call[0] === bitmap)).toBe(true);
+});
+
+it.each([false, true])(
+  'aggregates same-chart tile/stretch usage before source dedup (reversed=%s)',
+  reversed => {
+    const shared = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/shared-tile-stretch.png',
+      svgImagePath: 'xl/media/shared-tile-stretch.svg',
+      mimeType: 'image/png',
+    };
+    const stretch = { ...shared, stretch: true };
+    const tile = {
+      ...shared,
+      dpi: 96,
+      tile: { tx: 0, ty: 0, sx: 1, sy: 1, flip: 'none', algn: 'tl' },
+    };
+    const [chartFill, plotAreaFill] = reversed ? [tile, stretch] : [stretch, tile];
+    const usages = collectChartImageFillUsages(baseModel({
+      chartFill,
+      plotAreaFill,
+      series: [series({ values: [1] })],
+    }));
+
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toMatchObject({
+      preserveNaturalSize: true,
+      hasSourceCrop: false,
+      targetWidthFactor: 1,
+      targetHeightFactor: 1,
+      metafileWidthFactor: 1,
+      metafileHeightFactor: 1,
+    });
+  },
+);
+
+it.each([false, true])(
+  'aggregates same-chart crop/fillRect factors per occurrence (reversed=%s)',
+  reversed => {
+    const shared = {
+      fillType: 'image' as const,
+      imagePath: 'xl/media/shared-cropped.png',
+      svgImagePath: 'xl/media/shared-cropped.svg',
+      mimeType: 'image/png',
+      stretch: true,
+    };
+    const wide = {
+      ...shared,
+      srcRect: { l: 0.25, t: 0, r: 0.25, b: 0 },
+      fillRect: { l: -0.25, t: 0.1, r: -0.25, b: 0.1 },
+    };
+    const tall = {
+      ...shared,
+      srcRect: { l: 0, t: 0.5, r: 0, b: 0.25 },
+      fillRect: { l: 0.1, t: -0.25, r: 0.1, b: -0.25 },
+    };
+    const [chartFill, plotAreaFill] = reversed ? [tall, wide] : [wide, tall];
+    const usages = collectChartImageFillUsages(baseModel({
+      chartFill,
+      plotAreaFill,
+      series: [series({ values: [1] })],
+    }));
+
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toMatchObject({
+      preserveNaturalSize: false,
+      hasSourceCrop: true,
+      // wide: 150% destination / 50% source; tall: 150% / 25%.
+      targetWidthFactor: 3,
+      targetHeightFactor: 6,
+      metafileWidthFactor: 3,
+      metafileHeightFactor: 6,
+    });
+  },
+);
+
+it('does not let statically invalid tile recipes force native-size decoding', () => {
+  const shared = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/invalid-tile.png',
+    mimeType: 'image/png',
+  };
+  const stretch = { ...shared, stretch: true };
+  const complete = {
+    dpi: 96,
+    tile: { tx: 0, ty: 0, sx: 1, sy: 1, flip: 'none', algn: 'tl' },
+  };
+  const invalid = [
+    { ...shared, ...complete, dpi: undefined },
+    { ...shared, ...complete, tile: { ...complete.tile, sx: 0 } },
+    { ...shared, ...complete, tile: { ...complete.tile, tx: Number.NaN } },
+    { ...shared, ...complete, tile: { ...complete.tile, algn: 'unknown' } },
+  ];
+  for (const tile of invalid) {
+    const usages = collectChartImageFillUsages(baseModel({
+      chartFill: stretch,
+      plotAreaFill: tile,
+      series: [series({ values: [1] })],
+    }));
+    expect(usages).toHaveLength(1);
+    expect(usages[0]?.preserveNaturalSize).toBe(false);
+  }
+});
+
+it.each([
+  [
+    'an infinite destination extent',
+    {
+      fillRect: {
+        l: -Number.MAX_VALUE, t: 0, r: -Number.MAX_VALUE, b: 0,
+      },
+    },
+  ],
+  [
+    'an overflowing target/metafile factor',
+    {
+      srcRect: { l: 0.5, t: 0, r: 0.4999999999999999, b: 0 },
+      fillRect: { l: -Number.MAX_VALUE, t: 0, r: 0, b: 0 },
+    },
+  ],
+  [
+    'an underflowing target/metafile factor',
+    {
+      srcRect: { l: -Number.MAX_VALUE, t: 0, r: 0, b: 0 },
+      fillRect: { l: 1, t: 0, r: -Number.MIN_VALUE, b: 0 },
+    },
+  ],
+] as const)('rejects public chart image fills with %s', (_name, geometry) => {
+  const fill = {
+    fillType: 'image' as const,
+    imagePath: 'xl/media/non-finite-usage.png',
+    mimeType: 'image/png',
+    stretch: true,
+    ...geometry,
+  };
+  expect(collectChartImageFillUsages(baseModel({
+    chartFill: fill,
+    series: [series({ values: [1] })],
+  }))).toEqual([]);
+});
+
+it.each([
+  ['metafile width', { widthPt: Number.MAX_VALUE }],
+  ['metafile height', { heightPt: Number.MAX_VALUE }],
+  ['target width', { targetWidthPx: Number.MAX_VALUE }],
+  ['target height', { targetHeightPx: Number.MAX_VALUE }],
+] as const)('rejects host chart usage sizing that overflows %s', (_name, override) => {
+  const usage = collectChartImageFillUsages(baseModel({
+    chartFill: {
+      fillType: 'image',
+      imagePath: 'xl/media/host-overflow.png',
+      mimeType: 'image/png',
+      stretch: true,
+      fillRect: { l: -0.5, t: -0.5, r: -0.5, b: -0.5 },
+    },
+    series: [series({ values: [1] })],
+  }))[0]!;
+  expect(chartImageFillUsageSize(usage, {
+    widthPt: 1,
+    heightPt: 1,
+    targetWidthPx: 1,
+    targetHeightPx: 1,
+    ...override,
+  })).toBeNull();
 });
 
 it('collects only the effective direct bubble point picture', () => {
@@ -9574,6 +9741,11 @@ describe('CH9 — line/area consume marker detail (§21.2.2.32)', () => {
     }])).toEqual([]);
     expect(collectChartMarkerImageFillsForCharts([model(257), model(1)])).toEqual([]);
     expect(collectChartMarkerImageFillsForCharts([model(1), model(257)])).toEqual([]);
+    expect(collectChartImageFillUsagesForCharts(
+      [model(1), model(257)],
+      (usage, chartIndex) => chartIndex === 0
+        || usage.fill.imagePath !== 'xl/media/marker-256.png',
+    ).map(usage => usage.fill.imagePath)).toEqual(['xl/media/marker-0.png']);
   });
 
   it('does not fetch or charge image fills for stroke-only x/plus symbols', () => {
@@ -14648,6 +14820,84 @@ describe('authored minor tick marks are painted between major ticks', () => {
 });
 
 describe('radar value-axis planning', () => {
+  it('honors the authored inner plot-area layout', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'radar', radarStyle: 'standard',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ values: [8, 6, 2, 1] })],
+      plotAreaBg: 'ABCDEF',
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge', yMode: 'edge',
+        x: 0.2,
+        y: 0.25,
+        w: 0.5,
+        h: 0.4,
+      },
+    }), RECT, 1);
+
+    expect(rec.rects.find(rect => rect.fs === '#ABCDEF')).toEqual({
+      x: RECT.w * 0.2,
+      y: RECT.h * 0.25,
+      w: RECT.w * 0.5,
+      h: RECT.h * 0.4,
+      fs: '#ABCDEF',
+    });
+  });
+
+  it('inscribes maximum radar values in an authored inner plot area', () => {
+    const rec = strokedPolylineCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'radar', radarStyle: 'standard',
+      categories: ['A', 'B', 'C', 'D'],
+      series: [series({ values: [8, 8, 8, 8], lineColor: '123456' })],
+      valMin: 0,
+      valMax: 8,
+      valAxisMajorUnit: 8,
+      valAxisMajorGridlines: false,
+      plotAreaManualLayout: {
+        layoutTarget: 'inner',
+        xMode: 'edge', yMode: 'edge',
+        x: 0.2,
+        y: 0.25,
+        w: 0.5,
+        h: 0.4,
+      },
+    }), RECT, 1);
+
+    expect(rec.strokes.find(stroke => stroke.ss === '#123456')?.points).toEqual([
+      { x: 288, y: 90 },
+      { x: 360, y: 162 },
+      { x: 288, y: 234 },
+      { x: 216, y: 162 },
+    ]);
+  });
+
+  it('keeps the automatic radar radius when an inner layout size is absent or invalid', () => {
+    const points = (layout: 'none' | 'position-only' | 'invalid-size') => {
+      const rec = strokedPolylineCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType: 'radar', radarStyle: 'standard',
+        categories: ['A', 'B', 'C', 'D'],
+        series: [series({ values: [8, 8, 8, 8], lineColor: '123456' })],
+        valMin: 0,
+        valMax: 8,
+        valAxisMajorUnit: 8,
+        valAxisMajorGridlines: false,
+        plotAreaManualLayout: layout === 'position-only'
+          ? { layoutTarget: 'inner', x: 0, y: 0 }
+          : layout === 'invalid-size'
+            ? { layoutTarget: 'inner', x: 0, y: 0, w: -1, h: 0.4 }
+            : undefined,
+      }), RECT, 1);
+      return rec.strokes.find(stroke => stroke.ss === '#123456')?.points;
+    };
+
+    expect(points('position-only')).toEqual(points('none'));
+    expect(points('invalid-size')).toEqual(points('none'));
+  });
+
   it('honors an explicit minimum and paints minor gridlines without minor ticks', () => {
     const rec = segRecordingCtx();
     renderChart(rec.ctx, baseModel({

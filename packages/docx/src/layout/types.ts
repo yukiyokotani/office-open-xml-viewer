@@ -503,6 +503,16 @@ export interface ResourcePlacement {
   readonly advancePt: number;
 }
 
+/** One raster-backed paint occurrence projected onto its final physical-page
+ * axes. The source descriptor supplies bytes/effects; these retained dimensions
+ * alone own display-resolution decode demand. */
+export interface RasterPaintOccurrence {
+  readonly resourceKey: string;
+  readonly resourceKind: 'image' | 'chart' | 'picture-bullet';
+  readonly widthPt: number;
+  readonly heightPt: number;
+}
+
 export interface DrawingPlacement {
   readonly kind: 'drawing';
   readonly range: TextRange;
@@ -949,6 +959,10 @@ export interface PagePaintCapabilities {
    * Canvas paint must therefore use an element-backed context when available,
    * because OffscreenCanvas cannot apply the proven feature. */
   readonly requiresElementBackedVerticalGlyphPaint: boolean;
+  /** Resource identities reachable from this page's retained paint graph, in
+   * stable retained-graph order. Paint uses this immutable projection to prepare only
+   * resources the selected page can consume. */
+  readonly resourceKeys?: readonly string[];
 }
 
 export interface PageLayers {
