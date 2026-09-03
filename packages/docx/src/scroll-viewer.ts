@@ -1731,8 +1731,23 @@ export class DocxScrollViewer implements ZoomableViewer {
         !this._destroyed
       ) {
         // live.renderedPage === i already (set by _renderSlot on mount); the fresh
-        // dispatch runs at the CURRENT epoch/scale via _pageWidthPx(i).
-        void this._renderSlotBitmap(i, live, this._pageWidthPx(i), this._dpr(), this._scale);
+        // dispatch runs at the CURRENT epoch/scale via _pageWidthPx(i). Keep the
+        // replacement in this Promise chain: load() awaits the render originally
+        // mounted for the opening window, and must therefore follow superseding
+        // epochs until the render that can actually commit has finished. Callers
+        // that intentionally fire-and-forget this method still do so at their
+        // outer call site.
+        const nextDispatcher = live.dispatcher;
+        await this._renderSlotBitmap(
+          i,
+          live,
+          this._pageWidthPx(i),
+          this._dpr(),
+          this._scale,
+          nextDispatcher,
+          nextDispatcher.begin(),
+          reportErrors,
+        );
       }
     }
   }

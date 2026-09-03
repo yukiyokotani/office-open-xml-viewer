@@ -1786,8 +1786,23 @@ export class PptxScrollViewer implements ZoomableViewer {
         !(this._opts.enableMediaPlayback && live.mediaInteractive)
       ) {
         // live.renderedSlide === i already (set by _renderSlot on mount); the fresh
-        // dispatch runs at the CURRENT epoch/scale via _slideWidthPx().
-        void this._renderSlotBitmap(i, live, this._slideWidthPx(), this._dpr(), this._scale);
+        // dispatch runs at the CURRENT epoch/scale via _slideWidthPx(). Keep the
+        // replacement in this Promise chain so load() cannot resolve after a
+        // superseded opening render but before the bitmap that can actually
+        // commit. Fire-and-forget callers retain that behavior at their outer
+        // call site.
+        const nextDispatcher = live.dispatcher;
+        await this._renderSlotBitmap(
+          i,
+          live,
+          this._slideWidthPx(),
+          this._dpr(),
+          this._scale,
+          ++live.renderGeneration,
+          nextDispatcher,
+          nextDispatcher.begin(),
+          reportErrors,
+        );
       }
     }
   }

@@ -1695,6 +1695,55 @@ describe('DocxScrollViewer — self-load path (T7 story)', () => {
     expect(engine.renderCalls.length).toBeGreaterThan(0);
     v.destroy();
   });
+
+  it('worker load waits for the current first paint when progressive layout supersedes the initial render', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(
+      1,
+      [{ widthPt: 100, heightPt: 200 }],
+      'worker',
+      true,
+    );
+    engine.setLayoutComplete(false);
+    const doc = engine.asDoc();
+    vi.spyOn(DocxDocument, 'load').mockResolvedValue(doc);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      mode: 'worker',
+      progressiveLayout: true,
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+
+    let loadSettled = false;
+    const load = v.load('sample.docx').then(() => {
+      loadSettled = true;
+    });
+    await vi.waitFor(() => expect(engine.bitmapCalls).toHaveLength(1));
+    const initial = engine.bitmapCalls[0]!;
+
+    // A progressive publication invalidates the bitmap that load() originally
+    // collected. Its replacement is the first paint users will actually see.
+    publishDocxLayout(doc, { pageCount: 1, exact: false, complete: false });
+    initial.resolve();
+    await vi.waitFor(() => expect(engine.bitmapCalls).toHaveLength(2));
+
+    // load() must remain pending while the current-epoch replacement is pending;
+    // otherwise hosts that reveal the viewer after load() expose a blank canvas.
+    expect(loadSettled).toBe(false);
+
+    const current = engine.bitmapCalls[1]!;
+    current.resolve();
+    await load;
+
+    const slot = scrollHost.children.find((child) =>
+      child.children.some((nested) => nested.tag === 'canvas')) as FakeEl | undefined;
+    const canvas = slot?.children.find((child) => child.tag === 'canvas') as FakeEl | undefined;
+    expect(canvas?._bitmapCtx?.lastBitmap).toBe(engine.createdBitmaps[1]);
+    v.destroy();
+  });
 });
 
 describe('DocxScrollViewer — text selection (T5)', () => {
