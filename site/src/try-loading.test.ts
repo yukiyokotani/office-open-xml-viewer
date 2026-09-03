@@ -24,6 +24,7 @@ describe('Try Yours parsing progress', () => {
     expect(source).toContain('accept=".docx,.xlsx,.pptx,.csv,.tsv"');
     expect(source).toContain('<small>.docx · .xlsx · .pptx</small>');
     expect(source).not.toMatch(/accept="[^"]*\.dat/);
+    expect(source).toContain('wasmBadge.hidden = isTryYoursDelimitedTextFile(file.name)');
   });
 
   it('shows an accessible progress circle in the preview while renderFile is pending', () => {

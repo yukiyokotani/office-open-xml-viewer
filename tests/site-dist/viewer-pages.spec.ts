@@ -86,6 +86,7 @@ for (const format of ['csv', 'tsv'] as const) {
 
     await expect(page.locator('#stage canvas').first()).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('#status')).toContainText('rendered in');
+    await expect(page.locator('#wasm-badge')).toBeHidden();
     await expect(page.locator('#stage .xlsx-tab-strip')).toHaveCount(0);
   });
 }

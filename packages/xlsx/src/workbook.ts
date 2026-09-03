@@ -72,10 +72,12 @@ import {
 import { GridGeometry } from './internal/grid-geometry.js';
 import { applyAutoRowHeights, inheritSheetRenderCache } from './renderer.js';
 import {
+  assertDelimitedTextSourceBytes,
   resolveDelimitedTextOptions,
   type ResolvedDelimitedTextOptions,
   type XlsxSheetLoadOptions,
 } from './delimited-text.js';
+import { readDelimitedTextResponse } from './delimited-text-source.js';
 import type {
   DelimitedTextParseRequest,
   DelimitedTextParseResponse,
@@ -275,10 +277,13 @@ export class XlsxWorkbook {
         if (!response.ok) {
           throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
         }
-        buffer = await response.arrayBuffer();
+        buffer = await readDelimitedTextResponse(response);
       } else {
         buffer = source;
       }
+      // Reject caller-owned buffers before `slice(0)` doubles their retained
+      // memory, and keep this admission gate in front of worker creation.
+      assertDelimitedTextSourceBytes(buffer.byteLength);
       metrics.setSourceBytes(buffer.byteLength);
       metrics.checkpoint('source ready');
       const worker = mode === 'worker'

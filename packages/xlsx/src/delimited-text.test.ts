@@ -86,6 +86,22 @@ describe('delimited worksheet preview input', () => {
     ]);
   });
 
+  it('normalizes CR and CRLF line breaks inside quoted fields to renderer hard breaks', () => {
+    const { worksheet } = parseDelimitedWorksheet(
+      encode('id,notes\r\n1,"first\rsecond"\r\n2,"third\r\nfourth"\r\n'),
+      resolveDelimitedTextOptions({ format: 'csv' }),
+    );
+
+    expect(worksheet.rows[1]?.cells[1]?.value).toEqual({
+      type: 'text',
+      text: 'first\nsecond',
+    });
+    expect(worksheet.rows[2]?.cells[1]?.value).toEqual({
+      type: 'text',
+      text: 'third\nfourth',
+    });
+  });
+
   it('supports an explicit browser TextDecoder encoding', () => {
     const bytes = new Uint8Array([0x63, 0x61, 0x66, 0xe9]).buffer;
     const { worksheet } = parseDelimitedWorksheet(

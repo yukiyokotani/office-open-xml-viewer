@@ -140,7 +140,12 @@ export function addWorksheetCacheUsage(
 export function worksheetLimitError(
   operation: string,
   part: string | undefined,
-  resource: 'worksheet-model' | 'worksheet-cell-content' | 'worksheet-json' | 'worksheet-cache',
+  resource:
+    | 'delimited-text-source'
+    | 'worksheet-model'
+    | 'worksheet-cell-content'
+    | 'worksheet-json'
+    | 'worksheet-cache',
   metric: 'rows' | 'cells' | 'owned-utf8-bytes' | 'bytes',
   limit: number,
   observed: number,

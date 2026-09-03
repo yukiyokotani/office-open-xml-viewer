@@ -50,6 +50,23 @@ export interface ResolvedDelimitedTextOptions {
 
 const DELIMITED_TEXT_OPERATION = 'load-delimited-text';
 
+/** Hard input ceiling. Parsing can expand delimiters into a larger worksheet
+ * model, so this is only the first of the existing worksheet admission gates. */
+export const DELIMITED_TEXT_MAX_SOURCE_BYTES = XLSX_MAX_MATERIALIZED_JSON_BYTES;
+
+export function assertDelimitedTextSourceBytes(observed: number): void {
+  if (observed > DELIMITED_TEXT_MAX_SOURCE_BYTES) {
+    throw worksheetLimitError(
+      DELIMITED_TEXT_OPERATION,
+      undefined,
+      'delimited-text-source',
+      'bytes',
+      DELIMITED_TEXT_MAX_SOURCE_BYTES,
+      observed,
+    );
+  }
+}
+
 const DEFAULT_STYLES: Styles = Object.freeze({
   fonts: [Object.freeze({
     bold: false,
@@ -117,16 +134,7 @@ export function parseDelimitedWorksheet(
   source: ArrayBuffer,
   options: ResolvedDelimitedTextOptions,
 ): Readonly<{ workbook: ParsedWorkbook; worksheet: Worksheet }> {
-  if (source.byteLength > XLSX_MAX_MATERIALIZED_JSON_BYTES) {
-    throw worksheetLimitError(
-      DELIMITED_TEXT_OPERATION,
-      undefined,
-      'worksheet-json',
-      'bytes',
-      XLSX_MAX_MATERIALIZED_JSON_BYTES,
-      source.byteLength,
-    );
-  }
+  assertDelimitedTextSourceBytes(source.byteLength);
 
   let text: string;
   try {
@@ -225,7 +233,12 @@ export function parseDelimitedWorksheet(
     const character = text[index]!;
     if (quoted) {
       if (character !== '"') {
-        appendField(character);
+        if (character === '\r') {
+          appendField('\n');
+          if (text[index + 1] === '\n') index++;
+        } else {
+          appendField(character);
+        }
         continue;
       }
       if (text[index + 1] === '"') {

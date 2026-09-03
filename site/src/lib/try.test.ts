@@ -200,8 +200,9 @@ class FakeElement {
   }
 }
 
-const file = (name: string): File => ({
+const file = (name: string, size = 8): File => ({
   name,
+  size,
   arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
 }) as unknown as File;
 
@@ -384,6 +385,15 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(mocks.xlsxSheet[0].destroyed).toBe(true);
   });
 
+  it('rejects an oversized CSV before reading it into memory', async () => {
+    const oversized = file('oversized.csv', 64 * 1024 * 1024 + 1);
+    const read = vi.spyOn(oversized, 'arrayBuffer');
+
+    await expect(renderFile(stage(), oversized)).rejects.toThrow('too large to preview');
+    expect(read).not.toHaveBeenCalled();
+    expect(mocks.xlsxSheet).toHaveLength(0);
+  });
+
   it.each(['pdf', 'dat'])(
     'destroys the active viewer when a later .%s selection is unsupported',
     async (extension) => {
@@ -394,6 +404,14 @@ describe('Try Yours ScrollViewer integration', () => {
         'Unsupported file',
       );
       expect(active.destroyed).toBe(true);
+      expect(mocks.xlsxSheet).toHaveLength(0);
+    },
+  );
+
+  it.each(['csv', 'tsv'])(
+    'does not treat an extensionless file named %s as delimited text',
+    async (name) => {
+      await expect(renderFile(stage(), file(name))).rejects.toThrow('Unsupported file');
       expect(mocks.xlsxSheet).toHaveLength(0);
     },
   );

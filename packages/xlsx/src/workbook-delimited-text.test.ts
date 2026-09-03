@@ -3,7 +3,12 @@ import {
   XlsxWorkbook,
   loadXlsxSheetSource,
 } from './workbook.js';
-import { parseDelimitedWorksheet } from './delimited-text.js';
+import {
+  DELIMITED_TEXT_MAX_SOURCE_BYTES,
+  assertDelimitedTextSourceBytes,
+  parseDelimitedWorksheet,
+} from './delimited-text.js';
+import { readDelimitedTextResponse } from './delimited-text-source.js';
 import type { DelimitedTextParseRequest } from './delimited-text-protocol.js';
 
 class DelimitedTextWorkerProbe {
@@ -115,11 +120,7 @@ describe('XlsxSheetViewer delimited-text workbook bridge', () => {
   });
 
   it('fetches a generic delimited URL with the same string-source contract as XLSX', async () => {
-    const bytes = new TextEncoder().encode('left|right').buffer as ArrayBuffer;
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      arrayBuffer: () => Promise.resolve(bytes),
-    });
+    const fetch = vi.fn().mockResolvedValue(new Response('left|right'));
     vi.stubGlobal('fetch', fetch);
 
     const workbook = await XlsxWorkbook[loadXlsxSheetSource]('/data/report.dat', {}, {
@@ -130,6 +131,87 @@ describe('XlsxSheetViewer delimited-text workbook bridge', () => {
     expect(fetch).toHaveBeenCalledWith('/data/report.dat');
     expect((await workbook.getWorksheet(0)).rows[0]?.cells).toHaveLength(2);
     workbook.destroy();
+  });
+
+  it('rejects an oversized caller buffer before copying or starting a worker', async () => {
+    const slice = vi.fn();
+    const oversized = {
+      byteLength: DELIMITED_TEXT_MAX_SOURCE_BYTES + 1,
+      slice,
+    } as unknown as ArrayBuffer;
+
+    await expect(XlsxWorkbook[loadXlsxSheetSource](oversized, {}, { format: 'csv' }))
+      .rejects.toMatchObject({
+        code: 'ooxml-resource-limit',
+        details: {
+          violation: {
+            resource: 'delimited-text-source',
+            metric: 'bytes',
+            limit: DELIMITED_TEXT_MAX_SOURCE_BYTES,
+          },
+        },
+      });
+    expect(slice).not.toHaveBeenCalled();
+    expect(DelimitedTextWorkerProbe.instances).toHaveLength(0);
+  });
+
+  it('cancels a streamed URL response as soon as its bytes cross the source ceiling', async () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    let chunksRead = 0;
+    let cancelled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksRead++;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }));
+
+    await expect(readDelimitedTextResponse(response)).rejects.toMatchObject({
+      code: 'ooxml-resource-limit',
+      details: {
+        violation: {
+          resource: 'delimited-text-source',
+          limit: DELIMITED_TEXT_MAX_SOURCE_BYTES,
+        },
+      },
+    });
+    expect(chunksRead).toBe(DELIMITED_TEXT_MAX_SOURCE_BYTES / chunk.byteLength + 1);
+    expect(cancelled).toBe(true);
+  });
+
+  it('rejects an oversized declared response before reading its body', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const response = {
+      headers: new Headers({
+        'content-length': String(DELIMITED_TEXT_MAX_SOURCE_BYTES + 1),
+      }),
+      body: { cancel },
+    } as unknown as Response;
+
+    await expect(readDelimitedTextResponse(response)).rejects.toMatchObject({
+      code: 'ooxml-resource-limit',
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('does not use compressed transport length as decoded source length', async () => {
+    const response = new Response('small', {
+      headers: {
+        'content-encoding': 'gzip',
+        'content-length': String(DELIMITED_TEXT_MAX_SOURCE_BYTES + 1),
+      },
+    });
+
+    const bytes = await readDelimitedTextResponse(response);
+    expect(new TextDecoder().decode(bytes)).toBe('small');
+  });
+
+  it('uses the same typed source limit at the parser boundary', () => {
+    expect(() => assertDelimitedTextSourceBytes(DELIMITED_TEXT_MAX_SOURCE_BYTES + 1))
+      .toThrow('bytes 67108865 > 67108864');
   });
 
   it('keeps the public XlsxWorkbook loader XLSX-only', async () => {
