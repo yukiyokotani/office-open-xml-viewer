@@ -11,13 +11,10 @@
  * Scope: only enough of [MS-CFB] to enumerate the directory-entry names —
  *
  *   - §2.2 header: signature, sector shift (2^SectorShift @ 0x1E), first
- *     directory sector location (@ 0x30), and the in-header DIFAT (109 FAT
- *     sector locations @ 0x4C).
- *   - §2.3 FAT: walk the directory-stream sector chain via the FAT. The FAT
- *     sectors themselves are located through the in-header DIFAT only —
- *     DIFAT-sector extension (§2.5.1) is intentionally not followed, since a
- *     directory chain never needs more than 109 FAT sectors in practice and the
- *     sniffer only needs the directory. The mini FAT is likewise irrelevant.
+ *     directory sector location (@ 0x30), and DIFAT locations.
+ *   - §2.3 FAT / §2.5.1 DIFAT: walk the directory-stream sector chain via the
+ *     FAT, including DIFAT-sector extensions used by larger compound files. The
+ *     mini FAT is irrelevant because the directory is a regular FAT stream.
  *   - §2.6 directory entries: 128 bytes each, name is UTF-16LE @ 0x00..0x40
  *     with the byte length @ 0x40.
  *
@@ -25,6 +22,12 @@
  * arbitrary / hostile bytes can only make it return early — never throw, hang,
  * or read out of range.
  */
+
+import {
+  collectCfbFatSectors,
+  nextCfbFatSector,
+  type CfbFatIndexHeader,
+} from './cfb-read';
 
 /** CFB header signature (§2.2). */
 const CFB_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
@@ -46,6 +49,7 @@ const MAX_DIR_ENTRIES = 4096;
 const MAX_CHAIN_SECTORS = 8192;
 
 export type CfbKind = 'encrypted' | 'legacy-binary-format' | 'cfb-unknown';
+export type LegacyCfbFormat = 'doc' | 'xls' | 'ppt';
 
 /** Directory-entry names that mark a legacy binary Office document. Compared
  *  case-sensitively — [MS-CFB] entry names are case-preserving and these are
@@ -74,6 +78,26 @@ const ENCRYPTION_INFO_NAME = 'EncryptionInfo';
  *   - `null` — not a CFB at all (e.g. a ZIP-based .docx / .pptx / .xlsx).
  */
 export function sniffCfb(bytes: Uint8Array): CfbKind | null {
+  return inspectCfb(bytes)?.kind ?? null;
+}
+
+/**
+ * Return an unambiguous legacy family when the CFB directory contains markers
+ * for exactly one Office binary format. Multiple markers can legitimately
+ * occur for embedded OLE objects, so ambiguous containers return `null` and
+ * remain the converter's responsibility to validate.
+ */
+export function sniffLegacyOfficeFormat(bytes: Uint8Array): LegacyCfbFormat | null {
+  const inspection = inspectCfb(bytes);
+  if (inspection?.kind !== 'legacy-binary-format') return null;
+  const formats = new Set<LegacyCfbFormat>();
+  if (inspection.names.has('WordDocument')) formats.add('doc');
+  if (inspection.names.has('Workbook') || inspection.names.has('Book')) formats.add('xls');
+  if (inspection.names.has('PowerPoint Document')) formats.add('ppt');
+  return formats.size === 1 ? [...formats][0] as LegacyCfbFormat : null;
+}
+
+function inspectCfb(bytes: Uint8Array): Readonly<{ kind: CfbKind; names: ReadonlySet<string> }> | null {
   // Not a CFB unless the full header signature matches.
   if (bytes.length < HEADER_SIZE) {
     // Still confirm the signature so a merely-short CFB is distinguishable from
@@ -97,21 +121,37 @@ export function sniffCfb(bytes: Uint8Array): CfbKind | null {
   // 512-byte header region instead of past it, so the FAT/directory walk would
   // silently misinterpret header bytes as sector data instead of failing
   // closed. Reject anything else as 'cfb-unknown'.
-  if (sectorShift !== 9 && sectorShift !== 12) return 'cfb-unknown';
+  if (sectorShift !== 9 && sectorShift !== 12) {
+    return { kind: 'cfb-unknown', names: new Set() };
+  }
   const sectorSize = 1 << sectorShift;
 
   const firstDirSector = view.getUint32(0x30, true);
+  const fatHeader: CfbFatIndexHeader = {
+    sectorSize,
+    numFatSectors: view.getUint32(0x2c, true),
+    firstDifatSector: view.getUint32(0x44, true),
+    numDifatSectors: view.getUint32(0x48, true),
+  };
+  const fatSectors = collectCfbFatSectors(view, bytes.length, fatHeader);
+  if (fatSectors === null) return { kind: 'cfb-unknown', names: new Set() };
 
-  const names = enumerateDirectoryNames(view, bytes.length, sectorSize, firstDirSector);
-  if (names === null) return 'cfb-unknown';
+  const names = enumerateDirectoryNames(
+    view,
+    bytes.length,
+    sectorSize,
+    firstDirSector,
+    fatSectors,
+  );
+  if (names === null) return { kind: 'cfb-unknown', names: new Set() };
 
   // Encryption wins over a legacy marker: an encrypted .doc is still routed to
   // the crypto path, not the legacy dead-end.
-  if (names.has(ENCRYPTION_INFO_NAME)) return 'encrypted';
+  if (names.has(ENCRYPTION_INFO_NAME)) return { kind: 'encrypted', names };
   for (const n of names) {
-    if (LEGACY_STREAM_NAMES.has(n)) return 'legacy-binary-format';
+    if (LEGACY_STREAM_NAMES.has(n)) return { kind: 'legacy-binary-format', names };
   }
-  return 'cfb-unknown';
+  return { kind: 'cfb-unknown', names };
 }
 
 /**
@@ -123,6 +163,7 @@ function enumerateDirectoryNames(
   totalLen: number,
   sectorSize: number,
   firstDirSector: number,
+  fatSectors: number[],
 ): Set<string> | null {
   if (!isRegularSector(firstDirSector)) return null;
 
@@ -151,7 +192,7 @@ function enumerateDirectoryNames(
       if (name) names.add(name);
     }
 
-    const next = readFatEntry(view, totalLen, sectorSize, sector);
+    const next = nextCfbFatSector(view, totalLen, sectorSize, fatSectors, sector);
     if (next === null) break; // FAT entry unreadable -> stop with what we have
     sector = next;
   }
@@ -176,39 +217,6 @@ function readEntryName(view: DataView, entryOff: number): string {
     s += String.fromCharCode(code);
   }
   return s;
-}
-
-/**
- * Resolve the next sector in a FAT chain. The FAT sector that holds the entry
- * for `sector` is located through the in-header DIFAT (109 entries @ 0x4C).
- * Returns `null` if the FAT sector or entry cannot be read.
- */
-function readFatEntry(
-  view: DataView,
-  totalLen: number,
-  sectorSize: number,
-  sector: number,
-): number | null {
-  const fatEntriesPerSector = Math.floor(sectorSize / 4);
-  if (fatEntriesPerSector < 1) return null;
-
-  const fatSectorIndex = Math.floor(sector / fatEntriesPerSector);
-  const withinFat = sector % fatEntriesPerSector;
-
-  // In-header DIFAT covers the first 109 FAT sectors — enough for any directory
-  // chain we care about. Beyond that we deliberately give up (see module doc).
-  if (fatSectorIndex >= 109) return null;
-
-  const difatOff = 0x4c + fatSectorIndex * 4;
-  if (difatOff + 4 > totalLen) return null;
-  const fatSector = view.getUint32(difatOff, true);
-  if (!isRegularSector(fatSector)) return null;
-
-  const fatSectorOffset = fileOffsetOfSector(fatSector, sectorSize);
-  const entryOff = fatSectorOffset + withinFat * 4;
-  if (fatSectorOffset < 0 || entryOff + 4 > totalLen) return null;
-
-  return view.getUint32(entryOff, true);
 }
 
 /** File byte offset of logical sector N: the 512-byte header occupies "sector

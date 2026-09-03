@@ -33,6 +33,7 @@
     "./internal/dom-interaction-boundary": "./src/internal/dom-interaction-boundary.ts",
     "./internal/dom-geometry": "./src/internal/dom-geometry.ts",
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
+    "./internal/legacy-office-conversion": "./src/internal/legacy-office-conversion.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
     "./internal/progressive-layout-lifecycle": "./src/internal/progressive-layout-lifecycle.ts",
     "./internal/progressive-layout-observers": "./src/internal/progressive-layout-observers.ts",

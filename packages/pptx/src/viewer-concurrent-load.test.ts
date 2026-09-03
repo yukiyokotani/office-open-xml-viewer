@@ -100,6 +100,35 @@ describe('PptxViewer.load() — concurrent-load latch', () => {
     expect(only.destroyed).toBe(true);
   });
 
+  it('forwards and aborts the converter signal when a newer load supersedes it', async () => {
+    const { canvas } = mount();
+    const a = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const b = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const da = deferredLoad(a);
+    const db = deferredLoad(b);
+    let firstSignal: AbortSignal | undefined;
+    vi.spyOn(PptxPresentation, 'load')
+      .mockImplementationOnce((_source, options) => {
+        firstSignal = options?.legacyConversion?.signal;
+        return da.promise;
+      })
+      .mockImplementationOnce(() => db.promise);
+    const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
+      legacyConversion: { converter },
+    });
+
+    const first = v.load('a.ppt');
+    expect(firstSignal?.aborted).toBe(false);
+    const second = v.load('b.ppt');
+    expect(firstSignal?.aborted).toBe(true);
+    db.resolve();
+    await second;
+    da.resolve();
+    await first;
+    v.destroy();
+  });
+
   it('does not report a pending old-presentation render rejected by a successful reload', async () => {
     const { canvas } = mount();
     const onError = vi.fn();

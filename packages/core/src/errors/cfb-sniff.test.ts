@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sniffCfb } from './cfb-sniff';
+import { sniffCfb, sniffLegacyOfficeFormat } from './cfb-sniff';
 import { buildCfbFixture } from '../testing/cfb-fixture';
 
 /**
@@ -118,6 +118,55 @@ function encryptedCfb(): Uint8Array {
   });
 }
 
+/**
+ * Build the smallest v3 CFB whose directory FAT entry is addressed by the
+ * first extension-DIFAT item rather than the 109 locations in the header.
+ */
+function extendedDifatCfb(directoryName: string): Uint8Array {
+  const fatSectorCount = 110;
+  const difatSector = fatSectorCount;
+  const directorySector = 109 * (SECTOR / 4);
+  const totalSectors = directorySector + 1;
+  const bytes = new Uint8Array((totalSectors + 1) * SECTOR);
+  const view = new DataView(bytes.buffer);
+  bytes.set(SIGNATURE);
+  view.setUint16(0x18, 0x003e, true);
+  view.setUint16(0x1a, 3, true);
+  view.setUint16(0x1c, 0xfffe, true);
+  view.setUint16(0x1e, 9, true);
+  view.setUint16(0x20, 6, true);
+  view.setUint32(0x2c, fatSectorCount, true);
+  view.setUint32(0x30, directorySector, true);
+  view.setUint32(0x38, 0x1000, true);
+  view.setUint32(0x3c, ENDOFCHAIN, true);
+  view.setUint32(0x44, difatSector, true);
+  view.setUint32(0x48, 1, true);
+
+  for (let index = 0; index < 109; index++) {
+    view.setUint32(0x4c + index * 4, index, true);
+  }
+  const difatOffset = HEADER + difatSector * SECTOR;
+  view.setUint32(difatOffset, 109, true);
+  for (let index = 1; index < SECTOR / 4 - 1; index++) {
+    view.setUint32(difatOffset + index * 4, FREESECT, true);
+  }
+  view.setUint32(difatOffset + SECTOR - 4, ENDOFCHAIN, true);
+
+  for (let fatSector = 0; fatSector < fatSectorCount; fatSector++) {
+    const fatOffset = HEADER + fatSector * SECTOR;
+    for (let index = 0; index < SECTOR / 4; index++) {
+      view.setUint32(fatOffset + index * 4, FREESECT, true);
+    }
+  }
+  const directoryFatOffset = HEADER + 109 * SECTOR;
+  view.setUint32(directoryFatOffset, ENDOFCHAIN, true);
+  writeEntry(view, HEADER + directorySector * SECTOR, {
+    name: directoryName,
+    objType: 2,
+  });
+  return bytes;
+}
+
 describe('sniffCfb — signature', () => {
   it('returns null for non-CFB bytes (ZIP magic)', () => {
     const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0, 0, 0]);
@@ -218,6 +267,11 @@ describe('sniffCfb — classification', () => {
     expect(sniffCfb(buildCfb({ entries: filler }))).toBe('encrypted');
   });
 
+  it('uses extension DIFAT sectors to classify a large legacy container', () => {
+    expect(sniffCfb(extendedDifatCfb('WordDocument'))).toBe('legacy-binary-format');
+    expect(sniffLegacyOfficeFormat(extendedDifatCfb('WordDocument'))).toBe('doc');
+  });
+
   it('detects an encrypted container built as a major-version-4 (4096-byte sector) CFB', () => {
     // [MS-CFB] §2.2: major version 4 uses SectorShift 0x000C (4096-byte
     // sectors); the 512-byte header is followed by 3584 bytes of padding
@@ -229,6 +283,25 @@ describe('sniffCfb — classification', () => {
       majorVersion: 4,
     });
     expect(sniffCfb(new Uint8Array(cfb))).toBe('encrypted');
+  });
+});
+
+describe('sniffLegacyOfficeFormat', () => {
+  it.each([
+    ['WordDocument', 'doc'],
+    ['Workbook', 'xls'],
+    ['Book', 'xls'],
+    ['PowerPoint Document', 'ppt'],
+  ] as const)('classifies an unambiguous %s marker as %s', (stream, format) => {
+    expect(sniffLegacyOfficeFormat(new Uint8Array(buildCfbFixture(['Root Entry', stream])))).toBe(format);
+  });
+
+  it('does not guess when embedded-object markers make the family ambiguous', () => {
+    expect(sniffLegacyOfficeFormat(new Uint8Array(buildCfbFixture([
+      'Root Entry',
+      'WordDocument',
+      'Workbook',
+    ])))).toBeNull();
   });
 });
 
@@ -246,6 +319,12 @@ describe('sniffCfb — robustness (malicious / corrupt input)', () => {
       entries: [{ name: 'Root Entry', objType: 5 }],
       firstDirSector: 9999,
     });
+    expect(sniffCfb(cfb)).toBe('cfb-unknown');
+  });
+
+  it('rejects a FAT count larger than the file instead of allocating from it', () => {
+    const cfb = encryptedCfb();
+    new DataView(cfb.buffer).setUint32(0x2c, 0xffffffff, true);
     expect(sniffCfb(cfb)).toBe('cfb-unknown');
   });
 

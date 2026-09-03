@@ -14,6 +14,7 @@ import {
   resolveCanvasViewerMode,
   type CanvasViewerRenderMode,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import type { ReadOnlyCommentThread } from '@silurus/ooxml-core/internal/read-only-comment-contract';
 import {
   HEADER_W,
@@ -1210,8 +1211,11 @@ class XlsxViewerEngine implements ZoomableViewer {
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old workbook is freed the moment the new model arrives).
     try {
-      const wb = await this.acquisition.replace(() => XlsxWorkbook[loadXlsxSheetSource](source, {
+      const wb = await this.acquisition.replace((signal) => {
+        const conversion = bindLegacyOfficeConversionSignal(this.opts.legacyConversion, signal);
+        const pending = XlsxWorkbook[loadXlsxSheetSource](source, {
           password: this.opts.password,
+          legacyConversion: conversion.options,
           useGoogleFonts: this.opts.useGoogleFonts,
           maxZipEntryBytes: this.opts.maxZipEntryBytes,
           resourceLimits: this.opts.resourceLimits,
@@ -1225,7 +1229,11 @@ class XlsxViewerEngine implements ZoomableViewer {
           chartEx: this.opts.chartEx,
           tiff: this.opts.tiff,
           mode: this._mode,
-        }, sourceOptions), () => {
+        }, sourceOptions);
+        return conversion.options === undefined
+          ? pending
+          : pending.finally(conversion.cleanup);
+      }, () => {
           // Claim every async-operation generation before closing the old
           // workbook. Rejections caused by its worker termination are stale
           // completion, not errors belonging to the new workbook.

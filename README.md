@@ -200,6 +200,21 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
+### Opt-in legacy DOC, XLS, and PPT conversion
+
+Legacy binary Office input can be routed through an application-supplied
+asynchronous converter before the existing OOXML parser runs (`.doc -> .docx`,
+`.xls -> .xlsx`, `.ppt -> .pptx`). This is fully opt-in: the package includes no
+default conversion service or legacy converter engine, never uploads document
+bytes, and ordinary OOXML loads do not import or initialize a converter engine
+or its WASM.
+Without a converter, the existing typed `legacy-binary-format` rejection is
+unchanged. Converter output is validated as same-family, macro-free OOXML before
+parser handoff, and browser converters can use the provided disposable Worker
+transport from `@silurus/ooxml/legacy-conversion` so converter WASM memory is
+released before parser peak memory. See
+[Opt-in legacy Office conversion](docs/legacy-office-conversion.md).
+
 ### Optional rendering modules
 
 Classic DrawingML 2-D chart families are included in every format entry.

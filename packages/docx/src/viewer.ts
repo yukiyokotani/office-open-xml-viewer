@@ -22,6 +22,7 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import { invalidateDocxRenderTarget } from './paint/canvas-document';
 import {
   readDocxTextSelectionContext,
@@ -283,33 +284,42 @@ export class DocxViewer implements ZoomableViewer {
     // load itself (the old engine is freed the moment the new model arrives).
     let elementInvalidated = false;
     try {
-      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
-        password: this._opts.password,
-        useGoogleFonts: this._opts.useGoogleFonts,
-        maxZipEntryBytes: this._opts.maxZipEntryBytes,
-        resourceLimits: this._opts.resourceLimits,
-        debug: this._opts.debug,
-        onResourceMetrics: this._opts.onResourceMetrics,
-        workerTimeoutMs: this._opts.workerTimeoutMs,
-        wasmUrl: this._opts.wasmUrl,
-        math: this._opts.math,
-        threeD: this._opts.threeD,
-        regionMap: this._opts.regionMap,
-        chartEx: this._opts.chartEx,
-        tiff: this._opts.tiff,
-        mode: this._mode,
-        ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
-        ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
-        onLayoutProgress: this._opts.onLayoutProgress,
-        onLayoutPartial: this._opts.onLayoutPartial,
-        onLayoutComplete: this._opts.onLayoutComplete,
-        // The variant this viewer renders, so load builds that one rather than
-        // paying for a second full pagination on the first render.
-        ...(this._opts.showTrackedChanges === true ? { showTrackedChanges: true } : {}),
-        ...(this._opts.currentDate === undefined
-          ? {}
-          : { currentDate: this._opts.currentDate }),
-      }), () => {
+      const doc = await this._documentOwner.replace((signal) => {
+        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, signal);
+        const pending = DocxDocument.load(source, {
+          password: this._opts.password,
+          legacyConversion: conversion.options,
+          useGoogleFonts: this._opts.useGoogleFonts,
+          maxZipEntryBytes: this._opts.maxZipEntryBytes,
+          resourceLimits: this._opts.resourceLimits,
+          debug: this._opts.debug,
+          onResourceMetrics: this._opts.onResourceMetrics,
+          workerTimeoutMs: this._opts.workerTimeoutMs,
+          wasmUrl: this._opts.wasmUrl,
+          math: this._opts.math,
+          threeD: this._opts.threeD,
+          regionMap: this._opts.regionMap,
+          chartEx: this._opts.chartEx,
+          tiff: this._opts.tiff,
+          mode: this._mode,
+          ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
+          ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
+          onLayoutProgress: this._opts.onLayoutProgress,
+          onLayoutPartial: this._opts.onLayoutPartial,
+          onLayoutComplete: this._opts.onLayoutComplete,
+          // The variant this viewer renders, so load builds that one rather than
+          // paying for a second full pagination on the first render.
+          ...(this._opts.showTrackedChanges === true ? { showTrackedChanges: true } : {}),
+          ...(this._opts.currentDate === undefined
+            ? {}
+            : { currentDate: this._opts.currentDate }),
+        });
+        // Preserve the original promise timing for ordinary OOXML loads. The
+        // cleanup stage is needed only when conversion installed listeners.
+        return conversion.options === undefined
+          ? pending
+          : pending.finally(conversion.cleanup);
+      }, () => {
         // Invalidate operations owned by the old document before its worker is
         // terminated, so their expected rejection cannot surface as a reload
         // failure for the winning document.

@@ -4,6 +4,7 @@ import type { ChartRegionMapRenderer } from '../chart/region-map-contract';
 import type { ChartExRenderer } from '../chart/chart-ex-contract';
 import type { TiffRenderer } from '../image/tiff-contract';
 import type { OoxmlResourceMetrics } from './resource-metrics.js';
+import type { LegacyOfficeConversionOptions } from '../conversion/legacy-office.js';
 
 /** A positive safe-integer byte count, or `null` to disable one public limit. */
 export type OoxmlResourceLimit = number | null;
@@ -95,6 +96,18 @@ export interface LoadOptions {
    *     is not detected — see "Security & Privacy" in the README.
    */
   password?: string;
+  /**
+   * Opt in to normalizing a legacy binary `.doc`, `.xls`, or `.ppt` through an
+   * application-supplied asynchronous converter before the existing OOXML
+   * parser runs. The converter is invoked only for a classified legacy CFB;
+   * ordinary OOXML loads do not import, initialize, or retain a converter
+   * engine or its WASM.
+   *
+   * Converter output must be same-family, macro-free OOXML. It is validated as
+   * DOCX/XLSX/PPTX before parser handoff. Omitting this option preserves the
+   * existing `legacy-binary-format` rejection.
+   */
+  legacyConversion?: LegacyOfficeConversionOptions;
   /**
    * Override the URL the parser worker fetches the WebAssembly module from.
    *

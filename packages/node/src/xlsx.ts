@@ -28,6 +28,7 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
+import { normalizeNodeOfficeInput } from './normalize-input.ts';
 
 const getXlsxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -93,7 +94,7 @@ export async function openXlsxWorkbook(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<XlsxWorkbookSession> {
-  const bytes = toUint8(buffer);
+  const bytes = await normalizeNodeOfficeInput(buffer, 'xlsx', options);
   const acquired = await acquireXlsxNodeSession(bytes, getXlsxWasmModule(), options);
   return new XlsxWorkbookSessionImpl(
     acquired.closeArchive,
@@ -434,8 +435,4 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
     if (String(error).includes('worksheet cursor usage is unavailable')) return undefined;
     throw error;
   }
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }

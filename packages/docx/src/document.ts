@@ -10,7 +10,6 @@ import {
   defaultDpr,
   dropSvgImageCache,
   dropDecodedBitmapCache,
-  resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type ProgressiveLayoutPartial,
@@ -22,6 +21,7 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
+import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -462,7 +462,12 @@ export class DocxDocument {
     // Resolve the container on the main thread before spinning up the worker.
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
-    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+      buffer,
+      'docx',
+      opts.legacyConversion,
+      opts.password,
+    ));
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so

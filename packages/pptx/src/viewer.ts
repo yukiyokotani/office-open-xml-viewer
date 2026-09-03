@@ -34,6 +34,7 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import {
   readPptxTextSelectionContext,
 } from './selection-context';
@@ -341,26 +342,33 @@ export class PptxViewer implements ZoomableViewer {
     // load itself (the old engine is freed the moment the new model arrives).
     let selectionInvalidated = false;
     try {
-      const engine = await this.presentationOwner.replace(() => PptxPresentation.load(source, {
-        password: this.opts.password,
-        useGoogleFonts: this.opts.useGoogleFonts,
-        maxZipEntryBytes: this.opts.maxZipEntryBytes,
-        resourceLimits: this.opts.resourceLimits,
-        debug: this.opts.debug,
-        onResourceMetrics: this.opts.onResourceMetrics,
-        workerTimeoutMs: this.opts.workerTimeoutMs,
-        wasmUrl: this.opts.wasmUrl,
-        math: this.opts.math,
-        threeD: this.opts.threeD,
-        regionMap: this.opts.regionMap,
-        chartEx: this.opts.chartEx,
-        tiff: this.opts.tiff,
-        mode: this._mode,
-        progressiveLayout: this.opts.progressiveLayout,
-        onLayoutProgress: this.opts.onLayoutProgress,
-        onLayoutPartial: this.opts.onLayoutPartial,
-        onLayoutComplete: this.opts.onLayoutComplete,
-      }), () => {
+      const engine = await this.presentationOwner.replace((signal) => {
+        const conversion = bindLegacyOfficeConversionSignal(this.opts.legacyConversion, signal);
+        const pending = PptxPresentation.load(source, {
+          password: this.opts.password,
+          legacyConversion: conversion.options,
+          useGoogleFonts: this.opts.useGoogleFonts,
+          maxZipEntryBytes: this.opts.maxZipEntryBytes,
+          resourceLimits: this.opts.resourceLimits,
+          debug: this.opts.debug,
+          onResourceMetrics: this.opts.onResourceMetrics,
+          workerTimeoutMs: this.opts.workerTimeoutMs,
+          wasmUrl: this.opts.wasmUrl,
+          math: this.opts.math,
+          threeD: this.opts.threeD,
+          regionMap: this.opts.regionMap,
+          chartEx: this.opts.chartEx,
+          tiff: this.opts.tiff,
+          mode: this._mode,
+          progressiveLayout: this.opts.progressiveLayout,
+          onLayoutProgress: this.opts.onLayoutProgress,
+          onLayoutPartial: this.opts.onLayoutPartial,
+          onLayoutComplete: this.opts.onLayoutComplete,
+        });
+        return conversion.options === undefined
+          ? pending
+          : pending.finally(conversion.cleanup);
+      }, () => {
         // Retire old-engine hit promises before install() destroys that engine:
         // a worker bridge may reject them synchronously during destroy, and its
         // microtask must already observe the new selection generation.

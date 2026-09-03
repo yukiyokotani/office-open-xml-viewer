@@ -40,10 +40,18 @@ export type {
   OoxmlResourcePolicySnapshot,
 } from '@silurus/ooxml-core';
 export {
+  LegacyOfficeConversionError,
   OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
   isOoxmlDecodedImageLimitError,
   type OoxmlDecodedImageLimitMetric,
+  type LegacyOfficeConversionFailureReason,
+  type LegacyOfficeConversionInput,
+  type LegacyOfficeConversionOptions,
+  type LegacyOfficeConversionRecord,
+  type LegacyOfficeConversionResult,
+  type LegacyOfficeConverter,
+  type LegacyOfficeFormat,
   type OoxmlResourceLimit,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlResourceLimits,

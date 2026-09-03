@@ -83,6 +83,11 @@
       "import": "./dist/tiff.mjs",
       "default": "./dist/tiff.mjs"
     },
+    "./legacy-conversion": {
+      "types": "./dist/types/legacy-conversion.d.ts",
+      "import": "./dist/legacy-conversion.mjs",
+      "default": "./dist/legacy-conversion.mjs"
+    },
     "./node": {
       "types": "./dist/types/node.d.ts",
       "import": "./dist/node.mjs",
@@ -117,6 +122,7 @@
     "check:optional-region-map": "node scripts/check-optional-region-map.mjs dist",
     "check:optional-chart-ex": "node scripts/check-optional-chart-ex.mjs dist",
     "check:optional-tiff": "node scripts/check-optional-tiff.mjs dist",
+    "check:optional-legacy-conversion": "node scripts/check-optional-legacy-conversion.mjs dist",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",

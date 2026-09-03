@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { XlsxWorkbook } from './workbook.js';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
@@ -28,6 +28,21 @@ describe('XlsxWorkbook.load — CFB guard', () => {
     await expect(XlsxWorkbook.load(cfb)).rejects.toMatchObject({
       code: 'legacy-binary-format',
     });
+  });
+
+  it('routes an opted-in legacy .xls through the XLS -> XLSX converter contract', async () => {
+    const convert = vi.fn(async () => ({ bytes: new Uint8Array([0x50, 0x4b]) }));
+    const cfb = buildCfbFixture(['Root Entry', 'Workbook']);
+
+    await expect(XlsxWorkbook.load(cfb, {
+      legacyConversion: { converter: { convert } },
+    })).rejects.toMatchObject({
+      code: 'legacy-office-conversion',
+      reason: 'invalid-output',
+      from: 'xls',
+      to: 'xlsx',
+    });
+    expect(convert).toHaveBeenCalledWith(expect.objectContaining({ from: 'xls', to: 'xlsx' }));
   });
 
   it('rejects an unrecognised CFB with code "not-ooxml"', async () => {

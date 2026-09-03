@@ -116,13 +116,47 @@ export {
 // CFB (OLE2) container sniffer: the `load()` factories call this on the raw
 // bytes before touching the parser worker, so a password-protected or legacy
 // .doc/.xls/.ppt file becomes a typed OoxmlError instead of an opaque zip error.
-export { sniffCfb, type CfbKind } from './errors/cfb-sniff';
+export {
+  sniffCfb,
+  sniffLegacyOfficeFormat,
+  type CfbKind,
+  type LegacyCfbFormat,
+} from './errors/cfb-sniff';
 // Shared load() guard: throws the right OoxmlError when the bytes are a CFB
 // container (encrypted / legacy-binary / other) instead of an OOXML ZIP.
 // `resolveOoxmlContainer` is the decrypt-aware superset the load() factories
 // call: it returns plaintext ZIP bytes, decrypting an Agile-encrypted file when
 // a password is supplied ([MS-OFFCRYPTO], PD8).
 export { assertNotCfbContainer, resolveOoxmlContainer, toArrayBuffer } from './errors/cfb-guard';
+export {
+  DEFAULT_LEGACY_CONVERSION_TIMEOUT_MS,
+  DEFAULT_MAX_CONVERTED_OOXML_BYTES,
+  DEFAULT_MAX_LEGACY_INPUT_BYTES,
+  HARD_MAX_LEGACY_CONVERSION_BYTES,
+  normalizeOfficeInput,
+  validateConvertedOoxml,
+  type LegacyOfficeConversionInput,
+  type LegacyOfficeConversionOptions,
+  type LegacyOfficeConversionRecord,
+  type LegacyOfficeConversionResult,
+  type LegacyOfficeConverter,
+  type NormalizedOfficeInput,
+} from './conversion/legacy-office';
+export {
+  LegacyOfficeConversionError,
+  type LegacyOfficeConversionFailureReason,
+  type LegacyOfficeFormat,
+} from './conversion/legacy-office-error';
+export {
+  createDisposableWorkerLegacyOfficeConverter,
+  installLegacyOfficeConversionWorkerHandler,
+  type LegacyOfficeConversionWorker,
+  type LegacyOfficeConversionWorkerAdapterOptions,
+  type LegacyOfficeConversionWorkerFactory,
+  type LegacyOfficeConversionWorkerScope,
+  type LegacyOfficeWorkerRequest,
+  type LegacyOfficeWorkerResponse,
+} from './conversion/worker-converter';
 // Agile Encryption decryption ([MS-OFFCRYPTO]): `decryptOoxml` turns an
 // encrypted CFB + password into plaintext ZIP bytes. Lower-level primitives
 // (key derivation, EncryptionInfo parse) are exported for testing / advanced use.

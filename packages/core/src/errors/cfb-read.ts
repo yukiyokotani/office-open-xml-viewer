@@ -3,8 +3,7 @@
  *
  * The sibling {@link import('./cfb-sniff').sniffCfb} only *classifies* a
  * container by enumerating directory-entry names; it deliberately never returns
- * stream contents (and skips the mini FAT / mini stream / DIFAT-sector
- * extension). Decrypting a password-protected OOXML package needs the actual
+ * stream contents. Decrypting a password-protected OOXML package needs the actual
  * bytes of two streams — `EncryptionInfo` (a small stream, so it lives in the
  * root entry's *mini stream*) and `EncryptedPackage` (a large stream in the
  * regular FAT). This module reads a named stream in full, implementing the
@@ -47,14 +46,18 @@ const MAX_DIR_ENTRIES = 65_536;
 const MAX_DIFAT_SECTORS = 1_000_000;
 
 /** Parsed CFB header fields needed to walk streams. */
-interface CfbHeader {
+export interface CfbFatIndexHeader {
   sectorSize: number;
+  numFatSectors: number;
+  firstDifatSector: number;
+  numDifatSectors: number;
+}
+
+interface CfbHeader extends CfbFatIndexHeader {
   miniSectorSize: number;
   miniStreamCutoff: number;
   firstDirSector: number;
   firstMiniFatSector: number;
-  firstDifatSector: number;
-  numDifatSectors: number;
 }
 
 /**
@@ -75,7 +78,7 @@ export function readCfbStream(bytes: Uint8Array, streamName: string): Uint8Array
   if (header === null) return null;
 
   // Build the FAT-sector index (in-header DIFAT + DIFAT-sector extension).
-  const fatSectors = collectFatSectors(view, bytes.length, header);
+  const fatSectors = collectCfbFatSectors(view, bytes.length, header);
   if (fatSectors === null) return null;
 
   // Locate the directory entry for the requested stream, plus the root entry
@@ -108,6 +111,7 @@ function readHeader(view: DataView): CfbHeader | null {
   const miniStreamCutoff = view.getUint32(0x38, true);
   return {
     sectorSize,
+    numFatSectors: view.getUint32(0x2c, true),
     miniSectorSize,
     miniStreamCutoff,
     firstDirSector: view.getUint32(0x30, true),
@@ -132,14 +136,33 @@ function isRegularSector(sector: number): boolean {
  * (§2.5.1). Each DIFAT sector holds (sectorSize/4 - 1) FAT locations plus a
  * trailing pointer to the next DIFAT sector.
  */
-function collectFatSectors(view: DataView, totalLen: number, header: CfbHeader): number[] | null {
+export function collectCfbFatSectors(
+  view: DataView,
+  totalLen: number,
+  header: CfbFatIndexHeader,
+): number[] | null {
   const { sectorSize } = header;
   const fatSectors: number[] = [];
+  const seenFatSectors = new Set<number>();
+  const physicalSectorCount = Math.max(0, Math.floor(totalLen / sectorSize) - 1);
+  if (
+    header.numFatSectors > physicalSectorCount
+    || header.numDifatSectors > physicalSectorCount
+    || header.numDifatSectors > MAX_DIFAT_SECTORS
+  ) return null;
+  const addFatSector = (location: number): boolean => {
+    if (!isRegularSector(location)) return true;
+    if (fatSectors.length >= header.numFatSectors) return true;
+    if (location >= physicalSectorCount || seenFatSectors.has(location)) return false;
+    seenFatSectors.add(location);
+    fatSectors.push(location);
+    return true;
+  };
 
   // In-header DIFAT: 109 entries at 0x4C.
   for (let i = 0; i < 109; i++) {
     const loc = view.getUint32(0x4c + i * 4, true);
-    if (isRegularSector(loc)) fatSectors.push(loc);
+    if (!addFatSector(loc)) return null;
   }
 
   // DIFAT-sector extension chain.
@@ -147,8 +170,8 @@ function collectFatSectors(view: DataView, totalLen: number, header: CfbHeader):
   let difatSector = header.firstDifatSector;
   const visited = new Set<number>();
   let steps = 0;
-  while (isRegularSector(difatSector)) {
-    if (steps++ > MAX_DIFAT_SECTORS) return null;
+  while (isRegularSector(difatSector) && steps < header.numDifatSectors) {
+    steps++;
     if (visited.has(difatSector)) break; // cycle guard
     visited.add(difatSector);
 
@@ -156,17 +179,22 @@ function collectFatSectors(view: DataView, totalLen: number, header: CfbHeader):
     if (off < 0 || off + sectorSize > totalLen) return null;
     for (let i = 0; i < entriesPerDifat; i++) {
       const loc = view.getUint32(off + i * 4, true);
-      if (isRegularSector(loc)) fatSectors.push(loc);
+      if (!addFatSector(loc)) return null;
     }
     // Next DIFAT sector pointer is the last 4-byte slot.
     difatSector = view.getUint32(off + entriesPerDifat * 4, true);
   }
+  if (
+    steps !== header.numDifatSectors
+    || isRegularSector(difatSector)
+    || fatSectors.length !== header.numFatSectors
+  ) return null;
 
   return fatSectors;
 }
 
 /** Read the next FAT entry for `sector` using the precomputed FAT-sector list. */
-function nextFatSector(
+export function nextCfbFatSector(
   view: DataView,
   totalLen: number,
   sectorSize: number,
@@ -239,7 +267,7 @@ function findDirectoryEntries(
       if (name === streamName) target = { startSector, size };
     }
 
-    const next = nextFatSector(view, totalLen, sectorSize, fatSectors, sector);
+    const next = nextCfbFatSector(view, totalLen, sectorSize, fatSectors, sector);
     if (next === null) break;
     sector = next;
   }
@@ -288,7 +316,7 @@ function readFatStream(
     out.set(new Uint8Array(view.buffer, view.byteOffset + base, take), written);
     written += take;
 
-    const next = nextFatSector(view, totalLen, sectorSize, fatSectors, sector);
+    const next = nextCfbFatSector(view, totalLen, sectorSize, fatSectors, sector);
     if (next === null) return null;
     sector = next;
   }
@@ -371,7 +399,7 @@ function nextMiniFatEntry(
     if (!isRegularSector(fatSector)) return null;
     if (visited.has(fatSector)) return null;
     visited.add(fatSector);
-    const next = nextFatSector(view, totalLen, sectorSize, fatSectors, fatSector);
+    const next = nextCfbFatSector(view, totalLen, sectorSize, fatSectors, fatSector);
     if (next === null) return null;
     fatSector = next;
   }

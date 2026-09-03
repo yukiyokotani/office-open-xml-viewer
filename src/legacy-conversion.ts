@@ -1,0 +1,20 @@
+/** Optional browser Worker transport and converter-boundary utilities. */
+export {
+  createDisposableWorkerLegacyOfficeConverter,
+  installLegacyOfficeConversionWorkerHandler,
+  validateConvertedOoxml,
+  LegacyOfficeConversionError,
+  type LegacyOfficeConversionFailureReason,
+  type LegacyOfficeConversionInput,
+  type LegacyOfficeConversionOptions,
+  type LegacyOfficeConversionRecord,
+  type LegacyOfficeConversionResult,
+  type LegacyOfficeConverter,
+  type LegacyOfficeFormat,
+  type LegacyOfficeConversionWorker,
+  type LegacyOfficeConversionWorkerAdapterOptions,
+  type LegacyOfficeConversionWorkerFactory,
+  type LegacyOfficeConversionWorkerScope,
+  type LegacyOfficeWorkerRequest,
+  type LegacyOfficeWorkerResponse,
+} from '../packages/core/src/index.js';

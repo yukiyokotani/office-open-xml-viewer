@@ -20,7 +20,6 @@ import {
   defaultDpr,
   isHTMLCanvas,
   dropSvgImageCache,
-  resolveOoxmlContainer,
   toArrayBuffer,
   OoxmlResourceLimitError,
   type LoadOptions as CoreLoadOptions,
@@ -35,6 +34,7 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
+import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -356,7 +356,12 @@ export class PptxPresentation {
     // when `opts.password` is supplied ([MS-OFFCRYPTO]); a password-protected
     // file without a password, or a legacy-binary / unknown CFB, becomes a typed
     // OoxmlError (whose `instanceof` would not survive the worker boundary).
-    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+      buffer,
+      'pptx',
+      opts.legacyConversion,
+      opts.password,
+    ));
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so

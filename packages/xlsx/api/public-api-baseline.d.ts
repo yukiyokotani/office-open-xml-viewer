@@ -1132,6 +1132,51 @@ export interface ImageResourceOptions {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export function isTiffDecodeError(error: unknown): error is TiffDecodeError;
+export class LegacyOfficeConversionError extends Error {
+    readonly code: 'legacy-office-conversion';
+    readonly stage: 'conversion';
+    readonly reason: LegacyOfficeConversionFailureReason;
+    readonly from: LegacyOfficeFormat;
+    readonly to: OoxmlFormat;
+    constructor(reason: LegacyOfficeConversionFailureReason, from: LegacyOfficeFormat, to: OoxmlFormat, message?: string);
+}
+export type LegacyOfficeConversionFailureReason = 'aborted' | 'timeout' | 'source-too-large' | 'output-too-large' | 'capacity-exceeded' | 'unsupported-input' | 'failed' | 'invalid-output';
+export interface LegacyOfficeConversionInput {
+    readonly bytes: Uint8Array;
+    readonly from: LegacyOfficeFormat;
+    readonly to: OoxmlFormat;
+    readonly maxOutputBytes: number;
+    readonly signal: AbortSignal;
+}
+export interface LegacyOfficeConversionOptions {
+    readonly converter: LegacyOfficeConverter;
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly maxInputBytes?: number;
+    readonly maxOutputBytes?: number;
+    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+}
+export interface LegacyOfficeConversionRecord {
+    readonly from: LegacyOfficeFormat;
+    readonly to: OoxmlFormat;
+    readonly inputBytes: number;
+    readonly outputBytes: number;
+    readonly engine?: string;
+    readonly engineVersion?: string;
+    readonly outputSha256?: string;
+    readonly warnings?: readonly string[];
+}
+export interface LegacyOfficeConversionResult {
+    readonly bytes: Uint8Array | ArrayBuffer;
+    readonly engine?: string;
+    readonly engineVersion?: string;
+    readonly outputSha256?: string;
+    readonly warnings?: readonly string[];
+}
+export interface LegacyOfficeConverter {
+    convert(input: Readonly<LegacyOfficeConversionInput>): Promise<LegacyOfficeConversionResult>;
+}
+export type LegacyOfficeFormat = 'doc' | 'xls' | 'ppt';
 export interface LegendManualLayout {
     xMode?: string;
     yMode?: string;
@@ -1148,6 +1193,7 @@ export interface LoadOptions extends LoadOptions__emitterCollision1 {
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
     password?: string;
+    legacyConversion?: LegacyOfficeConversionOptions;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;
     resourceLimits?: OoxmlResourceLimits;

@@ -106,6 +106,35 @@ describe('DocxViewer.load() — concurrent-load latch', () => {
     expect(only.destroyed).toBe(true); // destroyed exactly once
   });
 
+  it('forwards and aborts the converter signal when a newer load supersedes it', async () => {
+    const { canvas } = mount();
+    const a = new FakeDocxEngine(2, A4);
+    const b = new FakeDocxEngine(2, A4);
+    const da = deferredLoad(a);
+    const db = deferredLoad(b);
+    let firstSignal: AbortSignal | undefined;
+    vi.spyOn(DocxDocument, 'load')
+      .mockImplementationOnce((_source, options) => {
+        firstSignal = options?.legacyConversion?.signal;
+        return da.promise;
+      })
+      .mockImplementationOnce(() => db.promise);
+    const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
+    const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, {
+      legacyConversion: { converter },
+    });
+
+    const first = v.load('a.doc');
+    expect(firstSignal?.aborted).toBe(false);
+    const second = v.load('b.doc');
+    expect(firstSignal?.aborted).toBe(true);
+    db.resolve();
+    await second;
+    da.resolve();
+    await first;
+    v.destroy();
+  });
+
   it('does not report a pending old-document render rejected by a successful reload', async () => {
     const { canvas } = mount();
     const onError = vi.fn();

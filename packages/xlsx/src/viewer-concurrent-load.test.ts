@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { XlsxViewer } from './viewer.js';
+import { XlsxViewer, type XlsxViewerOptions } from './viewer.js';
 import { XlsxWorkbook } from './workbook.js';
 import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
 
@@ -31,10 +31,10 @@ function fakeWorkbook() {
  * workbook must stay live and untouched. A generation token (`_loadGen`) closes it.
  */
 describe('XlsxViewer.load() — concurrent-load latch', () => {
-  function build() {
+  function build(options: XlsxViewerOptions = {}) {
     installDom();
     const container = makeContainer();
-    const v = new XlsxViewer(container as unknown as HTMLElement);
+    const v = new XlsxViewer(container as unknown as HTMLElement, options);
     // Isolate the latch from the sheet-render path: showSheet needs a full
     // worksheet model, out of scope here. The engine-swap happens in load() BEFORE
     // showSheet, so a resolved no-op keeps this test on the leak.
@@ -104,5 +104,30 @@ describe('XlsxViewer.load() — concurrent-load latch', () => {
 
     v.destroy();
     expect(b.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards and aborts the converter signal when a newer load supersedes it', async () => {
+    const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
+    const { v } = build({ legacyConversion: { converter } });
+    const a = fakeWorkbook();
+    const b = fakeWorkbook();
+    const da = deferredLoad(a.wb);
+    const db = deferredLoad(b.wb);
+    let firstSignal: AbortSignal | undefined;
+    vi.spyOn(XlsxWorkbook, 'load')
+      .mockImplementationOnce((_source, options) => {
+        firstSignal = options?.legacyConversion?.signal;
+        return da.promise;
+      })
+      .mockImplementationOnce(() => db.promise);
+    const first = v.load('a.xls');
+    expect(firstSignal?.aborted).toBe(false);
+    const second = v.load('b.xls');
+    expect(firstSignal?.aborted).toBe(true);
+    db.resolve();
+    await second;
+    da.resolve();
+    await first;
+    v.destroy();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DocxDocument } from './document';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
@@ -21,6 +21,21 @@ describe('DocxDocument.load — CFB guard', () => {
     await expect(DocxDocument.load(cfb)).rejects.toMatchObject({
       code: 'legacy-binary-format',
     });
+  });
+
+  it('routes an opted-in legacy .doc through the DOC -> DOCX converter contract', async () => {
+    const convert = vi.fn(async () => ({ bytes: new Uint8Array([0x50, 0x4b]) }));
+    const cfb = buildCfbFixture(['Root Entry', 'WordDocument', '1Table']);
+
+    await expect(DocxDocument.load(cfb, {
+      legacyConversion: { converter: { convert } },
+    })).rejects.toMatchObject({
+      code: 'legacy-office-conversion',
+      reason: 'invalid-output',
+      from: 'doc',
+      to: 'docx',
+    });
+    expect(convert).toHaveBeenCalledWith(expect.objectContaining({ from: 'doc', to: 'docx' }));
   });
 
   it('rejects an unrecognised CFB with code "not-ooxml"', async () => {

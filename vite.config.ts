@@ -121,6 +121,9 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in TIFF 6.0 software decoder. Native raster users retain only the
         // lightweight codec contract and header guard.
         tiff: resolve(__dirname, 'src/tiff.ts'),
+        // Opt-in disposable Worker transport for application-owned legacy
+        // Office converter engines. No converter WASM is bundled here.
+        'legacy-conversion': resolve(__dirname, 'src/legacy-conversion.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),

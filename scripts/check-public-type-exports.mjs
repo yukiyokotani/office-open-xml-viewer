@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -88,11 +88,36 @@ for (const name of sharedOoxmlTypes) {
   }
 }
 
-const tiffExports = moduleExports(files.at(-1));
+const tiffExports = moduleExports(files.at(-2));
 assert.deepEqual(
   [...tiffExports.keys()].sort(),
   ['TiffDecodeError', 'TiffRenderOptions', 'TiffRenderer', 'isTiffDecodeError', 'tiff'],
   'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
+);
+
+const legacyConversionExports = moduleExports(files.at(-1));
+assert.deepEqual(
+  [...legacyConversionExports.keys()].sort(),
+  [
+    'LegacyOfficeConversionError',
+    'LegacyOfficeConversionFailureReason',
+    'LegacyOfficeConversionInput',
+    'LegacyOfficeConversionOptions',
+    'LegacyOfficeConversionRecord',
+    'LegacyOfficeConversionResult',
+    'LegacyOfficeConversionWorker',
+    'LegacyOfficeConversionWorkerAdapterOptions',
+    'LegacyOfficeConversionWorkerFactory',
+    'LegacyOfficeConversionWorkerScope',
+    'LegacyOfficeConverter',
+    'LegacyOfficeFormat',
+    'LegacyOfficeWorkerRequest',
+    'LegacyOfficeWorkerResponse',
+    'createDisposableWorkerLegacyOfficeConverter',
+    'installLegacyOfficeConversionWorkerHandler',
+    'validateConvertedOoxml',
+  ].sort(),
+  'The ./legacy-conversion declaration entry must expose the Worker transport and shared contract.',
 );
 
 process.stdout.write(

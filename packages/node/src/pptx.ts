@@ -29,6 +29,7 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
+import { normalizeNodeOfficeInput } from './normalize-input.ts';
 
 const getPptxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -85,7 +86,8 @@ async function openPptxPresentationImpl(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
-  const acquired = await acquirePptxNodeSession(toUint8(buffer), getPptxWasmModule(), options);
+  const bytes = await normalizeNodeOfficeInput(buffer, 'pptx', options);
+  const acquired = await acquirePptxNodeSession(bytes, getPptxWasmModule(), options);
   return new PptxPresentationSessionImpl(
     acquired.closeArchive,
     acquired.archive,
@@ -334,10 +336,6 @@ export async function materializePptxPresentation(
       return session.materialize(slides);
     },
   );
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

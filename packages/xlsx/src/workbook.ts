@@ -7,7 +7,6 @@ import {
   defaultDpr,
   dropDecodedBitmapCache,
   dropSvgImageCache,
-  resolveOoxmlContainer,
   toArrayBuffer,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -19,6 +18,7 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
+import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -353,7 +353,12 @@ export class XlsxWorkbook {
     } else {
       buffer = source;
     }
-    buffer = toArrayBuffer(await resolveOoxmlContainer(buffer, opts.password));
+    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+      buffer,
+      'xlsx',
+      opts.legacyConversion,
+      opts.password,
+    ));
     const preserveCallerBuffer = buffer === callerBuffer;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');

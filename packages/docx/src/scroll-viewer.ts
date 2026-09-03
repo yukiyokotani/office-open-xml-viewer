@@ -14,6 +14,7 @@ import {
   StaticCanvasRenderDispatcher,
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
+import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import { READ_ONLY_COMMENT_MARGIN_WIDTH_PX } from '@silurus/ooxml-core/internal/read-only-comment-contract';
 import { eventTargetsDataAttributeWithin } from '@silurus/ooxml-core/internal/dom-interaction-boundary';
 import type { ReadOnlyCommentMarginGeometry } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
@@ -642,34 +643,41 @@ export class DocxScrollViewer implements ZoomableViewer {
     // frees an engine we created.)
     let elementInvalidated = false;
     try {
-      const doc = await this._documentOwner.replace(() => DocxDocument.load(source, {
-        password: this._opts.password,
-        useGoogleFonts: this._opts.useGoogleFonts,
-        maxZipEntryBytes: this._opts.maxZipEntryBytes,
-        resourceLimits: this._opts.resourceLimits,
-        debug: this._opts.debug,
-        onResourceMetrics: this._opts.onResourceMetrics,
-        workerTimeoutMs: this._opts.workerTimeoutMs,
-        wasmUrl: this._opts.wasmUrl,
-        math: this._opts.math,
-        threeD: this._opts.threeD,
-        regionMap: this._opts.regionMap,
-        chartEx: this._opts.chartEx,
-        tiff: this._opts.tiff,
-        mode: this._mode,
-        // The variant the viewer will render. Without these, load builds the
-        // final view while every render asks for the markup view, and the first
-        // paint pays a full synchronous repagination.
-        ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
-        ...(this._currentDate === undefined
-          ? {}
-          : { currentDate: this._currentDate }),
-        ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
-        ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
-        onLayoutProgress: this._opts.onLayoutProgress,
-        onLayoutPartial: this._opts.onLayoutPartial,
-        onLayoutComplete: this._opts.onLayoutComplete,
-      }), (ownedDocument) => {
+      const doc = await this._documentOwner.replace((signal) => {
+        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, signal);
+        const pending = DocxDocument.load(source, {
+          password: this._opts.password,
+          legacyConversion: conversion.options,
+          useGoogleFonts: this._opts.useGoogleFonts,
+          maxZipEntryBytes: this._opts.maxZipEntryBytes,
+          resourceLimits: this._opts.resourceLimits,
+          debug: this._opts.debug,
+          onResourceMetrics: this._opts.onResourceMetrics,
+          workerTimeoutMs: this._opts.workerTimeoutMs,
+          wasmUrl: this._opts.wasmUrl,
+          math: this._opts.math,
+          threeD: this._opts.threeD,
+          regionMap: this._opts.regionMap,
+          chartEx: this._opts.chartEx,
+          tiff: this._opts.tiff,
+          mode: this._mode,
+          // The variant the viewer will render. Without these, load builds the
+          // final view while every render asks for the markup view, and the first
+          // paint pays a full synchronous repagination.
+          ...(this._showTrackedChanges ? { showTrackedChanges: true } : {}),
+          ...(this._currentDate === undefined
+            ? {}
+            : { currentDate: this._currentDate }),
+          ...(this._opts.progressiveLayout ? { progressiveLayout: true } : {}),
+          ...(this._opts.sliceLayout ? { sliceLayout: true } : {}),
+          onLayoutProgress: this._opts.onLayoutProgress,
+          onLayoutPartial: this._opts.onLayoutPartial,
+          onLayoutComplete: this._opts.onLayoutComplete,
+        });
+        return conversion.options === undefined
+          ? pending
+          : pending.finally(conversion.cleanup);
+      }, (ownedDocument) => {
         this._invalidateElementContext(false);
         elementInvalidated = true;
         this._findRequestGeneration++;

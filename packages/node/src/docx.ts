@@ -30,6 +30,7 @@ import {
 } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
+import { normalizeNodeOfficeInput } from './normalize-input.ts';
 
 const getDocxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -85,8 +86,9 @@ export async function openDocxDocument(
   options: OpenDocxDocumentOptions,
 ): Promise<DocxDocumentSession> {
   if (!options?.factory) throw new TypeError('openDocxDocument requires a canvas factory');
+  const normalized = await normalizeNodeOfficeInput(buffer, 'docx', options);
   const acquired = await acquireDocxNodeDocument(
-    toUint8(buffer),
+    normalized,
     getDocxWasmModule(),
     options,
     (transport, identity, pullOptions) =>
@@ -138,10 +140,11 @@ export async function materializeDocxDocument(
   buffer: ArrayBuffer | Uint8Array,
   options: OoxmlNodeSessionOptions = {},
 ): Promise<DocxDocumentModel> {
+  const normalized = await normalizeNodeOfficeInput(buffer, 'docx', options);
   return usingOwnedSession(
     async () => {
       const acquired = await acquireDocxNodeDocument(
-        toUint8(buffer),
+        normalized,
         getDocxWasmModule(),
         options,
         (transport, identity, pullOptions) =>
@@ -343,10 +346,6 @@ function normalizeCurrentDate(value: Date | number | undefined): number {
     throw new RangeError('currentDate must resolve to finite epoch milliseconds');
   }
   return current;
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

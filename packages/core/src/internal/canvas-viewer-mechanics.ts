@@ -348,6 +348,7 @@ export class TerminalResourceOwner<T extends DestroyableResource> {
   private resource: T | null;
   private ownsResource: boolean;
   private closed = false;
+  private pendingAcquisition: AbortController | undefined;
 
   constructor(
     private readonly ownerName: string,
@@ -363,18 +364,23 @@ export class TerminalResourceOwner<T extends DestroyableResource> {
   }
 
   async replace(
-    load: () => Promise<T>,
+    load: (signal: AbortSignal) => Promise<T>,
     beforeCommit?: (previous: T | null) => void,
   ): Promise<T | null> {
     this.assertOpen();
+    this.pendingAcquisition?.abort();
+    const acquisition = new AbortController();
+    this.pendingAcquisition = acquisition;
     const generation = ++this.generation;
     let candidate: T;
     try {
-      candidate = await load();
+      candidate = await load(acquisition.signal);
     } catch (error) {
       if (this.closed) throw this.closedError();
       if (generation !== this.generation) return null;
       throw error;
+    } finally {
+      if (this.pendingAcquisition === acquisition) this.pendingAcquisition = undefined;
     }
     if (this.closed) {
       this.dispose(candidate);
@@ -396,6 +402,8 @@ export class TerminalResourceOwner<T extends DestroyableResource> {
 
   install(candidate: T, owned = true): void {
     this.assertOpen();
+    this.pendingAcquisition?.abort();
+    this.pendingAcquisition = undefined;
     // A direct installation is itself a replacement generation. Any loader
     // already in flight must lose when it resolves; otherwise it can overwrite
     // this explicitly installed resource and destroy it as the previous owner.
@@ -410,6 +418,8 @@ export class TerminalResourceOwner<T extends DestroyableResource> {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.pendingAcquisition?.abort();
+    this.pendingAcquisition = undefined;
     this.generation++;
     const previous = this.resource;
     const ownedPrevious = this.ownsResource;

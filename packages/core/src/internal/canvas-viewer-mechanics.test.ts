@@ -346,6 +346,35 @@ describe('TerminalResourceOwner', () => {
     expect(candidate.destroyed).toBe(true);
   });
 
+  it('aborts superseded and closed acquisitions', async () => {
+    const owner = new TerminalResourceOwner<Resource>('test');
+    const first = deferred<Resource>();
+    let firstSignal: AbortSignal | undefined;
+    const stale = owner.replace((signal) => {
+      firstSignal = signal;
+      return first.promise;
+    });
+    const current = owner.replace(async (signal) => {
+      expect(signal.aborted).toBe(false);
+      return new Resource();
+    });
+    expect(firstSignal?.aborted).toBe(true);
+    first.resolve(new Resource());
+    await expect(stale).resolves.toBeNull();
+    await expect(current).resolves.toBeInstanceOf(Resource);
+
+    const pending = deferred<Resource>();
+    let closeSignal: AbortSignal | undefined;
+    const closing = owner.replace((signal) => {
+      closeSignal = signal;
+      return pending.promise;
+    });
+    owner.close();
+    expect(closeSignal?.aborted).toBe(true);
+    pending.resolve(new Resource());
+    await expect(closing).rejects.toThrow('test is closed');
+  });
+
   it('direct install supersedes and disposes a pending replacement candidate', async () => {
     const pending = deferred<Resource>();
     const owner = new TerminalResourceOwner<Resource>('test');

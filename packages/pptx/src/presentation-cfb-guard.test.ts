@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PptxPresentation } from './presentation';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
@@ -21,6 +21,21 @@ describe('PptxPresentation.load — CFB guard', () => {
     await expect(PptxPresentation.load(cfb)).rejects.toMatchObject({
       code: 'legacy-binary-format',
     });
+  });
+
+  it('routes an opted-in legacy .ppt through the PPT -> PPTX converter contract', async () => {
+    const convert = vi.fn(async () => ({ bytes: new Uint8Array([0x50, 0x4b]) }));
+    const cfb = buildCfbFixture(['Root Entry', 'PowerPoint Document']);
+
+    await expect(PptxPresentation.load(cfb, {
+      legacyConversion: { converter: { convert } },
+    })).rejects.toMatchObject({
+      code: 'legacy-office-conversion',
+      reason: 'invalid-output',
+      from: 'ppt',
+      to: 'pptx',
+    });
+    expect(convert).toHaveBeenCalledWith(expect.objectContaining({ from: 'ppt', to: 'pptx' }));
   });
 
   it('rejects an unrecognised CFB with code "not-ooxml"', async () => {

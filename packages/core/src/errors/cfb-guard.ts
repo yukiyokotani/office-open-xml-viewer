@@ -128,5 +128,10 @@ export function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
   if (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength && u8.buffer instanceof ArrayBuffer) {
     return u8.buffer;
   }
-  return u8.slice().buffer;
+  // Do not call the instance `slice()`: Node.js Buffer subclasses Uint8Array
+  // but overrides `slice()` to return another view over the original pooled
+  // backing store. Copy explicitly so the result contains exactly this view.
+  const copy = new Uint8Array(u8.byteLength);
+  copy.set(u8);
+  return copy.buffer;
 }

@@ -140,6 +140,7 @@ export { type HyperlinkTarget, openExternalHyperlink } from '@silurus/ooxml-core
 // password-protected or legacy-binary .ppt file). Re-exported so
 // `@silurus/ooxml/pptx` consumers can narrow on `err.code`.
 export {
+  LegacyOfficeConversionError,
   OoxmlError,
   OoxmlDecodedImageLimitError,
   OoxmlResourceLimitError,
@@ -149,6 +150,13 @@ export {
   type OoxmlDecodedImageLimitMetric,
   type DecodedImageBudgetStrategy,
   type ImageResourceOptions,
+  type LegacyOfficeConversionFailureReason,
+  type LegacyOfficeConversionInput,
+  type LegacyOfficeConversionOptions,
+  type LegacyOfficeConversionRecord,
+  type LegacyOfficeConversionResult,
+  type LegacyOfficeConverter,
+  type LegacyOfficeFormat,
   type OoxmlErrorCode,
   type OoxmlErrorStage,
   type OoxmlFormat,
