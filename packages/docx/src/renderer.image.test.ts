@@ -81,7 +81,7 @@ describe('docx lazy image bytes', () => {
 
     expect(globalThis.createImageBitmap).toHaveBeenCalledWith(
       expect.any(Blob),
-      expect.objectContaining({ resizeWidth: 200, resizeQuality: 'high' }),
+      expect.objectContaining({ resizeWidth: 400, resizeHeight: 200, resizeQuality: 'high' }),
     );
   });
 
@@ -123,7 +123,7 @@ describe('docx lazy image bytes', () => {
       options?: ImageBitmapOptions,
     ) => ({
       width: options?.resizeWidth ?? (source instanceof Blob ? 2 : source.width),
-      height: options?.resizeWidth ? 1 : source instanceof Blob ? 2 : source.height,
+      height: options?.resizeHeight ?? (source instanceof Blob ? 2 : source.height),
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', createBitmap);
@@ -151,6 +151,7 @@ describe('docx lazy image bytes', () => {
     expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
     expect(createBitmap).toHaveBeenNthCalledWith(2, expect.any(ExactColorSurface), {
       resizeWidth: 1,
+      resizeHeight: 1,
       resizeQuality: 'high',
     });
   });
@@ -194,7 +195,7 @@ describe('docx lazy image bytes', () => {
       const width = options?.resizeWidth ?? source.width;
       return {
         width,
-        height: Math.ceil(source.height * width / source.width),
+        height: options?.resizeHeight ?? source.height,
         finalIndex: finalIndex++,
         close: vi.fn(),
       } as unknown as ImageBitmap;
@@ -206,11 +207,11 @@ describe('docx lazy image bytes', () => {
     ] as const;
 
     const wide = await decodeRaster(...args, { targetWidthPx: 4, targetHeightPx: 1 });
-    const tall = await decodeRaster(...args, { targetWidthPx: 2, targetHeightPx: 3 });
+    const tall = await decodeRaster(...args, { targetWidthPx: 4, targetHeightPx: 3 });
     const wideAgain = await decodeRaster(...args, { targetWidthPx: 4, targetHeightPx: 1 });
 
-    expect(wide).toMatchObject({ width: 4, height: 2 });
-    expect(tall).toMatchObject({ width: 6, height: 3 });
+    expect(wide).toMatchObject({ width: 4, height: 1 });
+    expect(tall).toMatchObject({ width: 4, height: 3 });
     expect(wideAgain).toBe(wide);
     expect(fetchImage).toHaveBeenCalledOnce();
     expect(surfaces).toHaveLength(2);
@@ -219,10 +220,12 @@ describe('docx lazy image bytes', () => {
     expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
     expect(createBitmap).toHaveBeenNthCalledWith(2, surfaces[0], {
       resizeWidth: 4,
+      resizeHeight: 1,
       resizeQuality: 'high',
     });
     expect(createBitmap).toHaveBeenNthCalledWith(3, surfaces[1], {
-      resizeWidth: 6,
+      resizeWidth: 4,
+      resizeHeight: 3,
       resizeQuality: 'high',
     });
     // Exact white becomes transparent first; the still-opaque gray neighbour is
@@ -291,6 +294,7 @@ describe('docx lazy image bytes', () => {
       expect(createBitmap).toHaveBeenCalledTimes(2);
       expect(createBitmap).toHaveBeenNthCalledWith(2, expect.any(FallbackSurface), {
         resizeWidth: 1,
+        resizeHeight: 1,
         resizeQuality: 'high',
       });
     } finally {
@@ -345,7 +349,60 @@ describe('docx lazy image bytes', () => {
     expect(createBitmap).toHaveBeenCalledTimes(2);
   });
 
-  it('preserves native decoding for an ordinary raster that fits the document budget', async () => {
+  it('downsamples an oversized effect source before allocating its working surfaces', async () => {
+    const png = new Uint8Array(26);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+    const view = new DataView(png.buffer);
+    view.setUint32(16, 3_600);
+    view.setUint32(20, 2_500); // 9 MP: above the four-surface 8 MP ceiling.
+    const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
+    class BudgetSurface {
+      constructor(readonly width: number, readonly height: number) {}
+      getContext() {
+        return {
+          drawImage() {},
+          getImageData: () => ({
+            data: new Uint8ClampedArray([255, 255, 255, 255]),
+            width: this.width,
+            height: this.height,
+          }),
+          putImageData() {},
+        };
+      }
+    }
+    vi.stubGlobal('OffscreenCanvas', BudgetSurface);
+    const createBitmap = vi.fn(async (
+      source: Blob | BudgetSurface,
+      options?: ImageBitmapOptions,
+    ) => ({
+      width: options?.resizeWidth ?? (source instanceof Blob ? 3_600 : source.width),
+      height: options?.resizeHeight ?? (source instanceof Blob ? 2_500 : source.height),
+      close() {},
+    }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', createBitmap);
+
+    await expect(decodeRaster(
+      'word/media/oversized-effect.png',
+      'image/png',
+      'FFFFFF',
+      fetchImage,
+      0,
+      0,
+      { clr1: '000000', clr2: 'FFFFFF' },
+      false,
+      undefined,
+      { targetWidthPx: 300, targetHeightPx: 250 },
+    )).resolves.toMatchObject({ width: 300, height: 250 });
+    expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob), {
+      resizeWidth: 300,
+      resizeHeight: 250,
+      resizeQuality: 'high',
+    });
+    expect(createBitmap).toHaveBeenNthCalledWith(2, expect.any(BudgetSurface));
+  });
+
+  it('preserves native decoding for an ordinary raster that fits by default', async () => {
     const png = new Uint8Array(24);
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     png.set([0x49, 0x48, 0x44, 0x52], 12);
@@ -368,6 +425,35 @@ describe('docx lazy image bytes', () => {
     await preloadImages(doc, fetchImage, undefined, 1);
 
     expect(globalThis.createImageBitmap).toHaveBeenCalledWith(blob);
+  });
+
+  it('decodes an ordinary raster at its bounded display grid by default', async () => {
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    png.set([0x49, 0x48, 0x44, 0x52], 12);
+    new DataView(png.buffer).setUint32(16, 800);
+    new DataView(png.buffer).setUint32(20, 600);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const fetchImage = vi.fn(async () => blob);
+    const doc = {
+      body: [{
+        type: 'paragraph',
+        runs: [{
+          type: 'image', imagePath: 'word/media/photo.png', mimeType: 'image/png',
+          widthPt: 100, heightPt: 75,
+        }],
+      }],
+      headers: {},
+      footers: {},
+    } as unknown as DocxDocumentModel;
+
+    await preloadImages(doc, fetchImage, undefined, 1, { resolution: 'display' });
+
+    expect(globalThis.createImageBitmap).toHaveBeenCalledWith(blob, {
+      resizeWidth: 100,
+      resizeHeight: 75,
+      resizeQuality: 'high',
+    });
   });
 
   it('keeps DrawingML pixel effects on the authored source grid during preload', async () => {
@@ -431,7 +517,7 @@ describe('docx lazy image bytes', () => {
     expect(render).toHaveBeenCalledOnce();
   });
 
-  it('display-decodes the redacted issue #1426 image class even though each source is below 32 MP', async () => {
+  it('keeps issue #1426 sources within geometry-weighted shares without an aggregate error', async () => {
     const png = (width: number, height: number) => {
       const bytes = new Uint8Array(24);
       bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -463,13 +549,16 @@ describe('docx lazy image bytes', () => {
 
     await preloadImages(doc, fetchImage, undefined, 2);
 
+    // The dominant photograph fits its geometry-weighted share and therefore
+    // keeps the established native-quality decode. The much smaller header
+    // cannot consume the remainder of the document budget and falls back to
+    // its exact display grid.
     expect(globalThis.createImageBitmap).toHaveBeenCalledWith(
       blobs.get('word/media/photo.png'),
-      expect.objectContaining({ resizeWidth: 600, resizeQuality: 'high' }),
     );
     expect(globalThis.createImageBitmap).toHaveBeenCalledWith(
       blobs.get('word/media/header.png'),
-      expect.objectContaining({ resizeWidth: 201, resizeQuality: 'high' }),
+      expect.objectContaining({ resizeWidth: 400, resizeHeight: 116, resizeQuality: 'high' }),
     );
   });
 

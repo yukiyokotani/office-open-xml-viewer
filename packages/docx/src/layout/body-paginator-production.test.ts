@@ -915,6 +915,105 @@ describe('canonical body producer', () => {
     expect(layout.pages[0]!.layers.body.map((node) => node.source.path)).toEqual([[0]]);
   });
 
+  it('admits a table fragment whose charge matches the region within floating-point precision', () => {
+    // The region extent (blockEnd - blockStart) and the fragment charge (a sum
+    // of retained row advances) reconstruct the same authored boundary through
+    // different arithmetic, so they can disagree by single-ULP drift. With
+    // zero footnote reserve the retry request is identical to the first, so a
+    // raw `>` fit test can never converge on such a fragment.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          if (!request.cursor) {
+            const extentPt = request.availableBlockExtentPt
+              + Number.EPSILON * request.availableBlockExtentPt / 2;
+            return {
+              layout: table('head-slice', request.input.source, extentPt),
+              blockExtentPt: extentPt,
+              nextCursor: {
+                kind: 'table' as const,
+                cursor: { rowIndex: 1, rowFragmentIndex: 0, cells: [] },
+              },
+            };
+          }
+          return {
+            layout: table('tail-slice', request.input.source, 30),
+            blockExtentPt: 30,
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: { kind: 'table', source: source(0) },
+      }],
+    } as unknown as BodyLayoutInput;
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+
+    expect(layout.pages).toHaveLength(2);
+    expect(layout.pages[0]!.layers.body[0]!.id).toContain('head-slice');
+    expect(layout.pages[1]!.layers.body[0]!.id).toContain('tail-slice');
+  });
+
+  it('still reports non-convergence for table overshoot beyond floating-point precision', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          const extentPt = request.availableBlockExtentPt + 1;
+          return {
+            layout: table('oversized-slice', request.input.source, extentPt),
+            blockExtentPt: extentPt,
+            nextCursor: {
+              kind: 'table' as const,
+              cursor: { rowIndex: 1, rowFragmentIndex: 0, cells: [] },
+            },
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [{
+        kind: 'body-block',
+        block: { kind: 'table', source: source(0) },
+      }],
+    } as unknown as BodyLayoutInput;
+
+    expect(() => paginateBody(input, services, { currentDateMs: 0 }))
+      .toThrow('Table footnote admission did not converge');
+  });
+
   it('admits references from each accepted split-table slice only', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },

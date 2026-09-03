@@ -33,9 +33,7 @@ import {
   type PullSessionResponse,
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
-import { renderWorksheetViewport } from './render-orchestrator.js';
 import { workerRenderDeps } from './worker-render-deps.js';
-import { inheritSheetRenderCache, markAutoRowHeightsPrepared } from './renderer.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
@@ -82,6 +80,14 @@ const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
 });
+// Keep the renderer and its orchestrator behind explicit module boundaries. The
+// production worker is flattened into one self-contained asset, and a static
+// function import can otherwise be hoisted past the initializers of shared draw
+// dependencies that are also reached by optional renderers. Awaiting the modules
+// preserves ESM initialization order, so the shared border dash tables and
+// pattern-fill caches exist before the first bordered or filled cell is stroked.
+const rendererModule = import('./renderer.js');
+const orchestratorModule = import('./render-orchestrator.js');
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
   (sheetIndex, worksheet, measured, resourceUsage) => {
@@ -237,6 +243,8 @@ self.onmessage = async (e: MessageEvent<
     if (req.type === 'renderViewport') {
       if (!workbook) throw new Error('Workbook not loaded');
       await fontsLoaded;
+      const { inheritSheetRenderCache, markAutoRowHeightsPrepared } = await rendererModule;
+      const { renderWorksheetViewport } = await orchestratorModule;
       const ws = sheetCache.get(req.sheetIndex);
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
       // Apply view-only size mutations to a render-local projection. Multiple

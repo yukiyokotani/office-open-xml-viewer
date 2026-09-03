@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TiffDecodeError } from '@silurus/ooxml-core';
+import { OptionalImageCodecUnavailableError, TiffDecodeError } from '@silurus/ooxml-core';
 import type { Slide } from './types.js';
 
 const coreMocks = vi.hoisted(() => ({
@@ -28,7 +28,10 @@ function pngHeader(width: number, height: number): Uint8Array {
   return bytes;
 }
 
-function canvas(drawImage?: ReturnType<typeof vi.fn>): HTMLCanvasElement {
+function canvas(
+  drawImage?: ReturnType<typeof vi.fn>,
+  fillText?: ReturnType<typeof vi.fn>,
+): HTMLCanvasElement {
   const state: Record<string, unknown> = {
     fillStyle: '', strokeStyle: '', globalAlpha: 1, lineWidth: 1,
   };
@@ -36,6 +39,7 @@ function canvas(drawImage?: ReturnType<typeof vi.fn>): HTMLCanvasElement {
     get(target, property: string) {
       if (property in target) return target[property];
       if (property === 'drawImage' && drawImage) return drawImage;
+      if (property === 'fillText' && fillText) return fillText;
       return () => undefined;
     },
     set(target, property: string, value) {
@@ -83,6 +87,59 @@ describe('PPTX display-sized picture decode', () => {
     })).rejects.toBe(error);
   });
 
+  it('paints a placeholder and continues when only the optional TIFF codec is absent', async () => {
+    coreMocks.decode.mockRejectedValue(new OptionalImageCodecUnavailableError('tiff'));
+    const fillText = vi.fn();
+    const slide = {
+      index: 0,
+      slideNumber: 1,
+      background: null,
+      elements: [{
+        type: 'picture',
+        x: 0,
+        y: 0,
+        width: 4_572_000,
+        height: 3_429_000,
+        rotation: 0,
+        flipH: false,
+        flipV: false,
+        imagePath: 'ppt/media/optional.tiff',
+        mimeType: 'image/tiff',
+      }],
+    } as Slide;
+
+    await expect(renderSlide(canvas(undefined, fillText), slide, 9_144_000, 6_858_000, {
+      width: 960,
+      dpr: 1,
+      fetchImage: vi.fn(async () => new Blob(['tiff'], { type: 'image/tiff' })),
+    })).resolves.toBeDefined();
+
+    expect(fillText).toHaveBeenCalledWith('TIFF image unavailable', 240, 180, 480);
+  });
+
+  it('contains a missing optional TIFF codec in a slide background', async () => {
+    coreMocks.decode.mockRejectedValue(new OptionalImageCodecUnavailableError('tiff'));
+    const fillText = vi.fn();
+    const slide = {
+      index: 0,
+      slideNumber: 1,
+      background: {
+        fillType: 'image',
+        imagePath: 'ppt/media/background.tiff',
+        mimeType: 'image/tiff',
+      },
+      elements: [],
+    } as Slide;
+
+    await expect(renderSlide(canvas(undefined, fillText), slide, 9_144_000, 6_858_000, {
+      width: 960,
+      dpr: 1,
+      fetchImage: vi.fn(async () => new Blob(['tiff'], { type: 'image/tiff' })),
+    })).resolves.toBeDefined();
+
+    expect(fillText).toHaveBeenCalledWith('TIFF image unavailable', 480, 360, 960);
+  });
+
   it('derives full-source device pixels from the frame, effective DPR, and srcRect crop', async () => {
     const slide = {
       index: 0,
@@ -114,9 +171,10 @@ describe('PPTX display-sized picture decode', () => {
     expect(coreMocks.decode).toHaveBeenCalled();
     for (const call of coreMocks.decode.mock.calls) {
       expect(call[4]).toMatchObject({
-        // 480 CSS px × DPR 2, then / 50% visible source width.
-        targetWidthPx: 1920,
-        targetHeightPx: 720,
+        // 480 CSS px × DPR 2, then / 50% visible source width, retained at
+        // 2× that display grid while the geometry share has room.
+        targetWidthPx: 3840,
+        targetHeightPx: 1440,
       });
     }
   });
@@ -148,7 +206,7 @@ describe('PPTX display-sized picture decode', () => {
       'image/png',
       undefined,
       expect.any(Function),
-      expect.objectContaining({ targetWidthPx: 2068, targetHeightPx: 1512 }),
+      expect.objectContaining({ targetWidthPx: 4136, targetHeightPx: 3024 }),
     );
     expect(drawImage).toHaveBeenCalledWith(
       coreMocks.bitmap,

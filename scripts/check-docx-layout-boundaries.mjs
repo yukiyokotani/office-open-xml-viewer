@@ -132,9 +132,15 @@ const SHARED_PAINT_IMPORTS = new Map([
     // whether browser target-resize is available. Both predicates remain
     // paint-resource admission and cannot affect acquired layout geometry.
     ['inspectCachedRasterSource', 'value'],
+    ['isBrowserResizableRasterMimeType', 'value'],
     ['isDecodeTargetResizableRasterFormat', 'value'],
     ['isOoxmlDecodedImageLimitError', 'value'],
     ['isTiffDecodeError', 'value'],
+    // Missing optional image codecs are contained at paint-resource acquisition;
+    // the placeholder consumes only the already-retained authored bounds.
+    ['isOptionalImageCodecUnavailableError', 'value'],
+    ['paintOptionalImagePlaceholder', 'value'],
+    ['OptionalImageCodecUnavailableError', 'type'],
     ['HyperlinkTarget', 'type'],
     ['imageNaturalSize', 'value'],
     ['isHTMLCanvas', 'value'],

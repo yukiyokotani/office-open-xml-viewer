@@ -327,8 +327,13 @@ README, docs, and Storybook public-facing code examples should:
 
 Keep announcements concise and user-facing:
 
-- state the supported capability and any required migration;
-- omit implementation detail that does not change a user's decision or action;
+- write first for readers who do not know the implementation: lead with the
+  visible outcome and group low-level fixes by the user problem they solve;
+- state explicitly whether migration is required. When it is, give the minimum
+  steps and name any changed default or behavior; when it is not, say so plainly;
+- omit implementation detail that does not change a user's decision or action.
+  If a technical qualification is useful, put it in a final `Technical note`
+  section after the outcome and migration guidance;
 - keep version-sensitive bundle measurements on the stable `/bundle-size` page,
   not in release announcements;
 - do not link API reference details directly to release notes. Use a stable

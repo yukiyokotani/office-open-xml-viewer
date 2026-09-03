@@ -15,6 +15,9 @@ class RecordingContext {
   save(): void { this.operations.push('save'); }
   restore(): void { this.operations.push('restore'); }
   drawImage(): void { this.operations.push('drawImage'); }
+  fillText(): void { this.operations.push('fillText'); }
+  translate(): void { this.operations.push('translate'); }
+  rotate(): void { this.operations.push('rotate'); }
   setTransform(): void { this.operations.push('setTransform'); }
   clearRect(): void { this.operations.push('clearRect'); }
 }
@@ -176,6 +179,65 @@ describe('vertical OpenType paint target projection', () => {
       widthPt: 8,
       heightPt: 9,
     }]);
+  });
+
+  it('contains a missing optional TIFF codec at the retained image node', async () => {
+    const resourceKey = 'image:body:optional-tiff';
+    const frame = { xPt: 20, yPt: 10, widthPt: 80, heightPt: 40 };
+    const drawing = {
+      kind: 'drawing' as const,
+      id: 'optional-tiff-drawing',
+      source: { story: 'body' as const, storyInstance: 'body', path: [0, 2] },
+      flowDomainId: 'body:domain',
+      flowBounds: frame,
+      inkBounds: frame,
+      advancePt: 0,
+      ordinaryFlow: false,
+      commands: [{
+        kind: 'resource' as const,
+        resourceKind: 'image' as const,
+        resourceKey,
+        rect: frame,
+      }],
+    };
+    const descriptor = {
+      kind: 'image' as const,
+      resourceKey,
+      partPath: 'word/media/optional.tiff',
+      mimeType: 'image/tiff',
+      intrinsicSize: { widthPt: 80, heightPt: 40 },
+    };
+    const imageRegistry: PaintResourceRegistry = {
+      keys: [resourceKey],
+      descriptors: [descriptor],
+      resolve() { return descriptor as never; },
+    };
+    const directPage: LayoutPage = {
+      ...page,
+      layers: buildPageLayers([{ layer: 'body', node: drawing }]),
+    };
+    const directLayout: DocumentLayout = { pages: [directPage], diagnostics: [] };
+    const canvas = new WorkerCanvas();
+    const fetchImage = vi.fn(async () => new Blob([
+      tiffDimensions(80, 40) as BlobPart,
+    ], { type: 'image/tiff' }));
+
+    await expect(renderSelectedDocumentPage(
+      directLayout,
+      directPage,
+      canvas as unknown as OffscreenCanvas,
+      {
+        dpr: 1,
+        parseError: false,
+        registry: imageRegistry,
+        rasterPaintOccurrences: rasterPaintOccurrencesForPage(directLayout, 0),
+        textRuns: [],
+        fetchImage,
+      },
+    )).resolves.toBeUndefined();
+
+    expect(canvas.context.operations).toContain('fillText');
+    expect(canvas.context.operations).not.toContain('drawImage');
   });
 
   it('prefetches one relationship-backed chart picture marker before synchronous paint', async () => {

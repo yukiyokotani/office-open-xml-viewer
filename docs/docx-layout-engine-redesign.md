@@ -140,8 +140,12 @@ plus legal grapheme boundaries, which also constrain emergency overlong-word
 splits. Each span carries one immutable core `CanvasFontRoute`;
 measurement, kashida/vertical probes, and paint serialize that same complete CSS
 family list. Exact registered tuples win first. Otherwise an authored family is
-an engine-scoped native CSS request with a fontTable-derived generic tail (or the
-fixed sans default), not a claim that a local face was discovered.
+an engine-scoped native CSS request with a fontTable-derived generic tail, then
+the shared bounded face-name classifier for faces absent from the table. When no
+OOXML font slot resolves at any level, the DOCX consumer policy uses a serif
+generic default for Latin and complex-script slots while preserving the existing
+East Asian sans fallback, as permitted by §17.3.2.26; none of these fallback
+routes claims that a local face was discovered.
 Non-content glyphs use the same authority. Effective numbering-level run facts
 and paragraph-mark run facts remain private parser-wire metadata. The
 parser-model boundary projects numbering into a plain immutable shape input;

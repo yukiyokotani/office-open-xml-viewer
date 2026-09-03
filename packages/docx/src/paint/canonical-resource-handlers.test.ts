@@ -143,6 +143,33 @@ describe('canonical Canvas paint resource handlers', () => {
     expect(operations).toEqual([]);
   });
 
+  it('paints a placeholder for an image whose optional TIFF codec is unavailable', () => {
+    const resourceKey = 'image:tiff-unavailable';
+    const paint = painter(
+      [{
+        kind: 'image', resourceKey, partPath: 'word/media/image.tiff', mimeType: 'image/tiff',
+        intrinsicSize: { widthPt: 40, heightPt: 30 }, rotation: 90,
+      }],
+      [{
+        kind: 'image', resourceKey,
+        handle: unavailablePaintResourceHandle(
+          'optional TIFF codec unavailable',
+          { placeholder: 'tiff' },
+        ),
+      }],
+    );
+    const { ctx, operations } = recordingContext();
+
+    paint.paint(resourceKey, 'image', { xPt: 10, yPt: 20, widthPt: 40, heightPt: 30 }, ctx);
+
+    expect(operations).toEqual(expect.arrayContaining([
+      { name: 'translate', args: [30, 35] },
+      { name: 'rotate', args: [Math.PI / 2] },
+      { name: 'fillText', args: ['TIFF image unavailable', 0, 0, 40] },
+    ]));
+    expect(operations.some(operation => operation.name === 'drawImage')).toBe(false);
+  });
+
   it('passes chart bounds and point scaling once to the shared core renderer', () => {
     const resourceKey = 'chart:body:0';
     const paint = painter([{

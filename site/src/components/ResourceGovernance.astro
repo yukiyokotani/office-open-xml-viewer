@@ -23,16 +23,17 @@
       </div>
     </div>
     <p class="rg-caveat">
-      Raster decode is also governed uniformly. Target-resizable rasters (browser formats and TIFF
-      when its optional codec is configured) keep their
-      native decode while a complete paint fits the hard surface ceilings and the default
-      <strong>128 MiB decoded budget</strong>. When native ownership would cross a boundary, they decode
-      at the current canvas/DPR requirement; if those display targets still exceed the budget,
-      adaptive mode lowers them by one quality ratio instead of rejecting the document. Image-bearing paints for one
+      Raster decode is also governed uniformly. Ordinary browser rasters receive a geometry-weighted
+      share of the <strong>128 MiB decoded budget</strong> before source extraction, so each image can
+      flow directly into decode. Sources that fit keep their native grid; oversized sources use up to
+      a 2x canvas/DPR grid when their share has headroom. If the complete set of display grids exceeds the budget, adaptive mode
+      reduces them by one uniform quality ratio. Image-bearing paints for one
       document are serialized so overlapping paints cannot each consume the full budget, while the admitted paint still decodes up to
       two images concurrently. Applications can configure <code>imageResources.decodedByteBudget</code>
-      up to 512 MiB or select <code>strategy: 'strict'</code>. The encoded source grid, per-axis and
-      per-surface ceilings remain non-disableable, and non-resizable sources remain subject to
+      up to 512 MiB, select <code>strategy: 'strict'</code>, or use
+      <code>resolution: 'display'</code> to minimize retained raster pixels. The encoded source grid, per-axis and
+      per-surface ceilings remain non-disableable. Natural-size consumers, pixel effects that need
+      the authored grid, and non-resizable sources remain subject to
       those hard ceilings, so a tiny display request cannot bypass decode-bomb
       protection. These are deterministic admission guards—not exact
       JavaScript, WASM, canvas or GPU accounting—so they bound planned and retained RGBA surfaces but cannot
@@ -51,6 +52,7 @@
   imageResources: {'{'}
     decodedByteBudget: <span class="num">128</span> * <span class="num">1024</span> * <span class="num">1024</span>,
     strategy: <span class="str">'adaptive'</span>,
+    resolution: <span class="str">'native-if-fit'</span>,
   {'}'},
   onResourceMetrics(metrics) {'{'}
     analytics.record(<span class="str">'ooxml-resource-usage'</span>, metrics);

@@ -89,6 +89,20 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
     v.destroy();
   });
 
+  it('zoomOut returns to an initial width fit below zoomMin', () => {
+    // Natural page width is 133.33px, so a 5px host establishes a 0.0375 fit.
+    // That opening fit must remain reachable after crossing the zoom ladder.
+    const { v } = setup({}, { w: 5, h: 400 });
+    expect(v.getScale()).toBeCloseTo(0.0375, 6);
+
+    v.zoomIn();
+    expect(v.getScale()).toBeGreaterThan(0.0375);
+    v.zoomOut();
+
+    expect(v.getScale()).toBeCloseTo(0.0375, 6);
+    v.destroy();
+  });
+
   it('fitWidth restores the width-fit base after a zoom', () => {
     const { v } = setup();
     v.setScale(4); // zoom right in
@@ -96,6 +110,62 @@ describe('DocxScrollViewer IX9 zoom contract', () => {
     v.fitWidth();
     // Back to the width-fit base = 200 / (100 × 4/3) = 1.5.
     expect(v.getScale()).toBeCloseTo(1.5, 5);
+    v.destroy();
+  });
+
+  it('fitWidth and the initial base use the widest page in the document', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(2, [
+      { widthPt: 100, heightPt: 200 },
+      { widthPt: 100.05, heightPt: 200 },
+    ]);
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+
+    const widestFit = 200 / (100.05 * 4 / 3);
+    expect(v.getScale()).toBeCloseTo(widestFit, 8);
+    v.setScale(3);
+    v.fitWidth();
+    expect(v.getScale()).toBeCloseTo(widestFit, 8);
+    v.destroy();
+  });
+
+  it('re-fits when progressive layout reveals a wider later page', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakeDocxEngine(1, [
+      { widthPt: 100, heightPt: 200 },
+      { widthPt: 120, heightPt: 200 },
+    ]);
+    const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
+      paddingLeft: 0,
+      paddingRight: 0,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientWidth = 200;
+    scrollHost.clientHeight = 400;
+    v.relayout();
+    expect(v.getScale()).toBeCloseTo(1.5, 8);
+
+    engine.setPageCount(2);
+    v.relayout();
+
+    expect(v.getScale()).toBeCloseTo(1.25, 8);
     v.destroy();
   });
 

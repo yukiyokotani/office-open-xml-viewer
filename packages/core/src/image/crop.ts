@@ -171,10 +171,11 @@ export function sourceRasterTargetSize(
   const logicalHeight = srcRect ? 1 - srcRect.t - srcRect.b : 1;
   if (!Number.isFinite(logicalWidth) || !Number.isFinite(logicalHeight)) return null;
   if (!(logicalWidth > 0) || !(logicalHeight > 0) || !srcRectHasVisibleArea(srcRect)) return null;
-  return {
-    width: Math.ceil(destinationWidthPx / logicalWidth),
-    height: Math.ceil(destinationHeightPx / logicalHeight),
-  };
+  const width = Math.ceil(destinationWidthPx / logicalWidth);
+  const height = Math.ceil(destinationHeightPx / logicalHeight);
+  return Number.isFinite(width) && Number.isFinite(height)
+    ? { width, height }
+    : null;
 }
 
 /** Raster target size (pt) for decoding an embedded image. A browser raster's

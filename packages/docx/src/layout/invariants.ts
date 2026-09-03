@@ -906,7 +906,10 @@ function assertDocumentLayoutUnchecked(layout: DocumentLayout): void {
             `${node.id} references a body flow domain without a section region`,
           );
         }
-        if (node.flowBounds.yPt + node.flowBounds.heightPt > bodyRegion.blockEndPt) {
+        if (!atMostWithinFloatingPrecision(
+          node.flowBounds.yPt + node.flowBounds.heightPt,
+          bodyRegion.blockEndPt,
+        )) {
           throw new LayoutInvariantError('BOTTOM_MARGIN_INVASION', `${node.id} crosses logical block end`);
         }
       }

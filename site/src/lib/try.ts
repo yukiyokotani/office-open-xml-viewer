@@ -38,6 +38,12 @@ export interface RenderResult {
   finalUnits?: Promise<number>;
 }
 
+export interface RenderProgress {
+  format: 'docx' | 'pptx';
+  units: number;
+  unitLabel: 'page' | 'slide';
+}
+
 function scrollViewerHost(stage: HTMLElement): HTMLDivElement {
   const host = document.createElement('div');
   host.className = 'lv-scroll-viewer';
@@ -63,7 +69,11 @@ export function disposeRenderedFile(): void {
   activeCleanup = null;
 }
 
-export async function renderFile(stage: HTMLElement, file: File): Promise<RenderResult> {
+export async function renderFile(
+  stage: HTMLElement,
+  file: File,
+  onProgress?: (progress: Readonly<RenderProgress>) => void,
+): Promise<RenderResult> {
   const generation = ++renderGeneration;
   // Any new selection — supported or not — supersedes and releases the current
   // viewer before validation. The page hides the panel on validation failure, so
@@ -88,7 +98,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       mode: 'main',
       useGoogleFonts: true,
       showZoomSlider: true,
-      comments: true,
+      comments: false,
       math,
       ...fullRenderers,
     });
@@ -108,6 +118,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
 
   if (ext === 'pptx') {
     const host = scrollViewerHost(stage);
+    let viewer!: PptxScrollViewer;
     const viewerOptions: PptxScrollViewerOptions = {
       gap: VIEWER_GAP,
       overscan: 0,
@@ -118,15 +129,24 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
       zoomMin: MIN_SCALE,
       pageShadow: false,
       useGoogleFonts: true,
-      comments: true,
+      comments: false,
       math,
       // Keep progressive preflight and paint off the UI thread while the user
       // scrolls through slides that are still becoming available.
       mode: 'worker',
       progressiveLayout: true,
+      onLayoutPartial: ({ availableUnits }) => {
+        if (generation !== renderGeneration) return;
+        // Try Yours intentionally keeps every already-paintable slide mounted:
+        // the next slides continue loading without requiring reader scroll and
+        // the complete text layer remains available to native Find.
+        viewerOptions.overscan = availableUnits;
+        viewer.relayout();
+        onProgress?.({ format: 'pptx', units: availableUnits, unitLabel: 'slide' });
+      },
       ...fullRenderers,
     };
-    const viewer = new PptxScrollViewer(host, viewerOptions);
+    viewer = new PptxScrollViewer(host, viewerOptions);
     // Do not force an absolute scale here. ScrollViewer derives its initial
     // scale from the laid-out container width and keeps that fit on resize, so
     // a wide slide never opens with horizontal overflow in this workspace.
@@ -165,6 +185,7 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
   }
 
   const host = scrollViewerHost(stage);
+  let viewer!: DocxScrollViewer;
   const viewerOptions: DocxScrollViewerOptions = {
     gap: VIEWER_GAP,
     overscan: 0,
@@ -173,18 +194,27 @@ export async function renderFile(stage: HTMLElement, file: File): Promise<Render
     zoomMin: MIN_SCALE,
     pageShadow: false,
     useGoogleFonts: true,
-    comments: true,
+    comments: false,
     math,
     // Keep progressive pagination and painting off the UI thread so scrolling
     // remains responsive while later pages are still being prepared.
     mode: 'worker',
     progressiveLayout: true,
+    onLayoutPartial: ({ availableUnits }) => {
+      if (generation !== renderGeneration) return;
+      // Grow the preview and start painting each published page immediately.
+      // Waiting for the final pagination result made an idle reader see one
+      // page for seconds even though later pages were already paintable.
+      viewerOptions.overscan = availableUnits;
+      viewer.relayout();
+      onProgress?.({ format: 'docx', units: availableUnits, unitLabel: 'page' });
+    },
     ...fullRenderers,
   };
-  const viewer = new DocxScrollViewer(host, viewerOptions);
+  viewer = new DocxScrollViewer(host, viewerOptions);
   // As with PPTX, the viewer-owned width fit is the initial zoom contract for
-  // Try Yours. It can go below zoomMin when necessary to admit a wide page;
-  // zoomMin remains the floor for subsequent user-driven zoom operations.
+  // Try Yours. When it falls below zoomMin, that fit stays reachable as the
+  // effective floor for subsequent user-driven zoom operations.
   try {
     await viewer.load(buffer);
   } catch (error) {

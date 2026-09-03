@@ -7,6 +7,76 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.85.2 — 2026-09-03
+
+Patch release restoring smooth progressive viewing in worker mode and fixing
+large-image decoding, PowerPoint placeholder alignment, and provisional Word
+pagination.
+
+- **responsive progressive viewing:** Try Yours continues loading later pages
+  while idle, updates page totals as pages arrive, and starts image decoding
+  without waiting for whole-document raster inspection.
+- **large-image reliability and clarity:** decoded raster dimensions now match
+  the two-axis resource plan, avoiding false decoded-image-limit failures for
+  poster-sized slides while preserving native image detail when it fits the
+  configured budget.
+- **PowerPoint text placement:** placeholder text boxes inherit their vertical
+  anchor from the matching layout placeholder, preventing top-aligned text from
+  appearing at the bottom of large slides.
+- **stable Word pagination:** documents whose header or footer reserve is still
+  converging no longer publish a transient page assignment that can briefly
+  place the next page's content on the previous page.
+- **Try Yours defaults:** comments are hidden in the public file preview.
+- **compatibility:** no existing option or method is removed or renamed, and no
+  application changes are required. The optional image resolution policy can be
+  set to `display`; its default remains `native-if-fit`.
+
+## 0.85.1 — 2026-09-02
+
+Compatible patch release restoring fitted viewing after zoom and preventing a
+floating-point edge case from rejecting Word tables that fit on the page.
+
+- **fitted zoom:** after zooming into poster-sized PPTX slides or DOCX pages,
+  zooming out can return to the original fit-to-viewport scale even when that
+  scale is below the configured manual zoom minimum.
+- **mixed Word page sizes:** fit-to-width uses the widest page in the document,
+  and progressive rendering refits when a wider page becomes available, without
+  leaving an avoidable horizontal scrollbar.
+- **Word table stability:** tolerate single-ULP arithmetic drift when a table
+  fragment exactly meets a page boundary, avoiding a false non-convergence
+  error while retaining strict handling for genuine overflow.
+- **compatibility:** no existing option or method is removed or renamed, and no
+  application changes are required.
+
+## 0.85.0 — 2026-09-02
+
+Compatible minor release making image-heavy Office files more reliable while
+improving rendering fidelity and stability across regular and worker modes.
+
+- **large images:** open DOCX, XLSX and PPTX files whose high-resolution source
+  images would previously exceed the decoded-image limit. Oversized rasters are
+  prepared for the current display size, and zooming can request a sharper
+  result without retaining unnecessary source pixels.
+- **configurable image policy:** add the shared `imageResources` option for
+  applications that need a different decoded-image budget or strict rejection.
+  Non-disableable source, dimension and per-image safety limits remain in place.
+- **broader TIFF support:** render bounded bilevel, grayscale, RGB, RGBA,
+  process-CMYK and CCITT Group 4 TIFF images through the existing optional TIFF
+  entry, including display-sized output for Office image paints.
+- **worker reliability:** keep SVG images, PowerPoint text and styled Excel
+  sheets consistent between regular and worker rendering, with clearer image
+  and worksheet diagnostics.
+- **PowerPoint viewing:** keep the visible slide anchored while zoom settles,
+  including at maximum zoom, and improve placeholder formatting, built-in table
+  styles and several chart layouts.
+- **Word fidelity:** retain page-dependent fields without cached results and use
+  Word-compatible default font intent for Latin and complex-script text while
+  preserving authored and font-table choices.
+- **compatibility:** no existing option or method is removed or renamed. Most
+  applications require no source changes. When the optional TIFF codec is not
+  enabled, the document remains viewable and the affected image is shown as an
+  unavailable-image placeholder.
+
 ## 0.84.1 — 2026-09-01
 
 Compatible patch release tightening the Word compatibility boundaries introduced

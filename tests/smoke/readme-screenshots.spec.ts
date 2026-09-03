@@ -20,7 +20,10 @@ async function waitForLoaded(page: import('@playwright/test').Page): Promise<voi
     null,
     { timeout: 60_000 },
   );
-  // let the final render settle
+  // A Google-font request may outlive the initial Viewer load and trigger a
+  // final layout paint when the FontFaceSet settles. Capture that stable paint,
+  // not the system-font fallback frame.
+  await page.evaluate(async () => { await document.fonts.ready; });
   await page.waitForTimeout(400);
 }
 
@@ -51,7 +54,8 @@ test.describe('README screenshots', () => {
     await page.getByRole('button', { name: 'Dashboard', exact: true })
       .waitFor({ state: 'visible', timeout: 60_000 });
     await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 60_000 });
-    await page.waitForTimeout(600);
+    await page.evaluate(async () => { await document.fonts.ready; });
+    await page.waitForTimeout(400);
     await page.screenshot({ path: `${OUT_DIR}/xlsx.png`, fullPage: false });
   });
 });

@@ -56,6 +56,7 @@ const demoId = `built-in-comment-${formats.join('-')}`;
   import { DocxScrollViewer } from '@silurus/ooxml-docx';
   import { PptxScrollViewer } from '@silurus/ooxml-pptx';
   import { XlsxViewer } from '@silurus/ooxml-xlsx';
+  import { fitVisibleCommentSurface } from '../lib/comment-demo-fit';
 
   type DemoFormat = 'docx' | 'xlsx' | 'pptx';
   type Viewer = DocxScrollViewer | PptxScrollViewer | XlsxViewer;
@@ -117,12 +118,14 @@ const demoId = `built-in-comment-${formats.join('-')}`;
           await next.load(sampleUrl(format));
           if (request !== generation) return;
           next.scrollToPage(1);
+          fitVisibleCommentSurface(next, host);
         } else if (format === 'pptx') {
           const next = new PptxScrollViewer(host, { comments: true, useGoogleFonts: true });
           viewer = next;
           await next.load(sampleUrl(format));
           if (request !== generation) return;
           next.scrollToSlide(0);
+          fitVisibleCommentSurface(next, host);
         } else {
           const next = new XlsxViewer(host, { comments: true });
           viewer = next;

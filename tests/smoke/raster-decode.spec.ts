@@ -76,12 +76,7 @@ test('decodes the reported 109,571,670-pixel poster at display resolution', asyn
   }, png.toString('base64'));
 
   expect(result).not.toBeNull();
-  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
-  const retainedWidth = Math.ceil(sourceWidth * scale);
-  const retainedHeight = Math.ceil(sourceHeight * retainedWidth / sourceWidth);
-  expect(result?.width).toBe(retainedWidth);
-  // Engines may round the aspect-derived axis to the nearest pixel or upward.
-  expect(result?.height).toBeGreaterThanOrEqual(targetHeight);
-  expect(result?.height).toBeLessThanOrEqual(retainedHeight);
+  expect(result?.width).toBe(targetWidth);
+  expect(result?.height).toBe(targetHeight);
   expect(result?.pixel).toEqual([17, 34, 51, 255]);
 });

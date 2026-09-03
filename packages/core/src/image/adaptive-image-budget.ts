@@ -19,11 +19,17 @@ export interface ImageResourceOptions {
   decodedByteBudget?: number;
   /** Default `adaptive`: preserve the document by reducing raster resolution. */
   strategy?: DecodedImageBudgetStrategy;
+  /** Preferred source grid for ordinary decoder-resizable rasters. The default
+   * `native-if-fit` preserves the source grid while it fits the source's share
+   * of the paint budget, without waiting for every source inspection. `display`
+   * requests the current canvas/DPR grid. */
+  resolution?: 'native-if-fit' | 'display';
 }
 
 export interface NormalizedImageResourceOptions {
   readonly decodedByteBudget: number;
   readonly strategy: DecodedImageBudgetStrategy;
+  readonly resolution: 'native-if-fit' | 'display';
 }
 
 export function normalizeImageResourceOptions(
@@ -45,7 +51,11 @@ export function normalizeImageResourceOptions(
   if (strategy !== 'adaptive' && strategy !== 'strict') {
     throw new TypeError("imageResources.strategy must be 'adaptive' or 'strict'");
   }
-  return Object.freeze({ decodedByteBudget, strategy });
+  const resolution = options?.resolution ?? 'native-if-fit';
+  if (resolution !== 'native-if-fit' && resolution !== 'display') {
+    throw new TypeError("imageResources.resolution must be 'native-if-fit' or 'display'");
+  }
+  return Object.freeze({ decodedByteBudget, strategy, resolution });
 }
 
 export interface DecodedImageTargetDemand {
@@ -66,13 +76,16 @@ export interface DecodedImageTargetDemand {
 
 export interface DecodedImageTargetPlan {
   readonly targets: ReadonlyMap<string, Readonly<{
-    /** Decoder request axes. Browsers retain source aspect ratio from these bounds. */
+    /** Exact decoder request axes for the retained display grid. */
     width: number;
     height: number;
-    /** Actual aspect-preserving grid charged to the decoded-surface budget. */
+    /** Actual grid charged to the decoded-surface budget. */
     retainedWidth: number;
     retainedHeight: number;
     retainedPixels: number;
+    /** Per-surface native-admission ceiling. A source at or below this share
+     * may keep its original grid; a larger source uses the decoder target. */
+    maxRetainedPixels: number;
   }>>;
   readonly idealBytes: number;
   readonly plannedBytes: number;
@@ -163,14 +176,20 @@ export function planDecodedImageTargets(
       requested.height,
     ) ?? { width: demand.sourceWidth, height: demand.sourceHeight };
   };
-  const plannedTarget = (demand: MutableDemand, scale: number) => {
+  const plannedTarget = (
+    demand: MutableDemand,
+    scale: number,
+    maxRetainedPixels?: number,
+  ) => {
     const requested = scaledRequestSize(demand, scale);
     const retained = retainedSize(demand, scale);
+    const retainedPixels = retained.width * retained.height;
     return Object.freeze({
       ...requested,
       retainedWidth: retained.width,
       retainedHeight: retained.height,
-      retainedPixels: retained.width * retained.height,
+      retainedPixels,
+      maxRetainedPixels: maxRetainedPixels ?? retainedPixels,
     });
   };
   const nativeBytes = byteCost(demands, nativeSize);
@@ -178,7 +197,13 @@ export function planDecodedImageTargets(
     const native = nativeSize(demand);
     return native.width * native.height <= MAX_RASTER_PIXELS;
   });
-  const preserveNative = nativeSurfacesFit && nativeBytes <= options.decodedByteBudget;
+  const hasUninspectedSource = [...demands.values()].some(
+    demand => demand.sourceWidth === undefined || demand.sourceHeight === undefined,
+  );
+  const preserveNative = options.resolution === 'native-if-fit'
+    && !hasUninspectedSource
+    && nativeSurfacesFit
+    && nativeBytes <= options.decodedByteBudget;
   const idealBytes = byteCost(demands, demand => retainedSize(demand, 1));
   if (preserveNative) {
     const targets = new Map<string, ReturnType<typeof plannedTarget>>();
@@ -190,12 +215,58 @@ export function planDecodedImageTargets(
         retainedWidth: native.width,
         retainedHeight: native.height,
         retainedPixels: native.width * native.height,
+        maxRetainedPixels: native.width * native.height,
       }));
     }
     return Object.freeze({
       targets,
       idealBytes,
       plannedBytes: nativeBytes,
+      qualityScale: 1,
+      degraded: false,
+    });
+  }
+  if (options.resolution === 'native-if-fit'
+    && options.strategy === 'adaptive'
+    && hasUninspectedSource
+    && idealBytes <= options.decodedByteBudget) {
+    // Allocate the unused aggregate budget as one uniform native-admission
+    // share per display pixel. The decoder fallback may use up to a 2x grid
+    // while that share has headroom: a strict 1x intermediate can visibly blur
+    // small placed artwork after browser resampling even though its final paint
+    // remains tiny. The bounded supersampling still avoids both the all-paint
+    // inspection barrier and a near-budget decode for one huge image.
+    let admissionScale = Math.sqrt(options.decodedByteBudget / Math.max(1, idealBytes));
+    for (const demand of demands.values()) {
+      const fallback = retainedSize(demand, 1);
+      admissionScale = Math.min(
+        admissionScale,
+        Math.sqrt(MAX_RASTER_PIXELS / (fallback.width * fallback.height)),
+      );
+    }
+    const targets = new Map<string, ReturnType<typeof plannedTarget>>();
+    let remainingPixels = Math.floor(options.decodedByteBudget / 4);
+    let plannedBytes = 0;
+    for (const [key, demand] of demands) {
+      const fallback = retainedSize(demand, 1);
+      const displayPixels = fallback.width * fallback.height;
+      const proportionalShare = Math.max(displayPixels, Math.floor(
+        displayPixels * admissionScale * admissionScale,
+      ));
+      const maxRetainedPixels = Math.max(1, Math.min(
+        proportionalShare,
+        Math.floor(remainingPixels / demand.surfaces),
+      ));
+      const fallbackScale = Math.min(2, Math.sqrt(maxRetainedPixels / displayPixels));
+      targets.set(key, plannedTarget(demand, fallbackScale, maxRetainedPixels));
+      const retainedPixels = maxRetainedPixels * demand.surfaces;
+      remainingPixels -= retainedPixels;
+      plannedBytes += retainedPixels * 4;
+    }
+    return Object.freeze({
+      targets,
+      idealBytes,
+      plannedBytes,
       qualityScale: 1,
       degraded: false,
     });

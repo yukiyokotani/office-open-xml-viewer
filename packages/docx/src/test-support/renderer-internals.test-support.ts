@@ -5,6 +5,7 @@ import {
   decodeRaster,
   preloadPaintImages,
   type DecodedImage,
+  type DecodedPaintImage,
   type DocxFetchImage,
 } from '../paint/browser-images.js';
 import { paintResourceRegistryOf } from '../layout/runtime-state.js';
@@ -49,7 +50,7 @@ export async function preloadImages(
   devicePixelsPerPoint?: number,
   imageResources?: import('@silurus/ooxml-core').ImageResourceOptions,
   tiff?: import('@silurus/ooxml-core').TiffRenderer,
-): Promise<Map<string, DecodedImage>> {
+): Promise<Map<string, DecodedPaintImage>> {
   const registry = services
     ? paintResourceRegistryOf(services)
     : layoutSourceStore(doc).paintResources;

@@ -1,5 +1,6 @@
 import type { LayoutDiagnostic } from './types.js';
 import {
+  classifyFontGeneric,
   graphemeClusterOffsets,
   normalizeLocalFontMetricFamily,
   type ResolvedLocalFontMetric,
@@ -368,8 +369,9 @@ export interface TextLayoutServiceInput {
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
 }
 
-/** Generic tail for an authored DOCX face. Only fontTable family/pitch metadata
- * is evidence; absent or `auto` entries deliberately use the fixed sans tail. */
+/** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
+ * authoritative; absent or `auto` entries use the shared, bounded face-name
+ * classifier that also drives the native fallback list. */
 export function classifyDocxFontGeneric(
   family: string | null | undefined,
   fontFamilyClasses: Readonly<Record<string, string>> = {},
@@ -380,7 +382,17 @@ export function classifyDocxFontGeneric(
   if (tableClass === 'roman') return 'serif';
   if (tableClass === 'swiss') return 'sans-serif';
   if (tableClass === 'modern' && fontFamilyPitches[family] === 'fixed') return 'monospace';
-  return 'sans-serif';
+  const inferred = classifyFontGeneric(family);
+  return inferred === 'mono' ? 'monospace' : inferred === 'serif' ? 'serif' : 'sans-serif';
+}
+
+/** Consumer choice at the §17.3.2.26 boundary where no font slot resolves.
+ * Keep the established East Asian fallback stable; Word-produced evidence for
+ * this change covers Latin and complex-script text only. */
+function defaultGenericForSlot(
+  slot: FontScriptSlot,
+): 'serif' | 'sans-serif' {
+  return slot === 'eastAsia' ? 'sans-serif' : 'serif';
 }
 
 const LOCAL_METRIC_SNAPSHOT = Symbol('docx.localMetricSnapshot');
@@ -548,7 +560,11 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       ? genericFamilies[authoredFamily.trim().toLocaleLowerCase('en-US')]
         ?? request.genericFamily
         ?? 'sans-serif'
-      : request.genericFamily;
+      // ECMA-376 §17.3.2.26 deliberately leaves the consumer's supported
+      // default font unspecified when no rFonts slot resolves. This bounded
+      // consumer policy changes only the script classes covered by Word output
+      // evidence; every authored direct/theme face remains authoritative above.
+      : request.genericFamily ?? defaultGenericForSlot(request.slot);
     return input.fonts.resolve({
       requestedFamily: authoredFamily,
       genericFamily,

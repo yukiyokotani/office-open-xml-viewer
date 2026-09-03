@@ -150,7 +150,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
    */
   mediaOverscan?: number;
   /** Minimum zoom scale — a DIMENSIONLESS multiplier over the 96-dpi natural
-   *  slide size (10% = 0.1), matching `DocxScrollViewer`. Default 0.1. */
+   *  slide size (10% = 0.1), matching `DocxScrollViewer`. A smaller width-fit
+   *  base remains reachable as the effective minimum. Default 0.1. */
   zoomMin?: number;
   /** Maximum zoom scale (dimensionless multiplier, 400% = 4). Default 4. */
   zoomMax?: number;
@@ -1814,14 +1815,13 @@ export class PptxScrollViewer implements ZoomableViewer {
    * `[0, totalHeight' − viewportHeight]`. Because a slide's height scales linearly
    * with `_scale`, the same fractional position maps exactly to the new geometry.
    *
-   * CAVEAT — base fit below the floor: `relayout()` sets `_scale = base` WITHOUT
-   * clamping to `[zoomMin, zoomMax]`. If the base fit is below `zoomMin` (a wide
-   * slide in a narrow container), the initial scale sits under the floor, but once
-   * the user zooms via `setScale` the clamp pins the minimum to `zoomMin`, so they
-   * can no longer return below the floor to the original base fit through this API.
+   * When the width-fit base is below `zoomMin` (for example a poster-sized slide
+   * in a narrow container), that fit becomes the effective floor. The opening
+   * view already permits the smaller scale, so keeping it reachable avoids a
+   * one-way zoom ratchet after the user zooms in.
    */
   setScale(scale: number): void {
-    const zoomMin = this._opts.zoomMin ?? 0.1;
+    const zoomMin = this._effectiveZoomMin();
     const zoomMax = this._opts.zoomMax ?? 4;
     const next = Math.min(zoomMax, Math.max(zoomMin, scale));
     // Consume the gesture-only pointer anchor (Ctrl/⌘+wheel set it just above)
@@ -1954,15 +1954,25 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   /** IX9 {@link ZoomableViewer} — step down to the next lower ladder rung. */
   zoomOut(): void {
-    this.setScale(prevZoomStep(this.getScale()));
+    this.setScale(prevZoomStep(this.getScale(), this._effectiveZoomMin()));
+  }
+
+  /** The configured floor, extended down to the current width fit when needed.
+   * Before layout establishes there is no fit exception, so pre-load requests
+   * retain the documented `[zoomMin, zoomMax]` clamp. */
+  private _effectiveZoomMin(): number {
+    const configured = this._opts.zoomMin ?? 0.1;
+    return this._scaleEstablished && this._prevBase > 0
+      ? Math.min(configured, this._prevBase)
+      : configured;
   }
 
   /**
    * IX9 {@link ZoomableViewer} — fit a slide's WIDTH to the container (the classic
    * continuous-scroll "fit width"). Sets the scale to the width-fit base for the
    * current container, then re-anchors + re-renders via {@link setScale}. Defers
-   * (no-op) while the container is unlaid-out. The `zoomMin`/`zoomMax` clamp still
-   * applies, so a fit below `zoomMin` pins to `zoomMin`.
+   * (no-op) while the container is unlaid-out. A width fit below `zoomMin`
+   * becomes the effective floor so it remains reachable after later zooms.
    */
   fitWidth(): void {
     this._fit('width');
@@ -2854,15 +2864,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     // Route through setScale so the epoch bumps and the re-anchor/force-re-render
     // path runs identically to a zoom.
     //
-    // zoomMin RATCHET (design §8.2 caveat, see setScale JSDoc): `zoomMin`/`zoomMax`
-    // are ABSOLUTE dimensionless bounds, but the re-fit base (`newBase × mult`) is
-    // computed UNCLAMPED. A resize that transits the scale below `zoomMin` (a wide
-    // slide in a container that briefly narrows) is clamped UP by `setScale`,
-    // which permanently inflates the implied multiplier even with zero user zoom —
-    // the next re-fit reads back the clamped `_scale` as `mult`. This is bounded and
-    // converges (the clamp floor is fixed), but it means the preserved multiplier can
-    // drift above 1 purely from resize transits below the floor. Accepted consequence
-    // of using absolute bounds (§8.2) with an unclamped relayout base.
+    // `_prevBase` is updated before `setScale`, so a newly smaller width fit also
+    // becomes the effective floor for this resize. That preserves the multiplier
+    // without ratcheting an initially fitted poster up to the configured zoomMin.
     this.setScale(newBase * mult);
     // `setScale` no-ops when the clamped scale is unchanged (e.g. already pinned at
     // a clamp boundary), which would skip its preview + settle. A width+height

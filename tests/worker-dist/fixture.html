@@ -6,6 +6,7 @@
   <canvas id="xlsx"></canvas>
   <canvas id="pptx"></canvas>
   <canvas id="pptx-text"></canvas>
+  <canvas id="xlsx-bordered"></canvas>
   <canvas id="docx-chart-ex"></canvas>
   <canvas id="xlsx-chart-ex"></canvas>
   <canvas id="pptx-chart-ex"></canvas>
@@ -73,6 +74,17 @@
       paint('pptx-text', await textPptx.renderSlideToBitmap(0, { width: 640, dpr: 1 }));
       window.pptxTextRuns = await textPptx.collectSlideRuns(0, 640);
       textPptx.destroy();
+
+      const borderedXlsx = await XlsxWorkbook.load(
+        await bytes('/consumer/bordered.xlsx'),
+        { mode: 'worker', useGoogleFonts: false },
+      );
+      paint('xlsx-bordered', await borderedXlsx.renderViewportToBitmap(
+        0,
+        { row: 0, col: 0, rows: 8, cols: 4 },
+        { width: 320, height: 200, dpr: 1 },
+      ));
+      borderedXlsx.destroy();
 
       const chartExDocx = await DocxDocument.load(
         await bytes('/consumer/chart-ex.docx'),

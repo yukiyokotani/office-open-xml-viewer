@@ -108,10 +108,13 @@ export async function getCachedDuotoneBitmapByPath(
     requestedBitmapOpts.targetWidthPx,
     requestedBitmapOpts.targetHeightPx,
   );
+  const resizeKey = resizeOptions
+    ? `|resize:${resizeOptions.resizeWidth}x${resizeOptions.resizeHeight}`
+    : '';
   const key = `${duotoneCacheKey(
     resolvedBaseKey,
     duotone,
-  )}${resizeOptions ? `|resize-width:${resizeOptions.resizeWidth}` : ''}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
+  )}${resizeKey}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
   return getCachedDerivedBitmap(
     DUOTONE_CACHE_NAMESPACE,
     key,

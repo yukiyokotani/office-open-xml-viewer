@@ -11,6 +11,7 @@ import {
   type OffscreenFactory,
   type TiffRenderOptions,
 } from '@silurus/ooxml-core';
+import { isOptionalImageUnavailable } from './internal/optional-image-fallback.js';
 
 /**
  * The render orchestrator decodes embedded images lazily by zip path:
@@ -265,14 +266,14 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     await expect(run([small, large])).resolves.toEqual(largeOnly);
   });
 
-  it('preserves native decoding for an ordinary visible raster that fits', async () => {
+  it('preserves native decoding for an ordinary visible raster by default', async () => {
     const png = new Uint8Array(24);
     png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     png.set([0x49, 0x48, 0x44, 0x52], 12);
     new DataView(png.buffer).setUint32(16, 800);
     new DataView(png.buffer).setUint32(20, 600);
     const blob = new Blob([png as BlobPart], { type: 'image/png' });
-    const decode = vi.fn(async () => new FakeBitmap('native'));
+    const decode = vi.fn(async () => new FakeBitmap('display'));
     vi.stubGlobal('createImageBitmap', decode);
     const fetchImage = vi.fn(async () => blob);
     const ws = worksheetWithImages();
@@ -281,6 +282,31 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     await prefetchImages(ws, new Map(), fetchImage, { effectiveDpr: 1 });
 
     expect(decode).toHaveBeenCalledWith(blob);
+  });
+
+  it('decodes an ordinary visible raster at its bounded display grid when requested', async () => {
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    png.set([0x49, 0x48, 0x44, 0x52], 12);
+    new DataView(png.buffer).setUint32(16, 800);
+    new DataView(png.buffer).setUint32(20, 600);
+    const blob = new Blob([png as BlobPart], { type: 'image/png' });
+    const decode = vi.fn(async () => new FakeBitmap('display'));
+    vi.stubGlobal('createImageBitmap', decode);
+    const fetchImage = vi.fn(async () => blob);
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+
+    await prefetchImages(ws, new Map(), fetchImage, {
+      effectiveDpr: 1,
+      imageResources: { resolution: 'display' },
+    });
+
+    expect(decode).toHaveBeenCalledWith(blob, {
+      resizeWidth: 800,
+      resizeHeight: 54,
+      resizeQuality: 'high',
+    });
   });
 
   it('keeps DrawingML pixel effects on the authored source grid during prefetch', async () => {
@@ -378,9 +404,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     view.setUint32(20, 1000);
     const decode = vi.fn(async (_source: unknown, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 3200,
-      height: options?.resizeWidth
-        ? Math.ceil(1000 * options.resizeWidth / 3200)
-        : 1000,
+      height: options?.resizeHeight ?? 1000,
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', decode);
@@ -394,9 +418,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(decode).toHaveBeenCalledTimes(2);
     const targets = decode.mock.calls.map((call) => ({
       width: call[1]?.resizeWidth as number,
-      height: call[1]?.resizeWidth
-        ? Math.ceil(1000 * call[1].resizeWidth / 3200)
-        : 1000,
+      height: call[1]?.resizeHeight as number,
     }));
     expect(targets[0]).toEqual(targets[1]);
     expect(targets[0].width * targets[0].height * 4 * targets.length)
@@ -445,8 +467,9 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(decode).toHaveBeenCalledOnce();
     expect(decode.mock.calls[0]?.[1]).toMatchObject({
       // Four authored 64-character columns resolve to 2048 CSS px in this
-      // fixture; at DPR 2 the full chart-bound source request is 4096 px wide.
-      resizeWidth: 4_096,
+      // fixture; DPR 2 needs 4096 px, and the available geometry share retains
+      // up to 2× that display grid.
+      resizeWidth: 8_192,
       resizeQuality: 'high',
     });
     expect(cache.has(chartImageFillKey({
@@ -590,7 +613,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(fetchImage).toHaveBeenCalledWith('xl/media/visible-overflow-gate.png', 'image/png');
     expect(decode).toHaveBeenCalledOnce();
     expect(decode.mock.calls[0]?.[1]).toMatchObject({
-      resizeWidth: 2_048,
+      resizeWidth: 4_096,
       resizeQuality: 'high',
     });
     expect(cache.size).toBe(1);
@@ -896,6 +919,26 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
       tiff: { render },
     })).rejects.toBe(failure);
     expect(cache.size).toBe(0);
+  });
+
+  it('marks a TIFF image unavailable instead of failing when the optional codec is absent', async () => {
+    const fetchImage = vi.fn(async () =>
+      new Blob([tiffHeader(32, 24) as BlobPart], { type: 'image/tiff' }));
+    const ws = worksheetWithImages();
+    ws.images = [{
+      fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+      toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+      nativeExtCx: 0, nativeExtCy: 0,
+      imagePath: 'xl/media/optional.tiff',
+      mimeType: 'image/tiff',
+    } as ImageAnchor];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await expect(prefetchImages(ws, cache, fetchImage)).resolves.toBeUndefined();
+
+    expect(cache.get('xl/media/optional.tiff')).toBeNull();
+    expect(isOptionalImageUnavailable(cache, 'xl/media/optional.tiff', 'tiff')).toBe(true);
   });
 
   it('decodeImageSource forces the raster (not the SVG vector) when the picture is cropped', async () => {
@@ -1268,11 +1311,12 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
   /** A fake HTMLCanvas + proxy 2D context whose drawImage records the closed
    *  state of every image it is handed AT DRAW TIME. All other context members
    *  no-op (the resize-test pattern). */
-  function makeRecordingCanvas(drawn: { closedAtDraw: boolean[] }) {
+  function makeRecordingCanvas(drawn: { closedAtDraw: boolean[]; texts?: string[] }) {
     const target: Record<string, unknown> = {
       drawImage: (img: unknown) => {
         drawn.closedAtDraw.push(Boolean((img as { closed?: boolean }).closed));
       },
+      fillText: (text: string) => drawn.texts?.push(text),
       measureText: (s: string) => ({ width: [...String(s)].length * 7 }),
       createLinearGradient: () => ({ addColorStop() {} }),
       createPattern: () => null,
@@ -1303,6 +1347,35 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
   const STYLES = {
     fonts: [], fills: [], borders: [], cellXfs: [], numFmts: {},
   } as unknown as ParsedWorkbook['styles'];
+
+  it('renders the missing-codec TIFF placeholder without blanking the worksheet', async () => {
+    const fetchImage = vi.fn(async () =>
+      new Blob([tiffHeader(32, 24) as BlobPart], { type: 'image/tiff' }));
+    const ws = {
+      name: 'S', rows: [], colWidths: {}, rowHeights: {},
+      defaultColWidth: 64, defaultRowHeight: 20,
+      mergeCells: [], freezeRows: 0, freezeCols: 0,
+      conditionalFormats: [], charts: [], shapeGroups: [],
+      images: [{
+        fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+        toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/optional.tiff',
+        mimeType: 'image/tiff',
+      } as ImageAnchor],
+    } as unknown as Worksheet;
+    const drawn = { closedAtDraw: [] as boolean[], texts: [] as string[] };
+
+    await expect(renderWorksheetViewport(
+      { ws, styles: STYLES },
+      makeRecordingCanvas(drawn),
+      { row: 1, col: 1, rows: 10, cols: 10 },
+      { fetchImage, width: 800, height: 600, dpr: 1 },
+    )).resolves.toBeUndefined();
+
+    expect(drawn.texts).toContain('TIFF image unavailable');
+    expect(drawn.closedAtDraw).toEqual([]);
+  });
 
   it('draws 300 images (cap 256) in one pass with every bitmap still open; evicted ones close after the pass', async () => {
     // Each decode yields a bitmap with a live `closed` flag the recording

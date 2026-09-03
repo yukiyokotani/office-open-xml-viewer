@@ -88,8 +88,8 @@ describe('PPTX chart picture-marker preload', () => {
     ]);
     expect(coreMocks.decode.mock.calls[0]?.[4]).toMatchObject({
       tiff,
-      targetWidthPx: 420,
-      targetHeightPx: 315,
+      targetWidthPx: 840,
+      targetHeightPx: 630,
     });
     expect(coreMocks.renderChart).toHaveBeenCalledTimes(1);
     expect(coreMocks.resolved()).toBe(coreMocks.bitmap);
@@ -216,10 +216,11 @@ describe('PPTX chart picture-marker preload', () => {
 
     expect(coreMocks.decode).toHaveBeenCalledTimes(1);
     expect(coreMocks.decode.mock.calls[0]?.[4]).toMatchObject({
-      // Larger frame: ~420 × 315 CSS px × DPR 2, then magnified by the
-      // 50%-wide / 60%-high visible source rectangle.
-      targetWidthPx: 1680,
-      targetHeightPx: 1050,
+      // Larger frame: ~420 × 315 CSS px × DPR 2, magnified by the
+      // 50%-wide / 60%-high visible source rectangle, then retained at 2×
+      // that display grid while the geometry share has room.
+      targetWidthPx: 3360,
+      targetHeightPx: 2100,
     });
     expect(coreMocks.renderChart).toHaveBeenCalledTimes(2);
     expect(coreMocks.resolved()).toBe(coreMocks.bitmap);
@@ -268,7 +269,7 @@ describe('PPTX chart picture-marker preload', () => {
       expect(coreMocks.decodeSvg).not.toHaveBeenCalled();
       expect(coreMocks.decode).toHaveBeenCalledTimes(1);
       const options = coreMocks.decode.mock.calls[0]?.[4] as Record<string, number>;
-      expect(options).toMatchObject({ targetWidthPx: 2520, targetHeightPx: 1890 });
+      expect(options).toMatchObject({ targetWidthPx: 5040, targetHeightPx: 3780 });
       expect(options.widthPt).toBeCloseTo(4_000_000 / 12_700 * 3);
       expect(options.heightPt).toBeCloseTo(3_000_000 / 12_700 * 3);
       expect(coreMocks.resolved()).toBe(coreMocks.bitmap);

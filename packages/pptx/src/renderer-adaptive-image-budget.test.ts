@@ -67,6 +67,72 @@ function twoPictureSlide(): Slide {
 describe('PPTX adaptive decoded-image budget', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('pipelines the first raster decode without waiting for every source inspection', async () => {
+    let releaseSecond!: () => void;
+    const secondSource = new Promise<Blob>((resolve) => {
+      releaseSecond = () => resolve(new Blob([
+        pngHeader(320, 260) as BlobPart,
+      ], { type: 'image/png' }));
+    });
+    const decode = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
+      width: options?.resizeWidth ?? 320,
+      height: options?.resizeHeight ?? 260,
+      close() {},
+    }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', decode);
+    const fetchImage = vi.fn(async (path: string) => path.endsWith('right.png')
+      ? secondSource
+      : new Blob([pngHeader(320, 260) as BlobPart], { type: 'image/png' }));
+
+    const render = renderSlide(canvas(), twoPictureSlide(), 9_144_000, 6_858_000, {
+      width: 960,
+      dpr: 1,
+      fetchImage,
+    });
+
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    releaseSecond();
+    await render;
+    expect(decode).toHaveBeenCalledTimes(2);
+  });
+
+  it('requests both planned raster axes so the retained surface matches its pixel limit', async () => {
+    const decode = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
+      width: options?.resizeWidth ?? 320,
+      height: options?.resizeHeight ?? 260,
+      close() {},
+    }) as unknown as ImageBitmap);
+    vi.stubGlobal('createImageBitmap', decode);
+    const fetchImage = vi.fn(async () => new Blob([
+      pngHeader(320, 260) as BlobPart,
+    ], { type: 'image/png' }));
+    const slide = {
+      ...twoPictureSlide(),
+      elements: [{
+        ...picture('ppt/media/photo.png', 0),
+        width: 304_800,
+        height: 209_550,
+      }],
+    };
+
+    await expect(renderSlide(canvas(), slide, 9_144_000, 6_858_000, {
+      width: 960,
+      dpr: 1,
+      fetchImage,
+      imageResources: {
+        decodedByteBudget: 2_816,
+        strategy: 'adaptive',
+        resolution: 'display',
+      },
+    })).resolves.toBeDefined();
+
+    expect(decode).toHaveBeenCalledWith(expect.any(Blob), {
+      resizeWidth: 32,
+      resizeHeight: 22,
+      resizeQuality: 'high',
+    });
+  });
+
   it('allocates one bounded quality level across every raster on the slide', async () => {
     const decode = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 4_000,
@@ -89,17 +155,17 @@ describe('PPTX adaptive decoded-image budget', () => {
     expect(decode).toHaveBeenCalledTimes(2);
     const targets = decode.mock.calls.map((call) => ({
       width: call[1]?.resizeWidth as number,
-      height: call[1]?.resizeWidth as number,
+      height: call[1]?.resizeHeight as number,
     }));
     expect(targets[0]).toEqual(targets[1]);
     expect(targets[0].width * targets[0].height * 4 * targets.length)
       .toBeLessThanOrEqual(budget);
   });
 
-  it('preserves native decoding for an ordinary slide raster that fits', async () => {
-    const decode = vi.fn(async () => ({
-      width: 800,
-      height: 600,
+  it('preserves native decoding for an ordinary slide raster that fits by default', async () => {
+    const decode = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
+      width: options?.resizeWidth ?? 800,
+      height: options?.resizeHeight ?? 600,
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', decode);
@@ -116,7 +182,7 @@ describe('PPTX adaptive decoded-image budget', () => {
     expect(decode).toHaveBeenCalledWith(blob);
   });
 
-  it('renders the reported 109,571,670-pixel picture at its visible target', async () => {
+  it('renders the reported 109,571,670-pixel picture at a bounded supersampled target', async () => {
     const decode = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 12_090,
       height: options?.resizeWidth
@@ -137,7 +203,8 @@ describe('PPTX adaptive decoded-image budget', () => {
     });
 
     expect(decode).toHaveBeenCalledWith(expect.any(Blob), {
-      resizeWidth: 1_921,
+      resizeWidth: 1_920,
+      resizeHeight: 2_880,
       resizeQuality: 'high',
     });
   });

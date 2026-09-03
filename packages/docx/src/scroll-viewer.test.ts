@@ -1081,10 +1081,9 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     installDom();
     const container = makeContainer(200, 400);
     // Mixed physical widths: page 0 is 100pt wide, page 1 is 200pt wide. The
-    // uniform document scale is fixed by fitting the FIRST page to the container
-    // (base scale = 200 / (100 * PT_TO_PX) = 1.5), so page 1 — twice as wide —
-    // must render at TWICE the px width, not the same fit-width. A vacuous impl
-    // that hands every page a constant fit-width would give [200, 200].
+    // uniform document scale fits the WIDEST page to the container (base scale =
+    // 200 / (200 * PT_TO_PX) = 0.75), so page 0 remains half as wide. A vacuous
+    // impl that hands every page a constant fit-width would give [200, 200].
     const engine = new FakeDocxEngine(2, [
       { widthPt: 100, heightPt: 100 },
       { widthPt: 200, heightPt: 100 },
@@ -1092,24 +1091,23 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     const v = makeBorrowedDocxScrollViewer(container as unknown as HTMLElement, {
       document: engine.asDoc(),
       gap: 10,
-      paddingLeft: 0, // full-width fit → base scale 1.5 (page widths 200 / 400)
+      paddingLeft: 0, // full-width fit → base scale 0.75 (page widths 100 / 200)
       paddingRight: 0,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     v.relayout();
-    // Both pages mount (page 0 height px = 100*PT_TO_PX*1.5 = 200; page 1 sits at
-    // top 210 and intersects the 400px viewport), so both get exactly one render.
+    // Both pages mount, so both get exactly one render.
     const mounted = v.mountedPageIndicesForTest().sort((a, b) => a - b);
     expect(mounted).toEqual([0, 1]);
-    // Per-page px widths in call order: page 0 → 200, page 1 → 400.
+    // Per-page px widths in call order: page 0 → 100, page 1 → 200.
     const widths = engine.renderCalls
       .slice()
       .sort((a, b) => a.page - b.page)
       .map((c) => c.width ?? NaN);
-    expect(widths[0]).toBeCloseTo(200, 3);
-    expect(widths[1]).toBeCloseTo(400, 3);
+    expect(widths[0]).toBeCloseTo(100, 3);
+    expect(widths[1]).toBeCloseTo(200, 3);
     v.destroy();
   });
 
@@ -2762,7 +2760,7 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
   it('spacer width uses the WIDEST page over mixed page widths (+ both gutters)', () => {
     installDom();
     const container = makeContainer(200, 400);
-    // Page 0 100pt wide (base fit target), page 1 200pt wide (twice as wide).
+    // Page 0 is 100pt wide; page 1 is the 200pt-wide fit target.
     const engine = new FakeDocxEngine(2, [
       { widthPt: 100, heightPt: 100 },
       { widthPt: 200, heightPt: 100 },
@@ -2777,10 +2775,10 @@ describe('DocxScrollViewer — paddingLeft/paddingRight (horizontal desk gutters
     scrollHost.clientHeight = 400;
     scrollHost.clientWidth = 200;
     v.relayout();
-    // fit = 200 − 12 − 12 = 176, base = 176/(100×4/3) = 1.32. Page widths px: page 0
-    // = 176, page 1 = 200×4/3×1.32 = 352 (the widest). Spacer width = 352 + 12 + 12.
-    const base = 176 / (100 * PT_TO_PX);
-    const widest = 200 * PT_TO_PX * base; // 352
+    // fit = 200 − 12 − 12 = 176, base = 176/(200×4/3) = 0.66. The widest page is
+    // exactly 176px, so its spacer plus both gutters is exactly the 200px viewport.
+    const base = 176 / (200 * PT_TO_PX);
+    const widest = 200 * PT_TO_PX * base; // 176
     const spacer = scrollHost.children[0] as FakeEl;
     expect(parseFloat(spacer.style.width)).toBeCloseTo(widest + 12 + 12, 3);
     v.destroy();

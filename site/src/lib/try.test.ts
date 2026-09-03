@@ -221,7 +221,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.pageShadow).toBe(false);
     expect(viewer.opts.mode).toBe('worker');
     expect(viewer.opts.progressiveLayout).toBe(true);
-    expect(viewer.opts.comments).toBe(true);
+    expect(viewer.opts.comments).toBe(false);
     expect(viewer.opts.math).toBe(mocks.math);
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
@@ -238,7 +238,8 @@ describe('Try Yours ScrollViewer integration', () => {
 
   it('returns opening DOCX pages early and mounts the full native-Find surface after layout converges', async () => {
     mocks.deferDocxLayout = true;
-    const result = await renderFile(stage(), file('large.docx'));
+    const progress = vi.fn();
+    const result = await renderFile(stage(), file('large.docx'), progress);
     const viewer = mocks.docx[0];
 
     expect(result.units).toBe(4);
@@ -247,10 +248,16 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.overscan).toBe(0);
     expect(viewer.relayout).not.toHaveBeenCalled();
 
+    viewer.pageCount = 6;
+    viewer.opts.onLayoutPartial({ availableUnits: 6, exact: false });
+    expect(viewer.opts.overscan).toBe(6);
+    expect(viewer.relayout).toHaveBeenCalledTimes(1);
+    expect(progress).toHaveBeenLastCalledWith({ format: 'docx', units: 6, unitLabel: 'page' });
+
     viewer.resolveLayout();
     await expect(result.finalUnits).resolves.toBe(7);
     expect(viewer.opts.overscan).toBe(7);
-    expect(viewer.relayout).toHaveBeenCalledTimes(1);
+    expect(viewer.relayout).toHaveBeenCalledTimes(2);
   });
 
   it('lets PPTX fit the preview width while keeping selection, media, and native Find', async () => {
@@ -267,7 +274,7 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.pageShadow).toBe(false);
     expect(viewer.opts.mode).toBe('worker');
     expect(viewer.opts.progressiveLayout).toBe(true);
-    expect(viewer.opts.comments).toBe(true);
+    expect(viewer.opts.comments).toBe(false);
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);
     expect(viewer.opts.chartEx).toBe(mocks.chartEx);
@@ -279,7 +286,8 @@ describe('Try Yours ScrollViewer integration', () => {
 
   it('reports PPTX progressive completion without changing its final slide count', async () => {
     mocks.deferPptxLayout = true;
-    const result = await renderFile(stage(), file('progressive.pptx'));
+    const progress = vi.fn();
+    const result = await renderFile(stage(), file('progressive.pptx'), progress);
     const viewer = mocks.pptx[0];
 
     expect(result.units).toBe(2);
@@ -287,10 +295,16 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.overscan).toBe(0);
     expect(viewer.relayout).not.toHaveBeenCalled();
 
+    viewer.availableSlideCount = 4;
+    viewer.opts.onLayoutPartial({ availableUnits: 4, totalUnits: 6, exact: false });
+    expect(viewer.opts.overscan).toBe(4);
+    expect(viewer.relayout).toHaveBeenCalledTimes(1);
+    expect(progress).toHaveBeenLastCalledWith({ format: 'pptx', units: 4, unitLabel: 'slide' });
+
     viewer.resolveLayout();
     await expect(result.finalUnits).resolves.toBe(6);
     expect(viewer.opts.overscan).toBe(6);
-    expect(viewer.relayout).toHaveBeenCalledTimes(1);
+    expect(viewer.relayout).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -316,7 +330,7 @@ describe('Try Yours ScrollViewer integration', () => {
     const viewer = mocks.xlsx[0];
 
     expect(viewer.opts.mode).toBe('main');
-    expect(viewer.opts.comments).toBe(true);
+    expect(viewer.opts.comments).toBe(false);
     expect(viewer.opts.math).toBeDefined();
     expect(viewer.opts.threeD).toBe(mocks.threeD);
     expect(viewer.opts.regionMap).toBe(mocks.regionMap);

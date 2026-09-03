@@ -66,6 +66,9 @@ export interface SyntheticDocumentOptions {
   readonly paragraphs?: number;
   /** Words per generated paragraph. `long-paragraphs` overrides this upward. */
   readonly wordsPerParagraph?: number;
+  /** Font size for synthetic header/footer stories. A value larger than the
+   *  margin allowance exercises body-reserve convergence. */
+  readonly headerFooterFontSize?: number;
 }
 
 /**
@@ -296,11 +299,18 @@ export function syntheticDocxModel(
 
   const headers: DocxDocumentModel['headers'] = { default: null, first: null, even: null };
   const footers: DocxDocumentModel['footers'] = { default: null, first: null, even: null };
+  const headerFooterFontSize = options.headerFooterFontSize ?? 10;
   if (shape === 'header-footer') {
-    headers.default = headerFooterStory([textRun('Synthetic layout benchmark')]);
-    footers.default = headerFooterStory([textRun('Confidential draft')]);
+    headers.default = headerFooterStory([
+      textRun('Synthetic layout benchmark', headerFooterFontSize),
+    ]);
+    footers.default = headerFooterStory([
+      textRun('Confidential draft', headerFooterFontSize),
+    ]);
   } else if (shape === 'fields' || shape === 'tracked-fields') {
-    headers.default = headerFooterStory([textRun('Synthetic layout benchmark')]);
+    headers.default = headerFooterStory([
+      textRun('Synthetic layout benchmark', headerFooterFontSize),
+    ]);
     footers.default = headerFooterStory([
       textRun('Page '),
       fieldRun('page', '1'),

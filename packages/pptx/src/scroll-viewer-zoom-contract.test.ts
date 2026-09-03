@@ -84,6 +84,47 @@ describe('PptxScrollViewer IX9 zoom contract', () => {
     v.destroy();
   });
 
+  it('zoomOut returns to an initial width fit below zoomMin', () => {
+    // A poster-sized slide can need a scale below the ordinary user zoom floor.
+    // The opening layout already permits that fit, so it must stay reachable
+    // after the user zooms in. Here natural width 200px in a 10px host gives a
+    // 0.05 fit, below zoomMin 0.1 and below the ladder's 0.25 bottom rung.
+    const { v } = setup({}, { w: 10, h: 400 });
+    expect(v.getScale()).toBeCloseTo(0.05, 6);
+
+    v.zoomIn();
+    expect(v.getScale()).toBeGreaterThan(0.05);
+    v.zoomOut();
+
+    expect(v.getScale()).toBeCloseTo(0.05, 6);
+    v.destroy();
+  });
+
+  it('wheel zoom can round-trip to a poster fit below an explicit zoomMin', () => {
+    const { v, scrollHost } = setup({ zoomMin: 0.5 }, { w: 10, h: 400 });
+    const initialFit = v.getScale();
+    expect(initialFit).toBeCloseTo(0.05, 6);
+
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: -50,
+      clientX: 5,
+      clientY: 200,
+      preventDefault() {},
+    });
+    expect(v.getScale()).toBeGreaterThan(initialFit);
+    scrollHost.dispatch('wheel', {
+      ctrlKey: true,
+      deltaY: 50,
+      clientX: 5,
+      clientY: 200,
+      preventDefault() {},
+    });
+
+    expect(v.getScale()).toBeCloseTo(initialFit, 10);
+    v.destroy();
+  });
+
   it('fitWidth restores the width-fit base after a zoom', () => {
     const { v } = setup();
     v.setScale(4);
