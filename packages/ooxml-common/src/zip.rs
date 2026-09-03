@@ -570,34 +570,41 @@ fn local_entry_sizes(
     Some((compressed, uncompressed))
 }
 
-fn descriptor_matches(
+fn descriptor_fields_match(
+    data: &[u8],
+    crc: usize,
+    directory_start: usize,
+    fields: CentralEntryFields,
+) -> bool {
+    if le_u32(data, crc) != Some(fields.crc32) {
+        return false;
+    }
+    let sizes = crc + 4;
+    if fields.zip64_sizes {
+        le_u64(data, sizes) == Some(fields.compressed_size)
+            && le_u64(data, sizes + 8) == Some(fields.uncompressed_size)
+            && sizes
+                .checked_add(16)
+                .is_some_and(|end| end <= directory_start)
+    } else {
+        le_u32(data, sizes) == Some(fields.compressed_size as u32)
+            && le_u32(data, sizes + 4) == Some(fields.uncompressed_size as u32)
+            && sizes
+                .checked_add(8)
+                .is_some_and(|end| end <= directory_start)
+    }
+}
+
+fn signed_descriptor_matches(
     data: &[u8],
     descriptor: usize,
     directory_start: usize,
     fields: CentralEntryFields,
 ) -> bool {
-    let matches_at = |crc: usize| {
-        if le_u32(data, crc) != Some(fields.crc32) {
-            return false;
-        }
-        let sizes = crc + 4;
-        if fields.zip64_sizes {
-            le_u64(data, sizes) == Some(fields.compressed_size)
-                && le_u64(data, sizes + 8) == Some(fields.uncompressed_size)
-                && sizes
-                    .checked_add(16)
-                    .is_some_and(|end| end <= directory_start)
-        } else {
-            le_u32(data, sizes) == Some(fields.compressed_size as u32)
-                && le_u32(data, sizes + 4) == Some(fields.uncompressed_size as u32)
-                && sizes
-                    .checked_add(8)
-                    .is_some_and(|end| end <= directory_start)
-        }
-    };
-    matches_at(descriptor)
-        || (le_u32(data, descriptor) == Some(0x0807_4b50)
-            && descriptor.checked_add(4).is_some_and(matches_at))
+    le_u32(data, descriptor) == Some(0x0807_4b50)
+        && descriptor
+            .checked_add(4)
+            .is_some_and(|crc| descriptor_fields_match(data, crc, directory_start, fields))
 }
 
 fn validate_local_entry(
@@ -635,11 +642,28 @@ fn validate_local_entry(
         return None;
     }
     if fields.flags & (1 << 3) != 0 {
-        if le_u32(data, local + 14) != Some(0)
-            || le_u32(data, local + 18) != Some(0)
-            || le_u32(data, local + 22) != Some(0)
-            || !descriptor_matches(data, payload_end, directory.start, fields)
-        {
+        let local_crc = le_u32(data, local + 14)?;
+        let local_compressed = le_u32(data, local + 18)?;
+        let local_uncompressed = le_u32(data, local + 22)?;
+        let canonical_local_fields =
+            local_crc == 0 && local_compressed == 0 && local_uncompressed == 0;
+        let signed_descriptor =
+            signed_descriptor_matches(data, payload_end, directory.start, fields);
+        let valid_descriptor = signed_descriptor
+            || descriptor_fields_match(data, payload_end, directory.start, fields);
+        // ECMA-376 Part 2, Annex B.2/Table B.5 requires zero local fields when
+        // bit 3 is set. NPOI 2.3.0 output reported in #1428 is a legacy form
+        // that Excel accepts: non-ZIP64, with a signed descriptor and all three
+        // local fields populated. Keep that exception bounded to exact agreement.
+        let compatible_populated_local_fields = !fields.zip64_sizes
+            && signed_descriptor
+            && local_crc != 0
+            && local_compressed != 0
+            && local_uncompressed != 0
+            && local_crc == fields.crc32
+            && u64::from(local_compressed) == fields.compressed_size
+            && u64::from(local_uncompressed) == fields.uncompressed_size;
+        if (!canonical_local_fields && !compatible_populated_local_fields) || !valid_descriptor {
             return None;
         }
     } else {
@@ -1059,7 +1083,7 @@ pub fn fallback_max_archive_entry_bytes() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, Read, Write};
 
     fn archive_with(name: &str, body: &[u8]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
         let mut bytes = Vec::new();
@@ -1263,6 +1287,45 @@ mod tests {
         bytes.extend_from_slice(NAME);
         let central_size = bytes.len() as u32 - central_offset;
         append_classic_eocd(&mut bytes, central_offset, central_size, 1, &[]);
+        bytes
+    }
+
+    fn npoi_230_descriptor_zip(body: &[u8]) -> Vec<u8> {
+        const NAME: &str = "xl/worksheets/sheet1.xml";
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            writer
+                .start_file(
+                    NAME,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(body).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let eocd = last_signature(&bytes, EOCD_SIGNATURE);
+        let central = le_u32(&bytes, eocd + 16).unwrap() as usize;
+        let crc = le_u32(&bytes, central + 16).unwrap();
+        let compressed = le_u32(&bytes, central + 20).unwrap();
+        let uncompressed = le_u32(&bytes, central + 24).unwrap();
+        assert_ne!(crc, 0);
+        assert_ne!(compressed, 0);
+        assert_ne!(uncompressed, 0);
+
+        bytes[6..8].copy_from_slice(&(1u16 << 3).to_le_bytes());
+        bytes[central + 8..central + 10].copy_from_slice(&(1u16 << 3).to_le_bytes());
+        let mut descriptor = 0x0807_4b50u32.to_le_bytes().to_vec();
+        descriptor.extend_from_slice(&crc.to_le_bytes());
+        descriptor.extend_from_slice(&compressed.to_le_bytes());
+        descriptor.extend_from_slice(&uncompressed.to_le_bytes());
+        bytes.splice(central..central, descriptor);
+
+        let shifted_eocd = eocd + 16;
+        bytes[shifted_eocd + 16..shifted_eocd + 20]
+            .copy_from_slice(&((central + 16) as u32).to_le_bytes());
         bytes
     }
 
@@ -1567,6 +1630,55 @@ mod tests {
         let descriptor_start = last_signature(&descriptor_mismatch, 0x0807_4b50);
         descriptor_mismatch[descriptor_start + 8] ^= 1;
         assert!(preflight_archive_limits(&descriptor_mismatch).is_err());
+    }
+
+    #[test]
+    fn compatibility_accepts_matching_populated_local_fields_with_signed_descriptor() {
+        let bytes = npoi_230_descriptor_zip(b"confirmed NPOI 2.3.0 compatibility shape");
+        let preflight = preflight_archive_limits(&bytes).unwrap();
+        let mut archive =
+            zip::ZipArchive::with_config(preflight.read_config(), Cursor::new(bytes.as_slice()))
+                .unwrap();
+        preflight.validate_archive_item_names(&mut archive).unwrap();
+        let mut entry = archive.by_name("xl/worksheets/sheet1.xml").unwrap();
+        let mut body = Vec::new();
+        entry.read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"confirmed NPOI 2.3.0 compatibility shape");
+    }
+
+    #[test]
+    fn compatibility_rejects_partial_or_mismatched_populated_local_fields() {
+        let bytes = npoi_230_descriptor_zip(b"bounded compatibility");
+
+        for field in [14, 18, 22] {
+            let mut partial = bytes.clone();
+            partial[field..field + 4].copy_from_slice(&0u32.to_le_bytes());
+            assert!(preflight_archive_limits(&partial).is_err());
+
+            let mut mismatched = bytes.clone();
+            mismatched[field] ^= 1;
+            assert!(preflight_archive_limits(&mismatched).is_err());
+        }
+
+        let eocd = last_signature(&bytes, EOCD_SIGNATURE);
+        let central = le_u32(&bytes, eocd + 16).unwrap() as usize;
+        for field in [central - 12, central - 8, central - 4] {
+            let mut mismatched_descriptor = bytes.clone();
+            mismatched_descriptor[field] ^= 1;
+            assert!(preflight_archive_limits(&mismatched_descriptor).is_err());
+        }
+        for field in [central + 16, central + 20, central + 24] {
+            let mut mismatched_central = bytes.clone();
+            mismatched_central[field] ^= 1;
+            assert!(preflight_archive_limits(&mismatched_central).is_err());
+        }
+
+        let mut unsigned_descriptor = bytes;
+        unsigned_descriptor.drain(central - 16..central - 12);
+        let shifted_eocd = eocd - 4;
+        unsigned_descriptor[shifted_eocd + 16..shifted_eocd + 20]
+            .copy_from_slice(&((central - 4) as u32).to_le_bytes());
+        assert!(preflight_archive_limits(&unsigned_descriptor).is_err());
     }
 
     #[test]
