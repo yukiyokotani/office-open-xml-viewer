@@ -33,7 +33,8 @@ mod types;
 pub(crate) use types::*;
 
 mod markdown;
-use markdown::{render_presentation_md, render_slide_md, MarkdownWriter};
+mod markdown_layout;
+use markdown::{render_presentation_md, render_slide_comments_md, render_slide_md, MarkdownWriter};
 
 mod chart;
 
@@ -1842,6 +1843,7 @@ fn parse_slide(
 
     let mut elements = Vec::new();
     let mut element_sources = Vec::new();
+    let mut semantic_groups = Vec::new();
 
     // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
     // sldLayout, AG_ChildSlide, default true) ─────────────────────────────
@@ -1950,6 +1952,16 @@ fn parse_slide(
         element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
             origin: SlideElementOrigin::Slide,
         }));
+        // ECMA-376 Part 1 §19.3.1.22 defines grpSp as one grouped object.
+        // Retain its top-level boundary even though the render model flattens
+        // and transforms the children. Semantic projections can therefore
+        // keep explicitly authored groups atomic without changing canvas JSON.
+        if node.tag_name().name() == "grpSp" && elements.len() > start {
+            semantic_groups.push(SlideElementGroup {
+                start,
+                end: elements.len(),
+            });
+        }
     }
 
     debug_assert_eq!(elements.len(), element_sources.len());
@@ -1974,6 +1986,7 @@ fn parse_slide(
         background,
         elements,
         element_sources,
+        semantic_groups,
         notes,
         comments,
         hidden,
@@ -1994,6 +2007,7 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
         background: None,
         elements: Vec::new(),
         element_sources: Vec::new(),
+        semantic_groups: Vec::new(),
         notes: None,
         comments: Vec::new(),
         hidden: false,
@@ -2431,6 +2445,7 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
             background: None,
             elements: Vec::new(),
             element_sources: Vec::new(),
+            semantic_groups: Vec::new(),
             notes: None,
             comments: Vec::new(),
             hidden: false,
@@ -2513,6 +2528,8 @@ fn render_markdown_from_shared(
     let reporter = zip.operation()?.limit_reporter()?;
     let limit = pptx_internal_limits().markdown_bytes;
     let mut output = MarkdownWriter::new(limit);
+    let mut comments = MarkdownWriter::sharing_budget(&output);
+    let mut has_comments = false;
     for index in 0..shared.slide_descriptors.len() {
         if index > 0 {
             output.push_str("\n---\n\n");
@@ -2525,7 +2542,19 @@ fn render_markdown_from_shared(
         }
         let produced = produce_slide_unit_with_journal(index, shared, zip, None)
             .map_err(|error| error.to_string())?;
-        render_slide_md(&produced.slide, &mut output);
+        render_slide_md(
+            &produced.slide,
+            shared.slide_width,
+            shared.slide_height,
+            &mut output,
+        );
+        render_slide_comments_md(
+            &produced.slide,
+            shared.slide_width,
+            shared.slide_height,
+            &mut comments,
+            &mut has_comments,
+        );
         reporter.observe_hard_limit(
             HardResourceLimitKind::PptxMarkdownBytes,
             None,
@@ -2533,6 +2562,13 @@ fn render_markdown_from_shared(
             output.observed(),
         )?;
     }
+    output.append_precounted(comments.into_string());
+    reporter.observe_hard_limit(
+        HardResourceLimitKind::PptxMarkdownBytes,
+        None,
+        limit,
+        output.observed(),
+    )?;
     zip.assert_healthy()?;
     Ok(output.into_string())
 }
@@ -10757,6 +10793,99 @@ mod tests {
             .unwrap();
         archive.acknowledge_slide_inner(1, 1).unwrap();
         assert_eq!(archive.render_markdown_inner().unwrap(), expected);
+    }
+
+    #[test]
+    fn markdown_retains_authored_groups_and_infers_a_free_text_title() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Free title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="200000"/><a:ext cx="8000000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="3200" b="1"/><a:t>Free Title</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Authored group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="500000" y="1500000"/><a:ext cx="8000000" cy="3000000"/><a:chOff x="0" y="0"/><a:chExt cx="8000000" cy="3000000"/></a:xfrm></p:grpSpPr>
+            <p:sp><p:nvSpPr><p:cNvPr id="4" name="Right"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="4500000" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right body</a:t></a:r></a:p></p:txBody></p:sp>
+            <p:sp><p:nvSpPr><p:cNvPr id="5" name="Left"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Left body</a:t></a:r></a:p></p:txBody></p:sp>
+          </p:grpSp>
+          <p:sp><p:nvSpPr><p:cNvPr id="6" name="Local heading"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="4900000"/><a:ext cx="3500000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2200" b="1"/><a:t>Local heading</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="7" name="Local body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="5400000"/><a:ext cx="3500000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1600"/><a:t>Local body</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="8" name="Combined section"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="4900000"/><a:ext cx="4000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2200" b="1"/><a:t>Combined</a:t></a:r><a:r><a:rPr sz="2200" b="1"/><a:t xml:space="preserve"> heading</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1600"/><a:t>Combined body</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let presentation = parse_presentation_from_bytes(&data).unwrap();
+        assert_eq!(presentation.slides[0].semantic_groups.len(), 1);
+        assert_eq!(
+            presentation.slides[0].semantic_groups[0],
+            SlideElementGroup { start: 1, end: 3 }
+        );
+
+        let markdown = to_markdown_native(&data).unwrap();
+        assert!(markdown.starts_with("# Free Title (slide 1)"), "{markdown}");
+        assert!(
+            markdown.find("Left body").unwrap() < markdown.find("Right body").unwrap(),
+            "{markdown}"
+        );
+        assert_eq!(markdown.matches("Free Title").count(), 1, "{markdown}");
+        assert!(markdown.contains("## **Local heading**"), "{markdown}");
+        assert!(
+            markdown.contains("## **Combined heading**\n\nCombined body"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_uses_a_backplate_as_a_semantic_block() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="2100000"/><a:ext cx="5000000" cy="4000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Heading"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="800000" y="2500000"/><a:ext cx="4000000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2600" b="1"/><a:t>Panel heading</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="4" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="800000" y="3500000"/><a:ext cx="4000000" cy="1800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1600"/><a:t>Panel body</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let presentation = parse_presentation_from_bytes(&data).unwrap();
+        let projected = crate::markdown_layout::project_slide(
+            &presentation.slides[0],
+            presentation.slide_width,
+            presentation.slide_height,
+        );
+        assert!(projected
+            .blocks
+            .iter()
+            .any(|block| block.related && block.element_indices == vec![1, 2]));
+        let markdown = to_markdown_native(&data).unwrap();
+        assert!(markdown.contains("## **Panel heading**"), "{markdown}");
+    }
+
+    #[test]
+    fn markdown_collects_comments_after_the_deck_narrative() {
+        let comments = valid_comment_xml("Review note");
+        let authors = r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="0" name="Ada"/></p:cmAuthorLst>"#;
+        let data = build_comment_deck([true, false], [Some(&comments), None], authors);
+        let markdown = to_markdown_native(&data).unwrap();
+
+        let last_slide = markdown.find("# Slide 3").unwrap();
+        let review = markdown.find("## Review comments").unwrap();
+        assert!(last_slide < review, "{markdown}");
+        assert_eq!(
+            markdown.matches("## Review comments").count(),
+            1,
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Slide 1 — slide 1"), "{markdown}");
+        assert!(markdown.contains("**Ada**\n\n> Review note"), "{markdown}");
+
+        let exact = markdown.len() as u64;
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                markdown_bytes: exact,
+                ..PptxInternalLimits::default()
+            });
+            assert_eq!(to_markdown_native(&data).unwrap(), markdown);
+        }
+        {
+            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
+                markdown_bytes: exact - 1,
+                ..PptxInternalLimits::default()
+            });
+            assert!(to_markdown_native(&data)
+                .unwrap_err()
+                .starts_with("OOXML_RESOURCE_LIMIT:"));
+        }
     }
 
     #[test]

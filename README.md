@@ -579,10 +579,14 @@ headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
 ### Markdown export
 
 Every headless engine can project its document to GitHub-flavoured markdown for
-LLM ingestion, full-text search, or diffing — headings, lists, tables, and (for
-docx) footnotes / comments are preserved; layout, fonts, and positioning are
-dropped. The projection is compiled into the parser WASM you already ship, so it
-adds **zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
+LLM ingestion, full-text search, or diffing. DOCX keeps linked footnote/endnote
+references and anchored comment threads. PPTX uses authored groups, containing
+background panels, geometry, and relative typography to keep related content
+together and derive a reading order; those visual details guide the projection
+but are not exposed in the output. XLSX separates independent cell regions at
+blank row/column bands while keeping declared Excel tables atomic. The
+projection is compiled into the parser WASM you already ship, so it adds
+**zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
 `mode: 'worker'` (it runs off the archive opened at `load()`):
 
 ```typescript
@@ -592,9 +596,9 @@ const doc = await DocxDocument.load('/document.docx');
 const md = await doc.toMarkdown();
 ```
 
-`PptxPresentation.toMarkdown()` (title slides → `#` headings, body → nested
-bullets, notes / comments collated) and `XlsxWorkbook.toMarkdown()` (each sheet →
-a `## SheetName` pipe table) are the twins.
+`PptxPresentation.toMarkdown()` also collates review comments after the deck,
+with slide and target context. `XlsxWorkbook.toMarkdown()` collects cell comment
+threads after each sheet's data regions.
 
 The repository also contains a low-level adapter and CLI for workspace tooling.
 They are internal implementation utilities, not separately published packages;
@@ -732,7 +736,7 @@ file without uploading it.
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (§17.13.5 `w:ins` / `w:del` / `w:moveFrom` / `w:moveTo`) — the default render is the FINAL state (deletions and moved-away text hidden); the opt-in markup view (`showTrackedChanges`) draws author-coloured underline / strikethrough plus margin change bars, and body-story revision records are available as data | ✅ |
 | | Comments (§17.13.4) — opt-in margin balloons (`comments: true`): commented ranges tinted, threaded replies via `commentsExtended.xml`, resolved threads hidden, click-to-select stacking; also available as data (`doc.comments`, `doc.commentAnchorRanges()`) | ✅ |
-| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, footnotes / comments) | ✅ |
+| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, linked notes / anchored comment threads) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection, including table-cell text (transparent overlay, native copy) | ✅ |
 | | Bounded read-only text/element context (`getSelectionContext()`, page/source locators, element selection, AI/MCP callback) | ✅ |
@@ -790,7 +794,7 @@ file without uploading it.
 | | Pivot tables (saved worksheet output renders unchanged; read-only metadata is exposed. Refresh, recalculation, filtering, restructuring, and interactivity are unsupported) | ⚠️ Partial |
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model; pointer or keyboard users can open the popup, with a polite screen-reader status) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
-| | Markdown export (`XlsxWorkbook.toMarkdown()` — each sheet as a `## SheetName` pipe table) | ✅ |
+| | Markdown export (`XlsxWorkbook.toMarkdown()` — sheets split into semantic cell regions; comments collated) | ✅ |
 | **Interaction** | Cell selection (single / range / row / column / all / multiple areas; `setSelection('B2:D5')` or canonical structured state) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl/⌘+drag to add another area, Ctrl+C to copy as TSV | ✅ |
@@ -817,7 +821,7 @@ file without uploading it.
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
 | | Speaker notes (plain text via `getNotes()`) | ✅ |
-| | Markdown export (`PptxPresentation.toMarkdown()` — title slides → headings, body → nested bullets, notes / comments collated) | ✅ |
+| | Markdown export (`PptxPresentation.toMarkdown()` — semantic grouping / reading order, inferred headings, notes / comments collated) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`, with adaptive display-sized decoding for oversized rasters) | ✅ |
