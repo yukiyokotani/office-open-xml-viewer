@@ -40,32 +40,36 @@ export function aspectPreservingRasterTarget(
   return width < source.width && height < source.height ? { width, height } : null;
 }
 
-/** Pixel grid retained by the browser when the HTML decode request supplies
- * only `resizeWidth`. The one-axis request is intentional: it preserves the
- * decoder's natural (including EXIF-oriented) aspect ratio. This helper is the
- * single accounting counterpart for that browser behavior. */
+/** Pixel grid retained by the browser for a bounded display decode. DrawingML
+ * maps the source independently onto the authored destination axes, so a
+ * two-axis request uses that exact axis-wise grid (clamped to avoid upscaling).
+ * A genuinely single-axis request still derives the other axis from the
+ * decoder-natural, including EXIF-oriented, source ratio. */
 export function decodedBitmapRetainedTarget(
   source: Readonly<RasterDimensions>,
   targetWidthPx: number | undefined,
   targetHeightPx: number | undefined,
   allowSingleAxis = false,
 ): RasterDimensions | null {
+  if (!Number.isFinite(source.width) || !Number.isFinite(source.height)
+    || !(source.width > 0) || !(source.height > 0)) return null;
+  const targetWidth = positiveFinite(targetWidthPx);
+  const targetHeight = positiveFinite(targetHeightPx);
+  if (targetWidth !== undefined && targetHeight !== undefined) {
+    const width = Math.min(source.width, Math.max(1, Math.ceil(targetWidth)));
+    const height = Math.min(source.height, Math.max(1, Math.ceil(targetHeight)));
+    return width < source.width || height < source.height ? { width, height } : null;
+  }
   const target = aspectPreservingRasterTarget(
     source,
-    targetWidthPx,
-    targetHeightPx,
+    targetWidth,
+    targetHeight,
     allowSingleAxis,
   );
-  if (!target) return null;
-  const width = target.width;
-  const height = Math.min(
-    source.height,
-    Math.max(1, Math.ceil(source.height * width / source.width)),
-  );
-  return { width, height };
+  return target;
 }
 
-/** Browser one-axis resize request for an already-decoded pixel surface. */
+/** Browser resize request for an already-decoded pixel surface. */
 export function decodedBitmapTargetResizeOptions(
   sourceWidth: number,
   sourceHeight: number,
@@ -79,6 +83,6 @@ export function decodedBitmapTargetResizeOptions(
     true,
   );
   return target
-    ? { resizeWidth: target.width, resizeQuality: 'high' }
+    ? { resizeWidth: target.width, resizeHeight: target.height, resizeQuality: 'high' }
     : undefined;
 }

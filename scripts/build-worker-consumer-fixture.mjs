@@ -162,6 +162,66 @@ writeFileSync(join(outDir, 'text.pptx'), storedZip([
     </p:sld>`],
 ]));
 
+// A self-authored bordered workbook exercises the production XLSX worker without
+// optional renderer descriptors. Every border edge goes through the shared
+// border dash lookup, so a worker bundle that strands the shared draw module's
+// initializer throws on the first bordered cell. The public demo and the
+// chart-ex workbook cannot catch that: one has no borders, and the other pulls
+// in an optional renderer that initializes the shared draw module as a side
+// effect. `thin` is deliberate — it is the style Excel emits most, and it is
+// absent from the dash table (it is solid), so it reaches the lookup's miss path.
+writeFileSync(join(outDir, 'bordered.xlsx'), storedZip([
+  ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+      <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+    </Types>`],
+  ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+    </Relationships>`],
+  ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?>
+    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets><sheet name="Bordered" sheetId="1" r:id="rIdSheet"/></sheets>
+    </workbook>`],
+  ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rIdSheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+    </Relationships>`],
+  ['xl/styles.xml', `<?xml version="1.0" encoding="UTF-8"?>
+    <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+      <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+      <borders count="2">
+        <border/>
+        <border>
+          <left style="thin"><color rgb="FF000000"/></left>
+          <right style="thin"><color rgb="FF000000"/></right>
+          <top style="thin"><color rgb="FF000000"/></top>
+          <bottom style="thin"><color rgb="FF000000"/></bottom>
+          <diagonal/>
+        </border>
+      </borders>
+      <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+      <cellXfs count="2">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>
+      </cellXfs>
+    </styleSheet>`],
+  ['xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <dimension ref="A1:B2"/>
+      <sheetData>
+        <row r="1"><c r="A1" s="1"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row>
+        <row r="2"><c r="A2" s="1"><v>3</v></c><c r="B2" s="1"><v>4</v></c></row>
+      </sheetData>
+    </worksheet>`],
+]));
+
 const chartExXml = `<?xml version="1.0" encoding="UTF-8"?>
   <cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">
     <cx:chartData><cx:data id="0">

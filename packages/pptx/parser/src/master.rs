@@ -42,7 +42,7 @@ pub(crate) struct LayoutPlaceholders {
     pub(crate) by_idx: HashMap<u32, Transform>,
     /// Effective placeholder type declared by a layout slot. A slide
     /// placeholder may omit @type while retaining @idx; the matching layout
-    /// type then precedes the CT_Placeholder schema default (`obj`).
+    /// slot supplies its authored type or the CT_Placeholder default (`obj`).
     pub(crate) by_idx_placeholder_type: HashMap<u32, String>,
     pub(crate) by_type: HashMap<String, Transform>,
     /// Fallback transforms from slide master (by ph_type), used when layout has no xfrm
@@ -94,8 +94,12 @@ pub(crate) struct LayoutPlaceholders {
     /// Default run reflection per placeholder type, inherited from layout or
     /// master `lvl1pPr/defRPr/effectLst`.
     pub(crate) by_type_reflection: HashMap<String, Reflection>,
-    /// Vertical anchor ("t"/"ctr"/"b") per placeholder type, from layout/master bodyPr
+    /// Vertical anchor ("t"/"ctr"/"b") per placeholder idx/type, from
+    /// layout/master bodyPr. The idx tier prevents one of several same-type
+    /// layout slots from leaking its alignment into its siblings.
+    pub(crate) by_idx_anchor: HashMap<u32, String>,
     pub(crate) by_type_anchor: HashMap<String, String>,
+    pub(crate) by_type_master_anchor: HashMap<String, String>,
     /// Per-placeholder layout `bodyPr` text insets (`lIns`, `tIns`, `rIns`,
     /// `bIns`). Each component stays optional so an omitted layout attribute
     /// can continue through the theme/spec fallback instead of being replaced
@@ -259,6 +263,17 @@ impl LayoutPlaceholders {
                 }
             })
             .or_else(|| self.master_by_type.get(ph_type))
+            // ECMA-376 §19.7.9 defines placeholder size relative to the body
+            // placeholder on the master. An object/content layout slot with no
+            // own transform therefore uses the master body box; its semantic
+            // placeholder type remains the CT_Placeholder default (`obj`).
+            .or_else(|| {
+                if ph_type == "obj" {
+                    self.master_by_type.get("body")
+                } else {
+                    None
+                }
+            })
     }
 
     /// Look up the inherited default font size for a placeholder (layout then master fallback).
@@ -453,10 +468,42 @@ impl LayoutPlaceholders {
         })
     }
 
-    /// Look up inherited vertical anchor for this placeholder type.
-    pub(crate) fn lookup_anchor(&self, ph_type: &str) -> Option<String> {
+    /// Look up inherited vertical anchor for this placeholder. An anchor on the
+    /// exact idx-matched layout slot wins. PowerPoint otherwise retains the
+    /// layout's type-level placeholder fallback before consulting the master;
+    /// this preserves layouts whose first same-type slot carries the shared
+    /// anchor while still preventing it from overriding an explicitly authored
+    /// anchor on a later idx.
+    pub(crate) fn lookup_anchor(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
+        let master = || {
+            self.by_type_master_anchor
+                .get(ph_type)
+                .cloned()
+                .or_else(|| {
+                    if ph_type == "body" || ph_type == "obj" {
+                        self.by_type_master_anchor.get("").cloned()
+                    } else {
+                        None
+                    }
+                })
+        };
+        if let Some(i) = ph_idx {
+            return self
+                .by_idx_anchor
+                .get(&i)
+                .cloned()
+                .or_else(|| self.by_type_anchor.get(ph_type).cloned())
+                .or_else(|| {
+                    if ph_type == "body" || ph_type == "obj" {
+                        self.by_type_anchor.get("").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .or_else(master);
+        }
         self.by_type_anchor.get(ph_type).cloned().or_else(|| {
-            if ph_type == "body" {
+            if ph_type == "body" || ph_type == "obj" {
                 self.by_type_anchor.get("").cloned()
             } else {
                 None
@@ -954,35 +1001,6 @@ pub(crate) fn parse_master_font_sizes(root: roxmltree::Node<'_, '_>) -> HashMap<
     map
 }
 
-/// Effective placeholder types declared by the master, keyed by @idx. Layout
-/// placeholders may omit @type while retaining the same index; ECMA-376's
-/// placeholder inheritance then uses the master slot before applying the
-/// CT_Placeholder schema default.
-pub(crate) fn parse_master_placeholder_types(
-    root: roxmltree::Node<'_, '_>,
-) -> HashMap<u32, String> {
-    let mut map = HashMap::new();
-    if let Some(sp_tree) = child(root, "cSld").and_then(|node| child(node, "spTree")) {
-        for sp in sp_tree
-            .children()
-            .filter(|node| node.is_element() && node.tag_name().name() == "sp")
-        {
-            let Some(ph) = sp
-                .descendants()
-                .find(|node| node.is_element() && node.tag_name().name() == "ph")
-            else {
-                continue;
-            };
-            let Some(idx) = attr(&ph, "idx").and_then(|value| value.parse().ok()) else {
-                continue;
-            };
-            map.entry(idx)
-                .or_insert_with(|| attr(&ph, "type").unwrap_or_else(|| "obj".to_owned()));
-        }
-    }
-    map
-}
-
 /// Default Latin typefaces from master placeholder lstStyle/txStyles. The
 /// specific placeholder shape wins over the generic title/body/other style,
 /// matching the font-size cascade above (ECMA-376 §19.3.1.52 and
@@ -1430,7 +1448,6 @@ pub(crate) fn parse_master_transforms(root: roxmltree::Node<'_, '_>) -> HashMap<
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_layout_placeholders(
     root: roxmltree::Node<'_, '_>,
-    master_placeholder_types: &HashMap<u32, String>,
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
@@ -1456,6 +1473,7 @@ pub(crate) fn parse_layout_placeholders(
         by_type_master_level_sizes: master_level_font_sizes.clone(),
         by_type_master_level_indents: master_level_indents.clone(),
         by_type_master_level_bullets: master_level_bullets.clone(),
+        by_type_master_anchor: master_anchors.clone(),
         by_type_master_alignment: master_alignments.clone(),
         by_type_master_ea_ln_brk: master_ea_ln_brk.clone(),
         by_type_master_space_before: master_space_before.clone(),
@@ -1620,27 +1638,18 @@ pub(crate) fn parse_layout_placeholders(
         });
 
         if let Some(ph) = ph_node {
-            // Keep an omitted type on the internal empty-key cascade so it can
-            // inherit an equally typeless master placeholder's authored
-            // lstStyle. The effective semantic type surfaced to a slide is
-            // still the CT_Placeholder default (`obj`).
+            // CT_Placeholder defaults an omitted @type to `obj`. The idx binds
+            // the slide placeholder to this layout slot, but does not permit a
+            // same-numbered master placeholder of another type to rewrite the
+            // schema value. Real PowerPoint layouts can reuse an idx for a
+            // content slot where the master uses it for date/footer metadata.
             let ph_idx: Option<u32> = attr(&ph, "idx").and_then(|v| v.parse().ok());
-            let authored_ph_type = attr(&ph, "type");
-            let inherited_ph_type = ph_idx
-                .and_then(|idx| master_placeholder_types.get(&idx))
-                .cloned();
-            let ph_type = authored_ph_type
-                .clone()
-                .or_else(|| inherited_ph_type.clone())
-                .unwrap_or_default();
-            let effective_ph_type = authored_ph_type
-                .or(inherited_ph_type)
-                .unwrap_or_else(|| "obj".to_owned());
+            let ph_type = attr(&ph, "type").unwrap_or_else(|| "obj".to_owned());
 
             if let Some(idx) = ph_idx {
                 lph.by_idx_placeholder_type
                     .entry(idx)
-                    .or_insert(effective_ph_type);
+                    .or_insert_with(|| ph_type.clone());
                 if let Some(ref t) = t_opt {
                     lph.by_idx.entry(idx).or_insert_with(|| t.clone());
                 }
@@ -1719,6 +1728,15 @@ pub(crate) fn parse_layout_placeholders(
                     .or_else(|| master_alignments.get(&ph_type).cloned());
                 if let Some(a) = idx_algn {
                     lph.by_idx_alignment.entry(idx).or_insert(a);
+                }
+                // ECMA-376 §19.3.1.36: idx binds the slide placeholder to this
+                // exact layout slot. Preserve its vertical anchor independently
+                // from same-type siblings; fall back to the master for this type.
+                let idx_anchor = layout_anchor
+                    .clone()
+                    .or_else(|| master_anchors.get(&ph_type).cloned());
+                if let Some(a) = idx_anchor {
+                    lph.by_idx_anchor.entry(idx).or_insert(a);
                 }
             }
             let effective_fs =
@@ -1932,7 +1950,6 @@ pub(crate) fn read_show_master_sp(node: roxmltree::Node<'_, '_>) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_layout(
     layout_xml: &str,
-    master_placeholder_types: &HashMap<u32, String>,
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
@@ -1961,7 +1978,6 @@ pub(crate) fn parse_layout(
 
     let placeholders = parse_layout_placeholders(
         root,
-        master_placeholder_types,
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
@@ -2028,7 +2044,6 @@ pub(crate) struct ParsedMaster {
     /// (see `parse_slide`), so these frozen-against-master-theme elements are used
     /// only by the common no-override slides.
     pub(crate) master_decorative: Vec<SlideElement>,
-    pub(crate) master_placeholder_types: HashMap<u32, String>,
     pub(crate) master_font_sizes: HashMap<String, f64>,
     pub(crate) master_font_families: HashMap<String, String>,
     pub(crate) master_level_font_sizes: HashMap<String, LevelFontSizes>,
@@ -2148,9 +2163,6 @@ pub(crate) fn build_master_bundle(
         parse_background(c_sld, &theme, &mut resolve)
     });
 
-    let master_placeholder_types = master_root
-        .map(parse_master_placeholder_types)
-        .unwrap_or_default();
     let master_font_sizes = master_root.map(parse_master_font_sizes).unwrap_or_default();
     let master_font_families = master_root
         .map(|root| parse_master_font_families(root, &theme))
@@ -2204,7 +2216,6 @@ pub(crate) fn build_master_bundle(
         master_smartart_drawings,
         master_bg,
         master_decorative,
-        master_placeholder_types,
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
@@ -2240,7 +2251,6 @@ mod placeholder_geometry_tests {
 
     fn parse_layout_with_master(
         layout_shape: &str,
-        master_placeholder_types: &HashMap<u32, String>,
         master_font_sizes: &HashMap<String, f64>,
     ) -> LayoutPlaceholders {
         let xml = format!(
@@ -2254,7 +2264,6 @@ mod placeholder_geometry_tests {
         let mut zip = empty_zip();
         parse_layout_placeholders(
             doc.root_element(),
-            master_placeholder_types,
             master_font_sizes,
             &HashMap::<String, String>::new(),
             &HashMap::<String, LevelFontSizes>::new(),
@@ -2275,7 +2284,7 @@ mod placeholder_geometry_tests {
     }
 
     fn parse_layout_geometry(layout_shape: &str) -> LayoutPlaceholders {
-        parse_layout_with_master(layout_shape, &HashMap::new(), &HashMap::new())
+        parse_layout_with_master(layout_shape, &HashMap::new())
     }
 
     fn parse_slide_shape(shape: &str, placeholders: &LayoutPlaceholders) -> ShapeElement {
@@ -2355,22 +2364,34 @@ mod placeholder_geometry_tests {
     }
 
     #[test]
-    fn typeless_layout_slot_inherits_master_idx_type_and_its_text_style() {
-        let master_xml = r#"<p:sldMaster
-          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
-          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-          <p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr>
-            <p:ph type="body" idx="1"/>
-          </p:nvPr></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld>
-        </p:sldMaster>"#;
-        let master_doc = roxmltree::Document::parse(master_xml).unwrap();
-        let master_types = parse_master_placeholder_types(master_doc.root_element());
-        let master_sizes = HashMap::from([("body".to_owned(), 28.0)]);
+    fn object_slot_without_layout_transform_uses_master_body_box() {
+        let body = Transform {
+            x: 838_200,
+            y: 1_825_625,
+            cx: 10_515_600,
+            cy: 4_351_338,
+            ..Default::default()
+        };
+        let placeholders = LayoutPlaceholders {
+            master_by_type: HashMap::from([("body".to_owned(), body.clone())]),
+            ..Default::default()
+        };
+
+        let inherited = placeholders.lookup("obj", Some(1));
+
+        assert_eq!(inherited.map(|transform| transform.x), Some(body.x));
+        assert_eq!(inherited.map(|transform| transform.y), Some(body.y));
+        assert_eq!(inherited.map(|transform| transform.cx), Some(body.cx));
+        assert_eq!(inherited.map(|transform| transform.cy), Some(body.cy));
+    }
+
+    #[test]
+    fn typeless_layout_slot_uses_schema_default_text_style() {
+        let master_sizes = HashMap::from([("body".to_owned(), 28.0), ("obj".to_owned(), 18.0)]);
         let placeholders = parse_layout_with_master(
             r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Content"/><p:cNvSpPr/>
                  <p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
                <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#,
-            &master_types,
             &master_sizes,
         );
         let shape = parse_slide_shape(
@@ -2380,8 +2401,12 @@ mod placeholder_geometry_tests {
             &placeholders,
         );
 
-        assert_eq!(shape.placeholder_type.as_deref(), Some("body"));
-        assert_eq!(shape.text_body.unwrap().default_font_size, Some(28.0));
+        // CT_Placeholder defaults an omitted @type to obj. The idx is used to
+        // match corresponding placeholders, but cannot rewrite that schema
+        // value from an unrelated master slot that happens to reuse the same
+        // idx in a two-content layout.
+        assert_eq!(shape.placeholder_type.as_deref(), Some("obj"));
+        assert_eq!(shape.text_body.unwrap().default_font_size, Some(18.0));
     }
 
     #[test]
@@ -2504,7 +2529,6 @@ mod placeholder_geometry_tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
-            &HashMap::new(),
             &master_bullets,
             &HashMap::new(),
             &HashMap::new(),
@@ -2598,6 +2622,79 @@ mod placeholder_geometry_tests {
         assert_eq!(body.t_ins, 72_000);
         assert_eq!(body.r_ins, 216_000);
         assert_eq!(body.b_ins, 72_000);
+    }
+
+    #[test]
+    fn slide_placeholder_inherits_vertical_anchor_from_matching_layout_idx() {
+        let placeholders = parse_layout_geometry(
+            r#"
+              <p:sp>
+                <p:nvSpPr><p:cNvPr id="2" name="Bottom body"/><p:cNvSpPr/>
+                  <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+                </p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+                <p:txBody><a:bodyPr anchor="b"/><a:lstStyle/><a:p/></p:txBody>
+              </p:sp>
+              <p:sp>
+                <p:nvSpPr><p:cNvPr id="3" name="Top body"/><p:cNvSpPr/>
+                  <p:nvPr><p:ph type="body" idx="2"/></p:nvPr>
+                </p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="0" y="1000"/><a:ext cx="1000" cy="1000"/></a:xfrm></p:spPr>
+                <p:txBody><a:bodyPr anchor="t"/><a:lstStyle/><a:p/></p:txBody>
+              </p:sp>"#,
+        );
+        let shape = parse_slide_shape(
+            r#"
+              <p:nvSpPr><p:cNvPr id="4" name="Top body instance"/><p:cNvSpPr/>
+                <p:nvPr><p:ph type="body" idx="2"/></p:nvPr>
+              </p:nvSpPr>
+              <p:spPr/>
+              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Top</a:t></a:r></a:p></p:txBody>"#,
+            &placeholders,
+        );
+
+        assert_eq!(
+            shape
+                .text_body
+                .expect("placeholder text body")
+                .vertical_anchor,
+            "t",
+        );
+
+        let master_only = LayoutPlaceholders {
+            by_type_master_anchor: HashMap::from([("".to_owned(), "b".to_owned())]),
+            ..LayoutPlaceholders::default()
+        };
+        assert_eq!(
+            master_only.lookup_anchor("obj", Some(99)).as_deref(),
+            Some("b"),
+        );
+    }
+
+    #[test]
+    fn idx_placeholder_without_anchor_retains_layout_type_fallback() {
+        let placeholders = parse_layout_geometry(
+            r#"
+              <p:sp>
+                <p:nvSpPr><p:cNvPr id="2" name="Shared body anchor"/><p:cNvSpPr/>
+                  <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+                </p:nvSpPr>
+                <p:spPr/>
+                <p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/><a:p/></p:txBody>
+              </p:sp>
+              <p:sp>
+                <p:nvSpPr><p:cNvPr id="3" name="Body instance"/><p:cNvSpPr/>
+                  <p:nvPr><p:ph type="body" idx="10"/></p:nvPr>
+                </p:nvSpPr>
+                <p:spPr/>
+                <p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>
+              </p:sp>"#,
+        );
+
+        assert_eq!(
+            placeholders.lookup_anchor("body", Some(10)).as_deref(),
+            Some("ctr"),
+        );
     }
 
     const LAYOUT_ELLIPSE: &str = r#"

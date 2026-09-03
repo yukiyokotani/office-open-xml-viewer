@@ -62,6 +62,17 @@ try {
   window.pptxTextRuns = await textPptx.collectSlideRuns(0, 640);
   textPptx.destroy();
 
+  const borderedXlsx = await XlsxWorkbook.load(
+    await bytes('/consumer/bordered.xlsx'),
+    { mode: 'worker', useGoogleFonts: false },
+  );
+  paint('xlsx-bordered', await borderedXlsx.renderViewportToBitmap(
+    0,
+    { row: 0, col: 0, rows: 8, cols: 4 },
+    { width: 320, height: 200, dpr: 1 },
+  ));
+  borderedXlsx.destroy();
+
   const chartExDocx = await DocxDocument.load(
     await bytes('/consumer/chart-ex.docx'),
     { mode: 'worker', ...renderers },

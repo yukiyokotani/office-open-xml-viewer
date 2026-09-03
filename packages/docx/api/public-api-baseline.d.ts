@@ -1511,6 +1511,7 @@ export interface ImageFill {
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
     strategy?: DecodedImageBudgetStrategy;
+    resolution?: 'native-if-fit' | 'display';
 }
 export interface ImageRun {
     imagePath: string;

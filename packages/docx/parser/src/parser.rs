@@ -5672,7 +5672,16 @@ fn handle_run_in_para(
                 }
             }
             "end" => {
-                if let Some(frame) = field.stack.pop() {
+                if let Some(mut frame) = field.stack.pop() {
+                    // §17.16.18: `separate` marks the start of a stored field
+                    // result, but it is absent when no result is stored. Fields
+                    // whose value we compute locally are still complete at
+                    // `end`; retain them instead of treating the missing cached
+                    // result as a missing field.
+                    if !frame.past_separate {
+                        frame.substitute = frame.legacy_checkbox_checked.is_some()
+                            || classify_field(&frame.instruction) != "other";
+                    }
                     if frame.substitute && !frame.legacy_checkbox_nested {
                         let fmt = if has_mergeformat_switch(&frame.instruction) {
                             frame
@@ -14565,6 +14574,48 @@ mod tests {
             .expect("NUMPAGES field run");
 
         assert_eq!(field.font_size, 10.0);
+    }
+
+    /// ECMA-376 §17.16.18 permits a complex field to omit the result separator
+    /// when no cached result is stored. Recomputable fields still have complete
+    /// semantics between `begin` and `end`, so PAGE/NUMPAGES must remain visible
+    /// even when there is no `separate` fldChar or fallback text.
+    #[test]
+    fn complex_page_fields_without_cached_results_are_retained() {
+        let runs = parse_para(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:instrText> PAGE </w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>
+               <w:r><w:t xml:space="preserve"> / </w:t></w:r>
+               <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:instrText> NUMPAGES </w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>
+               <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:instrText> REF MissingBookmark </w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>
+               <w:r><w:t>tail</w:t></w:r>"#,
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let fields = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Field(field) => Some(field.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].field_type, "page");
+        assert_eq!(fields[0].instruction, "PAGE");
+        assert_eq!(fields[0].fallback_text, "");
+        assert_eq!(fields[0].font_size, 10.0);
+        assert_eq!(fields[1].field_type, "numPages");
+        assert_eq!(fields[1].instruction, "NUMPAGES");
+        assert_eq!(fields[1].fallback_text, "");
+        assert!(runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Text(text) if text.text == "tail")));
     }
 
     #[test]

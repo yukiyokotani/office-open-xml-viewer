@@ -155,5 +155,10 @@ describe('sourceRasterTargetSize', () => {
   it('rejects non-visible and non-finite crop targets', () => {
     expect(sourceRasterTargetSize(1200, 900, { l: 0.6, t: 0, r: 0.6, b: 0 })).toBeNull();
     expect(sourceRasterTargetSize(Number.NaN, 900)).toBeNull();
+    expect(sourceRasterTargetSize(
+      Number.MAX_VALUE,
+      900,
+      { l: 1 - Number.EPSILON, t: 0, r: 0, b: 0 },
+    )).toBeNull();
   });
 });

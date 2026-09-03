@@ -131,6 +131,7 @@ describe('getCachedDuotoneBitmapByPath', () => {
     expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
     expect(createBitmap).toHaveBeenNthCalledWith(2, expect.anything(), {
       resizeWidth: 1,
+      resizeHeight: 1,
       resizeQuality: 'high',
     });
 
@@ -153,12 +154,12 @@ describe('getCachedDuotoneBitmapByPath', () => {
     ) => source instanceof Blob
       ? ({
           width: options?.resizeWidth ?? 300,
-          height: options?.resizeWidth ?? 300,
+          height: options?.resizeHeight ?? 300,
           close() {},
         } as unknown as ImageBitmap)
       : ({
           width: options?.resizeWidth ?? source.width,
-          height: options?.resizeWidth ?? source.height,
+          height: options?.resizeHeight ?? source.height,
           derivedIndex: derivedIndex++,
           close() {},
         } as unknown as ImageBitmap)));
@@ -190,7 +191,7 @@ describe('getCachedDuotoneBitmapByPath', () => {
       duotone,
       fetchImage,
       {
-        targetWidthPx: 80,
+        targetWidthPx: 200,
         targetHeightPx: 30,
         maxRetainedPixels,
         offscreenFactory: factory,
@@ -215,9 +216,9 @@ describe('getCachedDuotoneBitmapByPath', () => {
       },
     );
 
-    expect(smallDerived).toMatchObject({ width: 80, height: 80 });
-    expect(largeBase).toMatchObject({ width: 200, height: 200 });
-    expect(largeDerived).toMatchObject({ width: 200, height: 200 });
+    expect(smallDerived).toMatchObject({ width: 200, height: 30 });
+    expect(largeBase).toMatchObject({ width: 300, height: 300 });
+    expect(largeDerived).toMatchObject({ width: 200, height: 40 });
     expect(largeDerived).not.toBe(smallDerived);
 
     dropDuotoneBitmapCache(fetchImage);
@@ -388,6 +389,7 @@ describe('getCachedDuotoneBitmapByPath', () => {
     expect(createBitmap).toHaveBeenNthCalledWith(1, expect.any(Blob));
     expect(createBitmap).toHaveBeenNthCalledWith(2, base, {
       resizeWidth: 2,
+      resizeHeight: 1,
       resizeQuality: 'high',
     });
 

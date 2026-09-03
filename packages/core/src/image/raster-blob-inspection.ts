@@ -15,6 +15,25 @@ export interface RasterBlobInspection {
   readonly dimensions: RasterDimensions | null;
 }
 
+/** MIME types whose browser decoder accepts a bounded two-axis resize request.
+ * A renderer can plan these from authored display geometry without first
+ * extracting every source merely to classify it. The decode boundary still
+ * sniffs the bytes and enforces the encoded-source hard limits. */
+export function isBrowserResizableRasterMimeType(mimeType: string): boolean {
+  switch (mimeType.split(';', 1)[0]?.trim().toLowerCase()) {
+    case 'image/png':
+    case 'image/jpeg':
+    case 'image/jpg':
+    case 'image/gif':
+    case 'image/bmp':
+    case 'image/x-ms-bmp':
+    case 'image/webp':
+      return true;
+    default:
+      return false;
+  }
+}
+
 /** Raster formats whose active decoder can honor a retained-grid target.
  * Browser formats use `createImageBitmap` resize; TIFF participates only when
  * the caller has installed the optional codec. WMF/EMF are deliberately

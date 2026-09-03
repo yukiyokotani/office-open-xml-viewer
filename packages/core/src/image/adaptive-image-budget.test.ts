@@ -13,6 +13,7 @@ describe('normalizeImageResourceOptions', () => {
     expect(normalizeImageResourceOptions()).toEqual({
       decodedByteBudget: MAX_DECODED_IMAGE_BYTES,
       strategy: 'adaptive',
+      resolution: 'native-if-fit',
     });
   });
 
@@ -20,10 +21,18 @@ describe('normalizeImageResourceOptions', () => {
     expect(normalizeImageResourceOptions({
       decodedByteBudget: HARD_MAX_DECODED_IMAGE_BYTES,
       strategy: 'strict',
+      resolution: 'display',
     })).toEqual({
       decodedByteBudget: HARD_MAX_DECODED_IMAGE_BYTES,
       strategy: 'strict',
+      resolution: 'display',
     });
+  });
+
+  it('rejects an unknown raster resolution policy', () => {
+    expect(() => normalizeImageResourceOptions({
+      resolution: 'source' as never,
+    })).toThrow(TypeError);
   });
 
   it.each([0, -1, 1.5, Number.NaN, HARD_MAX_DECODED_IMAGE_BYTES + 1])(
@@ -52,12 +61,73 @@ describe('planDecodedImageTargets', () => {
     const plan = planDecodedImageTargets([
       { key: 'a', targetWidthPx: 100, targetHeightPx: 50 },
       { key: 'b', targetWidthPx: 20, targetHeightPx: 10, retainedSurfaceCount: 2 },
-    ], { decodedByteBudget: 1_000_000, strategy: 'adaptive' });
+    ], { decodedByteBudget: 1_000_000, strategy: 'adaptive', resolution: 'display' });
 
     expect(plan.degraded).toBe(false);
     expect(plan.targets.get('a')).toMatchObject({ width: 100, height: 50 });
     expect(plan.targets.get('b')).toMatchObject({ width: 20, height: 10 });
     expect(plan.plannedBytes).toBe((100 * 50 + 20 * 10 * 2) * 4);
+  });
+
+  it('honors display resolution even when every source grid is already known', () => {
+    const plan = planDecodedImageTargets([{
+      key: 'known',
+      targetWidthPx: 100,
+      targetHeightPx: 50,
+      sourceWidthPx: 800,
+      sourceHeightPx: 600,
+    }], {
+      decodedByteBudget: 10_000_000,
+      strategy: 'adaptive',
+      resolution: 'display',
+    });
+
+    expect(plan.targets.get('known')).toMatchObject({
+      width: 100,
+      height: 50,
+      retainedWidth: 100,
+      retainedHeight: 50,
+      maxRetainedPixels: 5_000,
+    });
+  });
+
+  it('allocates spare budget to native admission and a bounded supersampled fallback', () => {
+    const plan = planDecodedImageTargets([
+      { key: 'wide', targetWidthPx: 200, targetHeightPx: 100 },
+      { key: 'small', targetWidthPx: 100, targetHeightPx: 50 },
+    ], {
+      decodedByteBudget: 2_000_000,
+      strategy: 'adaptive',
+      resolution: 'native-if-fit',
+    });
+
+    expect(plan.qualityScale).toBe(1);
+    expect(plan.targets.get('wide')).toMatchObject({ width: 400, height: 200 });
+    expect(plan.targets.get('small')).toMatchObject({ width: 200, height: 100 });
+    expect(plan.targets.get('wide')?.maxRetainedPixels).toBeGreaterThan(200 * 100);
+    expect(plan.targets.get('small')?.maxRetainedPixels).toBeGreaterThan(100 * 50);
+    expect(plan.plannedBytes).toBeLessThanOrEqual(2_000_000);
+  });
+
+  it('charges the retained grid when inspected sources are smaller than their display target', () => {
+    const plan = planDecodedImageTargets([
+      {
+        key: 'small-source',
+        targetWidthPx: 100,
+        targetHeightPx: 100,
+        sourceWidthPx: 1,
+        sourceHeightPx: 1,
+      },
+      { key: 'uninspected', targetWidthPx: 1, targetHeightPx: 1 },
+    ], {
+      decodedByteBudget: 400,
+      strategy: 'adaptive',
+      resolution: 'native-if-fit',
+    });
+
+    expect(plan.plannedBytes).toBeLessThanOrEqual(400);
+    expect(plan.targets.get('small-source')?.retainedPixels).toBe(1);
+    expect(plan.targets.get('uninspected')?.maxRetainedPixels).toBeGreaterThanOrEqual(1);
   });
 
   it('preserves established native decoding while the source working set fits', () => {
@@ -67,7 +137,11 @@ describe('planDecodedImageTargets', () => {
       targetHeightPx: 300,
       sourceWidthPx: 4000,
       sourceHeightPx: 3000,
-    }], { decodedByteBudget: MAX_DECODED_IMAGE_BYTES, strategy: 'adaptive' });
+    }], {
+      decodedByteBudget: MAX_DECODED_IMAGE_BYTES,
+      strategy: 'adaptive',
+      resolution: 'native-if-fit',
+    });
 
     expect(plan.targets.get('photo')).toMatchObject({ width: 4000, height: 3000 });
     expect(plan.plannedBytes).toBe(4000 * 3000 * 4);
@@ -81,7 +155,11 @@ describe('planDecodedImageTargets', () => {
       sourceWidthPx: 5000,
       sourceHeightPx: 4000,
       retainedSurfaceCount: 2,
-    }], { decodedByteBudget: 200_000_000, strategy: 'adaptive' });
+    }], {
+      decodedByteBudget: 200_000_000,
+      strategy: 'adaptive',
+      resolution: 'native-if-fit',
+    });
 
     expect(plan.targets.get('effect-photo')).toMatchObject({ width: 5000, height: 4000 });
     expect(plan.plannedBytes).toBe(5000 * 4000 * 2 * 4);
@@ -94,23 +172,28 @@ describe('planDecodedImageTargets', () => {
       targetHeightPx: 960,
       sourceWidthPx: 12_090,
       sourceHeightPx: 9_063,
-    }], { decodedByteBudget: MAX_DECODED_IMAGE_BYTES, strategy: 'adaptive' });
+    }], {
+      decodedByteBudget: MAX_DECODED_IMAGE_BYTES,
+      strategy: 'adaptive',
+      resolution: 'native-if-fit',
+    });
 
     expect(plan.targets.get('poster')).toEqual({
       width: 1280,
       height: 960,
-      retainedWidth: 1281,
-      retainedHeight: 961,
-      retainedPixels: 1281 * 961,
+      retainedWidth: 1280,
+      retainedHeight: 960,
+      retainedPixels: 1280 * 960,
+      maxRetainedPixels: 1280 * 960,
     });
-    expect(plan.plannedBytes).toBe(1281 * 961 * 4);
+    expect(plan.plannedBytes).toBe(1280 * 960 * 4);
   });
 
   it('allocates one uniform pixels-per-display-pixel scale when the pass is over budget', () => {
     const plan = planDecodedImageTargets([
       { key: 'a', targetWidthPx: 100, targetHeightPx: 100 },
       { key: 'b', targetWidthPx: 100, targetHeightPx: 100 },
-    ], { decodedByteBudget: 20_000, strategy: 'adaptive' });
+    ], { decodedByteBudget: 20_000, strategy: 'adaptive', resolution: 'display' });
 
     expect(plan.degraded).toBe(true);
     expect(plan.qualityScale).toBeCloseTo(0.5, 2);
@@ -123,7 +206,7 @@ describe('planDecodedImageTargets', () => {
     const plan = planDecodedImageTargets([
       { key: 'same', targetWidthPx: 100, targetHeightPx: 50 },
       { key: 'same', targetWidthPx: 200, targetHeightPx: 100 },
-    ], { decodedByteBudget: 1_000_000, strategy: 'adaptive' });
+    ], { decodedByteBudget: 1_000_000, strategy: 'adaptive', resolution: 'display' });
 
     expect(plan.targets.size).toBe(1);
     expect(plan.targets.get('same')).toMatchObject({ width: 200, height: 100 });
@@ -136,7 +219,7 @@ describe('planDecodedImageTargets', () => {
       targetWidthPx: 333 + index,
       targetHeightPx: 271 + index,
       retainedSurfaceCount: index % 3 === 0 ? 2 : 1,
-    })), { decodedByteBudget: 1_234_567, strategy: 'adaptive' });
+    })), { decodedByteBudget: 1_234_567, strategy: 'adaptive', resolution: 'display' });
 
     expect(plan.degraded).toBe(true);
     expect(plan.plannedBytes).toBeLessThanOrEqual(1_234_567);
@@ -146,22 +229,24 @@ describe('planDecodedImageTargets', () => {
     expect(() => planDecodedImageTargets([
       { key: 'a', targetWidthPx: 100, targetHeightPx: 100 },
       { key: 'b', targetWidthPx: 100, targetHeightPx: 100 },
-    ], { decodedByteBudget: 4, strategy: 'adaptive' })).toThrow(expect.objectContaining({
-      code: 'ooxml-decoded-image-limit',
-      metric: 'active-decoded-bytes',
-      limit: 4,
-      observed: 8,
-    }));
+    ], { decodedByteBudget: 4, strategy: 'adaptive', resolution: 'display' }))
+      .toThrow(expect.objectContaining({
+        code: 'ooxml-decoded-image-limit',
+        metric: 'active-decoded-bytes',
+        limit: 4,
+        observed: 8,
+      }));
   });
 
   it('rejects strict aggregate crossings before starting decode work', () => {
     expect(() => planDecodedImageTargets([
       { key: 'a', targetWidthPx: 100, targetHeightPx: 100 },
-    ], { decodedByteBudget: 100, strategy: 'strict' })).toThrow(expect.objectContaining({
-      code: 'ooxml-decoded-image-limit',
-      metric: 'active-decoded-bytes',
-      limit: 100,
-      observed: 40_000,
-    }));
+    ], { decodedByteBudget: 100, strategy: 'strict', resolution: 'display' }))
+      .toThrow(expect.objectContaining({
+        code: 'ooxml-decoded-image-limit',
+        metric: 'active-decoded-bytes',
+        limit: 100,
+        observed: 40_000,
+      }));
   });
 });

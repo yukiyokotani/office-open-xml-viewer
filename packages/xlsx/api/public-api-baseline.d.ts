@@ -1128,6 +1128,7 @@ export interface ImageFill {
 export interface ImageResourceOptions {
     decodedByteBudget?: number;
     strategy?: DecodedImageBudgetStrategy;
+    resolution?: 'native-if-fit' | 'display';
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export function isTiffDecodeError(error: unknown): error is TiffDecodeError;

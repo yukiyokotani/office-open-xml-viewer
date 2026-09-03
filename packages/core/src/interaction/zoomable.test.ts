@@ -71,6 +71,12 @@ describe('prevZoomStep (− step)', () => {
     expect(prevZoomStep(0.05)).toBe(0.25);
   });
 
+  it('steps below the ladder to an explicit fitted floor', () => {
+    expect(prevZoomStep(0.25, 0.05)).toBe(0.05);
+    expect(prevZoomStep(0.1, 0.05)).toBe(0.05);
+    expect(prevZoomStep(0.05, 0.05)).toBe(0.05);
+  });
+
   it('round-trips +/- symmetrically on-ladder', () => {
     expect(prevZoomStep(nextZoomStep(1))).toBe(1);
     expect(nextZoomStep(prevZoomStep(2))).toBe(2);

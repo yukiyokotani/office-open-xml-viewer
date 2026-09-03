@@ -95,7 +95,12 @@ import BrandIcon from '../components/BrandIcon.astro';
       stageProgress.hidden = false;
       try {
         const t0 = performance.now();
-        const res = await renderFile(stage, file);
+        const res = await renderFile(stage, file, ({ units, unitLabel }) => {
+          if (generation !== loadGeneration) return;
+          const elapsed = Math.round(performance.now() - t0);
+          const count = `${units} ${unitLabel}${units === 1 ? '' : 's'} · `;
+          status.textContent = `${count}available · loading for ${elapsed} ms`;
+        });
         if (generation !== loadGeneration) return;
         preview.dataset.format = res.format;
         const ms = Math.round(performance.now() - t0);

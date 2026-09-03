@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { isDecodeTargetResizableRasterFormat } from './raster-blob-inspection';
+import {
+  isBrowserResizableRasterMimeType,
+  isDecodeTargetResizableRasterFormat,
+} from './raster-blob-inspection';
+
+describe('isBrowserResizableRasterMimeType', () => {
+  it.each([
+    'image/png',
+    'IMAGE/JPEG; charset=binary',
+    'image/jpg',
+    'image/gif',
+    'image/bmp',
+    'image/x-ms-bmp',
+    'image/webp',
+  ])('recognizes %s without source extraction', (mimeType) => {
+    expect(isBrowserResizableRasterMimeType(mimeType)).toBe(true);
+  });
+
+  it.each(['image/svg+xml', 'image/tiff', 'image/wmf', 'application/octet-stream'])(
+    'keeps %s on the inspected path',
+    (mimeType) => {
+      expect(isBrowserResizableRasterMimeType(mimeType)).toBe(false);
+    },
+  );
+});
 
 describe('isDecodeTargetResizableRasterFormat', () => {
   it.each(['png', 'jpeg', 'gif', 'bmp', 'webp'] as const)(

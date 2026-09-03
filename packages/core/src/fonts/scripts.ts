@@ -109,19 +109,16 @@ export type FontGenericClass = 'serif' | 'sans' | 'mono';
 
 /**
  * Classify a font *name* into a CSS generic class (serif / sans / monospace).
- * The shared serif/sans name heuristic for the pptx and xlsx renderers, which
- * both now route through it (collapsing their two duplicated regexes into one).
- * docx is NOT yet wired in: its name classifier layers word/fontTable.xml
- * `<w:family>` priority and Arabic-companion handling on top, and its Latin-first
- * fallback ordering is still on an unmerged branch — routing docx through here is
- * a deferred follow-up (it becomes the third caller, completing the unification).
+ * The shared serif/sans name heuristic for the pptx, xlsx, and docx renderers.
+ * DOCX layers word/fontTable.xml `<w:family>` priority and its format-specific
+ * fallback-chain construction on top; only the final name-pattern decision is
+ * shared here.
  *
  * This is the NAME-pattern fallback only. A caller that has authoritative class
  * data — Word's word/fontTable.xml `<w:family>` §17.8.3.10 (roman/swiss/modern)
  * — MUST consult that first and use this only for faces absent from the table or
- * marked "auto". The token set is the union of all three renderers' prior regexes
- * (docx included, so the future docx migration loses no coverage); no new name
- * guessing is introduced.
+ * marked "auto". The token set is the union of all three renderers' prior
+ * regexes; no package-specific name guessing is introduced.
  *
  * - mono : mono / courier / consolas / 等幅 …
  * - serif: Latin serifs (Times, Cambria/Caladea, Georgia, Garamond, Century,

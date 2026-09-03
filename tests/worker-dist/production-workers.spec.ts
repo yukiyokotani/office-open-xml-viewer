@@ -4,7 +4,7 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
   await page.goto(url);
   await expect(page.locator('body')).toHaveAttribute('data-status', 'ready', { timeout: 60_000 });
 
-  for (const id of ['docx', 'math', 'xlsx', 'pptx', 'pptx-text']) {
+  for (const id of ['docx', 'math', 'xlsx', 'pptx', 'pptx-text', 'xlsx-bordered']) {
     const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
       const context = canvas.getContext('2d');
       if (!context) return 0;

@@ -42,6 +42,7 @@ import {
 } from './raster-or-metafile.js';
 import { inspectRasterBlob, type RasterBlobInspection } from './raster-blob-inspection.js';
 import { rasterExceedsBudget } from './raster-dimensions.js';
+import { decodedBitmapRetainedTarget } from './raster-target.js';
 import { closeImageBitmapIfSupported } from './image-bitmap-lifecycle.js';
 import { withDecodedImageSlot } from './decode-gate.js';
 import {
@@ -673,17 +674,14 @@ function reusableResolutionVariantKey(
     const actualHeight = Number(entry.bitmap?.height);
     const hasActualGrid = Number.isFinite(actualWidth) && actualWidth > 0
       && Number.isFinite(actualHeight) && actualHeight > 0;
-    const scale = sourceDimensions
-      ? Math.min(1, Math.max(
-          width > 0 ? width / sourceDimensions.width : 0,
-          height > 0 ? height / sourceDimensions.height : 0,
-        ))
-      : 0;
+    const retained = sourceDimensions
+      ? decodedBitmapRetainedTarget(sourceDimensions, width, height)
+        ?? sourceDimensions
+      : undefined;
     const pixels = hasActualGrid
       ? actualWidth * actualHeight
-      : sourceDimensions && scale > 0
-        ? Math.max(1, Math.ceil(sourceDimensions.width * scale))
-          * Math.max(1, Math.ceil(sourceDimensions.height * scale))
+      : retained
+        ? retained.width * retained.height
         : width * height;
     if (!best || pixels < best.pixels) best = { key: key.slice(BASE_CACHE_PREFIX.length), pixels };
   }
@@ -697,6 +695,15 @@ function profileNeedsResolutionVariant(
   const pixelLimit = retainedPixelLimit(opts);
   const dimensions = profile.inspection.dimensions;
   if (!dimensions) return false;
+  const sourcePixels = dimensions.width * dimensions.height;
+  // A render plan's explicit pixel limit is the source's share of the complete
+  // paint budget. Preserve the native surface whenever it fits that share,
+  // even if its aspect differs from the geometry-derived fallback grid.
+  // Display-mode plans set the limit to the display grid itself, so a larger
+  // source still takes the bounded variant.
+  if (opts.maxRetainedPixels !== undefined
+    && !rasterExceedsBudget(dimensions)
+    && sourcePixels <= pixelLimit) return false;
   const targetWidth = normalizedRasterTarget(opts.targetWidthPx);
   const targetHeight = normalizedRasterTarget(opts.targetHeightPx);
   const hasSmallerDisplayTarget = profile.inspection.format === 'tiff'
@@ -705,11 +712,10 @@ function profileNeedsResolutionVariant(
       && (targetHeight === undefined || targetHeight < dimensions.height)
     : targetWidth !== undefined
       && targetHeight !== undefined
-      && targetWidth < dimensions.width
-      && targetHeight < dimensions.height;
+      && (targetWidth < dimensions.width || targetHeight < dimensions.height);
   return hasSmallerDisplayTarget
     || rasterExceedsBudget(dimensions)
-    || dimensions.width * dimensions.height > pixelLimit;
+    || sourcePixels > pixelLimit;
 }
 
 /** Resolve the actual base-cache key after source inspection. A sufficient
@@ -954,7 +960,11 @@ export function getCachedBitmapByPath(
       }),
     );
   }
-  const decode = (cacheKey: string, initial?: RasterSourceProfile) => {
+  const decode = (
+    cacheKey: string,
+    initial?: RasterSourceProfile,
+    resizeToTarget = true,
+  ) => {
     const initialBlob = initial?.initialBlob;
     if (initial) initial.initialBlob = undefined;
     return getCachedDecodedBitmap(
@@ -968,8 +978,8 @@ export function getCachedBitmapByPath(
           heightPt,
           suppressBoundaryFrame,
           tiff,
-          targetWidthPx,
-          targetHeightPx,
+          targetWidthPx: resizeToTarget ? targetWidthPx : undefined,
+          targetHeightPx: resizeToTarget ? targetHeightPx : undefined,
           maxRetainedPixels,
         };
         const bitmap = initial
@@ -990,15 +1000,16 @@ export function getCachedBitmapByPath(
       );
     }
     if (!targetWidthPx && !targetHeightPx) {
-      return decode(cachedBitmapVariantKey(imagePath), profile);
+      return decode(cachedBitmapVariantKey(imagePath), profile, false);
     }
     const nativeKey = `${BASE_CACHE_PREFIX}${cachedBitmapVariantKey(imagePath)}`;
     if (!hasRestrictedPixelLimit(normalized)
       && bitmapCacheByFetch.get(owner)?.entries.has(nativeKey)) {
-      return decode(cachedBitmapVariantKey(imagePath), profile);
+      return decode(cachedBitmapVariantKey(imagePath), profile, false);
     }
+    const needsResolutionVariant = profileNeedsResolutionVariant(profile, normalized);
     return decode(
-      profileNeedsResolutionVariant(profile, normalized)
+      needsResolutionVariant
         ? reusableResolutionVariantKey(
             owner,
             imagePath,
@@ -1008,6 +1019,7 @@ export function getCachedBitmapByPath(
           ?? cachedBitmapVariantKey(imagePath, normalized)
         : cachedBitmapVariantKey(imagePath),
       profile,
+      needsResolutionVariant,
     );
   });
 }

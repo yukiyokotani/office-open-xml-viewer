@@ -13,7 +13,9 @@
  * Publications remain provisional because later anchor/header/footer/field
  * convergence can repaginate the document. They are nevertheless based on the
  * complete source input, so unbounded `keepNext` lookahead is no longer cut off
- * at an artificial preview boundary.
+ * at an artificial preview boundary. Header/footer reserve and pagination-field
+ * convergence can replace a preview; the public publication contract marks
+ * these snapshots `exact:false` until the authoritative final layout arrives.
  *
  * ## What is guaranteed
  *

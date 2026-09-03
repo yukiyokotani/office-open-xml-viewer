@@ -12,7 +12,7 @@ import type {
   ChartRegionMapRenderer,
   ChartExRenderer,
 } from '@silurus/ooxml-core';
-import { chartImageFillKey } from '@silurus/ooxml-core';
+import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -31,6 +31,7 @@ import {
 import { GridGeometry, MAX_WORKSHEET_COL } from './internal/grid-geometry.js';
 import type { GridAxisGeometry } from './internal/grid-axis-geometry.js';
 import { usesNativeOneCellExtent } from './internal/cell-anchor-geometry.js';
+import { isOptionalImageUnavailable } from './internal/optional-image-fallback.js';
 import {
   MDW_FALLBACK,
   colWidthToPx,
@@ -4253,8 +4254,10 @@ function renderImages(
   for (const anchor of anchors) {
     // A `<a:duotone>` picture was recoloured at decode time and cached under a
     // colour-suffixed key (§20.1.8.23); look it up with the same key.
-    const img = loadedImages.get(imageCacheKey(anchor.imagePath, anchor.duotone));
-    if (!img) continue;
+    const lookupKey = imageCacheKey(anchor.imagePath, anchor.duotone);
+    const img = loadedImages.get(lookupKey);
+    const tiffUnavailable = isOptionalImageUnavailable(loadedImages, lookupKey, 'tiff');
+    if (!img && !tiffUnavailable) continue;
 
     // xdr col/row are 0-indexed; our widths map is 1-indexed.
     const fromCol1 = anchor.fromCol + 1;
@@ -4300,13 +4303,22 @@ function renderImages(
     // ECMA-376 §20.1.8.6 `<a:alphaModFix>`: scale the picture's opacity so it
     // composites over the cells beneath it. Saved/restored so it never leaks
     // into a later anchor's draw.
+    const paint = () => {
+      if (img) {
+        drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+      } else {
+        paintOptionalImagePlaceholder(ctx, 'tiff', {
+          x: canvasX, y: canvasY, width: imgW, height: imgH,
+        });
+      }
+    };
     if (anchor.alpha != null && anchor.alpha < 1) {
       ctx.save();
       ctx.globalAlpha = anchor.alpha;
-      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+      paint();
       ctx.restore();
     } else {
-      drawImageCropped(ctx, img, anchor.srcRect, canvasX, canvasY, imgW, imgH);
+      paint();
     }
   }
 
@@ -4513,21 +4525,31 @@ function drawShape(
     // calendar header). The caller pre-decodes every image path seen in
     // `ws.shapeGroups[*].shapes[*].geom` via XlsxWorkbook.renderViewport,
     // so we should normally have it in `loadedImages` (keyed by imagePath).
-    // If not, fall back to a silent skip — drawing an empty rect would look
-    // worse.
-    const img = loadedImages?.get(imageCacheKey(shape.geom.imagePath, shape.geom.duotone));
-    if (img) {
+    // Missing ordinary sources remain a silent skip. A recognized TIFF whose
+    // optional codec is absent carries an explicit frame-local placeholder mark.
+    const imageGeom = shape.geom;
+    const lookupKey = imageCacheKey(imageGeom.imagePath, imageGeom.duotone);
+    const img = loadedImages?.get(lookupKey);
+    const tiffUnavailable = isOptionalImageUnavailable(loadedImages, lookupKey, 'tiff');
+    if (img || tiffUnavailable) {
       // Honor an `<a:srcRect>` crop on the leaf pic (oneCellAnchor / grpSp leaf),
       // same as the top-level anchor path (ECMA-376 §20.1.8.55). Apply the leaf's
       // `<a:alphaModFix>` opacity (§20.1.8.6) via globalAlpha, saved/restored.
-      const leafAlpha = shape.geom.alpha;
+      const leafAlpha = imageGeom.alpha;
+      const paint = () => {
+        if (img) {
+          drawImageCropped(ctx, img, imageGeom.srcRect, 0, 0, sw, sh);
+        } else {
+          paintOptionalImagePlaceholder(ctx, 'tiff', { x: 0, y: 0, width: sw, height: sh });
+        }
+      };
       if (leafAlpha != null && leafAlpha < 1) {
         ctx.save();
         ctx.globalAlpha = leafAlpha;
-        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+        paint();
         ctx.restore();
       } else {
-        drawImageCropped(ctx, img, shape.geom.srcRect, 0, 0, sw, sh);
+        paint();
       }
     }
   }

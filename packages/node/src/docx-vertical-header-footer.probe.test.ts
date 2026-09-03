@@ -231,8 +231,11 @@ describe.skipIf(!skia || !docxMod || !rendererMod)(
       const { layoutDocument } = rendererMod!;
       const margins =
         'w:top="2880" w:right="720" w:bottom="2880" w:left="720" w:header="360" w:footer="360" w:gutter="0"';
-      const withHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: true, paras: 40, pgMar: margins }));
-      const noHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: false, paras: 40, pgMar: margins }));
+      // Keep the corpus comfortably beyond a single logical page. A smaller
+      // paragraph count can fit when the selected CJK fallback has compact
+      // metrics, making this pagination invariant depend on the host fonts.
+      const withHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: true, paras: 80, pgMar: margins }));
+      const noHF = await materializeDocxDocument(verticalHeaderFooterDocx({ hf: false, paras: 80, pgMar: margins }));
       const rImg = installImageBitmapShim(factory);
       const rOff = installOffscreenCanvasShim(factory);
       let withPages = 0;

@@ -24,7 +24,7 @@ describe('Try Yours parsing progress', () => {
     expect(source).toContain('id="stage-progress" role="status" aria-live="polite" hidden');
     expect(source).toContain('class="try-progress-circle" aria-hidden="true"');
     expect(source).toMatch(/\.try-stage-progress\s*\{[\s\S]*?color: var\(--preview-text\);/);
-    expect(source).toMatch(/stageProgress\.hidden = false;[\s\S]*await renderFile\(stage, file\)/);
+    expect(source).toMatch(/stageProgress\.hidden = false;[\s\S]*await renderFile\(stage, file,/);
   });
 
   it('hides the progress UI on both the current render success and failure paths', () => {
@@ -35,7 +35,10 @@ describe('Try Yours parsing progress', () => {
     expect(renderer).toContain("mode: 'worker'");
     expect(renderer).toContain('progressiveLayout: true');
     expect(renderer).toContain('viewer.waitUntilLayoutComplete().then(mountAllPages)');
+    expect(renderer).toContain('onLayoutPartial: ({ availableUnits }) =>');
+    expect(renderer).toContain('viewerOptions.overscan = availableUnits');
     expect(source).toContain('available · opened in');
+    expect(source).toContain('available · loading for');
     expect(source).toContain('res.finalUnits.then');
   });
 

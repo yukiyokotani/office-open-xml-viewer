@@ -416,6 +416,13 @@ describe('production layout service integration', () => {
 
   it('derives generic fallback from fontTable family and pitch for each selected face', () => {
     const doc = model({
+      body: [{
+        type: 'paragraph',
+        runs: [
+          textRun('serif', { fontFamily: 'Garamond' }),
+          textRun('sans', { fontFamily: 'Arial' }),
+        ],
+      } as DocxDocumentModel['body'][number]],
       fontFamilyClasses: {
         'Roman Face': 'roman',
         'Swiss Face': 'swiss',
@@ -436,12 +443,35 @@ describe('production layout service integration', () => {
     expect(generic('Swiss Face')).toBe('sans-serif');
     expect(generic('Fixed Modern')).toBe('monospace');
     expect(generic('Variable Modern')).toBe('sans-serif');
-    expect(generic('Garamond')).toBe('sans-serif');
+    expect(generic('Garamond')).toBe('serif');
+    expect(generic('Arial')).toBe('sans-serif');
     expect(services.text.shape({
       text: 'x', fontSizePt: 10, fonts: { ascii: 'Roman Face' },
     }).spans[0]?.font.route).toMatchObject({
       familyList: expect.stringMatching(/^"Roman Face", .*"Noto Serif".*serif$/),
       scope: 'native',
+    });
+  });
+
+  it('uses bounded consumer defaults only when no rFonts slot resolves', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+
+    expect(services.text.shape({
+      text: 'Header 1', fontSizePt: 10, fonts: {},
+    }).spans[0]?.font).toMatchObject({
+      source: 'generic', requestedFamily: 'serif', genericFamily: 'serif',
+      route: { familyList: 'serif', scope: 'generic' },
+    });
+    expect(services.text.shape({
+      text: 'Header 1', fontSizePt: 10, fonts: { ascii: 'Arial' },
+    }).spans[0]?.font).toMatchObject({
+      source: 'native', requestedFamily: 'Arial', genericFamily: 'sans-serif',
+    });
+    expect(services.text.shape({
+      text: '漢字', fontSizePt: 10, fonts: {},
+    }).spans[0]?.font).toMatchObject({
+      source: 'generic', requestedFamily: 'sans-serif', genericFamily: 'sans-serif',
+      route: { familyList: 'sans-serif', scope: 'generic' },
     });
   });
 

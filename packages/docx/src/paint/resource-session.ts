@@ -16,6 +16,7 @@ export interface OpaquePaintResourceHandle {
 export type UnavailablePaintResourceHandle = Readonly<{
   status: 'unavailable';
   reason: string;
+  placeholder?: 'tiff';
 }>;
 
 export type ResolvedPaintResource<K extends PaintResourceDescriptorKind> = Readonly<{
@@ -43,9 +44,10 @@ function assertNonEmptyString(value: unknown, path: string): asserts value is st
 
 export function unavailablePaintResourceHandle(
   reason: string,
+  options: Readonly<{ placeholder?: 'tiff' }> = {},
 ): UnavailablePaintResourceHandle {
   assertNonEmptyString(reason, 'unavailable paint resource reason');
-  return Object.freeze({ status: 'unavailable', reason });
+  return Object.freeze({ status: 'unavailable', reason, ...options });
 }
 
 export function isUnavailablePaintResourceHandle(
@@ -54,7 +56,9 @@ export function isUnavailablePaintResourceHandle(
   return typeof handle === 'object' && handle !== null
     && (handle as { status?: unknown }).status === 'unavailable'
     && typeof (handle as { reason?: unknown }).reason === 'string'
-    && (handle as { reason: string }).reason.trim().length > 0;
+    && (handle as { reason: string }).reason.trim().length > 0
+    && ((handle as { placeholder?: unknown }).placeholder === undefined
+      || (handle as { placeholder?: unknown }).placeholder === 'tiff');
 }
 
 function assertValidOpaqueHandle(handle: unknown): void {
@@ -66,6 +70,10 @@ function assertValidOpaqueHandle(handle: unknown): void {
     (handle as { reason?: unknown }).reason,
     'unavailable paint resource reason',
   );
+  const placeholder = (handle as { placeholder?: unknown }).placeholder;
+  if (placeholder !== undefined && placeholder !== 'tiff') {
+    throw new TypeError('unavailable paint resource placeholder must be tiff when supplied');
+  }
 }
 
 /** Browser-owned handles are render-session state. Keeping them here prevents
