@@ -1929,6 +1929,62 @@ describe('planLine visual geometry', () => {
     ]);
   });
 
+  it('keeps a solid underline continuous across floating-precision retained run seams', () => {
+    const seamPt = 300;
+    const driftedSeamPt = seamPt + Number.EPSILON * seamPt * 2;
+    const underline = (fromXPt: number, toXPt: number, yPt: number) => ({
+      kind: 'underline' as const,
+      from: { xPt: fromXPt, yPt }, to: { xPt: toXPt, yPt },
+      color: '#ff3333', widthPt: 1, style: 'solid' as const,
+    });
+    const first = {
+      ...measuredText('left  ', 0, seamPt),
+      decorations: [underline(0, seamPt, 16)],
+    };
+    const second = {
+      ...measuredText('right', 6, 20),
+      decorations: [underline(driftedSeamPt, 320, 17)],
+    };
+
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 400, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 11 }, topPt: 5, baselinePt: 15, advancePt: 14,
+        xOffsetPt: 0, availableWidthPt: 400, endsWithBreak: false,
+        segments: [first, second],
+      },
+    });
+
+    expect(line.placements).toMatchObject([
+      { kind: 'text', decorations: [{ from: { xPt: 0, yPt: 17 }, to: { xPt: 320, yPt: 17 } }] },
+      { kind: 'text', decorations: [] },
+    ]);
+  });
+
+  it('keeps a one-point underline gap across adjacent runs', () => {
+    const underline = (fromXPt: number, toXPt: number) => ({
+      kind: 'underline' as const,
+      from: { xPt: fromXPt, yPt: 16 }, to: { xPt: toXPt, yPt: 16 },
+      color: '#000000', widthPt: 1, style: 'solid' as const,
+    });
+    const first = { ...measuredText('aa', 0, 20), decorations: [underline(0, 20)] };
+    const second = { ...measuredText('bb', 2, 20), decorations: [underline(21, 40)] };
+
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+      isFirstLine: true, isLastLine: true, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 4 }, topPt: 5, baselinePt: 15, advancePt: 14,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false,
+        segments: [first, second],
+      },
+    });
+
+    expect(line.placements.map((placement) =>
+      placement.kind === 'text' ? placement.decorations?.length : 0)).toEqual([1, 1]);
+  });
+
   it('retains one wave cadence across adjacent underlined source runs', () => {
     const wave = (fromXPt: number, toXPt: number) => ({
       kind: 'underline' as const,

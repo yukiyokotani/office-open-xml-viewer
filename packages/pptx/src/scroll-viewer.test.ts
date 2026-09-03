@@ -1446,6 +1446,48 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     expect(engine.renderCalls.length).toBeGreaterThan(0);
     v.destroy();
   });
+
+  it('worker load waits for the current first paint when the render epoch changes', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    const engine = new FakePptxEngine(
+      1,
+      SLIDE_W_EMU,
+      SLIDE_H_EMU,
+      'worker',
+      true,
+    );
+    vi.spyOn(PptxPresentation, 'load').mockResolvedValue(engine.asPres());
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      mode: 'worker',
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+
+    let loadSettled = false;
+    const load = v.load('sample.pptx').then(() => {
+      loadSettled = true;
+    });
+    await vi.waitFor(() => expect(engine.bitmapCalls).toHaveLength(1));
+    const initial = engine.bitmapCalls[0]!;
+
+    v.setScale(v.scaleForTest() * 2);
+    initial.resolve();
+    await vi.waitFor(() => expect(engine.bitmapCalls).toHaveLength(2));
+    expect(loadSettled).toBe(false);
+
+    const current = engine.bitmapCalls[1]!;
+    current.resolve();
+    await load;
+
+    const slot = scrollHost.children.find((child) =>
+      child.children.some((nested) => nested.tag === 'canvas')) as FakeEl | undefined;
+    const canvas = slot?.children.find((child) => child.tag === 'canvas') as FakeEl | undefined;
+    expect(canvas?._bitmapCtx?.lastBitmap).toBe(engine.createdBitmaps[1]);
+    v.destroy();
+  });
 });
 
 describe('PptxScrollViewer — interactive media lifecycle', () => {

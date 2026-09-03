@@ -108,9 +108,8 @@ describe('getPosterBitmap — RB1 poster decode-bomb guard', () => {
       { targetWidthPx: 1280, targetHeightPx: 960 },
     )).resolves.toBe(resized);
     expect(createImageBitmapSpy).toHaveBeenCalledWith(expect.any(Blob), {
-      // Preserve aspect ratio while covering both requested axes. This source
-      // is fractionally wider than 4:3, so 960 target rows require 1281 columns.
-      resizeWidth: 1281,
+      resizeWidth: 1280,
+      resizeHeight: 960,
       resizeQuality: 'high',
     });
   });

@@ -939,7 +939,7 @@ pub(crate) fn parse_shape(
         return None;
     }
     let inherited_anchor: Option<String> = if ph_node.is_some() {
-        lph.lookup_anchor(&ph_type)
+        lph.lookup_anchor(&ph_type, ph_idx)
     } else {
         None
     };
@@ -1090,7 +1090,7 @@ pub(crate) fn parse_shape(
             lph.lookup_italic(&ph_type),
             lph.lookup_caps(&ph_type),
             lph.lookup_reflection(&ph_type),
-            lph.lookup_anchor(&ph_type),
+            lph.lookup_anchor(&ph_type, ph_idx),
             lph.lookup_text_insets(&ph_type, ph_idx),
             lph.lookup_alignment(&ph_type, ph_idx),
             lph.lookup_ea_ln_brk(&ph_type),

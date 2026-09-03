@@ -191,7 +191,7 @@ export const WORD_CONTIGUOUS_UNDERLINE_GEOMETRY = defineCompatibilityRule({
   id: 'word-contiguous-underline-geometry',
   evidence: {
     kind: 'regression-test',
-    reference: 'packages/docx/src/layout/paragraph.test.ts#uses one safe baseline for a solid underline spanning adjacent source runs',
+    reference: 'packages/docx/src/layout/paragraph.test.ts#keeps a solid underline continuous across floating-precision retained run seams',
   },
   description: 'Adjacent compatible underlined source runs share one safe baseline and continuous authored cadence while style, color, and thickness boundaries remain distinct.',
 });

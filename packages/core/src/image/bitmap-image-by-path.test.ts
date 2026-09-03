@@ -165,7 +165,7 @@ describe('getCachedBitmapByPath', () => {
     const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 300,
-      height: options?.resizeWidth ?? 300,
+      height: options?.resizeHeight ?? 300,
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', cib);
@@ -185,8 +185,8 @@ describe('getCachedBitmapByPath', () => {
     });
 
     expect(square).toMatchObject({ width: 100, height: 100 });
-    expect(wideRequest).toMatchObject({ width: 200, height: 200 });
-    expect(smallestCover).toBe(square);
+    expect(wideRequest).toMatchObject({ width: 200, height: 40 });
+    expect(smallestCover).toBe(wideRequest);
     expect(cib).toHaveBeenCalledTimes(2);
   });
 
@@ -200,7 +200,7 @@ describe('getCachedBitmapByPath', () => {
     const fetchImage = vi.fn(async () => new Blob([png as BlobPart], { type: 'image/png' }));
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 1920,
-      height: options?.resizeWidth ? options.resizeWidth * 9 / 16 : 1080,
+      height: options?.resizeHeight ?? 1080,
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', cib);
@@ -232,10 +232,12 @@ describe('getCachedBitmapByPath', () => {
     expect(cib).toHaveBeenCalledTimes(3);
     expect(cib).toHaveBeenNthCalledWith(1, expect.any(Blob), {
       resizeWidth: 640,
+      resizeHeight: 360,
       resizeQuality: 'high',
     });
     expect(cib).toHaveBeenNthCalledWith(2, expect.any(Blob), {
       resizeWidth: 1600,
+      resizeHeight: 900,
       resizeQuality: 'high',
     });
     expect(cib).toHaveBeenNthCalledWith(3, expect.any(Blob));
@@ -246,7 +248,8 @@ describe('getCachedBitmapByPath', () => {
     const fetchImage = vi.fn(async () => new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
       const width = options?.resizeWidth ?? 100;
-      return { width, height: width * 4, close() {} } as unknown as ImageBitmap;
+      const height = options?.resizeHeight ?? 400;
+      return { width, height, close() {} } as unknown as ImageBitmap;
     });
     vi.stubGlobal('createImageBitmap', cib);
     const path = 'word/media/exif-oriented-bands.jpg';
@@ -255,19 +258,24 @@ describe('getCachedBitmapByPath', () => {
       targetWidthPx: 50,
       targetHeightPx: 200,
     });
-    const native = await getCachedBitmapByPath(path, 'image/jpeg', fetchImage, {
+    const crossAspect = await getCachedBitmapByPath(path, 'image/jpeg', fetchImage, {
       targetWidthPx: 200,
       targetHeightPx: 50,
     });
 
     expect(reduced).toMatchObject({ width: 50, height: 200 });
-    expect(native).toMatchObject({ width: 100, height: 400 });
+    expect(crossAspect).toMatchObject({ width: 100, height: 50 });
     expect(fetchImage).toHaveBeenCalledTimes(2);
     expect(cib).toHaveBeenNthCalledWith(1, expect.any(Blob), {
       resizeWidth: 50,
+      resizeHeight: 200,
       resizeQuality: 'high',
     });
-    expect(cib).toHaveBeenNthCalledWith(2, expect.any(Blob));
+    expect(cib).toHaveBeenNthCalledWith(2, expect.any(Blob), {
+      resizeWidth: 100,
+      resizeHeight: 50,
+      resizeQuality: 'high',
+    });
   });
 
   it('keeps TIFF display-resolution variants across target changes', async () => {
@@ -570,7 +578,7 @@ describe('getCachedBitmapByPath', () => {
       new Blob([png as BlobPart], { type: 'image/wmf' }));
     const create = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => ({
       width: options?.resizeWidth ?? 400,
-      height: options?.resizeWidth ? options.resizeWidth / 2 : 200,
+      height: options?.resizeHeight ?? 200,
       close() {},
     }) as unknown as ImageBitmap);
     vi.stubGlobal('createImageBitmap', create);
@@ -602,6 +610,7 @@ describe('getCachedBitmapByPath', () => {
     expect(create).toHaveBeenCalledTimes(2);
     expect(create).toHaveBeenNthCalledWith(1, expect.any(Blob), {
       resizeWidth: 100,
+      resizeHeight: 50,
       resizeQuality: 'high',
     });
     expect(create).toHaveBeenNthCalledWith(2, expect.any(Blob));

@@ -59,7 +59,7 @@ describe('DocxScrollViewer — growing page count', () => {
     viewer.destroy();
   });
 
-  it('coalesces background page growth until the reader reaches the presented tail', () => {
+  it('publishes background page growth without waiting for reader scroll', () => {
     installDom();
     const container = makeContainer(700, 500);
     const engine = new FakeDocxEngine(4, PAGE);
@@ -78,18 +78,11 @@ describe('DocxScrollViewer — growing page count', () => {
     engine.setPageCount(16);
     publishDocxLayout(doc, { pageCount: 16, exact: false, complete: false });
 
-    // pageCount/callbacks report the newest available pages, but a background
-    // publication does not resize the native scrollbar under an idle reader.
+    // The document, callback and native scroll extent all expose the newest
+    // paintable prefix while the reader remains idle at the top.
     expect(viewer.pageCount).toBe(16);
-    expect(parseFloat(spacerOf(container).style.height)).toBe(initialHeight);
-    expect(fires.at(-1)).toEqual([0, 16, false]);
-
-    // Once the reader actually reaches the end of the presented prefix, the
-    // newest coalesced publication is revealed in one step.
-    const scrollHost = scrollHostOf(container);
-    scrollHost.scrollTop = initialHeight;
-    scrollHost.dispatch('scroll');
     expect(parseFloat(spacerOf(container).style.height)).toBeGreaterThan(initialHeight);
+    expect(fires.at(-1)).toEqual([0, 16, false]);
     viewer.destroy();
   });
 

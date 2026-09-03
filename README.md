@@ -1,3 +1,4 @@
+> [!NOTE]
 > **This entire codebase — Rust parsers, TypeScript renderers, tests, and tooling — is implemented by AI coding agents, primarily [Claude](https://claude.ai) and [Codex](https://openai.com/codex/)**, through iterative prompting. No human-written application code exists in this repository.
 
 <details>
@@ -310,10 +311,11 @@ await viewer.load('/deck.pptx');
 ```
 
 The container must have a bounded height (e.g. `height: 100vh` or a flex child)
-so the viewer can size its scroll host to it. Base zoom fits the first page/slide
-width to the container width and re-fits on resize; a `0`-width container defers
-layout until it has width. Call `destroy()` to tear down (a self-loaded engine is
-destroyed with it; a borrowed one is not — see below).
+so the viewer can size its scroll host to it. Base zoom fits the widest available
+DOCX page, or the PPTX slide width, to the container and re-fits on resize. A
+progressively loaded DOCX re-fits if a wider page appears; a `0`-width container
+defers layout until it has width. Call `destroy()` to tear down (a self-loaded
+engine is destroyed with it; a borrowed one is not — see below).
 
 Pass `refitOnResize: false` when the viewport must not determine the document's
 physical display size. An explicit pre-load `setScale(1)` then keeps the same
@@ -342,7 +344,9 @@ sheet sits inside a uniform desk margin; pass `0` for a flush edge.
 bare-wheel still scrolls natively. Zoom is flicker-free — a rapid gesture shows a
 CSS preview and settles into a crisp re-render when it pauses. Bounds are the
 absolute scale factors `zoomMin` / `zoomMax` (default `0.1` / `4`), and
-`setScale(scale)` sets it programmatically. Pass `enableZoom: false` to disable.
+`setScale(scale)` sets it programmatically. When fitting needs a scale below
+`zoomMin`, that fitted scale becomes the effective minimum so users can zoom in
+and still return to the original fit. Pass `enableZoom: false` to disable.
 
 **Text selection and find.** Pass `enableTextSelection: true` to overlay a
 transparent, selectable text layer per page/slide for native copy. It works in
@@ -691,7 +695,7 @@ file without uploading it.
 | | Charts (embedded DrawingML `c:chart` — bar / line / area / pie / doughnut / radar / scatter, via the shared core chart renderer; data labels honour `dLblPos`, §21.2.2.48) | ✅ |
 | | ChartEx (waterfall / histogram / Pareto / funnel / box &amp; whisker / treemap / sunburst) | ✅ opt-in |
 | | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
-| | Images (inline and anchored, with text wrap) | ✅ |
+| | Images (inline and anchored, with text wrap and adaptive display-sized decoding for oversized rasters) | ✅ |
 | | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
 | | Text boxes / drawing shapes (inline and anchored `wps:wsp` / `wps:txbx`, including solid, gradient, and image fills; `a:prstGeom` — 186 preset geometries via the shared engine; connector arrow heads `headEnd` / `tailEnd` (§20.1.8.3) and `prstDash` dash patterns (§20.1.8.48)). Text-box paragraphs run through the **same line-layout engine as body text**, so kinsoku 行頭/行末禁則 (§17.15.1.58–60), UAX#9 bidi (`w:bidi`, §17.3.1.6), justification (§17.18.44) and tab stops (§17.3.1.37) all apply inside a box | ✅ |
@@ -745,7 +749,7 @@ file without uploading it.
 | | Row / column sizing (custom widths and heights) | ✅ |
 | | Hidden rows / columns | ✅ |
 | | Row / column outline grouping (`outlineLevel` / `collapsed` §18.3.1.73 / .13, `<outlinePr>` — gutter brackets, +/− collapse, numbered level buttons; view-only) | ✅ |
-| **Elements** | Images (`<xdr:twoCellAnchor>`) | ✅ |
+| **Elements** | Images (`<xdr:twoCellAnchor>`, with adaptive display-sized decoding for oversized rasters) | ✅ |
 | | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | OLE embedded objects (`<oleObjects>` — the legacy VML `v:imagedata` preview keyed by `oleObject@shapeId` is drawn; an image-typed `objectPr` target is preferred when present, and the embedded app is not run) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, raster fallback) | ✅ |
@@ -793,7 +797,7 @@ file without uploading it.
 | | Markdown export (`PptxPresentation.toMarkdown()` — title slides → headings, body → nested bullets, notes / comments collated) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
-| | Pictures (`pic`) | ✅ |
+| | Pictures (`pic`, with adaptive display-sized decoding for oversized rasters) | ✅ |
 | | TIFF images (opt-in `@silurus/ooxml/tiff`; bounded bilevel, grayscale, RGB(A), process-CMYK and CCITT Group 4) | ✅ |
 | | SVG images (`asvg:svgBlip` MS-2016 extension — vector drawn from the embedded `.svg`, PNG fallback) | ✅ |
 | | Groups (`grpSp`) with nested transforms | ✅ |
@@ -958,8 +962,10 @@ Stable failures can be narrowed without parsing message strings:
   active decoded-byte ceiling. Its `metric`, `limit`, and `observed` properties
   are stable.
 - `TiffDecodeError` (`code === 'ooxml-tiff-decode'`) — a recognized TIFF part
-  has no configured codec, is malformed, or uses a class the configured codec
-  does not support. Its message is diagnostic rather than a stable subtype.
+  is malformed, uses a class the configured codec does not support, or fails
+  during bitmap handoff. Its message is diagnostic rather than a stable subtype.
+  Omitting the optional TIFF codec is not an error; the affected image is shown
+  as an unavailable-image placeholder while the rest of the document renders.
 - An otherwise ordinary `Error` may carry `code === 'parser-crashed'` for a
   recognized WASM trap. This does not mean “OOM”: panic, allocation failure,
   stack overflow, and other traps can be indistinguishable at the current WASM
@@ -1046,16 +1052,17 @@ try {
 
   The report is content-free by construction: it does not include source URLs, filenames, package paths, document text, passwords, or raw error messages. It still contains document-derived sizes, counts, and timings, so applications remain responsible for consent, retention, and telemetry policy. The initial browser callback covers the underlying document/workbook/presentation factory and does not wait for a Viewer's first canvas paint; use `getResourceMetrics()` for the latest observed package counters. Bounded Node sessions accept both `onResourceMetrics` and `debug`. DOCX/PPTX report successful terminal metrics when their one-pass stream completes or the session is explicitly closed; XLSX reports success when the reusable workbook session is explicitly closed. Open-time and session-operation failures report immediately.
 
-  Image decoding uses a separate adaptive resource policy shared by all three formats. Target-resizable rasters—browser-decodable formats and TIFF when its optional codec is configured—keep their native decode while the complete visible paint fits the default 128 MiB decoded budget and the per-surface ceilings, preserving established output. When native ownership would cross either boundary, the renderer decodes those rasters at the current canvas/DPR requirement instead of retaining source pixels the paint cannot show. If even those display targets exceed the aggregate budget, it applies one uniform quality reduction across them; a later zoom requests a sharper cache variant. Image-bearing paints for the same loaded document are serialized so overlapping paints cannot each consume the full budget, while the admitted paint still runs up to two decodes concurrently. Formats or sources that cannot be decoder-resized remain on their format-specific path under the hard surface ceilings. Applications with a known environment can override the aggregate budget on Viewer or per-render options:
+  Image decoding uses a separate adaptive resource policy shared by all three formats. Ordinary browser-decodable rasters are assigned a geometry-weighted share of the default 128 MiB decoded budget before source extraction. Each source can then flow directly from extraction to decode: it keeps native resolution when it fits its share and otherwise uses up to a 2x canvas/DPR grid when that share has headroom, avoiding visibly soft 1x intermediates for small placed artwork. If the complete set of display grids itself exceeds the budget, adaptive mode reduces them by one uniform quality ratio. This avoids an all-paint inspection barrier without making display-sized downsampling the default. Natural-size consumers, pixel effects that require the authored grid, and formats that cannot be decoder-resized remain on their guarded format-specific paths under the hard surface ceilings. Image-bearing paints for the same loaded document are serialized so overlapping paints cannot each consume the full budget, while the admitted paint still runs up to two decodes concurrently. Applications with a known environment can override the aggregate budget on Viewer or per-render options:
   ```ts
   new PptxViewer(canvas, {
     imageResources: {
       decodedByteBudget: 256 * 1024 * 1024,
       strategy: 'adaptive', // or 'strict' to reject instead of reducing quality
+      resolution: 'native-if-fit', // or 'display' to minimize retained pixels
     },
   });
   ```
-  `decodedByteBudget` accepts a positive safe integer from 4 bytes through 512 MiB. This configures planned and retained decoded RGBA ownership; it does not measure browser decoder intermediates or disable the encoded-source, per-axis, or per-surface hard safety ceilings. A strict aggregate crossing or any hard-ceiling crossing rejects with `OoxmlDecodedImageLimitError` (`code === 'ooxml-decoded-image-limit'`) instead of silently omitting the image.
+  `resolution` defaults to `'native-if-fit'`. Use `'display'` when minimizing retained raster pixels is more important than preserving source-resolution sampling. `decodedByteBudget` accepts a positive safe integer from 4 bytes through 512 MiB. This configures planned and retained decoded RGBA ownership; it does not measure browser decoder intermediates or disable the encoded-source, per-axis, or per-surface hard safety ceilings. A strict aggregate crossing or any hard-ceiling crossing rejects with `OoxmlDecodedImageLimitError` (`code === 'ooxml-decoded-image-limit'`) instead of silently omitting the image.
 
   The package counters and raster-image guards are deterministic admission limits, not exact JavaScript/WASM process-memory accounting. XML trees, document models, canvas backing stores, browser decoder overhead, renderer state, and browser-managed SVG/vector parse or decoded storage can still require several times the measured input. SVG has no portable decoded-byte measure or explicit browser release primitive; the library count-bounds its cache and revokes owned object URLs, but cannot charge it as RGBA bytes. The defaults therefore reduce risk but cannot promise that an OOM is impossible on every device. Running parse and render work in `mode: 'worker'` can contain many failures away from the main UI thread, but a Worker is not a separate operating-system process or a strict memory sandbox.
 

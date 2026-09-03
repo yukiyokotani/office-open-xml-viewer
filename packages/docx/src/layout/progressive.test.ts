@@ -174,6 +174,33 @@ describe('preview pages match the final layout', () => {
     }
   }, 300_000);
 
+  it('keeps publishing provisional pages while header/footer reserves converge', async () => {
+    const previews: ProgressiveLayoutPreview[] = [];
+    const testCase = open('header-footer', 200, { headerFooterFontSize: 64 });
+    const final = await layoutDocumentProgressively(
+      testCase.source.bodyLayoutInput,
+      testCase.services,
+      testCase.options,
+      {
+        onPreview: (preview) => { previews.push(preview); },
+      },
+    );
+
+    expect(previews.length).toBeGreaterThan(0);
+    expect(previews.at(-1)!.layout.pages.length).toBeLessThan(final.pages.length);
+    const counts = previews.map((preview) => preview.layout.pages.length);
+    expect(counts).toEqual([...counts].sort((left, right) => left - right));
+    expect(new Set(counts).size).toBe(counts.length);
+    // The seed deliberately uses zero header/footer body reserves. At least one
+    // preview must therefore differ from the authoritative converged geometry:
+    // consumers may paint it immediately, but must replace it when a newer
+    // generation arrives instead of treating it as exact layout.
+    expect(previews.some((preview) => preview.layout.pages.some((page, pageIndex) => (
+      pageFingerprint(page as LayoutPage)
+        !== pageFingerprint(final.pages[pageIndex] as LayoutPage)
+    )))).toBe(true);
+  }, 300_000);
+
   it('keeps a keepNext chain beyond the checkpoint in the canonical lookahead', async () => {
     // Paragraphs 44-47 form a keepNext chain whose terminal block (48) crossed
     // the old truncated-preview boundary. A resumable checkpoint sees the full

@@ -36,6 +36,49 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v085-large-images-and-rendering',
+    date: '2026-09-02',
+    label: 'Release note',
+    version: 'v0.85.0',
+    title: 'Larger images and steadier rendering in v0.85.0',
+    summary: 'v0.85.0 opens more Office files with large images, broadens TIFF support and improves rendering stability in worker mode and during PowerPoint zoom.',
+    audience: 'Applications that display image-heavy DOCX, XLSX or PPTX files, use worker rendering, or open TIFF images. Most applications can upgrade without code changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'Word, Excel and PowerPoint files with large, high-resolution images can now open more reliably. Images are prepared for the current display size when retaining their full source resolution would be excessive, and a later zoom can request a sharper result.',
+        ],
+        bullets: [
+          'Display poster-sized and camera images that previously crossed the decoded-image limit.',
+          'Support more TIFF images, including common black-and-white, grayscale, colour and Group 4 files.',
+          'Keep embedded SVGs, PowerPoint text and styled Excel sheets dependable in worker mode.',
+        ],
+      },
+      {
+        title: 'Smoother, more faithful viewing',
+        paragraphs: [
+          'PowerPoint zoom now keeps the viewed slide in place while the sharper render settles, including at the maximum zoom level. Placeholder text, built-in table styles and several chart layouts also more closely follow their Office appearance.',
+          'The same image handling is available across DOCX, XLSX and PPTX, in both regular and worker rendering modes.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'Most applications can upgrade without code changes. The new image policy is automatic, and applications with a specific memory or image-quality requirement can optionally adjust imageResources.',
+          'TIFF support remains optional. Without the TIFF module, the affected image is shown as unavailable while the rest of the document remains viewable. Add @silurus/ooxml/tiff only when those images need to be displayed.',
+        ],
+      },
+      {
+        title: 'Technical note',
+        paragraphs: [
+          'Adaptive image sizing remains bounded by non-disableable source, dimension and per-image safety limits. imageResources controls the decoded working budget and can select strict rejection when an application prefers it; it is not a promise about total browser or GPU memory.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v0841-word-layout-refinements',
     date: '2026-09-01',
     label: 'Release note',

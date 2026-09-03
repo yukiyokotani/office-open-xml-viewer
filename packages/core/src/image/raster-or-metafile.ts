@@ -24,6 +24,7 @@ import {
   TiffDecodeError,
   type TiffRenderer,
 } from './tiff-contract.js';
+import { OptionalImageCodecUnavailableError } from './optional-image-fallback.js';
 import { isEmf, isWmf, renderWmfToBitmap, wmfRasterTarget } from './wmf.js';
 
 export interface DecodeRasterOptions {
@@ -77,11 +78,10 @@ function decodePlan(
   );
   if (!target) return native;
   const resizeWidth = target.width;
-  // One axis lets the HTML algorithm preserve the oriented source aspect ratio
-  // (including EXIF rotation) instead of imposing the coded header's W×H.
+  const resizeHeight = target.height;
   return {
     retainedDimensions: target,
-    resizeOptions: { resizeWidth, resizeQuality: 'high' },
+    resizeOptions: { resizeWidth, resizeHeight, resizeQuality: 'high' },
   };
 }
 
@@ -167,7 +167,7 @@ export async function decodeRasterOrMetafileWithInspection(
     throw rasterLimitError(plan.retainedDimensions, MAX_RASTER_DIMENSION, retainedPixelLimit);
   }
   if (tiffInput) {
-    if (!tiff) throw new TiffDecodeError('TIFF image requires an opt-in TIFF codec');
+    if (!tiff) throw new OptionalImageCodecUnavailableError('tiff');
     let bitmap: ImageBitmap | null;
     try {
       bitmap = await tiff.render(new Uint8Array(await data.arrayBuffer()), {

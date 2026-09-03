@@ -49,7 +49,9 @@ export interface ZoomableViewer {
    *  pre-load `setScale` is waiting to be applied (see the module note). */
   getScale(): number;
   /** Set the absolute zoom factor (`1` = 100%), clamped to the viewer's
-   *  `[zoomMin, zoomMax]`. Re-renders at the new scale and fires `onScaleChange`
+   *  effective zoom range. A continuous-scroll viewer extends its floor down to
+   *  a smaller width-fit base when necessary, so its opening fit stays reachable
+   *  after zooming in. Re-renders and fires `onScaleChange`
    *  when the clamped value actually changes. Called BEFORE the content is
    *  loaded / the layout is established, the (clamped) factor is LATCHED and
    *  applied once the viewer establishes its scale — family-unified semantics
@@ -58,7 +60,8 @@ export interface ZoomableViewer {
   /** Step up to the next larger rung of the shared zoom ladder (25 %→400 %),
    *  clamped to `zoomMax`. Equivalent to `setScale(nextZoomStep(getScale()))`. */
   zoomIn(): void | Promise<void>;
-  /** Step down to the next smaller ladder rung, clamped to `zoomMin`. */
+  /** Step down to the next smaller ladder rung, then to a continuous viewer's
+   *  width-fit floor when that floor is below both `zoomMin` and the ladder. */
   zoomOut(): void | Promise<void>;
   /** Fit the content's WIDTH to the container (the common "fit width" / "fit
    *  page width" verb). Sets the scale so one page/slide/sheet-column-run spans
@@ -119,14 +122,20 @@ export function nextZoomStep(scale: number): number {
 /**
  * The next ladder rung strictly less than `scale` (the "−" step). Mirror of
  * {@link nextZoomStep}: a `scale` at or below the bottom rung returns the bottom
- * rung; a between-rungs value jumps DOWN to the next rung. Pure.
+ * rung by default. Callers whose valid floor is below the ladder (for example a
+ * continuous viewer's width fit) may pass it as `floor`; once no lower rung
+ * exists, the step returns that floor instead. A between-rungs value jumps DOWN
+ * to the next rung. Pure.
  */
-export function prevZoomStep(scale: number): number {
+export function prevZoomStep(
+  scale: number,
+  floor: number = ZOOM_STEP_LADDER[0],
+): number {
   for (let i = ZOOM_STEP_LADDER.length - 1; i >= 0; i--) {
     const rung = ZOOM_STEP_LADDER[i];
     if (rung < scale - LADDER_EPS) return rung;
   }
-  return ZOOM_STEP_LADDER[0];
+  return Math.min(floor, ZOOM_STEP_LADDER[0]);
 }
 
 /** Clamp `scale` to `[min, max]`. Pure; `max < min` yields `min` (degenerate

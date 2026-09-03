@@ -1,4 +1,4 @@
-import { drawImageCropped, renderChart } from '@silurus/ooxml-core';
+import { drawImageCropped, paintOptionalImagePlaceholder, renderChart } from '@silurus/ooxml-core';
 import type {
   ChartImageLookup,
   ChartThreeDRenderer,
@@ -42,17 +42,29 @@ export function paintImageResource(
 ): void {
   const descriptor = resource.descriptor as ImagePaintResourceDescriptor;
   const image = drawableHandle(resource);
-  if (!image) return;
+  const placeholder = isUnavailablePaintResourceHandle(resource.handle)
+    ? resource.handle.placeholder
+    : undefined;
+  if (!image && !placeholder) return;
   const draw = (xPt: number, yPt: number): void => {
-    drawImageCropped(
-      ctx as CanvasRenderingContext2D,
-      image,
-      descriptor.srcRect,
-      xPt,
-      yPt,
-      bounds.widthPt,
-      bounds.heightPt,
-    );
+    if (image) {
+      drawImageCropped(
+        ctx as CanvasRenderingContext2D,
+        image,
+        descriptor.srcRect,
+        xPt,
+        yPt,
+        bounds.widthPt,
+        bounds.heightPt,
+      );
+    } else if (placeholder === 'tiff') {
+      paintOptionalImagePlaceholder(ctx as CanvasRenderingContext2D, 'tiff', {
+        x: xPt,
+        y: yPt,
+        width: bounds.widthPt,
+        height: bounds.heightPt,
+      });
+    }
   };
   const hasAlpha = descriptor.alpha !== undefined && descriptor.alpha < 1;
   if (hasAlpha) {
@@ -82,7 +94,18 @@ function paintDrawableResource(
   ctx: PaintCanvas2D,
 ): void {
   const drawable = drawableHandle(resource);
-  if (!drawable) return;
+  if (!drawable) {
+    if (isUnavailablePaintResourceHandle(resource.handle)
+      && resource.handle.placeholder === 'tiff') {
+      paintOptionalImagePlaceholder(ctx as CanvasRenderingContext2D, 'tiff', {
+        x: bounds.xPt,
+        y: bounds.yPt,
+        width: bounds.widthPt,
+        height: bounds.heightPt,
+      });
+    }
+    return;
+  }
   ctx.drawImage(
     drawable,
     bounds.xPt,

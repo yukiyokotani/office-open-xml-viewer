@@ -9,6 +9,7 @@ import {
 } from './wmf.js';
 import { decodeRasterOrMetafile } from './raster-or-metafile.js';
 import { TiffDecodeError } from './tiff-contract.js';
+import { isOptionalImageCodecUnavailableError } from './optional-image-fallback.js';
 
 // ── WMF (Windows Metafile) player unit tests ────────────────────────────────
 // The renderer falls back to this player for `.wmf`/`.emf` blips the browser
@@ -901,6 +902,7 @@ describe('decodeRasterOrMetafile', () => {
     })).resolves.toBe(fake);
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 960,
+      resizeHeight: 540,
       resizeQuality: 'high',
     });
   });
@@ -930,11 +932,12 @@ describe('decodeRasterOrMetafile', () => {
     })).resolves.toBe(resized);
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 1_200,
+      resizeHeight: 900,
       resizeQuality: 'high',
     });
   });
 
-  it('rounds an aspect-preserving decode up to cover both integer target axes', async () => {
+  it('uses the exact axis-wise DrawingML display grid', async () => {
     const sourceWidth = 12_090;
     const sourceHeight = 9_063;
     const png = new Uint8Array(26);
@@ -948,7 +951,7 @@ describe('decodeRasterOrMetafile', () => {
       const width = options?.resizeWidth ?? sourceWidth;
       return {
         width,
-        height: Math.ceil(sourceHeight * width / sourceWidth),
+        height: options?.resizeHeight ?? sourceHeight,
         close() {},
       } as unknown as ImageBitmap;
     });
@@ -957,9 +960,10 @@ describe('decodeRasterOrMetafile', () => {
     await expect(decodeRasterOrMetafile(blob, {
       targetWidthPx: 960,
       targetHeightPx: 720,
-    })).resolves.toMatchObject({ width: 961, height: 721 });
+    })).resolves.toMatchObject({ width: 960, height: 720 });
     expect(cib).toHaveBeenCalledWith(blob, {
-      resizeWidth: 961,
+      resizeWidth: 960,
+      resizeHeight: 720,
       resizeQuality: 'high',
     });
   });
@@ -983,6 +987,7 @@ describe('decodeRasterOrMetafile', () => {
     })).resolves.toBe(bitmap);
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 7,
+      resizeHeight: 7,
       resizeQuality: 'high',
     });
   });
@@ -1035,6 +1040,7 @@ describe('decodeRasterOrMetafile', () => {
     })).resolves.toBe(resized);
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 1_200,
+      resizeHeight: 900,
       resizeQuality: 'high',
     });
   });
@@ -1068,7 +1074,8 @@ describe('decodeRasterOrMetafile', () => {
     const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
       const width = options?.resizeWidth ?? 100;
-      return { width, height: width * 4, close() {} } as unknown as ImageBitmap;
+      const height = options?.resizeHeight ?? 400;
+      return { width, height, close() {} } as unknown as ImageBitmap;
     });
     vi.stubGlobal('createImageBitmap', cib);
 
@@ -1076,9 +1083,10 @@ describe('decodeRasterOrMetafile', () => {
       targetWidthPx: 25,
       targetHeightPx: 25,
       maxRetainedPixels: 2_500,
-    })).resolves.toMatchObject({ width: 25, height: 100 });
+    })).resolves.toMatchObject({ width: 25, height: 25 });
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 25,
+      resizeHeight: 25,
       resizeQuality: 'high',
     });
   });
@@ -1107,7 +1115,8 @@ describe('decodeRasterOrMetafile', () => {
     const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
       const width = options?.resizeWidth ?? 400;
-      return { width, height: width / 4, close() {} } as unknown as ImageBitmap;
+      const height = options?.resizeHeight ?? 100;
+      return { width, height, close() {} } as unknown as ImageBitmap;
     });
     vi.stubGlobal('createImageBitmap', cib);
 
@@ -1115,9 +1124,10 @@ describe('decodeRasterOrMetafile', () => {
       targetWidthPx: 25,
       targetHeightPx: 25,
       maxRetainedPixels: 2_500,
-    })).resolves.toMatchObject({ width: 100, height: 25 });
+    })).resolves.toMatchObject({ width: 25, height: 25 });
     expect(cib).toHaveBeenCalledWith(blob, {
-      resizeWidth: 100,
+      resizeWidth: 25,
+      resizeHeight: 25,
       resizeQuality: 'high',
     });
   });
@@ -1154,7 +1164,8 @@ describe('decodeRasterOrMetafile', () => {
     const blob = new Blob([jpeg as BlobPart], { type: 'image/jpeg' });
     const cib = vi.fn(async (_blob: Blob, options?: ImageBitmapOptions) => {
       const width = options?.resizeWidth ?? 100;
-      return { width, height: width * 4, close() {} } as unknown as ImageBitmap;
+      const height = options?.resizeHeight ?? 400;
+      return { width, height, close() {} } as unknown as ImageBitmap;
     });
     vi.stubGlobal('createImageBitmap', cib);
 
@@ -1162,9 +1173,10 @@ describe('decodeRasterOrMetafile', () => {
       targetWidthPx: 25,
       targetHeightPx: 25,
       maxRetainedPixels: 2_500,
-    })).resolves.toMatchObject({ width: 25, height: 100 });
+    })).resolves.toMatchObject({ width: 25, height: 25 });
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 25,
+      resizeHeight: 25,
       resizeQuality: 'high',
     });
   });
@@ -1187,6 +1199,7 @@ describe('decodeRasterOrMetafile', () => {
     })).resolves.toBe(resized);
     expect(cib).toHaveBeenCalledWith(blob, {
       resizeWidth: 4_000,
+      resizeHeight: 200,
       resizeQuality: 'high',
     });
   });
@@ -1273,6 +1286,7 @@ describe('decodeRasterOrMetafile', () => {
     )).resolves.toBe(bitmap);
     expect(cib).toHaveBeenCalledWith(expect.any(Blob), {
       resizeWidth: 1_000,
+      resizeHeight: 10,
       resizeQuality: 'high',
     });
   });
@@ -1298,17 +1312,15 @@ describe('decodeRasterOrMetafile', () => {
     expect(cib).not.toHaveBeenCalled();
   });
 
-  it('a recognized TIFF fails clearly without a codec or when its codec returns null', async () => {
+  it('distinguishes a missing optional TIFF codec from a configured codec failure', async () => {
     const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 1, 2, 3, 4]);
     const blob = new Blob([bytes as BlobPart], { type: 'image/tiff' });
     const browserDecode = vi.fn();
     vi.stubGlobal('createImageBitmap', browserDecode);
 
-    await expect(decodeRasterOrMetafile(blob)).rejects.toMatchObject({
-      name: 'TiffDecodeError',
-      code: 'ooxml-tiff-decode',
-      message: expect.stringMatching(/TIFF.*codec/i),
-    });
+    await expect(decodeRasterOrMetafile(blob)).rejects.toSatisfy(
+      error => isOptionalImageCodecUnavailableError(error, 'tiff'),
+    );
     expect(browserDecode).not.toHaveBeenCalled();
 
     const emptyRender = vi.fn(async () => null);

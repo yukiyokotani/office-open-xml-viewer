@@ -8,6 +8,7 @@ import {
   getCachedDerivedBitmap,
   getCachedSvgImageByPath,
   inspectCachedRasterSource,
+  isBrowserResizableRasterMimeType,
   isDecodeTargetResizableRasterFormat,
   metafileRasterSize,
   preferVectorBlip,
@@ -18,8 +19,14 @@ import {
   chartImageFillKey,
   chartImageFillUsageSize,
   collectChartImageFillUsages,
+  isOptionalImageCodecUnavailableError,
 } from '@silurus/ooxml-core';
-import type { Duotone, ImageResourceOptions, TiffRenderer } from '@silurus/ooxml-core';
+import type {
+  Duotone,
+  ImageResourceOptions,
+  OptionalImageCodecUnavailableError,
+  TiffRenderer,
+} from '@silurus/ooxml-core';
 import type {
   DeepReadonly,
   ImagePaintResourceDescriptor,
@@ -28,6 +35,7 @@ import type {
 } from '../layout/types.js';
 
 export type DecodedImage = ImageBitmap | HTMLImageElement;
+export type DecodedPaintImage = DecodedImage | OptionalImageCodecUnavailableError;
 export type DocxFetchImage = (path: string, mime: string) => Promise<Blob>;
 
 interface ImageDecodeRequest {
@@ -182,7 +190,11 @@ export async function decodeRaster(
     suppressBoundaryFrame: true,
     tiff,
     maxRetainedPixels,
-    ...(colorReplaceFrom || duotone ? {} : target ?? {}),
+    // The shared decoder preserves the native grid while it fits the explicit
+    // effect working-set ceiling. Supplying the display target as a fallback
+    // lets adaptive mode downsample an oversized effect source before the four
+    // source/offscreen/ImageData/result surfaces would cross that ceiling.
+    ...(target ?? {}),
   };
   const base = await getCachedBitmapByPath(imagePath, mimeType, fetchImage, {
     ...sourceBitmapOptions,
@@ -203,7 +215,10 @@ export async function decodeRaster(
     target?.targetWidthPx,
     target?.targetHeightPx,
   );
-  const key = `${imageKey(resolvedBaseKey, colorReplaceFrom, duotone)}${resizeOptions ? `|resize-width:${resizeOptions.resizeWidth}` : ''}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
+  const resizeKey = resizeOptions
+    ? `|resize:${resizeOptions.resizeWidth}x${resizeOptions.resizeHeight}`
+    : '';
+  const key = `${imageKey(resolvedBaseKey, colorReplaceFrom, duotone)}${resizeKey}${failClosedOnDuotoneFailure ? '|strict' : ''}`;
   return getCachedDerivedBitmap(
     DOCX_COLOR_EFFECT_CACHE_NAMESPACE,
     key,
@@ -384,7 +399,7 @@ export async function preloadPaintImages(
   devicePixelsPerPoint?: number,
   svgDecoder?: import('@silurus/ooxml-core').SvgBlobDecoder,
   imageResources?: ImageResourceOptions,
-): Promise<Map<string, DecodedImage>> {
+): Promise<Map<string, DecodedPaintImage>> {
   if (!fetchImage) return new Map();
   const policy = normalizeImageResourceOptions(imageResources);
   const decodeSvg = (path: string, request: ImageDecodeRequest) => svgDecoder
@@ -411,6 +426,15 @@ export async function preloadPaintImages(
     const dataIsSvg = request.mimeType === 'image/svg+xml';
     const blip = { svgImagePath: request.svgImagePath, srcRect: request.hasCrop || null };
     if (dataIsSvg || preferVectorBlip(blip)) return null;
+    if (isBrowserResizableRasterMimeType(request.mimeType)
+      && (policy.resolution === 'display' || policy.strategy === 'adaptive')) {
+      return {
+        key: requestKey(request),
+        targetWidthPx: request.targetWidthPx,
+        targetHeightPx: request.targetHeightPx,
+        retainedSurfaceCount: 1,
+      };
+    }
     const inspection = await inspectCachedRasterSource(
       request.imagePath,
       request.mimeType,
@@ -443,58 +467,69 @@ export async function preloadPaintImages(
     const target = plan.targets.get(requestKey(request));
     request.targetWidthPx = target?.width;
     request.targetHeightPx = target?.height;
-    request.plannedPixelLimit = target?.retainedPixels;
+    request.plannedPixelLimit = target?.maxRetainedPixels;
   }
   const entries = await Promise.all(requests.map(async (request) => {
-    const dataIsSvg = request.mimeType === 'image/svg+xml';
-    const blip = { svgImagePath: request.svgImagePath, srcRect: request.hasCrop || null };
-    let image: DecodedImage | null;
-    if (preferVectorBlip(blip)) {
-      try {
-        image = await decodeSvg(blip.svgImagePath, request);
-      } catch (vectorError) {
-        const fallback = dataIsSvg
-          ? await decodeSvg(request.imagePath, request)
-          : await decodeRaster(
-              request.imagePath,
-              request.mimeType,
-              request.colorReplaceFrom,
-              fetchImage,
-              request.widthPt,
-              request.heightPt,
-              request.duotone,
-              request.failClosedOnDuotoneFailure ?? false,
-              tiff,
-              request.targetWidthPx && request.targetHeightPx
-                ? { targetWidthPx: request.targetWidthPx, targetHeightPx: request.targetHeightPx }
-                : undefined,
-              request.plannedPixelLimit,
-            );
-        if (!fallback) throw vectorError;
-        image = fallback;
+    try {
+      const dataIsSvg = request.mimeType === 'image/svg+xml';
+      const blip = { svgImagePath: request.svgImagePath, srcRect: request.hasCrop || null };
+      let image: DecodedImage | null;
+      if (preferVectorBlip(blip)) {
+        try {
+          image = await decodeSvg(blip.svgImagePath, request);
+        } catch (vectorError) {
+          const fallback = dataIsSvg
+            ? await decodeSvg(request.imagePath, request)
+            : await decodeRaster(
+                request.imagePath,
+                request.mimeType,
+                request.colorReplaceFrom,
+                fetchImage,
+                request.widthPt,
+                request.heightPt,
+                request.duotone,
+                request.failClosedOnDuotoneFailure ?? false,
+                tiff,
+                request.targetWidthPx && request.targetHeightPx
+                  ? { targetWidthPx: request.targetWidthPx, targetHeightPx: request.targetHeightPx }
+                  : undefined,
+                request.plannedPixelLimit,
+              );
+          if (!fallback) throw vectorError;
+          image = fallback;
+        }
+      } else if (dataIsSvg) {
+        image = await decodeSvg(request.imagePath, request);
+      } else {
+        image = await decodeRaster(
+          request.imagePath,
+          request.mimeType,
+          request.colorReplaceFrom,
+          fetchImage,
+          request.widthPt,
+          request.heightPt,
+          request.duotone,
+          request.failClosedOnDuotoneFailure ?? false,
+          tiff,
+          request.targetWidthPx && request.targetHeightPx
+            ? { targetWidthPx: request.targetWidthPx, targetHeightPx: request.targetHeightPx }
+            : undefined,
+          request.plannedPixelLimit,
+        );
       }
-    } else if (dataIsSvg) {
-      image = await decodeSvg(request.imagePath, request);
-    } else {
-      image = await decodeRaster(
-        request.imagePath,
-        request.mimeType,
-        request.colorReplaceFrom,
-        fetchImage,
-        request.widthPt,
-        request.heightPt,
-        request.duotone,
-        request.failClosedOnDuotoneFailure ?? false,
-        tiff,
-        request.targetWidthPx && request.targetHeightPx
-          ? { targetWidthPx: request.targetWidthPx, targetHeightPx: request.targetHeightPx }
-          : undefined,
-        request.plannedPixelLimit,
-      );
+      return image == null
+        ? null
+        : [requestKey(request), image] as const;
+    } catch (error) {
+      if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+        return [requestKey(request), error] as const;
+      }
+      throw error;
     }
-    return image == null
-      ? null
-      : [requestKey(request), image] as const;
   }));
-  return new Map(entries.filter((entry): entry is readonly [string, DecodedImage] => entry !== null));
+  const decoded = new Map<string, DecodedPaintImage>();
+  for (const entry of entries) {
+    if (entry) decoded.set(entry[0], entry[1]);
+  }
+  return decoded;
 }

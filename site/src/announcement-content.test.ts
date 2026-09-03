@@ -11,6 +11,34 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.85 large-image and rendering announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v085-large-images-and-rendering');
+
+  it('leads with user outcomes, gives bounded migration guidance and leaves technical detail last', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.85.0',
+      title: 'Larger images and steadier rendering in v0.85.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections.at(-1)?.title).toBe('Technical note');
+
+    const userFacingText = announcement?.sections.slice(0, -1).flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+    ]).join('\n') ?? '';
+
+    for (const outcome of ['large, high-resolution images', 'Word', 'Excel', 'PowerPoint', 'worker mode', 'zoom']) {
+      expect(userFacingText).toContain(outcome);
+    }
+    expect(userFacingText).toContain('Most applications can upgrade without code changes');
+    expect(userFacingText).toContain('the rest of the document remains viewable');
+    expect(userFacingText).not.toContain('TiffDecodeError');
+    expect(userFacingText).not.toMatch(/RGBA|cache eviction|header inspection|module initialization|ESM|\b(?:KB|KiB|MiB|MP|gzip)\b/i);
+  });
+});
+
 describe('v0.84.1 Word layout announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v0841-word-layout-refinements');
 
@@ -172,15 +200,18 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets in v0.84.1');
+    expect(bundleSizePage).toContain('Current production assets for v0.85.2');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
-    expect(bundleSizePage).toContain('<td>1,924 KiB</td>');
+    expect(bundleSizePage).toMatch(/<td>1,967 KiB<\/td>\s*<td>479 KiB<\/td>/);
     expect(bundleSizePage).toContain('XLSX static JavaScript');
+    expect(bundleSizePage).toMatch(/<td>1,283 KiB<\/td>\s*<td>306 KiB<\/td>/);
     expect(bundleSizePage).toContain('PPTX static JavaScript');
+    expect(bundleSizePage).toMatch(/<td>1,329 KiB<\/td>\s*<td>311 KiB<\/td>/);
     expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,786 KiB</td><td>741 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,650 KiB</td><td>649 KiB</td></tr>');
     expect(bundleSizePage).toContain('ChartEx');
     expect(bundleSizePage.match(/<th>TIFF image codec<\/th>/g)).toHaveLength(1);
-    expect(bundleSizePage).toContain('<td>4.0 KiB</td><td>1.6 KiB</td>');
+    expect(bundleSizePage).toContain('<td>22.2 KiB</td><td>6.7 KiB</td>');
     expect(bundleSizePage).not.toContain('3.9 KiB');
     expect(bundleSizePage).not.toContain('7.3 KiB');
     expect(bundleSizePage).not.toContain('3.1 KiB');

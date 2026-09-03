@@ -5,6 +5,7 @@ import {
   isHTMLCanvas,
   isOoxmlDecodedImageLimitError,
   isTiffDecodeError,
+  isOptionalImageCodecUnavailableError,
   PT_TO_PX,
   chartImageFillKey,
   chartImageFillUsageSize,
@@ -348,7 +349,11 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
       }
       await Promise.all([...chartEntries].map(async ([key, entry]) => {
         if (images.has(key)) {
-          chartImages.set(key, images.get(key) ?? null);
+          const image = images.get(key);
+          chartImages.set(
+            key,
+            isOptionalImageCodecUnavailableError(image, 'tiff') ? null : image ?? null,
+          );
           return;
         }
         const {
@@ -386,6 +391,10 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
           }
           chartImages.set(key, image);
         } catch (error) {
+          if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+            chartImages.set(key, null);
+            return;
+          }
           if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
           chartImages.set(key, null);
         }
@@ -400,11 +409,18 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
           : unavailablePaintResourceHandle('optional math renderer unavailable');
       }
       if (descriptor.kind === 'image' || descriptor.kind === 'picture-bullet') {
-        return images.get(imageKey(
+        const image = images.get(imageKey(
           descriptor.partPath,
           descriptor.colorReplaceFrom,
           descriptor.duotone as Duotone | undefined,
-        )) ?? unavailablePaintResourceHandle(
+        ));
+        if (isOptionalImageCodecUnavailableError(image, 'tiff')) {
+          return unavailablePaintResourceHandle(
+            'optional TIFF codec unavailable',
+            { placeholder: 'tiff' },
+          );
+        }
+        return image ?? unavailablePaintResourceHandle(
           options.fetchImage
             ? 'unsupported image format produced no drawable output'
             : 'image byte source unavailable',

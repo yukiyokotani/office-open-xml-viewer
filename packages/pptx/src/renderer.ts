@@ -88,6 +88,7 @@ import {
   planDecodedImageTargets,
   duotoneCacheKey,
   inspectCachedRasterSource,
+  isBrowserResizableRasterMimeType,
   isDecodeTargetResizableRasterFormat,
   peekCachedBitmapByPath,
   dropDecodedBitmapCache,
@@ -107,6 +108,8 @@ import {
   warpGlyphTransform,
   followPathUScale,
   fillDoubleBorder,
+  isOptionalImageCodecUnavailableError,
+  paintOptionalImagePlaceholder,
 } from '@silurus/ooxml-core';
 import type {
   DecodedBitmapCacheOwner,
@@ -292,7 +295,7 @@ function plannedRasterOptions(
     targetHeightPx: target.height,
     // A restricted variant key prevents a larger cached zoom level from being
     // substituted into a pass whose aggregate plan charged only this surface.
-    maxRetainedPixels: target.retainedPixels,
+    maxRetainedPixels: target.maxRetainedPixels,
   } : undefined;
 }
 
@@ -343,6 +346,8 @@ async function planSlideImages(
   bitmapOwner?: DecodedBitmapCacheOwner,
   tiff?: TiffRenderer,
 ): Promise<DecodedImageTargetPlan> {
+  const policy = normalizeImageResourceOptions(imageResources);
+  const demands: DecodedImageTargetDemand[] = [];
   const pending: Array<Promise<DecodedImageTargetDemand | null>> = [];
   const push = (
     key: string,
@@ -354,6 +359,16 @@ async function planSlideImages(
     owner: DecodedBitmapCacheOwner | undefined = loader,
   ) => {
     if (!target || !loader) return;
+    // Common browser rasters have a bounded, axis-wise display target already.
+    // Admit that target immediately so each source inspection can pipeline into
+    // its decode instead of placing an all-slide inspection barrier before the
+    // first bitmap. The decode boundary still sniffs the bytes and enforces all
+    // non-configurable source, dimension, and per-surface ceilings.
+    if (isBrowserResizableRasterMimeType(mimeType)
+      && (policy.resolution === 'display' || policy.strategy === 'adaptive')) {
+      demands.push({ key, ...target, retainedSurfaceCount });
+      return;
+    }
     pending.push(inspectCachedRasterSource(imagePath, mimeType, loader, owner)
       .then((inspection) => inspection.dimensions
         && isDecodeTargetResizableRasterFormat(inspection.format, tiff !== undefined)
@@ -471,9 +486,9 @@ async function planSlideImages(
       }
     }
   }
-  const demands = (await Promise.all(pending))
-    .filter((demand): demand is DecodedImageTargetDemand => demand !== null);
-  return planDecodedImageTargets(demands, normalizeImageResourceOptions(imageResources));
+  demands.push(...(await Promise.all(pending))
+    .filter((demand): demand is DecodedImageTargetDemand => demand !== null));
+  return planDecodedImageTargets(demands, policy);
 }
 
 function slideMayDecodeImages(slide: Slide): boolean {
@@ -2035,6 +2050,12 @@ async function renderBackground(
       }
       ctx.restore();
     } catch (error) {
+      if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+        paintOptionalImagePlaceholder(ctx, 'tiff', {
+          x: 0, y: 0, width: canvasW, height: canvasH,
+        });
+        return;
+      }
       if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
       // Decode failed — the white base painted above remains as the fallback.
     }
@@ -4115,6 +4136,9 @@ export function renderTextBody(
     alignment: string;
     isLastLine: boolean;
     para: Paragraph;
+    /** This spAutoFit line replaces an authored-font design floor with metrics
+     * from the font Canvas actually resolved. */
+    useResolvedFontMetrics: boolean;
   }
 
   // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
@@ -4296,6 +4320,11 @@ export function renderTextBody(
       // authored `<a:spcPct>`; §21.1.2.2.5 / §21.1.2.2.11 define percentage
       // spacing from the line's largest text size.
       let designSingle = 0;
+      // spAutoFit is recalculated by the consuming application. Measure the
+      // fonts Canvas actually resolved (including browser substitutions) so
+      // that a shape saved with another machine's font metrics is not laid out
+      // again with those stale design metrics.
+      let resolvedFontLine = 0;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
         // size (so a short label like "y"/"p"/"z" gets the normal font-ascent
@@ -4310,6 +4339,14 @@ export function renderTextBody(
         if (!seg.math) {
           const ds = intendedSingleLinePx(seg.fontFamily, seg.sizePx);
           if (ds > designSingle) designSingle = ds;
+          if (isSpAutoFit) {
+            ctx.font = seg.font;
+            const metrics = ctx.measureText(seg.text || 'M');
+            const fontAscent = metrics.fontBoundingBoxAscent ?? 0;
+            const fontDescent = metrics.fontBoundingBoxDescent ?? 0;
+            const resolved = fontAscent + fontDescent;
+            if (resolved > resolvedFontLine) resolvedFontLine = resolved;
+          }
         }
       }
       if (maxSizePx === 0) maxSizePx = paraDefaultFontSizePx;
@@ -4335,7 +4372,12 @@ export function renderTextBody(
       // design-metric floor; glyph painting may keep that floor below without
       // enlarging the table structure.
       const naturalSingle = maxSizePx * 1.2;
-      const implicitSingle = Math.max(naturalSingle, designSingle);
+      const useResolvedFontMetrics = isSpAutoFit
+        && designSingle > naturalSingle
+        && resolvedFontLine > 0;
+      const implicitSingle = useResolvedFontMetrics
+        ? Math.max(naturalSingle, resolvedFontLine)
+        : Math.max(naturalSingle, designSingle);
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
@@ -4345,7 +4387,7 @@ export function renderTextBody(
           lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = measureOnly
+        lineHeight = measureOnly && !isSpAutoFit
           ? (measureNaturalLineSpacing ? naturalSingle : maxSizePx)
           : implicitSingle;
       }
@@ -4393,6 +4435,7 @@ export function renderTextBody(
         alignment: para.alignment,
         isLastLine: isLast,
         para,
+        useResolvedFontMetrics,
       });
       totalHeight += linePx + topGap;
     }
@@ -4519,7 +4562,7 @@ export function renderTextBody(
   let entriesInCol = 0;
 
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletImage, alignment, isLastLine } = entry;
+    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletImage, alignment, isLastLine, useResolvedFontMetrics } = entry;
     // Balanced column advance: when the current column has reached its share
     // of paragraphs, jump to the next one. PowerPoint never breaks a single
     // line across columns and never spills past the last column — anything
@@ -4589,12 +4632,14 @@ export function renderTextBody(
       }
     }
 
-    // Measure line for alignment AND baseline ascent in one pass.
-    // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,
-    // replacing the 0.8×lineHeight heuristic that over-estimates for CJK and
-    // tall fonts, causing text to sit too low within the line box.
+    // Measure line width and the metrics of the fonts Canvas actually resolved.
+    // spAutoFit is a live recalculation, so its baseline must use the same
+    // resolved metrics as the line-height pass above. Ordinary text retains the
+    // established PowerPoint-compatible baseline.
     let lineWidth = 0;
-    let maxAscent = lineHeight * 0.8; // fallback when no segments
+    let maxAscent = 0;
+    let resolvedFontAscent = 0;
+    let resolvedFontHeight = 0;
     for (const seg of line.segments) {
       if (seg.isTab) {
         lineWidth += seg.tabWidthPx ?? 0;
@@ -4613,8 +4658,29 @@ export function renderTextBody(
       if (m.actualBoundingBoxAscent > 0) {
         maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
       }
+      if (useResolvedFontMetrics) {
+        const fontAscent = m.fontBoundingBoxAscent ?? 0;
+        const fontHeight = fontAscent + (m.fontBoundingBoxDescent ?? 0);
+        if (fontHeight > resolvedFontHeight) {
+          resolvedFontHeight = fontHeight;
+          resolvedFontAscent = fontAscent;
+        }
+      }
     }
-    const baseline = cursorY + maxAscent;
+    const baselineOffset = useResolvedFontMetrics && resolvedFontHeight > 0
+      ? anchor === 't' && maxAscent > 0
+        // PowerPoint's spAutoFit recalculation seats the visible ink at the
+        // top inset for a top-anchored body. fontBoundingBoxAscent includes
+        // leading above that ink; using it here leaves the exact downward gap
+        // spAutoFit is meant to remove. Keep the font box for line advance and
+        // required height, but use the actual glyph ascent for this origin.
+        ? maxAscent
+        : Math.max(
+            maxAscent,
+            resolvedFontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,
+          )
+      : Math.max(lineHeight * 0.8, maxAscent);
+    const baseline = cursorY + baselineOffset;
 
     // Reading-frame marker placement under an RTL base (issue #930, same class as
     // the docx #830 / pptx #913 leading-edge mirroring). PowerPoint seats a list
@@ -5490,6 +5556,30 @@ export function getPosterBitmap(
   });
 }
 
+function paintUnavailablePicture(
+  ctx: CanvasRenderingContext2D,
+  el: PictureElement,
+  scale: number,
+): void {
+  const x = emuToPx(el.x, scale);
+  const y = emuToPx(el.y, scale);
+  const w = emuToPx(el.width, scale);
+  const h = emuToPx(el.height, scale);
+  ctx.save();
+  try {
+    if (el.alpha != null) ctx.globalAlpha *= el.alpha;
+    if (el.rotation !== 0 || el.flipH || el.flipV) {
+      ctx.translate(x + w / 2, y + h / 2);
+      ctx.rotate((el.rotation * Math.PI) / 180);
+      ctx.scale(el.flipH ? -1 : 1, el.flipV ? -1 : 1);
+      ctx.translate(-(x + w / 2), -(y + h / 2));
+    }
+    paintOptionalImagePlaceholder(ctx, 'tiff', { x, y, width: w, height: h });
+  } finally {
+    ctx.restore();
+  }
+}
+
 async function renderPicture(
   ctx: CanvasRenderingContext2D,
   el: PictureElement,
@@ -6000,6 +6090,10 @@ async function renderPicture(
     ctx.restore();
     // bitmap is owned by getCachedBitmapByPath's cache — do not close it here.
   } catch (error) {
+    if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+      if (!superseded()) paintUnavailablePicture(ctx, el, scale);
+      return;
+    }
     if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
     // silently skip broken images
   }
@@ -6024,6 +6118,7 @@ async function renderMedia(
   const h = emuToPx(el.height, scale);
 
   let poster: ImageBitmap | undefined;
+  let posterCodecUnavailable = false;
   if (el.posterPath && fetchMedia) {
     try {
       // Poster is cached (and prefetched by renderSlide); do not close it here —
@@ -6035,8 +6130,12 @@ async function renderMedia(
           : undefined;
       poster = await getPosterBitmap(el, fetchMedia, bitmapOwner, tiff, target, svgDecoder);
     } catch (error) {
-      if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
-      // fall through to plain fill
+      if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+        posterCodecUnavailable = true;
+      } else {
+        if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
+        // fall through to plain fill
+      }
     }
   }
 
@@ -6051,6 +6150,9 @@ async function renderMedia(
   } else {
     ctx.fillStyle = el.mediaKind === 'video' ? '#111' : '#f0f0f0';
     ctx.fillRect(x, y, w, h);
+    if (posterCodecUnavailable) {
+      paintOptionalImagePlaceholder(ctx, 'tiff', { x, y, width: w, height: h });
+    }
   }
 
   if (!skipControls) drawPlayBadge(ctx, x + w / 2, y + h / 2, w, h, 'paused');
@@ -7207,6 +7309,10 @@ async function renderSlideLeased(
               });
           pictureBulletImages.set(path, image);
         } catch (error) {
+          if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+            pictureBulletImages.set(path, null);
+            return;
+          }
           if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
           pictureBulletImages.set(path, null);
         }
@@ -7258,6 +7364,10 @@ async function renderSlideLeased(
           }
           chartMarkerImages.set(key, bitmap);
         } catch (error) {
+          if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+            chartMarkerImages.set(key, null);
+            return;
+          }
           if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
           chartMarkerImages.set(key, null);
         }

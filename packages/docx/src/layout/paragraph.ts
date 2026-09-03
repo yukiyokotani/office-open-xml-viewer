@@ -595,6 +595,16 @@ function sameDashPattern(
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+/** Decoration endpoints reconstruct the same retained run seam through
+ * independent justification sums. Their combined binary64 roundoff is bounded
+ * by the precision of both operands; this is not a visible layout tolerance. */
+function sameCoordinateWithinFloatingPrecision(left: number, right: number): boolean {
+  if (left === right) return true;
+  const roundoffBound = Number.EPSILON
+    * Math.max(1, Math.abs(left) + Math.abs(right));
+  return Math.abs(left - right) <= roundoffBound;
+}
+
 function sameContinuousDecoration(
   left: TextDecorationLayout,
   right: TextDecorationLayout,
@@ -605,7 +615,7 @@ function sameContinuousDecoration(
     && left.style === right.style
     && left.color === right.color
     && left.widthPt === right.widthPt
-    && left.to.xPt === right.from.xPt
+    && sameCoordinateWithinFloatingPrecision(left.to.xPt, right.from.xPt)
     && sameDashPattern(left.dashPatternPt, right.dashPatternPt);
 }
 
