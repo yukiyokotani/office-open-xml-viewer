@@ -7,6 +7,27 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.85.3 — 2026-09-04
+
+Compatible patch release improving progressive Word opening, PowerPoint text
+alignment, underline continuity, and worker-mode first paint.
+
+- **progressive Word opening:** safe provisional page prefixes are published
+  while header and footer pagination converges, so later pages keep arriving
+  without requiring the reader to scroll. The authoritative final layout still
+  replaces provisional pagination atomically.
+- **stable worker first paint:** DOCX and PPTX scroll-viewer loads wait for the
+  current opening page or slide bitmap, preventing a transient browser-default
+  canvas from becoming visible before the real content.
+- **PowerPoint text placement:** `spAutoFit` text uses resolved browser font
+  metrics when a saved shape height is stale, preserving top alignment for
+  large-format slides without changing fixed-size or explicitly spaced text.
+- **continuous Word underlines:** adjacent underlined runs whose shared boundary
+  differs only by floating-point roundoff paint as one continuous underline,
+  while authored gaps remain visible.
+- **compatibility:** no existing option or method is removed or renamed, and no
+  application changes are required.
+
 ## 0.85.2 — 2026-09-03
 
 Patch release restoring smooth progressive viewing in worker mode and fixing
