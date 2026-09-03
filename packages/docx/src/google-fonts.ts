@@ -15,9 +15,10 @@ import { docxRenderedTextUsages } from './document-content.js';
  *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
  *  Carlito, Cambria → Caladea), the popular free web fonts and the Arabic Noto
  *  fallbacks — shared with pptx/xlsx. {@link SCRIPT_GOOGLE_FONTS} adds the
- *  CJK (KR/SC/TC/JP) / Cyrillic / Thai / Devanagari / Hebrew Noto faces the
- *  renderer appends to the font chain (CJK ordered by document language). Both
- *  load only when `useGoogleFonts` is on — no binaries ship in the bundle. DOCX
+ *  CJK (KR/SC/TC/JP, plus HK sans) / Cyrillic / Thai / Devanagari / Hebrew
+ *  Noto faces the renderer appends to the font chain. CJK fallbacks are ordered
+ *  by document language. Both load only when `useGoogleFonts` is on — no binaries
+ *  ship in the bundle. DOCX
  *  currently has no format-specific additions. */
 export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   ...GOOGLE_FONT_SUBSTITUTES,

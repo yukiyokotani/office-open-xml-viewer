@@ -210,6 +210,42 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     expect(added).toHaveLength(0);
   });
 
+  it('does not request remote fonts when useGoogleFonts is false', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    installFontFaceSet();
+    const fetch = vi.fn(async () => ({ ok: true, text: async () => CSS }));
+    G.fetch = fetch;
+    vi.spyOn(
+      PptxPresentation.prototype as unknown as {
+        _parse(buffer: ArrayBuffer, resourcePolicy: object): Promise<void>;
+      },
+      '_parse',
+    ).mockImplementationOnce(async function (this: PptxPresentation) {
+      (this as unknown as { _preflight: object })._preflight = {
+        slideCount: 0,
+        slideWidth: 914400,
+        slideHeight: 914400,
+        defaultTextColor: null,
+        majorFont: 'Noto Sans CJK SC',
+        minorFont: null,
+        hlinkColor: null,
+        folHlinkColor: null,
+        embeddedFonts: [],
+        slides: [],
+        fontPreloadNames: ['Noto Sans CJK SC'],
+      };
+    });
+
+    const presentation = await PptxPresentation.load(new ArrayBuffer(0), {
+      mode: 'main',
+      useGoogleFonts: false,
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
+    presentation.destroy();
+  });
+
   it('terminates directly when construction fails before the factory owns an instance', async () => {
     G.Worker = SilentWorker;
     G.location = { href: 'not a valid base URL' };
