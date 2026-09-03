@@ -1,6 +1,6 @@
 /**
- * Shared Office-font → Google-Fonts substitute registry for the docx / pptx /
- * xlsx preload maps.
+ * Office-font → Google-Fonts substitute registry used by
+ * {@link GoogleFontsProvider}.
  *
  * These are the well-known free webfont alternatives Microsoft Office templates
  * pull from, plus the metric-compatible pairings Microsoft and Google both
@@ -28,22 +28,21 @@
  * Keep the list to faces with a published metric-compatible or well-known
  * substitute; do not add speculative names.
  *
- * ## Why these live in ONE table (not per format)
+ * ## Why these live in ONE table
  *
  * A DOCX template requesting Roboto, a PPTX theme requesting Calibri Light and
  * an XLSX cell styled Cambria Math all describe the SAME concept — an Office
  * face the host may not ship — and all want the SAME metric-compatible
  * substitute. None of these substitutions is specific to one file format, so
- * they are consolidated here and every package spreads this registry into its
- * own map (`{ ...GOOGLE_FONT_SUBSTITUTES }`), appending only entries that are
- * genuinely format-specific (currently: none). The script-fallback Noto faces
- * live separately in {@link SCRIPT_GOOGLE_FONTS} (also spread by each package),
- * because CJK ordering there is language-dependent — see that map's doc.
+ * the built-in provider owns one shared registry. The format packages only
+ * discover names from their parsed models; they do not own Google URLs or
+ * substitution policy. Script-fallback Noto faces live separately in
+ * {@link SCRIPT_GOOGLE_FONTS}, because CJK ordering is language-dependent.
  *
  * All keys are lower-cased family names (callers lower-case the requested face
  * before lookup).
  */
-import type { FontPreloadEntry } from './preload.js';
+import type { FontPreloadEntry } from './google-css.js';
 
 const NOTO_NASKH_ARABIC_URL =
   'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';

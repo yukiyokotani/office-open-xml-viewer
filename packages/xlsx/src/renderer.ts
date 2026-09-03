@@ -12,7 +12,12 @@ import type {
   ChartRegionMapRenderer,
   ChartExRenderer,
 } from '@silurus/ooxml-core';
-import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml-core';
+import {
+  chartImageFillKey,
+  paintOptionalImagePlaceholder,
+  providerFontFamily,
+  type FontFamilyRoutes,
+} from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -123,8 +128,12 @@ export function cssTailFor(name: string | null | undefined): string {
 }
 
 /** Full CSS font-family list for a cell font name (named face first). */
-export function fontStackFor(name: string | null | undefined): string {
-  return name ? `"${name}", ${cssTailFor(name)}` : DEFAULT_FONT_FAMILY;
+export function fontStackFor(
+  name: string | null | undefined,
+  providerFamily?: string,
+): string {
+  const provider = providerFamily ? `"${providerFamily}", ` : '';
+  return name ? `"${name}", ${provider}${cssTailFor(name)}` : DEFAULT_FONT_FAMILY;
 }
 
 const DEFAULT_FONT_SIZE = 11;
@@ -187,7 +196,11 @@ const FREEZE_LINE_COLOR = '#7a7a7a';
  *  Font registration is lifecycle-managed and may change between workbooks;
  *  caching by family/size alone would retain fallback metrics after the real
  *  face loads or is released. */
-export function computeMdw(family: string, sizePt: number): number {
+export function computeMdw(
+  family: string,
+  sizePt: number,
+  routes?: FontFamilyRoutes,
+): number {
   const sizePx = sizePt * PT_TO_PX;
   // Off-DOM canvas: avoids touching the document tree from background calls.
   const canvas = (typeof OffscreenCanvas !== 'undefined')
@@ -197,7 +210,7 @@ export function computeMdw(family: string, sizePt: number): number {
   const ctx = canvas.getContext('2d');
   if (!ctx) return MDW_FALLBACK;
   // Quote the family so multi-word names like "Meiryo UI" parse as one face.
-  ctx.font = `${sizePx}px ${fontStackFor(family)}`;
+  ctx.font = `${sizePx}px ${fontStackFor(family, providerFontFamily(routes, family))}`;
   let mdw = 0;
   for (const d of '0123456789') {
     const w = ctx.measureText(d).width;
@@ -210,9 +223,13 @@ export function computeMdw(family: string, sizePt: number): number {
 /** Resolve the Max Digit Width for a worksheet's Normal-style font. Falls
  *  back to the Calibri 11 pt baseline (~8 px) when the parser couldn't
  *  determine the workbook's default font. */
-export function getMdwForWorksheet(ws: { defaultFontFamily?: string; defaultFontSize?: number }): number {
+export function getMdwForWorksheet(ws: {
+  defaultFontFamily?: string;
+  defaultFontSize?: number;
+  providerFontRoutes?: FontFamilyRoutes;
+}): number {
   if (!ws.defaultFontFamily || !ws.defaultFontSize) return MDW_FALLBACK;
-  return computeMdw(ws.defaultFontFamily, ws.defaultFontSize);
+  return computeMdw(ws.defaultFontFamily, ws.defaultFontSize, ws.providerFontRoutes);
 }
 
 /** Worksheet-lifetime geometry snapshot. Font loading completes before a
@@ -612,7 +629,7 @@ function buildFont(font: CellFont, cs = 1): string {
   const style = font.italic ? 'italic ' : '';
   const weight = font.bold ? 'bold ' : '';
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
-  return `${style}${weight}${sizePx}px ${fontStackFor(font.name)}`;
+  return `${style}${weight}${sizePx}px ${fontStackFor(font.name, font.providerFamily)}`;
 }
 
 /**
@@ -4393,7 +4410,7 @@ function renderShapeGroups(
       const sw = shape.w * w;
       const sh = shape.h * h;
       if (sw <= 0 || sh <= 0) continue;
-      drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages);
+      drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, ws.providerFontRoutes);
     }
   }
 
@@ -4406,6 +4423,7 @@ function drawShape(
   sx: number, sy: number, sw: number, sh: number,
   cs: number,
   loadedImages?: Map<string, CanvasImageSource | null>,
+  providerRoutes?: FontFamilyRoutes,
 ): void {
   ctx.save();
   if (shape.rot !== 0 || shape.flipH || shape.flipV) {
@@ -4556,7 +4574,7 @@ function drawShape(
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after
   // fill/stroke so it sits on top of the shape's background.
   if (shape.text) {
-    drawShapeText(ctx, shape.text, sw, sh, cs);
+    drawShapeText(ctx, shape.text, sw, sh, cs, providerRoutes);
   }
   ctx.restore();
 }
@@ -4663,6 +4681,7 @@ export function drawShapeText(
   txt: import('./types.js').ShapeText,
   sw: number, sh: number,
   cs: number,
+  providerRoutes?: FontFamilyRoutes,
 ): void {
   if (sw <= 0 || sh <= 0 || txt.paragraphs.length === 0) return;
   // The shape box (sw,sh) is already cellScale-scaled by the caller, but font
@@ -4699,7 +4718,10 @@ export function drawShapeText(
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
     const px = size * PT_TO_PX * cs;
-    const family = fontStackFor(run.fontFace);
+    const family = fontStackFor(
+      run.fontFace,
+      providerFontFamily(providerRoutes, run.fontFace),
+    );
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 
@@ -5403,7 +5425,9 @@ function renderCharts(
     // default/mapping logic now lives in the parser's `From<ChartData>`.
     renderChart(
       ctx,
-      anchor.chart,
+      ws.providerFontRoutes
+        ? { ...anchor.chart, providerFontRoutes: ws.providerFontRoutes }
+        : anchor.chart,
       cs === 1
         ? { x: cx, y: cy, w: cw, h: ch }
         : { x: cx / cs, y: cy / cs, w: cw / cs, h: ch / cs },

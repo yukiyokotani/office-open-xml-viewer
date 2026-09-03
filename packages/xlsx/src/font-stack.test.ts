@@ -17,6 +17,11 @@ describe('fontStackFor — default Latin chain (regression)', () => {
     const stack = fontStackFor('Arial');
     expect(stack.startsWith('"Arial", "Calibri", "Carlito"')).toBe(true);
   });
+
+  it('keeps an installed authored face ahead of its isolated provider alias', () => {
+    expect(fontStackFor('Calibri', '__private_calibri'))
+      .toMatch(/^"Calibri", "__private_calibri",/);
+  });
 });
 
 describe('fontStackFor — CJK language-specific Noto ordering', () => {

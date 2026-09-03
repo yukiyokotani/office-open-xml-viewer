@@ -1,9 +1,9 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
-  preloadGoogleFonts,
+  FontProviderSession,
+  GoogleFontsProvider,
   releaseOwnedBitmap,
-  unloadGoogleFonts,
   unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
   WorkerBridge,
@@ -20,6 +20,7 @@ import {
   type ChartRegionMapRenderer,
   type ChartExRenderer,
   type OoxmlResourceMetrics,
+  type FontFamilyRoutes,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -33,6 +34,8 @@ import {
   readLatestOoxmlResourceMetrics,
   PULL_SESSION_PROTOCOL,
   respondToWorkerSvgDecodeRequest,
+  FontProviderHost,
+  isWorkerFontRequest,
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
@@ -43,7 +46,7 @@ import type { DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerRespons
 import { renderLayoutSourceToCanvas, documentHasMath, prepareMathRuns, type DocxTextRunInfo } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
+import { docxFontPreloadNames, docxFontProviderNames } from './font-plan';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import {
@@ -374,14 +377,11 @@ export class DocxDocument {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a font shared with another open document survives until both go). */
   private _embeddedFontFaces: FontFace[] = [];
-  /** Google-Fonts `FontFace` objects this document preloaded into `document.fonts`
-   *  (main mode only — in worker mode the worker owns them and terminates with its
-   *  own FontFaceSet). Released in {@link destroy} so they do not leak into the
-   *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
-   *  so a web font shared with another open document survives until both go). */
-  private _googleFontFaces: FontFace[] = [];
   /** Exact local faces used for version-adaptive Office line metrics. */
   private _localMetricFontFaces: FontFace[] = [];
+  private readonly _fontSession: FontProviderSession | null;
+  private readonly _fontHost: FontProviderHost | null;
+  private _fontRoutes: FontFamilyRoutes = {};
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -394,10 +394,17 @@ export class DocxDocument {
     mode: 'main' | 'worker',
     defaultCurrentDateMs: number,
     wasmUrlOverride?: string | URL,
+    fontSession: FontProviderSession | null = null,
   ) {
     this._worker = worker;
     this._mode = mode;
     attachDocumentLayoutRuntime(this, defaultCurrentDateMs);
+    this._fontSession = fontSession;
+    this._fontHost = fontSession
+      ? new FontProviderHost(fontSession, (message, transfer) => (
+          worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+        )(message, transfer))
+      : null;
     this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) =>
         'protocol' in res && res.protocol === PULL_SESSION_PROTOCOL
@@ -408,7 +415,13 @@ export class DocxDocument {
       // Progressive layout pushes carry `forId` rather than `id`, so `correlate`
       // above returns undefined for them and they arrive here instead of
       // resolving the still-pending `parse`. That is the whole mechanism.
-      onUnsolicited: (res) => this._onWorkerLayoutPush(res),
+      onUnsolicited: (res) => {
+        if (isWorkerFontRequest(res)) {
+          void this._fontHost?.accept(res);
+          return;
+        }
+        this._onWorkerLayoutPush(res);
+      },
       toError: (res) => {
         if ('protocol' in res || res.type !== 'error') return undefined;
         // Reconstruct every shared typed error first (resource quota, decoded
@@ -436,6 +449,10 @@ export class DocxDocument {
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
+    if (opts.fontProvider && opts.useGoogleFonts) {
+      throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
+    }
+    const googleFonts = !!opts.useGoogleFonts || opts.fontProvider instanceof GoogleFontsProvider;
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
@@ -475,7 +492,13 @@ export class DocxDocument {
     const workerProgressive = mode === 'worker' && !!opts.progressiveLayout;
     let doc: DocxDocument | undefined;
     try {
-      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+      const fontSession = opts.fontProvider || opts.useGoogleFonts
+        ? new FontProviderSession(
+            opts.fontProvider ?? new GoogleFontsProvider(),
+            opts.fontProvider ? opts.fontFailure : 'fallback',
+          )
+        : null;
+      doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl, fontSession);
       doc._metrics = metrics;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
@@ -497,7 +520,7 @@ export class DocxDocument {
       await doc._parse(
         buffer,
         resourceOptions.policy,
-        mode === 'worker' ? !!opts.useGoogleFonts : false,
+        mode === 'worker' ? googleFonts : false,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -513,6 +536,7 @@ export class DocxDocument {
               settled: false,
             }
           : undefined,
+        mode === 'worker' ? !!fontSession : false,
       );
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
@@ -549,12 +573,6 @@ export class DocxDocument {
         );
       }
       doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
-      if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
-        doc._googleFontFaces = await preloadGoogleFonts(
-          docxFontPreloadNames(doc._document),
-          DOCX_GOOGLE_FONTS,
-        );
-      }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
       // the worker's zip-entry extraction) before the lazy first pagination, so
       // text measures/draws with the authored typeface. Worker mode does this
@@ -565,6 +583,13 @@ export class DocxDocument {
           doc._document,
           (p) => loadingDocument.getFontBytes(p),
         );
+      }
+      if (doc._mode === 'main' && doc._fontSession && doc._document) {
+        const names = googleFonts
+          ? docxFontPreloadNames(doc._document)
+          : docxFontProviderNames(doc._document);
+        const resolved = await doc._fontSession.ensure(names);
+        doc._fontRoutes = resolved.routes;
       }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
       if (doc._mode === 'main' && doc._document) {
@@ -584,9 +609,8 @@ export class DocxDocument {
         const runtime = documentLayoutRuntimeOf(doc);
         runtime.services = createLayoutServices(doc._source, {
           localMetrics: localMetrics?.metrics,
-          useGoogleFonts: !!opts.useGoogleFonts,
           embeddedFaces: doc._embeddedFontFaces,
-          googleFaces: doc._googleFontFaces,
+          providerRoutes: doc._fontRoutes,
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
         });
@@ -788,12 +812,14 @@ export class DocxDocument {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: WorkerProgressiveLoad,
+    useFontProvider = false,
   ): Promise<void> {
     if (progressive) {
       await this._parseProgressively(
         buffer,
         resourcePolicy,
         useGoogleFonts,
+        useFontProvider,
         timeoutMs,
         onUsage,
         renderers,
@@ -804,7 +830,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, useFontProvider, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1088,6 +1114,7 @@ export class DocxDocument {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -1105,6 +1132,7 @@ export class DocxDocument {
           data: buffer,
           resourcePolicy,
           useGoogleFonts,
+          useFontProvider,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
           renderers,
@@ -1206,19 +1234,12 @@ export class DocxDocument {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
     }
-    // Release the Google-Fonts substitutes this document preloaded into the
-    // shared FontFaceSet (main mode). Same refcount contract as the embedded
-    // fonts: a web font also used by another open document stays until that one
-    // is destroyed too. Without this, every opened document left its Google
-    // FontFace objects in `document.fonts` forever (SPA memory leak).
-    if (this._googleFontFaces.length > 0) {
-      unloadGoogleFonts(this._googleFontFaces);
-      this._googleFontFaces = [];
-    }
     if (this._localMetricFontFaces.length > 0) {
       unloadLocalFontMetrics(this._localMetricFontFaces);
       this._localMetricFontFaces = [];
     }
+    this._fontSession?.destroy();
+    this._fontRoutes = {};
     // Release both image owners keyed by this document's stable loader: the
     // shared decoded owner (base + derived colour surfaces) and the SVG lookup
     // owner. SVG object URLs are revoked immediately after decode; dropping its

@@ -1,12 +1,24 @@
 import { DocxDocument } from '@silurus/ooxml/docx';
 import { XlsxWorkbook } from '@silurus/ooxml/xlsx';
-import { PptxPresentation } from '@silurus/ooxml/pptx';
+import { FontProvider, PptxPresentation } from '@silurus/ooxml/pptx';
 import { math } from '@silurus/ooxml/math';
 import { threeD } from '@silurus/ooxml/three-d';
 import { regionMap } from '@silurus/ooxml/region-map';
 import { chartEx } from '@silurus/ooxml/chart-ex';
 
 const renderers = { math, threeD, regionMap, chartEx };
+window.fontProviderRequests = [];
+class FixtureFonts extends FontProvider {
+  async resolve(families) {
+    window.fontProviderRequests.push([...families]);
+    return families.map((family) => ({
+      family,
+      source: { url: '/node_modules/storybook/assets/browser/nunito-sans-regular.woff2' },
+      descriptors: { style: 'normal', weight: '100 900' },
+    }));
+  }
+}
+const fontProvider = new FixtureFonts();
 const paint = (id, bitmap) => {
   const canvas = document.getElementById(id);
   canvas.width = bitmap.width;
@@ -23,7 +35,7 @@ const bytes = async (url) => {
 try {
   const docx = await DocxDocument.load(
     await bytes('/packages/docx/public/demo/sample-1.docx'),
-    { mode: 'worker', ...renderers },
+    { mode: 'worker', fontProvider, fontFailure: 'error', ...renderers },
   );
   if (docx.mode !== 'worker') throw new Error(`DOCX effective mode: ${docx.mode}`);
   paint('docx', await docx.renderPageToBitmap(0, { width: 360, dpr: 1 }));
@@ -38,7 +50,7 @@ try {
 
   const xlsx = await XlsxWorkbook.load(
     await bytes('/packages/xlsx/public/demo/sample-1.xlsx'),
-    { mode: 'worker', ...renderers },
+    { mode: 'worker', fontProvider, fontFailure: 'error', ...renderers },
   );
   paint('xlsx', await xlsx.renderViewportToBitmap(
     0,
@@ -49,7 +61,7 @@ try {
 
   const pptx = await PptxPresentation.load(
     await bytes('/packages/pptx/public/demo/sample-1.pptx'),
-    { mode: 'worker', ...renderers },
+    { mode: 'worker', fontProvider, fontFailure: 'error', ...renderers },
   );
   paint('pptx', await pptx.renderSlideToBitmap(0, { width: 360, dpr: 1 }));
   pptx.destroy();

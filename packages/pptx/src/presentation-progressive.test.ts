@@ -259,7 +259,6 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._mode = 'main';
     instance._bridge = bridge;
-    instance._googleFontFaces = [];
     instance._embeddedFontFaces = [];
     instance._embeddedFontAliases = new Map();
     instance._embeddedFontAuthoredFamilies = new Map();
@@ -395,7 +394,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     };
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     Object.assign(instance, {
-      _mode: 'main', _bridge: bridge, _googleFontFaces: [], _embeddedFontFaces: [],
+      _mode: 'main', _bridge: bridge, _embeddedFontFaces: [],
       _embeddedFontAliases: new Map(), _embeddedFontAuthoredFamilies: new Map(),
       _destroyed: false, _layoutWaiters: new Set(),
       _layoutLifecycle: new ProgressiveLayoutLifecycle(),
@@ -619,7 +618,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
     };
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     Object.assign(instance, {
-      _mode: 'main', _bridge: bridge, _googleFontFaces: [], _embeddedFontFaces: [],
+      _mode: 'main', _bridge: bridge, _embeddedFontFaces: [],
       _embeddedFontAliases: new Map(), _embeddedFontAuthoredFamilies: new Map(),
       _destroyed: false, _layoutWaiters: new Set(),
       _layoutLifecycle: new ProgressiveLayoutLifecycle(),

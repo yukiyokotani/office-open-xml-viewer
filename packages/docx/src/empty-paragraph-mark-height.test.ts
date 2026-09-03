@@ -477,10 +477,9 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     const mainContext = makeContext();
     const workerContext = makeContext();
     const options = (ctx: CanvasRenderingContext2D) => ({
-      useGoogleFonts: true,
-      googleFaces: [{
-        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
-      } as FontFace],
+      providerRoutes: {
+        calibri: { family: 'Carlito', source: 'substitute' as const },
+      },
       measureContext: ctx,
     });
     const main = createLayoutServices(model, options(mainContext.ctx));

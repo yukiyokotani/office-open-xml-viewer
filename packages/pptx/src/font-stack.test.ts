@@ -79,7 +79,24 @@ describe('cssFontStack — serif/sans generic classification (core classifier)',
   });
 });
 
+describe('cssFontStack — private provider fallback', () => {
+  it('keeps an installed authored face ahead of its isolated provider alias', () => {
+    expect(cssFontStack('Calibri', 'Calibri', '__private_calibri'))
+      .toMatch(/^"Calibri", "__private_calibri", "Carlito"/);
+  });
+});
+
 describe('buildFont — style encoded in a face name', () => {
+  it('uses the provider alias after the authored family', () => {
+    const font = buildFont(true, false, 24, 'Deck Sans', {
+      themeMajorFont: null,
+      themeMinorFont: null,
+      providerFontRoutes: { 'deck sans': '__private_deck_sans' },
+      dpr: 1,
+    });
+    expect(font).toContain('"Deck Sans", "__private_deck_sans"');
+  });
+
   it('selects a presentation-scoped embedded alias instead of the global authored family', () => {
     const font = buildFont(false, false, 24, 'Deck Sans', {
       themeMajorFont: null,

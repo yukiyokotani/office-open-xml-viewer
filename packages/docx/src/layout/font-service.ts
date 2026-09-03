@@ -2,7 +2,7 @@ import type { LayoutDiagnostic } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import { createCanvasFontRoute, type CanvasFontRoute } from '@silurus/ooxml-core';
 
-export type FontResolutionSource = 'embedded' | 'local' | 'google' | 'substitute' | 'native' | 'generic';
+export type FontResolutionSource = 'embedded' | 'local' | 'provider' | 'google' | 'substitute' | 'native' | 'generic';
 export type FontStyle = 'normal' | 'italic';
 
 export interface FontRequest {
@@ -75,8 +75,9 @@ export function createFontResolver(
   const sourcePriority: Readonly<Record<FontInventoryFace['source'], number>> = {
     embedded: 0,
     local: 1,
-    google: 2,
-    substitute: 3,
+    provider: 2,
+    google: 3,
+    substitute: 4,
   };
   const faces = inventory
     .filter((face) => face.requestedFamily.trim() && face.resolvedFamily.trim())
@@ -112,7 +113,8 @@ export function createFontResolver(
       const weight = normalizedWeight(request.weight);
       const style = request.style ?? 'normal';
       const candidates = byFamily.get(normalizeFamily(requestedFamily)) ?? [];
-      const face = candidates.find((candidate) => candidate.weight === weight && candidate.style === style);
+      const face = candidates.find((candidate) => candidate.weight === weight && candidate.style === style)
+        ?? candidates.find((candidate) => candidate.source === 'provider');
       if (face) {
         const diagnostics: LayoutDiagnostic[] = face.source === 'substitute'
           ? [{
@@ -121,7 +123,9 @@ export function createFontResolver(
               message: `ECMA-376 §17.8.2 implementation-dependent font substitution: ${requestedFamily} resolved to ${face.resolvedFamily}`,
             }]
           : [];
-        const familyList = cssFamilyList(face.resolvedFamily, request.genericFamily ?? 'sans-serif');
+        const familyList = face.source === 'provider'
+          ? `${quoteCssFamily(requestedFamily)}, ${quoteCssFamily(face.resolvedFamily)}, ${request.genericFamily ?? 'sans-serif'}`
+          : cssFamilyList(face.resolvedFamily, request.genericFamily ?? 'sans-serif');
         return freezeResolution({
           requestedFamily,
           resolvedFamily: face.resolvedFamily,

@@ -6,6 +6,17 @@ export {
   type RenderPageToBitmapOptions,
 } from './document';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
+export {
+  FontProvider,
+  FontProviderSession,
+  GoogleFontsProvider,
+  type FontAsset,
+  type FontAssetSource,
+  type FontFailure,
+  type FontResolveOptions,
+  type ResolvedFontFace,
+  type ResolvedFonts,
+} from '@silurus/ooxml-core';
 export { DocxScrollViewer, type DocxScrollViewerOptions } from './scroll-viewer';
 export type { DocxCommentsOptions } from './comment-margin';
 export type {

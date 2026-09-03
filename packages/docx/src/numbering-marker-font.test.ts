@@ -249,8 +249,9 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
       dpr: 1,
       width: 400,
       layoutServices: createLayoutServices(model, {
-        useGoogleFonts: true,
-        googleFaces: [carlito],
+        providerRoutes: {
+          calibri: { family: carlito.family.replaceAll('"', ''), source: 'substitute' },
+        },
         measureContext: canvas.getContext('2d'),
       }),
     });
@@ -400,10 +401,9 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
     } as unknown as NumberingInfo;
     const doc = { ...headingDoc(num), majorFont: 'Calibri' };
     const services = createLayoutServices(doc, {
-      useGoogleFonts: true,
-      googleFaces: [{
-        family: 'Carlito', weight: '400', style: 'normal', status: 'loaded',
-      } as FontFace],
+      providerRoutes: {
+        calibri: { family: 'Carlito', source: 'substitute' },
+      },
       measureContext: ctx,
     });
     const state = shapeAcquisitionState(ctx, {});

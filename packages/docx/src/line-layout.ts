@@ -708,7 +708,7 @@ export interface LineLayoutEnvironment {
 // em-extents synchronously; drawing blits the Canvas. Skipped entirely for
 // math-free documents.
 /** Arabic-script faces that hosts rarely ship; we substitute them with Noto
- *  Naskh/Sans Arabic web fonts (see DOCX_GOOGLE_FONTS in document.ts — this
+ *  Naskh/Sans Arabic web fonts (provided by GoogleFontsProvider when
  *  list MUST mirror the Arabic entries there). A source run whose font is one
  *  of these contains both Arabic and Latin/digit glyphs in one requested face,
  *  so the fallback chain must keep both scripts stylistically

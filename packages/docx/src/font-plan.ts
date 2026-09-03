@@ -1,28 +1,12 @@
 import {
   classifyCjkFont,
+  chartFontFamilies,
   scriptPreloadNamesForText,
-  GOOGLE_FONT_SUBSTITUTES,
-  SCRIPT_GOOGLE_FONTS,
-  type FontPreloadEntry,
 } from '@silurus/ooxml-core';
 import type {
   DocxDocumentModel,
 } from './types.js';
-import { docxRenderedTextUsages } from './document-content.js';
-
-/** Theme-referenced typefaces commonly used by DOCX templates.
- *
- *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
- *  Carlito, Cambria → Caladea), the popular free web fonts and the Arabic Noto
- *  fallbacks — shared with pptx/xlsx. {@link SCRIPT_GOOGLE_FONTS} adds the
- *  CJK (KR/SC/TC/JP) / Cyrillic / Thai / Devanagari / Hebrew Noto faces the
- *  renderer appends to the font chain (CJK ordered by document language). Both
- *  load only when `useGoogleFonts` is on — no binaries ship in the bundle. DOCX
- *  currently has no format-specific additions. */
-export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  ...GOOGLE_FONT_SUBSTITUTES,
-  ...SCRIPT_GOOGLE_FONTS,
-};
+import { docxRenderedCharts, docxRenderedTextUsages } from './document-content.js';
 
 function* docxTextRuns(doc: DocxDocumentModel): Generator<string> {
   for (const usage of docxRenderedTextUsages(doc)) yield usage.text;
@@ -52,4 +36,19 @@ export function docxFontPreloadNames(
     doc.minorFont,
     ...scriptPreloadNamesForText(docxTextRuns(doc), cjkLang),
   ];
+}
+
+/** Authored families offered to an application font provider. Google-only
+ * script fallback names deliberately stay in {@link docxFontPreloadNames}. */
+export function docxFontProviderNames(doc: DocxDocumentModel): string[] {
+  const names = new Set<string>();
+  if (doc.majorFont) names.add(doc.majorFont);
+  if (doc.minorFont) names.add(doc.minorFont);
+  for (const usage of docxRenderedTextUsages(doc)) {
+    for (const family of usage.fontFamilies) if (family) names.add(family);
+  }
+  for (const chart of docxRenderedCharts(doc)) {
+    for (const family of chartFontFamilies(chart)) names.add(family);
+  }
+  return [...names];
 }

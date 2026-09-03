@@ -131,7 +131,7 @@ import type {
   ImageResourceOptions,
   DecodedImageTargetPlan,
 } from '@silurus/ooxml-core';
-import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { providerFontFamily, type FontFamilyRoutes, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { paintDistanceAwareReflectionBlur } from './reflection-blur';
 import { classifyPptxHyperlink } from './hyperlink';
 import { drawPlayBadge } from './media-chrome';
@@ -156,6 +156,7 @@ export interface RenderContext {
   embeddedFontAliases?: ReadonlyMap<string, string>;
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  providerFontRoutes?: FontFamilyRoutes;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -826,21 +827,26 @@ function quoteAll(names: readonly string[]): string {
  *
  * Exported for unit testing the fallback ordering.
  */
-export function cssFontStack(normalized: string, authoredFamily = normalized): string {
+export function cssFontStack(
+  normalized: string,
+  authoredFamily = normalized,
+  providerFamily?: string,
+): string {
   const generic = genericFallback(authoredFamily);
   const sub = OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()];
+  const providerPart = providerFamily ? `"${providerFamily}", ` : '';
   const subPart = sub ? `"${sub}", ` : '';
   // Arabic faces keep the historical chain unchanged (Arabic leads; appending a
   // CJK or non-CJK tail would let Latin/digits leak away from the Arabic face).
   if (isArabicScriptFace(authoredFamily)) {
-    return `"${normalized}", ${subPart}${ARABIC_FALLBACKS}, ${generic}`;
+    return `"${normalized}", ${providerPart}${subPart}${ARABIC_FALLBACKS}, ${generic}`;
   }
   const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
   const cjk = classifyCjkFont(authoredFamily);
   const cjkPart = cjk ? `${quoteAll(cjkFallbackChain(cjk, variant))}, ` : '';
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
-  return `"${normalized}", ${subPart}${cjkPart}${nonCjkPart}${generic}`;
+  return `"${normalized}", ${providerPart}${subPart}${cjkPart}${nonCjkPart}${generic}`;
 }
 
 /**
@@ -1004,7 +1010,11 @@ export function buildFont(bold: boolean, italic: boolean, sizePx: number, family
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  return `${style}${weight}${sizePx}px ${cssFontStack(normalized, authoredFamily)}`;
+  return `${style}${weight}${sizePx}px ${cssFontStack(
+    normalized,
+    authoredFamily,
+    providerFontFamily(rc.providerFontRoutes, authoredFamily),
+  )}`;
 }
 
 /**
@@ -6792,6 +6802,7 @@ export type SlideRenderOptions = RenderOptions & {
 type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
+  providerFontRoutes?: FontFamilyRoutes;
   svgDecoder?: SvgBlobDecoder;
 };
 
@@ -7027,6 +7038,7 @@ async function renderSlideLeased(
     themeHlinkColor: opts.hlinkColor ?? null,
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
+    providerFontRoutes: opts.providerFontRoutes,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,
@@ -7435,7 +7447,9 @@ async function renderSlideLeased(
       applyFrameTransform(ctx, el, scale);
       renderChart(
         ctx,
-        el.chart,
+        rc.providerFontRoutes
+          ? { ...el.chart, providerFontRoutes: rc.providerFontRoutes }
+          : el.chart,
         {
           x: emuToPx(el.x, scale),
           y: emuToPx(el.y, scale),

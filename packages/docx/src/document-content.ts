@@ -10,6 +10,7 @@ import type {
   ShapeRun,
   ShapeText,
 } from './types.js';
+import type { ChartModel } from '@silurus/ooxml-core';
 
 type InternalRenderedFontAxes = Readonly<{
   fontFamilyHighAnsi?: string | null;
@@ -182,4 +183,37 @@ export function docxRenderedFontFamilies(doc: DocxDocumentModel): string[] {
     }
   }
   return [...families];
+}
+
+function* bodyCharts(body: readonly BodyElement[]): Generator<ChartModel> {
+  for (const element of body) {
+    if (element.type === 'paragraph') {
+      for (const run of element.runs) {
+        if (run.type === 'chart') yield run.chart;
+      }
+    } else if (element.type === 'table') {
+      for (const row of element.rows) {
+        for (const cell of row.cells) yield* bodyCharts(cell.content);
+      }
+    } else if (element.type === 'sectionBreak') {
+      for (const stories of [element.headers, element.footers]) {
+        for (const story of [stories?.default, stories?.first, stories?.even]) {
+          if (story) yield* bodyCharts(story.body);
+        }
+      }
+    }
+  }
+}
+
+/** Every chart painted from the document's rendered stories. */
+export function* docxRenderedCharts(doc: DocxDocumentModel): Generator<ChartModel> {
+  yield* bodyCharts(doc.body ?? []);
+  for (const stories of [doc.headers, doc.footers]) {
+    for (const story of [stories?.default, stories?.first, stories?.even]) {
+      if (story) yield* bodyCharts(story.body);
+    }
+  }
+  for (const note of [...(doc.footnotes ?? []), ...(doc.endnotes ?? [])]) {
+    yield* bodyCharts(note.content);
+  }
 }

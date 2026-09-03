@@ -8,6 +8,7 @@ import type {
   ChartThreeDRenderer,
   ChartRegionMapRenderer,
   ChartExRenderer,
+  FontFamilyRoutes,
 } from '@silurus/ooxml-core';
 
 export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
@@ -62,6 +63,8 @@ export interface MergeCell {
 }
 
 export interface Worksheet {
+  /** @internal Application font fallbacks prepared for this workbook. */
+  providerFontRoutes?: FontFamilyRoutes;
   name: string;
   /** `true` for an `xl/chartsheets/*.xml` part. Chart sheets have no cell grid;
    *  their absolute-anchored drawing is the sheet content. */
@@ -931,6 +934,8 @@ export interface RunFont {
   size?: number;
   color?: string | null;
   name?: string | null;
+  /** @internal Loaded application fallback for {@link name}. */
+  providerFamily?: string;
   /**
    * Underline style when not the default single line. ECMA-376 §18.4.13
    * (`ST_UnderlineValues`): "double" | "singleAccounting" | "doubleAccounting".
@@ -961,6 +966,8 @@ export interface NumFmt {
 }
 
 export interface Styles {
+  /** @internal Application font fallbacks prepared for this workbook. */
+  providerFontRoutes?: FontFamilyRoutes;
   fonts: CellFont[];
   fills: CellFill[];
   borders: Border[];
@@ -988,6 +995,8 @@ export interface CellFont {
   size: number;
   color: string | null;
   name: string | null;
+  /** @internal Loaded application fallback for {@link name}. */
+  providerFamily?: string;
   /** ECMA-376 §18.4.13 ST_UnderlineValues — see RunFont.underlineStyle. */
   underlineStyle?: string;
   /** ECMA-376 §18.4.6 ST_VerticalAlignRun on a cell-level <font>. */

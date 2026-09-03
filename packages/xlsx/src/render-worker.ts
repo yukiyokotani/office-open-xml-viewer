@@ -12,10 +12,10 @@
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
   decodeDataUrl,
-  preloadGoogleFonts,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
+  type FontFamilyRoutes,
 } from '@silurus/ooxml-core';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
@@ -28,13 +28,19 @@ import {
   isWorkerSvgDecodeResponse,
   postOwnedImageBitmap,
   WorkerSvgDecodeClient,
+  FontProviderClient,
+  isWorkerFontResponse,
   type LoadedWorkerRenderers,
   type PullSessionCommand,
   type PullSessionResponse,
   type WorkerSvgDecodeResponse,
 } from '@silurus/ooxml-core/worker';
 import { workerRenderDeps } from './worker-render-deps.js';
-import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
+import {
+  xlsxFontPreloadNames,
+  xlsxFontProviderNames,
+  xlsxWorksheetFontProviderNames,
+} from './font-plan.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
@@ -47,6 +53,10 @@ import { GridGeometry } from './internal/grid-geometry.js';
 import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
+import {
+  applyWorkbookFontRoutes,
+  applyWorksheetFontRoutes,
+} from './font-routes.js';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -62,11 +72,9 @@ const host = new WasmParserHost<XlsxArchive>(init, {
 });
 let workbook: ParsedWorkbook | null = null;
 let renderers: LoadedWorkerRenderers = {};
-/** Settled before any render when `useGoogleFonts` was requested. The resolved
- *  value (the preloaded FontFace[]) is unused here: the worker owns its own
- *  FontFaceSet (`self.fonts`) and terminates with it, so there is nothing to
- *  release — only the sequencing (fonts landed before first paint) matters. */
-let fontsLoaded: Promise<unknown> = Promise.resolve();
+let providerFontRoutes: FontFamilyRoutes = {};
+let providerEnabled = false;
+let generation = 0;
 const sheetCache = new Map<number, Worksheet>();
 const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
@@ -101,6 +109,7 @@ const worksheetPull = new WorksheetPullWorker(
       resourceUsage,
     );
     sheetCache.set(sheetIndex, worksheet);
+    applyWorksheetFontRoutes(worksheet, providerFontRoutes);
     return {
       commit: () => {
         retainedSheetUsage = nextUsage;
@@ -128,6 +137,7 @@ const rawPost = (msg: unknown, transfer?: Transferable[]) =>
 const post = (msg: RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>, transfer?: Transferable[]) =>
   rawPost(msg, transfer);
 const svgDecodeClient = new WorkerSvgDecodeClient(rawPost);
+const fontProvider = new FontProviderClient(rawPost);
 
 /** In-worker image-byte loader (twin of the docx render-worker `getImage`). The
  *  orchestrator's `fetchImage` routes here in worker mode, so image bytes are
@@ -146,6 +156,10 @@ self.onmessage = async (e: MessageEvent<
   RenderWorkerRequest | PullSessionCommand<number> | WorkerSvgDecodeResponse
 >) => {
   const req = e.data;
+  if (isWorkerFontResponse(req)) {
+    await fontProvider.accept(req);
+    return;
+  }
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);
     return;
@@ -203,6 +217,10 @@ self.onmessage = async (e: MessageEvent<
       // zip path. Symmetric with XlsxWorkbook.destroy() and the docx/pptx render
       // workers (issue #781).
       sheetCache.clear();
+      fontProvider.reset();
+      providerFontRoutes = {};
+      providerEnabled = !!req.useFontProvider;
+      generation += 1;
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
@@ -230,23 +248,31 @@ self.onmessage = async (e: MessageEvent<
         () => host.run(() => host.archive!.resource_usage()),
       );
       workbook = bootstrap.workbook;
-      if (req.useGoogleFonts) {
-        // Mirror XlsxWorkbook._load exactly: queue Google Fonts substitutes for
-        // every styled font name, plus the generic Arabic fallbacks. Fonts must
-        // land before rendering (which measures text), so we keep the promise
-        // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
+      if (req.useFontProvider) {
+        providerFontRoutes = await fontProvider.resolve(
+          req.useGoogleFonts
+            ? [...xlsxFontPreloadNames(workbook)]
+            : xlsxFontProviderNames(workbook),
+          generation,
+        );
+        applyWorkbookFontRoutes(workbook, providerFontRoutes);
       }
       post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
       return;
     }
     if (req.type === 'renderViewport') {
       if (!workbook) throw new Error('Workbook not loaded');
-      await fontsLoaded;
       const { inheritSheetRenderCache, markAutoRowHeightsPrepared } = await rendererModule;
       const { renderWorksheetViewport } = await orchestratorModule;
       const ws = sheetCache.get(req.sheetIndex);
       if (!ws) throw new Error('Worksheet is not loaded through its pull session');
+      if (providerEnabled) {
+        providerFontRoutes = {
+          ...providerFontRoutes,
+          ...await fontProvider.resolve(xlsxWorksheetFontProviderNames(ws), generation),
+        };
+        applyWorksheetFontRoutes(ws, providerFontRoutes);
+      }
       // Apply view-only size mutations to a render-local projection. Multiple
       // viewers may share this worker cache while retaining different outline
       // and resize state, so the cached worksheet itself must stay unchanged.

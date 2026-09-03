@@ -37,6 +37,15 @@ export {
 export { exactTransferableArrayBuffer } from './transfer.js';
 export { postOwnedImageBitmap } from './owned-image-bitmap-transfer.js';
 export {
+  FONT_PROVIDER_PROTOCOL,
+  FontProviderClient,
+  FontProviderHost,
+  isWorkerFontRequest,
+  isWorkerFontResponse,
+  type WorkerFontRequest,
+  type WorkerFontResponse,
+} from './font-provider.js';
+export {
   assertWorkerRendererDescriptor,
   workerRendererDescriptors,
   type WorkerRendererDescriptor,

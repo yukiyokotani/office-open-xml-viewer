@@ -88,6 +88,7 @@ export type RenderWorkerRequest =
       buffer: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
+      useFontProvider?: boolean;
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;
     }
@@ -139,6 +140,7 @@ export type RenderWorkerResponse =
       availableSlides: number;
       slide: PresentationPreflight['slides'][number];
       fontPreloadNames: PresentationPreflight['fontPreloadNames'];
+      fontProviderNames?: PresentationPreflight['fontProviderNames'];
       usage?: OoxmlResourceUsageSnapshot;
     }
   | { kind: 'slideRendered'; id: number; bitmap: ImageBitmap; runs: PptxTextRunInfo[] }

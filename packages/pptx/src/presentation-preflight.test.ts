@@ -7,7 +7,7 @@ import {
   assertPresentationPreflightProjectionBytes,
   normalizePresentationBootstrap,
 } from './presentation-preflight';
-import { pptxFontPreloadNames } from './google-fonts';
+import { pptxFontPreloadNames } from './font-plan';
 import type { Presentation, Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol';
 
@@ -131,6 +131,8 @@ describe('PresentationPreflightBuilder', () => {
       folHlinkColor: bootstrap.folHlinkColor ?? undefined,
     };
     expect(facts.fontPreloadNames).toEqual(pptxFontPreloadNames(full));
+    expect(facts.fontProviderNames).toEqual(['SimSun', 'Aptos']);
+    expect(facts.fontProviderNames).not.toContain('Noto Sans KR');
   });
 
   it('accounts for the exact structural JSON projection deterministically', () => {
@@ -157,6 +159,7 @@ describe('PresentationPreflightBuilder', () => {
         mediaElements: [],
       }],
       fontPreloadNames: ['SimSun', 'Aptos', 'Noto Sans SC', 'Noto Serif SC'],
+      fontProviderNames: ['SimSun', 'Aptos'],
     };
     expect(builder.projectedBytes).toBe(
       new TextEncoder().encode(JSON.stringify(buildingState)).byteLength,

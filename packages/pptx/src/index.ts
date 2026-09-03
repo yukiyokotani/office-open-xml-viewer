@@ -1,4 +1,15 @@
 export { PptxViewer, type PptxViewerOptions, type HiddenSlideMode } from './viewer';
+export {
+  FontProvider,
+  FontProviderSession,
+  GoogleFontsProvider,
+  type FontAsset,
+  type FontAssetSource,
+  type FontFailure,
+  type FontResolveOptions,
+  type ResolvedFontFace,
+  type ResolvedFonts,
+} from '@silurus/ooxml-core';
 export { PptxScrollViewer, type PptxScrollViewerOptions } from './scroll-viewer';
 export type { PptxCommentsOptions } from './comment-margin';
 export type {

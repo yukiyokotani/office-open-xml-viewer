@@ -12,9 +12,9 @@ import {
   type SlidePartNames,
 } from './slide-nav';
 import {
-  preloadGoogleFonts,
+  FontProviderSession,
+  GoogleFontsProvider,
   releaseOwnedBitmap,
-  unloadGoogleFonts,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -33,6 +33,7 @@ import {
   type TiffRenderer,
   type ImageResourceOptions,
   type OoxmlResourceMetrics,
+  type FontFamilyRoutes,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
 import {
@@ -48,6 +49,8 @@ import {
   parseResourceLimitError,
   PULL_SESSION_PROTOCOL,
   respondToWorkerSvgDecodeRequest,
+  FontProviderHost,
+  isWorkerFontRequest,
   type NormalizedOoxmlResourcePolicy,
   type PullSessionResponse,
   type WorkerRendererDescriptors,
@@ -55,7 +58,6 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
-import { PPTX_GOOGLE_FONTS } from './google-fonts';
 import {
   findPreflightMimeType,
   normalizePresentationBootstrap,
@@ -253,16 +255,13 @@ export class PptxPresentation {
     maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
     maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
   });
-  /** Google-Fonts `FontFace` objects this deck preloaded into `document.fonts`
-   *  (main mode only — in worker mode the worker owns them and terminates with
-   *  its own FontFaceSet). Released in {@link destroy} so they do not leak into
-   *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
-   *  core, so a web font shared with another open deck survives until both go). */
-  private _googleFontFaces: FontFace[] = [];
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
+  private readonly _fontSession: FontProviderSession | null;
+  private readonly _fontHost: FontProviderHost | null;
+  private _fontRoutes: FontFamilyRoutes = {};
   private _destroyed = false;
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
@@ -280,9 +279,20 @@ export class PptxPresentation {
   private _chartEx: ChartExRenderer | undefined;
   private _tiff: TiffRenderer | undefined;
 
-  private constructor(worker: Worker, mode: 'main' | 'worker', wasmUrlOverride?: string | URL) {
+  private constructor(
+    worker: Worker,
+    mode: 'main' | 'worker',
+    wasmUrlOverride?: string | URL,
+    fontSession: FontProviderSession | null = null,
+  ) {
     this._worker = worker;
     this._mode = mode;
+    this._fontSession = fontSession;
+    this._fontHost = fontSession
+      ? new FontProviderHost(fontSession, (message, transfer) => (
+          worker.postMessage as (value: unknown, transfer?: Transferable[]) => void
+        )(message, transfer))
+      : null;
     this._bridge = new WorkerBridge<
       PptxWorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
     >(this._worker, {
@@ -300,7 +310,13 @@ export class PptxPresentation {
         !('protocol' in msg) && msg.kind === 'error'
           ? deserializeWorkerError(msg)
           : undefined,
-      onUnsolicited: (msg) => this._onWorkerLayoutPush(msg),
+      onUnsolicited: (msg) => {
+        if (isWorkerFontRequest(msg)) {
+          void this._fontHost?.accept(msg);
+          return;
+        }
+        this._onWorkerLayoutPush(msg);
+      },
     });
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
@@ -329,6 +345,10 @@ export class PptxPresentation {
     source: string | ArrayBuffer,
     opts: LoadOptions = {},
   ): Promise<PptxPresentation> {
+    if (opts.fontProvider && opts.useGoogleFonts) {
+      throw new TypeError('fontProvider and useGoogleFonts cannot be used together');
+    }
+    const googleFonts = !!opts.useGoogleFonts || opts.fontProvider instanceof GoogleFontsProvider;
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
@@ -368,7 +388,13 @@ export class PptxPresentation {
     const rendererDescriptors = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
     let pres: PptxPresentation | undefined;
     try {
-      pres = new PptxPresentation(worker, mode, opts.wasmUrl);
+      const fontSession = opts.fontProvider || opts.useGoogleFonts
+        ? new FontProviderSession(
+            opts.fontProvider ?? new GoogleFontsProvider(),
+            opts.fontProvider ? opts.fontFailure : 'fallback',
+          )
+        : null;
+      pres = new PptxPresentation(worker, mode, opts.wasmUrl, fontSession);
       pres._metrics = metrics;
       if (opts.math && mode === 'worker' && !rendererDescriptors?.math) {
         console.warn(
@@ -414,21 +440,22 @@ export class PptxPresentation {
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        !!opts.useGoogleFonts,
+        googleFonts,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
         progressive,
+        !!fontSession,
       );
       metrics.checkpoint('presentation preflight ready');
-      if (mode === 'main' && opts.useGoogleFonts && pres._preflight && !progressive) {
-        pres._googleFontFaces = await preloadGoogleFonts(
-          excludeEmbeddedFontFamilies(
-            pres._preflight.fontPreloadNames,
-            pres._embeddedFontAliases,
-          ),
-          PPTX_GOOGLE_FONTS,
+      if (mode === 'main' && pres._fontSession && pres._preflight && !progressive) {
+        const names = googleFonts
+          ? pres._preflight.fontPreloadNames
+          : pres._preflight.fontProviderNames ?? [];
+        const resolved = await pres._fontSession.ensure(
+          excludeEmbeddedFontFamilies(names, pres._embeddedFontAliases),
         );
+        pres._fontRoutes = resolved.routes;
       }
       metrics.succeed({ slides: pres.slideCount });
       return pres;
@@ -451,16 +478,17 @@ export class PptxPresentation {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: ProgressiveLoad,
+    useFontProvider = false,
   ): Promise<void> {
     if (progressive) {
       this._progressive = progressive;
       if (this._mode === 'worker') {
         await this._parseWorkerProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, renderers, progressive,
+          buffer, resourcePolicy, useGoogleFonts, useFontProvider, timeoutMs, onUsage, renderers, progressive,
         );
       } else {
         await this._parseMainProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, progressive,
+          buffer, resourcePolicy, useGoogleFonts, useFontProvider, timeoutMs, onUsage, progressive,
         );
       }
       return;
@@ -468,7 +496,7 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers } satisfies RenderWorkerRequest)
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, useFontProvider, renderers } satisfies RenderWorkerRequest)
           : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
@@ -558,6 +586,7 @@ export class PptxPresentation {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     progressive: ProgressiveLoad,
@@ -596,17 +625,17 @@ export class PptxPresentation {
       },
     });
     const builder = new PresentationPreflightBuilder(bootstrap);
-    const loadedGoogleFonts = new Set<string>();
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
-      if (!useGoogleFonts) return;
-      const requested = excludeEmbeddedFontFamilies(
-        builder.currentFontPreloadNames,
-        this._embeddedFontAliases,
-      ).filter((name): name is string => !!name && !loadedGoogleFonts.has(name));
-      if (requested.length === 0) return;
-      for (const name of requested) loadedGoogleFonts.add(name);
-      this._googleFontFaces.push(...await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS));
+      if (useFontProvider && this._fontSession) {
+        const names = useGoogleFonts
+          ? builder.currentFontPreloadNames
+          : builder.currentFontProviderNames;
+        const resolved = await this._fontSession.ensure(
+          excludeEmbeddedFontFamilies(names, this._embeddedFontAliases),
+        );
+        this._fontRoutes = { ...this._fontRoutes, ...resolved.routes };
+      }
     };
     const full = (async () => {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
@@ -636,6 +665,7 @@ export class PptxPresentation {
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
+    useFontProvider: boolean,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -646,7 +676,7 @@ export class PptxPresentation {
       (id) => {
         this._parseRequestId = id;
         return {
-          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers,
+          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, useFontProvider, renderers,
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },
@@ -726,6 +756,7 @@ export class PptxPresentation {
           ...bootstrap,
           slides: [...prior, response.slide],
           fontPreloadNames: response.fontPreloadNames,
+          fontProviderNames: response.fontProviderNames ?? [],
         }),
         this._progressive,
       );
@@ -1052,6 +1083,7 @@ export class PptxPresentation {
             hlinkColor: compact.hlinkColor,
             embeddedFontAliases: this._embeddedFontAliases,
             embeddedFontAuthoredFamilies: this._embeddedFontAuthoredFamilies,
+            providerFontRoutes: this._fontRoutes,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1423,20 +1455,14 @@ export class PptxPresentation {
     this._resourceFailure = null;
     this._slidePartIndex = null;
     this._rawParts.clear();
-    // Release the Google-Fonts substitutes this deck preloaded into the shared
-    // FontFaceSet (main mode). Refcounted in core: a web font also used by another
-    // open deck stays until that one is destroyed too. Without this, every opened
-    // deck left its Google FontFace objects in `document.fonts` forever (SPA leak).
-    if (this._googleFontFaces.length > 0) {
-      unloadGoogleFonts(this._googleFontFaces);
-      this._googleFontFaces = [];
-    }
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];
     }
     this._embeddedFontAliases = new Map();
     this._embeddedFontAuthoredFamilies = new Map();
+    this._fontSession?.destroy();
+    this._fontRoutes = {};
     // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured
     // rasters, and SVG object URLs promptly; all three caches are keyed by
     // `_fetchImage`.

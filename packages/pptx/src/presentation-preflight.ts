@@ -7,7 +7,7 @@ import {
   measureStructuralJson,
 } from '@silurus/ooxml-core/internal/resource-measurement';
 import { HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES } from '@silurus/ooxml-core/worker';
-import { PptxFontPreloadAccumulator } from './google-fonts';
+import { PptxFontPreloadAccumulator } from './font-plan';
 import type {
   MediaElement,
   PptxComment,
@@ -61,6 +61,7 @@ export interface PresentationPreflight {
   readonly embeddedFonts: readonly Readonly<PptxEmbeddedFontRef>[];
   readonly slides: readonly PresentationPreflightSlide[];
   readonly fontPreloadNames: readonly (string | null)[];
+  readonly fontProviderNames?: readonly string[];
 }
 
 function assertNullableString(value: unknown, field: string): asserts value is string | null {
@@ -335,7 +336,8 @@ function normalizePresentationPreflightValue(
     (allowPartial
       ? candidate.slides.length > (candidate.slideCount ?? -1)
       : candidate.slides.length !== candidate.slideCount) ||
-    !Array.isArray(candidate.fontPreloadNames)
+    !Array.isArray(candidate.fontPreloadNames) ||
+    (candidate.fontProviderNames !== undefined && !Array.isArray(candidate.fontProviderNames))
   ) {
     throw new Error('invalid PPTX presentation preflight dimensions or slide count');
   }
@@ -378,6 +380,12 @@ function normalizePresentationPreflightValue(
     }
     return name;
   });
+  const fontProviderNames = (candidate.fontProviderNames ?? []).map((name, index) => {
+    if (typeof name !== 'string') {
+      throw new Error(`invalid PPTX presentation provider font at ${index}`);
+    }
+    return name;
+  });
   return Object.freeze({
     slideCount: candidate.slideCount as number,
     slideWidth: candidate.slideWidth as number,
@@ -392,6 +400,7 @@ function normalizePresentationPreflightValue(
     ),
     slides: Object.freeze(slides),
     fontPreloadNames: Object.freeze(fontPreloadNames),
+    fontProviderNames: Object.freeze(fontProviderNames),
   });
 }
 
@@ -485,6 +494,7 @@ interface PendingAcceptance {
   readonly fact: PresentationPreflightSlide;
   readonly fonts: PptxFontPreloadAccumulator;
   readonly fontNames: readonly (string | null)[];
+  readonly providerNames: readonly string[];
   readonly fontBytes: number;
   readonly committedBytes: number;
 }
@@ -513,6 +523,7 @@ export class PresentationPreflightBuilder {
   private slides: PresentationPreflightSlide[] = [];
   private fonts: PptxFontPreloadAccumulator;
   private fontPreloadNames: readonly (string | null)[];
+  private fontProviderNames: readonly string[];
   private fontProjectionBytes: number;
   private projectionBytesValue: number;
   private readonly limit: number;
@@ -547,8 +558,9 @@ export class PresentationPreflightBuilder {
       this.minorFontValue,
     );
     this.fontPreloadNames = Object.freeze(this.fonts.names());
+    this.fontProviderNames = Object.freeze(this.fonts.providerNames());
     this.fontProjectionBytes = measureStructuralJson(
-      this.fontPreloadNames,
+      { fontPreloadNames: this.fontPreloadNames, fontProviderNames: this.fontProviderNames },
       this.limit,
     ).jsonBytes;
     this.projectionBytesValue = measureStructuralJson({
@@ -564,6 +576,7 @@ export class PresentationPreflightBuilder {
       remainingSlides: this.descriptors,
       slides: [],
       fontPreloadNames: this.fontPreloadNames,
+      fontProviderNames: this.fontProviderNames,
     }, this.limit).jsonBytes;
     assertProjectionBytes(this.projectionBytesValue, this.limit, ZERO_RESOURCE_USAGE);
   }
@@ -590,6 +603,10 @@ export class PresentationPreflightBuilder {
     return this.fontPreloadNames;
   }
 
+  get currentFontProviderNames(): readonly string[] {
+    return this.fontProviderNames;
+  }
+
   /**
    * Read-only snapshot of the committed prefix while preflight is still open.
    * `slideCount` remains the final bootstrap count; `slides.length` is the
@@ -611,6 +628,7 @@ export class PresentationPreflightBuilder {
       embeddedFonts: this.embeddedFontsValue,
       slides: Object.freeze([...this.slides]),
       fontPreloadNames: this.fontPreloadNames,
+      fontProviderNames: this.fontProviderNames,
     });
   }
 
@@ -633,8 +651,9 @@ export class PresentationPreflightBuilder {
     const fact = projectSlide(slide, descriptor);
     const nextFonts = this.fonts.withSlide(slide);
     const nextFontNames = Object.freeze(nextFonts.names());
+    const nextProviderNames = Object.freeze(nextFonts.providerNames());
     const nextFontBytes = measureStructuralJson(
-      nextFontNames,
+      { fontPreloadNames: nextFontNames, fontProviderNames: nextProviderNames },
       this.limit,
     ).jsonBytes;
     const slideBytes = measureStructuralJson(
@@ -659,6 +678,7 @@ export class PresentationPreflightBuilder {
     const candidateBytes = measureStructuralJson({
       slide: fact,
       fontPreloadNames: nextFontNames,
+      fontProviderNames: nextProviderNames,
     }, this.limit).jsonBytes;
     const preparedBytes = cappedAdd(this.projectionBytesValue, candidateBytes, this.limit);
     const observed = Math.max(preparedBytes, committedBytes);
@@ -668,6 +688,7 @@ export class PresentationPreflightBuilder {
       fact,
       fonts: nextFonts,
       fontNames: nextFontNames,
+      providerNames: nextProviderNames,
       fontBytes: nextFontBytes,
       committedBytes,
     };
@@ -686,6 +707,7 @@ export class PresentationPreflightBuilder {
         this.slides.push(pending.fact);
         this.fonts = pending.fonts;
         this.fontPreloadNames = pending.fontNames;
+        this.fontProviderNames = pending.providerNames;
         this.fontProjectionBytes = pending.fontBytes;
         this.projectionBytesValue = pending.committedBytes;
         pending.state = 'committed';
@@ -725,6 +747,7 @@ export class PresentationPreflightBuilder {
       embeddedFonts: this.embeddedFontsValue,
       slides: Object.freeze([...this.slides]),
       fontPreloadNames: this.fontPreloadNames,
+      fontProviderNames: this.fontProviderNames,
     });
     // The frozen compact model owns its slide-array storage from here. The
     // builder releases both construction-only arrays rather than retaining a

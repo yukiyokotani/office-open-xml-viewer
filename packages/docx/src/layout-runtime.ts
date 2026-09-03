@@ -1,6 +1,7 @@
 import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
 import type { ResolvedLocalFontMetric } from './layout/text.js';
+import type { FontFamilyRoutes } from '@silurus/ooxml-core';
 import { snapshotLocalMetrics } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
 import type { BodyLayoutKernel } from './layout/body-layout-kernel.js';
@@ -44,12 +45,11 @@ export function createLayoutServices(
   input: DocxDocumentModel | LayoutSourceStore,
   options: {
     readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
-    readonly useGoogleFonts?: boolean;
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     readonly embeddedFaces?: readonly FontFace[];
-    readonly googleFaces?: readonly FontFace[];
+    readonly providerRoutes?: FontFamilyRoutes;
   } = {},
 ): LayoutServices {
   const source = isLayoutSourceStore(input) ? input : layoutSourceStore(input);

@@ -1,28 +1,10 @@
 import {
+  chartFontFamilies,
   classifyCjkFont,
   scriptPreloadNamesForText,
-  GOOGLE_FONT_SUBSTITUTES,
-  SCRIPT_GOOGLE_FONTS,
   type CjkLang,
-  type FontPreloadEntry,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook } from './types.js';
-
-/** Office font name → metric-compatible Google Fonts substitute for XLSX cells.
- *
- *  {@link GOOGLE_FONT_SUBSTITUTES} supplies the Office substitutes (Calibri →
- *  Carlito, Cambria → Caladea — same advance widths / vertical metrics, so
- *  text-width measurements stay close to Excel's), the popular free web fonts
- *  and the Arabic Noto fallbacks — shared with docx/pptx. {@link
- *  SCRIPT_GOOGLE_FONTS} adds the CJK / Cyrillic / Thai / Devanagari / Hebrew
- *  Noto faces (the renderer chooses the CJK Noto per cell from the cell's font
- *  name; non-CJK scripts append to the default chain). Both load only when
- *  `useGoogleFonts` is on — no binaries ship in the bundle. XLSX currently has
- *  no format-specific additions. */
-export const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  ...GOOGLE_FONT_SUBSTITUTES,
-  ...SCRIPT_GOOGLE_FONTS,
-};
+import type { ParsedWorkbook, Worksheet } from './types.js';
 
 /** Yield every textual cell value carried by the parsed workbook: the shared
  *  string table (`text` plus rich-text `runs[].text`). This is the bulk of a
@@ -68,4 +50,47 @@ export function xlsxFontPreloadNames(wb: ParsedWorkbook | undefined): Set<string
     names.add(n);
   }
   return names;
+}
+
+/** Authored families resolved by an application-provided font provider. */
+export function xlsxFontProviderNames(workbook: ParsedWorkbook | undefined): string[] {
+  const names = new Set<string>();
+  for (const font of workbook?.styles.fonts ?? []) {
+    if (font.name?.trim()) names.add(font.name.trim());
+  }
+  for (const item of workbook?.sharedStrings ?? []) {
+    for (const run of item.runs ?? []) {
+      if (run.font?.name?.trim()) names.add(run.font.name.trim());
+    }
+  }
+  return [...names];
+}
+
+/** Families discovered only after a worksheet is parsed lazily. */
+export function xlsxWorksheetFontProviderNames(worksheet: Worksheet): string[] {
+  const names = new Set<string>();
+  for (const row of worksheet.rows) {
+    for (const cell of row.cells) {
+      if (cell.value.type !== 'text') continue;
+      for (const run of cell.value.runs ?? []) {
+        if (run.font?.name?.trim()) names.add(run.font.name.trim());
+      }
+    }
+  }
+  for (const anchor of worksheet.shapeGroups ?? []) {
+    for (const shape of anchor.shapes) {
+      for (const paragraph of shape.text?.paragraphs ?? []) {
+        for (const run of paragraph.runs) {
+          if (run.type !== 'text') continue;
+          if (run.fontFace?.trim()) names.add(run.fontFace.trim());
+          if (run.fontFaceEa?.trim()) names.add(run.fontFaceEa.trim());
+          if (run.fontFaceCs?.trim()) names.add(run.fontFaceCs.trim());
+        }
+      }
+    }
+  }
+  for (const anchor of worksheet.charts) {
+    for (const family of chartFontFamilies(anchor.chart)) names.add(family);
+  }
+  return [...names];
 }

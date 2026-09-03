@@ -1,6 +1,6 @@
 import type { DocParagraph, DocRun, DocxDocumentModel, HeadersFooters } from './types.js';
 import { docxRenderedFontFamilies } from './document-content.js';
-import { docxFontPreloadNames } from './google-fonts.js';
+import { docxFontPreloadNames } from './font-plan.js';
 import { resolveDocumentLayoutSettings } from './layout-context.js';
 import { getDefaultFontSize } from './line-layout.js';
 import { docDefaultFontSizePt } from './layout/measurement-environment.js';
