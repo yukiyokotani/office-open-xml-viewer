@@ -20,6 +20,16 @@ describe('fontStackFor — default Latin chain (regression)', () => {
 });
 
 describe('fontStackFor — CJK language-specific Noto ordering', () => {
+  it('routes a native Noto CJK name through the loaded Google family', () => {
+    const sans = fontStackFor(' Noto Sans CJK JP ');
+    expect(sans.startsWith('"Noto Sans CJK JP", "Noto Sans JP", ')).toBe(true);
+    expect(sans.match(/"Noto Sans JP"/g)).toHaveLength(1);
+
+    const serif = fontStackFor('Noto Serif CJK KR');
+    expect(serif.startsWith('"Noto Serif CJK KR", "Noto Serif KR", ')).toBe(true);
+    expect(serif.endsWith('serif')).toBe(true);
+  });
+
   it('Korean sans (Malgun Gothic) → Noto Sans KR leads the tail', () => {
     const tail = cssTailFor('Malgun Gothic');
     expect(tail.startsWith('"Noto Sans KR"')).toBe(true);

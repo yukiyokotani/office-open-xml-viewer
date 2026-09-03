@@ -6,6 +6,8 @@ import {
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
+  GOOGLE_CJK_FONT_ALIASES,
+  googleCjkFontAlias,
   SCRIPT_GOOGLE_FONTS,
   SCRIPT_PRELOAD_NAMES,
   ScriptPreloadAccumulator,
@@ -23,6 +25,13 @@ function assertResolvable(names: string[]): void {
 }
 
 describe('classifyCjkFont — Office font name → CJK language', () => {
+  it('classifies native Noto CJK names across case and surrounding whitespace', () => {
+    expect(classifyCjkFont(' Noto Sans CJK SC ')).toBe('sc');
+    expect(classifyCjkFont('nOtO SeRiF CjK Tc')).toBe('tc');
+    expect(classifyCjkFont('Noto Sans CJK JP')).toBe('jp');
+    expect(classifyCjkFont('Noto Serif CJK KR')).toBe('kr');
+  });
+
   it('classifies Korean faces (Malgun Gothic, Batang, Gulim, Dotum, 돋움)', () => {
     expect(classifyCjkFont('Malgun Gothic')).toBe('kr');
     expect(classifyCjkFont('Batang')).toBe('kr');
@@ -195,6 +204,29 @@ describe('non-CJK fallback constants', () => {
 });
 
 describe('SCRIPT_GOOGLE_FONTS / SCRIPT_PRELOAD_NAMES', () => {
+  it('maps every native Noto CJK name to its Google Fonts family', () => {
+    expect(GOOGLE_CJK_FONT_ALIASES).toEqual({
+      'noto sans cjk sc': 'Noto Sans SC',
+      'noto serif cjk sc': 'Noto Serif SC',
+      'noto sans cjk tc': 'Noto Sans TC',
+      'noto serif cjk tc': 'Noto Serif TC',
+      'noto sans cjk jp': 'Noto Sans JP',
+      'noto serif cjk jp': 'Noto Serif JP',
+      'noto sans cjk kr': 'Noto Sans KR',
+      'noto serif cjk kr': 'Noto Serif KR',
+    });
+    expect(googleCjkFontAlias('  NOTO SANS CJK SC ')).toBe('Noto Sans SC');
+    expect(googleCjkFontAlias('Noto Serif CJK KR')).toBe('Noto Serif KR');
+    expect(googleCjkFontAlias('Noto Sans SC')).toBeNull();
+
+    for (const [alias, family] of Object.entries(GOOGLE_CJK_FONT_ALIASES)) {
+      expect(SCRIPT_GOOGLE_FONTS[alias]).toEqual({
+        ...SCRIPT_GOOGLE_FONTS[family.toLowerCase()],
+        loadFamily: family,
+      });
+    }
+  });
+
   it('maps every script Noto family to a Google Fonts URL', () => {
     for (const name of SCRIPT_PRELOAD_NAMES) {
       const entry = SCRIPT_GOOGLE_FONTS[name.toLowerCase()];

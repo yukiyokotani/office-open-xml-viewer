@@ -154,6 +154,8 @@ export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from '.
 export {
   classifyCjkFont,
   classifyFontGeneric,
+  GOOGLE_CJK_FONT_ALIASES,
+  googleCjkFontAlias,
   isComplexScriptCodePoint,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,

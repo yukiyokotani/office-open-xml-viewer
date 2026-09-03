@@ -14,7 +14,7 @@ import type {
 } from '@silurus/ooxml-core';
 import { chartImageFillKey, paintOptionalImagePlaceholder } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, tintMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, isLatinWordCodePoint, isUax14NoBreakPair, containsSeaScript, isGraphemeFillText, seaMixedBreakOffsets, fitSeaWordPrefix, graphemeClusterOffsets, xlsxBorderDashArray, drawImageCropped, hexToRgba, intendedSingleLinePx, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValueWithColor } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
@@ -113,7 +113,12 @@ export function cssTailFor(name: string | null | undefined): string {
     return DEFAULT_FONT_FAMILY;
   }
   const serif = generic === 'serif';
-  const cjkPart = cjkFallbackChain(cjk, serif ? 'serif' : 'sans')
+  const googleAlias = googleCjkFontAlias(name);
+  const cjkPart = [
+    ...(googleAlias ? [googleAlias] : []),
+    ...cjkFallbackChain(cjk, serif ? 'serif' : 'sans')
+      .filter((family) => family !== googleAlias),
+  ]
     .map((n) => `"${n}"`)
     .join(', ');
   const tail = serif ? NON_CJK_SERIF_TAIL : NON_CJK_SANS_TAIL;
@@ -124,7 +129,8 @@ export function cssTailFor(name: string | null | undefined): string {
 
 /** Full CSS font-family list for a cell font name (named face first). */
 export function fontStackFor(name: string | null | undefined): string {
-  return name ? `"${name}", ${cssTailFor(name)}` : DEFAULT_FONT_FAMILY;
+  const normalized = name?.trim();
+  return normalized ? `"${normalized}", ${cssTailFor(normalized)}` : DEFAULT_FONT_FAMILY;
 }
 
 const DEFAULT_FONT_SIZE = 11;

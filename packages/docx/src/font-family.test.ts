@@ -110,6 +110,15 @@ describe('normalizeFontFamily — Latin fonts lead with Latin faces, JP companio
 });
 
 describe('normalizeFontFamily — CJK language-specific Noto ordering', () => {
+  it('routes native Noto CJK names through the loaded Google family', () => {
+    const sans = normalizeFontFamily('Noto Sans CJK SC');
+    expect(sans.startsWith('"Noto Sans CJK SC", "Noto Sans SC", ')).toBe(true);
+
+    const serif = normalizeFontFamily('Noto Serif CJK TC');
+    expect(serif.startsWith('"Noto Serif CJK TC", "Noto Serif TC", ')).toBe(true);
+    expect(serif.endsWith('serif')).toBe(true);
+  });
+
   it('puts Noto Sans KR first for Korean sans faces (Malgun Gothic, Gulim, Dotum, 돋움)', () => {
     for (const f of ['Malgun Gothic', 'Gulim', 'Dotum', '돋움']) {
       const chain = normalizeFontFamily(f);
