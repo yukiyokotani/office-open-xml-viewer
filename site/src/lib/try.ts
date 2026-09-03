@@ -11,7 +11,7 @@ import {
   DocxScrollViewer,
   type DocxScrollViewerOptions,
 } from '@silurus/ooxml-docx';
-import { XlsxViewer } from '@silurus/ooxml-xlsx';
+import { XlsxSheetViewer, XlsxViewer } from '@silurus/ooxml-xlsx';
 import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
@@ -82,7 +82,13 @@ export async function renderFile(
   activeCleanup = null;
 
   const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext !== 'docx' && ext !== 'xlsx' && ext !== 'pptx') {
+  if (
+    ext !== 'docx'
+    && ext !== 'xlsx'
+    && ext !== 'pptx'
+    && ext !== 'csv'
+    && ext !== 'tsv'
+  ) {
     throw new Error('Unsupported file — choose a .docx, .xlsx or .pptx file.');
   }
 
@@ -104,6 +110,35 @@ export async function renderFile(
     });
     try {
       await viewer.load(buffer);
+    } catch (error) {
+      viewer.destroy();
+      throw error;
+    }
+    if (generation !== renderGeneration) {
+      viewer.destroy();
+      throw new SupersededRenderError();
+    }
+    activeCleanup = () => viewer.destroy();
+    return { format: 'xlsx', units: 0, unitLabel: 'sheet' };
+  }
+
+  if (ext === 'csv' || ext === 'tsv') {
+    const host = document.createElement('div');
+    host.className = 'lv-xlsx';
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    host.appendChild(canvas);
+    stage.appendChild(host);
+    const viewer = new XlsxSheetViewer(canvas, {
+      mode: 'main',
+      useGoogleFonts: true,
+      comments: false,
+      math,
+      ...fullRenderers,
+    });
+    try {
+      await viewer.load(buffer, { format: ext });
     } catch (error) {
       viewer.destroy();
       throw error;

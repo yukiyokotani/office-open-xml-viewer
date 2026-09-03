@@ -20,6 +20,12 @@ describe('Try Yours parsing progress', () => {
     expect(source).not.toContain('02 / Privacy');
   });
 
+  it('quietly allows CSV and TSV selection without advertising generic text formats', () => {
+    expect(source).toContain('accept=".docx,.xlsx,.pptx,.csv,.tsv"');
+    expect(source).toContain('<small>.docx · .xlsx · .pptx</small>');
+    expect(source).not.toMatch(/accept="[^"]*\.dat/);
+  });
+
   it('shows an accessible progress circle in the preview while renderFile is pending', () => {
     expect(source).toContain('id="stage-progress" role="status" aria-live="polite" hidden');
     expect(source).toContain('class="try-progress-circle" aria-hidden="true"');
