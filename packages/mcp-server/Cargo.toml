@@ -19,6 +19,6 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-xlsx-parser = { path = "../xlsx/parser" }
-docx-parser = { path = "../docx/parser" }
-pptx-parser = { path = "../pptx/parser" }
+xlsx-parser = { path = "../xlsx/parser", default-features = false }
+docx-parser = { path = "../docx/parser", default-features = false }
+pptx-parser = { path = "../pptx/parser", default-features = false }

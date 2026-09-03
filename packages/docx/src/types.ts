@@ -1610,17 +1610,12 @@ export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
   | { type: 'extractImage'; id: number; path: string }
-  | { type: 'resourceUsage'; id: number }
-  // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
-  // the handle already opened at `parse` — no re-copy of the file). Twin of
-  // `extractImage`: the archive stays in the worker, only the string crosses back.
-  | { type: 'toMarkdown'; id: number };
+  | { type: 'resourceUsage'; id: number };
 
 export type WorkerResponse =
   | ({ type: 'documentSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
-  | { type: 'markdownRendered'; id: number; markdown: string }
   | ({
       type: 'error';
       id: number;

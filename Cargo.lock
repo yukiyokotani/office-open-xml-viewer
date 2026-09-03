@@ -502,6 +502,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ooxml-markdown-docx"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "docx-parser",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "ooxml-markdown-pptx"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "pptx-parser",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "ooxml-markdown-xlsx"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "wasm-bindgen",
+ "xlsx-parser",
+]
+
+[[package]]
 name = "ooxml-mcp-server"
 version = "0.85.3"
 dependencies = [

@@ -171,7 +171,7 @@ fn note_bootstrap_output_slide_retained() {
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn parse_pptx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -187,20 +187,6 @@ pub fn parse_pptx(
     .map_err(pptx_parser_js_error)?;
     serde_json::to_vec(&presentation)
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
-}
-
-/// WASM-callable markdown projection. Shares the body of `to_markdown_native`
-/// so the browser / Node WASM path and the native mcp-server path stay in
-/// lock-step. See `to_markdown_native` for the design rationale.
-#[wasm_bindgen]
-pub fn pptx_to_markdown(
-    data: &[u8],
-    max_archive_entry_bytes: Option<u64>,
-    max_total_inflated_bytes: Option<u64>,
-) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
-    render_markdown_from_bytes_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes)
-        .map_err(pptx_parser_js_error)
 }
 
 /// Native equivalent of `parse_pptx` for use from the MCP server.
@@ -230,7 +216,7 @@ fn pptx_parser_js_error(error: String) -> JsValue {
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn extract_media(
     data: &[u8],
     path: &str,
@@ -250,7 +236,7 @@ pub fn extract_media(
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "ppt/media/image1.png") from a pptx zip archive. Used by the main thread to
 /// lazily materialize image blobs on demand through a bounded package operation.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -268,7 +254,7 @@ pub fn extract_image(
 }
 
 /// Extract one font part referenced by `p:embeddedFontLst`.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn extract_font(
     data: &[u8],
     path: &str,
@@ -286,15 +272,15 @@ pub fn extract_font(
 
 /// A stateful handle over an opened pptx archive.
 ///
-/// The free functions above (`parse_pptx` / `pptx_to_markdown` / `extract_media`
-/// / `extract_image` / `extract_font`) each re-copy the whole file into WASM and re-scan the ZIP
+/// The free functions above (`parse_pptx` / `extract_media` / `extract_image` /
+/// `extract_font`) each re-copy the whole file into WASM and re-scan the ZIP
 /// central directory on every call. A `PptxArchive` copies the bytes into WASM
 /// **once** (in `new`) and keeps the opened [`PptxZip`] session alive, so a `parse`
 /// followed by any number of `extract_media` / `extract_image` calls (the
 /// viewer's parse-then-lazily-load-media pattern) pays the copy + open cost a
 /// single time. The session owns the source bytes, validated central-directory
 /// index, resource governor, and first package-wide poison error.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub struct PptxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
@@ -579,7 +565,7 @@ fn serialize_presentation_bootstrap(
     serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
 }
 
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 impl PptxArchive {
     fn ensure_presentation(&mut self) -> Result<(), String> {
         if self.presentation.is_none() {
@@ -602,7 +588,7 @@ impl PptxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(feature = "viewer-wasm", wasm_bindgen(constructor))]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
@@ -991,42 +977,6 @@ impl PptxArchive {
             .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
         zip.read_font_part(path).map_err(|e| JsValue::from_str(&e))
-    }
-
-    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
-    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        self.render_markdown_inner().map_err(pptx_parser_js_error)
-    }
-
-    fn render_markdown_inner(&mut self) -> Result<String, String> {
-        if self.prepared_slide.is_some() {
-            return Err("a slide unit is awaiting acknowledgement".to_string());
-        }
-        if let Err(error) = &self.archive {
-            return Ok(render_presentation_md(&degraded_container_presentation(
-                error.clone(),
-            )));
-        }
-
-        self.archive
-            .as_mut()
-            .expect("container open checked above")
-            .begin_operation("markdown")?;
-        let result = (|| -> Result<String, String> {
-            self.ensure_presentation()?;
-            let mut shared = self.presentation.take().expect("presentation loaded above");
-            let rendered = render_markdown_from_shared(
-                &mut shared,
-                self.archive.as_mut().expect("container open checked above"),
-            );
-            self.presentation = Some(shared);
-            rendered
-        })();
-        settle_pptx_operation(
-            self.archive.as_mut().expect("container open checked above"),
-            result,
-        )
     }
 }
 
@@ -2461,8 +2411,8 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
 
 /// Parse a presentation from raw archive bytes. Thin wrapper that opens a fresh
 /// owned [`PptxZip`] (copying `data`) and delegates to [`parse_presentation`].
-/// Kept so the free `parse_pptx` / `pptx_to_markdown` WASM entry points and the
-/// native `parse_pptx_native` path keep their `&[u8]` signature; the stateful
+/// Kept so the free `parse_pptx` WASM entry point and the native
+/// `parse_pptx_native` path keep their `&[u8]` signature; the stateful
 /// `PptxArchive` handle calls [`parse_presentation`] directly on its retained
 /// archive to avoid re-opening it per call.
 ///
@@ -10771,7 +10721,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_projection_is_sequential_equivalent_and_independent_of_full_model_limit() {
+    fn markdown_projection_is_sequential_and_independent_of_full_model_limit() {
         let data = build_three_slide_deck(usize::MAX, "");
         let expected = render_presentation_md(&parse_presentation_from_bytes(&data).unwrap());
         let exact_markdown_bytes = expected.len() as u64;
@@ -10785,14 +10735,6 @@ mod tests {
             to_markdown_native(&data).expect("the exact markdown ceiling is inclusive"),
             expected,
         );
-
-        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
-        archive.presentation_bootstrap().unwrap();
-        archive
-            .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
-            .unwrap();
-        archive.acknowledge_slide_inner(1, 1).unwrap();
-        assert_eq!(archive.render_markdown_inner().unwrap(), expected);
     }
 
     #[test]
@@ -10863,6 +10805,33 @@ mod tests {
             markdown.contains("## Attached label\n\nPanel body"),
             "{markdown}"
         );
+    }
+
+    #[test]
+    fn markdown_pairs_repeated_number_badges_with_adjacent_body_text() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="List panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="900000" y="1800000"/><a:ext cx="7500000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Badge 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1200000" y="2200000"/><a:ext cx="500000" cy="500000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>1</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="4" name="First item"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1900000" y="2100000"/><a:ext cx="5700000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>First process description</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="5" name="Badge 2"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1200000" y="3500000"/><a:ext cx="500000" cy="500000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>2</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="6" name="Second item"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1900000" y="3400000"/><a:ext cx="5700000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Second process description</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let markdown = to_markdown_native(&data).unwrap();
+        assert!(
+            markdown.contains("1. First process description\n\n2. Second process description"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("\n\n1\n\n"), "{markdown}");
+
+        let nonconsecutive_slide = slide.replace("<a:t>2</a:t>", "<a:t>4</a:t>");
+        let nonconsecutive =
+            to_markdown_native(&build_three_slide_deck(0, &nonconsecutive_slide)).unwrap();
+        assert!(
+            !nonconsecutive.contains("1. First process description"),
+            "{nonconsecutive}"
+        );
+        assert!(nonconsecutive.contains("\n\n1\n\n"), "{nonconsecutive}");
     }
 
     #[test]
@@ -12223,7 +12192,6 @@ mod tests {
     #[allow(clippy::type_complexity)] // Exact exported ABI shapes are the assertion.
     fn public_wasm_signatures_remain_stable() {
         let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> = parse_pptx;
-        let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<String, JsValue> = pptx_to_markdown;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_media;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
@@ -12233,7 +12201,6 @@ mod tests {
         let _: fn(&mut PptxArchive) -> Result<Vec<u8>, JsValue> = PptxArchive::parse;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_media;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_image;
-        let _: fn(&mut PptxArchive) -> Result<String, JsValue> = PptxArchive::to_markdown;
         let _: fn(&PptxArchive) -> Result<(), JsValue> = PptxArchive::assert_healthy;
         let _: fn(&[u8]) -> Result<String, String> = parse_pptx_native;
         let _: fn(&[u8]) -> Result<String, String> = to_markdown_native;

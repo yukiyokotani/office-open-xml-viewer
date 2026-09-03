@@ -1294,34 +1294,6 @@ export class PptxPresentation {
   }
 
   /**
-   * Project the presentation to GitHub-flavoured markdown: title slides become
-   * `#` headings, body shapes become nested bullets at each paragraph's `lvl`,
-   * tables become pipe tables, charts become summarised bullets, and speaker
-   * notes and comments are collated. Positioning, animations, images, and
-   * drawing detail are discarded — the projection is meant for AI ingestion and
-   * full-text search, not layout.
-   *
-   * Runs entirely in the worker off the archive opened at {@link load} (no
-   * re-copy of the file, no re-parse of the model on the main thread), so it
-   * works in BOTH `mode: 'main'` and `mode: 'worker'`.
-   *
-   * @example
-   * const pres = await PptxPresentation.load(buffer);
-   * const md = await pres.toMarkdown();
-   */
-  async toMarkdown(): Promise<string> {
-    this._assertResourceHealthy();
-    try {
-      const res = await this._bridge.request(
-        (id) => ({ kind: 'toMarkdown', id }) satisfies PptxWorkerRequest,
-      );
-      return (res as Extract<PptxWorkerResponse, { kind: 'markdownRendered' }>).markdown;
-    } catch (error) {
-      this._rethrowWithResourceFailure(error);
-    }
-  }
-
-  /**
    * Render a slide and attach canvas-native playback controls for any
    * embedded audio/video. Returns a {@link PresentationHandle} that owns the
    * RAF loop, media elements, and object URLs. Unlike {@link renderSlide}, this

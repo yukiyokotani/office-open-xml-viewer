@@ -141,16 +141,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       return;
     }
 
-    if (req.type === 'toMarkdown') {
-      if (!archive) throw new Error('No xlsx loaded');
-      // Project the already-opened handle to markdown (no re-copy of the file,
-      // no re-scan of the central directory). A plain string has no transferable
-      // backing, so it is posted by structured clone like any other value.
-      const markdown = host.run(() => archive.to_markdown());
-      const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
-      self.postMessage(res);
-      return;
-    }
     });
   } catch (err) {
     if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);

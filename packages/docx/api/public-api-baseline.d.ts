@@ -1094,7 +1094,6 @@ export class DocxDocument {
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getFontBytes(partPath: string): Promise<Uint8Array>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
-    toMarkdown(): Promise<string>;
     get pageCount(): number;
     get layoutComplete(): boolean;
     waitUntilLayoutComplete(): Promise<void>;

@@ -122,16 +122,6 @@ importers:
         version: 3.6.0(vite@6.4.2(@types/node@25.6.0)(lightningcss@1.32.0))
 
   packages/markdown:
-    dependencies:
-      '@silurus/ooxml-docx':
-        specifier: workspace:*
-        version: link:../docx
-      '@silurus/ooxml-pptx':
-        specifier: workspace:*
-        version: link:../pptx
-      '@silurus/ooxml-xlsx':
-        specifier: workspace:*
-        version: link:../xlsx
     devDependencies:
       '@types/node':
         specifier: ^25.6.0

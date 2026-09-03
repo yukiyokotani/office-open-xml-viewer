@@ -78,8 +78,6 @@ describe('PptxPresentation document-level resource poison', () => {
 
     await expect(presentation.renderSlide({} as HTMLCanvasElement, 0)).rejects.toBe(fatal);
     await expect(presentation.getImage('ppt/media/image1.png', 'image/png')).rejects.toBe(fatal);
-    await expect(presentation.toMarkdown()).rejects.toBe(fatal);
-
     expect(withSlide).not.toHaveBeenCalled();
     expect(request).toHaveBeenCalledTimes(requestsAfterFailure);
   });

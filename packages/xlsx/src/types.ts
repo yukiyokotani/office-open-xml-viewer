@@ -1153,12 +1153,7 @@ export type WorkerRequest =
    *  retained at parse time. Twin of pptx/docx `extractImage`; xlsx uses the
    *  `type` discriminant. */
   | { type: 'extractImage'; id: number; path: string }
-  | { type: 'resourceUsage'; id: number }
-  /** Project the retained archive to GitHub-flavoured markdown
-   *  (`XlsxArchive.to_markdown`, the handle already opened at `parse` — no
-   *  re-copy of the file). Twin of `extractImage`: the archive stays in the
-   *  worker, only the string crosses back. */
-  | { type: 'toMarkdown'; id: number };
+  | { type: 'resourceUsage'; id: number };
 
 export type WorkerResponse =
   // The workbook index / worksheet cross the worker boundary as raw UTF-8 JSON
@@ -1174,5 +1169,4 @@ export type WorkerResponse =
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { type: 'resourceUsage'; id: number; usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot }
-  | { type: 'markdownRendered'; id: number; markdown: string }
   | ({ type: 'error'; id: number } & WorkerErrorPayload);

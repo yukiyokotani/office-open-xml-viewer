@@ -1459,7 +1459,6 @@ export class PptxPresentation {
     getMedia(mediaPath: string): Promise<Blob>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
-    toMarkdown(): Promise<string>;
     presentSlide(canvas: HTMLCanvasElement, slideIndex: number, opts?: PresentSlideOptions): Promise<PresentationHandle>;
     destroy(): void;
     private __privatePresence;

@@ -169,9 +169,6 @@ self.onmessage = async (
         return;
       }
 
-      if (request.kind === 'toMarkdown') {
-        post({ kind: 'markdownRendered', id, markdown: host.run(() => archive.to_markdown()) });
-      }
     });
   } catch (error) {
     if (ownsParseReservation) presentationState = 'failed';

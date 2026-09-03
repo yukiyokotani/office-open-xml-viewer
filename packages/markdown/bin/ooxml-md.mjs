@@ -8,16 +8,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 /**
- * Locate a parser package's compiled `_bg.wasm` on disk. Tries the published
- * layout first (the parser packages export `./wasm-binary`, so `require.resolve`
- * finds it under `node_modules` after `npm i`, and via pnpm's symlinks inside
- * this monorepo), then falls back to the monorepo-relative sibling path used
- * when running straight from a raw source checkout (e.g. the GitHub Action,
- * where the parser packages' `dist` may be absent but `src/wasm` is present).
+ * Locate one format-specific Markdown WASM binary. Published packages resolve
+ * through the subpath export; a source checkout falls back to generated output.
  */
-function resolveWasm(pkg, relFallback) {
+function resolveWasm(specifier, relFallback) {
   try {
-    return require.resolve(`${pkg}/wasm-binary`);
+    return require.resolve(specifier);
   } catch {
     return resolve(here, relFallback);
   }
@@ -45,38 +41,22 @@ const filePath = resolve(positionals[0]);
 const ext = extname(filePath).toLowerCase();
 const here = dirname(fileURLToPath(import.meta.url));
 
-const {
-  pptxToMarkdown,
-  docxToMarkdown,
-  xlsxToMarkdown,
-  initPptxFromBytes,
-  initDocxFromBytes,
-  initXlsxFromBytes,
-} = await import('../src/index.ts').catch(() => import('../dist/index.js'));
-// Dev (monorepo) runs the TS source directly via Node's type stripping; a
-// published install has no `src/` (it ships `dist/`), so the first import
-// rejects with a not-found / unknown-extension error and we fall back to the
-// compiled `dist/index.js`. Node refuses to strip types from `.ts` files under
-// node_modules, so the standalone package MUST expose compiled JS here.
-
 const buf = readFileSync(filePath);
-let md;
-if (ext === '.pptx') {
-  const wasm = readFileSync(resolveWasm('@silurus/ooxml-pptx', '../../pptx/src/wasm/pptx_parser_bg.wasm'));
-  initPptxFromBytes(wasm);
-  md = pptxToMarkdown(buf);
-} else if (ext === '.docx') {
-  const wasm = readFileSync(resolveWasm('@silurus/ooxml-docx', '../../docx/src/wasm/docx_parser_bg.wasm'));
-  initDocxFromBytes(wasm);
-  md = docxToMarkdown(buf);
-} else if (ext === '.xlsx') {
-  const wasm = readFileSync(resolveWasm('@silurus/ooxml-xlsx', '../../xlsx/src/wasm/xlsx_parser_bg.wasm'));
-  initXlsxFromBytes(wasm);
-  md = xlsxToMarkdown(buf);
-} else {
+const format = ext.slice(1);
+if (!['pptx', 'docx', 'xlsx'].includes(format)) {
   console.error(`Unsupported extension: ${ext}. Expected .pptx / .docx / .xlsx`);
   process.exit(2);
 }
+
+// A source checkout can run the TypeScript module directly on current Node;
+// published installs contain only compiled JavaScript.
+const api = await import(`../src/${format}.ts`).catch(() => import(`../dist/${format}.js`));
+const wasmPath = resolveWasm(
+  `@silurus/ooxml-markdown/${format}/wasm-binary`,
+  `../wasm/${format}/ooxml_markdown_${format}_bg.wasm`,
+);
+api.initFromBytes(readFileSync(wasmPath));
+const md = api.toMarkdown(buf);
 
 if (values.out) {
   writeFileSync(resolve(values.out), md);

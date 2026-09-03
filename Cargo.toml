@@ -5,6 +5,9 @@ members = [
   "packages/pptx/parser",
   "packages/docx/parser",
   "packages/xlsx/parser",
+  "packages/markdown/parsers/docx",
+  "packages/markdown/parsers/xlsx",
+  "packages/markdown/parsers/pptx",
   "packages/mcp-server",
 ]
 

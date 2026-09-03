@@ -11,5 +11,5 @@
     // by design.
     "types": []
   },
-  "include": ["src/index.ts"]
+  "include": ["src/pptx.ts", "src/docx.ts", "src/xlsx.ts"]
 }

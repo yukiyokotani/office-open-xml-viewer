@@ -14,6 +14,10 @@ use std::rc::Rc;
 const HEADING_MAX_VERTICAL_GAP_IN_OWN_HEIGHTS: i64 = 4;
 const HEADING_MAX_CHARACTERS: usize = 140;
 const HEADING_FONT_SIZE_RATIO: f64 = 1.2;
+const NUMBER_BADGE_MAX_VALUE: u16 = 999;
+const NUMBER_BADGE_MAX_WIDTH_TO_BODY_RATIO: i64 = 2;
+const NUMBER_BADGE_MAX_GAP_IN_BADGE_EXTENTS: i64 = 3;
+const NUMBER_BADGE_ALLOWED_HORIZONTAL_OVERLAP_DIVISOR: i64 = 4;
 
 /// UTF-8 markdown sink that stops retaining bytes at the configured ceiling.
 /// The parser reports the crossing through its package-scoped limit reporter;
@@ -120,6 +124,9 @@ pub(crate) fn render_slide_md(
         if block.starts_new_region && block_index > 0 {
             out.push_str("---\n\n");
         }
+        if block.related && render_inferred_numbered_block(slide, &block.element_indices, out) {
+            continue;
+        }
         let heading_index = if block.related {
             inferred_block_heading(slide, &block.element_indices)
         } else if block.element_indices.len() == 1 {
@@ -147,6 +154,109 @@ pub(crate) fn render_slide_md(
             let _ = writeln!(out, "## Speaker notes\n\n{}\n", trimmed);
         }
     }
+}
+
+/// Collapse a repeated "small number badge + adjacent body" layout into one
+/// ordered list. The inference is intentionally block-local and requires a
+/// complete one-to-one geometric matching, so isolated numbers and numeric
+/// content elsewhere on the slide retain their authored representation.
+fn render_inferred_numbered_block(
+    slide: &Slide,
+    indices: &[usize],
+    out: &mut MarkdownWriter,
+) -> bool {
+    if indices.len() < 4 {
+        return false;
+    }
+    let mut badges = Vec::new();
+    let mut bodies = Vec::new();
+    for index in indices.iter().copied() {
+        let SlideElement::Shape(shape) = &slide.elements[index] else {
+            return false;
+        };
+        let Some(text) = shape_text_plain(shape) else {
+            return false;
+        };
+        let is_single_paragraph = shape
+            .text_body
+            .as_ref()
+            .is_some_and(|body| body.paragraphs.len() == 1);
+        match text.parse::<u16>() {
+            Ok(number @ 1..=NUMBER_BADGE_MAX_VALUE) if is_single_paragraph => {
+                badges.push((index, number));
+            }
+            _ => bodies.push(index),
+        }
+    }
+    if badges.len() < 2 || badges.len() != bodies.len() {
+        return false;
+    }
+
+    // `project_slide` already placed the block's members in its two-dimensional
+    // reading order. Requiring the visible sequence itself to be consecutive
+    // handles both vertical and multi-column lists without a second ordering
+    // policy here.
+    if badges
+        .windows(2)
+        .any(|pair| pair[1].1 != pair[0].1.saturating_add(1))
+    {
+        return false;
+    }
+
+    let mut pairs = Vec::with_capacity(badges.len());
+    for ((badge_index, number), body_index) in badges.into_iter().zip(bodies) {
+        let (badge_x, badge_y, badge_width, badge_height) =
+            element_bounds(&slide.elements[badge_index]);
+        let (body_x, body_y, body_width, body_height) = element_bounds(&slide.elements[body_index]);
+        if badge_width <= 0
+            || badge_height <= 0
+            || body_width <= 0
+            || body_height <= 0
+            || badge_width.saturating_mul(NUMBER_BADGE_MAX_WIDTH_TO_BODY_RATIO) > body_width
+        {
+            return false;
+        }
+        let badge_right = badge_x.saturating_add(badge_width);
+        let badge_center_y = badge_y.saturating_add(badge_height / 2);
+        if body_x
+            < badge_right
+                .saturating_sub(badge_width / NUMBER_BADGE_ALLOWED_HORIZONTAL_OVERLAP_DIVISOR)
+        {
+            return false;
+        }
+        let gap = body_x.saturating_sub(badge_right);
+        let max_gap = badge_width
+            .max(badge_height)
+            .saturating_mul(NUMBER_BADGE_MAX_GAP_IN_BADGE_EXTENTS);
+        let body_center_y = body_y.saturating_add(body_height / 2);
+        let center_distance = body_center_y.abs_diff(badge_center_y);
+        if gap > max_gap
+            || center_distance.saturating_mul(2)
+                > u64::try_from(body_height.max(badge_height)).unwrap_or(u64::MAX)
+        {
+            return false;
+        }
+        pairs.push((number, body_index));
+    }
+
+    use std::fmt::Write as _;
+    for (number, body_index) in pairs {
+        let SlideElement::Shape(shape) = &slide.elements[body_index] else {
+            return false;
+        };
+        let Some(body) = &shape.text_body else {
+            return false;
+        };
+        let _ = write!(out, "{number}. ");
+        for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
+            if paragraph_index > 0 {
+                out.push_str("  \n   ");
+            }
+            render_runs_md(&paragraph.runs, paragraph, body, out);
+        }
+        out.push_str("\n\n");
+    }
+    true
 }
 
 fn inferred_standalone_heading(slide: &Slide, index: usize, next_index: usize) -> bool {

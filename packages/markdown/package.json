@@ -1,8 +1,7 @@
 {
   "name": "@silurus/ooxml-markdown",
-  "private": true,
   "version": "0.85.3",
-  "description": "Internal workspace adapter for DOCX / XLSX / PPTX Markdown projection",
+  "description": "Opt-in DOCX / XLSX / PPTX Markdown projection",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -13,6 +12,10 @@
   "homepage": "https://github.com/yukiyokotani/office-open-xml-viewer#readme",
   "bugs": {
     "url": "https://github.com/yukiyokotani/office-open-xml-viewer/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "keywords": [
     "ooxml",
@@ -27,31 +30,42 @@
   ],
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    }
+    "./pptx": {
+      "types": "./dist/pptx.d.ts",
+      "import": "./dist/pptx.js",
+      "default": "./dist/pptx.js"
+    },
+    "./pptx/wasm-binary": "./wasm/pptx/ooxml_markdown_pptx_bg.wasm",
+    "./docx": {
+      "types": "./dist/docx.d.ts",
+      "import": "./dist/docx.js",
+      "default": "./dist/docx.js"
+    },
+    "./docx/wasm-binary": "./wasm/docx/ooxml_markdown_docx_bg.wasm",
+    "./xlsx": {
+      "types": "./dist/xlsx.d.ts",
+      "import": "./dist/xlsx.js",
+      "default": "./dist/xlsx.js"
+    },
+    "./xlsx/wasm-binary": "./wasm/xlsx/ooxml_markdown_xlsx_bg.wasm"
   },
   "bin": {
     "ooxml-md": "./bin/ooxml-md.mjs"
   },
   "files": [
     "dist",
-    "bin"
+    "bin",
+    "wasm"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:ci": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
-  },
-  "dependencies": {
-    "@silurus/ooxml-docx": "workspace:*",
-    "@silurus/ooxml-pptx": "workspace:*",
-    "@silurus/ooxml-xlsx": "workspace:*"
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "wasm:pptx": "cd parsers/pptx && wasm-pack build --target web --out-dir ../../wasm/pptx && node ../../../../scripts/append-wasm-reinit.mjs ../../wasm/pptx/ooxml_markdown_pptx.js",
+    "wasm:docx": "cd parsers/docx && wasm-pack build --target web --out-dir ../../wasm/docx && node ../../../../scripts/append-wasm-reinit.mjs ../../wasm/docx/ooxml_markdown_docx.js",
+    "wasm:xlsx": "cd parsers/xlsx && wasm-pack build --target web --out-dir ../../wasm/xlsx && node ../../../../scripts/append-wasm-reinit.mjs ../../wasm/xlsx/ooxml_markdown_xlsx.js",
+    "wasm": "pnpm wasm:pptx && pnpm wasm:docx && pnpm wasm:xlsx"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

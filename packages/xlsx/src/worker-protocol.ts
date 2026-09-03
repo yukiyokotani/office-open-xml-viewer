@@ -247,8 +247,7 @@ export type RenderWorkerRequest =
   // never hangs). The render worker reads bytes straight from its retained
   // archive.
   | { type: 'extractImage'; id: number; path: string }
-  | { type: 'resourceUsage'; id: number }
-  | { type: 'toMarkdown'; id: number };
+  | { type: 'resourceUsage'; id: number };
 
 export type RenderWorkerResponse =
   // `imageExtracted` / `error` are reused from WorkerResponse. `parsed` is not:

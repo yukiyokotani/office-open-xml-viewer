@@ -1,9 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/html';
-// Direct workspace-relative import (instead of `@silurus/ooxml-markdown`)
-// so this story works without depending on whether pnpm has been re-run
-// after the workspace dep was added. Vite resolves the path directly.
-import { xlsxToMarkdown, initXlsxFromBytes } from '../../markdown/src/index';
-import xlsxWasmUrl from './wasm/xlsx_parser_bg.wasm?url';
+// Direct workspace-relative import keeps the story usable before publication.
+import { initFromBytes, toMarkdown } from '../../markdown/src/xlsx';
+import xlsxWasmUrl from '../../markdown/wasm/xlsx/ooxml_markdown_xlsx_bg.wasm?url';
 
 type Args = Record<string, never>;
 
@@ -19,7 +17,7 @@ function ensureInit(): Promise<void> {
   if (!initOnce) {
     initOnce = fetch(xlsxWasmUrl)
       .then((r) => r.arrayBuffer())
-      .then((buf) => initXlsxFromBytes(new Uint8Array(buf)));
+      .then((buf) => initFromBytes(new Uint8Array(buf)));
   }
   return initOnce;
 }
@@ -60,7 +58,7 @@ export const Markdown: Story = {
       try {
         await ensureInit();
         const t0 = performance.now();
-        const md = xlsxToMarkdown(buf);
+        const md = toMarkdown(buf);
         const elapsed = performance.now() - t0;
         const inKB = (buf.byteLength / 1024).toFixed(1);
         const outKB = (new TextEncoder().encode(md).byteLength / 1024).toFixed(1);

@@ -64,7 +64,9 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$(git describe --tags --exact-match HEAD)" == "$RELEASE_TAG" ]]
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          MARKDOWN_VERSION="$(node -p "require('./packages/markdown/package.json').version")"
           [[ "$RELEASE_TAG" == "v$PACKAGE_VERSION" ]]
+          [[ "$MARKDOWN_VERSION" == "$PACKAGE_VERSION" ]]
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             [[ "$GITHUB_REF" == "refs/heads/main" ]]
           fi
@@ -127,6 +129,9 @@ jobs:
         run: |
           npx --yes publint
           npx --yes @arethetypeswrong/cli --pack . --profile esm-only
+          cd packages/markdown
+          npx --yes publint
+          npx --yes @arethetypeswrong/cli --pack . --profile esm-only
 
       # Smoke test the actual tarball a consumer would install: pack it, install
       # it into a throwaway project, and import each subpath in a DOM-less Node
@@ -136,14 +141,17 @@ jobs:
       - name: Smoke test the packed tarball
         run: |
           npm pack
+          npm pack ./packages/markdown --pack-destination .
           mkdir -p /tmp/pack-smoke && cd /tmp/pack-smoke
           npm init -y
           npm i "$GITHUB_WORKSPACE"/silurus-ooxml-*.tgz
-          node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); const c = await import('@silurus/ooxml/chart-ex'); if (!c.chartEx?.render) throw new Error('chartEx missing'); const t = await import('@silurus/ooxml/tiff'); if (!t.tiff?.render) throw new Error('tiff missing'); console.log('pack smoke OK');"
+          node --input-type=module -e "const m = await import('@silurus/ooxml/docx'); if (!m.DocxViewer) throw new Error('DocxViewer missing'); const p = await import('@silurus/ooxml/pptx'); if (!p.PptxViewer) throw new Error('PptxViewer missing'); const x = await import('@silurus/ooxml/xlsx'); if (!x.XlsxViewer) throw new Error('XlsxViewer missing'); const c = await import('@silurus/ooxml/chart-ex'); if (!c.chartEx?.render) throw new Error('chartEx missing'); const t = await import('@silurus/ooxml/tiff'); if (!t.tiff?.render) throw new Error('tiff missing'); for (const format of ['docx', 'xlsx', 'pptx']) { const md = await import('@silurus/ooxml-markdown/' + format); if (!md.initFromBytes || !md.toMarkdown) throw new Error(format + ' Markdown entry missing'); } console.log('pack smoke OK');"
 
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Publish to npm
-        run: pnpm publish --no-git-checks
+        run: |
+          pnpm publish --no-git-checks
+          pnpm --dir packages/markdown publish --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # access / provenance are set via publishConfig in package.json

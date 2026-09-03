@@ -431,15 +431,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       post({ type: 'resourceUsage', id, usage });
       return;
     }
-    if (req.type === 'toMarkdown') {
-      // Project the retained archive to markdown, straight from the handle the
-      // worker already holds (same source as worker.ts's parse-mode arm).
-      const archive = host.archive;
-      if (!archive) throw new Error('No docx loaded');
-      const markdown = host.run(() => archive.to_markdown());
-      post({ type: 'markdownRendered', id, markdown });
-      return;
-    }
   } catch (err) {
     // A superseded progressive drain is not a failure the requester can act on:
     // the `parse` that aborted it has already moved on, and posting a

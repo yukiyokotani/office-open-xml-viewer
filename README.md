@@ -578,31 +578,25 @@ headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
 
 ### Markdown export
 
-Every headless engine can project its document to GitHub-flavoured markdown for
-LLM ingestion, full-text search, or diffing. DOCX keeps linked footnote/endnote
-references and anchored comment threads. PPTX uses authored groups, containing
-background panels, geometry, and relative typography to keep related content
-together and derive a reading order; those visual details guide the projection
-but are not exposed in the output. XLSX separates independent cell regions at
-blank row/column bands while keeping declared Excel tables atomic. The
-projection is compiled into the parser WASM you already ship, so it adds
-**zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
-`mode: 'worker'` (it runs off the archive opened at `load()`):
+The optional `@silurus/ooxml-markdown` package projects documents to
+GitHub-flavoured Markdown for LLM ingestion, full-text search, or diffing. Each
+format has an independent entry point and dedicated WASM binary, so applications
+that only render Office files do not download or compile Markdown code.
 
 ```typescript
-import { DocxDocument } from '@silurus/ooxml/docx';
+import { initFromBytes, toMarkdown } from '@silurus/ooxml-markdown/docx';
+import wasmUrl from '@silurus/ooxml-markdown/docx/wasm-binary?url';
 
-const doc = await DocxDocument.load('/document.docx');
-const md = await doc.toMarkdown();
+initFromBytes(await fetch(wasmUrl).then((response) => response.arrayBuffer()));
+const md = toMarkdown(await fetch('/document.docx').then((response) => response.arrayBuffer()));
 ```
 
-`PptxPresentation.toMarkdown()` also collates review comments after the deck,
-with slide and target context. `XlsxWorkbook.toMarkdown()` collects cell comment
-threads after each sheet's data regions.
-
-The repository also contains a low-level adapter and CLI for workspace tooling.
-They are internal implementation utilities, not separately published packages;
-installed applications should use the format model's `toMarkdown()` method.
+Use `/pptx` or `/xlsx` instead of `/docx` for the other formats. DOCX keeps
+linked footnote/endnote references and anchored comment threads. PPTX uses
+authored groups, containing background panels, geometry, and relative typography
+to preserve semantic regions and reading order. XLSX separates independent cell
+regions at blank row/column bands while keeping declared Excel tables atomic.
+The package also provides the `ooxml-md` CLI.
 
 ---
 
@@ -736,7 +730,7 @@ file without uploading it.
 | | `w:snapToGrid` opt-out of the document grid (§17.3.1.32) | ✅ |
 | | Track changes (§17.13.5 `w:ins` / `w:del` / `w:moveFrom` / `w:moveTo`) — the default render is the FINAL state (deletions and moved-away text hidden); the opt-in markup view (`showTrackedChanges`) draws author-coloured underline / strikethrough plus margin change bars, and body-story revision records are available as data | ✅ |
 | | Comments (§17.13.4) — opt-in margin balloons (`comments: true`): commented ranges tinted, threaded replies via `commentsExtended.xml`, resolved threads hidden, click-to-select stacking; also available as data (`doc.comments`, `doc.commentAnchorRanges()`) | ✅ |
-| | Markdown export (`DocxDocument.toMarkdown()` — headings, lists, tables, linked notes / anchored comment threads) | ✅ |
+| | Markdown export (opt-in `@silurus/ooxml-markdown/docx` — headings, lists, tables, linked notes / anchored comment threads) | ✅ |
 | | Mail merge fields | ❌ Not planned |
 | **Interaction** | Text selection, including table-cell text (transparent overlay, native copy) | ✅ |
 | | Bounded read-only text/element context (`getSelectionContext()`, page/source locators, element selection, AI/MCP callback) | ✅ |
@@ -794,7 +788,7 @@ file without uploading it.
 | | Pivot tables (saved worksheet output renders unchanged; read-only metadata is exposed. Refresh, recalculation, filtering, restructuring, and interactivity are unsupported) | ⚠️ Partial |
 | | Cell comments / notes (classic `xl/commentsN.xml` + Office-365 threaded comments — red triangle indicator + author / text via the worksheet model; pointer or keyboard users can open the popup, with a polite screen-reader status) | ✅ |
 | | Data validation (rules via the worksheet model; `list`-type dropdown arrow on the selected cell whose click opens a panel showing the allowed values — read-only) | ✅ |
-| | Markdown export (`XlsxWorkbook.toMarkdown()` — sheets split into semantic cell regions; comments collated) | ✅ |
+| | Markdown export (opt-in `@silurus/ooxml-markdown/xlsx` — sheets split into semantic cell regions; comments collated) | ✅ |
 | **Interaction** | Cell selection (single / range / row / column / all / multiple areas; `setSelection('B2:D5')` or canonical structured state) | ✅ |
 | | Excel-style row / column header highlight on selection | ✅ |
 | | Shift+click to extend, Ctrl/⌘+drag to add another area, Ctrl+C to copy as TSV | ✅ |
@@ -821,7 +815,7 @@ file without uploading it.
 | | Slide background (solid, gradient, image) | ✅ |
 | | Slide numbers | ✅ |
 | | Speaker notes (plain text via `getNotes()`) | ✅ |
-| | Markdown export (`PptxPresentation.toMarkdown()` — semantic grouping / reading order, inferred headings, notes / comments collated) | ✅ |
+| | Markdown export (opt-in `@silurus/ooxml-markdown/pptx` — semantic grouping / reading order, inferred headings, notes / comments collated) | ✅ |
 | | Animations / transitions | ❌ Not planned |
 | **Element types** | Shapes (`sp`) | ✅ |
 | | Pictures (`pic`, with adaptive display-sized decoding for oversized rasters) | ✅ |
@@ -920,7 +914,7 @@ file without uploading it.
 
 ## Companion packages
 
-- **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.
+- **[`packages/markdown/`](packages/markdown/)** — opt-in `@silurus/ooxml-markdown/{docx,xlsx,pptx}` entry points with format-specific WASM binaries, plus the `ooxml-md` CLI. Viewer-only applications carry none of the Markdown projection code.
 - **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
   See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) surfaces the library's metric-compatible font substitution, widening the webview CSP to the Google Fonts CDN only while enabled.

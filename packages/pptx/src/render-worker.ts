@@ -426,11 +426,6 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
       return;
     }
 
-    if (request.kind === 'toMarkdown') {
-      const markdown = await slidePull.run(() =>
-        executeArchive((archive) => archive.to_markdown()));
-      post({ kind: 'markdownRendered', id: request.id, markdown });
-    }
   } catch (error) {
     if (ownsParseReservation) {
       presentationState = 'failed';

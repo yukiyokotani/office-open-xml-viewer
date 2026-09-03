@@ -842,29 +842,6 @@ export class XlsxWorkbook {
   }
 
   /**
-   * Project the workbook to GitHub-flavoured markdown: each sheet becomes a
-   * `## SheetName` section followed by a pipe table of its populated bounding
-   * box (fully-empty middle rows trimmed, ULP noise masked). Styling, charts,
-   * and drawings are discarded — the projection is meant for AI ingestion and
-   * full-text search, not layout.
-   *
-   * Runs entirely in the worker off the archive opened at {@link load} (no
-   * re-copy of the file, no re-parse of the model on the main thread), so it
-   * works in BOTH `mode: 'main'` and `mode: 'worker'`.
-   *
-   * @example
-   * const wb = await XlsxWorkbook.load(buffer);
-   * const md = await wb.toMarkdown();
-   */
-  async toMarkdown(): Promise<string> {
-    this.assertResourceHealthy();
-    const res = await this.runArchiveOperation(() => this.requireArchiveBridge().request(
-      (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
-    ));
-    return (res as Extract<WorkerResponse, { type: 'markdownRendered' }>).markdown;
-  }
-
-  /**
    * Resolve a `list`-type data-validation `formula1` (ECMA-376 §18.3.1.32) into
    * the set of allowed values to display, evaluated relative to `sheetIndex`
    * (the sheet that owns the validation, used to resolve unqualified ranges):

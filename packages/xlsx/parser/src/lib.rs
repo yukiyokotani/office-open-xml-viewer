@@ -340,7 +340,7 @@ const INDEXED_COLORS: &[&str] = &[
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn parse_xlsx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -3462,26 +3462,11 @@ pub fn parse_workbook_native(data: &[u8]) -> Result<String, String> {
         .and_then(|wb| serde_json::to_string(&wb.workbook).map_err(|e| e.to_string()))
 }
 
-/// Parse the workbook and project every sheet to GitHub-flavoured markdown:
-/// `## SheetName` headings followed by a pipe table per sheet. Merged-cell
-/// continuation cells are rendered as empty; the display value comes from the
-/// WASM-callable markdown projection (mirrors `to_markdown_native`).
-#[wasm_bindgen]
-pub fn xlsx_to_markdown(
-    data: &[u8],
-    max_archive_entry_bytes: Option<u64>,
-    max_total_inflated_bytes: Option<u64>,
-) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
-    to_markdown_impl_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes)
-        .map_err(|error| JsValue::from_str(&error))
-}
-
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "xl/media/image1.png") from an xlsx zip archive. Thin `wasm_bindgen` wrapper
 /// over the shared [`ooxml_common::zip::extract_zip_entry`] reader; used by the
 /// main thread to lazily materialize image blobs on demand.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -3512,7 +3497,7 @@ pub fn extract_image(
 /// The package session and every cached part are fully owned (no borrow into the
 /// input), which is what lets them live in a `#[wasm_bindgen]` struct. Limits and
 /// poison state are retained by that same session across public operations.
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 pub struct XlsxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
@@ -3579,7 +3564,7 @@ fn serialize_cursor_finished(
     serde_json::to_vec(&finished).map_err(|error| format!("serialize error: {error}"))
 }
 
-#[wasm_bindgen]
+#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
 impl XlsxArchive {
     /// Copy `data` into WASM once and open the ZIP central directory once.
     /// Resource limits are retained and applied on every subsequent parse
@@ -3592,7 +3577,7 @@ impl XlsxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(feature = "viewer-wasm", wasm_bindgen(constructor))]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
@@ -4122,17 +4107,6 @@ impl XlsxArchive {
         zip.run_operation("extract-image", |zip| read_zip_bytes(zip, path))
             .map_err(|error| JsValue::from_str(&error))
     }
-
-    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
-    /// free `xlsx_to_markdown`. A corrupt container degrades to an empty document.
-    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let zip = self
-            .archive
-            .as_mut()
-            .map_err(|error| JsValue::from_str(&format!("xlsx-parser error: {error}")))?;
-        zip.run_operation("markdown", to_markdown_from_archive)
-            .map_err(|error| JsValue::from_str(&error))
-    }
 }
 
 /// cached `<v>` so formula formulas show their results, not the formula text.
@@ -4142,8 +4116,7 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     to_markdown_impl(data)
 }
 
-/// Shared implementation between `to_markdown_native` (mcp-server) and
-/// `xlsx_to_markdown` (browser / Node WASM).
+/// Shared implementation used by native consumers and the opt-in Markdown WASM.
 fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
     to_markdown_impl_with_limits(data, None, None)
 }
@@ -4167,8 +4140,8 @@ fn to_markdown_impl_with_limits(
     archive.run_operation("markdown", to_markdown_from_archive)
 }
 
-/// Render every sheet of an opened archive to markdown. Shared by the free
-/// `xlsx_to_markdown` / `to_markdown_native` and `XlsxArchive::to_markdown`;
+/// Render every sheet of an opened archive to markdown. Used by
+/// `to_markdown_native` and its dedicated Markdown WASM wrapper;
 /// loads the workbook-level [`WorkbookShared`] parts once and renders each sheet
 /// through the same `parse_sheet_with` pipeline as the JSON path (so markdown and
 /// JSON never diverge on cell values).
