@@ -11,6 +11,14 @@ use std::collections::{HashMap, HashSet};
 
 const PANEL_CONTAINMENT_TOLERANCE_RATIO: f64 = 0.015;
 const PANEL_MAX_SLIDE_AREA_RATIO: f64 = 0.9;
+const PANEL_COMPONENT_OVERLAP_RATIO: f64 = 0.08;
+const ATTACHED_CONTENT_OVERLAP_RATIO: f64 = 0.15;
+const DUPLICATE_CONTENT_OVERLAP_RATIO: f64 = 0.8;
+const INDEPENDENT_COLUMN_MIN_SLIDE_HEIGHT_RATIO: f64 = 0.35;
+const INDEPENDENT_COLUMN_MIN_SLIDE_WIDTH_RATIO: f64 = 0.15;
+const INDEPENDENT_COLUMN_MIN_VERTICAL_OVERLAP_RATIO: f64 = 0.5;
+const GRID_ROW_OVERLAP_RATIO: f64 = 0.5;
+const GRID_ALIGNMENT_TOLERANCE_RATIO: f64 = 0.05;
 const PLACEHOLDER_TITLE_REGION_NUMERATOR: i64 = 9;
 const PLACEHOLDER_TITLE_REGION_DENOMINATOR: i64 = 20;
 const INFERRED_TITLE_REGION_NUMERATOR: i64 = 3;
@@ -40,6 +48,16 @@ impl Rect {
 
     fn area(self) -> f64 {
         self.width.max(0.0) * self.height.max(0.0)
+    }
+
+    fn intersection_area(self, other: Self) -> f64 {
+        let width = self.right().min(other.right()) - self.x.max(other.x);
+        let height = self.bottom().min(other.bottom()) - self.y.max(other.y);
+        width.max(0.0) * height.max(0.0)
+    }
+
+    fn overlap_ratio(self, other: Self) -> f64 {
+        self.intersection_area(other) / self.area().min(other.area()).max(1.0)
     }
 
     fn union(self, other: Self) -> Self {
@@ -72,6 +90,9 @@ pub(crate) struct SemanticBlock {
     /// True for an authored group or an inferred containing panel. Markdown
     /// uses this to infer a local heading only where a real relationship exists.
     pub(crate) related: bool,
+    /// A thematic break before this block preserves an independent spatial
+    /// region after the two-dimensional slide is linearized.
+    pub(crate) starts_new_region: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +107,7 @@ struct LayoutBlock {
     source_order: usize,
     element_indices: Vec<usize>,
     related: bool,
+    starts_new_region: bool,
 }
 
 /// Resource-governance ceiling for recursive whitespace partitioning. A slide
@@ -96,7 +118,7 @@ const MAX_SPATIAL_PARTITION_DEPTH: usize = 64;
 pub(crate) fn project_slide(slide: &Slide, slide_width: i64, slide_height: i64) -> SemanticSlide {
     let title = title_candidate(slide, slide_width, slide_height);
     let title_index = title.as_ref().map(|(index, _)| *index);
-    let visible: Vec<usize> = slide
+    let candidates: Vec<usize> = slide
         .elements
         .iter()
         .enumerate()
@@ -104,6 +126,7 @@ pub(crate) fn project_slide(slide: &Slide, slide_width: i64, slide_height: i64) 
             (Some(index) != title_index && element_has_content(element)).then_some(index)
         })
         .collect();
+    let visible = deduplicate_visible_content(slide, candidates);
 
     let mut claimed = HashSet::new();
     let mut blocks = Vec::new();
@@ -122,12 +145,24 @@ pub(crate) fn project_slide(slide: &Slide, slide_width: i64, slide_height: i64) 
         blocks.push(make_block(slide, members, true));
     }
 
-    // A common ungrouped authoring pattern is a filled/stroked rectangle
-    // behind several text boxes. Associate content with the smallest authored
-    // underlay that contains it. Full-slide backgrounds are deliberately
-    // excluded: they describe the slide, not a local semantic block.
+    // A common ungrouped authoring pattern is a set of overlapping filled or
+    // stroked shapes (for example a Venn diagram) behind multiple text boxes.
+    // Treat the connected underlays as one semantic region, then associate
+    // content with the smallest containing shape. Full-slide backgrounds are
+    // deliberately excluded: they describe the slide, not a local block.
     let slide_area = (slide_width.max(1) as f64) * (slide_height.max(1) as f64);
-    let mut memberships: HashMap<usize, Vec<usize>> = HashMap::new();
+    let panels: Vec<(usize, Rect)> = slide
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| !element_has_content(element) && is_panel_shape(element))
+        .filter_map(|(index, element)| {
+            element_rect(element)
+                .filter(|rect| rect.area() < slide_area * PANEL_MAX_SLIDE_AREA_RATIO)
+                .map(|rect| (index, rect))
+        })
+        .collect();
+    let mut panel_memberships: HashMap<usize, Vec<usize>> = HashMap::new();
     for index in visible
         .iter()
         .copied()
@@ -136,32 +171,54 @@ pub(crate) fn project_slide(slide: &Slide, slide_width: i64, slide_height: i64) 
         let Some(content_rect) = element_rect(&slide.elements[index]) else {
             continue;
         };
-        let panel = slide
-            .elements
+        let panel = panels
             .iter()
-            .enumerate()
-            .filter(|(panel_index, element)| {
-                *panel_index < index
-                    && !element_has_content(element)
-                    && is_panel_shape(element)
-                    && element_rect(element).is_some_and(|rect| {
-                        rect.area() < slide_area * PANEL_MAX_SLIDE_AREA_RATIO
-                            && rect.contains(content_rect)
-                    })
-            })
-            .filter_map(|(panel_index, element)| {
-                element_rect(element).map(|rect| (panel_index, rect.area()))
-            })
+            .filter(|(panel_index, rect)| *panel_index < index && rect.contains(content_rect))
+            .map(|(panel_index, rect)| (*panel_index, rect.area()))
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
             .map(|(panel_index, _)| panel_index);
         if let Some(panel_index) = panel {
-            memberships.entry(panel_index).or_default().push(index);
+            panel_memberships
+                .entry(panel_index)
+                .or_default()
+                .push(index);
         }
     }
-    for members in memberships
-        .into_values()
-        .filter(|members| members.len() >= 2)
-    {
+    // Only panels that actually contain content may connect regions. This
+    // prevents a large decorative outline or flourish from acting as a bridge
+    // between otherwise independent cards merely because its bounding box
+    // overlaps them.
+    let active_panels: Vec<(usize, Rect)> = panels
+        .iter()
+        .copied()
+        .filter(|(index, _)| panel_memberships.contains_key(index))
+        .collect();
+    for panel_component in connected_components(&active_panels, PANEL_COMPONENT_OVERLAP_RATIO) {
+        let members: Vec<usize> = panel_component
+            .iter()
+            .flat_map(|panel| panel_memberships.get(panel).into_iter().flatten().copied())
+            .collect();
+        if members.len() < 2 {
+            continue;
+        }
+        claimed.extend(members.iter().copied());
+        blocks.push(make_block(slide, members, true));
+    }
+
+    // Label badges and their content-bearing cards are often authored as two
+    // ungrouped shapes that intentionally overlap. A substantial overlap with
+    // at least one styled panel is a stronger relationship signal than mere
+    // proximity, so merge these attachments before spatial ordering.
+    let remaining: Vec<(usize, Rect)> = visible
+        .iter()
+        .copied()
+        .filter(|index| !claimed.contains(index))
+        .filter_map(|index| element_rect(&slide.elements[index]).map(|rect| (index, rect)))
+        .collect();
+    for members in connected_content_components(slide, &remaining) {
+        if members.len() < 2 {
+            continue;
+        }
         claimed.extend(members.iter().copied());
         blocks.push(make_block(slide, members, true));
     }
@@ -190,6 +247,7 @@ pub(crate) fn project_slide(slide: &Slide, slide_width: i64, slide_height: i64) 
         SemanticBlock {
             element_indices: block.element_indices,
             related: block.related,
+            starts_new_region: block.starts_new_region,
         }
     })
     .collect();
@@ -214,6 +272,7 @@ fn make_block(slide: &Slide, element_indices: Vec<usize>, related: bool) -> Layo
         source_order,
         element_indices,
         related,
+        starts_new_region: false,
     }
 }
 
@@ -245,10 +304,14 @@ fn spatial_order_at_depth(
     let vertical = best_split(&blocks, Axis::Vertical, slide_width);
     let selected = match (horizontal, vertical) {
         (Some(h), Some(v)) => {
-            // Repeated cards should read row-major. Outside that case, use the
-            // stronger whitespace separator; source order is only a tie-breaker.
-            let repeated_grid = blocks.len() >= 4 && h.left_len >= 2 && h.right_len >= 2;
-            if repeated_grid || h.score >= v.score {
+            // A real repeated grid reads row-major. Independent tall columns
+            // read one complete region at a time, even when small horizontal
+            // gaps inside the columns happen to line up.
+            if looks_like_repeated_grid(&blocks, slide_width) {
+                h
+            } else if independent_column_split(&blocks, &v, slide_width, slide_height) {
+                v
+            } else if h.score >= v.score {
                 h
             } else {
                 v
@@ -264,6 +327,8 @@ fn spatial_order_at_depth(
         }
     };
 
+    let starts_independent_region = matches!(selected.axis, Axis::Vertical)
+        && independent_column_split(&blocks, &selected, slide_width, slide_height);
     let mut first = Vec::new();
     let mut second = Vec::new();
     for block in blocks {
@@ -274,25 +339,25 @@ fn spatial_order_at_depth(
         }
     }
     let mut result = spatial_order_at_depth(first, slide_width, slide_height, depth + 1);
-    result.extend(spatial_order_at_depth(
-        second,
-        slide_width,
-        slide_height,
-        depth + 1,
-    ));
+    let mut ordered_second = spatial_order_at_depth(second, slide_width, slide_height, depth + 1);
+    if starts_independent_region {
+        if let Some(block) = ordered_second.first_mut() {
+            block.starts_new_region = true;
+        }
+    }
+    result.extend(ordered_second);
     result
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Axis {
     Horizontal,
     Vertical,
 }
 
 struct Split {
+    axis: Axis,
     first_orders: HashSet<usize>,
-    left_len: usize,
-    right_len: usize,
     score: f64,
 }
 
@@ -334,17 +399,197 @@ fn best_split(blocks: &[LayoutBlock], axis: Axis, extent: f64) -> Option<Split> 
         let score = gap / extent.max(1.0);
         if best.as_ref().is_none_or(|current| score > current.score) {
             best = Some(Split {
+                axis,
                 first_orders: ordered[..cut]
                     .iter()
                     .map(|block| block.source_order)
                     .collect(),
-                left_len: cut,
-                right_len: ordered.len() - cut,
                 score,
             });
         }
     }
     best
+}
+
+fn independent_column_split(
+    blocks: &[LayoutBlock],
+    split: &Split,
+    slide_width: f64,
+    slide_height: f64,
+) -> bool {
+    if split.axis != Axis::Vertical {
+        return false;
+    }
+    let first = blocks
+        .iter()
+        .filter(|block| split.first_orders.contains(&block.source_order))
+        .map(|block| block.rect)
+        .reduce(Rect::union);
+    let second = blocks
+        .iter()
+        .filter(|block| !split.first_orders.contains(&block.source_order))
+        .map(|block| block.rect)
+        .reduce(Rect::union);
+    let (Some(first), Some(second)) = (first, second) else {
+        return false;
+    };
+    if first.width < slide_width * INDEPENDENT_COLUMN_MIN_SLIDE_WIDTH_RATIO
+        || second.width < slide_width * INDEPENDENT_COLUMN_MIN_SLIDE_WIDTH_RATIO
+        || first.height < slide_height * INDEPENDENT_COLUMN_MIN_SLIDE_HEIGHT_RATIO
+        || second.height < slide_height * INDEPENDENT_COLUMN_MIN_SLIDE_HEIGHT_RATIO
+    {
+        return false;
+    }
+    let vertical_overlap = first.bottom().min(second.bottom()) - first.y.max(second.y);
+    vertical_overlap.max(0.0) / first.height.min(second.height).max(1.0)
+        >= INDEPENDENT_COLUMN_MIN_VERTICAL_OVERLAP_RATIO
+}
+
+fn looks_like_repeated_grid(blocks: &[LayoutBlock], slide_width: f64) -> bool {
+    if blocks.len() < 4 {
+        return false;
+    }
+    let mut ordered: Vec<&LayoutBlock> = blocks.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.rect
+            .y
+            .partial_cmp(&b.rect.y)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.rect.x.partial_cmp(&b.rect.x).unwrap_or(Ordering::Equal))
+    });
+    let mut rows: Vec<Vec<&LayoutBlock>> = Vec::new();
+    for block in ordered {
+        let row = rows.iter_mut().find(|row| {
+            let row_rect = row
+                .iter()
+                .map(|member| member.rect)
+                .reduce(Rect::union)
+                .unwrap_or(block.rect);
+            let overlap = row_rect.bottom().min(block.rect.bottom()) - row_rect.y.max(block.rect.y);
+            overlap.max(0.0) / row_rect.height.min(block.rect.height).max(1.0)
+                >= GRID_ROW_OVERLAP_RATIO
+        });
+        if let Some(row) = row {
+            row.push(block);
+        } else {
+            rows.push(vec![block]);
+        }
+    }
+    if rows.len() < 2 {
+        return false;
+    }
+    let columns = rows[0].len();
+    if columns < 2 || rows.iter().any(|row| row.len() != columns) {
+        return false;
+    }
+    for row in &mut rows {
+        row.sort_by(|a, b| a.rect.x.partial_cmp(&b.rect.x).unwrap_or(Ordering::Equal));
+    }
+    let tolerance = slide_width.max(1.0) * GRID_ALIGNMENT_TOLERANCE_RATIO;
+    (0..columns).all(|column| {
+        let anchor = rows[0][column].rect;
+        rows[1..].iter().all(|row| {
+            (row[column].rect.x - anchor.x).abs() <= tolerance
+                && (row[column].rect.right() - anchor.right()).abs() <= tolerance
+        })
+    })
+}
+
+fn deduplicate_visible_content(slide: &Slide, candidates: Vec<usize>) -> Vec<usize> {
+    let mut visible = Vec::new();
+    for index in candidates {
+        let duplicate = visible.iter().position(|existing| {
+            semantic_duplicate(&slide.elements[*existing], &slide.elements[index])
+        });
+        if let Some(position) = duplicate {
+            // Keep the foreground copy while preserving the first occurrence's
+            // reading position.
+            visible[position] = index;
+        } else {
+            visible.push(index);
+        }
+    }
+    visible
+}
+
+fn semantic_duplicate(first: &SlideElement, second: &SlideElement) -> bool {
+    let (SlideElement::Shape(first), SlideElement::Shape(second)) = (first, second) else {
+        return false;
+    };
+    let Some(first_text) = shape_text(first) else {
+        return false;
+    };
+    let Some(second_text) = shape_text(second) else {
+        return false;
+    };
+    if normalize_text(&first_text) != normalize_text(&second_text) {
+        return false;
+    }
+    let (Some(first_rect), Some(second_rect)) = (shape_rect(first), shape_rect(second)) else {
+        return false;
+    };
+    first_rect.overlap_ratio(second_rect) >= DUPLICATE_CONTENT_OVERLAP_RATIO
+}
+
+fn normalize_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn connected_components(items: &[(usize, Rect)], overlap_threshold: f64) -> Vec<Vec<usize>> {
+    let mut visited = vec![false; items.len()];
+    let mut components = Vec::new();
+    for start in 0..items.len() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![start];
+        let mut component = Vec::new();
+        while let Some(current) = stack.pop() {
+            component.push(items[current].0);
+            for candidate in 0..items.len() {
+                if !visited[candidate]
+                    && items[current].1.overlap_ratio(items[candidate].1) >= overlap_threshold
+                {
+                    visited[candidate] = true;
+                    stack.push(candidate);
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
+fn connected_content_components(slide: &Slide, items: &[(usize, Rect)]) -> Vec<Vec<usize>> {
+    let mut visited = vec![false; items.len()];
+    let mut components = Vec::new();
+    for start in 0..items.len() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![start];
+        let mut component = Vec::new();
+        while let Some(current) = stack.pop() {
+            component.push(items[current].0);
+            for candidate in 0..items.len() {
+                if visited[candidate] {
+                    continue;
+                }
+                let related = (is_panel_shape(&slide.elements[items[current].0])
+                    || is_panel_shape(&slide.elements[items[candidate].0]))
+                    && items[current].1.overlap_ratio(items[candidate].1)
+                        >= ATTACHED_CONTENT_OVERLAP_RATIO;
+                if related {
+                    visited[candidate] = true;
+                    stack.push(candidate);
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
 }
 
 fn compare_rects(a: Option<Rect>, b: Option<Rect>, a_order: usize, b_order: usize) -> Ordering {
@@ -538,8 +783,11 @@ fn is_panel_shape(element: &SlideElement) -> bool {
 }
 
 fn element_rect(element: &SlideElement) -> Option<Rect> {
+    if let SlideElement::Shape(shape) = element {
+        return shape_rect(shape);
+    }
     let (x, y, width, height) = match element {
-        SlideElement::Shape(value) => (value.x, value.y, value.width, value.height),
+        SlideElement::Shape(_) => unreachable!(),
         SlideElement::Picture(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Table(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Chart(value) => (value.x, value.y, value.width, value.height),
@@ -550,6 +798,15 @@ fn element_rect(element: &SlideElement) -> Option<Rect> {
         y: y as f64,
         width: width as f64,
         height: height as f64,
+    })
+}
+
+fn shape_rect(shape: &ShapeElement) -> Option<Rect> {
+    (shape.width > 0 && shape.height > 0).then_some(Rect {
+        x: shape.x as f64,
+        y: shape.y as f64,
+        width: shape.width as f64,
+        height: shape.height as f64,
     })
 }
 
@@ -568,6 +825,7 @@ mod tests {
             source_order: order,
             element_indices: vec![order],
             related: false,
+            starts_new_region: false,
         }
     }
 
@@ -581,10 +839,7 @@ mod tests {
             block(3, 60.0, 30.0, 40.0, 20.0),
         ];
         let ordered = spatial_order(blocks, 100.0, 50.0);
-        let indices: Vec<usize> = ordered
-            .into_iter()
-            .map(|block| block.source_order)
-            .collect();
+        let indices: Vec<usize> = ordered.iter().map(|block| block.source_order).collect();
         // A repeated 2x2 card layout is row-major, not column-major.
         assert_eq!(indices, vec![0, 1, 2, 3]);
     }
@@ -597,11 +852,71 @@ mod tests {
             block(2, 0.0, 30.0, 40.0, 50.0),
         ];
         let ordered = spatial_order(blocks, 100.0, 80.0);
-        let indices: Vec<usize> = ordered
-            .into_iter()
-            .map(|block| block.source_order)
-            .collect();
+        let indices: Vec<usize> = ordered.iter().map(|block| block.source_order).collect();
         assert_eq!(indices, vec![1, 2, 0]);
+        assert!(ordered[2].starts_new_region);
+    }
+
+    #[test]
+    fn asymmetric_columns_are_not_mistaken_for_a_repeated_grid() {
+        let blocks = vec![
+            block(0, 0.0, 5.0, 42.0, 70.0),
+            block(1, 58.0, 0.0, 42.0, 20.0),
+            block(2, 58.0, 30.0, 42.0, 20.0),
+            block(3, 58.0, 60.0, 42.0, 20.0),
+        ];
+        let ordered = spatial_order(blocks, 100.0, 80.0);
+        let indices: Vec<usize> = ordered.iter().map(|block| block.source_order).collect();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
+        assert!(ordered[1].starts_new_region);
+    }
+
+    #[test]
+    fn overlapping_backplates_form_one_connected_component() {
+        let panels = vec![
+            (
+                2,
+                Rect {
+                    x: 10.0,
+                    y: 0.0,
+                    width: 40.0,
+                    height: 40.0,
+                },
+            ),
+            (
+                3,
+                Rect {
+                    x: 0.0,
+                    y: 30.0,
+                    width: 40.0,
+                    height: 40.0,
+                },
+            ),
+            (
+                4,
+                Rect {
+                    x: 30.0,
+                    y: 30.0,
+                    width: 40.0,
+                    height: 40.0,
+                },
+            ),
+            (
+                9,
+                Rect {
+                    x: 80.0,
+                    y: 0.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            ),
+        ];
+        let mut components = connected_components(&panels, PANEL_COMPONENT_OVERLAP_RATIO);
+        for component in &mut components {
+            component.sort_unstable();
+        }
+        components.sort();
+        assert_eq!(components, vec![vec![2, 3, 4], vec![9]]);
     }
 
     #[test]

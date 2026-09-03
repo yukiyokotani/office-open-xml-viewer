@@ -117,6 +117,9 @@ pub(crate) fn render_slide_md(
         let _ = writeln!(out, "# Slide {}\n", slide.slide_number);
     }
     for (block_index, block) in semantic.blocks.iter().enumerate() {
+        if block.starts_new_region && block_index > 0 {
+            out.push_str("---\n\n");
+        }
         let heading_index = if block.related {
             inferred_block_heading(slide, &block.element_indices)
         } else if block.element_indices.len() == 1 {
@@ -249,6 +252,16 @@ fn inferred_block_heading(slide: &Slide, indices: &[usize]) -> Option<usize> {
     if indices.len() < 2 {
         return None;
     }
+    // A compact label deliberately overlapping the top edge of a larger
+    // content-bearing panel is a common visual heading treatment even when
+    // both shapes use the same font size and weight.
+    if let Some(index) = indices
+        .iter()
+        .copied()
+        .find(|index| attached_panel_label(slide, *index, indices))
+    {
+        return Some(index);
+    }
     let mut styled: Vec<(usize, f64, bool)> = indices
         .iter()
         .filter_map(|index| {
@@ -285,6 +298,50 @@ fn inferred_block_heading(slide: &Slide, indices: &[usize]) -> Option<usize> {
     });
     let (index, size, bold) = styled[0];
     (size >= median * HEADING_FONT_SIZE_RATIO || (bold && size >= median)).then_some(index)
+}
+
+fn attached_panel_label(slide: &Slide, candidate_index: usize, indices: &[usize]) -> bool {
+    let SlideElement::Shape(candidate) = &slide.elements[candidate_index] else {
+        return false;
+    };
+    let Some(text) = shape_text_plain(candidate) else {
+        return false;
+    };
+    if candidate
+        .text_body
+        .as_ref()
+        .is_none_or(|body| body.paragraphs.len() != 1)
+        || text.chars().count() > HEADING_MAX_CHARACTERS
+        || !text.chars().any(char::is_alphabetic)
+    {
+        return false;
+    }
+    let (x, y, width, height) = element_bounds(&slide.elements[candidate_index]);
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    indices.iter().copied().any(|other_index| {
+        if other_index == candidate_index {
+            return false;
+        }
+        let (other_x, other_y, other_width, other_height) =
+            element_bounds(&slide.elements[other_index]);
+        if other_width <= width || other_height <= height || y > other_y {
+            return false;
+        }
+        let overlap_x = x
+            .saturating_add(width)
+            .min(other_x.saturating_add(other_width))
+            .saturating_sub(x.max(other_x));
+        let overlap_y = y
+            .saturating_add(height)
+            .min(other_y.saturating_add(other_height))
+            .saturating_sub(y.max(other_y));
+        overlap_x.saturating_mul(4) >= width.saturating_mul(3)
+            && overlap_y.saturating_mul(5) >= height
+            && width.saturating_mul(4) <= other_width.saturating_mul(3)
+            && height.saturating_mul(2) <= other_height
+    })
 }
 
 fn render_shape_heading_md(element: &SlideElement, out: &mut MarkdownWriter) {

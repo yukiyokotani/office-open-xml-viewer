@@ -10852,6 +10852,51 @@ mod tests {
     }
 
     #[test]
+    fn markdown_uses_an_overlapping_panel_label_as_a_heading() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Body panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1000000" y="2200000"/><a:ext cx="6000000" cy="1800000"/></a:xfrm><a:prstGeom prst="parallelogram"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Panel body</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Attached label"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1400000" y="1900000"/><a:ext cx="2500000" cy="600000"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="DCEBFB"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Attached label</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let markdown = to_markdown_native(&data).unwrap();
+        assert!(
+            markdown.contains("## Attached label\n\nPanel body"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_preserves_independent_column_regions() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Left region"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="1400000"/><a:ext cx="4500000" cy="4400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Left region</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Right one"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="1400000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right one</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="4" name="Right two"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="3000000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right two</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="5" name="Right three"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="4600000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right three</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let markdown = to_markdown_native(&data).unwrap();
+        assert!(
+            markdown.contains("Left region\n\n---\n\nRight one\n\nRight two\n\nRight three"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_coalesces_overlapping_duplicate_text() {
+        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Shadow copy"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="2000000" y="3000000"/><a:ext cx="3000000" cy="800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>One semantic label</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Foreground copy"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="2050000" y="3050000"/><a:ext cx="3000000" cy="800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>One semantic label</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let data = build_three_slide_deck(0, slide);
+        let markdown = to_markdown_native(&data).unwrap();
+        assert_eq!(
+            markdown.matches("One semantic label").count(),
+            1,
+            "{markdown}"
+        );
+    }
+
+    #[test]
     fn markdown_collects_comments_after_the_deck_narrative() {
         let comments = valid_comment_xml("Review note");
         let authors = r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="0" name="Ada"/></p:cmAuthorLst>"#;
