@@ -52,3 +52,59 @@ for (const sheetIndex of SHEETS) {
     expect(pct).toBeLessThanOrEqual(MAX_DIFF_PCT[sheetIndex]);
   });
 }
+
+test('worker mode matches main mode for the sheet viewer CSV preview', async ({ page }) => {
+  await page.goto('/tests/visual/delimited-text-worker-fixture.html');
+  await page.waitForFunction(
+    () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+    { timeout: 60_000 },
+  );
+  const state = await page.evaluate(() => ({
+    status: document.body.dataset.status,
+    error: document.body.dataset.errorMessage,
+    mainName: document.body.dataset.mainName,
+    workerName: document.body.dataset.workerName,
+    values: document.body.dataset.values,
+  }));
+  if (state.status === 'error') throw new Error(state.error ?? 'CSV preview failed');
+  expect(state.mainName).toBe('CSV preview');
+  expect(state.workerName).toBe('CSV preview');
+  expect(JSON.parse(state.values ?? '[]')).toEqual([
+    ['text', '00123'],
+    ['text', 'first line\nsecond, line'],
+    ['text', '=1+1'],
+    ['text', '9007199254740993'],
+    ['text', 'plain'],
+    ['text', '2026-09-04'],
+  ]);
+
+  const [mainUrl, workerUrl] = await page.evaluate(() => [
+    (document.getElementById('main-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+    (document.getElementById('worker-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+  ]);
+  const main = PNG.sync.read(Buffer.from(mainUrl.split(',')[1], 'base64'));
+  const worker = PNG.sync.read(Buffer.from(workerUrl.split(',')[1], 'base64'));
+  expect(main.width).toBeGreaterThan(0);
+  expect(main.height).toBeGreaterThan(0);
+  expect(worker.width).toBe(main.width);
+  expect(worker.height).toBe(main.height);
+  let ink = 0;
+  for (let offset = 0; offset < main.data.length; offset += 4) {
+    if (
+      main.data[offset] < 250 ||
+      main.data[offset + 1] < 250 ||
+      main.data[offset + 2] < 250
+    ) ink++;
+  }
+  expect(ink).toBeGreaterThan(100);
+
+  const diff = pixelmatch(
+    main.data,
+    worker.data,
+    undefined,
+    main.width,
+    main.height,
+    { threshold: 0.1 },
+  );
+  expect((diff / (main.width * main.height)) * 100).toBeLessThanOrEqual(0.5);
+});

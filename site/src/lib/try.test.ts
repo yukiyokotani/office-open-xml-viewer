@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   docx: [] as Array<Record<string, any>>,
   pptx: [] as Array<Record<string, any>>,
   xlsx: [] as Array<Record<string, any>>,
+  xlsxSheet: [] as Array<Record<string, any>>,
   deferDocx: false,
   deferDocxLayout: false,
   deferPptxLayout: false,
@@ -121,15 +122,34 @@ vi.mock('@silurus/ooxml-pptx', () => {
 vi.mock('@silurus/ooxml-xlsx', () => ({
   XlsxViewer: class {
     destroyed = false;
+    readonly loadCalls: unknown[][] = [];
     constructor(
       public readonly host: HTMLElement,
       public readonly opts: Record<string, any>,
     ) {
       mocks.xlsx.push(this as unknown as Record<string, any>);
     }
-    load(): Promise<void> {
+    load(...args: unknown[]): Promise<void> {
+      this.loadCalls.push(args);
       return mocks.rejectXlsx
         ? Promise.reject(new Error('xlsx parse failed'))
+        : Promise.resolve();
+    }
+    destroy(): void { this.destroyed = true; }
+  },
+  XlsxSheetViewer: class {
+    destroyed = false;
+    readonly loadCalls: unknown[][] = [];
+    constructor(
+      public readonly canvas: HTMLCanvasElement,
+      public readonly opts: Record<string, any>,
+    ) {
+      mocks.xlsxSheet.push(this as unknown as Record<string, any>);
+    }
+    load(...args: unknown[]): Promise<void> {
+      this.loadCalls.push(args);
+      return mocks.rejectXlsx
+        ? Promise.reject(new Error('delimited text parse failed'))
         : Promise.resolve();
     }
     destroy(): void { this.destroyed = true; }
@@ -180,8 +200,9 @@ class FakeElement {
   }
 }
 
-const file = (name: string): File => ({
+const file = (name: string, size = 8): File => ({
   name,
+  size,
   arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
 }) as unknown as File;
 
@@ -202,6 +223,7 @@ afterEach(() => {
   mocks.docx.length = 0;
   mocks.pptx.length = 0;
   mocks.xlsx.length = 0;
+  mocks.xlsxSheet.length = 0;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -338,13 +360,61 @@ describe('Try Yours ScrollViewer integration', () => {
     expect(viewer.opts.useGoogleFonts).toBe(true);
   });
 
-  it('destroys the active viewer when a later selection has an unsupported extension', async () => {
-    await renderFile(stage(), file('valid.docx'));
-    const active = mocks.docx[0];
+  it.each(['csv', 'tsv'] as const)(
+    'opens a selected %s file in the sheet-only viewer',
+    async (format) => {
+      const hostStage = stage();
+      const result = await renderFile(hostStage, file(`table.${format}`));
+      const viewer = mocks.xlsxSheet[0];
 
-    await expect(renderFile(stage(), file('unsupported.pdf'))).rejects.toThrow('Unsupported file');
-    expect(active.destroyed).toBe(true);
+      expect(result).toEqual({ format: 'xlsx', units: 0, unitLabel: 'sheet' });
+      expect(mocks.xlsx).toHaveLength(0);
+      expect(mocks.xlsxSheet).toHaveLength(1);
+      expect(viewer.loadCalls).toHaveLength(1);
+      expect(viewer.loadCalls[0][0]).toBeInstanceOf(ArrayBuffer);
+      expect(viewer.loadCalls[0][1]).toEqual({ format });
+      expect((hostStage as unknown as FakeElement).children[0].className).toBe('lv-xlsx');
+    },
+  );
+
+  it('destroys a CSV sheet viewer when parsing fails', async () => {
+    mocks.rejectXlsx = true;
+    await expect(renderFile(stage(), file('broken.csv'))).rejects.toThrow(
+      'delimited text parse failed',
+    );
+    expect(mocks.xlsxSheet[0].destroyed).toBe(true);
   });
+
+  it('rejects an oversized CSV before reading it into memory', async () => {
+    const oversized = file('oversized.csv', 64 * 1024 * 1024 + 1);
+    const read = vi.spyOn(oversized, 'arrayBuffer');
+
+    await expect(renderFile(stage(), oversized)).rejects.toThrow('too large to preview');
+    expect(read).not.toHaveBeenCalled();
+    expect(mocks.xlsxSheet).toHaveLength(0);
+  });
+
+  it.each(['pdf', 'dat'])(
+    'destroys the active viewer when a later .%s selection is unsupported',
+    async (extension) => {
+      await renderFile(stage(), file('valid.docx'));
+      const active = mocks.docx[0];
+
+      await expect(renderFile(stage(), file(`unsupported.${extension}`))).rejects.toThrow(
+        'Unsupported file',
+      );
+      expect(active.destroyed).toBe(true);
+      expect(mocks.xlsxSheet).toHaveLength(0);
+    },
+  );
+
+  it.each(['csv', 'tsv'])(
+    'does not treat an extensionless file named %s as delimited text',
+    async (name) => {
+      await expect(renderFile(stage(), file(name))).rejects.toThrow('Unsupported file');
+      expect(mocks.xlsxSheet).toHaveLength(0);
+    },
+  );
 
   it('destroys a superseded viewer and prevents it from becoming active', async () => {
     mocks.deferDocx = true;

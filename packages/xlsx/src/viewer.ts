@@ -1,5 +1,6 @@
 import {
   XlsxWorkbook,
+  loadXlsxSheetSource,
   prepareXlsxViewerRowHeights,
   releaseXlsxViewerProjection,
   retainXlsxViewerFonts,
@@ -96,8 +97,13 @@ import { CanvasSurface, SheetOverlayHost } from './internal/sheet-surface.js';
 import { withXlsxRenderCommitGuard } from './render-orchestrator.js';
 import { selectionAutoScrollVelocity } from './selection-auto-scroll.js';
 import { worksheetContentBounds } from './internal/worksheet-content-bounds.js';
+import type { XlsxSheetLoadOptions } from './delimited-text.js';
+
+export type { XlsxSheetLoadOptions } from './delimited-text.js';
 
 const borrowedWorkbookOption = Symbol('XlsxViewer.borrowedWorkbook');
+/** @internal Shared source-loading hook for the two XLSX viewer facades. */
+const loadXlsxViewerSource = Symbol('XlsxViewer.loadSource');
 type XlsxCommentUiRuntime = typeof import('./comment-ui-runtime.js');
 let xlsxCommentUiRuntimePromise: Promise<XlsxCommentUiRuntime> | undefined;
 
@@ -1186,7 +1192,10 @@ class XlsxViewerEngine implements ZoomableViewer {
    * `onError` is reserved for later Viewer-managed work that has no directly
    * awaitable method result, so one failure is never delivered twice.
    */
-  async load(source: string | ArrayBuffer): Promise<void> {
+  async [loadXlsxViewerSource](
+    source: string | ArrayBuffer,
+    sourceOptions: XlsxSheetLoadOptions = {},
+  ): Promise<void> {
     this.assertOpen();
     if (this._borrowed) {
       throw new Error(
@@ -1201,7 +1210,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // than dropping to an empty viewer. The 2× memory window is bounded to the
     // load itself (the old workbook is freed the moment the new model arrives).
     try {
-      const wb = await this.acquisition.replace(() => XlsxWorkbook.load(source, {
+      const wb = await this.acquisition.replace(() => XlsxWorkbook[loadXlsxSheetSource](source, {
           password: this.opts.password,
           useGoogleFonts: this.opts.useGoogleFonts,
           maxZipEntryBytes: this.opts.maxZipEntryBytes,
@@ -1216,7 +1225,7 @@ class XlsxViewerEngine implements ZoomableViewer {
           chartEx: this.opts.chartEx,
           tiff: this.opts.tiff,
           mode: this._mode,
-        }), () => {
+        }, sourceOptions), () => {
           // Claim every async-operation generation before closing the old
           // workbook. Rejections caused by its worker termination are stale
           // completion, not errors belonging to the new workbook.
@@ -5113,6 +5122,11 @@ export class XlsxViewer extends XlsxViewerEngine {
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     super(container, opts, { kind: 'composite' });
   }
+
+  /** Load an OOXML workbook from a URL or ArrayBuffer. */
+  async load(source: string | ArrayBuffer): Promise<void> {
+    await this[loadXlsxViewerSource](source);
+  }
 }
 
 type XlsxSheetViewerSnapshot = Readonly<{
@@ -5190,10 +5204,18 @@ export class XlsxSheetViewer implements ZoomableViewer {
     };
   }
 
-  async load(source: string | ArrayBuffer): Promise<void> {
+  /**
+   * Load an XLSX worksheet, or reuse the XLSX sheet renderer for one explicitly
+   * selected delimited-text source. URL/ArrayBuffer input, reload replacement,
+   * callbacks, and destroy ownership match XLSX loading.
+   */
+  async load(
+    source: string | ArrayBuffer,
+    options: XlsxSheetLoadOptions = {},
+  ): Promise<void> {
     this.assertOpen();
     try {
-      await this.engine.load(source);
+      await this.engine[loadXlsxViewerSource](source, options);
     } finally {
       if (!this.destroyed) this.captureSnapshot();
     }

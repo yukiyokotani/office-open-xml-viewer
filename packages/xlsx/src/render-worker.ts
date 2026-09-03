@@ -39,6 +39,7 @@ import { resolveSharedStringRows } from './shared-strings.js';
 import {
   addWorksheetCacheUsage,
   assertWorksheetCacheUsage,
+  measureWorksheet,
   type WorksheetCacheUsage,
 } from './worksheet-resource-limits.js';
 import type { ParsedWorkbook, Worksheet } from './types.js';
@@ -61,6 +62,7 @@ const host = new WasmParserHost<XlsxArchive>(init, {
   reinit,
 });
 let workbook: ParsedWorkbook | null = null;
+let archiveBacked = false;
 let renderers: LoadedWorkerRenderers = {};
 /** Settled before any render when `useGoogleFonts` was requested. The resolved
  *  value (the preloaded FontFace[]) is unused here: the worker owns its own
@@ -88,6 +90,7 @@ const rawParts = new BoundedRawPartCache({
 // pattern-fill caches exist before the first bordered or filled cell is stroked.
 const rendererModule = import('./renderer.js');
 const orchestratorModule = import('./render-orchestrator.js');
+const delimitedTextModule = import('./delimited-text.js');
 const worksheetPull = new WorksheetPullWorker(
   () => host.archive,
   (sheetIndex, worksheet, measured, resourceUsage) => {
@@ -166,6 +169,7 @@ self.onmessage = async (e: MessageEvent<
   if (req.type === 'openSheetSession') worksheetPull.reserveOpen(req);
   try {
     if (req.type === 'openSheetSession') {
+      if (!archiveBacked) throw new Error('Worksheet is already materialized');
       await host.ensureReady();
       if (host.archive) {
         const retained = host.archive;
@@ -185,14 +189,16 @@ self.onmessage = async (e: MessageEvent<
       );
       return;
     }
-    if (req.type === 'parse') await worksheetPull.reset();
+    if (req.type === 'parse' || req.type === 'parseDelimitedText') {
+      await worksheetPull.reset();
+    }
     await worksheetPull.run(async () => {
-    await host.ensureReady();
-    if (req.type !== 'parse' && host.archive) {
+    if (req.type === 'parse' || archiveBacked) await host.ensureReady();
+    if (req.type !== 'parse' && req.type !== 'parseDelimitedText' && host.archive) {
       const retained = host.archive;
       host.run(() => retained.assert_healthy());
     }
-    if (req.type === 'parse') {
+    if (req.type === 'parse' || req.type === 'parseDelimitedText') {
       // A re-parse starts a fresh document: drop any cached sheets / images so
       // we never serve stale data from a previous load. `imageCache` is now a
       // pure lookup map into the shared, per-`getImage` core caches (base raster,
@@ -210,6 +216,30 @@ self.onmessage = async (e: MessageEvent<
       dropSvgImageCache(getImage);
       rawParts.clear();
       renderers = await loadWorkerRenderers(req.renderers);
+      if (req.type === 'parseDelimitedText') {
+        host.disposeArchive();
+        archiveBacked = false;
+        const { parseDelimitedWorksheet } = await delimitedTextModule;
+        const parsed = parseDelimitedWorksheet(req.data, req.options);
+        workbook = parsed.workbook;
+        const measured = measureWorksheet(parsed.worksheet);
+        retainedSheetUsage = measured;
+        sheetCache.set(0, parsed.worksheet);
+        sheetCacheUsage.set(0, measured);
+        fontsLoaded = req.useGoogleFonts
+          ? preloadGoogleFonts(xlsxFontPreloadNames(parsed.workbook), XLSX_GOOGLE_FONTS)
+          : Promise.resolve();
+        const worksheetJson = new TextEncoder()
+          .encode(JSON.stringify(parsed.worksheet)).buffer as ArrayBuffer;
+        post({
+          type: 'delimitedTextParsed',
+          id,
+          workbook,
+          worksheetJson,
+        }, [worksheetJson]);
+        return;
+      }
+      archiveBacked = true;
       const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(req.resourcePolicy);
       // Construction + `parse()` run under `host.run` so a trap in EITHER poisons
       // + recycles the instance (and frees the archive). `setArchive` frees any

@@ -11,7 +11,7 @@ import {
   DocxScrollViewer,
   type DocxScrollViewerOptions,
 } from '@silurus/ooxml-docx';
-import { XlsxViewer } from '@silurus/ooxml-xlsx';
+import { XlsxSheetViewer, XlsxViewer } from '@silurus/ooxml-xlsx';
 import { math } from '../../../src/math';
 import { threeD } from '../../../src/three-d';
 import { regionMap } from '../../../src/region-map';
@@ -24,6 +24,10 @@ const fullRenderers = { threeD, regionMap, chartEx, tiff };
 
 const VIEWER_GAP = 26;
 const MIN_SCALE = 0.5;
+// Match the library's hard delimited-source ceiling. Unlike OOXML archives,
+// CSV/TSV have no compressed container and can be rejected from File.size
+// before `arrayBuffer()` allocates a second copy.
+const MAX_DELIMITED_TEXT_FILE_BYTES = 64 * 1024 * 1024;
 
 // Disposes the previous viewer and its parser/worker resources when a new file
 // is loaded.
@@ -62,6 +66,17 @@ function assertCurrentRender(generation: number): void {
   if (generation !== renderGeneration) throw new SupersededRenderError();
 }
 
+function tryYoursFileExtension(fileName: string): string | undefined {
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === fileName.length - 1) return undefined;
+  return fileName.slice(dotIndex + 1).toLowerCase();
+}
+
+export function isTryYoursDelimitedTextFile(fileName: string): boolean {
+  const extension = tryYoursFileExtension(fileName);
+  return extension === 'csv' || extension === 'tsv';
+}
+
 /** Tear down the current viewer when Try Yours leaves the page. */
 export function disposeRenderedFile(): void {
   renderGeneration++;
@@ -81,9 +96,19 @@ export async function renderFile(
   activeCleanup?.();
   activeCleanup = null;
 
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext !== 'docx' && ext !== 'xlsx' && ext !== 'pptx') {
+  const ext = tryYoursFileExtension(file.name);
+  if (
+    ext !== 'docx'
+    && ext !== 'xlsx'
+    && ext !== 'pptx'
+    && ext !== 'csv'
+    && ext !== 'tsv'
+  ) {
     throw new Error('Unsupported file — choose a .docx, .xlsx or .pptx file.');
+  }
+
+  if ((ext === 'csv' || ext === 'tsv') && file.size > MAX_DELIMITED_TEXT_FILE_BYTES) {
+    throw new Error('This file is too large to preview.');
   }
 
   const buffer = await file.arrayBuffer();
@@ -104,6 +129,35 @@ export async function renderFile(
     });
     try {
       await viewer.load(buffer);
+    } catch (error) {
+      viewer.destroy();
+      throw error;
+    }
+    if (generation !== renderGeneration) {
+      viewer.destroy();
+      throw new SupersededRenderError();
+    }
+    activeCleanup = () => viewer.destroy();
+    return { format: 'xlsx', units: 0, unitLabel: 'sheet' };
+  }
+
+  if (ext === 'csv' || ext === 'tsv') {
+    const host = document.createElement('div');
+    host.className = 'lv-xlsx';
+    const canvas = document.createElement('canvas');
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    host.appendChild(canvas);
+    stage.appendChild(host);
+    const viewer = new XlsxSheetViewer(canvas, {
+      mode: 'main',
+      useGoogleFonts: true,
+      comments: false,
+      math,
+      ...fullRenderers,
+    });
+    try {
+      await viewer.load(buffer, { format: ext });
     } catch (error) {
       viewer.destroy();
       throw error;

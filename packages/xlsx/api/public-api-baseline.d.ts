@@ -1983,6 +1983,7 @@ export interface XlsxCommentReply {
 }
 export interface XlsxCommentsOptions extends ViewerCommentsOptions {
 }
+declare const loadXlsxViewerSource: unique symbol;
 export type XlsxCopyResult = Readonly<{
     status: 'copied';
     cellCount: number;
@@ -2111,11 +2112,24 @@ export interface XlsxSelectionState {
     readonly activeCell: CellAddress;
     readonly extensionAnchor: CellAddress;
 }
+export type XlsxSheetLoadOptions = Readonly<{
+    format?: 'xlsx';
+}> | Readonly<{
+    format: 'csv' | 'tsv';
+    delimiter?: string;
+    encoding?: string;
+    sheetName?: string;
+}> | Readonly<{
+    format: 'delimited-text';
+    delimiter: string;
+    encoding?: string;
+    sheetName?: string;
+}>;
 export class XlsxSheetViewer implements ZoomableViewer {
     readonly canvasElement: HTMLCanvasElement;
     static fromWorkbook(canvasElement: HTMLCanvasElement, workbook: XlsxWorkbook, options?: Omit<XlsxSheetViewerOptions, keyof LoadOptions>): Omit<XlsxSheetViewer, 'load'>;
     constructor(canvasElement: HTMLCanvasElement, options?: XlsxSheetViewerOptions);
-    load(source: string | ArrayBuffer): Promise<void>;
+    load(source: string | ArrayBuffer, options?: XlsxSheetLoadOptions): Promise<void>;
     get sheetIndex(): number;
     get sheetCount(): number;
     get sheetNames(): string[];
@@ -2189,10 +2203,11 @@ export interface XlsxTextRunInfo {
 export class XlsxViewer extends XlsxViewerEngine {
     static fromWorkbook(container: HTMLElement, workbook: XlsxWorkbook, opts?: Omit<XlsxViewerOptions, keyof LoadOptions>): Omit<XlsxViewer, 'load'>;
     constructor(container: HTMLElement, opts?: XlsxViewerOptions);
+    load(source: string | ArrayBuffer): Promise<void>;
 }
 class XlsxViewerEngine implements ZoomableViewer {
     constructor(container: HTMLElement, opts: XlsxViewerOptions | XlsxSheetViewerOptions | undefined, mount: XlsxViewerMount);
-    load(source: string | ArrayBuffer): Promise<void>;
+    [loadXlsxViewerSource](source: string | ArrayBuffer, sourceOptions?: XlsxSheetLoadOptions): Promise<void>;
     get sheetIndex(): number;
     get sheetCount(): number;
     goToSheet(index: number): Promise<void>;
@@ -2263,6 +2278,7 @@ export class XlsxWorkbook {
     renderViewportToBitmap(sheetIndex: number, viewport: ViewportRange, opts: RenderViewportToBitmapOptions): Promise<ImageBitmap>;
     destroy(): void;
     private __privatePresence;
+    private static __staticPrivatePresence;
     private constructor();
 }
 export interface ZoomableViewer {

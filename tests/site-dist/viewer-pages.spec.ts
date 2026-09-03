@@ -72,6 +72,25 @@ test('other live viewer screens survive persisted pagehide', async ({ page }) =>
   await expect(tryCanvas).toBeVisible();
 });
 
+for (const format of ['csv', 'tsv'] as const) {
+  test(`Try Yours opens a selected ${format.toUpperCase()} file in the sheet surface`, async ({
+    page,
+  }) => {
+    const separator = format === 'csv' ? ',' : '\t';
+    await page.goto('/try/');
+    await page.locator('#file').setInputFiles({
+      name: `table.${format}`,
+      mimeType: format === 'csv' ? 'text/csv' : 'text/tab-separated-values',
+      buffer: Buffer.from(`Code${separator}Value\n001${separator}alpha`),
+    });
+
+    await expect(page.locator('#stage canvas').first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('#status')).toContainText('rendered in');
+    await expect(page.locator('#wasm-badge')).toBeHidden();
+    await expect(page.locator('#stage .xlsx-tab-strip')).toHaveCount(0);
+  });
+}
+
 test('PPTX single-comment margin has no trailing scroll range', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/pptx/?all');

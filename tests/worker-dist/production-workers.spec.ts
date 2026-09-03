@@ -2,13 +2,36 @@ import { expect, test } from '@playwright/test';
 
 async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: string) {
   await page.goto(url);
-  await expect(page.locator('body')).toHaveAttribute('data-status', 'ready', { timeout: 60_000 });
+  await expect.poll(
+    () => page.locator('body').getAttribute('data-status'),
+    { timeout: 60_000 },
+  ).not.toBe('loading');
+  const status = await page.locator('body').getAttribute('data-status');
+  if (status !== 'ready') {
+    throw new Error(await page.locator('body').getAttribute('data-error-message') ?? status ?? '');
+  }
 
-  for (const id of ['docx', 'math', 'xlsx', 'pptx', 'pptx-text', 'xlsx-bordered']) {
+  for (const id of [
+    'docx',
+    'math',
+    'xlsx',
+    'pptx',
+    'pptx-text',
+    'xlsx-bordered',
+    'xlsx-csv-main',
+    'xlsx-csv-worker',
+  ]) {
     const ink = await page.locator(`#${id}`).evaluate((canvas: HTMLCanvasElement) => {
-      const context = canvas.getContext('2d');
+      // Worker-backed viewers own a `bitmaprenderer` context, so acquiring a
+      // second 2D context on their canvas correctly returns null. Copy the
+      // displayed bitmap into a disposable 2D canvas before inspecting pixels.
+      const sample = document.createElement('canvas');
+      sample.width = canvas.width;
+      sample.height = canvas.height;
+      const context = sample.getContext('2d');
       if (!context) return 0;
-      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      context.drawImage(canvas, 0, 0);
+      const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
       let count = 0;
       for (let offset = 0; offset < pixels.length; offset += 4) {
         if (pixels[offset] < 250 || pixels[offset + 1] < 250 || pixels[offset + 2] < 250) count++;

@@ -14,7 +14,7 @@ import BrandIcon from '../components/BrandIcon.astro';
         <p class="try-lead">DOCX, XLSX and PPTX are parsed and rendered locally in your browser. Your file is never uploaded.</p>
       </div>
 
-      <input type="file" id="file" accept=".docx,.xlsx,.pptx" hidden />
+      <input type="file" id="file" accept=".docx,.xlsx,.pptx,.csv,.tsv" hidden />
       <button class="dropzone" id="dropzone" type="button">
         <span class="dz-action"><strong>Choose or drop a file</strong><small>.docx · .xlsx · .pptx</small></span>
         <span class="dz-arrow" aria-hidden="true">＋</span>
@@ -32,7 +32,7 @@ import BrandIcon from '../components/BrandIcon.astro';
       <div class="try-panel" id="panel" hidden>
         <div class="try-panel-head">
           <span class="try-file" id="panel-file"></span>
-          <span class="panel-badge">live · WASM</span>
+          <span class="panel-badge" id="wasm-badge">live · WASM</span>
           <button class="try-reset" id="reset">Choose another file</button>
         </div>
         <div class="try-stage-shell">
@@ -65,7 +65,12 @@ import BrandIcon from '../components/BrandIcon.astro';
   </footer>
 
   <script>
-    import { disposeRenderedFile, renderFile, prewarmEngines } from '../lib/try';
+    import {
+      disposeRenderedFile,
+      isTryYoursDelimitedTextFile,
+      renderFile,
+      prewarmEngines,
+    } from '../lib/try';
     // Hot standby — prime the WASM engines + fonts on idle so the first dropped
     // file renders without the cold parser-load cost.
     prewarmEngines();
@@ -78,6 +83,7 @@ import BrandIcon from '../components/BrandIcon.astro';
     const stage = document.getElementById('stage') as HTMLElement;
     const stageProgress = document.getElementById('stage-progress') as HTMLElement;
     const fileLabel = document.getElementById('panel-file') as HTMLElement;
+    const wasmBadge = document.getElementById('wasm-badge') as HTMLElement;
     const reset = document.getElementById('reset') as HTMLButtonElement;
     let loadGeneration = 0;
 
@@ -90,6 +96,7 @@ import BrandIcon from '../components/BrandIcon.astro';
       // real preview viewport before its first paint.
       panel.hidden = false;
       empty.hidden = true;
+      wasmBadge.hidden = isTryYoursDelimitedTextFile(file.name);
       panel.classList.add('loading');
       stage.style.visibility = 'hidden';
       stageProgress.hidden = false;

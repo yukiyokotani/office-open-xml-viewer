@@ -1,5 +1,5 @@
 import { DocxDocument } from '@silurus/ooxml/docx';
-import { XlsxWorkbook } from '@silurus/ooxml/xlsx';
+import { XlsxSheetViewer, XlsxWorkbook } from '@silurus/ooxml/xlsx';
 import { PptxPresentation } from '@silurus/ooxml/pptx';
 import { math } from '@silurus/ooxml/math';
 import { threeD } from '@silurus/ooxml/three-d';
@@ -73,6 +73,23 @@ try {
   ));
   borderedXlsx.destroy();
 
+  const csvSource = new TextEncoder().encode(
+    'id,description,value\r\n00123,"production, worker",=1+1\r\n',
+  ).buffer;
+  const csvMain = new XlsxSheetViewer(document.getElementById('xlsx-csv-main'), {
+    showScrollbars: false,
+  });
+  document.body.dataset.stage = 'csv-main';
+  await csvMain.load(csvSource.slice(0), { format: 'csv' });
+  const csvWorker = new XlsxSheetViewer(document.getElementById('xlsx-csv-worker'), {
+    mode: 'worker',
+    showScrollbars: false,
+    onReady: () => { document.body.dataset.stage = 'csv-worker-render'; },
+  });
+  document.body.dataset.stage = 'csv-worker';
+  await csvWorker.load(csvSource.slice(0), { format: 'csv' });
+  window.csvViewers = [csvMain, csvWorker];
+
   const chartExDocx = await DocxDocument.load(
     await bytes('/consumer/chart-ex.docx'),
     { mode: 'worker', ...renderers },
@@ -101,5 +118,7 @@ try {
   document.body.dataset.status = 'ready';
 } catch (error) {
   document.body.dataset.status = 'error';
-  document.body.dataset.errorMessage = error instanceof Error ? error.message : String(error);
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  document.body.dataset.errorMessage = `${document.body.dataset.stage ?? 'unknown'}: ${detail}`;
+  console.error(error);
 }
