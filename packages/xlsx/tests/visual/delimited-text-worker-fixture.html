@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; }
+    canvas { display: block; width: 800px; height: 360px; }
+  </style>
+</head>
+<body>
+  <canvas id="main-canvas" width="800" height="360"></canvas>
+  <canvas id="worker-canvas" width="800" height="360"></canvas>
+  <script type="module">
+    import { XlsxSheetViewer } from '/src/index.ts';
+
+    const source = new TextEncoder().encode(
+      'id,description,value\r\n' +
+      '00123,"first line\nsecond, line",=1+1\r\n' +
+      '9007199254740993,plain,2026-09-04\r\n',
+    ).buffer;
+
+    try {
+      const mainCanvas = document.getElementById('main-canvas');
+      const main = new XlsxSheetViewer(mainCanvas, { showScrollbars: false });
+      await main.load(source.slice(0), { format: 'csv', sheetName: 'CSV preview' });
+      main.setSelection('A2:C3');
+      const context = main.getSelectionContext();
+      document.body.dataset.values = JSON.stringify(
+        context?.kind === 'range'
+          ? context.cells.map((cell) => [cell.valueType, cell.value])
+          : [],
+      );
+
+      const workerCanvas = document.getElementById('worker-canvas');
+      const worker = new XlsxSheetViewer(workerCanvas, {
+        mode: 'worker',
+        showScrollbars: false,
+      });
+      await worker.load(source.slice(0), { format: 'csv', sheetName: 'CSV preview' });
+
+      document.body.dataset.mainName = main.sheetNames[0];
+      document.body.dataset.workerName = worker.sheetNames[0];
+      document.body.dataset.status = 'ready';
+    } catch (error) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  </script>
+</body>
+</html>

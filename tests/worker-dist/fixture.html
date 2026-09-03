@@ -7,12 +7,14 @@
   <canvas id="pptx"></canvas>
   <canvas id="pptx-text"></canvas>
   <canvas id="xlsx-bordered"></canvas>
+  <canvas id="xlsx-csv-main" width="360" height="240"></canvas>
+  <canvas id="xlsx-csv-worker" width="360" height="240"></canvas>
   <canvas id="docx-chart-ex"></canvas>
   <canvas id="xlsx-chart-ex"></canvas>
   <canvas id="pptx-chart-ex"></canvas>
   <script type="module">
     import { DocxDocument } from '/dist/docx.mjs';
-    import { XlsxWorkbook } from '/dist/xlsx.mjs';
+    import { XlsxSheetViewer, XlsxWorkbook } from '/dist/xlsx.mjs';
     import { PptxPresentation } from '/dist/pptx.mjs';
     import { math } from '/dist/math.mjs';
     import { threeD } from '/dist/three-d.mjs';
@@ -86,6 +88,23 @@
       ));
       borderedXlsx.destroy();
 
+      const csvSource = new TextEncoder().encode(
+        'id,description,value\r\n00123,"production, worker",=1+1\r\n',
+      ).buffer;
+      const csvMain = new XlsxSheetViewer(document.getElementById('xlsx-csv-main'), {
+        showScrollbars: false,
+      });
+      document.body.dataset.stage = 'csv-main';
+      await csvMain.load(csvSource.slice(0), { format: 'csv' });
+      const csvWorker = new XlsxSheetViewer(document.getElementById('xlsx-csv-worker'), {
+        mode: 'worker',
+        showScrollbars: false,
+        onReady: () => { document.body.dataset.stage = 'csv-worker-render'; },
+      });
+      document.body.dataset.stage = 'csv-worker';
+      await csvWorker.load(csvSource.slice(0), { format: 'csv' });
+      window.csvViewers = [csvMain, csvWorker];
+
       const chartExDocx = await DocxDocument.load(
         await bytes('/consumer/chart-ex.docx'),
         { mode: 'worker', ...renderers },
@@ -114,7 +133,9 @@
       document.body.dataset.status = 'ready';
     } catch (error) {
       document.body.dataset.status = 'error';
-      document.body.dataset.errorMessage = error instanceof Error ? error.message : String(error);
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      document.body.dataset.errorMessage = `${document.body.dataset.stage ?? 'unknown'}: ${detail}`;
+      console.error(error);
     }
   </script>
 </body>

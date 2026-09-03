@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XlsxSheetViewer } from './viewer.js';
-import { XlsxWorkbook } from './workbook.js';
+import { XlsxWorkbook, loadXlsxSheetSource } from './workbook.js';
 import type { OoxmlResourceMetrics } from '@silurus/ooxml-core';
 import type { Worksheet, XlsxComment } from './types.js';
 import {
@@ -68,6 +68,60 @@ function pointerEvent(overrides: Record<string, unknown> = {}): Record<string, u
 }
 
 describe('XlsxSheetViewer canvas mount', () => {
+  it('forwards delimited source options through the ordinary reload lifecycle', async () => {
+    installDom();
+    const firstDestroy = vi.fn();
+    const secondDestroy = vi.fn();
+    const first = {
+      mode: 'main',
+      sheetNames: ['CSV'],
+      tabColors: [null],
+      destroy: firstDestroy,
+    } as unknown as XlsxWorkbook;
+    const second = {
+      mode: 'main',
+      sheetNames: ['TSV'],
+      tabColors: [null],
+      destroy: secondDestroy,
+    } as unknown as XlsxWorkbook;
+    const load = vi.spyOn(XlsxWorkbook, loadXlsxSheetSource)
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const canvas = makeEl('canvas');
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement);
+    const engine = (viewer as unknown as {
+      engine: { showSheet(index: number): Promise<void> };
+    }).engine;
+    vi.spyOn(engine, 'showSheet').mockResolvedValue(undefined);
+    const csv = new TextEncoder().encode('a;b').buffer as ArrayBuffer;
+
+    await viewer.load(csv, {
+      format: 'delimited-text',
+      delimiter: ';',
+      sheetName: 'CSV',
+    });
+    expect(load).toHaveBeenNthCalledWith(
+      1,
+      csv,
+      expect.objectContaining({ mode: 'main' }),
+      { format: 'delimited-text', delimiter: ';', sheetName: 'CSV' },
+    );
+    expect(firstDestroy).not.toHaveBeenCalled();
+
+    await viewer.load('/table.tsv', { format: 'tsv' });
+    expect(load).toHaveBeenNthCalledWith(
+      2,
+      '/table.tsv',
+      expect.objectContaining({ mode: 'main' }),
+      { format: 'tsv' },
+    );
+    expect(firstDestroy).toHaveBeenCalledOnce();
+    expect(secondDestroy).not.toHaveBeenCalled();
+
+    viewer.destroy();
+    expect(secondDestroy).toHaveBeenCalledOnce();
+  });
+
   it('routes Ctrl/Cmd areas through the canonical state, context, copy, and notification APIs', async () => {
     installDom();
     const parent = makeContainer();

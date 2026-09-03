@@ -147,6 +147,29 @@ await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
 
+`XlsxSheetViewer` also offers a deliberately small delimited-text preview convenience
+that reuses the Excel-style sheet surface. It has the same source and ownership
+lifecycle as XLSX loading: a string is fetched as a URL, an `ArrayBuffer` is
+caller-owned, a successful reload replaces and disposes the previous source,
+and `destroy()` releases the active source. There is no format auto-detection or
+general-purpose tabular model, and `XlsxWorkbook` / `XlsxViewer` remain
+OOXML-only. Every delimited field stays text, so leading zeroes, long identifiers,
+dates, and `=...` values are displayed without type or formula inference.
+This convenience covers delimiter-based text regardless of filename extension;
+fixed-width PRN, DIF, and SYLK remain separate formats and are not parsed here.
+
+```typescript
+const csvFile = document.querySelector('input[type=file]') as HTMLInputElement;
+const csvBytes = await (csvFile.files?.[0] as File).arrayBuffer();
+await sheet.load(csvBytes, { format: 'csv' });
+
+// String sources are URLs, just like sheet.load('/workbook.xlsx').
+await sheet.load('/export.tsv', { format: 'tsv', encoding: 'windows-1252' });
+
+// Extensions such as .txt, .dat, and .psv do not imply one delimiter.
+await sheet.load('/report.dat', { format: 'delimited-text', delimiter: '|' });
+```
+
 ### Rendering equations
 
 OMML equations (`m:oMath` / `m:oMathPara`) in `.docx`, `.pptx` and `.xlsx` are rendered with

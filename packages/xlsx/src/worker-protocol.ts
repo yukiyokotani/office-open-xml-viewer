@@ -9,6 +9,10 @@ import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { NormalizedOoxmlResourcePolicy } from '@silurus/ooxml-core/worker';
 import type { PullSessionIdentity } from '@silurus/ooxml-core/worker';
 import { GridGeometry } from './internal/grid-geometry.js';
+import type {
+  DelimitedTextParseRequest,
+  DelimitedTextParseResponse,
+} from './delimited-text-protocol.js';
 
 /**
  * View-only per-band size overrides for one sheet, carried with every worker
@@ -221,6 +225,7 @@ export function extractViewerRenderContext(opts: WireRenderViewportOptions): {
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; renderers?: import('@silurus/ooxml-core/worker').WorkerRendererDescriptors }
+  | DelimitedTextParseRequest
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | {
       type: 'renderViewport';
@@ -259,5 +264,6 @@ export type RenderWorkerResponse =
       workbook: ParsedWorkbook;
       usage?: OoxmlResourceUsageSnapshot;
     }
+  | DelimitedTextParseResponse
   | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);

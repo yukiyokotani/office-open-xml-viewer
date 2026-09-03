@@ -613,7 +613,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
     {
       name: 'XlsxSheetViewer',
       ctor: 'new XlsxSheetViewer(canvas: HTMLCanvasElement, options?: XlsxSheetViewerOptions)',
-      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome. Native worksheet scrollbars are visible by default. DOM chrome, styles and listeners follow canvas.ownerDocument, so a parent page can mount borrowed workbook sheets into same-origin popup canvases.',
+      note: 'Canvas-mounted active-sheet viewport. It uses the caller canvas and the same sheet rendering, selection, find and navigation mechanics as XlsxViewer, but creates no sheet-tab/footer chrome. As a secondary convenience, its load method can explicitly reuse this Excel-style surface for one CSV, TSV, or generic delimited-text source; this does not add delimited-text loading to XlsxWorkbook or XlsxViewer, and every field remains text. Native worksheet scrollbars are visible by default. DOM chrome, styles and listeners follow canvas.ownerDocument, so a parent page can mount borrowed workbook sheets into same-origin popup canvases.',
       options: [
         { name: 'cellScale', type: 'number', def: '1', desc: 'Scale factor for cell/header dimensions (0.5 = half size).' },
         { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom bounds as scale factors (10%–400%).' },
@@ -652,7 +652,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       ],
       methods: [
         { sig: 'static fromWorkbook(canvas, workbook, options?): Omit<XlsxSheetViewer, "load">', desc: 'Synchronously attach a borrowed workbook without materializing a sheet. Await goToSheet(index) to render only the requested sheet.' },
-        { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a Viewer-owned workbook and render its first active sheet viewport.' },
+        { sig: 'load(source: string | ArrayBuffer, options?: XlsxSheetLoadOptions): Promise<void>', desc: 'Load a Viewer-owned XLSX source by default, or explicitly preview CSV, TSV, or generic delimited text. Use { format: "delimited-text", delimiter } for formats such as .txt, .dat, and .psv. String sources are fetched URLs rather than raw text or filesystem paths; use File.arrayBuffer() for a browser File. Delimited fields stay text with no format or value inference. Reload replacement, callbacks, worker rendering, and destroy ownership are the same as XLSX loading.' },
         { sig: 'goToSheet(index: number): Promise<void>', desc: 'Show a specific sheet (0-indexed, clamped).' },
         { sig: 'nextSheet(): Promise<void>', desc: 'Advance one sheet.' },
         { sig: 'prevSheet(): Promise<void>', desc: 'Go back one sheet.' },

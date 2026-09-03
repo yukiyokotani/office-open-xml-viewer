@@ -36,7 +36,6 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, XlsxRenderViewportOptions, WorkerRequest, WorkerResponse, Cell, SheetVisibility, XlsxComment } from './types.js';
 import { selectSheetVisibility } from './sheet-visibility.js';
-import { resolveSharedStrings } from './shared-strings.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
@@ -72,6 +71,15 @@ import {
 } from './worksheet-pull-client.js';
 import { GridGeometry } from './internal/grid-geometry.js';
 import { applyAutoRowHeights, inheritSheetRenderCache } from './renderer.js';
+import {
+  resolveDelimitedTextOptions,
+  type ResolvedDelimitedTextOptions,
+  type XlsxSheetLoadOptions,
+} from './delimited-text.js';
+import type {
+  DelimitedTextParseRequest,
+  DelimitedTextParseResponse,
+} from './delimited-text-protocol.js';
 
 /** Public options for {@link XlsxWorkbook.renderViewportToBitmap}. Viewer-only
  * worksheet projection state is intentionally not part of this contract. */
@@ -86,6 +94,8 @@ export const retainXlsxViewerFonts = Symbol('retain-xlsx-viewer-fonts');
 export const prepareXlsxViewerRowHeights = Symbol('prepare-xlsx-viewer-row-heights');
 /** @internal Release worker-side viewer projection cache entries. */
 export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
+/** @internal XlsxSheetViewer-only source dispatcher. */
+export const loadXlsxSheetSource = Symbol('load-xlsx-sheet-source');
 
 interface RetainedFontSet {
   refs: number;
@@ -110,13 +120,14 @@ export interface LoadOptions extends CoreLoadOptions {
 }
 
 type WorkbookBridge = WorkerBridge<
-  WorkerResponse | RenderWorkerResponse | PullSessionResponse<ArrayBuffer, number>
+  WorkerResponse | RenderWorkerResponse | DelimitedTextParseResponse |
+  PullSessionResponse<ArrayBuffer, number>
 >;
 
 export class XlsxWorkbook {
   private metrics: OoxmlResourceMetricsSession | null = null;
   private bridge: WorkbookBridge | null = null;
-  private modelBacked = false;
+  private delimitedTextBacked = false;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
   /** One materialization per sheet at a time. This becomes the ownership seam
@@ -176,6 +187,7 @@ export class XlsxWorkbook {
     worker: Worker | null,
     mode: 'main' | 'worker',
     wasmUrlOverride?: string | URL,
+    initializeWasm = true,
   ) {
     this._mode = mode;
     if (!worker) return;
@@ -205,8 +217,10 @@ export class XlsxWorkbook {
     // Default: the parser WASM emitted next to this bundle, resolved relative to
     // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
     // relative override is still resolved against `location.href`.
-    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
-    this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
+    if (initializeWasm) {
+      const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+      this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
+    }
   }
 
   /** The render mode this loaded workbook owns. Injected viewers use this fact
@@ -215,64 +229,91 @@ export class XlsxWorkbook {
     return this._mode;
   }
 
-  /**
-   * Create a main-thread workbook from already-materialized render models.
-   *
-   * This path does not create a Worker, initialize WASM, or read an OOXML
-   * archive. `worksheets` must be parallel to `model.workbook.sheets` and are
-   * installed by reference. Shared-string cells are resolved in place before
-   * resource admission; callers must not otherwise mutate either input while
-   * the workbook is in use. Archive-only operations such as image extraction
-   * and Markdown projection are unavailable.
-   */
-  static fromModel(model: ParsedWorkbook, worksheets: readonly Worksheet[]): XlsxWorkbook {
-    const sheets = model.workbook.sheets;
-    if (sheets.length !== worksheets.length) {
-      throw new Error(
-        `Workbook metadata has ${sheets.length} ${sheets.length === 1 ? 'sheet' : 'sheets'} ` +
-        `but ${worksheets.length} worksheet models were supplied`,
-      );
+  /** @internal XlsxSheetViewer-only source dispatcher. */
+  static async [loadXlsxSheetSource](
+    source: string | ArrayBuffer,
+    opts: LoadOptions,
+    sourceOptions: XlsxSheetLoadOptions = {},
+  ): Promise<XlsxWorkbook> {
+    if (sourceOptions.format === undefined || sourceOptions.format === 'xlsx') {
+      return await this.load(source, opts);
     }
+    if (
+      sourceOptions.format === 'csv'
+      || sourceOptions.format === 'tsv'
+      || sourceOptions.format === 'delimited-text'
+    ) {
+      return await this.loadDelimitedText(source, opts, sourceOptions);
+    }
+    throw new TypeError('Unsupported XlsxSheetViewer source format');
+  }
 
-    const cache = new Map<number, Worksheet>();
-    let retained: WorksheetCacheUsage = {
-      rows: 0,
-      cells: 0,
-      ownedUtf8Bytes: 0,
-      jsonBytes: 0,
-    };
-    worksheets.forEach((worksheet, index) => {
-      const metadata = sheets[index]!;
-      if (worksheet.name !== metadata.name) {
-        throw new Error(
-          `Worksheet ${index} is named "${worksheet.name}" but workbook metadata names it "${metadata.name}"`,
-        );
-      }
-      resolveSharedStrings(worksheet, model.sharedStrings);
-      const measured = measureWorksheet(worksheet);
-      assertWorksheetModelUsage(measured, 'from-model', undefined);
-      assertWorksheetJsonBytes(measured.jsonBytes, 'from-model', undefined);
-      retained = addWorksheetCacheUsage(retained, measured);
-      assertWorksheetCacheUsage(retained, 'from-model', undefined);
-      cache.set(index, worksheet);
-    });
-
-    const workbook = new XlsxWorkbook(null, 'main');
-    workbook.modelBacked = true;
-    workbook.parsedWorkbook = model;
-    workbook.sheetCache = cache;
-    workbook.retainedSheetUsage = retained;
-    const resourceOptions = normalizeLoadResourceOptions({});
-    workbook.metrics = new OoxmlResourceMetricsSession({
+  private static async loadDelimitedText(
+    source: string | ArrayBuffer,
+    opts: LoadOptions,
+    sourceOptions: Exclude<XlsxSheetLoadOptions, Readonly<{ format?: 'xlsx' }>>,
+  ): Promise<XlsxWorkbook> {
+    const delimited = resolveDelimitedTextOptions(sourceOptions);
+    const resourceOptions = normalizeLoadResourceOptions(opts);
+    const mode = opts.mode ?? 'main';
+    const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'xlsx',
-      mode: 'main',
+      mode,
       policy: resourceOptions.policy,
-      emitToConsole: false,
+      onMetrics: resourceOptions.onResourceMetrics,
+      emitToConsole: resourceOptions.debug,
     });
-    workbook.metrics.checkpoint('model ready');
-    workbook.metrics.succeed({ sheets: worksheets.length });
-    return workbook;
+    try {
+      if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
+        throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
+      }
+      const callerBuffer = typeof source === 'string' ? undefined : source;
+      let buffer: ArrayBuffer;
+      if (typeof source === 'string') {
+        const response = await fetch(source);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
+        }
+        buffer = await response.arrayBuffer();
+      } else {
+        buffer = source;
+      }
+      metrics.setSourceBytes(buffer.byteLength);
+      metrics.checkpoint('source ready');
+      const worker = mode === 'worker'
+        ? (await import('./render-worker-host')).createRenderWorker()
+        : (await import('./delimited-text-worker-host')).createDelimitedTextWorker();
+      let workbook: XlsxWorkbook | undefined;
+      try {
+        const loaded = new XlsxWorkbook(worker, mode, undefined, false);
+        workbook = loaded;
+        loaded.metrics = metrics;
+        await loaded._loadDelimitedText(
+          callerBuffer === buffer ? buffer.slice(0) : buffer,
+          opts,
+          resourceOptions.policy,
+          delimited,
+        );
+        if (mode === 'main') {
+          loaded.bridge?.terminate();
+          loaded.bridge = null;
+        }
+        metrics.checkpoint('worksheet ready');
+        metrics.succeed({ sheets: 1 });
+        return loaded;
+      } catch (error) {
+        const rejectedWorkbook = workbook;
+        disposeRejectedLoad(
+          worker,
+          rejectedWorkbook ? () => rejectedWorkbook.destroy() : undefined,
+        );
+        throw error;
+      }
+    } catch (error) {
+      metrics.fail(error);
+      throw error;
+    }
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
@@ -436,6 +477,8 @@ export class XlsxWorkbook {
         new TextDecoder().decode(new Uint8Array(workbookJson)),
       ) as ParsedWorkbook;
     }
+    const parsedWorkbook = this.parsedWorkbook;
+    if (!parsedWorkbook) throw new Error('XLSX worker returned no workbook metadata');
     this.ensureWorksheetPullClient();
     // #773: a workbook-level degradation (a present-but-corrupt shared part such
     // as `xl/sharedStrings.xml`, which blanks every string cell across all sheets)
@@ -443,7 +486,7 @@ export class XlsxWorkbook {
     // the model also carries it on `workbook.parseError` for callers that inspect
     // it. Per-sheet placeholders (a broken worksheet) already surface via the
     // sheet-grid overlay, so they are not re-logged here.
-    const workbookError = this.parsedWorkbook?.workbook.parseError;
+    const workbookError = parsedWorkbook.workbook.parseError;
     if (workbookError) {
       console.warn(`[ooxml] xlsx opened with a degraded part: ${workbookError}`);
     }
@@ -452,7 +495,61 @@ export class XlsxWorkbook {
       // realm even when paint runs in a worker. Register the same fallback
       // faces in both realms before any worksheet geometry snapshot is made so
       // ECMA-376 MDW is identical across paint and interaction.
-      this.googleFontNames = [...xlsxFontPreloadNames(this.parsedWorkbook)];
+      this.googleFontNames = [...xlsxFontPreloadNames(parsedWorkbook)];
+      if (typeof document !== 'undefined' && document.fonts) {
+        await this.retainFontsInSet(document.fonts);
+      }
+    }
+  }
+
+  private async _loadDelimitedText(
+    data: ArrayBuffer,
+    opts: LoadOptions,
+    resourcePolicy: NormalizedOoxmlResourcePolicy,
+    options: ResolvedDelimitedTextOptions,
+  ): Promise<void> {
+    const bridge = this.requireBridge();
+    this.delimitedTextBacked = true;
+    this.resourcePolicy = resourcePolicy;
+    this.workerTimeoutMs = opts.workerTimeoutMs;
+    this.generation++;
+    this.math = this._mode === 'worker' ? undefined : opts.math;
+    this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
+    this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
+    this.chartEx = this._mode === 'worker' ? undefined : opts.chartEx;
+    this.tiff = this._mode === 'worker' ? undefined : opts.tiff;
+    const rendererDescriptors = this._mode === 'worker'
+      ? workerRendererDescriptors(opts)
+      : undefined;
+    const response = await bridge.request(
+      (id) => ({
+        type: 'parseDelimitedText',
+        id,
+        data,
+        options,
+        useGoogleFonts: !!opts.useGoogleFonts,
+        renderers: rendererDescriptors,
+      } satisfies DelimitedTextParseRequest),
+      [data],
+      { timeoutMs: opts.workerTimeoutMs },
+    ) as Extract<DelimitedTextParseResponse, { type: 'delimitedTextParsed' }>;
+    const worksheet = JSON.parse(
+      new TextDecoder().decode(response.worksheetJson),
+    ) as Worksheet;
+    const sheets = response.workbook.workbook.sheets;
+    if (sheets.length !== 1 || sheets[0]?.name !== worksheet.name) {
+      throw new Error('Delimited text worker returned inconsistent worksheet metadata');
+    }
+    const measured = measureWorksheet(worksheet);
+    assertWorksheetModelUsage(measured, 'load-delimited-text', undefined);
+    assertWorksheetJsonBytes(measured.jsonBytes, 'load-delimited-text', undefined);
+    assertWorksheetCacheUsage(measured, 'load-delimited-text', undefined);
+    this.parsedWorkbook = response.workbook;
+    this.sheetCache.set(0, worksheet);
+    this.retainedSheetUsage = measured;
+
+    if (opts.useGoogleFonts) {
+      this.googleFontNames = [...xlsxFontPreloadNames(response.workbook)];
       if (typeof document !== 'undefined' && document.fonts) {
         await this.retainFontsInSet(document.fonts);
       }
@@ -562,7 +659,7 @@ export class XlsxWorkbook {
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     const metrics = this.metrics;
     if (!metrics) throw new Error('Workbook not loaded');
-    if (this.modelBacked) {
+    if (this.delimitedTextBacked) {
       const report = metrics.current();
       if (!report) throw new Error('OOXML resource metrics are not ready');
       return report;
@@ -709,6 +806,7 @@ export class XlsxWorkbook {
    */
   async getImage(imagePath: string, mimeType: string): Promise<Blob> {
     this.assertResourceHealthy();
+    this.requireArchiveBridge();
     const queued = this.queuedImageLoads?.get(imagePath);
     if (queued) return queued;
     const p = this.runArchiveOperation(() =>
@@ -730,7 +828,7 @@ export class XlsxWorkbook {
   }
 
   private requestImage(imagePath: string, mimeType: string): Promise<Blob> {
-    return this.requireBridge()
+    return this.requireArchiveBridge()
       .request((id) => ({ type: 'extractImage', id, path: imagePath }) satisfies WorkerRequest)
       .then((res) => {
         const bytes = (res as Extract<WorkerResponse, { type: 'imageExtracted' }>).bytes;
@@ -755,7 +853,7 @@ export class XlsxWorkbook {
    */
   async toMarkdown(): Promise<string> {
     this.assertResourceHealthy();
-    const res = await this.runArchiveOperation(() => this.requireBridge().request(
+    const res = await this.runArchiveOperation(() => this.requireArchiveBridge().request(
       (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
     ));
     return (res as Extract<WorkerResponse, { type: 'markdownRendered' }>).markdown;
@@ -1009,6 +1107,13 @@ export class XlsxWorkbook {
 
   private requireBridge(): WorkbookBridge {
     if (!this.bridge) {
+      throw new Error('This operation requires an active workbook worker');
+    }
+    return this.bridge;
+  }
+
+  private requireArchiveBridge(): WorkbookBridge {
+    if (this.delimitedTextBacked || !this.bridge) {
       throw new Error('This operation requires an active archive-backed workbook');
     }
     return this.bridge;

@@ -9,6 +9,7 @@ export type { ResolvedList } from './validation-list.js';
 export type {
   XlsxViewerOptions,
   XlsxSheetViewerOptions,
+  XlsxSheetLoadOptions,
   XlsxViewportOffset,
   XlsxCellViewportRect,
   XlsxScrollToCellOptions,
