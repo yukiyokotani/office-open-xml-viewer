@@ -230,8 +230,7 @@ fn write_quoted_comment(
     out: &mut MarkdownWriter,
 ) {
     let author = escape_inline_md(&author.replace(['\r', '\n'], " "));
-    let _ = write_quote_prefix(depth, out)
-        .and_then(|()| writeln!(out, " **{author}**{status}"));
+    let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out, " **{author}**{status}"));
     let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out));
     if text.is_empty() {
         let _ = write_quote_prefix(depth, out).and_then(|()| writeln!(out));

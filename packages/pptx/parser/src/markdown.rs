@@ -38,7 +38,10 @@ impl MarkdownWriter {
             observed: Cell::new(0),
             exceeded: Cell::new(false),
         });
-        (Self::with_budget(Rc::clone(&budget)), Self::with_budget(budget))
+        (
+            Self::with_budget(Rc::clone(&budget)),
+            Self::with_budget(budget),
+        )
     }
 
     fn with_budget(budget: Rc<MarkdownBudget>) -> Self {

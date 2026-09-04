@@ -112,12 +112,8 @@ pub fn docx_to_markdown(
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    render_markdown_from_bytes_with_limits(
-        data,
-        max_archive_entry_bytes,
-        max_total_inflated_bytes,
-    )
-    .map_err(docx_markdown_js_error)
+    render_markdown_from_bytes_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes)
+        .map_err(docx_markdown_js_error)
 }
 
 /// Extract raw bytes for a single embedded image entry (e.g.
@@ -824,7 +820,10 @@ mod tests {
             assert!(error.contains(r#""stage":"serialization""#), "{error}");
             assert!(error.contains(r#""resource":"docx-markdown""#), "{error}");
             assert!(error.contains(r#""metric":"bytes""#), "{error}");
-            assert!(error.contains(&format!(r#""limit":{}"#, exact - 1)), "{error}");
+            assert!(
+                error.contains(&format!(r#""limit":{}"#, exact - 1)),
+                "{error}"
+            );
         }
     }
 
