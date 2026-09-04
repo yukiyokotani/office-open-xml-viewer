@@ -3,7 +3,8 @@ use ooxml_common::package_session::PackageLimitReporter;
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::resource::{
     HardResourceLimitKind, ResourceUsage, HARD_MAX_DOCX_BODY_CHUNK_JSON_BYTES,
-    HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES, HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
+    HARD_MAX_DOCX_BOOTSTRAP_JSON_BYTES, HARD_MAX_DOCX_MARKDOWN_BYTES,
+    HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES,
 };
 use wasm_bindgen::prelude::*;
 
@@ -21,6 +22,8 @@ mod xml_util;
 thread_local! {
     static DOCX_RETAINED_MODEL_JSON_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
+    static DOCX_MARKDOWN_LIMIT_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn docx_retained_model_json_limit() -> u64 {
@@ -29,6 +32,50 @@ fn docx_retained_model_json_limit() -> u64 {
         return limit;
     }
     HARD_MAX_DOCX_RETAINED_MODEL_JSON_BYTES
+}
+
+fn docx_markdown_limit() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = DOCX_MARKDOWN_LIMIT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    HARD_MAX_DOCX_MARKDOWN_BYTES
+}
+
+fn render_markdown_from_zip(zip: &mut parser::Zip) -> Result<String, String> {
+    let doc = parser::parse(zip)?;
+    let limit = docx_markdown_limit();
+    let output = markdown::render_document_with_limit(&doc, limit);
+    zip.operation()?.limit_reporter()?.observe_hard_limit(
+        HardResourceLimitKind::DocxMarkdownBytes,
+        None,
+        limit,
+        output.observed(),
+    )?;
+    Ok(output.into_string())
+}
+
+fn render_markdown_from_bytes_with_limits(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<String, String> {
+    let mut zip = match parser::open_zip_with_limits(
+        data.to_vec(),
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+    ) {
+        Ok(zip) => zip,
+        Err(error) if error.starts_with("OOXML_RESOURCE_LIMIT:") => return Err(error),
+        Err(error) => {
+            let output = markdown::render_document_with_limit(
+                &parser::degraded_container_document(error),
+                docx_markdown_limit(),
+            );
+            return Ok(output.into_string());
+        }
+    };
+    zip.run_operation("markdown", render_markdown_from_zip)
 }
 
 /// Parse a docx archive and return the model as UTF-8 JSON **bytes**.
@@ -65,14 +112,12 @@ pub fn docx_to_markdown(
     max_total_inflated_bytes: Option<u64>,
 ) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let doc = parser::parse_from_bytes_with_limits(
+    render_markdown_from_bytes_with_limits(
         data,
         max_archive_entry_bytes,
         max_total_inflated_bytes,
-        "markdown",
     )
-    .map_err(docx_markdown_js_error)?;
-    Ok(markdown::render_document(&doc))
+    .map_err(docx_markdown_js_error)
 }
 
 /// Extract raw bytes for a single embedded image entry (e.g.
@@ -549,12 +594,15 @@ impl DocxArchive {
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
-        let doc = match self.archive.as_mut() {
-            Ok(zip) => zip.run_operation("markdown", parser::parse),
-            Err(e) => Ok(parser::degraded_container_document(e.clone())),
+        let markdown = match self.archive.as_mut() {
+            Ok(zip) => zip.run_operation("markdown", render_markdown_from_zip),
+            Err(error) => Ok(markdown::render_document_with_limit(
+                &parser::degraded_container_document(error.clone()),
+                docx_markdown_limit(),
+            )
+            .into_string()),
         };
-        let doc = doc.map_err(docx_markdown_js_error)?;
-        Ok(markdown::render_document(&doc))
+        markdown.map_err(docx_markdown_js_error)
     }
 }
 
@@ -573,8 +621,7 @@ pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
 /// section properties, font metrics, drawing shapes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
-    let doc = parser::parse_from_bytes_with_limits(data, None, None, "markdown")?;
-    Ok(markdown::render_document(&doc))
+    render_markdown_from_bytes_with_limits(data, None, None)
 }
 
 fn docx_parser_js_error(error: String) -> JsValue {
@@ -607,6 +654,21 @@ fn extract_entry_with_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MarkdownLimitOverride(Option<u64>);
+
+    impl MarkdownLimitOverride {
+        fn set(limit: u64) -> Self {
+            let previous = DOCX_MARKDOWN_LIMIT_OVERRIDE.with(|value| value.replace(Some(limit)));
+            Self(previous)
+        }
+    }
+
+    impl Drop for MarkdownLimitOverride {
+        fn drop(&mut self) {
+            DOCX_MARKDOWN_LIMIT_OVERRIDE.with(|value| value.set(self.0));
+        }
+    }
 
     fn zip_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::{Cursor, Write};
@@ -741,6 +803,28 @@ mod tests {
             document_cursor: None,
             prepared_document_chunk: None,
             last_document_usage: None,
+        }
+    }
+
+    #[test]
+    fn markdown_projection_limit_is_typed_attributed_and_inclusive() {
+        let data = cursor_test_package();
+        let expected = to_markdown_native(&data).unwrap();
+        let exact = expected.len() as u64;
+
+        {
+            let _limit = MarkdownLimitOverride::set(exact);
+            assert_eq!(to_markdown_native(&data).unwrap(), expected);
+        }
+        {
+            let _limit = MarkdownLimitOverride::set(exact - 1);
+            let error = to_markdown_native(&data).unwrap_err();
+            assert!(error.starts_with("OOXML_RESOURCE_LIMIT:"), "{error}");
+            assert!(error.contains(r#""operation":"markdown""#), "{error}");
+            assert!(error.contains(r#""stage":"serialization""#), "{error}");
+            assert!(error.contains(r#""resource":"docx-markdown""#), "{error}");
+            assert!(error.contains(r#""metric":"bytes""#), "{error}");
+            assert!(error.contains(&format!(r#""limit":{}"#, exact - 1)), "{error}");
         }
     }
 

@@ -2513,8 +2513,7 @@ fn render_markdown_from_shared(
 ) -> Result<String, String> {
     let reporter = zip.operation()?.limit_reporter()?;
     let limit = pptx_internal_limits().markdown_bytes;
-    let mut output = MarkdownWriter::new(limit);
-    let mut review_comments = MarkdownWriter::new(limit);
+    let (mut output, mut review_comments) = MarkdownWriter::shared(limit);
     let mut has_comments = false;
     for index in 0..shared.slide_descriptors.len() {
         if index > 0 {
@@ -2539,12 +2538,13 @@ fn render_markdown_from_shared(
             HardResourceLimitKind::PptxMarkdownBytes,
             None,
             limit,
-            output.observed().saturating_add(review_comments.observed()),
+            output.observed(),
         )?;
     }
-    output.push_str(&review_comments.into_string());
+    let mut rendered = output.into_string();
+    rendered.push_str(&review_comments.into_string());
     zip.assert_healthy()?;
-    Ok(output.into_string())
+    Ok(rendered)
 }
 
 fn extract_entry_with_limits(

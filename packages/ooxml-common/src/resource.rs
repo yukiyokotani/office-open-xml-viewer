@@ -75,6 +75,7 @@ pub enum HardResourceLimitKind {
     DocxBodyChunkJsonBytes,
     DocxBootstrapJsonBytes,
     DocxRetainedModelJsonBytes,
+    DocxMarkdownBytes,
     PptxSlideXmlBytes,
     PptxSlideJsonBytes,
     PptxSharedDependencyXmlBytes,
@@ -109,6 +110,7 @@ impl HardResourceLimitKind {
             Self::DocxRetainedModelJsonBytes => {
                 ("serialization", "docx-retained-model-json", "bytes")
             }
+            Self::DocxMarkdownBytes => ("serialization", "docx-markdown", "bytes"),
             Self::PptxSlideXmlBytes => ("parsing", "pptx-slide-xml", "bytes"),
             Self::PptxSlideJsonBytes => ("serialization", "pptx-slide-json", "bytes"),
             Self::PptxSharedDependencyXmlBytes => {
