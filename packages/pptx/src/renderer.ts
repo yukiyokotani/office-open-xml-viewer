@@ -102,7 +102,6 @@ import {
   symbolFontToUnicode,
   isSymbolFontFamily,
   drawUnderline,
-  intendedSingleLinePx,
   hasTextWarp,
   buildWarpEnvelope,
   warpGlyphTransform,
@@ -648,15 +647,6 @@ type LayoutSegment = {
   isTab?: true;
   /** Reading-frame gap resolved against a:tabLst immediately before paint. */
   tabWidthPx?: number;
-  /**
-   * Raw (normalized) font-family requested for this segment's glyphs, kept
-   * alongside the composed CSS `font` string so the line-height pass can floor
-   * the single-line box to the DOCUMENT font's design line height via core's
-   * `intendedSingleLinePx` (ECMA-376 §17.3.1.33 single spacing). Only the
-   * tabled substituted faces (Meiryo / Sakkal Majalla) raise the floor; every
-   * other family returns 0 and leaves PowerPoint's flat 1.2×em untouched.
-   */
-  fontFamily?: string;
   sizePx: number;
   /**
    * Actual glyph size used for paint and width measurement. PowerPoint renders
@@ -1386,8 +1376,6 @@ export function layoutParagraph(
       reflection?: import('@silurus/ooxml-core').Reflection;
       outline?: import('@silurus/ooxml-core').TextOutline;
       highlight?: string;
-      /** Raw normalized family for the design-line-height floor (see LayoutSegment). */
-      fontFamily?: string;
       /** Resolved hyperlink target (IX1) — passed through to the overlay span. */
       hyperlink?: HyperlinkTarget;
       sourceRunId?: number;
@@ -1409,7 +1397,6 @@ export function layoutParagraph(
     const reflection = extras?.reflection;
     const outline = extras?.outline;
     const highlight = extras?.highlight;
-    const fontFamily = extras?.fontFamily;
     const hyperlink = extras?.hyperlink;
     const drawSizePx = extras?.drawSizePx ?? sizePx;
     // Shadow / outline use object identity for merging — adjacent runs share
@@ -1431,7 +1418,6 @@ export function layoutParagraph(
       a.reflection === reflection &&
       a.outline === outline &&
       (a.highlight ?? '') === (highlight ?? '') &&
-      (a.fontFamily ?? '') === (fontFamily ?? '') &&
       (a.drawSizePx ?? a.sizePx) === drawSizePx &&
       hyperlinkKey(a.hyperlink) === hyperlinkKey(hyperlink) &&
       (lsPx === 0 || a.sourceRunId === sourceRunId);
@@ -1463,7 +1449,7 @@ export function layoutParagraph(
         && sourceRunId != null && last.sourceRunId === sourceRunId
         ? lsPx
         : 0;
-      currentLine.segments.push({ text, font, fontFamily, sizePx, drawSizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
+      currentLine.segments.push({ text, font, sizePx, drawSizePx, color, underline, underlineStyle, underlineColor, strikethrough, strikeDouble, letterSpacingPx: lsPx || undefined, sourceRunId, leadingLetterSpacingPx: leadingLetterSpacingPx || undefined, baseline, shadow, reflection, outline, highlight, hyperlink });
     }
   };
 
@@ -1505,7 +1491,6 @@ export function layoutParagraph(
       reflection: seg.reflection,
       outline: seg.outline,
       highlight: seg.highlight,
-      fontFamily: seg.fontFamily,
       sourceRunId: seg.sourceRunId,
       drawSizePx: seg.drawSizePx,
     });
@@ -1620,10 +1605,6 @@ export function layoutParagraph(
       shadow: run.shadow,
       reflection: run.reflection,
       outline: run.outline,
-      // Raw latin/primary family for the design-line-height floor. CJK per-char
-      // pushes below override this to `familyEa` when they draw with `fontEa`,
-      // so a Meiryo set only as the East Asian typeface is still floored.
-      fontFamily: family,
       // §21.1.2.3.4 — highlight is a resolved hex (6-char opaque or 8-char
       // RRGGBBAA); hexToRgba handles both, matching how text/underline colours
       // are converted for canvas.
@@ -1660,7 +1641,6 @@ export function layoutParagraph(
             text: '',
             isTab: true,
             font,
-            fontFamily: family,
             sizePx,
             color,
             underline: false,
@@ -1748,7 +1728,7 @@ export function layoutParagraph(
         // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
         // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
         // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
-        const measured: (MeasuredChar & { font: string; family: string })[] = [];
+        const measured: (MeasuredChar & { font: string })[] = [];
         let westernWord = '';
         const flushWesternWord = (): void => {
           if (westernWord === '') return;
@@ -1757,7 +1737,6 @@ export function layoutParagraph(
             ch: westernWord,
             w: measureTextAdvance(ctx, westernWord, lsPx),
             font,
-            family,
           });
           westernWord = '';
         };
@@ -1769,11 +1748,8 @@ export function layoutParagraph(
           }
           flushWesternWord();
           const chFont = familyEa != null ? fontEa : font;
-          // Floor to the family actually rendering this glyph: `familyEa` for
-          // CJK when an East Asian typeface was declared, else the latin family.
-          const chFamily = familyEa != null ? familyEa : family;
           ctx.font = chFont;
-          measured.push({ ch, w: measureTextAdvance(ctx, ch, 0), font: chFont, family: chFamily });
+          measured.push({ ch, w: measureTextAdvance(ctx, ch, 0), font: chFont });
         }
         flushWesternWord();
         if (para.eaLnBrk === false) {
@@ -1789,7 +1765,7 @@ export function layoutParagraph(
             + (leadingBoundary && measured.length > 0 ? lsPx : 0);
           if (lineW > 0 && !fitsW(tokenW)) newLine();
           for (const m of measured) {
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
           }
           continue;
         }
@@ -1822,7 +1798,7 @@ export function layoutParagraph(
           }
           for (let i = 0; i < n; i++) {
             const m = rest[i];
-            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: m.family });
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
           }
           rest = rest.slice(n);
           if (rest.length > 0) newLine();
@@ -1880,8 +1856,7 @@ export function layoutParagraph(
           const flush = (): void => {
             if (runText === '') return;
             const pFont = runEa ? (fontEa as string) : font;
-            const pFamily = runEa ? (familyEa as string) : family;
-            push(runText, pFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, { ...segExtras, fontFamily: pFamily });
+            push(runText, pFont, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
             runText = '';
           };
           for (const ch of piece) {
@@ -4353,20 +4328,10 @@ export function renderTextBody(
       // defaults like `defRPr sz="30000"` (300pt prompt-text marker) would
       // inflate lineHeight and push real 24pt runs far below the anchor.
       let maxSizePx = 0;
-      // Design single-line-height FLOOR for IMPLICIT single spacing, shared
-      // with docx via core's `intendedSingleLinePx`. For a substituted face
-      // whose Windows design line height is taller than the 1.2×em fallback
-      // (Meiryo 1.596×em, Sakkal Majalla 1.3965×em), the floor keeps fixed
-      // shapes from collapsing. spAutoFit is recalculated from the resolved
-      // browser face below, so its omitted `<a:lnSpc>` path does not inherit
-      // that authored-face floor. Neither path may override an explicitly
-      // authored `<a:spcPct>`; §21.1.2.2.5 / §21.1.2.2.11 define percentage
-      // spacing from the line's largest text size.
-      let designSingle = 0;
-      // spAutoFit is recalculated by the consuming application. Measure the
-      // fonts Canvas actually resolved (including browser substitutions) so
-      // that a shape saved with another machine's font metrics is not laid out
-      // again with those stale design metrics.
+      // Measure the fonts Canvas actually resolved (including browser
+      // substitutions). A tall live font box is retained for containment under
+      // spAutoFit, but PowerPoint does not repeat that box as the implicit
+      // baseline pitch when `<a:lnSpc>` is omitted.
       let resolvedFontLine = 0;
       for (const seg of line.segments) {
         // For an equation, the line must be at least as tall as its own font
@@ -4378,10 +4343,7 @@ export function renderTextBody(
           ? Math.max(seg.sizePx, (seg.math.ascent + seg.math.descent) / 1.2)
           : seg.sizePx;
         if (effSize > maxSizePx) maxSizePx = effSize;
-        // Equations carry no text family; only text segments contribute a floor.
         if (!seg.math) {
-          const ds = intendedSingleLinePx(seg.fontFamily, seg.sizePx);
-          if (ds > designSingle) designSingle = ds;
           if (isSpAutoFit) {
             ctx.font = seg.font;
             const metrics = ctx.measureText(seg.text || 'M');
@@ -4407,23 +4369,21 @@ export function renderTextBody(
       }
 
       // PowerPoint's natural single-line pitch is 120% of the authored text size.
+      // An Office-produced boundary deck confirms that this is independent of
+      // the chosen font and of spAutoFit: Meiryo and Arial, fixed and spAutoFit
+      // shapes all keep the same omitted-lnSpc pitch at a given point size.
       // An explicit percentage is instead based directly on that authored size
       // (ECMA-376 §21.1.2.2.5/.11). Table measurement therefore retains the
       // natural 120% box only when line spacing is omitted in an auto-height
       // row. A positive a:tr@h remains a minimum and uses the glyph-size box for
-      // overflow measurement. Both exclude a substituted font's larger
-      // design-metric floor; glyph painting may keep that floor below without
-      // enlarging the table structure.
+      // overflow measurement. Neither path substitutes the font's design box
+      // for PowerPoint's natural baseline pitch.
       const naturalSingle = maxSizePx * 1.2;
-      const useResolvedFontMetrics = isSpAutoFit
-        && designSingle > naturalSingle
-        && resolvedFontLine > 0;
+      const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
       // being repeated between every pair of lines under spAutoFit (#1473).
-      const implicitSingle = isSpAutoFit && resolvedFontLine > 0
-        ? naturalSingle
-        : Math.max(naturalSingle, designSingle);
+      const implicitSingle = naturalSingle;
       let lineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {

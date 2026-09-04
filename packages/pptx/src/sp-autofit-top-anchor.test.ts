@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { intendedSingleLinePx, type TextRunData } from '@silurus/ooxml-core';
+import type { TextRunData } from '@silurus/ooxml-core';
 import { renderTextBody } from './renderer.js';
 import type { Paragraph, TextBody } from './types.js';
 
@@ -253,36 +253,35 @@ describe('pptx spAutoFit top anchoring', () => {
     expect(draws[0]!.y).toBeCloseTo(fontAscent, 5);
   });
 
-  it('falls back to the authored font design box when Canvas has no font metrics', () => {
+  it('falls back to the natural line box when Canvas has no font metrics', () => {
     const fontSize = 32;
     const { ctx, draws } = recordingContext(fontSize * 0.82, fontSize * 0.18, false);
     const textBody = body('Meiryo', 'Meiryo', fontSize);
     renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
-    const designedLineHeight = intendedSingleLinePx('Meiryo', fontSize);
+    const naturalLineHeight = fontSize * 1.2;
 
-    expect(draws[0]!.y).toBeCloseTo(designedLineHeight * 0.8, 5);
+    expect(draws[0]!.y).toBeCloseTo(naturalLineHeight * 0.8, 5);
     expect(renderTextBody(
       ctx, textBody, 0, 0, 400, 46, SCALE,
       null, 0, false, false, '#000000', undefined, undefined, undefined, true,
-    )).toBeCloseTo(designedLineHeight, 5);
+    )).toBeCloseTo(naturalLineHeight, 5);
   });
 
-  it('does not apply live spAutoFit metrics to fixed text', () => {
+  it('keeps fixed text independent of the authored font design box', () => {
     const fontSize = 32;
     const { ctx, draws } = recordingContext(fontSize * 0.98, fontSize * 0.37);
     const textBody = { ...body('Meiryo', 'Meiryo', fontSize), autoFit: 'none' as const };
     renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
 
-    expect(draws[0]!.y).toBeCloseTo(intendedSingleLinePx('Meiryo', fontSize) * 0.8, 5);
+    expect(draws[0]!.y).toBeCloseTo(fontSize * 0.98, 5);
   });
 
-  it('keeps the established natural line box for spAutoFit fonts without a taller design floor', () => {
+  it('uses live containment metrics for any tall resolved spAutoFit face', () => {
     const fontSize = 32;
     const { ctx, draws } = recordingContext(fontSize * 0.98, fontSize * 0.37);
     const textBody = body('Arial', 'Arial', fontSize);
     renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
 
-    expect(intendedSingleLinePx('Arial', fontSize)).toBeLessThan(fontSize * 1.2);
     expect(draws[0]!.y).toBeCloseTo(fontSize * 0.98, 5);
   });
 });
