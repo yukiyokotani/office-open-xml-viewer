@@ -66,6 +66,9 @@ export interface Worksheet {
   /** `true` for an `xl/chartsheets/*.xml` part. Chart sheets have no cell grid;
    *  their absolute-anchored drawing is the sheet content. */
   isChartSheet?: boolean;
+  /** `true` for a legacy `xl/dialogsheets/*.xml` part. Dialog sheets define
+   *  custom dialog forms rather than a worksheet cell grid. */
+  isDialogSheet?: boolean;
   rows: Row[];
   colWidths: Record<number, number>;
   /** Compact `<col min max width>` declarations in document order. The parser

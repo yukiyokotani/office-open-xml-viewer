@@ -554,14 +554,7 @@ fn parse_sheet_with(
 
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
-    let is_chart_sheet = rels_doc.descendants().any(|node| {
-        node.is_element()
-            && node.tag_name().name() == "Relationship"
-            && node.attribute("Id") == Some(sheet_meta.r_id.as_str())
-            && node
-                .attribute("Type")
-                .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
-    });
+    let sheet_part_kind = resolve_sheet_part_kind(&rels_doc, &sheet_meta.r_id);
 
     let theme_colors = shared.theme_colors.as_ref();
     let sheet_part = format!("xl/{}", sheet_path);
@@ -572,16 +565,16 @@ fn parse_sheet_with(
     // names the offending part, so the OTHER sheets stay openable. Everything
     // after (images / charts / comments / …) is already lenient (returns empty
     // on error), so it stays outside this guard.
-    let sheet_read_parse = if is_chart_sheet {
-        parse_chart_sheet_shell(archive, &sheet_part, name)
-    } else {
-        stream_sheet_data_from_archive(
+    let sheet_read_parse = match sheet_part_kind {
+        SheetPartKind::ChartSheet => parse_chart_sheet_shell(archive, &sheet_part, name),
+        SheetPartKind::DialogSheet => parse_dialog_sheet_shell(archive, &sheet_part, name),
+        SheetPartKind::Worksheet => stream_sheet_data_from_archive(
             archive,
             &sheet_part,
             Rc::clone(&shared.shared_strings),
             Rc::clone(&shared.theme_colors),
         )
-        .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name))
+        .and_then(|streamed| parse_projected_worksheet(streamed, theme_colors, name)),
     };
     let parsed = match sheet_read_parse {
         Ok(parsed) => parsed,
@@ -590,6 +583,13 @@ fn parse_sheet_with(
             return serialize_worksheet_bounded(archive, &sheet_part, &ws);
         }
     };
+    // Dialog sheets are legacy form definitions, not worksheet grids. Their
+    // DrawingML/control relationships are not displayable as worksheet content,
+    // so do not spend bounded package resources materializing content the
+    // renderer intentionally replaces with an informational surface.
+    if sheet_part_kind == SheetPartKind::DialogSheet {
+        return serialize_worksheet_bounded(archive, &sheet_part, &parsed.0);
+    }
     let worksheet = finalize_projected_sheet(
         archive,
         shared,
@@ -600,6 +600,46 @@ fn parse_sheet_with(
         CurrentSheetLookup::BuildFromMaterializedRows,
     )?;
     serialize_worksheet_bounded(archive, &sheet_part, &worksheet)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SheetPartKind {
+    Worksheet,
+    ChartSheet,
+    DialogSheet,
+}
+
+fn resolve_sheet_part_kind(doc: &roxmltree::Document, r_id: &str) -> SheetPartKind {
+    const PACKAGE_RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/package/2006/relationships";
+    let relationship_type = doc.descendants().find_map(|node| {
+        (node.is_element()
+            && node.tag_name().name() == "Relationship"
+            && node.tag_name().namespace() == Some(PACKAGE_RELATIONSHIPS)
+            && node.attribute("Id") == Some(r_id))
+        .then(|| node.attribute("Type"))
+        .flatten()
+    });
+    match relationship_type {
+        Some(value) if is_office_relationship_type(value, "chartsheet") => {
+            SheetPartKind::ChartSheet
+        }
+        Some(value) if is_office_relationship_type(value, "dialogsheet") => {
+            SheetPartKind::DialogSheet
+        }
+        _ => SheetPartKind::Worksheet,
+    }
+}
+
+fn is_office_relationship_type(value: &str, local_name: &str) -> bool {
+    [relationships::TRANSITIONAL, relationships::STRICT]
+        .into_iter()
+        .any(|base| {
+            value
+                .strip_prefix(base)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                == Some(local_name)
+        })
 }
 
 fn parse_chart_sheet_shell(
@@ -614,6 +654,20 @@ fn parse_chart_sheet_shell(
         return Err("expected SpreadsheetML chartsheet root".to_string());
     }
     Ok((Worksheet::chart_sheet(name), Vec::new(), xml))
+}
+
+fn parse_dialog_sheet_shell(
+    archive: &mut XlsxZip,
+    sheet_part: &str,
+    name: &str,
+) -> Result<(Worksheet, HyperlinkRids, String), String> {
+    let xml = read_zip_string(archive, sheet_part)?;
+    let document = parse_guarded(&xml).map_err(|error| error.to_string())?;
+    let root = document.root_element();
+    if root.tag_name().name() != "dialogsheet" || !is_x_ns(root.tag_name().namespace()) {
+        return Err("expected SpreadsheetML dialogsheet root".to_string());
+    }
+    Ok((Worksheet::dialog_sheet(name), Vec::new(), xml))
 }
 
 enum CurrentSheetLookup {
@@ -2270,6 +2324,7 @@ fn parse_projected_worksheet(
     let worksheet = Worksheet {
         name: name.to_string(),
         is_chart_sheet: false,
+        is_dialog_sheet: false,
         rows,
         col_widths,
         col_width_ranges,
@@ -3744,34 +3799,35 @@ impl XlsxArchive {
                 .ok_or_else(|| format!("rId {} not found in rels", sheet.r_id))?;
             let part = format!("xl/{sheet_path}");
             let zip = self.archive.as_mut().expect("container open checked above");
-            let is_chart_sheet = rels_doc.descendants().any(|node| {
-                node.is_element()
-                    && node.tag_name().name() == "Relationship"
-                    && node.attribute("Id") == Some(sheet.r_id.as_str())
-                    && node
-                        .attribute("Type")
-                        .is_some_and(|relationship_type| relationship_type.ends_with("/chartsheet"))
-            });
-            let source = if is_chart_sheet {
-                match parse_chart_sheet_shell(zip, &part, name).and_then(|parsed| {
-                    finalize_projected_sheet(
-                        zip,
-                        shared,
-                        sheet_index,
-                        name,
-                        &sheet_path,
-                        parsed,
-                        CurrentSheetLookup::BuildFromMaterializedRows,
-                    )
-                }) {
-                    Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
+            let sheet_part_kind = resolve_sheet_part_kind(&rels_doc, &sheet.r_id);
+            let source = match sheet_part_kind {
+                SheetPartKind::ChartSheet => {
+                    match parse_chart_sheet_shell(zip, &part, name).and_then(|parsed| {
+                        finalize_projected_sheet(
+                            zip,
+                            shared,
+                            sheet_index,
+                            name,
+                            &sheet_path,
+                            parsed,
+                            CurrentSheetLookup::BuildFromMaterializedRows,
+                        )
+                    }) {
+                        Ok(worksheet) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
+                        Err(error) => {
+                            zip.assert_healthy()?;
+                            ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
+                        }
+                    }
+                }
+                SheetPartKind::DialogSheet => match parse_dialog_sheet_shell(zip, &part, name) {
+                    Ok((worksheet, _, _)) => ActiveWorksheetSource::Ready(Box::new(worksheet)),
                     Err(error) => {
                         zip.assert_healthy()?;
                         ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
                     }
-                }
-            } else {
-                match zip.open_worksheet_cursor(
+                },
+                SheetPartKind::Worksheet => match zip.open_worksheet_cursor(
                     &part,
                     Rc::clone(&shared.shared_strings),
                     Rc::clone(&shared.theme_colors),
@@ -3781,14 +3837,15 @@ impl XlsxArchive {
                         zip.assert_healthy()?;
                         ActiveWorksheetSource::DeferredFailure(CursorOpenFailure::Sheet(error))
                     }
-                }
+                },
             };
             Ok(ActiveWorksheetCursor {
                 source,
                 sheet_index,
                 name: name.to_string(),
                 sheet_path,
-                reference_index: (!is_chart_sheet).then(WorksheetCellLookupBuilder::bounded),
+                reference_index: (sheet_part_kind == SheetPartKind::Worksheet)
+                    .then(WorksheetCellLookupBuilder::bounded),
             })
         })();
         match result {
@@ -5501,6 +5558,184 @@ mod chartsheet_tests {
                 .and_then(|v| v.as_array())
                 .map(Vec::len),
             Some(1),
+        );
+    }
+}
+
+#[cfg(test)]
+mod dialogsheet_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    const TRANSITIONAL_RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const STRICT_RELATIONSHIPS: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+
+    fn dialogsheet_bytes(relationship_base: &str, sheet_xml: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = SimpleFileOptions::default();
+            let workbook = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dialog" sheetId="1" r:id="rSheet"/></sheets></workbook>"#;
+            let relationships = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet" Type="{relationship_base}/dialogsheet" Target="dialogsheets/sheet1.xml"/></Relationships>"#,
+            );
+            for (path, content) in [
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", relationships.as_str()),
+                ("xl/dialogsheets/sheet1.xml", sheet_xml),
+            ] {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn valid_dialogsheet_xml() -> &'static str {
+        r#"<dialogsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></dialogsheet>"#
+    }
+
+    fn assert_dialogsheet_model(worksheet: &serde_json::Value) {
+        assert_eq!(
+            worksheet
+                .get("isDialogSheet")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            worksheet
+                .get("rows")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            worksheet.get("parseError").is_none(),
+            "a valid dialogsheet is not a broken worksheet: {worksheet}"
+        );
+    }
+
+    /// ECMA-376 Part 1 §12.3.7 / §18.3.1.34 defines a Dialogsheet as a
+    /// distinct Workbook target whose root is `dialogsheet`, not `worksheet`.
+    #[test]
+    fn dialog_sheet_is_a_normal_row_free_model() {
+        let mut archive = XlsxZip::new(Cursor::new(dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            valid_dialogsheet_xml(),
+        )))
+        .expect("dialogsheet zip opens");
+        let shared = WorkbookShared::load(&mut archive).expect("shared workbook parts");
+        let bytes =
+            parse_sheet_with(&mut archive, &shared, 0, "Dialog").expect("dialogsheet materializes");
+        let worksheet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_dialogsheet_model(&worksheet);
+    }
+
+    /// The browser viewer uses the resumable cursor path. It must produce the
+    /// same non-error terminal model as the monolithic/native path.
+    #[test]
+    fn dialog_sheet_production_cursor_returns_terminal_model() {
+        let mut archive = XlsxArchive::new(
+            dialogsheet_bytes(TRANSITIONAL_RELATIONSHIPS, valid_dialogsheet_xml()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value.get("kind").and_then(|item| item.as_str()),
+            Some("finished")
+        );
+        assert_dialogsheet_model(value.get("worksheet").expect("terminal worksheet model"));
+    }
+
+    /// Strict packages use the purl relationship base but the same part/root
+    /// contract. Exact recognition must cover both conformance classes.
+    #[test]
+    fn strict_dialog_sheet_relationship_is_recognized() {
+        let mut archive = XlsxArchive::new(
+            dialogsheet_bytes(STRICT_RELATIONSHIPS, valid_dialogsheet_xml()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_dialogsheet_model(value.get("worksheet").expect("terminal worksheet model"));
+    }
+
+    /// Relationship type determines the part kind, but the corresponding root
+    /// still has to satisfy the Dialogsheet host schema.
+    #[test]
+    fn dialog_sheet_relationship_with_wrong_root_remains_a_parse_error() {
+        let bytes = dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#,
+        );
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("expected SpreadsheetML dialogsheet root")));
+    }
+
+    #[test]
+    fn dialog_sheet_root_in_a_foreign_namespace_remains_a_parse_error() {
+        let bytes = dialogsheet_bytes(
+            TRANSITIONAL_RELATIONSHIPS,
+            r#"<dialogsheet xmlns="urn:foreign"><sheetViews/></dialogsheet>"#,
+        );
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("expected SpreadsheetML dialogsheet root")));
+    }
+
+    #[test]
+    fn foreign_relationship_suffix_is_not_a_dialog_sheet() {
+        let bytes = dialogsheet_bytes("urn:foreign", valid_dialogsheet_xml());
+        let mut archive = XlsxArchive::new(bytes, None, None, None).unwrap();
+        archive.open_sheet_cursor(0, "Dialog").unwrap();
+
+        let bytes = archive.pull_sheet_cursor_inner(1).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let worksheet = value.get("worksheet").expect("terminal worksheet model");
+        assert!(worksheet.get("isDialogSheet").is_none());
+        assert!(worksheet["parseError"]
+            .as_str()
+            .is_some_and(|error| error.contains("MCE-processed worksheet root")));
+    }
+
+    #[test]
+    fn strict_chart_sheet_relationship_keeps_the_chart_part_kind() {
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSheet" Type="{STRICT_RELATIONSHIPS}/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
+        );
+        let document = parse_guarded(&relationships).unwrap();
+        assert_eq!(
+            resolve_sheet_part_kind(&document, "rSheet"),
+            SheetPartKind::ChartSheet
         );
     }
 }
