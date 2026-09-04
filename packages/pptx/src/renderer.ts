@@ -840,9 +840,10 @@ export function cssFontStack(normalized: string, authoredFamily = normalized): s
   }
   const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
   const cjk = classifyCjkFont(authoredFamily);
-  const cjkPart = cjk
-    ? `${quoteAll(cjkFallbackChain(cjk, variant).filter((name) => name !== googleAlias))}, `
-    : '';
+  const cjkFamilies = cjk
+    ? cjkFallbackChain(cjk, variant).filter((name) => name !== googleAlias)
+    : [];
+  const cjkPart = cjkFamilies.length > 0 ? `${quoteAll(cjkFamilies)}, ` : '';
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
   return `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${generic}`;

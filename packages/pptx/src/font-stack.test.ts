@@ -33,6 +33,7 @@ describe('cssFontStack — CJK language-specific Noto ordering', () => {
     const serif = cssFontStack('Noto Serif CJK HK');
     expect(serif).not.toContain('"Noto Serif HK"');
     expect(serif).not.toContain('"Noto Serif TC"');
+    expect(serif).not.toMatch(/,\s*,/);
   });
 
   it('Korean sans (Malgun Gothic) → Noto Sans KR leads the CJK tail', () => {

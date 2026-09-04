@@ -114,17 +114,19 @@ export function cssTailFor(name: string | null | undefined): string {
   }
   const serif = generic === 'serif';
   const googleAlias = googleCjkFontAlias(name);
-  const cjkPart = [
+  const cjkFamilies = [
     ...(googleAlias ? [googleAlias] : []),
     ...cjkFallbackChain(cjk, serif ? 'serif' : 'sans')
       .filter((family) => family !== googleAlias),
-  ]
+  ];
+  const cjkPart = cjkFamilies
     .map((n) => `"${n}"`)
     .join(', ');
+  const cjkPrefix = cjkPart ? `${cjkPart}, ` : '';
   const tail = serif ? NON_CJK_SERIF_TAIL : NON_CJK_SANS_TAIL;
   const genericKeyword = serif ? 'serif' : 'sans-serif';
   // CJK Noto leads, then Latin/metric substitutes, Arabic, non-CJK scripts.
-  return `${cjkPart}, "Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${tail}, ${genericKeyword}`;
+  return `${cjkPrefix}"Calibri", "Carlito", "Cambria", "Caladea", Arial, "Noto Naskh Arabic", "Noto Sans Arabic", ${tail}, ${genericKeyword}`;
 }
 
 /** Full CSS font-family list for a cell font name (named face first). */
