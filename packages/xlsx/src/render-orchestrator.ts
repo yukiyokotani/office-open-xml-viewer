@@ -388,9 +388,10 @@ export async function decodeImageSource(
  *  renderer skip a falsy source without a re-fetch.
  *
  *  A no-op when `fetchImage` is absent (no byte source). Ordinary per-image
- *  failures are swallowed so one broken picture doesn't sink the grid. A
- *  missing optional TIFF codec is retained as a frame-local placeholder mark;
- *  decoded-image quota and actual TIFF codec failures remain actionable. */
+ *  failures are swallowed so one broken picture doesn't sink the grid. A TIFF
+ *  unavailable because its optional codec is missing or cannot decode it is
+ *  retained as a frame-local placeholder mark; decoded-image quota failures
+ *  remain actionable. */
 export async function prefetchImages(
   ws: Worksheet,
   imageCache: Map<string, CanvasImageSource | null>,
@@ -713,12 +714,12 @@ export async function prefetchImages(
         // metafile, so the renderer skips a falsy source without a re-fetch).
         imageCache.set(key, src);
       } catch (error) {
-        if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+        if (isOptionalImageCodecUnavailableError(error, 'tiff') || isTiffDecodeError(error)) {
           imageCache.set(key, null);
           markOptionalImageUnavailable(imageCache, key, 'tiff');
           return;
         }
-        if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
+        if (isOoxmlDecodedImageLimitError(error)) throw error;
         // Transient failure: DELETE any prior lookup entry rather than leaving
         // it. A prior entry is re-resolved precisely because its shared-cache
         // backing may be gone (LRU-evicted and GPU-closed); when the re-resolve
