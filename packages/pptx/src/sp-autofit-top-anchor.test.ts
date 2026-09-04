@@ -97,7 +97,69 @@ function body(fontFamily: string, fontFamilyEa: string, fontSize: number): TextB
   } as TextBody;
 }
 
+function twoLineBody(fontFamily: string, fontFamilyEa: string, fontSize: number): TextBody {
+  const textBody = body(fontFamily, fontFamilyEa, fontSize);
+  const first = textBody.paragraphs[0]!.runs[0] as TextRunData;
+  textBody.paragraphs[0]!.runs = [
+    { ...first, text: '一行目' },
+    { type: 'break' } as unknown as TextRunData,
+    { ...first, text: '二行目' },
+  ];
+  return textBody;
+}
+
 describe('pptx spAutoFit top anchoring', () => {
+  it('keeps implicit multi-line pitch separate from the taller resolved font box (#1473)', () => {
+    const fontSize = 32;
+    const actualAscent = fontSize * 0.78;
+    const actualDescent = fontSize * 0.18;
+    const fontAscent = fontSize * 0.98;
+    const fontDescent = fontSize * 0.37;
+    const { ctx, draws } = recordingContext(
+      actualAscent,
+      actualDescent,
+      true,
+      fontAscent,
+      fontDescent,
+    );
+    const textBody = twoLineBody('Meiryo', 'Meiryo', fontSize);
+
+    renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
+
+    expect(draws.map(({ text }) => text)).toEqual(['一行目', '二行目']);
+    expect(draws[0]!.y).toBeCloseTo(actualAscent, 5);
+    // A resolved Canvas design box may be useful for required bounds, but it is
+    // not PowerPoint's implicit baseline pitch when a:lnSpc is omitted.
+    expect(draws[1]!.y - draws[0]!.y).toBeCloseTo(fontSize * 1.2, 5);
+
+    const neededHeight = renderTextBody(
+      ctx, textBody, 0, 0, 400, 46, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, undefined, true,
+    );
+    // The final line still reserves the live font box below the last baseline:
+    // one baseline pitch plus one full resolved line box.
+    expect(neededHeight).toBeCloseTo(fontSize * 1.2 + fontAscent + fontDescent, 5);
+  });
+
+  it('preserves explicit percentage line spacing under spAutoFit (#1473)', () => {
+    const fontSize = 32;
+    const { ctx, draws } = recordingContext(
+      fontSize * 0.78,
+      fontSize * 0.18,
+      true,
+      fontSize * 0.98,
+      fontSize * 0.37,
+    );
+    const textBody = twoLineBody('Meiryo', 'Meiryo', fontSize);
+    textBody.paragraphs[0]!.spaceLine = { type: 'pct', val: 150000 };
+
+    renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
+
+    // a:spcPct is based on PowerPoint's natural single-line box; only the
+    // omitted a:lnSpc path is recalculated by this fix.
+    expect(draws[1]!.y - draws[0]!.y).toBeCloseTo(fontSize * 1.2 * 1.5, 5);
+  });
+
   it.each([
     ['theme-resolved heading face', 'Meiryo', 'Meiryo', 32, 46],
     ['explicit Meiryo face', 'Meiryo', 'Meiryo', 36, 50.9],
