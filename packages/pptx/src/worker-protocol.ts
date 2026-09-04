@@ -62,7 +62,8 @@ export type PptxWorkerRequest =
   | { kind: 'extractMedia'; id: number; path: string }
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'extractFont'; id: number; path: string }
-  | { kind: 'resourceUsage'; id: number };
+  | { kind: 'resourceUsage'; id: number }
+  | { kind: 'toMarkdown'; id: number };
 
 export type PptxWorkerResponse =
   | { kind: 'presentationOpened'; id: number; bootstrap: PresentationBootstrap }
@@ -72,6 +73,7 @@ export type PptxWorkerResponse =
   | { kind: 'imageExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'fontExtracted'; id: number; bytes: ArrayBuffer }
   | { kind: 'resourceUsage'; id: number; usage: OoxmlResourceUsageSnapshot }
+  | { kind: 'markdownRendered'; id: number; markdown: string }
   | ({ kind: 'error'; id: number } & WorkerErrorPayload);
 
 // The render worker owns both the cursor and bounded slide repository. It
@@ -93,6 +95,7 @@ export type RenderWorkerRequest =
   | { kind: 'extractImage'; id: number; path: string }
   | { kind: 'extractFont'; id: number; path: string }
   | { kind: 'resourceUsage'; id: number }
+  | { kind: 'toMarkdown'; id: number }
   | {
       kind: 'renderSlide';
       id: number;

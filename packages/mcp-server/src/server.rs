@@ -46,7 +46,7 @@ impl OoxmlServer {
     // ── xlsx tools ────────────────────────────────────────────────────────────
 
     #[tool(
-        description = "Convert an XLSX file to GitHub-flavoured markdown. Separates independent cell regions at blank row/column bands, preserves declared tables, and collects cell comments after each sheet",
+        description = "Convert an XLSX file to GitHub-flavoured markdown — text-focused projection. One `## SheetName` per sheet followed by a pipe table of cached cell values. Use when an agent needs to *read* spreadsheet content efficiently",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     fn xlsx_to_markdown(&self, Parameters(p): Parameters<XlsxPathParam>) -> String {
@@ -168,7 +168,7 @@ impl OoxmlServer {
     // ── docx tools ────────────────────────────────────────────────────────────
 
     #[tool(
-        description = "Convert a DOCX file to GitHub-flavoured markdown with headings, lists, tables, rich text, linked note references, and anchored threaded comments",
+        description = "Convert a DOCX file to GitHub-flavoured markdown — text-focused projection. Headings, paragraphs, bullet/numbered lists, tables, footnotes, comments, with bold/italic/strikethrough/hyperlinks preserved. Use when an agent needs to *read* the document content efficiently",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     fn docx_to_markdown(&self, Parameters(p): Parameters<DocxPathParam>) -> String {
@@ -354,7 +354,7 @@ impl OoxmlServer {
     }
 
     #[tool(
-        description = "Convert a PPTX file to GitHub-flavoured markdown. Uses grouping, background panels, geometry, and typography to preserve semantic blocks and reading order; comments are collected in a target-aware review appendix",
+        description = "Convert a PPTX file to GitHub-flavoured markdown — text-focused projection. Discards geometry/fills/strokes/effects, keeps titles, bullets, tables, chart summaries, notes, and comments. Use when an agent needs to *read* a deck efficiently (10-30× token reduction vs. structured tools)",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     fn pptx_to_markdown(&self, Parameters(p): Parameters<PptxPathParam>) -> String {

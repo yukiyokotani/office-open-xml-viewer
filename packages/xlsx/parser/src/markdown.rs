@@ -1,6 +1,6 @@
 // Text-focused markdown projection for xlsx workbooks. Walks a parsed
 // Worksheet JSON value and emits a `## SheetName` heading followed by a
-// one or more pipe tables containing the cells' cached display values. Designed for AI
+// pipe table containing the cells' cached display values. Designed for AI
 // agents that need to read spreadsheet content efficiently — drops
 // styling, formatting (numFmt), charts, sparklines, drawings, slicers,
 // conditional formatting, and the formula text (cached value only).
@@ -14,10 +14,9 @@ use crate::types::SharedString;
 
 pub(crate) fn render_sheet(sheet: &Value, shared_strings: &[SharedString], out: &mut String) {
     let name = sheet["name"].as_str().unwrap_or("(unnamed)");
-    let _ = writeln!(out, "## {}\n", escape_heading(name));
+    let _ = writeln!(out, "## {}\n", name);
 
     let Some(rows) = sheet["rows"].as_array() else {
-        render_comments(sheet, out);
         return;
     };
 
@@ -58,8 +57,7 @@ pub(crate) fn render_sheet(sheet: &Value, shared_strings: &[SharedString], out: 
         }
     }
     if max_row == 0 || max_col == 0 {
-        // Empty sheet — comments may still carry useful cell-attached review text.
-        render_comments(sheet, out);
+        // Empty sheet — emit the heading only.
         return;
     }
 
@@ -97,323 +95,20 @@ pub(crate) fn render_sheet(sheet: &Value, shared_strings: &[SharedString], out: 
         grid[(row_idx - min_row) as usize][(col - min_col) as usize].clear();
     }
 
-    let table_ranges = table_ranges(&sheet["tables"]);
-    let regions = semantic_regions(&grid, min_row, min_col, &table_ranges);
-    let multiple_regions = regions.len() > 1;
-    for region in regions {
-        if multiple_regions {
-            let _ = writeln!(
-                out,
-                "### {}:{}\n",
-                cell_ref(region.top_row, region.left_col),
-                cell_ref(region.bottom_row, region.right_col)
-            );
-        }
-        render_region(&grid, min_row, min_col, region, &table_ranges, out);
-    }
-    render_comments(sheet, out);
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Region {
-    top_row: u32,
-    bottom_row: u32,
-    left_col: u32,
-    right_col: u32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DeclaredTable {
-    range: Region,
-    has_header: bool,
-}
-
-fn semantic_regions(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    table_ranges: &[DeclaredTable],
-) -> Vec<Region> {
-    let initial = Region {
-        top_row: min_row,
-        bottom_row: min_row + grid.len() as u32 - 1,
-        left_col: min_col,
-        right_col: min_col + grid[0].len() as u32 - 1,
-    };
-    let mut out = Vec::new();
-    let mut pending = vec![initial];
-    while let Some(region) = pending.pop() {
-        // Blank row bands are semantic section boundaries. A declared Excel
-        // table remains atomic even when it contains a blank data row.
-        let row_split = (region.top_row..=region.bottom_row).find_map(|start| {
-            if !row_is_separator(grid, min_row, min_col, start, region, table_ranges) {
-                return None;
-            }
-            let mut end = start;
-            while end < region.bottom_row
-                && row_is_separator(grid, min_row, min_col, end + 1, region, table_ranges)
-            {
-                end += 1;
-            }
-            Some((start, end))
-        });
-        if let Some((start, end)) = row_split {
-            // Stack is LIFO: push the later block first for top-to-bottom output.
-            if end < region.bottom_row {
-                pending.push(Region {
-                    top_row: end + 1,
-                    ..region
-                });
-            }
-            if start > region.top_row {
-                pending.push(Region {
-                    bottom_row: start - 1,
-                    ..region
-                });
-            }
-            continue;
-        }
-
-        // With no horizontal separator, split side-by-side blocks on fully
-        // blank columns. Combined with the row-first pass this is row-major.
-        let col_split = (region.left_col..=region.right_col).find_map(|start| {
-            if !col_is_separator(grid, min_row, min_col, start, region, table_ranges) {
-                return None;
-            }
-            let mut end = start;
-            while end < region.right_col
-                && col_is_separator(grid, min_row, min_col, end + 1, region, table_ranges)
-            {
-                end += 1;
-            }
-            Some((start, end))
-        });
-        if let Some((start, end)) = col_split {
-            if end < region.right_col {
-                pending.push(Region {
-                    left_col: end + 1,
-                    ..region
-                });
-            }
-            if start > region.left_col {
-                pending.push(Region {
-                    right_col: start - 1,
-                    ..region
-                });
-            }
-            continue;
-        }
-        out.push(region);
-    }
-    out
-}
-
-fn render_region(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    region: Region,
-    table_ranges: &[DeclaredTable],
-    out: &mut String,
-) {
-    let n_cols = (region.right_col - region.left_col + 1) as usize;
-    let rows: Vec<Vec<String>> = (region.top_row..=region.bottom_row)
-        .map(|row| {
-            (region.left_col..=region.right_col)
-                .map(|col| grid[(row - min_row) as usize][(col - min_col) as usize].clone())
-                .collect()
-        })
-        .collect();
-    let declared_header = table_ranges.iter().any(|table| {
-        table.has_header
-            && table.range.top_row == region.top_row
-            && table.range.left_col <= region.left_col
-            && table.range.right_col >= region.right_col
-    });
-    // Outside a declared Excel table we do not guess that the first row is a
-    // header: promoting ordinary data to `<th>` changes its meaning. Synthetic
-    // column labels keep every authored row in the table body.
-    let has_header = declared_header;
-    if has_header {
-        write_table_row(out, &rows[0], n_cols);
-    } else {
-        let headers: Vec<String> = (region.left_col..=region.right_col)
-            .map(column_name)
-            .collect();
-        write_table_row(out, &headers, n_cols);
-    }
+    // Header row: use the first row of the bbox. Markdown tables require a
+    // header — if the first row is blank we still emit empty headers so
+    // downstream renderers parse the rest correctly.
+    write_table_row(out, &grid[0], n_cols);
     let sep: Vec<&str> = (0..n_cols).map(|_| "---").collect();
     let _ = writeln!(out, "| {} |", sep.join(" | "));
-    for row in rows.iter().skip(usize::from(has_header)) {
+    for row in grid.iter().skip(1) {
+        // Skip fully-empty middle rows to keep output tight.
+        if row.iter().all(|c| c.is_empty()) {
+            continue;
+        }
         write_table_row(out, row, n_cols);
     }
     out.push('\n');
-}
-
-fn row_is_empty(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    row: u32,
-    left: u32,
-    right: u32,
-) -> bool {
-    (left..=right).all(|col| grid[(row - min_row) as usize][(col - min_col) as usize].is_empty())
-}
-
-fn row_is_separator(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    row: u32,
-    region: Region,
-    table_ranges: &[DeclaredTable],
-) -> bool {
-    row_is_empty(
-        grid,
-        min_row,
-        min_col,
-        row,
-        region.left_col,
-        region.right_col,
-    ) && !table_ranges.iter().any(|table| {
-        row >= table.range.top_row
-            && row <= table.range.bottom_row
-            && ranges_overlap(
-                region.left_col,
-                region.right_col,
-                table.range.left_col,
-                table.range.right_col,
-            )
-    })
-}
-
-fn col_is_empty(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    col: u32,
-    top: u32,
-    bottom: u32,
-) -> bool {
-    (top..=bottom).all(|row| grid[(row - min_row) as usize][(col - min_col) as usize].is_empty())
-}
-
-fn col_is_separator(
-    grid: &[Vec<String>],
-    min_row: u32,
-    min_col: u32,
-    col: u32,
-    region: Region,
-    table_ranges: &[DeclaredTable],
-) -> bool {
-    col_is_empty(
-        grid,
-        min_row,
-        min_col,
-        col,
-        region.top_row,
-        region.bottom_row,
-    ) && !table_ranges.iter().any(|table| {
-        col >= table.range.left_col
-            && col <= table.range.right_col
-            && ranges_overlap(
-                region.top_row,
-                region.bottom_row,
-                table.range.top_row,
-                table.range.bottom_row,
-            )
-    })
-}
-
-fn ranges_overlap(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> bool {
-    a_start <= b_end && b_start <= a_end
-}
-
-fn table_ranges(tables: &Value) -> Vec<DeclaredTable> {
-    tables
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|table| {
-            let range = &table["range"];
-            Some(DeclaredTable {
-                range: Region {
-                    top_row: range["top"].as_u64()? as u32,
-                    bottom_row: range["bottom"].as_u64()? as u32,
-                    left_col: range["left"].as_u64()? as u32,
-                    right_col: range["right"].as_u64()? as u32,
-                },
-                has_header: table["headerRowCount"].as_u64().unwrap_or(1) > 0,
-            })
-        })
-        .collect()
-}
-
-fn column_name(mut col: u32) -> String {
-    let mut chars = Vec::new();
-    while col > 0 {
-        col -= 1;
-        chars.push((b'A' + (col % 26) as u8) as char);
-        col /= 26;
-    }
-    chars.iter().rev().collect()
-}
-
-fn cell_ref(row: u32, col: u32) -> String {
-    format!("{}{}", column_name(col), row)
-}
-
-fn escape_heading(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('#', "\\#")
-}
-
-fn render_comments(sheet: &Value, out: &mut String) {
-    let Some(comments) = sheet["comments"].as_array() else {
-        return;
-    };
-    if comments.is_empty() {
-        return;
-    }
-    out.push_str("### Cell comments\n\n");
-    for comment in comments {
-        let cell = comment["cellRef"].as_str().unwrap_or("(unknown cell)");
-        let author = comment["author"].as_str().unwrap_or("(unknown)");
-        let status = if comment["resolved"].as_bool() == Some(true) {
-            " [resolved]"
-        } else {
-            ""
-        };
-        let _ = writeln!(out, "#### {} — {}{}\n", cell, author, status);
-        let text = comment["rootText"]
-            .as_str()
-            .or_else(|| comment["text"].as_str())
-            .unwrap_or("");
-        write_quote(text, "> ", out);
-        if let Some(replies) = comment["replies"].as_array() {
-            for reply in replies {
-                let author = reply["author"].as_str().unwrap_or("(unknown)");
-                let status = if reply["resolved"].as_bool() == Some(true) {
-                    " [resolved]"
-                } else {
-                    ""
-                };
-                let _ = writeln!(out, ">> **{}{}**", author, status);
-                write_quote(reply["text"].as_str().unwrap_or(""), ">> ", out);
-            }
-        }
-        out.push('\n');
-    }
-}
-
-fn write_quote(value: &str, prefix: &str, out: &mut String) {
-    if value.is_empty() {
-        let _ = writeln!(out, "{prefix}");
-    } else {
-        for line in value.lines() {
-            let _ = writeln!(out, "{prefix}{line}");
-        }
-    }
 }
 
 fn write_table_row(out: &mut String, row: &[String], n_cols: usize) {
@@ -509,6 +204,91 @@ fn collect_merge_continuation_cells(merge_cells: &Value) -> HashSet<(u32, u32)> 
     set
 }
 
+pub(crate) fn render_sheet_comments(sheet: &Value, out: &mut String, has_comments: &mut bool) {
+    let Some(comments) = sheet["comments"].as_array() else {
+        return;
+    };
+    if comments.is_empty() {
+        return;
+    }
+    if !*has_comments {
+        out.push_str("\n## Review comments\n\n");
+        *has_comments = true;
+    }
+    let sheet_name = sheet["name"].as_str().unwrap_or("(unnamed)");
+    for comment in comments {
+        let cell = comment["cellRef"].as_str().unwrap_or("(unknown cell)");
+        let status = if comment["resolved"].as_bool() == Some(true) {
+            " (resolved)"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "### {} — {}{}\n",
+            escape_heading_text(sheet_name),
+            escape_heading_text(cell),
+            status
+        );
+        let text = comment["rootText"]
+            .as_str()
+            .or_else(|| comment["text"].as_str())
+            .unwrap_or("");
+        write_quoted_comment(
+            comment["author"].as_str().unwrap_or("(unknown)"),
+            text,
+            ">",
+            "",
+            out,
+        );
+        if let Some(replies) = comment["replies"].as_array() {
+            for reply in replies {
+                let status = if reply["resolved"].as_bool() == Some(true) {
+                    " (resolved)"
+                } else {
+                    ""
+                };
+                write_quoted_comment(
+                    reply["author"].as_str().unwrap_or("(unknown)"),
+                    reply["text"].as_str().unwrap_or(""),
+                    ">>",
+                    status,
+                    out,
+                );
+            }
+        }
+        out.push('\n');
+    }
+}
+
+fn write_quoted_comment(author: &str, text: &str, prefix: &str, status: &str, out: &mut String) {
+    let author = escape_inline_text(&author.replace(['\r', '\n'], " "));
+    let _ = writeln!(out, "{prefix} **{author}**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
+        let _ = writeln!(out, "{prefix}");
+    } else {
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
+    }
+}
+
+fn escape_heading_text(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .replace('\\', "\\\\")
+        .replace('#', "\\#")
+}
+
+fn escape_inline_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('`', "\\`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,82 +354,29 @@ mod tests {
     }
 
     #[test]
-    fn blank_rows_and_columns_create_separate_row_major_regions() {
-        let sheet = json!({
-            "name": "Blocks",
-            "rows": [
-                { "index": 1, "cells": [
-                    { "col": 1, "value": { "type": "text", "text": "top-left" } },
-                    { "col": 3, "value": { "type": "text", "text": "top-right" } }
-                ]},
-                { "index": 3, "cells": [
-                    { "col": 1, "value": { "type": "text", "text": "bottom-left" } },
-                    { "col": 3, "value": { "type": "text", "text": "bottom-right" } }
-                ]}
-            ]
-        });
-        let mut out = String::new();
-        render_sheet(&sheet, &[], &mut out);
-
-        let positions: Vec<usize> = ["top-left", "top-right", "bottom-left", "bottom-right"]
-            .iter()
-            .map(|value| out.find(value).expect("region value"))
-            .collect();
-        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{out}");
-        assert!(out.contains("### A1:A1"), "{out}");
-        assert!(out.contains("### C3:C3"), "{out}");
-    }
-
-    #[test]
-    fn declared_table_keeps_blank_rows_and_uses_its_real_header() {
-        let sheet = json!({
-            "name": "Table",
-            "rows": [
-                { "index": 1, "cells": [
-                    { "col": 1, "value": { "type": "text", "text": "Name" } }
-                ]},
-                { "index": 3, "cells": [
-                    { "col": 1, "value": { "type": "text", "text": "Ada" } }
-                ]}
-            ],
-            "tables": [{
-                "range": { "top": 1, "left": 1, "bottom": 3, "right": 1 },
-                "headerRowCount": 1
-            }]
-        });
-        let mut out = String::new();
-        render_sheet(&sheet, &[], &mut out);
-
-        assert!(
-            !out.contains("### A1:A1"),
-            "declared table must stay atomic: {out}"
-        );
-        assert!(out.contains("| Name |\n| --- |\n|  |\n| Ada |"), "{out}");
-    }
-
-    #[test]
-    fn comments_are_collected_after_the_sheet_data_with_thread_context() {
+    fn review_comments_are_separated_quoted_and_threaded() {
         let sheet = json!({
             "name": "Review",
-            "rows": [{ "index": 1, "cells": [
-                { "col": 1, "value": { "type": "text", "text": "Value" } }
-            ]}],
             "comments": [{
-                "cellRef": "A1",
-                "author": "Mina",
-                "rootText": "Check this",
-                "text": "Check this Reply",
-                "replies": [{ "author": "Ren", "text": "Done" }]
+                "cellRef": "B4",
+                "author": "Reviewer",
+                "rootText": "Check this cell.\nKeep the formula.",
+                "text": "Check this cell.\nKeep the formula.\nUpdated.",
+                "resolved": true,
+                "replies": [{ "author": "Editor", "text": "Updated." }]
             }]
         });
         let mut out = String::new();
-        render_sheet(&sheet, &[], &mut out);
+        let mut has_comments = false;
 
+        render_sheet_comments(&sheet, &mut out, &mut has_comments);
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Review — B4 (resolved)"), "{out}");
         assert!(
-            out.find("Value").unwrap() < out.find("### Cell comments").unwrap(),
+            out.contains("> **Reviewer**\n>\n> Check this cell.\n> Keep the formula."),
             "{out}"
         );
-        assert!(out.contains("#### A1 — Mina"), "{out}");
-        assert!(out.contains(">> **Ren**\n>> Done"), "{out}");
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
     }
 }

@@ -65,14 +65,6 @@ pub(crate) struct Slide {
     pub(crate) elements: Vec<SlideElement>,
     /// Provenance for each rendered element, index-aligned with `elements`.
     pub(crate) element_sources: Vec<SlideElementSource>,
-    /// Top-level `<p:grpSp>` membership retained for semantic projections.
-    ///
-    /// The canvas consumes the already-transformed flat `elements` list, so
-    /// this parser-internal sidecar deliberately stays off the public JSON
-    /// wire. Markdown uses it to keep an authored group together while it
-    /// linearises the two-dimensional slide.
-    #[serde(skip, default)]
-    pub(crate) semantic_groups: Vec<SlideElementGroup>,
     /// `ppt/notesSlides/notesSlideN.xml` plain text — the speaker-notes pane
     /// content as a single string (paragraphs joined with '\n'). `None` when
     /// the slide has no notes part. Renderer ignores this; surfaced for tools.
@@ -95,14 +87,6 @@ pub(crate) struct Slide {
     /// byte-for-byte unchanged. The renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) parse_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SlideElementGroup {
-    /// Inclusive index into `Slide::elements`.
-    pub(crate) start: usize,
-    /// Exclusive index into `Slide::elements`.
-    pub(crate) end: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

@@ -140,7 +140,7 @@ pub struct DocxTools;
 
 impl DocxTools {
     #[tool(
-        description = "Convert a DOCX file to GitHub-flavoured markdown. Preserves headings, paragraphs, lists, tables, rich-text formatting, linked footnote/endnote references, and comment anchors; threaded comments are collected at the end. Discards positioning, section properties, font metrics, drawing shapes, and headers/footers. Lossy by design: use `docx_get_structure` / `docx_get_body_element` for precise layout or styling"
+        description = "Convert a DOCX file to GitHub-flavoured markdown. Preserves textual structure (headings from outlineLevel, paragraphs, bullet/numbered lists, tables, footnotes, comments) and rich-text formatting (bold/italic/strikethrough/hyperlinks). Discards positioning, section properties, font metrics, drawing shapes, and headers/footers. Designed for agents that need to *read* the document content efficiently — typical 10×+ token reduction vs. the structured JSON tools. Lossy by design: when you need precise layout or styling, fall back to `docx_get_structure` / `docx_get_body_element`"
     )]
     pub fn docx_to_markdown(Parameters(p): Parameters<DocxPathParam>) -> String {
         let data = match read_file(&p.path) {

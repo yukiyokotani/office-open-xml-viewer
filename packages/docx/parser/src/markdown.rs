@@ -23,7 +23,7 @@ pub(crate) fn render_document(doc: &Document) -> String {
             if text.is_empty() {
                 continue;
             }
-            let _ = writeln!(out, "[^{}]: {}", markdown_label(&note.id), text);
+            let _ = writeln!(out, "[^{}]: {}", note.id, text);
         }
     }
     if !doc.endnotes.is_empty() {
@@ -34,35 +34,128 @@ pub(crate) fn render_document(doc: &Document) -> String {
             if text.is_empty() {
                 continue;
             }
-            let _ = writeln!(out, "[^en{}]: {}", markdown_label(&note.id), text);
+            let _ = writeln!(out, "[^en{}]: {}", note.id, text);
         }
     }
     if !doc.comments.is_empty() {
-        out.push_str("\n## Comments\n\n");
-        let children = comment_children(&doc.comments);
-        let mut emitted = HashSet::new();
-        for comment in doc
-            .comments
-            .iter()
-            .filter(|comment| comment.parent_id.is_none())
-        {
-            render_comment_definition(comment, &doc.comments, &children, &mut emitted, &mut out);
-        }
-        // Malformed extension metadata can point at a missing parent. Keep the
-        // comment visible as its own definition rather than silently dropping it.
-        for comment in &doc.comments {
-            if !emitted.contains(&comment.id) {
-                render_comment_definition(
-                    comment,
-                    &doc.comments,
-                    &children,
-                    &mut emitted,
-                    &mut out,
-                );
-            }
-        }
+        render_review_comments(&doc.comments, &mut out);
     }
     out
+}
+
+fn render_review_comments(comments: &[crate::types::DocxComment], out: &mut String) {
+    if comments.is_empty() {
+        return;
+    }
+    out.push_str("\n## Review comments\n\n");
+
+    let mut children = HashMap::<&str, Vec<usize>>::new();
+    for (index, comment) in comments.iter().enumerate() {
+        if let Some(parent_id) = comment.parent_id.as_deref() {
+            children.entry(parent_id).or_default().push(index);
+        }
+    }
+
+    let mut emitted = HashSet::new();
+    for comment in comments
+        .iter()
+        .filter(|comment| comment.parent_id.is_none())
+    {
+        render_comment_thread(comment, comments, &children, &mut emitted, out);
+    }
+    // Malformed extension metadata may reference a missing parent or form a
+    // cycle. Keep every comment visible once instead of guessing a repair.
+    for comment in comments {
+        if !emitted.contains(&comment.id) {
+            render_comment_thread(comment, comments, &children, &mut emitted, out);
+        }
+    }
+}
+
+fn render_comment_thread(
+    comment: &crate::types::DocxComment,
+    comments: &[crate::types::DocxComment],
+    children: &HashMap<&str, Vec<usize>>,
+    emitted: &mut HashSet<String>,
+    out: &mut String,
+) {
+    if !emitted.insert(comment.id.clone()) {
+        return;
+    }
+    let status = if comment.resolved == Some(true) {
+        " (resolved)"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        out,
+        "### Comment {}{}\n",
+        escape_heading_label(&comment.id),
+        status
+    );
+    write_quoted_comment(
+        comment.author.as_deref().unwrap_or("(unknown)"),
+        comment.text.trim(),
+        ">",
+        "",
+        out,
+    );
+
+    let mut pending: Vec<(usize, usize)> = children
+        .get(comment.id.as_str())
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|index| (*index, 2))
+        .collect();
+    while let Some((index, depth)) = pending.pop() {
+        let reply = &comments[index];
+        if !emitted.insert(reply.id.clone()) {
+            continue;
+        }
+        let prefix = ">".repeat(depth);
+        let status = if reply.resolved == Some(true) {
+            " (resolved)"
+        } else {
+            ""
+        };
+        write_quoted_comment(
+            reply.author.as_deref().unwrap_or("(unknown)"),
+            reply.text.trim(),
+            &prefix,
+            status,
+            out,
+        );
+        if let Some(grandchildren) = children.get(reply.id.as_str()) {
+            pending.extend(
+                grandchildren
+                    .iter()
+                    .rev()
+                    .map(|child_index| (*child_index, depth + 1)),
+            );
+        }
+    }
+    out.push('\n');
+}
+
+fn write_quoted_comment(author: &str, text: &str, prefix: &str, status: &str, out: &mut String) {
+    let author = escape_inline_md(&author.replace(['\r', '\n'], " "));
+    let _ = writeln!(out, "{prefix} **{author}**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
+        let _ = writeln!(out, "{prefix}");
+    } else {
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
+    }
+}
+
+fn escape_heading_label(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .replace('\\', "\\\\")
+        .replace('#', "\\#")
 }
 
 fn render_body(body: &[BodyElement], out: &mut String) {
@@ -81,7 +174,7 @@ fn render_body(body: &[BodyElement], out: &mut String) {
 }
 
 fn render_paragraph(p: &DocParagraph, out: &mut String) {
-    let text = render_paragraph_runs(p);
+    let text = render_runs(&p.runs, &p.run_revisions);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         out.push('\n');
@@ -112,13 +205,13 @@ fn render_paragraph(p: &DocParagraph, out: &mut String) {
 
 /// Flatten a note's block-level content into a single inline markdown string
 /// (paragraphs joined with a space). Used for the `[^id]:` footnote/endnote
-/// projection, which is single-line by convention. The note body's own empty-id
-/// auto-number placeholder is dropped by `format_text_run`.
+/// projection, which is single-line by convention. Reference markers are
+/// dropped by `format_text_run`.
 fn note_inline_text(content: &[BodyElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for el in content {
         if let BodyElement::Paragraph(p) = el {
-            let t = render_paragraph_runs(p);
+            let t = render_runs(&p.runs, &p.run_revisions);
             let t = t.trim();
             if !t.is_empty() {
                 parts.push(t.to_string());
@@ -126,47 +219,6 @@ fn note_inline_text(content: &[BodyElement]) -> String {
         }
     }
     parts.join(" ")
-}
-
-fn render_paragraph_runs(paragraph: &DocParagraph) -> String {
-    if paragraph.comment_marks.is_empty() {
-        return render_runs(&paragraph.runs, &paragraph.run_revisions);
-    }
-    let mut preferred = HashMap::<&str, &str>::new();
-    for mark in &paragraph.comment_marks {
-        let entry = preferred
-            .entry(mark.id.as_str())
-            .or_insert(mark.kind.as_str());
-        if mark.kind == "reference" || (*entry != "reference" && mark.kind == "rangeEnd") {
-            *entry = mark.kind.as_str();
-        }
-    }
-    let mut at_boundary = HashMap::<usize, Vec<&str>>::new();
-    for mark in &paragraph.comment_marks {
-        if preferred.get(mark.id.as_str()).copied() == Some(mark.kind.as_str()) {
-            let ids = at_boundary.entry(mark.run_index as usize).or_default();
-            if !ids.contains(&mark.id.as_str()) {
-                ids.push(mark.id.as_str());
-            }
-        }
-    }
-
-    let mut out = String::new();
-    let mut emitted_ids = HashSet::new();
-    for index in 0..=paragraph.runs.len() {
-        if let Some(ids) = at_boundary.get(&index) {
-            for id in ids {
-                if emitted_ids.insert(*id) {
-                    let _ = write!(out, "[^comment-{}]", markdown_label(id));
-                }
-            }
-        }
-        if index < paragraph.runs.len() {
-            let revision = paragraph.run_revisions.get(index..=index).unwrap_or(&[]);
-            out.push_str(&render_runs(&paragraph.runs[index..=index], revision));
-        }
-    }
-    out
 }
 
 fn render_runs(runs: &[DocRun], revisions: &[Option<crate::types::RunRevision>]) -> String {
@@ -229,14 +281,11 @@ fn render_runs(runs: &[DocRun], revisions: &[Option<crate::types::RunRevision>])
 }
 
 fn format_text_run(t: &crate::types::TextRun) -> String {
-    if let Some(note) = &t.note_ref {
-        // Empty ids are the auto-number placeholders inside note bodies, not
-        // references from the document body.
-        if note.id.is_empty() {
-            return String::new();
-        }
-        let prefix = if note.kind == "endnote" { "en" } else { "" };
-        return format!("[^{prefix}{}]", markdown_label(&note.id));
+    // Footnote/endnote reference markers carry only the note's id; the linkage
+    // is expressed via the `[^id]` syntax elsewhere, so drop the marker glyph
+    // from the inline text projection.
+    if t.note_ref.is_some() {
+        return String::new();
     }
     let raw = &t.text;
     if raw.is_empty() {
@@ -315,7 +364,7 @@ fn render_table_cell(cell: &DocTableCell) -> String {
         }
         match el {
             CellElement::Paragraph(p) => {
-                let text = render_paragraph_runs(p);
+                let text = render_runs(&p.runs, &p.run_revisions);
                 buf.push_str(text.trim());
             }
             CellElement::Table(_) => {
@@ -329,97 +378,6 @@ fn render_table_cell(cell: &DocTableCell) -> String {
     buf.replace('|', "\\|")
 }
 
-fn markdown_label(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn comment_children(comments: &[crate::types::DocxComment]) -> HashMap<&str, Vec<usize>> {
-    let mut children = HashMap::<&str, Vec<usize>>::new();
-    for (index, comment) in comments.iter().enumerate() {
-        if let Some(parent) = comment.parent_id.as_deref() {
-            children.entry(parent).or_default().push(index);
-        }
-    }
-    children
-}
-
-fn render_comment_definition(
-    comment: &crate::types::DocxComment,
-    comments: &[crate::types::DocxComment],
-    children: &HashMap<&str, Vec<usize>>,
-    emitted: &mut HashSet<String>,
-    out: &mut String,
-) {
-    if !emitted.insert(comment.id.clone()) {
-        return;
-    }
-    let author = comment.author.as_deref().unwrap_or("(unknown)");
-    let status = if comment.resolved == Some(true) {
-        " [resolved]"
-    } else {
-        ""
-    };
-    let body = comment.text.trim().replace('\n', "<br>");
-    let _ = writeln!(
-        out,
-        "[^comment-{}]: **{}{}**: {}",
-        markdown_label(&comment.id),
-        author,
-        status,
-        body
-    );
-    render_comment_replies(&comment.id, comments, children, emitted, 1, out);
-}
-
-fn render_comment_replies(
-    parent_id: &str,
-    comments: &[crate::types::DocxComment],
-    children: &HashMap<&str, Vec<usize>>,
-    emitted: &mut HashSet<String>,
-    depth: usize,
-    out: &mut String,
-) {
-    let mut pending: Vec<(usize, usize)> = children
-        .get(parent_id)
-        .into_iter()
-        .flatten()
-        .rev()
-        .map(|index| (*index, depth))
-        .collect();
-    while let Some((index, reply_depth)) = pending.pop() {
-        let reply = &comments[index];
-        if !emitted.insert(reply.id.clone()) {
-            continue;
-        }
-        let author = reply.author.as_deref().unwrap_or("(unknown)");
-        let status = if reply.resolved == Some(true) {
-            " [resolved]"
-        } else {
-            ""
-        };
-        let indent = "    ".repeat(reply_depth);
-        let body = reply.text.trim().replace('\n', "<br>");
-        let _ = writeln!(out, "{indent}- **{author}{status}**: {body}");
-        if let Some(grandchildren) = children.get(reply.id.as_str()) {
-            pending.extend(
-                grandchildren
-                    .iter()
-                    .rev()
-                    .map(|index| (*index, reply_depth + 1)),
-            );
-        }
-    }
-}
-
 // Silence unused-import warnings when the cfg gate excludes some types.
 #[allow(dead_code)]
 fn _ensure_types_used(_t: TextRun) {}
@@ -427,57 +385,43 @@ fn _ensure_types_used(_t: TextRun) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DocxCommentMark, NoteRef};
+    use crate::types::DocxComment;
 
     #[test]
-    fn note_references_link_to_the_definitions_emitted_at_document_end() {
-        assert_eq!(
-            format_text_run(&TextRun {
-                note_ref: Some(NoteRef {
-                    kind: "footnote".to_string(),
-                    id: "7".to_string(),
-                }),
-                ..Default::default()
-            }),
-            "[^7]"
-        );
-        assert_eq!(
-            format_text_run(&TextRun {
-                note_ref: Some(NoteRef {
-                    kind: "endnote".to_string(),
-                    id: "2".to_string(),
-                }),
-                ..Default::default()
-            }),
-            "[^en2]"
-        );
-    }
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let comments = vec![
+            DocxComment {
+                id: "12".to_string(),
+                author: Some("Reviewer".to_string()),
+                initials: None,
+                date: None,
+                text: "Check this line.\nKeep the wording.".to_string(),
+                parent_id: None,
+                resolved: Some(true),
+                paragraphs: Vec::new(),
+            },
+            DocxComment {
+                id: "13".to_string(),
+                author: Some("Editor".to_string()),
+                initials: None,
+                date: None,
+                text: "Updated.".to_string(),
+                parent_id: Some("12".to_string()),
+                resolved: None,
+                paragraphs: Vec::new(),
+            },
+        ];
+        let mut out = String::new();
 
-    #[test]
-    fn comment_reference_is_inserted_once_at_its_authored_boundary() {
-        let paragraph = DocParagraph {
-            runs: vec![DocRun::Text(Box::new(TextRun {
-                text: "Reviewed text".to_string(),
-                ..Default::default()
-            }))],
-            comment_marks: vec![
-                DocxCommentMark {
-                    id: "12".to_string(),
-                    kind: "rangeEnd".to_string(),
-                    run_index: 1,
-                },
-                DocxCommentMark {
-                    id: "12".to_string(),
-                    kind: "reference".to_string(),
-                    run_index: 1,
-                },
-            ],
-            ..Default::default()
-        };
+        render_review_comments(&comments, &mut out);
 
-        assert_eq!(
-            render_paragraph_runs(&paragraph),
-            "Reviewed text[^comment-12]"
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Comment 12 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this line.\n> Keep the wording."),
+            "{out}"
         );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
+        assert_eq!(out.matches("### Comment").count(), 1, "{out}");
     }
 }

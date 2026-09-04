@@ -126,6 +126,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       post({ type: 'resourceUsage', id, usage });
       return;
     }
+    if (req.type === 'toMarkdown') {
+      if (!archive) throw new Error('No docx loaded');
+      // Project the already-opened handle to markdown (no re-copy of the file,
+      // no re-scan of the central directory). A plain string has no transferable
+      // backing, so it is posted by structured clone like any other value.
+      const markdown = host.run(() => archive.to_markdown());
+      const res: WorkerResponse = { type: 'markdownRendered', id, markdown };
+      post(res);
+      return;
+    }
   } catch (err) {
     const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };
     post(res);

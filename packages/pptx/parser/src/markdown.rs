@@ -1,23 +1,9 @@
 //! The PPTX → GitHub-flavoured-markdown projection. All public conversion paths
 //! feed canonical slides through this one bounded writer and renderer.
 
-use crate::markdown_layout::{project_slide, shape_typography};
 use crate::types::*;
 use ooxml_common::math::nodes_to_text;
-use std::cell::Cell;
 use std::fmt;
-use std::rc::Rc;
-
-/// A local heading must be followed by content within four of its own box
-/// heights. This scale-relative bound works across slide sizes and avoids
-/// linking a prominent label to an unrelated object in a distant region.
-const HEADING_MAX_VERTICAL_GAP_IN_OWN_HEIGHTS: i64 = 4;
-const HEADING_MAX_CHARACTERS: usize = 140;
-const HEADING_FONT_SIZE_RATIO: f64 = 1.2;
-const NUMBER_BADGE_MAX_VALUE: u16 = 999;
-const NUMBER_BADGE_MAX_WIDTH_TO_BODY_RATIO: i64 = 2;
-const NUMBER_BADGE_MAX_GAP_IN_BADGE_EXTENTS: i64 = 3;
-const NUMBER_BADGE_ALLOWED_HORIZONTAL_OVERLAP_DIVISOR: i64 = 4;
 
 /// UTF-8 markdown sink that stops retaining bytes at the configured ceiling.
 /// The parser reports the crossing through its package-scoped limit reporter;
@@ -25,39 +11,23 @@ const NUMBER_BADGE_ALLOWED_HORIZONTAL_OVERLAP_DIVISOR: i64 = 4;
 /// first becoming an oversized allocation.
 pub(crate) struct MarkdownWriter {
     value: String,
-    budget: Rc<MarkdownBudget>,
-}
-
-struct MarkdownBudget {
     limit: u64,
-    observed: Cell<u64>,
-    exceeded: Cell<bool>,
+    observed: u64,
+    exceeded: bool,
 }
 
 impl MarkdownWriter {
     pub(crate) fn new(limit: u64) -> Self {
         Self {
             value: String::new(),
-            budget: Rc::new(MarkdownBudget {
-                limit,
-                observed: Cell::new(0),
-                exceeded: Cell::new(false),
-            }),
-        }
-    }
-
-    /// Create another sink charged to the same total allocation budget. The
-    /// comment appendix can then be assembled out of order without allowing
-    /// narrative + appendix memory to grow to twice the configured limit.
-    pub(crate) fn sharing_budget(other: &Self) -> Self {
-        Self {
-            value: String::new(),
-            budget: Rc::clone(&other.budget),
+            limit,
+            observed: 0,
+            exceeded: false,
         }
     }
 
     pub(crate) fn observed(&self) -> u64 {
-        self.budget.observed.get()
+        self.observed
     }
 
     pub(crate) fn into_string(self) -> String {
@@ -65,27 +35,17 @@ impl MarkdownWriter {
     }
 
     pub(crate) fn push_str(&mut self, value: &str) {
-        if self.budget.exceeded.get() {
+        if self.exceeded {
             return;
         }
-        let observed = self
-            .budget
+        self.observed = self
             .observed
-            .get()
             .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-        self.budget.observed.set(observed);
-        if observed > self.budget.limit {
-            self.budget.exceeded.set(true);
+        if self.observed > self.limit {
+            self.exceeded = true;
             return;
         }
         self.value.push_str(value);
-    }
-
-    /// Join text already charged through a writer sharing this budget.
-    pub(crate) fn append_precounted(&mut self, value: String) {
-        if !self.budget.exceeded.get() {
-            self.value.push_str(&value);
-        }
     }
 
     pub(crate) fn push(&mut self, value: char) {
@@ -97,7 +57,7 @@ impl MarkdownWriter {
 impl fmt::Write for MarkdownWriter {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         self.push_str(value);
-        if self.budget.exceeded.get() {
+        if self.exceeded {
             Err(fmt::Error)
         } else {
             Ok(())
@@ -105,48 +65,16 @@ impl fmt::Write for MarkdownWriter {
     }
 }
 
-pub(crate) fn render_slide_md(
-    slide: &Slide,
-    slide_width: i64,
-    slide_height: i64,
-    out: &mut MarkdownWriter,
-) {
+pub(crate) fn render_slide_md(slide: &Slide, out: &mut MarkdownWriter) {
     use std::fmt::Write as _;
-    let semantic = project_slide(slide, slide_width, slide_height);
-    if let Some((_, title)) = &semantic.title {
-        out.push_str("# ");
-        write_escaped_inline_md(title, out);
-        let _ = writeln!(out, " (slide {})\n", slide.slide_number);
+    let title = slide_title_md(slide);
+    if let Some(t) = title {
+        let _ = writeln!(out, "# {} (slide {})\n", t, slide.slide_number);
     } else {
         let _ = writeln!(out, "# Slide {}\n", slide.slide_number);
     }
-    for (block_index, block) in semantic.blocks.iter().enumerate() {
-        if block.starts_new_region && block_index > 0 {
-            out.push_str("---\n\n");
-        }
-        if block.related && render_inferred_numbered_block(slide, &block.element_indices, out) {
-            continue;
-        }
-        let heading_index = if block.related {
-            inferred_block_heading(slide, &block.element_indices)
-        } else if block.element_indices.len() == 1 {
-            semantic
-                .blocks
-                .get(block_index + 1)
-                .and_then(|next| next.element_indices.first())
-                .copied()
-                .filter(|next| inferred_standalone_heading(slide, block.element_indices[0], *next))
-                .map(|_| block.element_indices[0])
-        } else {
-            None
-        };
-        for index in &block.element_indices {
-            if Some(*index) == heading_index {
-                render_shape_heading_md(&slide.elements[*index], out);
-            } else {
-                render_element_md(&slide.elements[*index], out);
-            }
-        }
+    for el in &slide.elements {
+        render_element_md(el, out);
     }
     if let Some(notes) = &slide.notes {
         let trimmed = notes.trim();
@@ -156,187 +84,21 @@ pub(crate) fn render_slide_md(
     }
 }
 
-/// Collapse a repeated "small number badge + adjacent body" layout into one
-/// ordered list. The inference is intentionally block-local and requires a
-/// complete one-to-one geometric matching, so isolated numbers and numeric
-/// content elsewhere on the slide retain their authored representation.
-fn render_inferred_numbered_block(
-    slide: &Slide,
-    indices: &[usize],
-    out: &mut MarkdownWriter,
-) -> bool {
-    if indices.len() < 4 {
-        return false;
-    }
-    let mut badges = Vec::new();
-    let mut bodies = Vec::new();
-    for index in indices.iter().copied() {
-        let SlideElement::Shape(shape) = &slide.elements[index] else {
-            return false;
-        };
-        let Some(text) = shape_text_plain(shape) else {
-            return false;
-        };
-        let is_single_paragraph = shape
-            .text_body
-            .as_ref()
-            .is_some_and(|body| body.paragraphs.len() == 1);
-        match text.parse::<u16>() {
-            Ok(number @ 1..=NUMBER_BADGE_MAX_VALUE) if is_single_paragraph => {
-                badges.push((index, number));
+pub(crate) fn slide_title_md(slide: &Slide) -> Option<String> {
+    for el in &slide.elements {
+        if let SlideElement::Shape(s) = el {
+            let ph = s.placeholder_type.as_deref().unwrap_or("");
+            if ph == "title" || ph == "ctrTitle" {
+                let txt = shape_text_plain(s);
+                if let Some(t) = txt {
+                    if !t.is_empty() {
+                        return Some(t);
+                    }
+                }
             }
-            _ => bodies.push(index),
         }
     }
-    if badges.len() < 2 || badges.len() != bodies.len() {
-        return false;
-    }
-
-    // `project_slide` already placed the block's members in its two-dimensional
-    // reading order. Requiring the visible sequence itself to be consecutive
-    // handles both vertical and multi-column lists without a second ordering
-    // policy here.
-    if badges
-        .windows(2)
-        .any(|pair| pair[1].1 != pair[0].1.saturating_add(1))
-    {
-        return false;
-    }
-
-    let mut pairs = Vec::with_capacity(badges.len());
-    for ((badge_index, number), body_index) in badges.into_iter().zip(bodies) {
-        let (badge_x, badge_y, badge_width, badge_height) =
-            element_bounds(&slide.elements[badge_index]);
-        let (body_x, body_y, body_width, body_height) = element_bounds(&slide.elements[body_index]);
-        if badge_width <= 0
-            || badge_height <= 0
-            || body_width <= 0
-            || body_height <= 0
-            || badge_width.saturating_mul(NUMBER_BADGE_MAX_WIDTH_TO_BODY_RATIO) > body_width
-        {
-            return false;
-        }
-        let badge_right = badge_x.saturating_add(badge_width);
-        let badge_center_y = badge_y.saturating_add(badge_height / 2);
-        if body_x
-            < badge_right
-                .saturating_sub(badge_width / NUMBER_BADGE_ALLOWED_HORIZONTAL_OVERLAP_DIVISOR)
-        {
-            return false;
-        }
-        let gap = body_x.saturating_sub(badge_right);
-        let max_gap = badge_width
-            .max(badge_height)
-            .saturating_mul(NUMBER_BADGE_MAX_GAP_IN_BADGE_EXTENTS);
-        let body_center_y = body_y.saturating_add(body_height / 2);
-        let center_distance = body_center_y.abs_diff(badge_center_y);
-        if gap > max_gap
-            || center_distance.saturating_mul(2)
-                > u64::try_from(body_height.max(badge_height)).unwrap_or(u64::MAX)
-        {
-            return false;
-        }
-        pairs.push((number, body_index));
-    }
-
-    use std::fmt::Write as _;
-    for (number, body_index) in pairs {
-        let SlideElement::Shape(shape) = &slide.elements[body_index] else {
-            return false;
-        };
-        let Some(body) = &shape.text_body else {
-            return false;
-        };
-        let _ = write!(out, "{number}. ");
-        for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
-            if paragraph_index > 0 {
-                out.push_str("  \n   ");
-            }
-            render_runs_md(&paragraph.runs, paragraph, body, out);
-        }
-        out.push_str("\n\n");
-    }
-    true
-}
-
-fn inferred_standalone_heading(slide: &Slide, index: usize, next_index: usize) -> bool {
-    let SlideElement::Shape(shape) = &slide.elements[index] else {
-        return false;
-    };
-    let Some(body) = &shape.text_body else {
-        return false;
-    };
-    if body.paragraphs.len() != 1 {
-        return false;
-    }
-    let paragraph = &body.paragraphs[0];
-    let inherit_means_bullet = matches!(
-        shape.placeholder_type.as_deref(),
-        Some("body" | "subTitle" | "obj" | "tx")
-    );
-    if !matches!(
-        paragraph_kind(&paragraph.bullet, inherit_means_bullet),
-        ParaKind::Plain
-    ) {
-        return false;
-    }
-    let Some(text) = shape_text_plain(shape) else {
-        return false;
-    };
-    if text.chars().count() > HEADING_MAX_CHARACTERS || !text.chars().any(char::is_alphabetic) {
-        return false;
-    }
-    let typography = shape_typography(shape);
-    let bold = shape_is_bold(shape);
-    let mut sizes: Vec<f64> = slide
-        .elements
-        .iter()
-        .filter_map(|element| match element {
-            SlideElement::Shape(shape)
-                if !matches!(
-                    shape.placeholder_type.as_deref(),
-                    Some("title" | "ctrTitle" | "sldNum" | "dt" | "ftr" | "hdr")
-                ) =>
-            {
-                shape_typography(shape).map(|value| value.0)
-            }
-            _ => None,
-        })
-        .collect();
-    let size_is_salient = typography.is_some_and(|(size, _)| {
-        if sizes.len() < 2 {
-            return false;
-        }
-        sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = sizes[(sizes.len() - 1) / 2].max(1.0);
-        size >= median * HEADING_FONT_SIZE_RATIO || (bold && size >= median)
-    });
-    let bold_is_salient = bold
-        && match &slide.elements[next_index] {
-            SlideElement::Shape(next) => !shape_is_bold(next),
-            _ => true,
-        };
-    if !size_is_salient && !bold_is_salient {
-        return false;
-    }
-
-    let (x, y, width, height) = element_bounds(&slide.elements[index]);
-    let (next_x, next_y, next_width, _) = element_bounds(&slide.elements[next_index]);
-    if next_y < y || width <= 0 || next_width <= 0 {
-        return false;
-    }
-    let overlap = x
-        .saturating_add(width)
-        .min(next_x.saturating_add(next_width))
-        .saturating_sub(x.max(next_x));
-    let same_column = overlap.saturating_mul(2) >= width.min(next_width);
-    // A heading should introduce nearby content, not merely precede an
-    // unrelated object elsewhere in the same broad column.
-    let nearby = next_y.saturating_sub(y.saturating_add(height))
-        <= height
-            .max(1)
-            .saturating_mul(HEADING_MAX_VERTICAL_GAP_IN_OWN_HEIGHTS);
-    same_column && nearby
+    None
 }
 
 pub(crate) fn shape_text_plain(s: &ShapeElement) -> Option<String> {
@@ -356,116 +118,6 @@ pub(crate) fn shape_text_plain(s: &ShapeElement) -> Option<String> {
     } else {
         Some(trimmed)
     }
-}
-
-fn inferred_block_heading(slide: &Slide, indices: &[usize]) -> Option<usize> {
-    if indices.len() < 2 {
-        return None;
-    }
-    // A compact label deliberately overlapping the top edge of a larger
-    // content-bearing panel is a common visual heading treatment even when
-    // both shapes use the same font size and weight.
-    if let Some(index) = indices
-        .iter()
-        .copied()
-        .find(|index| attached_panel_label(slide, *index, indices))
-    {
-        return Some(index);
-    }
-    let mut styled: Vec<(usize, f64, bool)> = indices
-        .iter()
-        .filter_map(|index| {
-            let SlideElement::Shape(shape) = &slide.elements[*index] else {
-                return None;
-            };
-            let text = shape_text_plain(shape)?;
-            let single_paragraph = shape.text_body.as_ref()?.paragraphs.len() == 1;
-            let not_numeric = text.chars().any(char::is_alphabetic);
-            (single_paragraph && not_numeric && text.chars().count() <= HEADING_MAX_CHARACTERS)
-                .then(|| shape_typography(shape).map(|(size, bold)| (*index, size, bold)))?
-        })
-        .collect();
-    if styled.is_empty() {
-        return None;
-    }
-    let mut all_sizes: Vec<f64> = indices
-        .iter()
-        .filter_map(|index| match &slide.elements[*index] {
-            SlideElement::Shape(shape) => shape_typography(shape).map(|value| value.0),
-            _ => None,
-        })
-        .collect();
-    if all_sizes.len() < 2 {
-        return None;
-    }
-    all_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = all_sizes[(all_sizes.len() - 1) / 2].max(1.0);
-    styled.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.2.cmp(&a.2))
-            .then(a.0.cmp(&b.0))
-    });
-    let (index, size, bold) = styled[0];
-    (size >= median * HEADING_FONT_SIZE_RATIO || (bold && size >= median)).then_some(index)
-}
-
-fn attached_panel_label(slide: &Slide, candidate_index: usize, indices: &[usize]) -> bool {
-    let SlideElement::Shape(candidate) = &slide.elements[candidate_index] else {
-        return false;
-    };
-    let Some(text) = shape_text_plain(candidate) else {
-        return false;
-    };
-    if candidate
-        .text_body
-        .as_ref()
-        .is_none_or(|body| body.paragraphs.len() != 1)
-        || text.chars().count() > HEADING_MAX_CHARACTERS
-        || !text.chars().any(char::is_alphabetic)
-    {
-        return false;
-    }
-    let (x, y, width, height) = element_bounds(&slide.elements[candidate_index]);
-    if width <= 0 || height <= 0 {
-        return false;
-    }
-    indices.iter().copied().any(|other_index| {
-        if other_index == candidate_index {
-            return false;
-        }
-        let (other_x, other_y, other_width, other_height) =
-            element_bounds(&slide.elements[other_index]);
-        if other_width <= width || other_height <= height || y > other_y {
-            return false;
-        }
-        let overlap_x = x
-            .saturating_add(width)
-            .min(other_x.saturating_add(other_width))
-            .saturating_sub(x.max(other_x));
-        let overlap_y = y
-            .saturating_add(height)
-            .min(other_y.saturating_add(other_height))
-            .saturating_sub(y.max(other_y));
-        overlap_x.saturating_mul(4) >= width.saturating_mul(3)
-            && overlap_y.saturating_mul(5) >= height
-            && width.saturating_mul(4) <= other_width.saturating_mul(3)
-            && height.saturating_mul(2) <= other_height
-    })
-}
-
-fn render_shape_heading_md(element: &SlideElement, out: &mut MarkdownWriter) {
-    let SlideElement::Shape(shape) = element else {
-        render_element_md(element, out);
-        return;
-    };
-    let Some(body) = &shape.text_body else { return };
-    let Some(paragraph) = body.paragraphs.first() else {
-        return;
-    };
-    out.push_str("## ");
-    render_runs_md(&paragraph.runs, paragraph, body, out);
-    out.push_str("\n\n");
 }
 
 pub(crate) fn render_element_md(el: &SlideElement, out: &mut MarkdownWriter) {
@@ -505,127 +157,12 @@ pub(crate) fn render_shape_md(s: &ShapeElement, out: &mut MarkdownWriter) {
     // plain paragraphs.
     let ph = s.placeholder_type.as_deref().unwrap_or("");
     let inherit_means_bullet = matches!(ph, "body" | "subTitle" | "obj" | "tx" | "ftr" | "hdr");
-    let leading_heading = inferred_leading_paragraph_heading(s);
-    for (index, para) in tb.paragraphs.iter().enumerate() {
-        let kind = paragraph_kind(&para.bullet, inherit_means_bullet);
-        if index == 0 && leading_heading {
-            out.push_str("## ");
-            render_runs_md(&para.runs, para, tb, out);
-            out.push_str("\n\n");
-        } else {
-            render_paragraph_md(para, tb, inherit_means_bullet, out);
-        }
-        // Plain text boxes often contain separate prose paragraphs. A blank
-        // line is necessary for Markdown to preserve that authored boundary;
-        // list items remain contiguous.
-        if !(index == 0 && leading_heading)
-            && matches!(kind, ParaKind::Plain)
-            && index + 1 < tb.paragraphs.len()
-        {
-            out.push('\n');
-        }
+    for para in &tb.paragraphs {
+        render_paragraph_md(para, inherit_means_bullet, out);
     }
     out.push('\n');
 }
 
-fn inferred_leading_paragraph_heading(shape: &ShapeElement) -> bool {
-    let Some(body) = &shape.text_body else {
-        return false;
-    };
-    if body.paragraphs.len() < 2 {
-        return false;
-    }
-    let first = &body.paragraphs[0];
-    let inherit_means_bullet = matches!(
-        shape.placeholder_type.as_deref(),
-        Some("body" | "subTitle" | "obj" | "tx")
-    );
-    if !matches!(
-        paragraph_kind(&first.bullet, inherit_means_bullet),
-        ParaKind::Plain
-    ) {
-        return false;
-    }
-    let text = paragraph_text_plain(first);
-    if text.chars().count() > HEADING_MAX_CHARACTERS || !text.chars().any(char::is_alphabetic) {
-        return false;
-    }
-    let first_bold = paragraph_is_bold(first, body);
-    let following_bold = body.paragraphs[1..]
-        .iter()
-        .find(|paragraph| !paragraph_text_plain(paragraph).is_empty())
-        .is_some_and(|paragraph| paragraph_is_bold(paragraph, body));
-    if first_bold && !following_bold {
-        return true;
-    }
-    let Some((first_size, _)) = paragraph_typography(first, body) else {
-        return false;
-    };
-    let mut following_sizes: Vec<f64> = body.paragraphs[1..]
-        .iter()
-        .filter_map(|paragraph| paragraph_typography(paragraph, body).map(|value| value.0))
-        .collect();
-    if following_sizes.is_empty() {
-        return false;
-    }
-    following_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = following_sizes[(following_sizes.len() - 1) / 2].max(1.0);
-    first_size >= median * HEADING_FONT_SIZE_RATIO || (first_bold && first_size >= median)
-}
-
-fn shape_is_bold(shape: &ShapeElement) -> bool {
-    shape.text_body.as_ref().is_some_and(|body| {
-        body.paragraphs
-            .iter()
-            .any(|paragraph| paragraph_is_bold(paragraph, body))
-    })
-}
-
-fn paragraph_is_bold(paragraph: &Paragraph, body: &TextBody) -> bool {
-    paragraph.runs.iter().any(|run| {
-        matches!(run, TextRun::Text(text) if !text.text.trim().is_empty()
-            && text.bold.or(paragraph.def_bold).or(body.default_bold).unwrap_or(false))
-    })
-}
-
-fn paragraph_typography(paragraph: &Paragraph, body: &TextBody) -> Option<(f64, bool)> {
-    let mut max_size: Option<f64> = None;
-    let mut bold = false;
-    for run in &paragraph.runs {
-        let TextRun::Text(run) = run else { continue };
-        if run.text.trim().is_empty() {
-            continue;
-        }
-        if let Some(size) = run
-            .font_size
-            .or(paragraph.def_font_size)
-            .or(body.default_font_size)
-        {
-            max_size = Some(max_size.map_or(size, |current| current.max(size)));
-        }
-        bold |= run
-            .bold
-            .or(paragraph.def_bold)
-            .or(body.default_bold)
-            .unwrap_or(false);
-    }
-    max_size.map(|size| (size, bold))
-}
-
-fn paragraph_text_plain(paragraph: &Paragraph) -> String {
-    paragraph
-        .runs
-        .iter()
-        .filter_map(|run| match run {
-            TextRun::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
-#[derive(Clone, Copy)]
 pub(crate) enum ParaKind {
     Plain,
     Bullet,
@@ -651,7 +188,6 @@ pub(crate) fn paragraph_kind(b: &Bullet, inherit_means_bullet: bool) -> ParaKind
 
 pub(crate) fn render_paragraph_md(
     para: &Paragraph,
-    body: &TextBody,
     inherit_means_bullet: bool,
     out: &mut MarkdownWriter,
 ) {
@@ -672,7 +208,7 @@ pub(crate) fn render_paragraph_md(
         // we don't need to carry per-list state.
         ParaKind::Number => out.push_str("1. "),
     }
-    render_runs_md(&para.runs, para, body, out);
+    render_runs_md(&para.runs, out);
     let _ = writeln!(out);
 }
 
@@ -684,118 +220,58 @@ fn runs_have_visible_text(runs: &[TextRun]) -> bool {
     })
 }
 
-pub(crate) fn render_runs_md(
-    runs: &[TextRun],
-    para: &Paragraph,
-    body: &TextBody,
-    out: &mut MarkdownWriter,
-) {
-    let mut index = 0;
-    while index < runs.len() {
-        match &runs[index] {
+pub(crate) fn render_runs_md(runs: &[TextRun], out: &mut MarkdownWriter) {
+    for run in runs {
+        match run {
             // Intra-paragraph soft break (<a:br/>) → markdown hard line break
             // (two trailing spaces + newline).
-            TextRun::Break => {
-                out.push_str("  \n");
-                index += 1;
-            }
+            TextRun::Break => out.push_str("  \n"),
             // Equations have no faithful markdown form; emit their flattened text.
-            TextRun::Math { nodes, .. } => {
-                out.push_str(&nodes_to_text(nodes));
-                index += 1;
-            }
+            TextRun::Math { nodes, .. } => out.push_str(&nodes_to_text(nodes)),
             TextRun::Text(t) => {
-                let style = inline_style(t, para, body);
-                let mut raw = t.text.clone();
-                index += 1;
-                // PowerPoint frequently splits a visually continuous phrase
-                // into several runs for font/color metadata that Markdown
-                // cannot represent. Coalesce adjacent runs when their
-                // Markdown-visible style is identical so `**one phrase**`
-                // does not become `**one** **phrase**`.
-                while let Some(TextRun::Text(next)) = runs.get(index) {
-                    if inline_style(next, para, body) != style {
-                        break;
-                    }
-                    raw.push_str(&next.text);
-                    index += 1;
+                let raw = &t.text;
+                // Empty / whitespace-only runs (separators between formatted
+                // spans) shouldn't trigger bold/italic wrappers — `**   **`
+                // is awkward and most renderers drop the formatting anyway.
+                if raw.chars().all(|c| c.is_whitespace()) {
+                    out.push_str(raw);
+                    continue;
                 }
-                render_text_span(&raw, style, out);
+                // Preserve leading/trailing whitespace OUTSIDE the formatting
+                // wrappers so `(bold)" Title "` becomes ` **Title** ` not
+                // `**" Title "**`. This is how every markdown renderer treats
+                // strong/emphasis spans (they're trimmed of whitespace).
+                let leading_len = raw.len() - raw.trim_start().len();
+                let trail_start = raw.trim_end().len();
+                let leading = &raw[..leading_len];
+                let trailing = &raw[trail_start..];
+                let trimmed = &raw[leading_len..trail_start];
+                out.push_str(leading);
+                if t.italic == Some(true) {
+                    out.push('*');
+                }
+                if t.bold == Some(true) {
+                    out.push_str("**");
+                }
+                if t.hyperlink.is_some() {
+                    out.push('[');
+                }
+                write_escaped_inline_md(trimmed, out);
+                if let Some(url) = &t.hyperlink {
+                    out.push_str("](");
+                    out.push_str(url);
+                    out.push(')');
+                }
+                if t.bold == Some(true) {
+                    out.push_str("**");
+                }
+                if t.italic == Some(true) {
+                    out.push('*');
+                }
+                out.push_str(trailing);
             }
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InlineStyle<'a> {
-    bold: bool,
-    italic: bool,
-    strikethrough: bool,
-    hyperlink: Option<&'a str>,
-}
-
-fn inline_style<'a>(
-    text: &'a TextRunData,
-    paragraph: &Paragraph,
-    body: &TextBody,
-) -> InlineStyle<'a> {
-    InlineStyle {
-        bold: text
-            .bold
-            .or(paragraph.def_bold)
-            .or(body.default_bold)
-            .unwrap_or(false),
-        italic: text
-            .italic
-            .or(paragraph.def_italic)
-            .or(body.default_italic)
-            .unwrap_or(false),
-        strikethrough: text.strikethrough,
-        hyperlink: text.hyperlink.as_deref(),
-    }
-}
-
-fn render_text_span(raw: &str, style: InlineStyle<'_>, out: &mut MarkdownWriter) {
-    // Empty / whitespace-only runs should not trigger formatting wrappers.
-    if raw.chars().all(char::is_whitespace) {
-        out.push_str(raw);
-        return;
-    }
-    // Markdown strong/emphasis delimiters cannot contain edge whitespace.
-    let leading_len = raw.len() - raw.trim_start().len();
-    let trail_start = raw.trim_end().len();
-    let leading = &raw[..leading_len];
-    let trailing = &raw[trail_start..];
-    let trimmed = &raw[leading_len..trail_start];
-    out.push_str(leading);
-    if style.strikethrough {
-        out.push_str("~~");
-    }
-    if style.italic {
-        out.push('*');
-    }
-    if style.bold {
-        out.push_str("**");
-    }
-    if style.hyperlink.is_some() {
-        out.push('[');
-    }
-    write_escaped_inline_md(trimmed, out);
-    if let Some(url) = style.hyperlink {
-        out.push_str("](");
-        out.push_str(url);
-        out.push(')');
-    }
-    if style.bold {
-        out.push_str("**");
-    }
-    if style.italic {
-        out.push('*');
-    }
-    if style.strikethrough {
-        out.push_str("~~");
-    }
-    out.push_str(trailing);
 }
 
 /// Escape the markdown inline metacharacters that would otherwise be parsed as
@@ -877,181 +353,79 @@ pub(crate) fn render_chart_md(c: &ChartElement, out: &mut MarkdownWriter) {
     out.push('\n');
 }
 
-/// Append slide comments to a presentation-level review section. Keeping
-/// review metadata out of the slide narrative prevents comments from breaking
-/// a heading, list, table, or spatially-derived reading block.
-pub(crate) fn render_slide_comments_md(
-    slide: &Slide,
-    slide_width: i64,
-    slide_height: i64,
-    appendix: &mut MarkdownWriter,
+/// Append slide review metadata to one presentation-level section. Comments
+/// stay out of the slide narrative, and the label uses only the authored slide
+/// number plus a local ordinal—never a geometry-derived target.
+pub(crate) fn render_review_comments_md(
+    slide_number: usize,
+    comments: &[PptxComment],
+    out: &mut MarkdownWriter,
     has_comments: &mut bool,
 ) {
     use std::fmt::Write as _;
-    if slide.comments.is_empty() {
+    if comments.is_empty() {
         return;
     }
     if !*has_comments {
-        appendix.push_str("\n## Review comments\n\n");
+        out.push_str("\n## Review comments\n\n");
         *has_comments = true;
     }
-    let title = project_slide(slide, slide_width, slide_height)
-        .title
-        .map(|(_, title)| title);
-    for comment in &slide.comments {
-        let target = comment_target(slide, comment)
-            .or_else(|| title.clone())
-            .unwrap_or_else(|| format!("Slide {}", slide.slide_number));
-        let author = comment.author.as_deref().unwrap_or("(unknown)");
-        let status = comment
-            .status
-            .as_deref()
-            .filter(|status| *status != "active")
-            .map(|status| format!(" [{status}]"))
-            .unwrap_or_default();
+    for (index, comment) in comments.iter().enumerate() {
+        let status = review_status(comment.status.as_deref());
         let _ = writeln!(
-            appendix,
-            "### Slide {} — {}\n\n**{}{}**\n",
-            slide.slide_number,
-            escape_heading_text(&target),
-            author,
+            out,
+            "### Slide {} — Comment {}{}\n",
+            slide_number,
+            index + 1,
             status
         );
-        write_blockquote(comment.text.trim(), "> ", appendix);
+        write_quoted_comment_md(
+            comment.author.as_deref().unwrap_or("(unknown)"),
+            comment.text.trim(),
+            ">",
+            "",
+            out,
+        );
         for reply in &comment.replies {
-            let reply_author = reply.author.as_deref().unwrap_or("(unknown)");
-            let reply_status = reply
-                .status
-                .as_deref()
-                .filter(|status| *status != "active")
-                .map(|status| format!(" [{status}]"))
-                .unwrap_or_default();
-            let _ = writeln!(appendix, ">> **{}{}**", reply_author, reply_status);
-            write_blockquote(reply.text.trim(), ">> ", appendix);
+            let status = review_status(reply.status.as_deref());
+            write_quoted_comment_md(
+                reply.author.as_deref().unwrap_or("(unknown)"),
+                reply.text.trim(),
+                ">>",
+                &status,
+                out,
+            );
         }
-        appendix.push('\n');
+        out.push('\n');
     }
 }
 
-fn write_blockquote(value: &str, prefix: &str, out: &mut MarkdownWriter) {
+fn review_status(status: Option<&str>) -> String {
+    match status {
+        Some("active") | None => String::new(),
+        Some(status) => format!(" ({status})"),
+    }
+}
+
+fn write_quoted_comment_md(
+    author: &str,
+    text: &str,
+    prefix: &str,
+    status: &str,
+    out: &mut MarkdownWriter,
+) {
     use std::fmt::Write as _;
-    if value.is_empty() {
+    out.push_str(prefix);
+    out.push_str(" **");
+    write_escaped_inline_md(&author.replace(['\r', '\n'], " "), out);
+    let _ = writeln!(out, "**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
         let _ = writeln!(out, "{prefix}");
-        return;
-    }
-    for line in value.lines() {
-        let _ = writeln!(out, "{prefix}{line}");
-    }
-}
-
-fn escape_heading_text(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
-        .replace('`', "\\`")
-        .replace('#', "\\#")
-}
-
-fn comment_target(slide: &Slide, comment: &PptxComment) -> Option<String> {
-    for anchor in &comment.anchors {
-        let element_id = match anchor {
-            PptxCommentAnchor::DrawingElement { element_id, .. }
-            | PptxCommentAnchor::TextRange { element_id, .. } => element_id.as_deref(),
-            PptxCommentAnchor::Slide | PptxCommentAnchor::Unknown => None,
-        };
-        if let Some(id) = element_id {
-            if let Some(label) = slide.elements.iter().find_map(|element| {
-                (element_id_of(element) == Some(id))
-                    .then(|| element_label(element))
-                    .flatten()
-            }) {
-                return Some(label);
-            }
-        }
-    }
-    let (x, y) = (comment.x?, comment.y?);
-    slide
-        .elements
-        .iter()
-        .filter_map(|element| {
-            // A classic comment position is only a point on the slide, not an
-            // explicit element relationship. Restrict proximity labels to
-            // readable content so decorative lines/pictures do not become
-            // misleading targets.
-            let label = element_content_label(element)?;
-            let (left, top, width, height) = element_bounds(element);
-            let right = left.saturating_add(width);
-            let bottom = top.saturating_add(height);
-            (x >= left && x <= right && y >= top && y <= bottom)
-                .then_some((width.saturating_mul(height), label))
-        })
-        .min_by_key(|(area, _)| *area)
-        .map(|(_, label)| label)
-}
-
-fn element_content_label(element: &SlideElement) -> Option<String> {
-    match element {
-        SlideElement::Shape(shape) => shape_text_plain(shape),
-        SlideElement::Table(_) => Some("Table".to_string()),
-        SlideElement::Chart(chart) => Some(
-            chart
-                .chart
-                .title
-                .clone()
-                .unwrap_or_else(|| "Chart".to_string()),
-        ),
-        SlideElement::Picture(_) | SlideElement::Media(_) => None,
-    }
-    .map(compact_label)
-    .filter(|label| !label.is_empty())
-}
-
-fn element_id_of(element: &SlideElement) -> Option<&str> {
-    match element {
-        SlideElement::Shape(value) => value.id.as_deref(),
-        SlideElement::Picture(value) => value.id.as_deref(),
-        SlideElement::Table(value) => value.id.as_deref(),
-        SlideElement::Chart(value) => value.id.as_deref(),
-        SlideElement::Media(value) => value.id.as_deref(),
-    }
-}
-
-fn element_label(element: &SlideElement) -> Option<String> {
-    match element {
-        SlideElement::Shape(shape) => shape_text_plain(shape).or_else(|| shape.name.clone()),
-        SlideElement::Table(_) => Some("Table".to_string()),
-        SlideElement::Chart(chart) => Some(
-            chart
-                .chart
-                .title
-                .clone()
-                .unwrap_or_else(|| "Chart".to_string()),
-        ),
-        SlideElement::Picture(_) => Some("Picture".to_string()),
-        SlideElement::Media(media) => Some(media.media_kind.clone()),
-    }
-    .map(compact_label)
-    .filter(|label| !label.is_empty())
-}
-
-fn compact_label(label: String) -> String {
-    let mut chars = label.trim().chars();
-    let compact: String = chars.by_ref().take(80).collect();
-    if chars.next().is_some() {
-        format!("{compact}…")
     } else {
-        compact
-    }
-}
-
-fn element_bounds(element: &SlideElement) -> (i64, i64, i64, i64) {
-    match element {
-        SlideElement::Shape(value) => (value.x, value.y, value.width, value.height),
-        SlideElement::Picture(value) => (value.x, value.y, value.width, value.height),
-        SlideElement::Table(value) => (value.x, value.y, value.width, value.height),
-        SlideElement::Chart(value) => (value.x, value.y, value.width, value.height),
-        SlideElement::Media(value) => (value.x, value.y, value.width, value.height),
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
     }
 }
 
@@ -1059,28 +433,28 @@ fn element_bounds(element: &SlideElement) -> (i64, i64, i64, i64) {
 /// sequential-output equivalence tests.
 pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
     let mut out = MarkdownWriter::new(u64::MAX);
-    let mut appendix = MarkdownWriter::sharing_budget(&out);
+    let mut review_comments = MarkdownWriter::new(u64::MAX);
     let mut has_comments = false;
     for (i, slide) in pres.slides.iter().enumerate() {
         if i > 0 {
             out.push_str("\n---\n\n");
         }
-        render_slide_md(slide, pres.slide_width, pres.slide_height, &mut out);
-        render_slide_comments_md(
-            slide,
-            pres.slide_width,
-            pres.slide_height,
-            &mut appendix,
+        render_slide_md(slide, &mut out);
+        render_review_comments_md(
+            slide.slide_number,
+            &slide.comments,
+            &mut review_comments,
             &mut has_comments,
         );
     }
-    out.append_precounted(appendix.into_string());
+    out.push_str(&review_comments.into_string());
     out.into_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MarkdownWriter;
+    use super::*;
+    use crate::types::{PptxComment, PptxCommentReply};
 
     #[test]
     fn writer_counts_utf8_bytes_and_stops_retaining_at_the_first_crossing() {
@@ -1091,5 +465,43 @@ mod tests {
 
         assert_eq!(output.observed(), 4);
         assert_eq!(output.into_string(), "é");
+    }
+
+    #[test]
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let comments = vec![PptxComment {
+            author_id: None,
+            modern_author_id: None,
+            id: Some("comment-1".to_string()),
+            index: None,
+            author: Some("Reviewer".to_string()),
+            date: None,
+            x: None,
+            y: None,
+            anchors: Vec::new(),
+            status: Some("resolved".to_string()),
+            text: "Check this slide.\nKeep the wording.".to_string(),
+            replies: vec![PptxCommentReply {
+                id: Some("reply-1".to_string()),
+                author_id: None,
+                author: Some("Editor".to_string()),
+                date: None,
+                status: Some("active".to_string()),
+                text: "Updated.".to_string(),
+            }],
+        }];
+        let mut out = MarkdownWriter::new(u64::MAX);
+        let mut has_comments = false;
+
+        render_review_comments_md(3, &comments, &mut out, &mut has_comments);
+        let out = out.into_string();
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Slide 3 — Comment 1 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this slide.\n> Keep the wording."),
+            "{out}"
+        );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
     }
 }

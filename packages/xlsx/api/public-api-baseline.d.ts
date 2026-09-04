@@ -2271,6 +2271,7 @@ export class XlsxWorkbook {
     getComments(sheetIndex: number): Promise<readonly Readonly<XlsxComment>[]>;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getImage(imagePath: string, mimeType: string): Promise<Blob>;
+    toMarkdown(): Promise<string>;
     resolveValidationList(sheetIndex: number, formula1: string | undefined): Promise<ResolvedList>;
     cellText(ws: Worksheet, cell: Cell): string;
     renderViewport(target: HTMLCanvasElement | OffscreenCanvas, sheetIndex: number, viewport: ViewportRange, opts?: XlsxRenderViewportOptions): Promise<void>;

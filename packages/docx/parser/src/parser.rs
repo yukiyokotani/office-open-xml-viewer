@@ -28951,6 +28951,33 @@ mod comment_anchor_tests {
     }
 
     #[test]
+    fn markdown_collects_review_threads_after_the_document_body() {
+        let parts = comment_parts(true);
+        let borrowed: Vec<(&str, &str)> = parts
+            .iter()
+            .map(|(path, content)| (*path, content.as_str()))
+            .collect();
+        let doc = parse_parts(&borrowed);
+
+        let markdown = crate::markdown::render_document(&doc);
+
+        assert!(
+            markdown.find("threaded").unwrap() < markdown.find("## Review comments").unwrap(),
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Comment 1"), "{markdown}");
+        assert!(
+            markdown.contains("> **Alice**\n>\n> Root first paraRoot last para"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(">> **Bob**\n>>\n>> A reply"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Comment 3 (resolved)"), "{markdown}");
+    }
+
+    #[test]
     fn comment_relationship_targets_are_opc_normalized() {
         let mut parts = comment_parts(true);
         parts[1].1 = parts[1]

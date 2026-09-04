@@ -205,7 +205,7 @@ pub struct XlsxTools;
 
 impl XlsxTools {
     #[tool(
-        description = "Convert an XLSX file to GitHub-flavoured markdown. Each sheet is split into independent cell regions at blank row/column bands (declared Excel tables remain atomic), then emitted in top-to-bottom, left-to-right order. Cell comments are collected after the sheet data with thread context. Formula cells show the cached result, not the formula text (use `xlsx_get_formulas` for formulas). Lossy by design: drops styling, conditional formatting, charts, sparklines, and drawings"
+        description = "Convert an XLSX file to GitHub-flavoured markdown — one `## SheetName` per sheet, followed by a pipe table of the cells' cached display values. Merged-cell continuation cells render empty. Formula cells show the cached result, not the formula text (use `xlsx_get_formulas` if you need the formulas). Designed for agents that need to *read* spreadsheet content efficiently. Lossy by design: drops styling, conditional formatting, charts, sparklines, drawings. For precise structure use the structured tools (`xlsx_get_cell_range`, `xlsx_get_sheet_layout`, etc.)"
     )]
     pub fn xlsx_to_markdown(Parameters(p): Parameters<XlsxPathParam>) -> String {
         let data = match read_file(&p.path) {

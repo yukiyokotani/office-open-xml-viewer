@@ -32,7 +32,7 @@ const PARSED_WORKBOOK = {
 
 interface WorkbookProbe {
   getWorksheet(index: number): Promise<Worksheet>;
-  getImage(path: string, mimeType: string): Promise<Blob>;
+  toMarkdown(): Promise<string>;
   renderViewportToBitmap(
     sheetIndex: number,
     viewport: { startRow: number; endRow: number; startCol: number; endCol: number },
@@ -71,9 +71,6 @@ function makeWorkbook(
   instance.retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
   instance.resourceFailure = null;
   instance.workerTimeoutMs = workerTimeoutMs;
-  instance.rawParts = {
-    get: (_path: string, _mimeType: string, load: () => Promise<Blob>) => load(),
-  };
   return { workbook: instance as unknown as WorkbookProbe, request };
 }
 
@@ -215,18 +212,18 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
       if ('type' in message && message.type === 'openSheetSession') {
         throw new Error('open response timed out');
       }
-      if ('type' in message && message.type === 'extractImage') {
-        return { type: 'imageExtracted', id: message.id, bytes: new ArrayBuffer(0) };
+      if ('type' in message && message.type === 'toMarkdown') {
+        return { type: 'markdownRendered', id: message.id, markdown: 'ok' };
       }
       return streamResponse(message);
     });
 
     await expect(workbook.getWorksheet(0)).rejects.toThrow('open response timed out');
-    await expect(workbook.getImage('xl/media/a.png', 'image/png')).resolves.toBeInstanceOf(Blob);
+    await expect(workbook.toMarkdown()).resolves.toBe('ok');
     expect(messages.map((message) => 'type' in message ? message.type : message.kind)).toEqual([
       'openSheetSession',
       'cancel',
-      'extractImage',
+      'toMarkdown',
     ]);
   });
 
@@ -294,12 +291,12 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
       resource: 'worksheet-model', metric: 'rows', observed: 100_001,
     });
     const beforeSibling = messages.length;
-    await expect(workbook.getImage('xl/media/a.png', 'image/png')).rejects.toBe(first);
+    await expect(workbook.toMarkdown()).rejects.toBe(first);
     expect(messages).toHaveLength(beforeSibling);
     expect(messages.some((message) => !('type' in message) && message.kind === 'cancel')).toBe(true);
   });
 
-  it('latches a renderer resource failure across later image operations', async () => {
+  it('latches a renderer resource failure across later image and markdown operations', async () => {
     const fatal = new OoxmlResourceLimitError('renderer index limit', {
       stage: 'layout',
       violation: {
@@ -322,7 +319,33 @@ describe('XlsxWorkbook.getWorksheet compatibility materializer', () => {
     const requestCount = request.mock.calls.length;
     await expect((workbook as unknown as XlsxWorkbook).getImage('xl/media/a.png', 'image/png'))
       .rejects.toBe(fatal);
+    await expect(workbook.toMarkdown()).rejects.toBe(fatal);
     expect(request).toHaveBeenCalledTimes(requestCount);
+  });
+
+  it('keeps an uncached worker render atomic ahead of later markdown', async () => {
+    const order: string[] = [];
+    const bitmap = {} as ImageBitmap;
+    const { workbook } = makeWorkbook('worker', async (message) => {
+      order.push('type' in message ? message.type : `${message.kind}:${'sequence' in message ? message.sequence : ''}`);
+      if ('type' in message && message.type === 'renderViewport') {
+        return { type: 'viewportRendered', id: message.id, bitmap };
+      }
+      if ('type' in message && message.type === 'toMarkdown') {
+        return { type: 'markdownRendered', id: message.id, markdown: 'after' };
+      }
+      return streamResponse(message);
+    });
+
+    const rendered = workbook.renderViewportToBitmap(
+      0,
+      { startRow: 1, endRow: 1, startCol: 1, endCol: 1 },
+      { width: 100, height: 80 },
+    );
+    const markdown = workbook.toMarkdown();
+    await expect(rendered).resolves.toBe(bitmap);
+    await expect(markdown).resolves.toBe('after');
+    expect(order.indexOf('renderViewport')).toBeLessThan(order.indexOf('toMarkdown'));
   });
 
   it('settles open cleanup when a worker error makes the bridge permanently unusable', async () => {

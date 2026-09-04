@@ -33,8 +33,9 @@ mod types;
 pub(crate) use types::*;
 
 mod markdown;
-mod markdown_layout;
-use markdown::{render_presentation_md, render_slide_comments_md, render_slide_md, MarkdownWriter};
+use markdown::{
+    render_presentation_md, render_review_comments_md, render_slide_md, MarkdownWriter,
+};
 
 mod chart;
 
@@ -171,7 +172,7 @@ fn note_bootstrap_output_slide_retained() {
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn parse_pptx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -189,18 +190,31 @@ pub fn parse_pptx(
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// WASM-callable markdown projection. Shares the body of `to_markdown_native`
+/// so the browser / Node WASM path and the native mcp-server path stay in
+/// lock-step. See `to_markdown_native` for the design rationale.
+#[wasm_bindgen]
+pub fn pptx_to_markdown(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    render_markdown_from_bytes_with_limits(data, max_archive_entry_bytes, max_total_inflated_bytes)
+        .map_err(pptx_parser_js_error)
+}
+
 /// Native equivalent of `parse_pptx` for use from the MCP server.
 pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
     let presentation = parse_presentation_from_bytes(data).map_err(|e| e.to_string())?;
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
 }
 
-/// Parse a pptx and project the result to GitHub-flavoured markdown,
-/// preserving textual / semantic structure (headings, bullets, tables, charts,
-/// notes, comments) and discarding presentation details (geometry, fills,
-/// strokes, effects, theme inheritance details). Designed for AI agents that
-/// need to read content efficiently — typical 10-30× token reduction vs. the
-/// raw JSON of `parse_pptx_native`.
+/// Parse a pptx and produce a best-effort, text-focused GitHub-flavoured
+/// markdown projection. Explicit headings, bullets, tables, charts, and notes
+/// are retained where available; review comments are collected separately.
+/// Geometry, inferred shape relationships, fills, strokes, effects, and theme
+/// inheritance details are intentionally discarded.
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     render_markdown_from_bytes_with_limits(data, None, None)
 }
@@ -216,7 +230,7 @@ fn pptx_parser_js_error(error: String) -> JsValue {
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn extract_media(
     data: &[u8],
     path: &str,
@@ -236,7 +250,7 @@ pub fn extract_media(
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "ppt/media/image1.png") from a pptx zip archive. Used by the main thread to
 /// lazily materialize image blobs on demand through a bounded package operation.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -254,7 +268,7 @@ pub fn extract_image(
 }
 
 /// Extract one font part referenced by `p:embeddedFontLst`.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn extract_font(
     data: &[u8],
     path: &str,
@@ -272,15 +286,15 @@ pub fn extract_font(
 
 /// A stateful handle over an opened pptx archive.
 ///
-/// The free functions above (`parse_pptx` / `extract_media` / `extract_image` /
-/// `extract_font`) each re-copy the whole file into WASM and re-scan the ZIP
+/// The free functions above (`parse_pptx` / `pptx_to_markdown` / `extract_media`
+/// / `extract_image` / `extract_font`) each re-copy the whole file into WASM and re-scan the ZIP
 /// central directory on every call. A `PptxArchive` copies the bytes into WASM
 /// **once** (in `new`) and keeps the opened [`PptxZip`] session alive, so a `parse`
 /// followed by any number of `extract_media` / `extract_image` calls (the
 /// viewer's parse-then-lazily-load-media pattern) pays the copy + open cost a
 /// single time. The session owns the source bytes, validated central-directory
 /// index, resource governor, and first package-wide poison error.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub struct PptxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (#774, RB7 MAJOR). Deferring the failure here —
@@ -565,7 +579,7 @@ fn serialize_presentation_bootstrap(
     serde_json::to_vec(&bootstrap).map_err(|error| format!("serialize error: {error}"))
 }
 
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 impl PptxArchive {
     fn ensure_presentation(&mut self) -> Result<(), String> {
         if self.presentation.is_none() {
@@ -588,7 +602,7 @@ impl PptxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[cfg_attr(feature = "viewer-wasm", wasm_bindgen(constructor))]
+    #[wasm_bindgen(constructor)]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
@@ -977,6 +991,42 @@ impl PptxArchive {
             .as_ref()
             .map_err(|e| JsValue::from_str(&format!("pptx-parser error: {e}")))?;
         zip.read_font_part(path).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
+    /// free `pptx_to_markdown`. A corrupt container degrades to an empty deck.
+    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
+        self.render_markdown_inner().map_err(pptx_parser_js_error)
+    }
+
+    fn render_markdown_inner(&mut self) -> Result<String, String> {
+        if self.prepared_slide.is_some() {
+            return Err("a slide unit is awaiting acknowledgement".to_string());
+        }
+        if let Err(error) = &self.archive {
+            return Ok(render_presentation_md(&degraded_container_presentation(
+                error.clone(),
+            )));
+        }
+
+        self.archive
+            .as_mut()
+            .expect("container open checked above")
+            .begin_operation("markdown")?;
+        let result = (|| -> Result<String, String> {
+            self.ensure_presentation()?;
+            let mut shared = self.presentation.take().expect("presentation loaded above");
+            let rendered = render_markdown_from_shared(
+                &mut shared,
+                self.archive.as_mut().expect("container open checked above"),
+            );
+            self.presentation = Some(shared);
+            rendered
+        })();
+        settle_pptx_operation(
+            self.archive.as_mut().expect("container open checked above"),
+            result,
+        )
     }
 }
 
@@ -1793,7 +1843,6 @@ fn parse_slide(
 
     let mut elements = Vec::new();
     let mut element_sources = Vec::new();
-    let mut semantic_groups = Vec::new();
 
     // ── showMasterSp resolution (ECMA-376 §19.3.1.38 sld / §19.3.1.39
     // sldLayout, AG_ChildSlide, default true) ─────────────────────────────
@@ -1902,16 +1951,6 @@ fn parse_slide(
         element_sources.extend((start..elements.len()).map(|_| SlideElementSource {
             origin: SlideElementOrigin::Slide,
         }));
-        // ECMA-376 Part 1 §19.3.1.22 defines grpSp as one grouped object.
-        // Retain its top-level boundary even though the render model flattens
-        // and transforms the children. Semantic projections can therefore
-        // keep explicitly authored groups atomic without changing canvas JSON.
-        if node.tag_name().name() == "grpSp" && elements.len() > start {
-            semantic_groups.push(SlideElementGroup {
-                start,
-                end: elements.len(),
-            });
-        }
     }
 
     debug_assert_eq!(elements.len(), element_sources.len());
@@ -1936,7 +1975,6 @@ fn parse_slide(
         background,
         elements,
         element_sources,
-        semantic_groups,
         notes,
         comments,
         hidden,
@@ -1957,7 +1995,6 @@ fn broken_slide(index: usize, part: &str, detail: &str) -> Slide {
         background: None,
         elements: Vec::new(),
         element_sources: Vec::new(),
-        semantic_groups: Vec::new(),
         notes: None,
         comments: Vec::new(),
         hidden: false,
@@ -2395,7 +2432,6 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
             background: None,
             elements: Vec::new(),
             element_sources: Vec::new(),
-            semantic_groups: Vec::new(),
             notes: None,
             comments: Vec::new(),
             hidden: false,
@@ -2411,8 +2447,8 @@ pub(crate) fn degraded_container_presentation(parse_error: String) -> Presentati
 
 /// Parse a presentation from raw archive bytes. Thin wrapper that opens a fresh
 /// owned [`PptxZip`] (copying `data`) and delegates to [`parse_presentation`].
-/// Kept so the free `parse_pptx` WASM entry point and the native
-/// `parse_pptx_native` path keep their `&[u8]` signature; the stateful
+/// Kept so the free `parse_pptx` / `pptx_to_markdown` WASM entry points and the
+/// native `parse_pptx_native` path keep their `&[u8]` signature; the stateful
 /// `PptxArchive` handle calls [`parse_presentation`] directly on its retained
 /// archive to avoid re-opening it per call.
 ///
@@ -2478,7 +2514,7 @@ fn render_markdown_from_shared(
     let reporter = zip.operation()?.limit_reporter()?;
     let limit = pptx_internal_limits().markdown_bytes;
     let mut output = MarkdownWriter::new(limit);
-    let mut comments = MarkdownWriter::sharing_budget(&output);
+    let mut review_comments = MarkdownWriter::new(limit);
     let mut has_comments = false;
     for index in 0..shared.slide_descriptors.len() {
         if index > 0 {
@@ -2492,33 +2528,21 @@ fn render_markdown_from_shared(
         }
         let produced = produce_slide_unit_with_journal(index, shared, zip, None)
             .map_err(|error| error.to_string())?;
-        render_slide_md(
-            &produced.slide,
-            shared.slide_width,
-            shared.slide_height,
-            &mut output,
-        );
-        render_slide_comments_md(
-            &produced.slide,
-            shared.slide_width,
-            shared.slide_height,
-            &mut comments,
+        render_slide_md(&produced.slide, &mut output);
+        render_review_comments_md(
+            produced.slide.slide_number,
+            &produced.slide.comments,
+            &mut review_comments,
             &mut has_comments,
         );
         reporter.observe_hard_limit(
             HardResourceLimitKind::PptxMarkdownBytes,
             None,
             limit,
-            output.observed(),
+            output.observed().saturating_add(review_comments.observed()),
         )?;
     }
-    output.append_precounted(comments.into_string());
-    reporter.observe_hard_limit(
-        HardResourceLimitKind::PptxMarkdownBytes,
-        None,
-        limit,
-        output.observed(),
-    )?;
+    output.push_str(&review_comments.into_string());
     zip.assert_healthy()?;
     Ok(output.into_string())
 }
@@ -10721,7 +10745,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_projection_is_sequential_and_independent_of_full_model_limit() {
+    fn markdown_projection_is_sequential_equivalent_and_independent_of_full_model_limit() {
         let data = build_three_slide_deck(usize::MAX, "");
         let expected = render_presentation_md(&parse_presentation_from_bytes(&data).unwrap());
         let exact_markdown_bytes = expected.len() as u64;
@@ -10735,171 +10759,14 @@ mod tests {
             to_markdown_native(&data).expect("the exact markdown ceiling is inclusive"),
             expected,
         );
-    }
 
-    #[test]
-    fn markdown_retains_authored_groups_and_infers_a_free_text_title() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Free title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="200000"/><a:ext cx="8000000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="3200" b="1"/><a:t>Free Title</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Authored group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="500000" y="1500000"/><a:ext cx="8000000" cy="3000000"/><a:chOff x="0" y="0"/><a:chExt cx="8000000" cy="3000000"/></a:xfrm></p:grpSpPr>
-            <p:sp><p:nvSpPr><p:cNvPr id="4" name="Right"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="4500000" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right body</a:t></a:r></a:p></p:txBody></p:sp>
-            <p:sp><p:nvSpPr><p:cNvPr id="5" name="Left"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Left body</a:t></a:r></a:p></p:txBody></p:sp>
-          </p:grpSp>
-          <p:sp><p:nvSpPr><p:cNvPr id="6" name="Local heading"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="4900000"/><a:ext cx="3500000" cy="400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2200" b="1"/><a:t>Local heading</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="7" name="Local body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="5400000"/><a:ext cx="3500000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1600"/><a:t>Local body</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="8" name="Combined section"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="5000000" y="4900000"/><a:ext cx="4000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2200" b="1"/><a:t>Combined</a:t></a:r><a:r><a:rPr sz="2200" b="1"/><a:t xml:space="preserve"> heading</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1600"/><a:t>Combined body</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let presentation = parse_presentation_from_bytes(&data).unwrap();
-        assert_eq!(presentation.slides[0].semantic_groups.len(), 1);
-        assert_eq!(
-            presentation.slides[0].semantic_groups[0],
-            SlideElementGroup { start: 1, end: 3 }
-        );
-
-        let markdown = to_markdown_native(&data).unwrap();
-        assert!(markdown.starts_with("# Free Title (slide 1)"), "{markdown}");
-        assert!(
-            markdown.find("Left body").unwrap() < markdown.find("Right body").unwrap(),
-            "{markdown}"
-        );
-        assert_eq!(markdown.matches("Free Title").count(), 1, "{markdown}");
-        assert!(markdown.contains("## **Local heading**"), "{markdown}");
-        assert!(
-            markdown.contains("## **Combined heading**\n\nCombined body"),
-            "{markdown}"
-        );
-    }
-
-    #[test]
-    fn markdown_uses_a_backplate_as_a_semantic_block() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="2100000"/><a:ext cx="5000000" cy="4000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Heading"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="800000" y="2500000"/><a:ext cx="4000000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2600" b="1"/><a:t>Panel heading</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="4" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="800000" y="3500000"/><a:ext cx="4000000" cy="1800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1600"/><a:t>Panel body</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let presentation = parse_presentation_from_bytes(&data).unwrap();
-        let projected = crate::markdown_layout::project_slide(
-            &presentation.slides[0],
-            presentation.slide_width,
-            presentation.slide_height,
-        );
-        assert!(projected
-            .blocks
-            .iter()
-            .any(|block| block.related && block.element_indices == vec![1, 2]));
-        let markdown = to_markdown_native(&data).unwrap();
-        assert!(markdown.contains("## **Panel heading**"), "{markdown}");
-    }
-
-    #[test]
-    fn markdown_uses_an_overlapping_panel_label_as_a_heading() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Body panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1000000" y="2200000"/><a:ext cx="6000000" cy="1800000"/></a:xfrm><a:prstGeom prst="parallelogram"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Panel body</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Attached label"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1400000" y="1900000"/><a:ext cx="2500000" cy="600000"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="DCEBFB"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Attached label</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let markdown = to_markdown_native(&data).unwrap();
-        assert!(
-            markdown.contains("## Attached label\n\nPanel body"),
-            "{markdown}"
-        );
-    }
-
-    #[test]
-    fn markdown_pairs_repeated_number_badges_with_adjacent_body_text() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="List panel"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="900000" y="1800000"/><a:ext cx="7500000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill></p:spPr></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Badge 1"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1200000" y="2200000"/><a:ext cx="500000" cy="500000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>1</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="4" name="First item"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1900000" y="2100000"/><a:ext cx="5700000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>First process description</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="5" name="Badge 2"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1200000" y="3500000"/><a:ext cx="500000" cy="500000"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>2</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="6" name="Second item"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1900000" y="3400000"/><a:ext cx="5700000" cy="700000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Second process description</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let markdown = to_markdown_native(&data).unwrap();
-        assert!(
-            markdown.contains("1. First process description\n\n2. Second process description"),
-            "{markdown}"
-        );
-        assert!(!markdown.contains("\n\n1\n\n"), "{markdown}");
-
-        let nonconsecutive_slide = slide.replace("<a:t>2</a:t>", "<a:t>4</a:t>");
-        let nonconsecutive =
-            to_markdown_native(&build_three_slide_deck(0, &nonconsecutive_slide)).unwrap();
-        assert!(
-            !nonconsecutive.contains("1. First process description"),
-            "{nonconsecutive}"
-        );
-        assert!(nonconsecutive.contains("\n\n1\n\n"), "{nonconsecutive}");
-    }
-
-    #[test]
-    fn markdown_preserves_independent_column_regions() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Left region"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="500000" y="1400000"/><a:ext cx="4500000" cy="4400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Left region</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Right one"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="1400000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right one</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="4" name="Right two"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="3000000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right two</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="5" name="Right three"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="6500000" y="4600000"/><a:ext cx="4500000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>Right three</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let markdown = to_markdown_native(&data).unwrap();
-        assert!(
-            markdown.contains("Left region\n\n---\n\nRight one\n\nRight two\n\nRight three"),
-            "{markdown}"
-        );
-    }
-
-    #[test]
-    fn markdown_coalesces_overlapping_duplicate_text() {
-        let slide = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree>
-          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Shadow copy"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="2000000" y="3000000"/><a:ext cx="3000000" cy="800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>One semantic label</a:t></a:r></a:p></p:txBody></p:sp>
-          <p:sp><p:nvSpPr><p:cNvPr id="3" name="Foreground copy"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="2050000" y="3050000"/><a:ext cx="3000000" cy="800000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"/><a:t>One semantic label</a:t></a:r></a:p></p:txBody></p:sp>
-        </p:spTree></p:cSld></p:sld>"#;
-        let data = build_three_slide_deck(0, slide);
-        let markdown = to_markdown_native(&data).unwrap();
-        assert_eq!(
-            markdown.matches("One semantic label").count(),
-            1,
-            "{markdown}"
-        );
-    }
-
-    #[test]
-    fn markdown_collects_comments_after_the_deck_narrative() {
-        let comments = valid_comment_xml("Review note");
-        let authors = r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="0" name="Ada"/></p:cmAuthorLst>"#;
-        let data = build_comment_deck([true, false], [Some(&comments), None], authors);
-        let markdown = to_markdown_native(&data).unwrap();
-
-        let last_slide = markdown.find("# Slide 3").unwrap();
-        let review = markdown.find("## Review comments").unwrap();
-        assert!(last_slide < review, "{markdown}");
-        assert_eq!(
-            markdown.matches("## Review comments").count(),
-            1,
-            "{markdown}"
-        );
-        assert!(markdown.contains("### Slide 1 — slide 1"), "{markdown}");
-        assert!(markdown.contains("**Ada**\n\n> Review note"), "{markdown}");
-
-        let exact = markdown.len() as u64;
-        {
-            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
-                markdown_bytes: exact,
-                ..PptxInternalLimits::default()
-            });
-            assert_eq!(to_markdown_native(&data).unwrap(), markdown);
-        }
-        {
-            let _limits = InternalLimitsOverride::set(PptxInternalLimits {
-                markdown_bytes: exact - 1,
-                ..PptxInternalLimits::default()
-            });
-            assert!(to_markdown_native(&data)
-                .unwrap_err()
-                .starts_with("OOXML_RESOURCE_LIMIT:"));
-        }
+        let mut archive = PptxArchive::new(data, None, None, None).unwrap();
+        archive.presentation_bootstrap().unwrap();
+        archive
+            .pull_slide_inner(0, 1, 1, HARD_MAX_PPTX_SLIDE_JSON_BYTES as usize)
+            .unwrap();
+        archive.acknowledge_slide_inner(1, 1).unwrap();
+        assert_eq!(archive.render_markdown_inner().unwrap(), expected);
     }
 
     #[test]
@@ -11788,6 +11655,21 @@ mod tests {
         assert_eq!(comment.replies[0].author.as_deref(), Some("Bob"));
         assert_eq!(comment.replies[0].status.as_deref(), Some("resolved"));
         assert_eq!(comment.replies[0].text, "Reply");
+
+        let markdown = to_markdown_native(&data).expect("markdown projects");
+        assert!(
+            markdown.rfind("# Slide 3").unwrap() < markdown.find("## Review comments").unwrap(),
+            "{markdown}"
+        );
+        assert!(
+            markdown
+                .contains("### Slide 1 — Comment 1\n\n> **Ada**\n>\n> First line\n> Second line"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(">> **Bob** (resolved)\n>>\n>> Reply"),
+            "{markdown}"
+        );
     }
 
     #[test]
@@ -12192,6 +12074,7 @@ mod tests {
     #[allow(clippy::type_complexity)] // Exact exported ABI shapes are the assertion.
     fn public_wasm_signatures_remain_stable() {
         let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> = parse_pptx;
+        let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<String, JsValue> = pptx_to_markdown;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_media;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
@@ -12201,6 +12084,7 @@ mod tests {
         let _: fn(&mut PptxArchive) -> Result<Vec<u8>, JsValue> = PptxArchive::parse;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_media;
         let _: fn(&mut PptxArchive, &str) -> Result<Vec<u8>, JsValue> = PptxArchive::extract_image;
+        let _: fn(&mut PptxArchive) -> Result<String, JsValue> = PptxArchive::to_markdown;
         let _: fn(&PptxArchive) -> Result<(), JsValue> = PptxArchive::assert_healthy;
         let _: fn(&[u8]) -> Result<String, String> = parse_pptx_native;
         let _: fn(&[u8]) -> Result<String, String> = to_markdown_native;

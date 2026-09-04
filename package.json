@@ -98,7 +98,7 @@
     "typecheck": "tsc --build && pnpm --filter @silurus/ooxml-markdown --filter @silurus/ooxml-node --filter ./packages/vscode-extension typecheck",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-markdown wasm",
+    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm",
     "vrt": "pnpm -r --workspace-concurrency=1 vrt",
     "vrt:snapshot": "pnpm -r --workspace-concurrency=1 vrt:snapshot",
     "vrt:private": "pnpm -r --workspace-concurrency=1 --if-present vrt:private",

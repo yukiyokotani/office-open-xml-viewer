@@ -119,7 +119,8 @@ export type RenderWorkerRequest =
       opts: DocxElementContextOptions;
     }
   | { type: 'extractImage'; id: number; path: string }
-  | { type: 'resourceUsage'; id: number };
+  | { type: 'resourceUsage'; id: number }
+  | { type: 'toMarkdown'; id: number };
 
 export type RenderWorkerWireRequest =
   | RenderWorkerRequest

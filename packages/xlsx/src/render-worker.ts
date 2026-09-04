@@ -333,6 +333,15 @@ self.onmessage = async (e: MessageEvent<
       post({ type: 'resourceUsage', id, usage });
       return;
     }
+    if (req.type === 'toMarkdown') {
+      // Project the retained archive to markdown, straight from the handle the
+      // worker already holds (same source as worker.ts's parse-mode arm).
+      const archive = host.archive;
+      if (!archive) throw new Error('Workbook not loaded');
+      const markdown = host.run(() => archive.to_markdown());
+      post({ type: 'markdownRendered', id, markdown });
+      return;
+    }
     });
   } catch (err) {
     if (req.type === 'openSheetSession') worksheetPull.abandonOpen(req.sessionId);

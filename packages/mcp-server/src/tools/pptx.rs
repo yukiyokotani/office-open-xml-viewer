@@ -940,7 +940,7 @@ impl PptxTools {
     }
 
     #[tool(
-        description = "Convert a PPTX file to GitHub-flavoured markdown. Uses authored groups, containing background panels, geometry, and relative typography to keep related content together, infer headings, and linearise columns/cards. Preserves nested bullets, tables, chart summaries, and speaker notes; comments are collected in a review appendix with their slide/target context. The output remains lossy and does not expose coordinates, fills, strokes, or effects; use the structured tools for precise layout or styling"
+        description = "Convert a PPTX file to GitHub-flavoured markdown. Preserves textual structure (titles, bullets at correct nesting, tables, chart summaries, speaker notes, comments) and discards presentation details (geometry, fills, strokes, theme inheritance, positions). Designed for agents that need to *read* a deck efficiently — typical 10-30× token reduction vs. `pptx_get_slides` / `pptx_extract_text`. Lossy by design: when you need precise layout or styling, fall back to the structured tools (`pptx_get_element`, `pptx_get_slide_structure`, etc.)"
     )]
     pub fn pptx_to_markdown(Parameters(p): Parameters<PptxPathParam>) -> String {
         let data = match read_file(&p.path) {

@@ -38,7 +38,7 @@ fn docx_retained_model_json_limit() -> u64 {
 /// resulting `ArrayBuffer` to the main thread as a transferable and the main
 /// thread does a single `TextDecoder.decode` + `JSON.parse`, collapsing three
 /// serializations (Rust String → JsString → structured clone) into one decode.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn parse_docx(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
@@ -55,10 +55,30 @@ pub fn parse_docx(
     serde_json::to_vec(&doc).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+/// WASM-callable markdown projection (mirrors `to_markdown_native`). Returns
+/// GitHub-flavoured markdown of headings / paragraphs / tables / footnotes,
+/// discarding positioning, section properties, fonts, and drawing shapes.
+#[wasm_bindgen]
+pub fn docx_to_markdown(
+    data: &[u8],
+    max_archive_entry_bytes: Option<u64>,
+    max_total_inflated_bytes: Option<u64>,
+) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let doc = parser::parse_from_bytes_with_limits(
+        data,
+        max_archive_entry_bytes,
+        max_total_inflated_bytes,
+        "markdown",
+    )
+    .map_err(docx_markdown_js_error)?;
+    Ok(markdown::render_document(&doc))
+}
+
 /// Extract raw bytes for a single embedded image entry (e.g.
 /// "word/media/image1.png") from a docx zip archive. Used by the main thread to
 /// lazily materialize image blobs through one bounded package operation.
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub fn extract_image(
     data: &[u8],
     path: &str,
@@ -77,7 +97,7 @@ pub fn extract_image(
 
 /// A stateful handle over an opened docx archive.
 ///
-/// The free functions above (`parse_docx` / `extract_image`)
+/// The free functions above (`parse_docx` / `docx_to_markdown` / `extract_image`)
 /// each re-copy the whole file into WASM and re-scan the ZIP central directory on
 /// every call. A `DocxArchive` copies the bytes into WASM **once** (in `new`) and
 /// keeps the opened [`parser::Zip`] session alive, so a `parse` followed by any number of
@@ -129,7 +149,7 @@ fn serialize_document_unit(
     serde_json::to_vec(unit).map_err(|error| format!("serialize error: {error}"))
 }
 
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 pub struct DocxArchive {
     /// The opened archive, or the container-open error string when the ZIP itself
     /// was truncated / corrupt (RB7 MAJOR). Deferring the failure here — instead of
@@ -142,7 +162,7 @@ pub struct DocxArchive {
     last_document_usage: Option<ResourceUsage>,
 }
 
-#[cfg_attr(feature = "viewer-wasm", wasm_bindgen)]
+#[wasm_bindgen]
 impl DocxArchive {
     /// Copy `data` into WASM once and open the ZIP central directory once.
     /// Resource limits are retained by the package session and applied to every
@@ -154,7 +174,7 @@ impl DocxArchive {
     /// JS→WASM boundary. Taking `&[u8]` would force a second `to_vec()` copy so
     /// the `Cursor` could own its backing store, transiently doubling WASM
     /// linear memory to ~2x the file size during construction.
-    #[cfg_attr(feature = "viewer-wasm", wasm_bindgen(constructor))]
+    #[wasm_bindgen(constructor)]
     pub fn new(
         data: Vec<u8>,
         max_archive_entry_bytes: Option<u64>,
@@ -525,6 +545,17 @@ impl DocxArchive {
         zip.run_operation("extract-image", |zip| parser::read_zip_bytes(zip, path))
             .map_err(|e| JsValue::from_str(&e))
     }
+
+    /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
+    /// free `docx_to_markdown`. A corrupt container degrades to an empty document.
+    pub fn to_markdown(&mut self) -> Result<String, JsValue> {
+        let doc = match self.archive.as_mut() {
+            Ok(zip) => zip.run_operation("markdown", parser::parse),
+            Err(e) => Ok(parser::degraded_container_document(e.clone())),
+        };
+        let doc = doc.map_err(docx_markdown_js_error)?;
+        Ok(markdown::render_document(&doc))
+    }
 }
 
 /// Native equivalent of `parse_docx` for use from the MCP server.
@@ -540,6 +571,7 @@ pub fn parse_docx_native(data: &[u8]) -> Result<String, String> {
 /// formatting (bold / italic / strikethrough / hyperlink). Designed for AI
 /// agents that need to read content efficiently — discards positioning,
 /// section properties, font metrics, drawing shapes.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     let doc = parser::parse_from_bytes_with_limits(data, None, None, "markdown")?;
     Ok(markdown::render_document(&doc))
@@ -551,6 +583,10 @@ fn docx_parser_js_error(error: String) -> JsValue {
     } else {
         JsValue::from_str(&format!("docx-parser error: {error}"))
     }
+}
+
+fn docx_markdown_js_error(error: String) -> JsValue {
+    JsValue::from_str(&error)
 }
 
 fn extract_entry_with_limits(
@@ -1054,12 +1090,14 @@ mod tests {
     #[allow(clippy::type_complexity)] // Exact exported ABI shapes are the assertion.
     fn public_signatures_remain_stable() {
         let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> = parse_docx;
+        let _: fn(&[u8], Option<u64>, Option<u64>) -> Result<String, JsValue> = docx_to_markdown;
         let _: fn(&[u8], &str, Option<u64>, Option<u64>) -> Result<Vec<u8>, JsValue> =
             extract_image;
         let _: fn(Vec<u8>, Option<u64>, Option<u64>, Option<u64>) -> Result<DocxArchive, JsValue> =
             DocxArchive::new;
         let _: fn(&mut DocxArchive) -> Result<Vec<u8>, JsValue> = DocxArchive::parse;
         let _: fn(&mut DocxArchive, &str) -> Result<Vec<u8>, JsValue> = DocxArchive::extract_image;
+        let _: fn(&mut DocxArchive) -> Result<String, JsValue> = DocxArchive::to_markdown;
         let _: fn(&DocxArchive) -> Result<(), JsValue> = DocxArchive::assert_healthy;
         let _: fn(&[u8]) -> Result<String, String> = parse_docx_native;
         let _: fn(&[u8]) -> Result<String, String> = to_markdown_native;

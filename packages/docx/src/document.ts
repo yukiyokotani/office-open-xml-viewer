@@ -1280,6 +1280,32 @@ export class DocxDocument {
     return readLatestOoxmlResourceMetrics(metrics, (timeoutMs) => this._resourceUsage(timeoutMs));
   }
 
+  /**
+   * Produce a best-effort, text-focused GitHub-flavoured markdown projection:
+   * headings (from
+   * `<w:outlineLvl>`), bullet / numbered lists, tables (with vMerge
+   * continuation), and rich-text formatting (bold / italic / strikethrough /
+   * hyperlink), with footnotes / endnotes collated at the end and review
+   * comments kept in a final quoted appendix.
+   * Positioning, section properties, fonts, and drawing shapes are discarded —
+   * the projection is meant for AI ingestion and full-text search, not an
+   * authoritative semantic or reading-order representation.
+   *
+   * Runs entirely in the worker off the archive opened at {@link load} (no
+   * re-copy of the file, no re-parse of the model on the main thread), so it
+   * works in BOTH `mode: 'main'` and `mode: 'worker'`.
+   *
+   * @example
+   * const doc = await DocxDocument.load(buffer);
+   * const md = await doc.toMarkdown();
+   */
+  async toMarkdown(): Promise<string> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'toMarkdown', id }) satisfies WorkerRequest,
+    );
+    return (res as Extract<WorkerResponse, { type: 'markdownRendered' }>).markdown;
+  }
+
   get pageCount(): number {
     if (this._meta) return this._meta.pageCount;
     if (!this._document) return 0;
