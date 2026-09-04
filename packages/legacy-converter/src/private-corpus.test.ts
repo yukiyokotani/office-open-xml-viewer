@@ -1,4 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import initDocx, { docx_to_markdown } from '../../docx/src/wasm/docx_parser.js';
 import initXlsx, { xlsx_to_markdown } from '../../xlsx/src/wasm/xlsx_parser.js';
@@ -74,7 +76,7 @@ corpusTest('local Office-produced legacy corpus', () => {
       expect(names.length).toBeGreaterThan(0);
 
       for (const name of names) {
-        const source = await readFile(new URL(name, format.directory));
+        const source = await readFile(join(fileURLToPath(format.directory), name));
         const result = await converter.convert({
           bytes: source,
           from: format.from,

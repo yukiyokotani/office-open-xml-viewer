@@ -159,10 +159,17 @@ function buildPptFixture(): Uint8Array {
   const record = (version: number, kind: number, payload: Uint8Array) => concat(
     little16(version), little16(kind), little32(payload.length), payload,
   );
-  const document = record(0x000f, 1000, new Uint8Array());
+  const documentAtom = concat(little32(5760), little32(4320), new Uint8Array(32));
+  const slideReference = concat(little32(2), new Uint8Array(16));
+  const document = record(0x000f, 1000, concat(
+    record(1, 1001, documentAtom),
+    record(15, 4080, record(0, 1011, slideReference)),
+  ));
   const slide = record(0x000f, 1006, record(0, 4000, utf16le('Legacy 日本語 slide')));
-  const currentEdit = document.length + slide.length;
-  const userEdit = record(0, 0x0ff5, new Uint8Array(24));
+  const directoryOffset = document.length + slide.length;
+  const directory = record(0, 0x1772, concat(little32(0x00200001), little32(0), little32(document.length)));
+  const currentEdit = directoryOffset + directory.length;
+  const userEdit = record(0, 0x0ff5, concat(new Uint8Array(12), little32(directoryOffset), little32(1), new Uint8Array(8)));
   const currentUserPayload = concat(
     little32(0x14),
     little32(0xe391c05f),
@@ -174,7 +181,7 @@ function buildPptFixture(): Uint8Array {
   );
   const currentUser = record(0, 0x0ff6, currentUserPayload);
   return buildCfb([
-    ['PowerPoint Document', concat(document, slide, userEdit)],
+    ['PowerPoint Document', concat(document, slide, directory, userEdit)],
     ['Current User', currentUser],
   ]);
 }

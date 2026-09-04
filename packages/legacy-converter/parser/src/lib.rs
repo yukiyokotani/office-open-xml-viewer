@@ -261,15 +261,42 @@ mod tests {
             output.extend_from_slice(payload);
             output
         }
-        let document = ppt_record(0x000f, 1000, &[]);
+        let mut document_atom = vec![0u8; 40];
+        document_atom[..4].copy_from_slice(&5760u32.to_le_bytes());
+        document_atom[4..8].copy_from_slice(&4320u32.to_le_bytes());
+        let mut slide_ref = [0u8; 20];
+        slide_ref[..4].copy_from_slice(&2u32.to_le_bytes());
+        let document = ppt_record(
+            0x000f,
+            1000,
+            &[
+                ppt_record(1, 1001, &document_atom),
+                ppt_record(15, 4080, &ppt_record(0, 1011, &slide_ref)),
+            ]
+            .concat(),
+        );
         let mut text = Vec::new();
         for unit in "Legacy 日本語 slide".encode_utf16() {
             text.extend_from_slice(&unit.to_le_bytes());
         }
         let atom = ppt_record(0, 4000, &text);
         let slide = ppt_record(0x000f, 1006, &atom);
-        let current_edit = document.len() + slide.len();
-        let user_edit = ppt_record(0, 0x0ff5, &[0; 24]);
+        let directory_offset = document.len() + slide.len();
+        let directory = ppt_record(
+            0,
+            0x1772,
+            &[
+                0x00200001u32.to_le_bytes(),
+                0u32.to_le_bytes(),
+                (document.len() as u32).to_le_bytes(),
+            ]
+            .concat(),
+        );
+        let current_edit = directory_offset + directory.len();
+        let mut user_payload = [0u8; 28];
+        user_payload[12..16].copy_from_slice(&(directory_offset as u32).to_le_bytes());
+        user_payload[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let user_edit = ppt_record(0, 0x0ff5, &user_payload);
         let mut current_user_payload = vec![0; 24];
         current_user_payload[0..4].copy_from_slice(&0x14u32.to_le_bytes());
         current_user_payload[4..8].copy_from_slice(&0xe391_c05fu32.to_le_bytes());
@@ -279,7 +306,10 @@ mod tests {
         current_user_payload[20..24].copy_from_slice(&8u32.to_le_bytes());
         let current_user = ppt_record(0, 0x0ff6, &current_user_payload);
         let cfb = build_cfb(&[
-            ("PowerPoint Document", [document, slide, user_edit].concat()),
+            (
+                "PowerPoint Document",
+                [document, slide, directory, user_edit].concat(),
+            ),
             ("Current User", current_user),
         ]);
         let output = convert_native(&cfb, LegacyFormat::Ppt, 1024 * 1024).unwrap();
@@ -288,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_powerpoint_multiple_edit_generations() {
+    fn rejects_powerpoint_invalid_edit_chain() {
         fn ppt_record(kind: u16, payload: &[u8]) -> Vec<u8> {
             let mut output = Vec::new();
             output.extend_from_slice(&0u16.to_le_bytes());
@@ -314,7 +344,7 @@ mod tests {
         ]);
         assert!(convert_native(&ppt, LegacyFormat::Ppt, 1024)
             .unwrap_err()
-            .contains("multiple PowerPoint edit generations"));
+            .contains("invalid PowerPoint UserEditAtom"));
     }
 
     #[test]

@@ -1,13 +1,15 @@
 //! PowerPoint Binary File (`.ppt`) compatibility subset.
 //!
-//! The first converter milestone extracts text atoms from single-edit
-//! PowerPoint 97-2003 slide containers. It emits one macro-free PresentationML
-//! slide per binary Slide record and never executes actions, macros, hyperlinks,
+//! The converter resolves live slides and outline text through the edit-chain
+//! persist directory. It emits one macro-free PresentationML
+//! slide per live slide reference and never executes actions, macros, hyperlinks,
 //! animations, or external-resource updates. See [MS-PPT] 2.3.3, 2.4.3, and
 //! 2.9.40 through 2.9.42. Unsupported/encrypted containers fail closed.
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
+
+mod persist;
 
 const DOCUMENT_CONTAINER: u16 = 1000;
 const SLIDE_CONTAINER: u16 = 1006;
@@ -22,6 +24,8 @@ const MAX_RECORDS: usize = 2_000_000;
 const MAX_DEPTH: usize = 64;
 const MAX_SLIDES: usize = 100_000;
 const MAX_TEXT_BLOCKS_PER_SLIDE: usize = 100_000;
+// Implementation resource policy, independent of the compressed ZIP ceiling.
+const MAX_TEXT_BYTES: usize = 128 * 1024 * 1024;
 
 pub struct PptConversion {
     pub bytes: Vec<u8>,
@@ -31,6 +35,7 @@ pub struct PptConversion {
 #[derive(Debug, Clone, Copy)]
 struct Record<'a> {
     version: u8,
+    instance: u16,
     kind: u16,
     payload: &'a [u8],
 }
@@ -43,66 +48,39 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     }
     let document = cfb.stream("PowerPoint Document").map_err(unsupported)?;
     let mut record_budget = MAX_RECORDS;
-    validate_single_edit_generation(cfb, &document, &mut record_budget)?;
-    if contains_record(&document, DOCUMENT_ENCRYPTION_ATOM, 0, &mut record_budget)? {
-        return Err(unsupported(
-            "encrypted PowerPoint binary documents are not supported",
-        ));
-    }
-    let top_level = parse_records(&document, &mut record_budget)?;
-    if !top_level
-        .iter()
-        .any(|record| record.kind == DOCUMENT_CONTAINER)
-    {
-        return Err(unsupported("missing PowerPoint Document container"));
-    }
+    let current_user = cfb.stream("Current User").map_err(unsupported)?;
+    let current_edit = parse_current_user_atom(&current_user, &mut record_budget)?;
+    let presentation = persist::resolve(&document, current_edit, &mut record_budget)?;
     let mut slides = Vec::new();
-    for record in &top_level {
-        if record.kind != SLIDE_CONTAINER || record.version != 0x0f {
-            continue;
-        }
-        if slides.len() >= MAX_SLIDES {
-            return Err(unsupported("too many PowerPoint slides"));
+    let mut text_budget = MAX_TEXT_BYTES;
+    for (record, outline) in &presentation.slides {
+        if contains_record(
+            record.payload,
+            DOCUMENT_ENCRYPTION_ATOM,
+            0,
+            &mut record_budget,
+        )? {
+            return Err(unsupported("encrypted PowerPoint slide"));
         }
         let mut text = Vec::new();
-        collect_text(record.payload, 0, &mut record_budget, &mut text)?;
+        collect_text(
+            record.payload,
+            0,
+            &mut record_budget,
+            &mut text,
+            outline,
+            &mut text_budget,
+        )?;
         slides.push(text);
     }
-    if slides.is_empty() {
-        return Err(unsupported(
-            "no directly addressable PowerPoint slide records were found; multi-edit persist maps are not supported yet",
-        ));
-    }
-    let bytes = build_pptx(&slides, max_output_bytes)?;
+    let bytes = build_pptx(&slides, presentation.size, max_output_bytes)?;
     Ok(PptConversion {
         bytes,
         warnings: vec![
             "legacy-ppt:slide-text-only".into(),
-            "legacy-ppt:slides-emitted-in-stream-order".into(),
             "legacy-ppt:masters-formatting-media-and-actions-omitted".into(),
         ],
     })
-}
-
-fn validate_single_edit_generation(
-    cfb: &CompoundFile<'_>,
-    document: &[u8],
-    budget: &mut usize,
-) -> Result<(), String> {
-    let current_user = cfb.stream("Current User").map_err(unsupported)?;
-    let current_edit = parse_current_user_atom(&current_user, budget)?;
-    let user_edit = parse_record_at(document, current_edit, budget)?;
-    if user_edit.kind != USER_EDIT_ATOM || user_edit.version != 0 {
-        return Err(unsupported(
-            "PowerPoint current edit does not reference a UserEditAtom",
-        ));
-    }
-    if u32_at(user_edit.payload, 8)? != 0 {
-        return Err(unsupported(
-            "multiple PowerPoint edit generations are not supported yet",
-        ));
-    }
-    Ok(())
 }
 
 /// Parse the sole CurrentUserAtom from the Current User stream.
@@ -232,12 +210,17 @@ fn parse_record_with_end<'a>(
         return Err(unsupported("too many PowerPoint records"));
     }
     *budget -= 1;
-    let options = u16_at(bytes, offset)?;
-    let kind = u16_at(bytes, offset + 2)?;
-    let size = usize::try_from(u32_at(bytes, offset + 4)?)
+    let remaining = bytes
+        .get(offset..)
+        .filter(|tail| tail.len() >= 8)
+        .ok_or_else(|| unsupported("truncated PowerPoint record header"))?;
+    let options = u16_at(remaining, 0)?;
+    let kind = u16_at(remaining, 2)?;
+    let size = usize::try_from(u32_at(remaining, 4)?)
         .map_err(|_| unsupported("PowerPoint record is too large"))?;
     let end = offset
-        .checked_add(8 + size)
+        .checked_add(8)
+        .and_then(|start| start.checked_add(size))
         .ok_or_else(|| unsupported("PowerPoint record range overflow"))?;
     let payload = bytes
         .get(offset + 8..end)
@@ -250,6 +233,7 @@ fn parse_record_with_end<'a>(
     Ok((
         Record {
             version: (options & 0x000f) as u8,
+            instance: options >> 4,
             kind,
             payload,
         },
@@ -282,39 +266,72 @@ fn collect_text(
     depth: usize,
     budget: &mut usize,
     output: &mut Vec<String>,
+    outline: &[String],
+    text_budget: &mut usize,
 ) -> Result<(), String> {
     if depth > MAX_DEPTH {
         return Err(unsupported("PowerPoint record nesting is too deep"));
     }
     for record in parse_records(bytes, budget)? {
         match record.kind {
-            TEXT_CHARS_ATOM => {
-                if record.payload.len() % 2 != 0 {
-                    return Err(unsupported("misaligned PowerPoint Unicode text atom"));
-                }
-                let units = record
-                    .payload
-                    .chunks_exact(2)
-                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
-                let text: String = char::decode_utf16(units)
-                    .map(|value| value.unwrap_or('\u{fffd}'))
-                    .collect();
+            TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
+                let text = decode_text(record)?;
+                charge_text(text_budget, text.len())?;
                 push_text(output, text)?;
             }
-            TEXT_BYTES_ATOM => {
-                let text: String = record
-                    .payload
-                    .iter()
-                    .map(|byte| decode_windows_1252(*byte))
-                    .collect();
-                push_text(output, text)?;
+            3998 => {
+                // [MS-PPT] 2.9.78: index is relative to this slide's sequence
+                // of TextHeaderAtoms, not a global or byte-stream index.
+                let index = u32_at(record.payload, 0)? as usize;
+                let text = outline
+                    .get(index)
+                    .ok_or_else(|| unsupported("PowerPoint outline text index out of range"))?;
+                // Charge before cloning: repeated references must not amplify
+                // retained text beyond the global document budget.
+                charge_text(text_budget, text.len())?;
+                push_text(output, text.clone())?;
             }
             _ if record.version == 0x0f => {
-                collect_text(record.payload, depth + 1, budget, output)?;
+                collect_text(
+                    record.payload,
+                    depth + 1,
+                    budget,
+                    output,
+                    outline,
+                    text_budget,
+                )?;
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn decode_text(record: Record<'_>) -> Result<String, String> {
+    if record.kind == TEXT_CHARS_ATOM {
+        if !record.payload.len().is_multiple_of(2) {
+            return Err(unsupported("misaligned PowerPoint Unicode text atom"));
+        }
+        let units = record
+            .payload
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+        Ok(char::decode_utf16(units)
+            .map(|c| c.unwrap_or('\u{fffd}'))
+            .collect())
+    } else {
+        Ok(record
+            .payload
+            .iter()
+            .map(|byte| decode_windows_1252(*byte))
+            .collect())
+    }
+}
+
+fn charge_text(budget: &mut usize, bytes: usize) -> Result<(), String> {
+    *budget = budget
+        .checked_sub(bytes)
+        .ok_or_else(|| unsupported("PowerPoint decoded text budget exceeded"))?;
     Ok(())
 }
 
@@ -328,7 +345,11 @@ fn push_text(output: &mut Vec<String>, text: String) -> Result<(), String> {
     Ok(())
 }
 
-fn build_pptx(slides: &[Vec<String>], max_output_bytes: usize) -> Result<Vec<u8>, String> {
+fn build_pptx(
+    slides: &[Vec<String>],
+    size: (u32, u32),
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let mut content_types = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#,
@@ -373,7 +394,7 @@ fn build_pptx(slides: &[Vec<String>], max_output_bytes: usize) -> Result<Vec<u8>
         parts.push((format!("ppt/slides/_rels/slide{id}.xml.rels"), slide_rels()));
     }
     content_types.push_str("</Types>");
-    presentation.push_str("</p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"6858000\" type=\"screen4x3\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>");
+    presentation.push_str(&format!("</p:sldIdLst><p:sldSz cx=\"{}\" cy=\"{}\" type=\"custom\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>", size.0, size.1));
     presentation_rels.push_str("</Relationships>");
     parts.push(("[Content_Types].xml".into(), content_types));
     parts.push(("ppt/presentation.xml".into(), presentation));
@@ -468,6 +489,29 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 mod tests {
     use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
 
+    #[test]
+    fn rejects_record_offsets_before_doing_pointer_arithmetic() {
+        assert!(super::parse_record_at(&[], usize::MAX, &mut MAX_RECORDS.clone()).is_err());
+    }
+
+    #[test]
+    fn repeated_outline_references_are_charged_before_copying() {
+        let reference = super::persist::tests::record(0, 3998, &[0; 4]);
+        let mut output = Vec::new();
+        let mut bytes = 5;
+        assert!(collect_text(
+            &[reference.clone(), reference].concat(),
+            0,
+            &mut MAX_RECORDS.clone(),
+            &mut output,
+            &["abc".into()],
+            &mut bytes,
+        )
+        .is_err());
+        assert_eq!(output, ["abc"]);
+        assert_eq!(bytes, 2);
+    }
+
     fn current_user_atom(declared_len: u32, payload: &[u8]) -> Vec<u8> {
         let mut record = Vec::new();
         record.extend_from_slice(&0u16.to_le_bytes());
@@ -518,7 +562,15 @@ mod tests {
         container.extend_from_slice(&atom);
         let mut output = Vec::new();
         let mut budget = MAX_RECORDS;
-        collect_text(&container, 0, &mut budget, &mut output).unwrap();
+        collect_text(
+            &container,
+            0,
+            &mut budget,
+            &mut output,
+            &[],
+            &mut super::MAX_TEXT_BYTES.clone(),
+        )
+        .unwrap();
         assert_eq!(output, vec!["日本語"]);
     }
 

@@ -1,8 +1,8 @@
 //! BIFF8 (`.xls`) compatibility subset.
 //!
 //! The converter preserves worksheet names, scalar/string/boolean/error values,
-//! cached formula results, and merged-cell ranges. Formula token programs,
-//! formatting, drawings, charts, external links, and macros are never evaluated
+//! cached formula results, merged-cell ranges, BIFF8 cell styles and geometry.
+//! Formula token programs, drawings, charts, external links, and macros are never evaluated
 //! or copied. See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
+
+mod geometry;
+mod styles;
 
 const BOF: u16 = 0x0809;
 const EOF: u16 = 0x000a;
@@ -47,6 +50,7 @@ struct BoundSheet {
 
 #[derive(Debug, Clone)]
 enum CellValue {
+    Blank,
     Number(f64),
     Text(String),
     Bool(bool),
@@ -56,6 +60,8 @@ enum CellValue {
 #[derive(Default)]
 struct SheetData {
     rows: BTreeMap<u16, BTreeMap<u16, CellValue>>,
+    cell_styles: BTreeMap<(u16, u16), u16>,
+    geometry: geometry::Geometry,
     merged: Vec<(u16, u16, u16, u16)>,
     formula_results: bool,
 }
@@ -79,11 +85,17 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
         return Err(unsupported("encrypted BIFF workbooks are not supported"));
     }
 
+    let styles = styles::Styles::parse(&records)?;
+    let mut date1904 = false;
     let mut sheets = Vec::new();
     let mut shared_strings = Vec::new();
     let mut saw_sst = false;
     for (index, record) in records.iter().enumerate() {
+        if record.kind == EOF {
+            break;
+        }
         match record.kind {
+            0x0022 => date1904 = u16_at(record.data, 0)? != 0,
             BOUNDSHEET8 => {
                 if sheets.len() >= MAX_SHEETS {
                     return Err(unsupported("too many BIFF worksheets"));
@@ -130,6 +142,10 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             continue;
         }
         let data = parse_sheet(&records, &sheet, &shared_strings)?;
+        for index in data.cell_styles.values() {
+            styles.validate_xf(*index)?;
+        }
+        data.geometry.validate_styles(&styles)?;
         formula_results |= data.formula_results;
         converted.push((sheet.name, data));
     }
@@ -138,11 +154,14 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             "BIFF workbook contains no supported worksheets",
         ));
     }
-    let bytes = build_xlsx(&converted, max_output_bytes)?;
+    let bytes = build_xlsx(&converted, &styles.xml()?, date1904, max_output_bytes)?;
     let mut warnings = vec![
-        "legacy-xls:cell-values-and-merges-only".into(),
-        "legacy-xls:formatting-drawings-and-external-links-omitted".into(),
+        "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
+        "legacy-xls:rich-text-runs-and-print-settings-omitted".into(),
     ];
+    if styles.extensions_omitted {
+        warnings.push("legacy-xls:extended-styles-omitted".into());
+    }
     if formula_results {
         warnings.push("legacy-xls:formulas-replaced-with-cached-results".into());
     }
@@ -447,14 +466,47 @@ fn parse_sheet(
     let mut output = SheetData::default();
     let mut cell_count = 0usize;
     let mut pending_formula_string = None;
+    let mut nested_substreams = 0usize;
+    let mut found_eof = false;
     for record in &all_records[start_index + 1..] {
+        // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
+        // substream. Its records are not worksheet cells or geometry.
+        if record.kind == BOF {
+            nested_substreams += 1;
+            pending_formula_string = None;
+            continue;
+        }
         if record.kind == EOF {
+            if nested_substreams != 0 {
+                nested_substreams -= 1;
+                continue;
+            }
+            found_eof = true;
             break;
+        }
+        if nested_substreams != 0 {
+            continue;
         }
         if record.kind != STRING {
             pending_formula_string = None;
         }
+        if matches!(
+            record.kind,
+            NUMBER | RK | LABELSST | LABEL | BOOLERR | FORMULA | 0x0201
+        ) {
+            let position = cell_position(record.data)?;
+            output.cell_styles.insert(position, u16_at(record.data, 4)?);
+        }
+        output.geometry.read(record)?;
+        if record.kind == 0x0208 {
+            output.rows.entry(u16_at(record.data, 0)?).or_default();
+        }
         match record.kind {
+            0x0201 => {
+                let (row, column) = cell_position(record.data)?;
+                insert_cell(&mut output, row, column, CellValue::Blank, &mut cell_count)?;
+            }
+            0x00be => parse_mul_blank(record.data, &mut output, &mut cell_count)?,
             NUMBER => {
                 let (row, column) = cell_position(record.data)?;
                 insert_cell(
@@ -533,7 +585,9 @@ fn parse_sheet(
                         insert_cell(&mut output, row, column, value, &mut cell_count)?;
                     }
                     FormulaResult::String => pending_formula_string = Some((row, column)),
-                    FormulaResult::Empty => {}
+                    FormulaResult::Empty => {
+                        insert_cell(&mut output, row, column, CellValue::Blank, &mut cell_count)?;
+                    }
                 }
                 output.formula_results = true;
             }
@@ -554,6 +608,9 @@ fn parse_sheet(
             _ => {}
         }
     }
+    if !found_eof {
+        return Err(unsupported("unterminated BIFF worksheet substream"));
+    }
     Ok(output)
 }
 
@@ -564,6 +621,9 @@ fn insert_cell(
     value: CellValue,
     count: &mut usize,
 ) -> Result<(), String> {
+    if column > 255 {
+        return Err(unsupported("BIFF cell column exceeds the BIFF8 limit"));
+    }
     let row_values = sheet.rows.entry(row).or_default();
     if row_values.insert(column, value).is_none() {
         *count += 1;
@@ -590,7 +650,30 @@ fn parse_mul_rk(data: &[u8], sheet: &mut SheetData, count: &mut usize) -> Result
             .checked_add(index as u16)
             .ok_or_else(|| unsupported("MULRK column overflow"))?;
         let raw = u32_at(data, 6 + index * 6)?;
+        sheet
+            .cell_styles
+            .insert((row, column), u16_at(data, 4 + index * 6)?);
         insert_cell(sheet, row, column, CellValue::Number(decode_rk(raw)), count)?;
+    }
+    Ok(())
+}
+
+fn parse_mul_blank(data: &[u8], sheet: &mut SheetData, count: &mut usize) -> Result<(), String> {
+    if data.len() < 8 || !data.len().is_multiple_of(2) {
+        return Err(unsupported("invalid MULBLANK record"));
+    }
+    let row = u16_at(data, 0)?;
+    let first = u16_at(data, 2)?;
+    let last = u16_at(data, data.len() - 2)?;
+    if last < first || last > 255 || usize::from(last - first) + 1 != (data.len() - 6) / 2 {
+        return Err(unsupported("invalid MULBLANK column range"));
+    }
+    for column in first..=last {
+        sheet.cell_styles.insert(
+            (row, column),
+            u16_at(data, 4 + usize::from(column - first) * 2)?,
+        );
+        insert_cell(sheet, row, column, CellValue::Blank, count)?;
     }
     Ok(())
 }
@@ -662,11 +745,20 @@ fn decode_rk(raw: u32) -> f64 {
     value
 }
 
-fn build_xlsx(sheets: &[(String, SheetData)], max_output_bytes: usize) -> Result<Vec<u8>, String> {
+fn build_xlsx(
+    sheets: &[(String, SheetData)],
+    styles: &str,
+    date1904: bool,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let mut workbook = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>"#,
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
     );
+    workbook.push_str(&format!(
+        "<workbookPr date1904=\"{}\"/><sheets>",
+        u8::from(date1904)
+    ));
     let mut workbook_rels = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
@@ -677,7 +769,7 @@ fn build_xlsx(sheets: &[(String, SheetData)], max_output_bytes: usize) -> Result
     );
     let mut parts = vec![
         ("_rels/.rels".into(), ROOT_RELS_XLSX.to_string()),
-        ("xl/styles.xml".into(), minimal_styles()),
+        ("xl/styles.xml".into(), styles.into()),
     ];
     for (index, (name, sheet)) in sheets.iter().enumerate() {
         let id = index + 1;
@@ -715,36 +807,43 @@ fn build_xlsx(sheets: &[(String, SheetData)], max_output_bytes: usize) -> Result
 fn build_sheet_xml(sheet: &SheetData) -> String {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
     );
+    xml.push_str(&sheet.geometry.xml());
+    xml.push_str("<sheetData>");
     for (row, cells) in &sheet.rows {
-        xml.push_str(&format!("<row r=\"{}\">", u32::from(*row) + 1));
+        xml.push_str(&format!(
+            "<row r=\"{}\"{}>",
+            u32::from(*row) + 1,
+            sheet.geometry.row_attributes(*row)
+        ));
         for (column, value) in cells {
             let reference = cell_reference(*row, *column);
+            let style = sheet
+                .cell_styles
+                .get(&(*row, *column))
+                .copied()
+                .unwrap_or(0);
+            let cell = format!("<c r=\"{reference}\" s=\"{style}\"");
             match value {
+                CellValue::Blank => xml.push_str(&format!("{cell}/>")),
                 CellValue::Number(value) if value.is_finite() => {
-                    xml.push_str(&format!("<c r=\"{reference}\"><v>{value}</v></c>"));
+                    xml.push_str(&format!("{cell}><v>{value}</v></c>"));
                 }
                 CellValue::Number(_) => {
-                    xml.push_str(&format!("<c r=\"{reference}\" t=\"e\"><v>#NUM!</v></c>"));
+                    xml.push_str(&format!("{cell} t=\"e\"><v>#NUM!</v></c>"));
                 }
                 CellValue::Text(value) => {
                     xml.push_str(&format!(
-                        "<c r=\"{reference}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                        "{cell} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
                         xml_text(value)
                     ));
                 }
                 CellValue::Bool(value) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{reference}\" t=\"b\"><v>{}</v></c>",
-                        u8::from(*value)
-                    ));
+                    xml.push_str(&format!("{cell} t=\"b\"><v>{}</v></c>", u8::from(*value)));
                 }
                 CellValue::Error(value) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{reference}\" t=\"e\"><v>{}</v></c>",
-                        xml_text(value)
-                    ));
+                    xml.push_str(&format!("{cell} t=\"e\"><v>{}</v></c>", xml_text(value)));
                 }
             }
         }
@@ -830,6 +929,125 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
+
+    #[test]
+    fn worksheet_ignores_cells_in_nested_chart_substreams() {
+        use super::*;
+        let bof = [0, 6, 0x10, 0];
+        let chart_bof = [0, 6, 0x20, 0];
+        let number = [0u8; 14];
+        let records = [
+            Record {
+                kind: BOF,
+                offset: 0,
+                data: &bof,
+            },
+            Record {
+                kind: BOF,
+                offset: 8,
+                data: &chart_bof,
+            },
+            Record {
+                kind: NUMBER,
+                offset: 16,
+                data: &number,
+            },
+            Record {
+                kind: EOF,
+                offset: 34,
+                data: &[],
+            },
+            Record {
+                kind: EOF,
+                offset: 38,
+                data: &[],
+            },
+        ];
+        let sheet = BoundSheet {
+            offset: 0,
+            name: "S".into(),
+            sheet_type: 0,
+        };
+        assert!(parse_sheet(&records, &sheet, &[]).unwrap().rows.is_empty());
+        assert!(parse_sheet(&records[..4], &sheet, &[]).is_err());
+    }
+
+    #[test]
+    fn preserves_cell_xf_blank_borders_and_sheet_geometry() {
+        use crate::{cfb::test_support::build_cfb, convert_native, LegacyFormat};
+        use std::io::{Cursor, Read};
+        fn rec(kind: u16, data: &[u8]) -> Vec<u8> {
+            [
+                kind.to_le_bytes().as_slice(),
+                &(data.len() as u16).to_le_bytes(),
+                data,
+            ]
+            .concat()
+        }
+        let mut stream = rec(0x0809, &[0, 6, 5, 0]);
+        let bound = stream.len() + 4;
+        stream.extend(rec(0x0085, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
+        stream.extend(rec(0x0022, &[1, 0])); // Date1904
+        let mut font = vec![0; 16];
+        font[0..2].copy_from_slice(&360u16.to_le_bytes());
+        font[2] = 2; // italic
+        font[4..6].copy_from_slice(&10u16.to_le_bytes());
+        font[6..8].copy_from_slice(&700u16.to_le_bytes());
+        font[14..16].copy_from_slice(&[5, 0]);
+        font.extend(b"Arial");
+        stream.extend(rec(0x0031, &font));
+        let mut xf = [0u8; 20];
+        xf[6] = 0x2a; // center, wrap, bottom
+        xf[10..14].copy_from_slice(&(1u32 | (10 << 16)).to_le_bytes()); // thin red left
+        xf[14..18].copy_from_slice(&(1u32 << 26).to_le_bytes()); // solid fill
+        xf[18..20].copy_from_slice(&(13u16 | (65 << 7)).to_le_bytes());
+        stream.extend(rec(0x00e0, &xf));
+        xf[2..4].copy_from_slice(&14u16.to_le_bytes()); // date format
+        stream.extend(rec(0x00e0, &xf));
+        stream.extend(rec(0x000a, &[]));
+        let offset = stream.len() as u32;
+        stream[bound..bound + 4].copy_from_slice(&offset.to_le_bytes());
+        stream.extend(rec(0x0809, &[0, 6, 0x10, 0]));
+        stream.extend(rec(0x0225, &[0, 0, 0x2c, 1])); // default 15 pt
+        stream.extend(rec(0x007d, &[0, 0, 2, 0, 0, 20, 1, 0, 3, 0, 0, 0]));
+        let mut row = [0u8; 16];
+        row[0] = 2; // empty third row, preserve height/hidden state
+        row[6..8].copy_from_slice(&600u16.to_le_bytes());
+        row[12] = 0x60;
+        stream.extend(rec(0x0208, &row));
+        let mut number = vec![0, 0, 0, 0, 1, 0];
+        number.extend(1f64.to_le_bytes());
+        stream.extend(rec(0x0203, &number));
+        stream.extend(rec(0x0201, &[0, 0, 1, 0, 1, 0])); // styled empty cell
+        stream.extend(rec(0x00be, &[1, 0, 0, 0, 1, 0, 1, 0, 1, 0])); // two blanks
+        stream.extend(rec(0x000a, &[]));
+        let data = build_cfb(&[("Workbook", stream)]);
+        let output = convert_native(&data, LegacyFormat::Xls, 1024 * 1024).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(output.bytes)).unwrap();
+        let mut part = |name| {
+            let mut xml = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            xml
+        };
+        let styles = part("xl/styles.xml");
+        assert!(styles.contains("<sz val=\"18\"/>"));
+        assert!(styles.contains("<b/>") && styles.contains("<i/>"));
+        assert!(styles.contains("numFmtId=\"14\""));
+        assert!(styles.contains("patternType=\"solid\""));
+        assert!(styles.contains("<left style=\"thin\">"));
+        assert!(styles.contains("horizontal=\"center\"") && styles.contains("wrapText=\"1\""));
+        let sheet = part("xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A1\" s=\"1\"><v>1</v></c>"));
+        assert!(sheet.contains("<c r=\"B1\" s=\"1\"/>"));
+        assert!(sheet.contains("<c r=\"A2\" s=\"1\"/>") && sheet.contains("<c r=\"B2\" s=\"1\"/>"));
+        assert!(sheet.contains("width=\"20\""));
+        assert!(sheet.contains("<row r=\"3\" ht=\"30\" hidden=\"1\""));
+        assert!(part("xl/workbook.xml").contains("date1904=\"1\""));
+    }
 
     #[test]
     fn decodes_biff8_unicode_strings() {

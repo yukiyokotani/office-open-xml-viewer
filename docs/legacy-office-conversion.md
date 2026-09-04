@@ -67,13 +67,14 @@ legacy document in Microsoft Office.
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page breaks, displayed field results | formatting, sections, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, numbers, strings, booleans, errors, cached formula results, merged ranges | formula programs, number/cell formatting, row/column sizing, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files whose current slides are directly represented by a single edit generation | Unicode/Windows-1252 slide text atoms and slide boundaries | persist-map reconstruction across edit generations, ordering metadata, masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
+| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print settings, charts, drawings, external links, pre-BIFF8 sheets |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order, slide dimensions, Unicode/Windows-1252 text, outline text references, slide boundaries; superseded and deleted slides are not emitted | masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
-not filename-based. Unsupported input fails with `reason === 'unsupported-input'`
-instead of returning a misleading partial package.
+not filename-based. Unsupported binary structures fail with
+`reason === 'unsupported-input'`. Accepted documents can still lose the features
+listed above: their warning identifiers are not a fidelity certificate.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external
@@ -253,6 +254,58 @@ The corpus is deliberately not redistributed. Broader binary-record coverage,
 visual fidelity evaluation against Office, fuzzing, and resource measurements
 remain part of
 [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
+
+## Fidelity acceptance gate
+
+Parser acceptance is a smoke test, **not converter completion**. The acceptance
+target is complete content and display preservation of the supported corpus,
+with explicit accounting for every page, sheet, slide, drawing, and text run.
+Byte-identical ZIP files are not required. Pairing a legacy file with its original
+OOXML is useful for investigation, but does not prove fidelity: saving to an old
+format can itself change or remove features. Use Office opening the actual legacy
+file as the conversion oracle. In particular, rebuilt/down-saved corpus members
+must not silently be treated as lossless copies of their original OOXML.
+
+The local macOS oracle opens disposable copies using installed Microsoft Office,
+with macros disabled and Word/Excel external-link updates disabled, and exports
+both the legacy file and this converter's OOXML to PDF. It compares page counts,
+page sizes, and every pixel at 96 DPI. Missing pages, export errors, and any pixel
+difference fail the run. No blur, registration, resized comparison, or relaxed
+threshold hides a discrepancy. PDFs, page images, difference images, source/output
+hashes, converter WASM hash, and a report stay in a newly created local temporary
+directory; no private artifact is committed or uploaded.
+
+```bash
+pnpm --filter @silurus/ooxml-legacy-converter wasm
+node scripts/legacy-office-fidelity.mjs --format=xls --limit=10 --python=python3
+python3 scripts/legacy-office-compare.test.py
+```
+
+The oracle requires Office for macOS, macOS automation permission for each Office
+application, Poppler (`pdftoppm`), and Python with Pillow and pypdf. Omit `--format`
+and `--limit` to select the full locally installed corpus. Runs are sequential;
+an Office failure stops the batch rather than accumulating open documents or
+dialogs. Original corpus files and existing visual references are never changed.
+Temporary Office-container copies are intentionally retained for diagnosis.
+
+The exporter refuses to open a document unless Office reports its automation
+security setting and confirms that macros are disabled. PowerPoint builds that
+return no value for this property are currently blocked, even after macOS
+automation permission is granted. Word and Excel PDF export have been exercised;
+the PowerPoint export path is not yet validated end to end. Do not weaken this
+guard to obtain a passing report.
+
+Office-versus-Office PDF comparison isolates conversion loss. It is necessary but
+not sufficient for the viewer's final acceptance: compare the converted OOXML's
+Canvas output to the same Office oracle separately. Keep renderer self-regression
+tests against the previous renderer separate from both fidelity comparisons.
+Neither whole-corpus Office equality nor Canvas display equality has been reached.
+
+Resource policy for PPT reconstruction additionally limits each of retained
+outline text and emitted slide text to 128 MiB, and charges persist-directory
+entries against the record-work budget. Repeated references cannot bypass the
+text limit. XLS style tables are bounded, repeated fills/borders are interned,
+and the BIFF column-256 default-format sentinel never creates an extra column.
 
 Treat converted OOXML as a derived search/view representation, preserve the
 original binary as the authoritative source, and gate production use on a
