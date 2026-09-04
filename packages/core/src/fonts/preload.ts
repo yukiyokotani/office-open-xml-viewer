@@ -168,13 +168,15 @@ export async function preloadGoogleFonts(
 
   for (const name of fontNames) {
     if (!name) continue;
-    const key = name.toLowerCase();
+    const requestedName = name.trim();
+    if (!requestedName) continue;
+    const key = requestedName.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     const entry = map[key];
     if (!entry) continue;
     cssUrls.add(entry.url);
-    const family = (entry.loadFamily ?? name).toLowerCase();
+    const family = (entry.loadFamily ?? requestedName).toLowerCase();
     targetFamilies.add(family);
     let targets = urlTargets.get(entry.url);
     if (!targets) {

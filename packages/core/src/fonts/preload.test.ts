@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { preloadGoogleFonts, unloadGoogleFonts, parseFontFaceRules, _resetCssCacheForTests, type FontPreloadEntry } from './preload.js';
 import { _resetFontRegistryForTests } from './font-registry.js';
+import { SCRIPT_GOOGLE_FONTS } from './scripts.js';
 
 const G = globalThis as Record<string, unknown>;
 const ORIG = { document: G.document, self: G.self, fetch: G.fetch, FontFace: G.FontFace };
@@ -87,6 +88,45 @@ const MAP: Record<string, FontPreloadEntry> = {
 };
 
 describe('preloadGoogleFonts', () => {
+  it('trims a native Noto CJK name and fetches the aliased Google family', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const notoCss = CSS.replaceAll('Carlito', 'Noto Sans SC');
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => notoCss }));
+
+    await preloadGoogleFonts(['  NoTo SaNs CjK Sc  '], SCRIPT_GOOGLE_FONTS);
+
+    expect(G.fetch).toHaveBeenCalledWith(expect.stringContaining('family=Noto+Sans+SC'));
+    expect(added.map((face) => face.family)).toEqual(['Noto Sans SC', 'Noto Sans SC']);
+    expect(added.every((face) => face.loadCalls === 1)).toBe(true);
+  });
+
+  it('fetches and registers the Google Fonts HK sans family for its native alias', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const notoCss = CSS.replaceAll('Carlito', 'Noto Sans HK');
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => notoCss }));
+
+    await preloadGoogleFonts(['Noto Sans CJK HK'], SCRIPT_GOOGLE_FONTS);
+
+    expect(G.fetch).toHaveBeenCalledWith(expect.stringContaining('family=Noto+Sans+HK'));
+    expect(added.map((face) => face.family)).toEqual(['Noto Sans HK', 'Noto Sans HK']);
+  });
+
+  it('does not request a Google Fonts substitute for the native HK serif family', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    delete G.self;
+    const fetch = vi.fn();
+    G.fetch = fetch;
+
+    await preloadGoogleFonts(['Noto Serif CJK HK'], SCRIPT_GOOGLE_FONTS);
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('fetches the CSS once, registers FontFaces and force-loads them (document.fonts)', async () => {
     const { set, added } = installFakes();
     G.document = { fonts: set };

@@ -65,6 +65,7 @@ import {
   clampCanvasSize,
   classifyCjkFont,
   classifyFontGeneric,
+  googleCjkFontAlias,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
   NON_CJK_SERIF_FALLBACKS,
@@ -830,6 +831,8 @@ export function cssFontStack(normalized: string, authoredFamily = normalized): s
   const generic = genericFallback(authoredFamily);
   const sub = OFFICE_FONT_SUBSTITUTE[authoredFamily.toLowerCase()];
   const subPart = sub ? `"${sub}", ` : '';
+  const googleAlias = googleCjkFontAlias(authoredFamily);
+  const aliasPart = googleAlias ? `"${googleAlias}", ` : '';
   // Arabic faces keep the historical chain unchanged (Arabic leads; appending a
   // CJK or non-CJK tail would let Latin/digits leak away from the Arabic face).
   if (isArabicScriptFace(authoredFamily)) {
@@ -837,10 +840,13 @@ export function cssFontStack(normalized: string, authoredFamily = normalized): s
   }
   const variant: 'sans' | 'serif' = generic === 'serif' ? 'serif' : 'sans';
   const cjk = classifyCjkFont(authoredFamily);
-  const cjkPart = cjk ? `${quoteAll(cjkFallbackChain(cjk, variant))}, ` : '';
+  const cjkFamilies = cjk
+    ? cjkFallbackChain(cjk, variant).filter((name) => name !== googleAlias)
+    : [];
+  const cjkPart = cjkFamilies.length > 0 ? `${quoteAll(cjkFamilies)}, ` : '';
   const nonCjk = variant === 'serif' ? NON_CJK_SERIF_FALLBACKS : NON_CJK_SANS_FALLBACKS;
   const nonCjkPart = `${quoteAll(nonCjk)}, `;
-  return `"${normalized}", ${subPart}${cjkPart}${nonCjkPart}${generic}`;
+  return `"${normalized}", ${subPart}${aliasPart}${cjkPart}${nonCjkPart}${generic}`;
 }
 
 /**
