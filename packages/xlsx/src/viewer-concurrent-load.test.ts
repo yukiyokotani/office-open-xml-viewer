@@ -108,7 +108,7 @@ describe('XlsxViewer.load() — concurrent-load latch', () => {
 
   it('forwards and aborts the converter signal when a newer load supersedes it', async () => {
     const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
-    const { v } = build({ legacyConversion: { converter } });
+    const { v } = build({ legacyConversion: { xls: { converter } } });
     const a = fakeWorkbook();
     const b = fakeWorkbook();
     const da = deferredLoad(a.wb);
@@ -116,7 +116,7 @@ describe('XlsxViewer.load() — concurrent-load latch', () => {
     let firstSignal: AbortSignal | undefined;
     vi.spyOn(XlsxWorkbook, 'load')
       .mockImplementationOnce((_source, options) => {
-        firstSignal = options?.legacyConversion?.signal;
+        firstSignal = options?.legacyConversion?.xls?.signal;
         return da.promise;
       })
       .mockImplementationOnce(() => db.promise);

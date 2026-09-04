@@ -97,11 +97,12 @@ export interface LoadOptions {
    */
   password?: string;
   /**
-   * Opt in to normalizing a legacy binary `.doc`, `.xls`, or `.ppt` through an
-   * application-supplied asynchronous converter before the existing OOXML
-   * parser runs. The converter is invoked only for a classified legacy CFB;
-   * ordinary OOXML loads do not import, initialize, or retain a converter
-   * engine or its WASM.
+   * Opt in independently to normalizing legacy binary `.doc`, `.xls`, or `.ppt`
+   * input through an application-supplied asynchronous converter before the
+   * existing OOXML parser runs. Configure the matching `doc`, `xls`, or `ppt`
+   * field; enabling one format never enables either of the others. A converter
+   * is invoked only for a classified legacy CFB of its enabled family. Ordinary
+   * OOXML loads do not import, initialize, or retain a converter engine or WASM.
    *
    * Converter output must be same-family, macro-free OOXML. It is validated as
    * DOCX/XLSX/PPTX before parser handoff. Omitting this option preserves the

@@ -107,6 +107,7 @@ assert.deepEqual(
     'LegacyOfficeConversionOptions',
     'LegacyOfficeConversionRecord',
     'LegacyOfficeConversionResult',
+    'LegacyOfficeFormatConversionOptions',
     'LegacyOfficeConversionWorker',
     'LegacyOfficeConversionWorkerAdapterOptions',
     'LegacyOfficeConversionWorkerFactory',

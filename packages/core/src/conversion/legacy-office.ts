@@ -67,8 +67,9 @@ export interface LegacyOfficeConversionRecord {
   readonly warnings?: readonly string[];
 }
 
-export interface LegacyOfficeConversionOptions {
-  /** Opt-in converter implementation. Omit the whole option to retain fail-closed behavior. */
+/** Converter and resource policy for one explicitly enabled legacy format. */
+export interface LegacyOfficeFormatConversionOptions {
+  /** Converter implementation for this legacy format. */
   readonly converter: LegacyOfficeConverter;
   /** Cooperative caller cancellation for conversion. */
   readonly signal?: AbortSignal;
@@ -80,6 +81,16 @@ export interface LegacyOfficeConversionOptions {
   readonly maxOutputBytes?: number;
   /** Receives one content-free record after output validation succeeds. */
   readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+}
+
+/**
+ * Per-format legacy conversion opt-ins. Each omitted format remains rejected,
+ * even when another format uses the same converter implementation.
+ */
+export interface LegacyOfficeConversionOptions {
+  readonly doc?: LegacyOfficeFormatConversionOptions;
+  readonly xls?: LegacyOfficeFormatConversionOptions;
+  readonly ppt?: LegacyOfficeFormatConversionOptions;
 }
 
 export interface NormalizedOfficeInput {
@@ -137,32 +148,33 @@ export async function normalizeOfficeInput(
   password?: string,
 ): Promise<NormalizedOfficeInput> {
   const inspected = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if (sniffCfb(inspected) !== 'legacy-binary-format' || conversion === undefined) {
+  const from = FAMILY[target];
+  const selected = conversion?.[from];
+  if (sniffCfb(inspected) !== 'legacy-binary-format' || selected === undefined) {
     return { bytes: await resolveOoxmlContainer(inspected, password) };
   }
 
-  const from = FAMILY[target];
   const inputByteLength = inspected.byteLength;
   const classifiedFormat = sniffLegacyOfficeFormat(inspected);
   if (classifiedFormat !== null && classifiedFormat !== from) {
     throw new LegacyOfficeConversionError('unsupported-input', from, target);
   }
   const maxInputBytes = normalizeByteLimit(
-    conversion.maxInputBytes,
+    selected.maxInputBytes,
     DEFAULT_MAX_LEGACY_INPUT_BYTES,
-    'legacyConversion.maxInputBytes',
+    `legacyConversion.${from}.maxInputBytes`,
   );
   const maxOutputBytes = normalizeByteLimit(
-    conversion.maxOutputBytes,
+    selected.maxOutputBytes,
     DEFAULT_MAX_CONVERTED_OOXML_BYTES,
-    'legacyConversion.maxOutputBytes',
+    `legacyConversion.${from}.maxOutputBytes`,
   );
-  const timeoutMs = normalizeTimeout(conversion.timeoutMs);
+  const timeoutMs = normalizeTimeout(selected.timeoutMs, from);
 
   if (inputByteLength > maxInputBytes) {
     throw new LegacyOfficeConversionError('source-too-large', from, target);
   }
-  if (conversion.signal?.aborted) {
+  if (selected.signal?.aborted) {
     throw new LegacyOfficeConversionError('aborted', from, target);
   }
   const input = exactBytes(inspected);
@@ -180,13 +192,13 @@ export async function normalizeOfficeInput(
     rejectCancellation?.(new LegacyOfficeConversionError(reason, from, target));
   };
   const onAbort = (): void => cancel('aborted');
-  conversion.signal?.addEventListener('abort', onAbort, { once: true });
+  selected.signal?.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => cancel('timeout'), timeoutMs);
 
   try {
     let pending: Promise<LegacyOfficeConversionResult>;
     try {
-      pending = Promise.resolve(conversion.converter.convert({
+      pending = Promise.resolve(selected.converter.convert({
         bytes: input,
         from,
         to: target,
@@ -236,11 +248,11 @@ export async function normalizeOfficeInput(
       outputBytes: output.byteLength,
       ...diagnostics,
     });
-    notifyConversionObserver(conversion.onResult, record);
+    notifyConversionObserver(selected.onResult, record);
     return { bytes: output, conversion: record };
   } finally {
     clearTimeout(timer);
-    conversion.signal?.removeEventListener('abort', onAbort);
+    selected.signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -798,10 +810,10 @@ function normalizeByteLimit(value: number | undefined, fallback: number, name: s
   return resolved;
 }
 
-function normalizeTimeout(value: number | undefined): number {
+function normalizeTimeout(value: number | undefined, format: LegacyOfficeFormat): number {
   const resolved = value ?? DEFAULT_LEGACY_CONVERSION_TIMEOUT_MS;
   if (!Number.isSafeInteger(resolved) || resolved <= 0 || resolved > MAX_TIMER_DELAY_MS) {
-    throw new TypeError('legacyConversion.timeoutMs must be a positive integer no greater than 2147483647');
+    throw new TypeError(`legacyConversion.${format}.timeoutMs must be a positive integer no greater than 2147483647`);
   }
   return resolved;
 }
@@ -823,7 +835,7 @@ function freezeConversionRecord(
 }
 
 function notifyConversionObserver(
-  observer: LegacyOfficeConversionOptions['onResult'],
+  observer: LegacyOfficeFormatConversionOptions['onResult'],
   record: Readonly<LegacyOfficeConversionRecord>,
 ): void {
   if (observer === undefined) return;

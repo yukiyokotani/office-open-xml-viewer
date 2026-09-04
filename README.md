@@ -204,7 +204,9 @@ shapes / text boxes the same way.)
 
 Legacy binary Office input can be routed through an asynchronous converter
 before the existing OOXML parser runs (`.doc -> .docx`, `.xls -> .xlsx`,
-`.ppt -> .pptx`). This is fully opt-in: importing
+`.ppt -> .pptx`). This is fully opt-in per format: applications explicitly
+inject `legacyConversion.doc`, `.xls`, and/or `.ppt`, and enabling one never
+enables the others. Importing
 `@silurus/ooxml/legacy-conversion` provides an early, deliberately limited local
 WASM converter as well as the implementation-neutral adapter API. It never
 uploads document bytes, and ordinary OOXML loads do not import or initialize the

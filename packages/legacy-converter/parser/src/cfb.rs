@@ -8,7 +8,9 @@
 
 use std::collections::HashSet;
 
-const SIGNATURE: [u8; 8] = [0xe1, 0x1a, 0xb1, 0xa1, 0xe0, 0x11, 0xcf, 0xd0];
+// [MS-CFB] 2.2 Compound File Header (`_abSig`). This is a byte sequence,
+// not a little-endian integer; reversing it would reject every Office file.
+const SIGNATURE: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 const FREE_SECTOR: u32 = 0xffff_ffff;
 const END_OF_CHAIN: u32 = 0xffff_fffe;
 const FAT_SECTOR: u32 = 0xffff_fffd;
@@ -486,7 +488,9 @@ fn usize_at_u32(bytes: &[u8], offset: usize) -> Result<usize, String> {
 
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) mod test_support {
-    use super::{DIFAT_SECTOR, END_OF_CHAIN, FAT_SECTOR, FREE_SECTOR, HEADER_BYTES, NO_STREAM};
+    use super::{
+        DIFAT_SECTOR, END_OF_CHAIN, FAT_SECTOR, FREE_SECTOR, HEADER_BYTES, NO_STREAM, SIGNATURE,
+    };
 
     /// Build a version-3 CFB with regular (non-mini) streams for parser tests.
     /// Padding streams to 4096 bytes keeps the fixture writer intentionally tiny.
@@ -509,7 +513,7 @@ pub(crate) mod test_support {
         assert!(fat_sectors <= 109);
         let total_sectors = data_sectors + directory_sectors + fat_sectors;
         let mut bytes = vec![0u8; HEADER_BYTES + total_sectors * sector_size];
-        bytes[..8].copy_from_slice(&[0xe1, 0x1a, 0xb1, 0xa1, 0xe0, 0x11, 0xcf, 0xd0]);
+        bytes[..8].copy_from_slice(&SIGNATURE);
         bytes[24..26].copy_from_slice(&0x003eu16.to_le_bytes());
         bytes[26..28].copy_from_slice(&3u16.to_le_bytes());
         bytes[28..30].copy_from_slice(&0xfffeu16.to_le_bytes());
@@ -592,7 +596,7 @@ pub(crate) mod test_support {
         assert!(!source.is_empty() && source.len() <= 64);
         let sector_size = 512usize;
         let mut bytes = vec![0u8; HEADER_BYTES + 4 * sector_size];
-        bytes[..8].copy_from_slice(&[0xe1, 0x1a, 0xb1, 0xa1, 0xe0, 0x11, 0xcf, 0xd0]);
+        bytes[..8].copy_from_slice(&SIGNATURE);
         bytes[24..26].copy_from_slice(&0x003eu16.to_le_bytes());
         bytes[26..28].copy_from_slice(&3u16.to_le_bytes());
         bytes[28..30].copy_from_slice(&0xfffeu16.to_le_bytes());
@@ -651,7 +655,7 @@ pub(crate) mod test_support {
         let sector_size = 4096usize;
         assert!(source.len() <= sector_size);
         let mut bytes = vec![0u8; sector_size * 4];
-        bytes[..8].copy_from_slice(&[0xe1, 0x1a, 0xb1, 0xa1, 0xe0, 0x11, 0xcf, 0xd0]);
+        bytes[..8].copy_from_slice(&SIGNATURE);
         bytes[24..26].copy_from_slice(&0x003eu16.to_le_bytes());
         bytes[26..28].copy_from_slice(&4u16.to_le_bytes());
         bytes[28..30].copy_from_slice(&0xfffeu16.to_le_bytes());
@@ -736,6 +740,13 @@ mod tests {
         assert!(cfb.has_entry("workbook"));
         let stream = cfb.stream("Workbook").unwrap();
         assert_eq!(&stream[..source.len()], source);
+    }
+
+    #[test]
+    fn accepts_the_ms_cfb_header_signature() {
+        let mut bytes = build_cfb(&[("Workbook", vec![0; 16])]);
+        bytes[..8].copy_from_slice(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+        assert!(CompoundFile::open(&bytes).is_ok());
     }
 
     #[test]

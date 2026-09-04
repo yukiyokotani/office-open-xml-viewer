@@ -51,6 +51,7 @@ export {
   type LegacyOfficeConversionRecord,
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
+  type LegacyOfficeFormatConversionOptions,
   type LegacyOfficeFormat,
   type OoxmlResourceLimit,
   type OoxmlResourceLimitErrorDetails,

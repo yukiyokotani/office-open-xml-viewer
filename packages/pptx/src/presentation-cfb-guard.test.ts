@@ -28,7 +28,7 @@ describe('PptxPresentation.load — CFB guard', () => {
     const cfb = buildCfbFixture(['Root Entry', 'PowerPoint Document']);
 
     await expect(PptxPresentation.load(cfb, {
-      legacyConversion: { converter: { convert } },
+      legacyConversion: { ppt: { converter: { convert } } },
     })).rejects.toMatchObject({
       code: 'legacy-office-conversion',
       reason: 'invalid-output',

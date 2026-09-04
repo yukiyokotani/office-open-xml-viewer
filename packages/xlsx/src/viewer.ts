@@ -1212,7 +1212,7 @@ class XlsxViewerEngine implements ZoomableViewer {
     // load itself (the old workbook is freed the moment the new model arrives).
     try {
       const wb = await this.acquisition.replace((signal) => {
-        const conversion = bindLegacyOfficeConversionSignal(this.opts.legacyConversion, signal);
+        const conversion = bindLegacyOfficeConversionSignal(this.opts.legacyConversion, 'xlsx', signal);
         const pending = XlsxWorkbook[loadXlsxSheetSource](source, {
           password: this.opts.password,
           legacyConversion: conversion.options,

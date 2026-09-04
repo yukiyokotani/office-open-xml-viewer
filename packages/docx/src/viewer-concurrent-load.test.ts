@@ -115,13 +115,13 @@ describe('DocxViewer.load() — concurrent-load latch', () => {
     let firstSignal: AbortSignal | undefined;
     vi.spyOn(DocxDocument, 'load')
       .mockImplementationOnce((_source, options) => {
-        firstSignal = options?.legacyConversion?.signal;
+        firstSignal = options?.legacyConversion?.doc?.signal;
         return da.promise;
       })
       .mockImplementationOnce(() => db.promise);
     const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
     const v = new DocxViewer(canvas as unknown as HTMLCanvasElement, {
-      legacyConversion: { converter },
+      legacyConversion: { doc: { converter } },
     });
 
     const first = v.load('a.doc');

@@ -67,6 +67,7 @@ export {
   type LegacyOfficeConversionRecord,
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
+  type LegacyOfficeFormatConversionOptions,
   type LegacyOfficeFormat,
   type LegacyOfficeConversionWorker,
   type LegacyOfficeConversionWorkerAdapterOptions,

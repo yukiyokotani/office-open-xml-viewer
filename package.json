@@ -113,6 +113,7 @@
     "smoke": "playwright test --config tests/smoke/playwright.config.ts layouts raster-decode",
     "test:site-runtime": "playwright test --config tests/site-dist/playwright.config.ts",
     "test": "vitest run && node --test tests/visual/private-corpus.test.mjs",
+    "test:legacy-converter-private": "OOXML_LEGACY_CORPUS=1 vitest run packages/legacy-converter/src/private-corpus.test.ts",
     "bench:layout": "vitest bench --run packages/docx/src/layout/layout.bench.ts",
     "bench:progressive": "OOXML_DOCX_PROGRESSIVE_BENCH=1 vitest run --disableConsoleIntercept packages/docx/src/layout/progressive-timing.test.ts",
     "check:no-inline-wasm": "node scripts/check-no-inline-wasm.mjs dist",

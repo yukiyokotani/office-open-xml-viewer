@@ -28,7 +28,7 @@ describe('DocxDocument.load — CFB guard', () => {
     const cfb = buildCfbFixture(['Root Entry', 'WordDocument', '1Table']);
 
     await expect(DocxDocument.load(cfb, {
-      legacyConversion: { converter: { convert } },
+      legacyConversion: { doc: { converter: { convert } } },
     })).rejects.toMatchObject({
       code: 'legacy-office-conversion',
       reason: 'invalid-output',

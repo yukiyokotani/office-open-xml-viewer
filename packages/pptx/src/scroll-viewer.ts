@@ -599,7 +599,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     let selectionInvalidated = false;
     try {
       const pres = await this._presentationOwner.replace((signal) => {
-        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, signal);
+        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'pptx', signal);
         const pending = PptxPresentation.load(source, {
           password: this._opts.password,
           legacyConversion: conversion.options,

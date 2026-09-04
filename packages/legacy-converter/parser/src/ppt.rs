@@ -90,27 +90,7 @@ fn validate_single_edit_generation(
     budget: &mut usize,
 ) -> Result<(), String> {
     let current_user = cfb.stream("Current User").map_err(unsupported)?;
-    let records = parse_records(&current_user, budget)?;
-    let record = records
-        .first()
-        .ok_or_else(|| unsupported("missing PowerPoint CurrentUserAtom"))?;
-    if records.len() != 1 || record.kind != CURRENT_USER_ATOM || record.version != 0 {
-        return Err(unsupported("invalid PowerPoint Current User stream"));
-    }
-    if u32_at(record.payload, 0)? != 0x14 {
-        return Err(unsupported("invalid PowerPoint CurrentUserAtom size"));
-    }
-    match u32_at(record.payload, 4)? {
-        CURRENT_USER_NOT_ENCRYPTED => {}
-        CURRENT_USER_ENCRYPTED => {
-            return Err(unsupported(
-                "encrypted PowerPoint binary documents are not supported",
-            ));
-        }
-        _ => return Err(unsupported("invalid PowerPoint CurrentUserAtom token")),
-    }
-    let current_edit = usize::try_from(u32_at(record.payload, 8)?)
-        .map_err(|_| unsupported("PowerPoint current edit offset is too large"))?;
+    let current_edit = parse_current_user_atom(&current_user, budget)?;
     let user_edit = parse_record_at(document, current_edit, budget)?;
     if user_edit.kind != USER_EDIT_ATOM || user_edit.version != 0 {
         return Err(unsupported(
@@ -123,6 +103,88 @@ fn validate_single_edit_generation(
         ));
     }
     Ok(())
+}
+
+/// Parse the sole CurrentUserAtom from the Current User stream.
+///
+/// This record is handled separately from the generic record walker because
+/// PowerPoint for Mac writes an empty-user-name atom with `recLen = 0x1c` but
+/// can omit the final four zero bytes when the CFB stream is stored in the mini
+/// stream. All normative fields through `relVersion` are still present. Keep
+/// that compatibility allowance exact and bounded; other truncated records
+/// remain errors. See [MS-PPT] 2.3.2.
+fn parse_current_user_atom(bytes: &[u8], budget: &mut usize) -> Result<usize, String> {
+    if *budget == 0 {
+        return Err(unsupported("too many PowerPoint records"));
+    }
+    *budget -= 1;
+    if bytes.len() < 8 {
+        return Err(unsupported("missing PowerPoint CurrentUserAtom"));
+    }
+    let options = u16_at(bytes, 0)?;
+    if options != 0 || u16_at(bytes, 2)? != CURRENT_USER_ATOM {
+        return Err(unsupported("invalid PowerPoint Current User stream"));
+    }
+    let declared_len = usize::try_from(u32_at(bytes, 4)?)
+        .map_err(|_| unsupported("PowerPoint CurrentUserAtom is too large"))?;
+    let payload = &bytes[8..];
+    if u32_at(payload, 0)? != 0x14 {
+        return Err(unsupported("invalid PowerPoint CurrentUserAtom size"));
+    }
+    match u32_at(payload, 4)? {
+        CURRENT_USER_NOT_ENCRYPTED => {}
+        CURRENT_USER_ENCRYPTED => {
+            return Err(unsupported(
+                "encrypted PowerPoint binary documents are not supported",
+            ));
+        }
+        _ => return Err(unsupported("invalid PowerPoint CurrentUserAtom token")),
+    }
+
+    let user_name_len = u16_at(payload, 12)? as usize;
+    if user_name_len > 255 {
+        return Err(unsupported("PowerPoint user name is too long"));
+    }
+    if u16_at(payload, 14)? != 0x03f4 || payload.get(16..18) != Some(&[3, 0]) {
+        return Err(unsupported("invalid PowerPoint CurrentUserAtom version"));
+    }
+    let required_len = 24usize
+        .checked_add(user_name_len)
+        .ok_or_else(|| unsupported("PowerPoint CurrentUserAtom size overflow"))?;
+    if payload.len() < required_len {
+        return Err(unsupported("truncated PowerPoint CurrentUserAtom"));
+    }
+    let rel_version = u32_at(payload, 20 + user_name_len)?;
+    if !matches!(rel_version, 8 | 9) {
+        return Err(unsupported("invalid PowerPoint release version"));
+    }
+    let with_unicode_len = required_len
+        .checked_add(
+            user_name_len
+                .checked_mul(2)
+                .ok_or_else(|| unsupported("PowerPoint user name size overflow"))?,
+        )
+        .ok_or_else(|| unsupported("PowerPoint CurrentUserAtom size overflow"))?;
+    let standard_length = (declared_len == required_len || declared_len == with_unicode_len)
+        && payload.len() >= declared_len;
+    let mac_empty_name_length = user_name_len == 0
+        && declared_len == required_len + 4
+        && (payload.len() == required_len
+            || payload
+                .get(required_len..declared_len)
+                .is_some_and(|tail| tail.iter().all(|byte| *byte == 0)));
+    if !standard_length && !mac_empty_name_length {
+        return Err(unsupported("invalid PowerPoint CurrentUserAtom length"));
+    }
+    let consumed = declared_len.min(payload.len());
+    if payload[consumed..].iter().any(|byte| *byte != 0) {
+        return Err(unsupported(
+            "unexpected data after PowerPoint CurrentUserAtom",
+        ));
+    }
+
+    usize::try_from(u32_at(payload, 8)?)
+        .map_err(|_| unsupported("PowerPoint current edit offset is too large"))
 }
 
 fn parse_records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, String> {
@@ -179,7 +241,12 @@ fn parse_record_with_end<'a>(
         .ok_or_else(|| unsupported("PowerPoint record range overflow"))?;
     let payload = bytes
         .get(offset + 8..end)
-        .ok_or_else(|| unsupported("truncated PowerPoint record"))?;
+        .ok_or_else(|| {
+            unsupported(format!(
+                "truncated PowerPoint record at offset {offset}: declared {size} bytes with {} available",
+                bytes.len().saturating_sub(offset + 8),
+            ))
+        })?;
     Ok((
         Record {
             version: (options & 0x000f) as u8,
@@ -399,7 +466,41 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_text, parse_records, MAX_RECORDS};
+    use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
+
+    fn current_user_atom(declared_len: u32, payload: &[u8]) -> Vec<u8> {
+        let mut record = Vec::new();
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(&0x0ff6u16.to_le_bytes());
+        record.extend_from_slice(&declared_len.to_le_bytes());
+        record.extend_from_slice(payload);
+        record
+    }
+
+    fn empty_user_payload(current_edit: u32) -> Vec<u8> {
+        let mut payload = vec![0; 24];
+        payload[0..4].copy_from_slice(&0x14u32.to_le_bytes());
+        payload[4..8].copy_from_slice(&0xe391_c05fu32.to_le_bytes());
+        payload[8..12].copy_from_slice(&current_edit.to_le_bytes());
+        payload[14..16].copy_from_slice(&0x03f4u16.to_le_bytes());
+        payload[16] = 3;
+        payload[20..24].copy_from_slice(&8u32.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn accepts_office_mac_empty_user_atom_without_declared_zero_tail() {
+        let bytes = current_user_atom(28, &empty_user_payload(1234));
+        let mut budget = MAX_RECORDS;
+        assert_eq!(parse_current_user_atom(&bytes, &mut budget).unwrap(), 1234);
+    }
+
+    #[test]
+    fn rejects_other_truncated_current_user_atoms() {
+        let bytes = current_user_atom(29, &empty_user_payload(1234));
+        let mut budget = MAX_RECORDS;
+        assert!(parse_current_user_atom(&bytes, &mut budget).is_err());
+    }
 
     #[test]
     fn extracts_unicode_text_from_nested_records() {

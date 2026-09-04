@@ -13,7 +13,7 @@ export async function normalizeNodeOfficeInput(
   format: OoxmlFormat,
   options: OoxmlNodeSessionOptions,
 ): Promise<Uint8Array> {
-  const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, options.signal);
+  const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, format, options.signal);
   try {
     return await resolveOfficeInputWithOptionalConversion(
       buffer,

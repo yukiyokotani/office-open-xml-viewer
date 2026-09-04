@@ -140,6 +140,7 @@ export {
   type LegacyOfficeConversionRecord,
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
+  type LegacyOfficeFormatConversionOptions,
   type NormalizedOfficeInput,
 } from './conversion/legacy-office';
 export {

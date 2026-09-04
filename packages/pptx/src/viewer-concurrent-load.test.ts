@@ -109,13 +109,13 @@ describe('PptxViewer.load() — concurrent-load latch', () => {
     let firstSignal: AbortSignal | undefined;
     vi.spyOn(PptxPresentation, 'load')
       .mockImplementationOnce((_source, options) => {
-        firstSignal = options?.legacyConversion?.signal;
+        firstSignal = options?.legacyConversion?.ppt?.signal;
         return da.promise;
       })
       .mockImplementationOnce(() => db.promise);
     const converter = { convert: vi.fn(async () => ({ bytes: new Uint8Array() })) };
     const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
-      legacyConversion: { converter },
+      legacyConversion: { ppt: { converter } },
     });
 
     const first = v.load('a.ppt');

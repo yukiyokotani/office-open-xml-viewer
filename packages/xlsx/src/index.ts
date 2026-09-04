@@ -146,6 +146,7 @@ export {
   type LegacyOfficeConversionRecord,
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
+  type LegacyOfficeFormatConversionOptions,
   type LegacyOfficeFormat,
   type OoxmlErrorCode,
   type OoxmlErrorStage,

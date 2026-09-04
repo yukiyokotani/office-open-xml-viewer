@@ -644,7 +644,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     let elementInvalidated = false;
     try {
       const doc = await this._documentOwner.replace((signal) => {
-        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, signal);
+        const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'docx', signal);
         const pending = DocxDocument.load(source, {
           password: this._opts.password,
           legacyConversion: conversion.options,

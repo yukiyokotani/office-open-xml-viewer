@@ -164,7 +164,13 @@ function buildPptFixture(): Uint8Array {
   const currentEdit = document.length + slide.length;
   const userEdit = record(0, 0x0ff5, new Uint8Array(24));
   const currentUserPayload = concat(
-    little32(0x14), little32(0xe391c05f), little32(currentEdit), new Uint8Array(8),
+    little32(0x14),
+    little32(0xe391c05f),
+    little32(currentEdit),
+    little16(0),
+    little16(0x03f4),
+    new Uint8Array([3, 0, 0, 0]),
+    little32(8),
   );
   const currentUser = record(0, 0x0ff6, currentUserPayload);
   return buildCfb([
@@ -222,7 +228,7 @@ function buildCfb(streams: ReadonlyArray<readonly [string, Uint8Array]>): Uint8A
   while (dataSectors + directorySectors + fatSectors > fatSectors * 128) fatSectors++;
   const output = new Uint8Array(512 + (dataSectors + directorySectors + fatSectors) * sectorSize);
   const view = new DataView(output.buffer);
-  output.set([0xe1, 0x1a, 0xb1, 0xa1, 0xe0, 0x11, 0xcf, 0xd0]);
+  output.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
   view.setUint16(24, 0x003e, true);
   view.setUint16(26, 3, true);
   view.setUint16(28, 0xfffe, true);

@@ -1149,6 +1149,11 @@ export interface LegacyOfficeConversionInput {
     readonly signal: AbortSignal;
 }
 export interface LegacyOfficeConversionOptions {
+    readonly doc?: LegacyOfficeFormatConversionOptions;
+    readonly xls?: LegacyOfficeFormatConversionOptions;
+    readonly ppt?: LegacyOfficeFormatConversionOptions;
+}
+export interface LegacyOfficeFormatConversionOptions {
     readonly converter: LegacyOfficeConverter;
     readonly signal?: AbortSignal;
     readonly timeoutMs?: number;

@@ -94,15 +94,16 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
                 if saw_sst {
                     return Err(unsupported("multiple BIFF shared string tables"));
                 }
-                if records
-                    .get(index + 1)
-                    .is_some_and(|next| next.kind == CONTINUE)
-                {
-                    return Err(unsupported(
-                        "continued BIFF shared string tables are not supported yet",
-                    ));
+                let mut fragments = vec![record.data];
+                let mut continued = index + 1;
+                while let Some(next) = records.get(continued) {
+                    if next.kind != CONTINUE {
+                        break;
+                    }
+                    fragments.push(next.data);
+                    continued += 1;
                 }
-                shared_strings = parse_sst(record.data)?;
+                shared_strings = parse_sst(&fragments)?;
                 saw_sst = true;
             }
             _ => {}
@@ -213,25 +214,164 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
     })
 }
 
-fn parse_sst(data: &[u8]) -> Result<Vec<String>, String> {
-    if data.len() < 8 {
-        return Err(unsupported("truncated SST record"));
-    }
-    let unique = usize::try_from(u32_at(data, 4)?)
+fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
+    let total_bytes = fragments.iter().try_fold(0usize, |total, fragment| {
+        total
+            .checked_add(fragment.len())
+            .ok_or_else(|| unsupported("BIFF shared string table size overflow"))
+    })?;
+    let mut cursor = SstCursor::new(fragments);
+    let counts = cursor.read_fixed(8, "truncated SST record")?;
+    let unique = usize::try_from(u32_at(counts, 4)?)
         .map_err(|_| unsupported("BIFF shared string count is too large"))?;
-    if unique > MAX_CELLS || unique > (data.len() - 8) / 3 {
+    if unique > MAX_CELLS || unique > total_bytes.saturating_sub(8) / 3 {
         return Err(unsupported("too many BIFF shared strings"));
     }
     let mut strings = Vec::with_capacity(unique);
-    let mut offset = 8usize;
     for _ in 0..unique {
-        let (value, consumed) = parse_biff_string(&data[offset..])?;
-        offset = offset
-            .checked_add(consumed)
-            .ok_or_else(|| unsupported("BIFF string table offset overflow"))?;
-        strings.push(value);
+        let header = cursor.read_fixed(3, "split or truncated BIFF string header")?;
+        let chars = u16_at(header, 0)? as usize;
+        let flags = header[2];
+        let rich_runs = if (flags & 0x08) != 0 {
+            let count = cursor.read_fixed(2, "split or truncated BIFF rich string header")?;
+            u16_at(count, 0)? as usize
+        } else {
+            0
+        };
+        let ext_size = if (flags & 0x04) != 0 {
+            let count = cursor.read_fixed(4, "split or truncated BIFF extended string header")?;
+            usize::try_from(u32_at(count, 0)?)
+                .map_err(|_| unsupported("BIFF extended string data is too large"))?
+        } else {
+            0
+        };
+        strings.push(cursor.read_characters(chars, (flags & 0x01) != 0)?);
+        cursor.skip_variable(
+            rich_runs
+                .checked_mul(4)
+                .and_then(|size| size.checked_add(ext_size))
+                .ok_or_else(|| unsupported("BIFF string size overflow"))?,
+        )?;
     }
     Ok(strings)
+}
+
+struct SstCursor<'a, 'b> {
+    fragments: &'a [&'b [u8]],
+    fragment: usize,
+    offset: usize,
+}
+
+impl<'a, 'b> SstCursor<'a, 'b> {
+    fn new(fragments: &'a [&'b [u8]]) -> Self {
+        Self {
+            fragments,
+            fragment: 0,
+            offset: 0,
+        }
+    }
+
+    /// SST non-variable fields cannot straddle BIFF record boundaries.
+    fn read_fixed(&mut self, count: usize, message: &str) -> Result<&'b [u8], String> {
+        self.advance_empty_fragments();
+        let fragment = self
+            .fragments
+            .get(self.fragment)
+            .ok_or_else(|| unsupported(message))?;
+        let end = self
+            .offset
+            .checked_add(count)
+            .ok_or_else(|| unsupported("BIFF shared string offset overflow"))?;
+        let bytes = fragment
+            .get(self.offset..end)
+            .ok_or_else(|| unsupported(message))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    /// [MS-XLS] 2.5.293 permits the character array to cross CONTINUE records.
+    /// Each continued character fragment starts with its own compression flag.
+    fn read_characters(
+        &mut self,
+        mut remaining: usize,
+        mut high_byte: bool,
+    ) -> Result<String, String> {
+        let mut output = String::new();
+        while remaining > 0 {
+            if self.current_fragment_exhausted() {
+                self.fragment += 1;
+                self.offset = 0;
+                let option = *self
+                    .fragments
+                    .get(self.fragment)
+                    .and_then(|fragment| fragment.first())
+                    .ok_or_else(|| unsupported("truncated continued BIFF string"))?;
+                if option > 1 {
+                    return Err(unsupported(
+                        "invalid continued BIFF string compression flag",
+                    ));
+                }
+                high_byte = option == 1;
+                self.offset = 1;
+            }
+
+            let fragment = self
+                .fragments
+                .get(self.fragment)
+                .ok_or_else(|| unsupported("truncated continued BIFF string"))?;
+            let width = if high_byte { 2 } else { 1 };
+            let available_bytes = fragment.len() - self.offset;
+            if high_byte && remaining > available_bytes / 2 && !available_bytes.is_multiple_of(2) {
+                return Err(unsupported(
+                    "continued BIFF Unicode string splits a double-byte character",
+                ));
+            }
+            let take = remaining.min(available_bytes / width);
+            if take == 0 {
+                return Err(unsupported("empty continued BIFF string fragment"));
+            }
+            let byte_count = take * width;
+            let bytes = &fragment[self.offset..self.offset + byte_count];
+            if high_byte {
+                let units = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+                output.extend(char::decode_utf16(units).map(|value| value.unwrap_or('\u{fffd}')));
+            } else {
+                output.extend(bytes.iter().map(|byte| char::from(*byte)));
+            }
+            self.offset += byte_count;
+            remaining -= take;
+        }
+        Ok(output)
+    }
+
+    fn skip_variable(&mut self, mut remaining: usize) -> Result<(), String> {
+        while remaining > 0 {
+            self.advance_empty_fragments();
+            let fragment = self
+                .fragments
+                .get(self.fragment)
+                .ok_or_else(|| unsupported("truncated BIFF rich or extended string data"))?;
+            let take = remaining.min(fragment.len() - self.offset);
+            self.offset += take;
+            remaining -= take;
+        }
+        Ok(())
+    }
+
+    fn advance_empty_fragments(&mut self) {
+        while self.current_fragment_exhausted() && self.fragment < self.fragments.len() {
+            self.fragment += 1;
+            self.offset = 0;
+        }
+    }
+
+    fn current_fragment_exhausted(&self) -> bool {
+        self.fragments
+            .get(self.fragment)
+            .is_none_or(|fragment| self.offset == fragment.len())
+    }
 }
 
 fn parse_biff_string(data: &[u8]) -> Result<(String, usize), String> {
@@ -716,7 +856,63 @@ mod tests {
     fn rejects_impossible_shared_string_counts_before_allocation() {
         let mut raw = vec![0; 8];
         raw[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(parse_sst(&raw).is_err());
+        assert!(parse_sst(&[&raw]).is_err());
+    }
+
+    #[test]
+    fn decodes_sst_text_across_continue_records() {
+        let mut sst = Vec::new();
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&4u16.to_le_bytes());
+        sst.push(0);
+        sst.extend_from_slice(b"ab");
+        let continued = [1, 0x2d, 0x4e, 0x87, 0x65];
+
+        assert_eq!(
+            parse_sst(&[&sst, &continued]).unwrap(),
+            ["ab\u{4e2d}\u{6587}"]
+        );
+    }
+
+    #[test]
+    fn decodes_unicode_sst_text_after_switching_to_compressed_continue() {
+        let mut sst = Vec::new();
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&4u16.to_le_bytes());
+        sst.push(1);
+        for value in ['日', '本'] {
+            sst.extend_from_slice(&(value as u16).to_le_bytes());
+        }
+        let continued = [0, b'a', b'b'];
+
+        assert_eq!(parse_sst(&[&sst, &continued]).unwrap(), ["日本ab"]);
+    }
+
+    #[test]
+    fn rejects_sst_string_headers_split_across_continue_records() {
+        let mut sst = Vec::new();
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&1u32.to_le_bytes());
+        sst.extend_from_slice(&1u16.to_le_bytes());
+        let continued = [0, b'a'];
+
+        assert!(parse_sst(&[&sst, &continued]).is_err());
+    }
+
+    #[test]
+    fn stops_unicode_text_before_the_next_sst_string_header() {
+        let mut sst = Vec::new();
+        sst.extend_from_slice(&2u32.to_le_bytes());
+        sst.extend_from_slice(&2u32.to_le_bytes());
+        for value in ['\u{4e2d}', '\u{6587}'] {
+            sst.extend_from_slice(&1u16.to_le_bytes());
+            sst.push(1);
+            sst.extend_from_slice(&(value as u16).to_le_bytes());
+        }
+
+        assert_eq!(parse_sst(&[&sst]).unwrap(), ["\u{4e2d}", "\u{6587}"]);
     }
 
     #[test]

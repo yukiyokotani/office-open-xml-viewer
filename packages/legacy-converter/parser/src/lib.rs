@@ -270,10 +270,13 @@ mod tests {
         let slide = ppt_record(0x000f, 1006, &atom);
         let current_edit = document.len() + slide.len();
         let user_edit = ppt_record(0, 0x0ff5, &[0; 24]);
-        let mut current_user_payload = vec![0; 20];
+        let mut current_user_payload = vec![0; 24];
         current_user_payload[0..4].copy_from_slice(&0x14u32.to_le_bytes());
         current_user_payload[4..8].copy_from_slice(&0xe391_c05fu32.to_le_bytes());
         current_user_payload[8..12].copy_from_slice(&(current_edit as u32).to_le_bytes());
+        current_user_payload[14..16].copy_from_slice(&0x03f4u16.to_le_bytes());
+        current_user_payload[16] = 3;
+        current_user_payload[20..24].copy_from_slice(&8u32.to_le_bytes());
         let current_user = ppt_record(0, 0x0ff6, &current_user_payload);
         let cfb = build_cfb(&[
             ("PowerPoint Document", [document, slide, user_edit].concat()),
@@ -297,10 +300,13 @@ mod tests {
         let mut user_edit_payload = vec![0; 24];
         user_edit_payload[8..12].copy_from_slice(&1u32.to_le_bytes());
         let user_edit = ppt_record(0x0ff5, &user_edit_payload);
-        let mut current_user_payload = vec![0; 20];
+        let mut current_user_payload = vec![0; 24];
         current_user_payload[0..4].copy_from_slice(&0x14u32.to_le_bytes());
         current_user_payload[4..8].copy_from_slice(&0xe391_c05fu32.to_le_bytes());
         current_user_payload[8..12].copy_from_slice(&0u32.to_le_bytes());
+        current_user_payload[14..16].copy_from_slice(&0x03f4u16.to_le_bytes());
+        current_user_payload[16] = 3;
+        current_user_payload[20..24].copy_from_slice(&8u32.to_le_bytes());
         let current_user = ppt_record(0x0ff6, &current_user_payload);
         let ppt = build_cfb(&[
             ("PowerPoint Document", user_edit),

@@ -5,8 +5,11 @@ import {
   LegacyOfficeConversionError,
   normalizeOfficeInput,
   validateConvertedOoxml,
+  type LegacyOfficeConversionOptions,
   type LegacyOfficeConverter,
+  type LegacyOfficeFormatConversionOptions,
 } from './legacy-office.js';
+import type { LegacyOfficeFormat } from './legacy-office-error.js';
 import {
   createDisposableWorkerLegacyOfficeConverter,
   type LegacyOfficeConversionWorker,
@@ -45,12 +48,19 @@ function converterReturning(format: keyof typeof contentTypes): LegacyOfficeConv
   };
 }
 
+function conversionFor(
+  format: LegacyOfficeFormat,
+  options: LegacyOfficeFormatConversionOptions,
+): LegacyOfficeConversionOptions {
+  return { [format]: options };
+}
+
 describe('normalizeOfficeInput', () => {
   it('leaves the existing OOXML/decryption path untouched when input is not legacy CFB', async () => {
     const bytes = packageFor('docx');
     const converter = converterReturning('docx');
 
-    const result = await normalizeOfficeInput(bytes, 'docx', { converter });
+    const result = await normalizeOfficeInput(bytes, 'docx', conversionFor('doc', { converter }));
 
     expect(result.bytes).toBe(bytes);
     expect(result.conversion).toBeUndefined();
@@ -74,7 +84,11 @@ describe('normalizeOfficeInput', () => {
       'WordDocument',
     ]);
 
-    await expect(normalizeOfficeInput(input, 'docx', { converter })).rejects.toMatchObject({
+    await expect(normalizeOfficeInput(
+      input,
+      'docx',
+      conversionFor('doc', { converter }),
+    )).rejects.toMatchObject({
       code: 'encrypted',
     });
     expect(converter.convert).not.toHaveBeenCalled();
@@ -89,7 +103,11 @@ describe('normalizeOfficeInput', () => {
     const converter = converterReturning(to);
     const onResult = vi.fn();
 
-    const result = await normalizeOfficeInput(input, to, { converter, onResult });
+    const result = await normalizeOfficeInput(
+      input,
+      to,
+      conversionFor(from, { converter, onResult }),
+    );
 
     expect(converter.convert).toHaveBeenCalledOnce();
     expect(converter.convert).toHaveBeenCalledWith(expect.objectContaining({
@@ -112,12 +130,22 @@ describe('normalizeOfficeInput', () => {
     expect(onResult).toHaveBeenCalledWith(result.conversion);
   });
 
+  it('does not enable an omitted legacy family when another family is configured', async () => {
+    const converter = converterReturning('docx');
+    await expect(normalizeOfficeInput(
+      buildCfbFixture(['Root Entry', 'Workbook']),
+      'xlsx',
+      conversionFor('doc', { converter }),
+    )).rejects.toMatchObject({ code: 'legacy-binary-format' });
+    expect(converter.convert).not.toHaveBeenCalled();
+  });
+
   it('rejects an unambiguous cross-family CFB without invoking the selected converter', async () => {
     const converter = converterReturning('docx');
     await expect(normalizeOfficeInput(
       buildCfbFixture(['Root Entry', 'Workbook']),
       'docx',
-      { converter },
+      conversionFor('doc', { converter }),
     )).rejects.toMatchObject({
       reason: 'unsupported-input',
       from: 'doc',
@@ -128,10 +156,10 @@ describe('normalizeOfficeInput', () => {
 
   it('isolates a diagnostics observer failure from the successful load', async () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
-    const result = await normalizeOfficeInput(input, 'docx', {
+    const result = await normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: converterReturning('docx'),
       onResult: () => { throw new Error('observer failed'); },
-    });
+    }));
     expect(result.conversion?.to).toBe('docx');
   });
 
@@ -158,9 +186,9 @@ describe('normalizeOfficeInput', () => {
       terminate: vi.fn(),
     };
 
-    const result = await normalizeOfficeInput(input, 'docx', {
+    const result = await normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: createDisposableWorkerLegacyOfficeConverter(() => worker),
-    });
+    }));
 
     expect(input.byteLength).toBe(0);
     expect(result.conversion?.inputBytes).toBe(inputBytes);
@@ -171,10 +199,10 @@ describe('normalizeOfficeInput', () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
     const converter = converterReturning('docx');
 
-    await expect(normalizeOfficeInput(input, 'docx', {
+    await expect(normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter,
       maxInputBytes: input.byteLength - 1,
-    })).rejects.toMatchObject({
+    }))).rejects.toMatchObject({
       code: 'legacy-office-conversion',
       reason: 'source-too-large',
     });
@@ -185,10 +213,10 @@ describe('normalizeOfficeInput', () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
     const output = packageFor('docx');
 
-    await expect(normalizeOfficeInput(input, 'docx', {
+    await expect(normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: converterReturning('docx'),
       maxOutputBytes: output.byteLength - 1,
-    })).rejects.toMatchObject({
+    }))).rejects.toMatchObject({
       code: 'legacy-office-conversion',
       reason: 'output-too-large',
     });
@@ -199,7 +227,7 @@ describe('normalizeOfficeInput', () => {
     await expect(normalizeOfficeInput(
       buildCfbFixture(['Root Entry', 'WordDocument']),
       'docx',
-      { converter, timeoutMs: 0x80000000 },
+      conversionFor('doc', { converter, timeoutMs: 0x80000000 }),
     )).rejects.toThrow(TypeError);
     expect(converter.convert).not.toHaveBeenCalled();
   });
@@ -208,9 +236,9 @@ describe('normalizeOfficeInput', () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
     const secret = 'private document name.doc';
 
-    await expect(normalizeOfficeInput(input, 'docx', {
+    await expect(normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: { convert: async () => { throw new Error(secret); } },
-    })).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: unknown) => {
       expect(error).toBeInstanceOf(LegacyOfficeConversionError);
       expect(error).toMatchObject({ reason: 'failed', from: 'doc', to: 'docx' });
       expect(String(error)).not.toContain(secret);
@@ -220,27 +248,27 @@ describe('normalizeOfficeInput', () => {
 
   it('rejects malformed converter-supplied output digests', async () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
-    await expect(normalizeOfficeInput(input, 'docx', {
+    await expect(normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: {
         convert: async () => ({
           bytes: packageFor('docx'),
           outputSha256: 'not-a-sha256',
         }),
       },
-    })).rejects.toMatchObject({ reason: 'invalid-output' });
+    }))).rejects.toMatchObject({ reason: 'invalid-output' });
   });
 
   it('reconstructs converter-supplied typed errors so custom messages and formats cannot escape', async () => {
     const input = buildCfbFixture(['Root Entry', 'WordDocument']);
     const secret = 'customer-contract.doc';
 
-    await expect(normalizeOfficeInput(input, 'docx', {
+    await expect(normalizeOfficeInput(input, 'docx', conversionFor('doc', {
       converter: {
         convert: async () => {
           throw new LegacyOfficeConversionError('unsupported-input', 'ppt', 'pptx', secret);
         },
       },
-    })).rejects.toSatisfy((error: unknown) => {
+    }))).rejects.toSatisfy((error: unknown) => {
       expect(error).toMatchObject({ reason: 'unsupported-input', from: 'doc', to: 'docx' });
       expect(String(error)).not.toContain(secret);
       return true;
@@ -255,7 +283,7 @@ describe('normalizeOfficeInput', () => {
     await expect(normalizeOfficeInput(
       buildCfbFixture(['Root Entry', 'WordDocument']),
       'docx',
-      { converter, signal: controller.signal },
+      conversionFor('doc', { converter, signal: controller.signal }),
     )).rejects.toMatchObject({ reason: 'aborted' });
     expect(converter.convert).not.toHaveBeenCalled();
   });
@@ -272,7 +300,7 @@ describe('normalizeOfficeInput', () => {
     await expect(normalizeOfficeInput(
       buildCfbFixture(['Root Entry', 'WordDocument']),
       'docx',
-      { converter, timeoutMs: 5 },
+      conversionFor('doc', { converter, timeoutMs: 5 }),
     )).rejects.toMatchObject({ reason: 'timeout' });
   });
 });

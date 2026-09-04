@@ -28,15 +28,15 @@ describe('Node legacy Office normalization', () => {
   it.each([
     ['doc', 'docx', (convert: LegacyOfficeConverter['convert']) => materializeDocxDocument(
       buildCfbFixture(['Root Entry', 'WordDocument']),
-      { legacyConversion: { converter: { convert } } },
+      { legacyConversion: { doc: { converter: { convert } } } },
     )],
     ['xls', 'xlsx', (convert: LegacyOfficeConverter['convert']) => openXlsxWorkbook(
       buildCfbFixture(['Root Entry', 'Workbook']),
-      { legacyConversion: { converter: { convert } } },
+      { legacyConversion: { xls: { converter: { convert } } } },
     )],
     ['ppt', 'pptx', (convert: LegacyOfficeConverter['convert']) => openPptxPresentation(
       buildCfbFixture(['Root Entry', 'PowerPoint Document']),
-      { legacyConversion: { converter: { convert } } },
+      { legacyConversion: { ppt: { converter: { convert } } } },
     )],
   ] as const)('runs the opted-in %s -> %s converter before loading parser WASM', async (
     from,

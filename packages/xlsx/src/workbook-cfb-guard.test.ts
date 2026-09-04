@@ -35,7 +35,7 @@ describe('XlsxWorkbook.load — CFB guard', () => {
     const cfb = buildCfbFixture(['Root Entry', 'Workbook']);
 
     await expect(XlsxWorkbook.load(cfb, {
-      legacyConversion: { converter: { convert } },
+      legacyConversion: { xls: { converter: { convert } } },
     })).rejects.toMatchObject({
       code: 'legacy-office-conversion',
       reason: 'invalid-output',

@@ -12,7 +12,9 @@ export function resolveOfficeInputWithOptionalConversion(
   options?: LegacyOfficeConversionOptions,
   password?: string,
 ): Promise<Uint8Array> {
-  if (options === undefined) return resolveOoxmlContainer(bytes, password);
+  if (options?.[legacyFormatForTarget(target)] === undefined) {
+    return resolveOoxmlContainer(bytes, password);
+  }
   return import('../conversion/legacy-office.js')
     .then(({ normalizeOfficeInput }) => normalizeOfficeInput(bytes, target, options, password))
     .then((result) => result.bytes);
@@ -21,20 +23,35 @@ export function resolveOfficeInputWithOptionalConversion(
 /** Bind one owner/session cancellation signal to an optional converter request. */
 export function bindLegacyOfficeConversionSignal(
   options: LegacyOfficeConversionOptions | undefined,
+  target: OoxmlFormat,
   lifecycleSignal: AbortSignal | undefined,
 ): Readonly<{
   options?: LegacyOfficeConversionOptions;
   cleanup: () => void;
 }> {
   if (options === undefined) return { cleanup: () => {} };
-  const combined = combineAbortSignals(options.signal, lifecycleSignal);
+  const format = legacyFormatForTarget(target);
+  const selected = options[format];
+  if (selected === undefined) return { options, cleanup: () => {} };
+  const combined = combineAbortSignals(selected.signal, lifecycleSignal);
   return {
     options: {
       ...options,
-      ...(combined.signal === undefined ? {} : { signal: combined.signal }),
+      [format]: {
+        ...selected,
+        ...(combined.signal === undefined ? {} : { signal: combined.signal }),
+      },
     },
     cleanup: combined.cleanup,
   };
+}
+
+function legacyFormatForTarget(target: OoxmlFormat): 'doc' | 'xls' | 'ppt' {
+  switch (target) {
+    case 'docx': return 'doc';
+    case 'xlsx': return 'xls';
+    case 'pptx': return 'ppt';
+  }
 }
 
 function combineAbortSignals(

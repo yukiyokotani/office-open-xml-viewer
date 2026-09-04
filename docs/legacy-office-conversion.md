@@ -36,16 +36,21 @@ const legacyConverter = createLegacyOfficeWasmWorkerConverter({
 const canvas = document.querySelector('canvas') as HTMLCanvasElement;
 const viewer = new DocxViewer(canvas, {
   legacyConversion: {
-    converter: legacyConverter,
-    timeoutMs: 120_000,
+    doc: {
+      converter: legacyConverter,
+      timeoutMs: 120_000,
+    },
   },
 });
 await viewer.load(legacyDocBytes);
 ```
 
-`XlsxViewer` and `PptxViewer` accept the same option. Importing the opt-in entry
-emits a separate `legacy_office_converter_bg.wasm` asset. Applications must
-serve that asset with the other package assets.
+`XlsxViewer` and `PptxViewer` use the matching `xls` and `ppt` fields. Each
+field is an independent opt-in: configuring `doc` does not enable legacy input
+for either other viewer. Importing the opt-in entry emits a separate
+`legacy_office_converter_bg.wasm` asset. Applications must serve that asset with
+the other package assets; it is not fetched or initialized until an enabled
+legacy input actually reaches the converter.
 
 For Node, use `createLegacyOfficeWasmConverter()`. Its default loader reads the
 emitted WASM asset locally; `wasm` can be supplied explicitly as bytes or a
@@ -62,7 +67,7 @@ legacy document in Microsoft Office.
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page breaks, displayed field results | formatting, sections, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks; SST must fit in one BIFF record | worksheet names, numbers, strings, booleans, errors, cached formula results, merged ranges | formula programs, number/cell formatting, row/column sizing, charts, drawings, external links, continued SST records, pre-BIFF8 sheets |
+| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, numbers, strings, booleans, errors, cached formula results, merged ranges | formula programs, number/cell formatting, row/column sizing, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files whose current slides are directly represented by a single edit generation | Unicode/Windows-1252 slide text atoms and slide boundaries | persist-map reconstruction across edit generations, ordering metadata, masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
@@ -103,23 +108,27 @@ const converter: LegacyOfficeConverter = {
 
 const document = await DocxDocument.load(input, {
   legacyConversion: {
-    converter,
-    timeoutMs: 120_000,
-    maxInputBytes: 256 * 1024 * 1024,
-    maxOutputBytes: 512 * 1024 * 1024,
-    onResult(record) {
-      // Content-free provenance: formats, sizes, engine, version, digest, warnings.
-      conversionAuditLog.push(record);
+    doc: {
+      converter,
+      timeoutMs: 120_000,
+      maxInputBytes: 256 * 1024 * 1024,
+      maxOutputBytes: 512 * 1024 * 1024,
+      onResult(record) {
+        // Content-free provenance: formats, sizes, engine, version, digest, warnings.
+        conversionAuditLog.push(record);
+      },
     },
   },
 });
 ```
 
-The mapping is selected by the receiving API and cannot cross families:
-`DocxDocument` requests `doc -> docx`, `XlsxWorkbook` requests `xls -> xlsx`,
-and `PptxPresentation` requests `ppt -> pptx`. A converter must still verify the
-binary structures it receives and return `unsupported-input` for an unsupported
-version or feature set.
+The matching format must be opted in independently. `DocxDocument` reads only
+`legacyConversion.doc` and requests `doc -> docx`; `XlsxWorkbook` reads only
+`legacyConversion.xls` and requests `xls -> xlsx`; `PptxPresentation` reads only
+`legacyConversion.ppt` and requests `ppt -> pptx`. Supplying one field never
+enables the other two. A converter must still verify the binary structures it
+receives and return `unsupported-input` for an unsupported version or feature
+set.
 
 The same `legacyConversion` option is available on the browser viewers and the
 Node `open*` / `materialize*` APIs. Node resolves conversion before it lazily
@@ -231,9 +240,19 @@ embedded code must never be executed by a converter.
 
 The repository now contains the first purpose-built WASM engine in addition to
 the opt-in contract, browser/Node normalization, converter-output preflight,
-typed errors, and disposable Worker transport. Broader binary-record coverage,
-Office-produced fidelity evaluation, fuzzing, and resource measurements remain
-part of [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
+typed errors, and disposable Worker transport. An opt-in local regression run
+checks every installed Office-produced legacy counterpart and passes each
+generated package to the existing OOXML parser:
+
+```bash
+pnpm build:wasm
+pnpm test:legacy-converter-private
+```
+
+The corpus is deliberately not redistributed. Broader binary-record coverage,
+visual fidelity evaluation against Office, fuzzing, and resource measurements
+remain part of
+[issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
 
 Treat converted OOXML as a derived search/view representation, preserve the
 original binary as the authoritative source, and gate production use on a
