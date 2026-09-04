@@ -4533,8 +4533,9 @@ function drawShape(
     // calendar header). The caller pre-decodes every image path seen in
     // `ws.shapeGroups[*].shapes[*].geom` via XlsxWorkbook.renderViewport,
     // so we should normally have it in `loadedImages` (keyed by imagePath).
-    // Missing ordinary sources remain a silent skip. A recognized TIFF whose
-    // optional codec is absent carries an explicit frame-local placeholder mark.
+    // Missing ordinary sources remain a silent skip. A recognized TIFF that the
+    // optional codec cannot provide carries an explicit frame-local placeholder
+    // mark.
     const imageGeom = shape.geom;
     const lookupKey = imageCacheKey(imageGeom.imagePath, imageGeom.duotone);
     const img = loadedImages?.get(lookupKey);

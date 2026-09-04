@@ -7,6 +7,7 @@ import {
   dropSvgImageCache,
   getCachedBitmapByPath,
   chartImageFillKey,
+  OoxmlDecodedImageLimitError,
   TiffDecodeError,
   type OffscreenFactory,
   type TiffRenderOptions,
@@ -896,7 +897,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(browserDecode).not.toHaveBeenCalled();
   });
 
-  it('rethrows TIFF codec diagnostics instead of swallowing a broken picture', async () => {
+  it('contains a TIFF codec failure at the affected picture', async () => {
     const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
     const failure = new TiffDecodeError('synthetic TIFF decode failure');
     const render = vi.fn(async () => {
@@ -910,6 +911,32 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
       toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
       nativeExtCx: 0, nativeExtCy: 0,
       imagePath: 'xl/media/broken.tiff',
+      mimeType: 'image/tiff',
+    } as ImageAnchor];
+    ws.shapeGroups = [];
+    const cache = new Map<string, CanvasImageSource | null>();
+
+    await expect(prefetchImages(ws, cache, fetchImage, {
+      tiff: { render },
+    })).resolves.toBeUndefined();
+    expect(cache.get('xl/media/broken.tiff')).toBeNull();
+    expect(isOptionalImageUnavailable(cache, 'xl/media/broken.tiff', 'tiff')).toBe(true);
+  });
+
+  it('keeps decoded-image limit failures fail-closed for TIFF pictures', async () => {
+    const bytes = new Uint8Array([0x49, 0x49, 0x2a, 0x00, 8, 0, 0, 0]);
+    const failure = new OoxmlDecodedImageLimitError('image-pixels', 10, 11);
+    const render = vi.fn(async () => {
+      throw failure;
+    });
+    const fetchImage = vi.fn(async () =>
+      new Blob([bytes as BlobPart], { type: 'image/tiff' }));
+    const ws = worksheetWithImages();
+    ws.images = [{
+      fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
+      toCol: 2, toColOff: 0, toRow: 2, toRowOff: 0,
+      nativeExtCx: 0, nativeExtCy: 0,
+      imagePath: 'xl/media/over-budget.tiff',
       mimeType: 'image/tiff',
     } as ImageAnchor];
     ws.shapeGroups = [];
@@ -1311,12 +1338,19 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
   /** A fake HTMLCanvas + proxy 2D context whose drawImage records the closed
    *  state of every image it is handed AT DRAW TIME. All other context members
    *  no-op (the resize-test pattern). */
-  function makeRecordingCanvas(drawn: { closedAtDraw: boolean[]; texts?: string[] }) {
+  function makeRecordingCanvas(drawn: {
+    closedAtDraw: boolean[];
+    texts?: string[];
+    strokes?: number;
+  }) {
     const target: Record<string, unknown> = {
       drawImage: (img: unknown) => {
         drawn.closedAtDraw.push(Boolean((img as { closed?: boolean }).closed));
       },
       fillText: (text: string) => drawn.texts?.push(text),
+      stroke: () => {
+        if (drawn.strokes !== undefined) drawn.strokes++;
+      },
       measureText: (s: string) => ({ width: [...String(s)].length * 7 }),
       createLinearGradient: () => ({ addColorStop() {} }),
       createPattern: () => null,
@@ -1345,7 +1379,7 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
   }
 
   const STYLES = {
-    fonts: [], fills: [], borders: [], cellXfs: [], numFmts: {},
+    fonts: [], fills: [], borders: [], cellXfs: [], numFmts: [],
   } as unknown as ParsedWorkbook['styles'];
 
   it('renders the missing-codec TIFF placeholder without blanking the worksheet', async () => {
@@ -1375,6 +1409,57 @@ describe('render-pass lease: >cap prefetch never draws a closed bitmap', () => {
 
     expect(drawn.texts).toContain('TIFF image unavailable');
     expect(drawn.closedAtDraw).toEqual([]);
+  });
+
+  it('keeps cells, gridlines, and healthy pictures when a configured TIFF codec rejects one picture', async () => {
+    const healthy = { width: 32, height: 24, closed: false, close() {} } as unknown as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => healthy));
+    const failure = new TiffDecodeError('Unsupported TIFF Predictor: 2');
+    const render = vi.fn(async () => {
+      throw failure;
+    });
+    const fetchImage = vi.fn(async (path: string, mime: string) => new Blob(
+      [path.endsWith('.tiff') ? tiffHeader(32, 24) as BlobPart : 'healthy-png'],
+      { type: mime },
+    ));
+    const ws = {
+      name: 'S',
+      rows: [{
+        index: 1,
+        height: null,
+        cells: [{ row: 1, col: 1, styleIndex: 0, value: { type: 'text', text: 'cell survives' } }],
+      }],
+      colWidths: {}, rowHeights: {},
+      defaultColWidth: 64, defaultRowHeight: 20,
+      mergeCells: [], freezeRows: 0, freezeCols: 0,
+      conditionalFormats: [], charts: [], shapeGroups: [],
+      images: [{
+        fromCol: 2, fromColOff: 0, fromRow: 2, fromRowOff: 0,
+        toCol: 4, toColOff: 0, toRow: 4, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/healthy.png',
+        mimeType: 'image/png',
+      }, {
+        fromCol: 5, fromColOff: 0, fromRow: 5, fromRowOff: 0,
+        toCol: 7, toColOff: 0, toRow: 7, toRowOff: 0,
+        nativeExtCx: 0, nativeExtCy: 0,
+        imagePath: 'xl/media/unsupported.tiff',
+        mimeType: 'image/tiff',
+      }] as ImageAnchor[],
+    } as unknown as Worksheet;
+    const drawn = { closedAtDraw: [] as boolean[], texts: [] as string[], strokes: 0 };
+
+    await expect(renderWorksheetViewport(
+      { ws, styles: STYLES, tiff: { render } },
+      makeRecordingCanvas(drawn),
+      { row: 1, col: 1, rows: 10, cols: 10 },
+      { fetchImage, width: 800, height: 600, dpr: 1 },
+    )).resolves.toBeUndefined();
+
+    expect(drawn.texts).toContain('cell survives');
+    expect(drawn.texts).toContain('TIFF image unavailable');
+    expect(drawn.closedAtDraw).toEqual([false]);
+    expect(drawn.strokes).toBeGreaterThan(0);
   });
 
   it('draws 300 images (cap 256) in one pass with every bitmap still open; evicted ones close after the pass', async () => {

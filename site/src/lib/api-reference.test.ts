@@ -37,6 +37,23 @@ describe('official-site API reference', () => {
       ]);
   });
 
+  it('documents the format-specific TIFF decode-failure contract', () => {
+    const tiffRenderer = optionalRenderers.find(({ exportName }) => exportName === 'tiff');
+    expect(tiffRenderer?.desc).toContain('standalone calls and DOCX/PPTX rendering report TiffDecodeError');
+    expect(tiffRenderer?.desc).toContain('XLSX rendering, including XlsxViewer');
+    expect(tiffRenderer?.desc).toContain('unavailable-image placeholder');
+
+    for (const classes of Object.values(apiReference)) {
+      for (const apiClass of classes) {
+        const tiff = apiClass.options?.find(({ name }) => name === 'tiff');
+        expect(tiff?.desc, apiClass.name)
+          .toContain('standalone codec calls and DOCX/PPTX rendering report TiffDecodeError');
+        expect(tiff?.desc, apiClass.name).toContain('XLSX rendering, including XlsxViewer');
+        expect(tiff?.desc, apiClass.name).toContain('shows the placeholder');
+      }
+    }
+  });
+
   it('documents optional chart injection on every format Viewer and engine', () => {
     for (const classes of Object.values(apiReference)) {
       for (const apiClass of classes) {

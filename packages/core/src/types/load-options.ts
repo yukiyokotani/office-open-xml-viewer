@@ -202,8 +202,10 @@ export interface LoadOptions {
    * stripped bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK images, plus
    * CCITT Group 4 bilevel images. Without this option, recognized TIFF images
    * use a visible unavailable-image placeholder and the document keeps
-   * rendering. Unsupported or malformed input passed to a configured codec
-   * reports `TiffDecodeError`. The built-in codec works in main and worker modes.
+   * rendering. Unsupported or malformed input makes standalone codec calls and
+   * DOCX/PPTX rendering report `TiffDecodeError`; XLSX rendering, including
+   * `XlsxViewer`, contains it at that picture and shows the placeholder. The
+   * built-in codec works in main and worker modes.
    */
   tiff?: TiffRenderer;
 }
