@@ -918,6 +918,30 @@ describe('acquireBitmapCacheLease (render-pass liveness)', () => {
     await Promise.resolve();
   };
 
+  it('handles a failed cleanup promise while its render lease remains open', async () => {
+    const owner = {};
+    const failure = new Error('expected image decode failure');
+    const unhandled: unknown[] = [];
+    const recordUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', recordUnhandled);
+
+    try {
+      await withBitmapCacheLease(owner, undefined, async () => {
+        await expect(getCachedDerivedBitmap('test', 'failed', owner, async () => {
+          throw failure;
+        })).rejects.toBe(failure);
+
+        // A sibling image can keep the render pass alive after this decode has
+        // been contained. Node reports an unhandled rejection before the next
+        // timer when an internal cleanup branch has no rejection handler yet.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(unhandled).toEqual([]);
+      });
+    } finally {
+      process.off('unhandledRejection', recordUnhandled);
+    }
+  });
+
   it('defers an LRU-eviction close past the cap until the lease is released', async () => {
     const closed: string[] = [];
     vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => {
