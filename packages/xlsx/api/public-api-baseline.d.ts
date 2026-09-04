@@ -1901,6 +1901,7 @@ export interface Workbook {
 export interface Worksheet {
     name: string;
     isChartSheet?: boolean;
+    isDialogSheet?: boolean;
     rows: Row[];
     colWidths: Record<number, number>;
     colWidthRanges?: Array<{

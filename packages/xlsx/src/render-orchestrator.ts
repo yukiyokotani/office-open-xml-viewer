@@ -788,13 +788,15 @@ export async function renderWorksheetViewport(
   svgDecoder?: SvgBlobDecoder,
 ): Promise<void> {
   const paint = () => renderWorksheetViewportLeased(deps, target, viewport, opts, svgDecoder);
-  const hasDecodedImages = (deps.ws.images?.length ?? 0) > 0
+  const hasDecodedImages = !deps.ws.isDialogSheet && (
+    (deps.ws.images?.length ?? 0) > 0
     || (deps.ws.shapeGroups?.some(group => (
       group.shapes.some(shape => shape.geom.type === 'image')
     )) ?? false)
     || collectChartImageFillUsagesForCharts(
       (deps.ws.charts ?? []).map(chart => chart.chart),
-    ).length > 0;
+    ).length > 0
+  );
   return opts.fetchImage && hasDecodedImages
     ? withBitmapCacheLease(opts.fetchImage, opts.imageResources, paint)
     : paint();
@@ -813,7 +815,9 @@ async function renderWorksheetViewportLeased(
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
-  const ws = worksheetWithAutoRowHeights(measurementCtx, deps.ws, styles);
+  const ws = deps.ws.isDialogSheet
+    ? deps.ws
+    : worksheetWithAutoRowHeights(measurementCtx, deps.ws, styles);
   const rawW = isHTMLCanvas(target) ? (target.clientWidth || 800) : target.width;
   const rawH = isHTMLCanvas(target) ? (target.clientHeight || 600) : target.height;
   const width = opts.width ?? rawW;
@@ -838,18 +842,20 @@ async function renderWorksheetViewportLeased(
   // every scroll frame. By awaiting first (and only when there's something
   // uncached), the whole resize+draw runs synchronously in a single tick and
   // the old frame stays visible until the new one is ready.
-  await prefetchImages(ws, imageCache, opts.fetchImage, {
-    viewport,
-    width,
-    height,
-    cellScale: opts.cellScale,
-    freezeRows: opts.freezeRows,
-    freezeCols: opts.freezeCols,
-    tiff: deps.tiff,
-    effectiveDpr,
-    svgDecoder,
-    imageResources: opts.imageResources,
-  });
+  if (!ws.isDialogSheet) {
+    await prefetchImages(ws, imageCache, opts.fetchImage, {
+      viewport,
+      width,
+      height,
+      cellScale: opts.cellScale,
+      freezeRows: opts.freezeRows,
+      freezeCols: opts.freezeCols,
+      tiff: deps.tiff,
+      effectiveDpr,
+      svgDecoder,
+      imageResources: opts.imageResources,
+    });
+  }
 
   // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
   // for the same no-white-flash reason as the image preload. Gated on
@@ -857,7 +863,7 @@ async function renderWorksheetViewportLeased(
   // await and stay fully synchronous — only the first frame that reveals new
   // equations pays the (idempotently cached) MathJax cost. Opt-in: skipped
   // entirely unless the caller supplies a `math` engine.
-  if (deps.math && worksheetHasUncachedMath(ws)) {
+  if (!ws.isDialogSheet && deps.math && worksheetHasUncachedMath(ws)) {
     await prepareWorksheetMath(ws, deps.math);
   }
 
@@ -913,6 +919,10 @@ async function renderWorksheetViewportLeased(
     drawSheetParseErrorOverlay(ctx, width, height, ws.name, ws.parseError);
     return;
   }
+  if (ws.isDialogSheet) {
+    drawDialogSheetNotice(ctx, width, height);
+    return;
+  }
 
   renderViewport(ctx, ws, styles, viewport, {
     ...opts,
@@ -922,6 +932,28 @@ async function renderWorksheetViewportLeased(
     regionMap: deps.regionMap,
     chartEx: deps.chartEx,
   });
+}
+
+/**
+ * Paint a neutral, non-error surface for a valid legacy Dialogsheet part.
+ * Dialog sheets describe custom forms rather than a worksheet cell grid, so
+ * no parser diagnostic or package-internal path belongs in the viewer UI.
+ */
+function drawDialogSheetNotice(
+  ctx: CanvasRenderingContext2D,
+  widthPx: number,
+  heightPx: number,
+): void {
+  ctx.save();
+  ctx.fillStyle = '#f7f7f8';
+  ctx.fillRect(0, 0, widthPx, heightPx);
+  const base = Math.min(widthPx, heightPx);
+  ctx.fillStyle = '#555555';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${Math.max(13, base * 0.035)}px sans-serif`;
+  ctx.fillText('Legacy dialog sheets are not displayed', widthPx / 2, heightPx / 2);
+  ctx.restore();
 }
 
 /**

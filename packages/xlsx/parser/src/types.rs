@@ -101,6 +101,12 @@ pub struct Worksheet {
     /// Omitted for ordinary worksheets to preserve the existing wire shape.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub is_chart_sheet: bool,
+    /// `true` for an `xl/dialogsheets/*.xml` part (ECMA-376 Part 1 §12.3.7).
+    /// Dialog sheets are legacy custom-dialog definitions, not cell grids;
+    /// callers render a non-error informational surface instead of attempting
+    /// to interpret the part as a worksheet.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub is_dialog_sheet: bool,
     pub rows: Vec<Row>,
     /// Serialized as `BTreeMap`s so JSON key order is deterministic (columns /
     /// rows in ascending index order), making the parser output byte-stable for
@@ -243,6 +249,7 @@ impl Worksheet {
         Worksheet {
             name: name.to_string(),
             is_chart_sheet: false,
+            is_dialog_sheet: false,
             rows: Vec::new(),
             col_widths: BTreeMap::new(),
             col_width_ranges: Vec::new(),
@@ -289,6 +296,15 @@ impl Worksheet {
     pub fn chart_sheet(name: &str) -> Self {
         let mut worksheet = Self::empty(name);
         worksheet.is_chart_sheet = true;
+        worksheet.show_gridlines = false;
+        worksheet
+    }
+
+    /// A healthy row-free legacy dialog sheet. ECMA-376 §18.3.1.34 gives
+    /// this part its own `dialogsheet` root and no worksheet `sheetData` grid.
+    pub fn dialog_sheet(name: &str) -> Self {
+        let mut worksheet = Self::empty(name);
+        worksheet.is_dialog_sheet = true;
         worksheet.show_gridlines = false;
         worksheet
     }
