@@ -13,6 +13,7 @@ docx-parser = { path = "../packages/docx/parser" }
 pptx-parser = { path = "../packages/pptx/parser" }
 xlsx-parser = { path = "../packages/xlsx/parser" }
 ooxml-common = { path = "../packages/ooxml-common" }
+legacy-office-converter = { path = "../packages/legacy-converter/parser", features = ["fuzzing"] }
 
 # Use independent workspace for fuzzers so `cargo fuzz` doesn't pull the whole
 # monorepo workspace (with its wasm32 cdylib targets) into the fuzz build.
@@ -53,6 +54,13 @@ bench = false
 [[bin]]
 name = "fuzz_rels"
 path = "fuzz_targets/fuzz_rels.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_legacy_office_converter"
+path = "fuzz_targets/fuzz_legacy_office_converter.rs"
 test = false
 doc = false
 bench = false

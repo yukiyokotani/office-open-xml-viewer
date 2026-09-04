@@ -169,6 +169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "legacy-office-converter"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "wasm-bindgen",
+ "zip",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,6 +239,7 @@ name = "ooxml-fuzz"
 version = "0.0.0"
 dependencies = [
  "docx-parser",
+ "legacy-office-converter",
  "libfuzzer-sys",
  "ooxml-common",
  "pptx-parser",

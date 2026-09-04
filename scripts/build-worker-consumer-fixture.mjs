@@ -76,6 +76,7 @@ await build({
       '@silurus/ooxml/three-d': entry('three-d'),
       '@silurus/ooxml/region-map': entry('region-map'),
       '@silurus/ooxml/chart-ex': entry('chart-ex'),
+      '@silurus/ooxml/legacy-conversion': entry('legacy-conversion'),
     },
   },
   build: {

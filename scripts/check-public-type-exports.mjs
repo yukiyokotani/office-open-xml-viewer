@@ -99,6 +99,8 @@ const legacyConversionExports = moduleExports(files.at(-1));
 assert.deepEqual(
   [...legacyConversionExports.keys()].sort(),
   [
+    'LEGACY_OFFICE_WASM_ENGINE',
+    'LEGACY_OFFICE_WASM_ENGINE_VERSION',
     'LegacyOfficeConversionError',
     'LegacyOfficeConversionFailureReason',
     'LegacyOfficeConversionInput',
@@ -111,9 +113,12 @@ assert.deepEqual(
     'LegacyOfficeConversionWorkerScope',
     'LegacyOfficeConverter',
     'LegacyOfficeFormat',
+    'LegacyOfficeWasmConverterOptions',
     'LegacyOfficeWorkerRequest',
     'LegacyOfficeWorkerResponse',
     'createDisposableWorkerLegacyOfficeConverter',
+    'createLegacyOfficeWasmConverter',
+    'createLegacyOfficeWasmWorkerConverter',
     'installLegacyOfficeConversionWorkerHandler',
     'validateConvertedOoxml',
   ].sort(),

@@ -1,0 +1,24 @@
+[package]
+name = "legacy-office-converter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minimum-sufficient, macro-free legacy Office to OOXML converter"
+repository = "https://github.com/yukiyokotani/office-open-xml-viewer"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+fuzzing = []
+
+[dependencies]
+console_error_panic_hook = { workspace = true }
+wasm-bindgen = { workspace = true }
+zip = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+omit-default-module-path = true

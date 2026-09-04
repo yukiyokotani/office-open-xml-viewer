@@ -202,17 +202,19 @@ shapes / text boxes the same way.)
 
 ### Opt-in legacy DOC, XLS, and PPT conversion
 
-Legacy binary Office input can be routed through an application-supplied
-asynchronous converter before the existing OOXML parser runs (`.doc -> .docx`,
-`.xls -> .xlsx`, `.ppt -> .pptx`). This is fully opt-in: the package includes no
-default conversion service or legacy converter engine, never uploads document
-bytes, and ordinary OOXML loads do not import or initialize a converter engine
-or its WASM.
+Legacy binary Office input can be routed through an asynchronous converter
+before the existing OOXML parser runs (`.doc -> .docx`, `.xls -> .xlsx`,
+`.ppt -> .pptx`). This is fully opt-in: importing
+`@silurus/ooxml/legacy-conversion` provides an early, deliberately limited local
+WASM converter as well as the implementation-neutral adapter API. It never
+uploads document bytes, and ordinary OOXML loads do not import or initialize the
+converter Worker or its WASM.
 Without a converter, the existing typed `legacy-binary-format` rejection is
 unchanged. Converter output is validated as same-family, macro-free OOXML before
-parser handoff, and browser converters can use the provided disposable Worker
-transport from `@silurus/ooxml/legacy-conversion` so converter WASM memory is
-released before parser peak memory. See
+parser handoff. The built-in browser entry runs in a disposable Worker so its
+WASM memory is released before parser peak memory. Initial fidelity is limited
+to passive text and cell-value subsets; consult the explicit support matrix
+before enabling it on production archives. See
 [Opt-in legacy Office conversion](docs/legacy-office-conversion.md).
 
 ### Optional rendering modules

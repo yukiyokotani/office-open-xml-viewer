@@ -121,6 +121,25 @@ importers:
         specifier: ^3.6.0
         version: 3.6.0(vite@6.4.2(@types/node@25.6.0)(lightningcss@1.32.0))
 
+  packages/legacy-converter:
+    dependencies:
+      '@silurus/ooxml-core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.6.0
+        version: 25.6.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vite:
+        specifier: ^8.0.8
+        version: 8.0.8(@types/node@25.6.0)(esbuild@0.27.7)
+      vitest:
+        specifier: ^4.1.4
+        version: 4.1.4(@types/node@25.6.0)(@vitest/browser-playwright@4.1.4)(@vitest/coverage-v8@4.1.4)(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7))
+
   packages/markdown:
     dependencies:
       '@silurus/ooxml-docx':

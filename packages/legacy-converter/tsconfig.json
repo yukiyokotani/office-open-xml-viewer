@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "./src",
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@silurus/ooxml-core": ["../core/src/index.ts"],
+      "@silurus/ooxml-core/*": ["../core/src/*"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "../core" }]
+}

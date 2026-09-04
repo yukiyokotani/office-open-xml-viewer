@@ -3,6 +3,7 @@
   "include": [
     "src/**/*",
     "packages/core/src/**/*",
+    "packages/legacy-converter/src/**/*",
     "packages/pptx/src/**/*",
     "packages/xlsx/src/**/*",
     "packages/docx/src/**/*",
@@ -16,6 +17,7 @@
     "paths": {
       "@silurus/ooxml-core": ["./packages/core/src/index.ts"],
       "@silurus/ooxml-core/*": ["./packages/core/src/*"],
+      "@silurus/ooxml-legacy-converter": ["./packages/legacy-converter/src/index.ts"],
       "@silurus/ooxml-pptx": ["./packages/pptx/src/types.ts"],
       "@silurus/ooxml-pptx/internal/session": ["./packages/pptx/src/internal/session.ts"],
       "@silurus/ooxml-docx": ["./packages/node/typecheck/docx-public-types.ts"],

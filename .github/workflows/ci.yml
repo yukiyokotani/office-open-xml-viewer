@@ -119,6 +119,7 @@ jobs:
             packages/pptx/parser
             packages/xlsx/parser
             packages/docx/parser
+            packages/legacy-converter/parser
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -174,6 +175,7 @@ jobs:
           pnpm check:production-render-workers
           pnpm check:optional-chart-ex
           pnpm check:optional-tiff
+          pnpm check:optional-legacy-conversion
           pnpm check:public-type-exports
           pnpm check:public-api:built
 
@@ -201,6 +203,7 @@ jobs:
             packages/pptx/parser
             packages/xlsx/parser
             packages/docx/parser
+            packages/legacy-converter/parser
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Install dependencies

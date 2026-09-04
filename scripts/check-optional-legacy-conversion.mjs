@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -32,6 +32,8 @@ const converterClosure = await dependencyClosure('legacy-conversion.mjs');
 const converterModule = await import(pathToFileURL(join(distDir, 'legacy-conversion.mjs')).href);
 for (const name of [
   'createDisposableWorkerLegacyOfficeConverter',
+  'createLegacyOfficeWasmConverter',
+  'createLegacyOfficeWasmWorkerConverter',
   'installLegacyOfficeConversionWorkerHandler',
   'validateConvertedOoxml',
 ]) {
@@ -42,9 +44,18 @@ for (const name of [
 if (!converterClosure.some(({ source }) => source.includes(implementationMarker))) {
   throw new Error('legacy-conversion.mjs does not reach the converter boundary implementation');
 }
+if (!converterClosure.some(({ source }) => source.includes('legacy_office_converter_bg.wasm'))) {
+  throw new Error('legacy-conversion.mjs does not reference the opt-in converter WASM asset');
+}
+const converterWasm = await stat(join(distDir, 'legacy_office_converter_bg.wasm'));
+if (!converterWasm.isFile() || converterWasm.size === 0) {
+  throw new Error('legacy Office converter WASM asset is missing or empty');
+}
 
 for (const entry of ['index.mjs', 'docx.mjs', 'xlsx.mjs', 'pptx.mjs', 'node.mjs']) {
-  assertAbsent(await dependencyClosure(entry), implementationMarker, entry);
+  const closure = await dependencyClosure(entry);
+  assertAbsent(closure, implementationMarker, entry);
+  assertAbsent(closure, 'legacy_office_converter_bg.wasm', entry);
 }
 
 console.log('optional legacy Office conversion bundle boundary verified');

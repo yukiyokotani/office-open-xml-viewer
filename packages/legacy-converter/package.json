@@ -1,0 +1,35 @@
+{
+  "name": "@silurus/ooxml-legacy-converter",
+  "private": true,
+  "version": "0.85.3",
+  "description": "Optional legacy Office converter WASM for @silurus/ooxml",
+  "license": "MIT",
+  "author": "Yuki Yokotani <silurus.dev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yukiyokotani/office-open-xml-viewer.git",
+    "directory": "packages/legacy-converter"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./wasm": "./src/wasm/legacy_office_converter.js",
+    "./wasm-binary": "./src/wasm/legacy_office_converter_bg.wasm"
+  },
+  "scripts": {
+    "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/legacy_office_converter.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@silurus/ooxml-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4"
+  }
+}

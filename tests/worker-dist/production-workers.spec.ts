@@ -10,6 +10,7 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
   if (status !== 'ready') {
     throw new Error(await page.locator('body').getAttribute('data-error-message') ?? status ?? '');
   }
+  await expect(page.locator('body')).toHaveAttribute('data-legacy-converter', 'ready');
 
   for (const id of [
     'docx',

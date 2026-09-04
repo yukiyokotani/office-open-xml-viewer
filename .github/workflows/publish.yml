@@ -40,6 +40,7 @@ jobs:
             packages/pptx/parser
             packages/xlsx/parser
             packages/docx/parser
+            packages/legacy-converter/parser
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -113,6 +114,9 @@ jobs:
 
       - name: Verify optional TIFF bundle boundary
         run: pnpm check:optional-tiff
+
+      - name: Verify optional legacy Office converter boundary
+        run: pnpm check:optional-legacy-conversion
 
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,

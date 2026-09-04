@@ -7,15 +7,76 @@ parser runs:
 - `.xls` to macro-free `.xlsx`
 - `.ppt` to macro-free `.pptx`
 
-This is an adapter API, not a bundled conversion engine. Ordinary DOCX, XLSX,
-and PPTX loads do not import, fetch, initialize, or retain a converter engine or
-its WASM. If no converter is supplied, legacy input continues to reject with
-`OoxmlError.code === 'legacy-binary-format'`.
+The opt-in `@silurus/ooxml/legacy-conversion` entry contains both a purpose-built
+local WASM converter and the implementation-neutral adapter API. Ordinary DOCX,
+XLSX, and PPTX entry points do not import, fetch, initialize, or retain the
+converter Worker or its WASM. If no converter is supplied, legacy input
+continues to reject with `OoxmlError.code === 'legacy-binary-format'`.
 
 The renderer remains OOXML-only. A successful conversion enters exactly the
 same parser, model, layout, and Canvas renderer as a native OOXML package.
 
-## Converter contract
+## Built-in browser converter
+
+Use one shared converter instance so all viewers share its bounded queue. Each
+active conversion receives a new Worker; the Worker and converter WASM memory
+are released before the converted package enters the existing parser Worker.
+
+```typescript
+import { DocxViewer } from '@silurus/ooxml/docx';
+import {
+  createLegacyOfficeWasmWorkerConverter,
+} from '@silurus/ooxml/legacy-conversion';
+
+const legacyConverter = createLegacyOfficeWasmWorkerConverter({
+  maxConcurrency: 1,
+  maxQueuedConversions: 4,
+});
+
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas, {
+  legacyConversion: {
+    converter: legacyConverter,
+    timeoutMs: 120_000,
+  },
+});
+await viewer.load(legacyDocBytes);
+```
+
+`XlsxViewer` and `PptxViewer` accept the same option. Importing the opt-in entry
+emits a separate `legacy_office_converter_bg.wasm` asset. Applications must
+serve that asset with the other package assets.
+
+For Node, use `createLegacyOfficeWasmConverter()`. Its default loader reads the
+emitted WASM asset locally; `wasm` can be supplied explicitly as bytes or a
+compiled module when an application has its own asset pipeline. Direct browser
+use is also possible, but conversion is synchronous after WASM initialization
+and should therefore remain inside a Worker.
+
+## Initial support matrix
+
+This first engine version is suitable for feasibility testing and text/value
+ingestion experiments. It is not a general-fidelity replacement for opening a
+legacy document in Microsoft Office.
+
+| Input | Accepted subset | Preserved | Deliberately omitted / rejected |
+|---|---|---|---|
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page breaks, displayed field results | formatting, sections, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| XLS | CFB BIFF8 workbooks; SST must fit in one BIFF record | worksheet names, numbers, strings, booleans, errors, cached formula results, merged ranges | formula programs, number/cell formatting, row/column sizing, charts, drawings, external links, continued SST records, pre-BIFF8 sheets |
+| PPT | CFB PowerPoint 97-2003 files whose current slides are directly represented by a single edit generation | Unicode/Windows-1252 slide text atoms and slide boundaries | persist-map reconstruction across edit generations, ordering metadata, masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
+
+Version-3 and version-4 CFB containers are admitted. Password-protected legacy
+binaries and pre-CFB Office formats are rejected. These limits are structural,
+not filename-based. Unsupported input fails with `reason === 'unsupported-input'`
+instead of returning a misleading partial package.
+
+Every output package is created from scratch and contains no source macro,
+VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external
+relationship. The converter never evaluates formulas, fields, actions, links,
+or macros. Fixed, content-free warning identifiers report the intentional loss
+class in the conversion provenance record.
+
+## Custom converter contract
 
 ```typescript
 import { DocxDocument, type LegacyOfficeConverter } from '@silurus/ooxml/docx';
@@ -64,7 +125,7 @@ The same `legacyConversion` option is available on the browser viewers and the
 Node `open*` / `materialize*` APIs. Node resolves conversion before it lazily
 initializes parser WASM.
 
-## Disposable Worker adapter
+## Custom disposable Worker adapter
 
 CPU-heavy browser conversion should run in a dedicated Worker. The shared
 adapter transfers the source `ArrayBuffer` into one disposable Worker, transfers
@@ -168,10 +229,15 @@ embedded code must never be executed by a converter.
 
 ## Current implementation boundary
 
-This repository currently provides the opt-in contract, browser/Node
-normalization, converter-output preflight, typed errors, and disposable Worker
-transport. A purpose-built legacy-format WASM engine is still under investigation
-in [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
-Applications can supply their own local adapter now, but should treat converted
-OOXML as a derived representation and preserve the original binary as the
-authoritative source.
+The repository now contains the first purpose-built WASM engine in addition to
+the opt-in contract, browser/Node normalization, converter-output preflight,
+typed errors, and disposable Worker transport. Broader binary-record coverage,
+Office-produced fidelity evaluation, fuzzing, and resource measurements remain
+part of [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
+
+Treat converted OOXML as a derived search/view representation, preserve the
+original binary as the authoritative source, and gate production use on a
+corpus representative of the documents being ingested. A custom local or remote
+adapter remains supported for applications that need a broader conversion
+engine; the library still supplies no remote endpoint and never silently uploads
+document bytes.
