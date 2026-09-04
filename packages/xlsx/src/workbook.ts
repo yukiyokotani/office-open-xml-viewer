@@ -842,11 +842,13 @@ export class XlsxWorkbook {
   }
 
   /**
-   * Project the workbook to GitHub-flavoured markdown: each sheet becomes a
+   * Produce a best-effort, text-focused GitHub-flavoured markdown projection:
+   * each sheet becomes a
    * `## SheetName` section followed by a pipe table of its populated bounding
    * box (fully-empty middle rows trimmed, ULP noise masked). Styling, charts,
-   * and drawings are discarded — the projection is meant for AI ingestion and
-   * full-text search, not layout.
+   * and drawings are discarded, while review comments are kept in a final
+   * quoted appendix. The projection is meant for AI ingestion and full-text
+   * search, not an authoritative semantic or layout representation.
    *
    * Runs entirely in the worker off the archive opened at {@link load} (no
    * re-copy of the file, no re-parse of the model on the main thread), so it

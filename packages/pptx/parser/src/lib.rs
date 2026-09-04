@@ -33,7 +33,9 @@ mod types;
 pub(crate) use types::*;
 
 mod markdown;
-use markdown::{render_presentation_md, render_slide_md, MarkdownWriter};
+use markdown::{
+    render_presentation_md, render_review_comments_md, render_slide_md, MarkdownWriter,
+};
 
 mod chart;
 
@@ -208,12 +210,11 @@ pub fn parse_pptx_native(data: &[u8]) -> Result<String, String> {
     serde_json::to_string(&presentation).map_err(|e| e.to_string())
 }
 
-/// Parse a pptx and project the result to GitHub-flavoured markdown,
-/// preserving textual / semantic structure (headings, bullets, tables, charts,
-/// notes, comments) and discarding presentation details (geometry, fills,
-/// strokes, effects, theme inheritance details). Designed for AI agents that
-/// need to read content efficiently — typical 10-30× token reduction vs. the
-/// raw JSON of `parse_pptx_native`.
+/// Parse a pptx and produce a best-effort, text-focused GitHub-flavoured
+/// markdown projection. Explicit headings, bullets, tables, charts, and notes
+/// are retained where available; review comments are collected separately.
+/// Geometry, inferred shape relationships, fills, strokes, effects, and theme
+/// inheritance details are intentionally discarded.
 pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     render_markdown_from_bytes_with_limits(data, None, None)
 }
@@ -2513,6 +2514,8 @@ fn render_markdown_from_shared(
     let reporter = zip.operation()?.limit_reporter()?;
     let limit = pptx_internal_limits().markdown_bytes;
     let mut output = MarkdownWriter::new(limit);
+    let mut review_comments = MarkdownWriter::new(limit);
+    let mut has_comments = false;
     for index in 0..shared.slide_descriptors.len() {
         if index > 0 {
             output.push_str("\n---\n\n");
@@ -2526,13 +2529,20 @@ fn render_markdown_from_shared(
         let produced = produce_slide_unit_with_journal(index, shared, zip, None)
             .map_err(|error| error.to_string())?;
         render_slide_md(&produced.slide, &mut output);
+        render_review_comments_md(
+            produced.slide.slide_number,
+            &produced.slide.comments,
+            &mut review_comments,
+            &mut has_comments,
+        );
         reporter.observe_hard_limit(
             HardResourceLimitKind::PptxMarkdownBytes,
             None,
             limit,
-            output.observed(),
+            output.observed().saturating_add(review_comments.observed()),
         )?;
     }
+    output.push_str(&review_comments.into_string());
     zip.assert_healthy()?;
     Ok(output.into_string())
 }
@@ -11645,6 +11655,21 @@ mod tests {
         assert_eq!(comment.replies[0].author.as_deref(), Some("Bob"));
         assert_eq!(comment.replies[0].status.as_deref(), Some("resolved"));
         assert_eq!(comment.replies[0].text, "Reply");
+
+        let markdown = to_markdown_native(&data).expect("markdown projects");
+        assert!(
+            markdown.rfind("# Slide 3").unwrap() < markdown.find("## Review comments").unwrap(),
+            "{markdown}"
+        );
+        assert!(
+            markdown
+                .contains("### Slide 1 — Comment 1\n\n> **Ada**\n>\n> First line\n> Second line"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains(">> **Bob** (resolved)\n>>\n>> Reply"),
+            "{markdown}"
+        );
     }
 
     #[test]

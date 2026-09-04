@@ -4175,6 +4175,8 @@ fn to_markdown_impl_with_limits(
 fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
     let shared = WorkbookShared::load(archive)?;
     let mut out = String::new();
+    let mut review_comments = String::new();
+    let mut has_comments = false;
     for (idx, sheet_meta) in shared.sheets.iter().enumerate() {
         let sheet_json =
             parse_sheet_with(archive, &shared, idx as u32, &sheet_meta.name).map_err(|error| {
@@ -4186,7 +4188,9 @@ fn to_markdown_from_archive(archive: &mut XlsxZip) -> Result<String, String> {
         let sheet: serde_json::Value =
             serde_json::from_slice(&sheet_json).map_err(|e| e.to_string())?;
         markdown::render_sheet(&sheet, &shared.shared_strings, &mut out);
+        markdown::render_sheet_comments(&sheet, &mut review_comments, &mut has_comments);
     }
+    out.push_str(&review_comments);
     Ok(out)
 }
 
@@ -4974,7 +4978,7 @@ mod comment_tests {
 mod threaded_comment_tests {
     use super::{
         merge_sheet_comments, parse_comments_xml, parse_sheet_native, parse_threaded_comments_xml,
-        XlsxCommentKind,
+        to_markdown_native, XlsxCommentKind,
     };
     use std::collections::HashMap;
     use std::io::{Cursor, Write};
@@ -5047,6 +5051,29 @@ mod threaded_comment_tests {
         assert_eq!(
             parsed_thread_author(&package).as_deref(),
             Some("Referenced Reviewer")
+        );
+    }
+
+    #[test]
+    fn markdown_collects_cell_comments_after_all_sheet_data() {
+        let package = workbook_with_threaded_comment(
+            r#"<Relationship Id="rPersons" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="reviewers/custom-person-list.xml"/>"#,
+            &[(
+                "xl/reviewers/custom-person-list.xml",
+                r#"<personList><person id="{p1}" displayName="Referenced Reviewer"/></personList>"#,
+            )],
+        );
+
+        let markdown = to_markdown_native(&package).expect("markdown projects");
+
+        assert!(
+            markdown.find("## Sheet1").unwrap() < markdown.find("## Review comments").unwrap(),
+            "{markdown}"
+        );
+        assert!(markdown.contains("### Sheet1 — A1"), "{markdown}");
+        assert!(
+            markdown.contains("> **Referenced Reviewer**\n>\n> Review this."),
+            "{markdown}"
         );
     }
 

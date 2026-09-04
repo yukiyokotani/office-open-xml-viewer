@@ -578,11 +578,20 @@ headless engines (`mode`, `useGoogleFonts`, `resourceLimits`, the deprecated
 
 ### Markdown export
 
-Every headless engine can project its document to GitHub-flavoured markdown for
-LLM ingestion, full-text search, or diffing — headings, lists, tables, and (for
-docx) footnotes / comments are preserved; layout, fonts, and positioning are
-dropped. The projection is compiled into the parser WASM you already ship, so it
-adds **zero** bundle weight. `toMarkdown()` works in both `mode: 'main'` and
+Every headless engine can produce a best-effort, text-focused GitHub-flavoured
+markdown projection for LLM ingestion, full-text search, or diffing. Explicit
+headings, lists, and tables are preserved where available, but visual layout,
+fonts, positioning, and inferred relationships between shapes are intentionally
+dropped. Treat the result as full-text extraction, not an authoritative semantic
+or reading-order representation.
+
+Review comments are kept out of the document body and collected in a final
+`## Review comments` appendix. Comment text is quoted, replies use nested quotes,
+and only reliable locations (such as a slide number or worksheet cell) are
+reported. Speaker notes remain separate from review comments.
+
+The projection is compiled into each format's existing parser WASM; there is no
+separate markdown WASM to load. `toMarkdown()` works in both `mode: 'main'` and
 `mode: 'worker'` (it runs off the archive opened at `load()`):
 
 ```typescript
@@ -593,8 +602,8 @@ const md = await doc.toMarkdown();
 ```
 
 `PptxPresentation.toMarkdown()` (title slides → `#` headings, body → nested
-bullets, notes / comments collated) and `XlsxWorkbook.toMarkdown()` (each sheet →
-a `## SheetName` pipe table) are the twins.
+bullets, speaker notes kept with their slide) and `XlsxWorkbook.toMarkdown()`
+(each sheet → a `## SheetName` pipe table) are the twins.
 
 The repository also contains a low-level adapter and CLI for workspace tooling.
 They are internal implementation utilities, not separately published packages;

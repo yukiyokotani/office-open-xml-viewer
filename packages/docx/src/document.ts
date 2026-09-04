@@ -1281,12 +1281,15 @@ export class DocxDocument {
   }
 
   /**
-   * Project the document to GitHub-flavoured markdown: headings (from
+   * Produce a best-effort, text-focused GitHub-flavoured markdown projection:
+   * headings (from
    * `<w:outlineLvl>`), bullet / numbered lists, tables (with vMerge
    * continuation), and rich-text formatting (bold / italic / strikethrough /
-   * hyperlink), with footnotes / endnotes / comments collated at the end.
+   * hyperlink), with footnotes / endnotes collated at the end and review
+   * comments kept in a final quoted appendix.
    * Positioning, section properties, fonts, and drawing shapes are discarded —
-   * the projection is meant for AI ingestion and full-text search, not layout.
+   * the projection is meant for AI ingestion and full-text search, not an
+   * authoritative semantic or reading-order representation.
    *
    * Runs entirely in the worker off the archive opened at {@link load} (no
    * re-copy of the file, no re-parse of the model on the main thread), so it

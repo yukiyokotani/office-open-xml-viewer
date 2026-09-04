@@ -4,6 +4,7 @@
 // footnote bodies, and rich-text formatting; discards geometry, section
 // properties, font metrics, drawing shapes, page layout.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::types::{
@@ -37,13 +38,124 @@ pub(crate) fn render_document(doc: &Document) -> String {
         }
     }
     if !doc.comments.is_empty() {
-        out.push_str("\n## Comments\n\n");
-        for c in &doc.comments {
-            let author = c.author.as_deref().unwrap_or("(unknown)");
-            let _ = writeln!(out, "> **{}**: {}", author, c.text.trim());
-        }
+        render_review_comments(&doc.comments, &mut out);
     }
     out
+}
+
+fn render_review_comments(comments: &[crate::types::DocxComment], out: &mut String) {
+    if comments.is_empty() {
+        return;
+    }
+    out.push_str("\n## Review comments\n\n");
+
+    let mut children = HashMap::<&str, Vec<usize>>::new();
+    for (index, comment) in comments.iter().enumerate() {
+        if let Some(parent_id) = comment.parent_id.as_deref() {
+            children.entry(parent_id).or_default().push(index);
+        }
+    }
+
+    let mut emitted = HashSet::new();
+    for comment in comments
+        .iter()
+        .filter(|comment| comment.parent_id.is_none())
+    {
+        render_comment_thread(comment, comments, &children, &mut emitted, out);
+    }
+    // Malformed extension metadata may reference a missing parent or form a
+    // cycle. Keep every comment visible once instead of guessing a repair.
+    for comment in comments {
+        if !emitted.contains(&comment.id) {
+            render_comment_thread(comment, comments, &children, &mut emitted, out);
+        }
+    }
+}
+
+fn render_comment_thread(
+    comment: &crate::types::DocxComment,
+    comments: &[crate::types::DocxComment],
+    children: &HashMap<&str, Vec<usize>>,
+    emitted: &mut HashSet<String>,
+    out: &mut String,
+) {
+    if !emitted.insert(comment.id.clone()) {
+        return;
+    }
+    let status = if comment.resolved == Some(true) {
+        " (resolved)"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        out,
+        "### Comment {}{}\n",
+        escape_heading_label(&comment.id),
+        status
+    );
+    write_quoted_comment(
+        comment.author.as_deref().unwrap_or("(unknown)"),
+        comment.text.trim(),
+        ">",
+        "",
+        out,
+    );
+
+    let mut pending: Vec<(usize, usize)> = children
+        .get(comment.id.as_str())
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|index| (*index, 2))
+        .collect();
+    while let Some((index, depth)) = pending.pop() {
+        let reply = &comments[index];
+        if !emitted.insert(reply.id.clone()) {
+            continue;
+        }
+        let prefix = ">".repeat(depth);
+        let status = if reply.resolved == Some(true) {
+            " (resolved)"
+        } else {
+            ""
+        };
+        write_quoted_comment(
+            reply.author.as_deref().unwrap_or("(unknown)"),
+            reply.text.trim(),
+            &prefix,
+            status,
+            out,
+        );
+        if let Some(grandchildren) = children.get(reply.id.as_str()) {
+            pending.extend(
+                grandchildren
+                    .iter()
+                    .rev()
+                    .map(|child_index| (*child_index, depth + 1)),
+            );
+        }
+    }
+    out.push('\n');
+}
+
+fn write_quoted_comment(author: &str, text: &str, prefix: &str, status: &str, out: &mut String) {
+    let author = escape_inline_md(&author.replace(['\r', '\n'], " "));
+    let _ = writeln!(out, "{prefix} **{author}**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
+        let _ = writeln!(out, "{prefix}");
+    } else {
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
+    }
+}
+
+fn escape_heading_label(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .replace('\\', "\\\\")
+        .replace('#', "\\#")
 }
 
 fn render_body(body: &[BodyElement], out: &mut String) {
@@ -269,3 +381,47 @@ fn render_table_cell(cell: &DocTableCell) -> String {
 // Silence unused-import warnings when the cfg gate excludes some types.
 #[allow(dead_code)]
 fn _ensure_types_used(_t: TextRun) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DocxComment;
+
+    #[test]
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let comments = vec![
+            DocxComment {
+                id: "12".to_string(),
+                author: Some("Reviewer".to_string()),
+                initials: None,
+                date: None,
+                text: "Check this line.\nKeep the wording.".to_string(),
+                parent_id: None,
+                resolved: Some(true),
+                paragraphs: Vec::new(),
+            },
+            DocxComment {
+                id: "13".to_string(),
+                author: Some("Editor".to_string()),
+                initials: None,
+                date: None,
+                text: "Updated.".to_string(),
+                parent_id: Some("12".to_string()),
+                resolved: None,
+                paragraphs: Vec::new(),
+            },
+        ];
+        let mut out = String::new();
+
+        render_review_comments(&comments, &mut out);
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Comment 12 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this line.\n> Keep the wording."),
+            "{out}"
+        );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
+        assert_eq!(out.matches("### Comment").count(), 1, "{out}");
+    }
+}

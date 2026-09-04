@@ -82,14 +82,6 @@ pub(crate) fn render_slide_md(slide: &Slide, out: &mut MarkdownWriter) {
             let _ = writeln!(out, "## Speaker notes\n\n{}\n", trimmed);
         }
     }
-    if !slide.comments.is_empty() {
-        let _ = writeln!(out, "## Comments\n");
-        for c in &slide.comments {
-            let author = c.author.as_deref().unwrap_or("(unknown)");
-            let _ = writeln!(out, "> **{}**: {}", author, c.text.trim());
-        }
-        out.push('\n');
-    }
 }
 
 pub(crate) fn slide_title_md(slide: &Slide) -> Option<String> {
@@ -361,22 +353,108 @@ pub(crate) fn render_chart_md(c: &ChartElement, out: &mut MarkdownWriter) {
     out.push('\n');
 }
 
+/// Append slide review metadata to one presentation-level section. Comments
+/// stay out of the slide narrative, and the label uses only the authored slide
+/// number plus a local ordinal—never a geometry-derived target.
+pub(crate) fn render_review_comments_md(
+    slide_number: usize,
+    comments: &[PptxComment],
+    out: &mut MarkdownWriter,
+    has_comments: &mut bool,
+) {
+    use std::fmt::Write as _;
+    if comments.is_empty() {
+        return;
+    }
+    if !*has_comments {
+        out.push_str("\n## Review comments\n\n");
+        *has_comments = true;
+    }
+    for (index, comment) in comments.iter().enumerate() {
+        let status = review_status(comment.status.as_deref());
+        let _ = writeln!(
+            out,
+            "### Slide {} — Comment {}{}\n",
+            slide_number,
+            index + 1,
+            status
+        );
+        write_quoted_comment_md(
+            comment.author.as_deref().unwrap_or("(unknown)"),
+            comment.text.trim(),
+            ">",
+            "",
+            out,
+        );
+        for reply in &comment.replies {
+            let status = review_status(reply.status.as_deref());
+            write_quoted_comment_md(
+                reply.author.as_deref().unwrap_or("(unknown)"),
+                reply.text.trim(),
+                ">>",
+                &status,
+                out,
+            );
+        }
+        out.push('\n');
+    }
+}
+
+fn review_status(status: Option<&str>) -> String {
+    match status {
+        Some("active") | None => String::new(),
+        Some(status) => format!(" ({status})"),
+    }
+}
+
+fn write_quoted_comment_md(
+    author: &str,
+    text: &str,
+    prefix: &str,
+    status: &str,
+    out: &mut MarkdownWriter,
+) {
+    use std::fmt::Write as _;
+    out.push_str(prefix);
+    out.push_str(" **");
+    write_escaped_inline_md(&author.replace(['\r', '\n'], " "), out);
+    let _ = writeln!(out, "**{status}");
+    let _ = writeln!(out, "{prefix}");
+    if text.is_empty() {
+        let _ = writeln!(out, "{prefix}");
+    } else {
+        for line in text.lines() {
+            let _ = writeln!(out, "{prefix} {line}");
+        }
+    }
+}
+
 /// Materialized-model oracle retained for compatibility/degraded paths and
 /// sequential-output equivalence tests.
 pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
     let mut out = MarkdownWriter::new(u64::MAX);
+    let mut review_comments = MarkdownWriter::new(u64::MAX);
+    let mut has_comments = false;
     for (i, slide) in pres.slides.iter().enumerate() {
         if i > 0 {
             out.push_str("\n---\n\n");
         }
         render_slide_md(slide, &mut out);
+        render_review_comments_md(
+            slide.slide_number,
+            &slide.comments,
+            &mut review_comments,
+            &mut has_comments,
+        );
     }
+    out.push_str(&review_comments.into_string());
     out.into_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MarkdownWriter;
+    use super::*;
+    use crate::types::{PptxComment, PptxCommentReply};
 
     #[test]
     fn writer_counts_utf8_bytes_and_stops_retaining_at_the_first_crossing() {
@@ -387,5 +465,43 @@ mod tests {
 
         assert_eq!(output.observed(), 4);
         assert_eq!(output.into_string(), "é");
+    }
+
+    #[test]
+    fn review_comments_are_separated_quoted_and_threaded() {
+        let comments = vec![PptxComment {
+            author_id: None,
+            modern_author_id: None,
+            id: Some("comment-1".to_string()),
+            index: None,
+            author: Some("Reviewer".to_string()),
+            date: None,
+            x: None,
+            y: None,
+            anchors: Vec::new(),
+            status: Some("resolved".to_string()),
+            text: "Check this slide.\nKeep the wording.".to_string(),
+            replies: vec![PptxCommentReply {
+                id: Some("reply-1".to_string()),
+                author_id: None,
+                author: Some("Editor".to_string()),
+                date: None,
+                status: Some("active".to_string()),
+                text: "Updated.".to_string(),
+            }],
+        }];
+        let mut out = MarkdownWriter::new(u64::MAX);
+        let mut has_comments = false;
+
+        render_review_comments_md(3, &comments, &mut out, &mut has_comments);
+        let out = out.into_string();
+
+        assert!(out.starts_with("\n## Review comments\n"), "{out}");
+        assert!(out.contains("### Slide 3 — Comment 1 (resolved)"), "{out}");
+        assert!(
+            out.contains("> **Reviewer**\n>\n> Check this slide.\n> Keep the wording."),
+            "{out}"
+        );
+        assert!(out.contains(">> **Editor**\n>>\n>> Updated."), "{out}");
     }
 }
