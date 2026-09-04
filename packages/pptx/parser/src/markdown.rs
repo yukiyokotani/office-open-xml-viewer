@@ -3,7 +3,15 @@
 
 use crate::types::*;
 use ooxml_common::math::nodes_to_text;
+use std::cell::Cell;
 use std::fmt;
+use std::rc::Rc;
+
+struct MarkdownBudget {
+    limit: u64,
+    observed: Cell<u64>,
+    exceeded: Cell<bool>,
+}
 
 /// UTF-8 markdown sink that stops retaining bytes at the configured ceiling.
 /// The parser reports the crossing through its package-scoped limit reporter;
@@ -11,23 +19,40 @@ use std::fmt;
 /// first becoming an oversized allocation.
 pub(crate) struct MarkdownWriter {
     value: String,
-    limit: u64,
-    observed: u64,
-    exceeded: bool,
+    budget: Rc<MarkdownBudget>,
 }
 
 impl MarkdownWriter {
+    #[cfg(test)]
     pub(crate) fn new(limit: u64) -> Self {
+        Self::with_budget(Rc::new(MarkdownBudget {
+            limit,
+            observed: Cell::new(0),
+            exceeded: Cell::new(false),
+        }))
+    }
+
+    pub(crate) fn shared(limit: u64) -> (Self, Self) {
+        let budget = Rc::new(MarkdownBudget {
+            limit,
+            observed: Cell::new(0),
+            exceeded: Cell::new(false),
+        });
+        (
+            Self::with_budget(Rc::clone(&budget)),
+            Self::with_budget(budget),
+        )
+    }
+
+    fn with_budget(budget: Rc<MarkdownBudget>) -> Self {
         Self {
             value: String::new(),
-            limit,
-            observed: 0,
-            exceeded: false,
+            budget,
         }
     }
 
     pub(crate) fn observed(&self) -> u64 {
-        self.observed
+        self.budget.observed.get()
     }
 
     pub(crate) fn into_string(self) -> String {
@@ -35,14 +60,17 @@ impl MarkdownWriter {
     }
 
     pub(crate) fn push_str(&mut self, value: &str) {
-        if self.exceeded {
+        if self.budget.exceeded.get() {
             return;
         }
-        self.observed = self
+        let observed = self
+            .budget
             .observed
+            .get()
             .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-        if self.observed > self.limit {
-            self.exceeded = true;
+        self.budget.observed.set(observed);
+        if observed > self.budget.limit {
+            self.budget.exceeded.set(true);
             return;
         }
         self.value.push_str(value);
@@ -57,7 +85,7 @@ impl MarkdownWriter {
 impl fmt::Write for MarkdownWriter {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         self.push_str(value);
-        if self.exceeded {
+        if self.budget.exceeded.get() {
             Err(fmt::Error)
         } else {
             Ok(())
@@ -432,8 +460,7 @@ fn write_quoted_comment_md(
 /// Materialized-model oracle retained for compatibility/degraded paths and
 /// sequential-output equivalence tests.
 pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
-    let mut out = MarkdownWriter::new(u64::MAX);
-    let mut review_comments = MarkdownWriter::new(u64::MAX);
+    let (mut out, mut review_comments) = MarkdownWriter::shared(u64::MAX);
     let mut has_comments = false;
     for (i, slide) in pres.slides.iter().enumerate() {
         if i > 0 {
@@ -447,8 +474,9 @@ pub(crate) fn render_presentation_md(pres: &Presentation) -> String {
             &mut has_comments,
         );
     }
-    out.push_str(&review_comments.into_string());
-    out.into_string()
+    let mut rendered = out.into_string();
+    rendered.push_str(&review_comments.into_string());
+    rendered
 }
 
 #[cfg(test)]
@@ -465,6 +493,19 @@ mod tests {
 
         assert_eq!(output.observed(), 4);
         assert_eq!(output.into_string(), "é");
+    }
+
+    #[test]
+    fn shared_writers_enforce_one_combined_budget() {
+        let (mut body, mut comments) = MarkdownWriter::shared(6);
+        body.push_str("body");
+        comments.push_str("ok");
+        comments.push_str("x");
+        body.push_str("ignored");
+
+        assert_eq!(body.observed(), 7);
+        assert_eq!(body.into_string(), "body");
+        assert_eq!(comments.into_string(), "ok");
     }
 
     #[test]

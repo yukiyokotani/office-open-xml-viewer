@@ -181,9 +181,85 @@ describe('pptx spAutoFit top anchoring', () => {
 
     renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
 
-    // a:spcPct is based on PowerPoint's natural single-line box; only the
-    // omitted a:lnSpc path is recalculated by this fix.
+    // Preserve PowerPoint's established percentage-line advance. The
+    // fallback-font correction below affects the glyph origin, not the pitch.
     expect(draws[1]!.y - draws[0]!.y).toBeCloseTo(fontSize * 1.2 * 1.5, 5);
+  });
+
+  it('retains the resolved font-box baseline for percentage spacing in a top-anchored spAutoFit shape', () => {
+    const fontSize = 32;
+    const actualAscent = fontSize * 0.78;
+    const fontAscent = fontSize * 0.98;
+    const fontDescent = fontSize * 0.37;
+    const { ctx, draws } = recordingContext(
+      actualAscent,
+      fontSize * 0.18,
+      true,
+      fontAscent,
+      fontDescent,
+    );
+    const textBody = body('Unavailable CJK face', 'Unavailable CJK face', fontSize);
+    textBody.paragraphs[0]!.spaceLine = { type: 'pct', val: 120000 };
+
+    renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
+
+    expect(draws).toHaveLength(1);
+    const authoredLineHeight = fontSize * 1.2;
+    const resolvedFontHeight = fontAscent + fontDescent;
+    expect(draws[0]!.y).toBeCloseTo(
+      fontAscent + (authoredLineHeight - resolvedFontHeight) / 2,
+      5,
+    );
+  });
+
+  it.each(['ctr', 'b'] as const)(
+    'does not apply the top-anchor percentage correction to %s anchoring',
+    (verticalAnchor) => {
+      const fontSize = 32;
+      const actualAscent = fontSize * 0.78;
+      const fontAscent = fontSize * 0.98;
+      const fontDescent = fontSize * 0.37;
+      const { ctx, draws } = recordingContext(
+        actualAscent,
+        fontSize * 0.18,
+        true,
+        fontAscent,
+        fontDescent,
+      );
+      const textBody = { ...body('Unavailable CJK face', 'Unavailable CJK face', fontSize), verticalAnchor };
+      textBody.paragraphs[0]!.spaceLine = { type: 'pct', val: 120000 };
+      const lineHeight = fontSize * 1.2 * 1.2;
+
+      renderTextBody(ctx, textBody, 0, 0, 400, lineHeight, SCALE);
+
+      expect(draws).toHaveLength(1);
+      const resolvedFontHeight = fontAscent + fontDescent;
+      expect(draws[0]!.y).toBeCloseTo(
+        fontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,
+        5,
+      );
+    },
+  );
+
+  it('does not apply the percentage correction to absolute point spacing', () => {
+    const fontSize = 32;
+    const actualAscent = fontSize * 0.78;
+    const fontAscent = fontSize * 0.98;
+    const fontDescent = fontSize * 0.37;
+    const { ctx, draws } = recordingContext(
+      actualAscent,
+      fontSize * 0.18,
+      true,
+      fontAscent,
+      fontDescent,
+    );
+    const textBody = body('Unavailable CJK face', 'Unavailable CJK face', fontSize);
+    textBody.paragraphs[0]!.spaceLine = { type: 'pts', val: 36 };
+
+    renderTextBody(ctx, textBody, 0, 0, 400, 60, SCALE);
+
+    expect(draws).toHaveLength(1);
+    expect(draws[0]!.y).toBeCloseTo(actualAscent, 5);
   });
 
   it.each([

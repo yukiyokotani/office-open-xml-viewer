@@ -11,6 +11,55 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.86 presentation-text and CSV announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v086-presentation-text-and-csv-previews');
+
+  it('leads with presentation fidelity, keeps CSV and Markdown in their intended roles and states the migration boundary', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.86.0',
+      title: 'More faithful presentation text, plus CSV previews, in v0.86.0',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections[1]?.title).toBe('Presentation text, Markdown, and steadier viewing');
+    expect(announcement?.sections[2]?.title).toBe('A small extra: preview delimited text');
+    expect(announcement?.sections.at(-1)?.title).toBe('Upgrading');
+
+    expect(announcement?.title).toContain('presentation text');
+    expect(announcement?.title).toContain('plus CSV previews');
+    expect(announcement?.title).not.toMatch(/Markdown|cleaner/i);
+
+    const summaryAndLead = [
+      announcement?.summary,
+      ...(announcement?.sections[0]?.paragraphs ?? []),
+      ...(announcement?.sections[0]?.bullets ?? []),
+    ].join('\n');
+    for (const outcome of ['Markdown', 'review comments', 'document body', 'PowerPoint', 'CJK', 'Excel']) {
+      expect(summaryAndLead).toContain(outcome);
+    }
+    expect(announcement?.summary).toContain('changes Markdown exports to collect review comments separately');
+    expect(announcement?.summary).not.toMatch(/(?:cleaner|improv\w*) Markdown|Markdown[^.]*improv/i);
+
+    const text = announcement?.sections.flatMap((section) => [
+      section.title,
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join('\n') ?? '';
+
+    for (const outcome of ['CSV', 'TSV', 'Try Yours', 'XlsxSheetViewer']) {
+      expect(text).toContain(outcome);
+    }
+    expect(text).toContain('As a small extra');
+    expect(text).toContain('No viewer API migration is required');
+    expect(text).toContain('Applications that parse generated Markdown should account for review comments moving');
+    expect(text).toContain("format: 'delimited-text'");
+    expect(text).toContain('Existing XLSX calls without a format continue to open workbooks as before');
+    expect(text).not.toMatch(/WorkerBridge|TextDecoder|worksheet-model|cache eviction|parser diagnostic|signed data descriptor/i);
+    expect(text).not.toMatch(/\b(?:KB|KiB|MiB|gzip)\b/i);
+  });
+});
+
 describe('v0.85 large-image and rendering announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v085-large-images-and-rendering');
 
@@ -200,15 +249,16 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets for v0.85.3');
+    expect(bundleSizePage).toContain('Current production assets for v0.86.0');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
     expect(bundleSizePage).toMatch(/<td>1,967 KiB<\/td>\s*<td>479 KiB<\/td>/);
     expect(bundleSizePage).toContain('XLSX static JavaScript');
     expect(bundleSizePage).toMatch(/<td>1,283 KiB<\/td>\s*<td>306 KiB<\/td>/);
     expect(bundleSizePage).toContain('PPTX static JavaScript');
     expect(bundleSizePage).toMatch(/<td>1,330 KiB<\/td>\s*<td>311 KiB<\/td>/);
-    expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,786 KiB</td><td>741 KiB</td></tr>');
-    expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,650 KiB</td><td>649 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,792 KiB</td><td>744 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>XLSX parser WASM</th><td>1,581 KiB</td><td>651 KiB</td></tr>');
+    expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,653 KiB</td><td>651 KiB</td></tr>');
     expect(bundleSizePage).toContain('ChartEx');
     expect(bundleSizePage.match(/<th>TIFF image codec<\/th>/g)).toHaveLength(1);
     expect(bundleSizePage).toContain('<td>22.2 KiB</td><td>6.7 KiB</td>');

@@ -4133,6 +4133,7 @@ export function renderTextBody(
     line: LayoutLine;
     linePx: number;       // spacing advancement (lineHeight + spaceAfter for last line)
     lineHeight: number;   // pure line height used for baseline positioning (without spaceAfter)
+    baselineLineHeight: number; // authored box used only to seat this line's glyph baseline
     topGapPx: number;     // spaceBefore for first line of paragraph
     textXOffset: number;  // additional X offset for first-line indent (non-bullet)
     bulletLabel: string;  // text to render as bullet ('' = none)
@@ -4403,6 +4404,13 @@ export function renderTextBody(
           ? (measureNaturalLineSpacing ? naturalSingle : maxSizePx)
           : implicitSingle;
       }
+      // PowerPoint retains its established percentage-line advance, but seats
+      // glyphs from a tall resolved fallback inside the authored percentage
+      // box. Keeping that box separate from `lineHeight` fixes the first-line
+      // origin without tightening every continuation line in the paragraph.
+      const baselineLineHeight = para.spaceLine?.type === 'pct'
+        ? maxSizePx * (para.spaceLine.val / 100000)
+        : lineHeight;
       // normAutofit lnSpcReduction (ECMA-376 §21.1.2.1.3): PowerPoint reduces
       // each paragraph's line spacing by this fraction alongside the font
       // shrink. Apply it only when normAutofit stored a value AND the paragraph
@@ -4438,7 +4446,7 @@ export function renderTextBody(
       const entryBulletImage = isFirst && lineHasContent ? bulletImage : null;
 
       allLines.push({
-        line, linePx, lineHeight, topGapPx: topGap,
+        line, linePx, lineHeight, baselineLineHeight, topGapPx: topGap,
         textXOffset,
         bulletLabel: isFirst ? bulletLabel : '',
         bulletFont, bulletColor, bulletX,
@@ -4690,12 +4698,19 @@ export function renderTextBody(
     }
     const baselineOffset = useResolvedFontMetrics && resolvedFontHeight > 0
       ? anchor === 't' && maxAscent > 0
-        // PowerPoint's spAutoFit recalculation seats the visible ink at the
-        // top inset for a top-anchored body. fontBoundingBoxAscent includes
-        // leading above that ink; using it here leaves the exact downward gap
-        // spAutoFit is meant to remove. Keep the font box for line advance and
-        // required height, but use the actual glyph ascent for this origin.
-        ? maxAscent
+        // PowerPoint's spAutoFit recalculation normally seats the visible ink
+        // at the top inset. A top-anchored percentage a:lnSpc is the one
+        // exception confirmed by the Office boundary matrix: it retains the
+        // authored percentage box and centers a taller resolved fallback in
+        // that box. Absolute-point spacing and non-top anchors retain the
+        // established behavior; applying this correction there moves them
+        // away from the PowerPoint output.
+        ? entry.para.spaceLine?.type === 'pct'
+          ? Math.max(
+              maxAscent,
+              resolvedFontAscent + (entry.baselineLineHeight - resolvedFontHeight) / 2,
+            )
+          : maxAscent
         : Math.max(
             maxAscent,
             resolvedFontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,

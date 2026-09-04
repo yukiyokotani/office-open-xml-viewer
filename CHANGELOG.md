@@ -7,6 +7,33 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.86.0 — 2026-09-05
+
+Compatible minor release improving PowerPoint text fidelity, Markdown review
+workflows, and resilience when opening varied Excel files. A small delimited-text
+preview convenience is included for applications that already use the sheet
+viewer.
+
+- **PowerPoint text fidelity:** explicit percentage line spacing and tall
+  fallback-font metrics now keep top-anchored, auto-fit text closer to
+  PowerPoint, while multiline and mixed CJK/Latin text retain more natural
+  spacing and wrapping.
+- **Markdown review workflows:** DOCX, XLSX and PPTX exports collect review
+  comments and replies in a final quoted appendix, separate from document text;
+  PowerPoint speaker notes remain with their slide.
+- **safer Markdown projection:** DOCX and PPTX enforce one bounded output budget,
+  including deeply nested review threads and the combined presentation body and
+  comments.
+- **steadier Excel viewing:** model-backed workbooks, legacy dialog sheets,
+  unsupported TIFF pictures and compatible ZIP descriptors no longer prevent
+  otherwise usable sheet content from opening.
+- **delimited-text preview:** `XlsxSheetViewer` can display CSV, TSV or another
+  explicitly selected single-character delimiter as authored text. This is a
+  small preview convenience; `XlsxWorkbook` and `XlsxViewer` remain OOXML-only.
+- **compatibility:** no viewer option or method is removed or renamed. Existing
+  viewer integrations require no migration. Applications that parse generated
+  Markdown should account for review comments moving to the final appendix.
+
 ## 0.85.3 — 2026-09-04
 
 Compatible patch release improving progressive Word opening, PowerPoint text

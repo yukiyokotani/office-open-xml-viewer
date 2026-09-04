@@ -36,6 +36,63 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v086-presentation-text-and-csv-previews',
+    date: '2026-09-05',
+    label: 'Release note',
+    version: 'v0.86.0',
+    title: 'More faithful presentation text, plus CSV previews, in v0.86.0',
+    summary: 'v0.86.0 improves multiline and CJK text in PowerPoint, keeps usable Excel content visible in more files, and changes Markdown exports to collect review comments separately. CSV and TSV previews are included as a small extra.',
+    audience: 'Applications that export Office files as Markdown, display multilingual presentations, or open varied Excel files. Most applications can upgrade without code changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'PowerPoint presentations now keep multiline and mixed-language text closer to their authored appearance. Excel also continues displaying usable content in more cases when one item on a sheet cannot be shown. Markdown exports now collect review discussions separately from document text.',
+        ],
+        bullets: [
+          'Improve PowerPoint multiline spacing and wrapping across mixed CJK and Latin text.',
+          'Match more native Noto CJK font names across Word, Excel and PowerPoint.',
+          'Keep usable Excel content visible when an unsupported picture or legacy sheet is encountered.',
+          'Collect review comments and replies after the document body in Markdown exports.',
+        ],
+      },
+      {
+        title: 'Presentation text, Markdown, and steadier viewing',
+        paragraphs: [
+          'DOCX, XLSX and PPTX Markdown exports now collect review comments and their replies in a final quoted appendix, separate from the document body. PowerPoint speaker notes remain with their slide. This remains a best-effort text projection for search, comparison and AI workflows, not a reconstruction of visual layout.',
+          'PowerPoint text wraps more naturally across mixed CJK and Latin content, and multiline spacing more closely follows PowerPoint when no explicit spacing is stored. Shared CJK font matching also recognizes more native Noto family names across Word, Excel and PowerPoint.',
+          'Excel workbooks created by some older libraries open more reliably. Legacy dialog sheets now show a neutral notice, and an unsupported TIFF picture no longer prevents the usable cells and other pictures on that sheet from appearing.',
+        ],
+      },
+      {
+        title: 'A small extra: preview delimited text',
+        paragraphs: [
+          'As a small extra, CSV and TSV files can now use the same read-only sheet surface as Excel workbooks. Try Yours recognizes those two formats automatically, and library applications can preview text separated by another chosen delimiter in regular or worker rendering mode.',
+          'Pass an explicit format when loading delimited text with XlsxSheetViewer. CSV uses a comma and TSV uses a tab by default; delimited-text accepts another single-character separator. Dates, leading zeroes, long identifiers and values beginning with = remain authored text instead of being inferred as spreadsheet values.',
+          'This is a focused preview convenience rather than spreadsheet import. XlsxWorkbook and the container-backed XlsxViewer continue to open OOXML workbooks only.',
+        ],
+        examples: [
+          {
+            title: 'Preview delimited text',
+            code: `await sheet.load('/export.csv', { format: 'csv' });
+await sheet.load('/report.txt', {
+  format: 'delimited-text',
+  delimiter: '|',
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No viewer API migration is required. Existing DOCX, XLSX and PPTX loading keeps the same defaults and public methods. Applications that parse generated Markdown should account for review comments moving to the final appendix.',
+          'Delimited-text preview is opt-in for library applications: pass format: \'csv\', format: \'tsv\' or format: \'delimited-text\' to XlsxSheetViewer.load(). Existing XLSX calls without a format continue to open workbooks as before.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v085-large-images-and-rendering',
     date: '2026-09-02',
     label: 'Release note',

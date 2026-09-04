@@ -706,6 +706,7 @@ pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
     parse_from_bytes_with_limits(data, None, None, "parse")
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub(crate) fn parse_from_bytes_with_limits(
     data: &[u8],
     max_archive_entry_bytes: Option<u64>,
