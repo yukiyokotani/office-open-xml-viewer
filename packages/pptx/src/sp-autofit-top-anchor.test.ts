@@ -109,6 +109,32 @@ function twoLineBody(fontFamily: string, fontFamilyEa: string, fontSize: number)
 }
 
 describe('pptx spAutoFit top anchoring', () => {
+  it.each([
+    ['Meiryo', 12], ['Meiryo', 18], ['Meiryo', 24], ['Meiryo', 32],
+    ['Arial', 12], ['Arial', 18], ['Arial', 24], ['Arial', 32],
+  ] as const)(
+    'uses the PowerPoint 120%% implicit pitch for %s at %d pt with and without spAutoFit',
+    (fontFamily, fontSize) => {
+      for (const autoFit of ['none', 'sp'] as const) {
+        const { ctx, draws } = recordingContext(
+          fontSize * 0.78,
+          fontSize * 0.18,
+          true,
+          fontSize * 0.98,
+          fontSize * 0.37,
+        );
+        const textBody = {
+          ...twoLineBody(fontFamily, fontFamily, fontSize),
+          autoFit,
+        };
+
+        renderTextBody(ctx, textBody, 0, 0, 400, 46, SCALE);
+
+        expect(draws[1]!.y - draws[0]!.y).toBeCloseTo(fontSize * 1.2, 5);
+      }
+    },
+  );
+
   it('keeps implicit multi-line pitch separate from the taller resolved font box (#1473)', () => {
     const fontSize = 32;
     const actualAscent = fontSize * 0.78;
