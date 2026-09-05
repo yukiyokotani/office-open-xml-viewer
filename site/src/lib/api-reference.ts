@@ -166,7 +166,7 @@ const DOCX_LAYOUT_PARTIAL: ApiOption = {
 const DOCX_LAYOUT_COMPLETE: ApiOption = {
   name: 'onLayoutComplete',
   type: '(error?: unknown) => void',
-  desc: 'Called once the authoritative full layout replaces the provisional one, or with the background failure. It fires only when progressiveLayout actually deferred work after load() resolved. Observer exceptions are reported once and never change the layout result.',
+  desc: 'With progressiveLayout enabled, called exactly once when a successful load reaches its authoritative full layout, even when load() itself waited for completion. A failure after an early publication is passed as the argument; a failure before the first publication rejects load() directly without calling this observer. Observer exceptions are reported once and never change the layout result.',
   detailsHref: '/docx#progressive-layout',
   detailsLabel: 'Progressive layout guide',
 };
@@ -196,7 +196,7 @@ const PPTX_LAYOUT_PARTIAL: ApiOption = {
 const PPTX_LAYOUT_COMPLETE: ApiOption = {
   name: 'onLayoutComplete',
   type: '(error?: unknown) => void',
-  desc: 'Called once every slide is paintable, or with the background failure. It fires only when progressiveLayout deferred work after load() resolved. Observer exceptions are reported once and never change the layout result.',
+  desc: 'With progressiveLayout enabled, called exactly once when a successful load makes every slide paintable, even when load() itself waited for completion. A failure after an early publication is passed as the argument; a failure before the first publication rejects load() directly without calling this observer. Observer exceptions are reported once and never change the layout result.',
   detailsHref: '/pptx#progressive-layout',
   detailsLabel: 'Progressive layout guide',
 };

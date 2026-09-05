@@ -183,10 +183,12 @@ export interface LoadOptions extends CoreLoadOptions {
    */
   progressiveLayout?: boolean;
   /**
-   * Called once the full layout has replaced the provisional one, or with the
-   * failure if background layout threw. Only fires when
-   * {@link progressiveLayout} actually deferred work. Observer failures are
-   * reported and isolated from the layout result.
+   * Called exactly once when a successful {@link progressiveLayout} load has
+   * reached its authoritative full layout, whether that happens before or
+   * after `load()` resolves. A failure after an early publication is delivered
+   * as the argument; a failure before the first publication rejects `load()`
+   * directly and does not call this observer. Observer failures are reported
+   * and isolated from the layout result.
    */
   onLayoutComplete?: (error?: unknown) => void;
   /**
