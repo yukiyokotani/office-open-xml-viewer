@@ -144,6 +144,7 @@ mod tests {
             fonts: &fonts,
             scheme: Some(&scheme),
             levels: None,
+            ..Context::default()
         };
         let inherited = direct.inherit(&base());
         let xml = inherited.xml(context);

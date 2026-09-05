@@ -11,8 +11,11 @@ pub(super) struct TextContext<'a> {
     pub types: &'a [u16],
     pub master: Option<&'a text_style::Master>,
     pub shapes: Option<&'a shape_master::Resolver>,
+    pub outline_slide_numbers: &'a [Vec<u32>],
+    pub slide_number: u32,
 }
 
+#[cfg(test)]
 pub(super) fn render<'a>(
     slide: &[u8],
     outline: &'a [String],
@@ -22,14 +25,26 @@ pub(super) fn render<'a>(
     context: Option<TextContext<'a>>,
     media: Option<&mut media::Store<'a>>,
 ) -> Result<Option<String>, String> {
-    let children = parse_records(slide, records)?;
-    let mut drawings = children.iter().filter(|r| r.kind == 1036);
-    let Some(drawing) = drawings.next() else {
-        return Ok(None);
-    };
-    if drawings.next().is_some() || drawing.version != 15 {
-        return Err(unsupported("invalid PowerPoint drawing container"));
-    }
+    let result = render_with_masters(slide, &[], outline, records, text, xml, context, media)?;
+    Ok((!result.fallback).then_some(result.tree))
+}
+
+pub(super) struct Rendered {
+    pub tree: String,
+    pub fallback: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_with_masters<'a>(
+    slide: &[u8],
+    masters: &[Record<'_>],
+    outline: &'a [String],
+    records: &mut usize,
+    text: &mut usize,
+    xml: &mut usize,
+    context: Option<TextContext<'a>>,
+    media: Option<&mut media::Store<'a>>,
+) -> Result<Rendered, String> {
     let mut writer = Writer {
         outline,
         records,
@@ -39,16 +54,27 @@ pub(super) fn render<'a>(
         id: 1,
         context,
         media,
+        inherited: true,
     };
-    for dg in parse_records(drawing.payload, writer.records)? {
-        if dg.kind != 0xf002 || dg.version != 15 {
-            return Err(unsupported("invalid PowerPoint OfficeArt drawing"));
-        }
-        for child in parse_records(dg.payload, writer.records)? {
-            writer.node(child, false, 0)?;
-        }
+    // Flatten passive master objects below slide-local objects. One writer owns
+    // the IDs and budgets across all layers (ECMA-376 19.3.1.45 lexical z-order).
+    for master in masters {
+        writer.drawing(master.payload)?;
     }
-    Ok(Some(writer.output))
+    writer.inherited = false;
+    let local = writer.drawing(slide)?;
+    if !local {
+        // Preserve the prior missing-drawing fallback even if a master exists.
+        let mut blocks = Vec::new();
+        collect_text(slide, 0, writer.records, &mut blocks, outline, writer.text)?;
+        let id = writer.next_id()?;
+        let fallback = fallback_text(&blocks, id, writer.remaining)?;
+        writer.output.push_str(&fallback);
+    }
+    Ok(Rendered {
+        tree: writer.output,
+        fallback: !local,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -179,7 +205,7 @@ impl<'a> Shape<'a> {
         })
     }
     fn omitted(&self) -> bool {
-        self.flags & (8 | 16 | 1024) != 0
+        self.flags & (8 | 16 | 1024) != 0 || self.props.script
     }
     fn master(&self) -> Option<u32> {
         (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
@@ -198,6 +224,8 @@ impl<'a> Shape<'a> {
 }
 
 struct Properties {
+    hidden: bool,
+    script: bool,
     master: Option<u32>,
     picture: u32,
     crop: [i64; 4],
@@ -211,6 +239,8 @@ struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            hidden: false,
+            script: false,
             master: None,
             picture: 0,
             crop: [0; 4],
@@ -261,6 +291,15 @@ impl Properties {
                 continue;
             }
             match opid {
+                // MS-ODRAW 2.3.4.44. Hidden shapes and active script anchors
+                // are omitted before any text/image references are followed.
+                0x3bf => {
+                    for (bit, target) in [(1, &mut self.hidden), (7, &mut self.script)] {
+                        if value & (1 << (bit + 16)) != 0 {
+                            *target = value & (1 << bit) != 0;
+                        }
+                    }
+                }
                 // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
                 0x301 => self.master = Some(value),
                 // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
@@ -450,6 +489,7 @@ pub(super) fn master_shapes(
 }
 
 struct Writer<'a, 'b> {
+    inherited: bool,
     media: Option<&'b mut media::Store<'a>>,
     outline: &'a [String],
     records: &'b mut usize,
@@ -460,6 +500,25 @@ struct Writer<'a, 'b> {
     context: Option<TextContext<'a>>,
 }
 impl Writer<'_, '_> {
+    fn drawing(&mut self, slide: &[u8]) -> Result<bool, String> {
+        let children = parse_records(slide, self.records)?;
+        let mut drawings = children.iter().filter(|r| r.kind == 1036);
+        let Some(drawing) = drawings.next() else {
+            return Ok(false);
+        };
+        if drawings.next().is_some() || drawing.version != 15 {
+            return Err(unsupported("invalid PowerPoint drawing container"));
+        }
+        for dg in parse_records(drawing.payload, self.records)? {
+            if dg.kind != 0xf002 || dg.version != 15 {
+                return Err(unsupported("invalid PowerPoint OfficeArt drawing"));
+            }
+            for child in parse_records(dg.payload, self.records)? {
+                self.node(child, false, 0)?;
+            }
+        }
+        Ok(true)
+    }
     fn push(&mut self, value: &str) -> Result<(), String> {
         append(&mut self.output, self.remaining, value)
     }
@@ -485,7 +544,7 @@ impl Writer<'_, '_> {
                     .first()
                     .ok_or_else(|| unsupported("empty PowerPoint group"))?;
                 let group = Shape::read(*first, nested, self.records)?;
-                if group.omitted() {
+                if group.omitted() || group.props.hidden || (self.inherited && group.placeholder) {
                     return Ok(());
                 }
                 if group.flags & 1 == 0 {
@@ -515,7 +574,7 @@ impl Writer<'_, '_> {
             }
             0xf004 => {
                 let shape = Shape::read(record, nested, self.records)?;
-                if shape.omitted() {
+                if shape.omitted() || shape.props.hidden || (self.inherited && shape.placeholder) {
                     return Ok(());
                 }
                 let paint = match (shape.master(), self.context.and_then(|c| c.shapes)) {
@@ -547,6 +606,7 @@ impl Writer<'_, '_> {
                 let mut body_seen = false;
                 let mut outline_body = false;
                 let mut text_type = None;
+                let mut slide_numbers = Vec::new();
                 // The only source of visible text is this shape's ClientTextbox.
                 let atoms = shape
                     .textbox
@@ -571,6 +631,14 @@ impl Writer<'_, '_> {
                             push_text(&mut text, value)?;
                         }
                         3998 => {
+                            // Master placeholder exemplars must never acquire
+                            // slide-local outline text. Master non-placeholder
+                            // text should be stored directly in ClientTextbox.
+                            if self.inherited {
+                                return Err(unsupported(
+                                    "outline reference in inherited master object",
+                                ));
+                            }
                             if body_seen || style.is_some() {
                                 return Err(unsupported("ambiguous PowerPoint outline text body"));
                             }
@@ -586,6 +654,16 @@ impl Writer<'_, '_> {
                             style = self
                                 .context
                                 .and_then(|context| context.styles.get(index).copied().flatten());
+                            if let Some(positions) = self
+                                .context
+                                .and_then(|c| c.outline_slide_numbers.get(index))
+                            {
+                                *self.records =
+                                    self.records.checked_sub(positions.len()).ok_or_else(|| {
+                                        unsupported("PowerPoint slide-number work budget exceeded")
+                                    })?;
+                                slide_numbers.extend_from_slice(positions);
+                            }
                             let value = self.outline.get(index).ok_or_else(|| {
                                 unsupported("PowerPoint outline text index out of range")
                             })?;
@@ -598,9 +676,18 @@ impl Writer<'_, '_> {
                             }
                             style = Some(atom.payload);
                         }
+                        4056 => {
+                            if !body_seen || outline_body {
+                                return Err(unsupported("orphan PowerPoint slide-number atom"));
+                            }
+                            slide_numbers.push(text_style::slide_number_position(atom)?);
+                        }
                         // Do not descend into interactive/action containers.
                         _ => {}
                     }
+                }
+                if !slide_numbers.is_empty() && text.len() != 1 {
+                    return Err(unsupported("ambiguous PowerPoint slide-number text body"));
                 }
                 let preset = paint.geometry(shape.kind);
                 if text.is_empty() && preset.is_none() {
@@ -634,7 +721,11 @@ impl Writer<'_, '_> {
                 } else {
                     None
                 };
-                let default_style = if style.is_none() && levels.is_some() && text.len() == 1 {
+                slide_numbers.sort_unstable();
+                let default_style = if style.is_none()
+                    && (levels.is_some() || !slide_numbers.is_empty())
+                    && text.len() == 1
+                {
                     Some(text_style::default_style(&text[0]))
                 } else {
                     None
@@ -650,6 +741,8 @@ impl Writer<'_, '_> {
                             fonts: self.context.map_or(&[], |c| c.fonts),
                             scheme: self.context.and_then(|c| c.scheme),
                             levels,
+                            slide_numbers: &slide_numbers,
+                            slide_number: self.context.map_or(0, |c| c.slide_number),
                         },
                         &mut self.output,
                         self.remaining,
@@ -738,6 +831,84 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn master_layers_and_missing_local_drawing_share_ids_and_xml_budget() {
+        let master = drawing(vec![sp(
+            0xa00,
+            vec![record(0, 0xf010, &ints(&[0, 0, 576, 576])), text("Master")],
+        )]);
+        let layer = Record {
+            version: 15,
+            instance: 0,
+            kind: 1016,
+            payload: &master,
+        };
+        let local = record(0, 4008, b"Local fallback");
+        let rendered = render_with_masters(
+            &local,
+            &[layer],
+            &[],
+            &mut 1000,
+            &mut 1000,
+            &mut 10000,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(rendered.fallback);
+        assert!(rendered.tree.contains("id=\"2\" name=\"Legacy shape 2\""));
+        assert!(rendered
+            .tree
+            .contains("id=\"3\" name=\"Legacy slide text\""));
+        assert!(
+            rendered.tree.find(">Master<").unwrap()
+                < rendered.tree.find(">Local fallback<").unwrap()
+        );
+        assert!(render_with_masters(
+            &local,
+            &[layer],
+            &[],
+            &mut 1000,
+            &mut 1000,
+            &mut 100,
+            None,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn hidden_and_script_shapes_do_not_follow_outline_references_or_require_anchors() {
+        let bad_outline = record(15, 0xf00d, &record(0, 3998, &ints(&[99])));
+        for (value, omitted) in [
+            (0x00020002, true),
+            (0x00800080, true),
+            (2, false),
+            (0x00020000, false),
+        ] {
+            let shape = sp(
+                0xa00,
+                vec![properties(&[(0x3bf, value)]), bad_outline.clone()],
+            );
+            let result = xml(&drawing(vec![shape]));
+            if omitted {
+                assert_eq!(result.unwrap(), "");
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        let hidden_group = record(
+            15,
+            0xf003,
+            &[
+                sp(1, vec![properties(&[(0x3bf, 0x00020002)])]),
+                sp(0xa00, vec![bad_outline]),
+            ]
+            .concat(),
+        );
+        assert_eq!(xml(&drawing(vec![hidden_group])).unwrap(), "");
     }
 
     #[test]
@@ -849,6 +1020,8 @@ mod tests {
                 scheme: None,
                 master: Some(&master),
                 shapes: None,
+                outline_slide_numbers: &[],
+                slide_number: 0,
             }),
             None,
         )
@@ -912,6 +1085,7 @@ mod tests {
         for (id, budget, message) in [(100_001, 4096, "too many"), (1, 1, "OUTPUT_TOO_LARGE")] {
             let mut xml_budget = budget;
             let mut writer = Writer {
+                inherited: false,
                 outline: &[],
                 records: &mut MAX_RECORDS.clone(),
                 text: &mut MAX_TEXT_BYTES.clone(),
@@ -1021,6 +1195,7 @@ mod tests {
             );
         }
         let mut writer = Writer {
+            inherited: false,
             outline: &[],
             records: &mut MAX_RECORDS.clone(),
             text: &mut MAX_TEXT_BYTES.clone(),

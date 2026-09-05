@@ -7,6 +7,21 @@ pub(super) struct Context<'a> {
     pub fonts: &'a [String],
     pub scheme: Option<&'a scheme::Scheme>,
     pub levels: Option<&'a [Level]>,
+    pub slide_numbers: &'a [u32],
+    pub slide_number: u32,
+}
+
+/// MS-PPT 2.9.47 / 2.2.30: this is a passive positional substitution, not
+/// evaluation of arbitrary fields or replacement of literal asterisks.
+pub(super) fn slide_number_position(atom: Record<'_>) -> Result<u32, String> {
+    if atom.version != 0 || atom.instance != 0 || atom.payload.len() != 4 {
+        return Err(unsupported("invalid PowerPoint slide-number atom"));
+    }
+    let position = u32_at(atom.payload, 0)?;
+    if position > i32::MAX as u32 {
+        return Err(unsupported("negative PowerPoint slide-number position"));
+    }
+    Ok(position)
 }
 pub(super) fn text_type(atom: Record<'_>) -> Result<u16, String> {
     if atom.version != 0 || atom.payload.len() != 4 {
@@ -79,6 +94,13 @@ pub(super) fn write(
     xml_budget: &mut usize,
     work_budget: &mut usize,
 ) -> Result<(), String> {
+    if context.slide_numbers.windows(2).any(|v| v[0] >= v[1]) {
+        return Err(unsupported(
+            "duplicate or unordered PowerPoint slide-number positions",
+        ));
+    }
+    let mut numbers = context.slide_numbers.iter().peekable();
+    let number = context.slide_number.to_string();
     let Runs {
         paragraphs: pf,
         characters: cf,
@@ -108,6 +130,22 @@ pub(super) fn write(
                 ci += 1;
             }
             let run = ci;
+            if numbers.peek().is_some_and(|&&p| (p as usize) < cp) {
+                return Err(unsupported(
+                    "invalid PowerPoint slide-number character boundary",
+                ));
+            }
+            if numbers.peek().is_some_and(|&&p| p as usize == cp) {
+                let properties = cf[run].1.inherit(base.map(|v| &v.character)).xml(
+                    "rPr",
+                    context.fonts,
+                    context.scheme,
+                )?;
+                write_run(&paragraph[start..offset], &properties, output, xml_budget)?;
+                write_run(&number, &properties, output, xml_budget)?;
+                start = offset + c.len_utf8();
+                numbers.next();
+            }
             cp += c.len_utf16();
             if cp > cf[run].0 {
                 return Err(unsupported(
@@ -143,6 +181,9 @@ pub(super) fn write(
         )?;
         drawing::append(output, xml_budget, "</a:p>")?;
         cp += 1;
+    }
+    if numbers.next().is_some() {
+        return Err(unsupported("PowerPoint slide-number position outside text"));
     }
     Ok(())
 }
@@ -890,6 +931,104 @@ mod tests {
     }
     fn u16s(n: u16) -> Vec<u8> {
         n.to_le_bytes().to_vec()
+    }
+    #[test]
+    fn slide_numbers_keep_original_utf16_style_boundaries_and_literal_text() {
+        let text = "😀*\r*Z";
+        let data = [
+            u32s(4),
+            u16s(0),
+            u32s(0),
+            u32s(3),
+            u16s(0),
+            u32s(0),
+            u32s(3),
+            u32s(0x20000),
+            u16s(40),
+            u32s(4),
+            u32s(0x20000),
+            u16s(20),
+        ]
+        .concat();
+        let mut output = String::new();
+        write(
+            text,
+            &data,
+            Context {
+                slide_numbers: &[2, 4],
+                slide_number: 42,
+                ..Context::default()
+            },
+            &mut output,
+            &mut 4096,
+            &mut 100,
+        )
+        .unwrap();
+        assert!(output.contains("sz=\"4000\"/><a:t>😀</a:t>"));
+        assert!(output.contains("sz=\"4000\"/><a:t>42</a:t>"));
+        assert!(output.contains("sz=\"2000\"/><a:t>42</a:t>"));
+        assert!(output.contains("sz=\"2000\"/><a:t>Z</a:t>"));
+        assert_eq!(output.matches("<a:p>").count(), 2);
+        for positions in [&[1][..], &[3], &[6], &[7], &[2, 2], &[4, 2]] {
+            assert!(
+                write(
+                    text,
+                    &data,
+                    Context {
+                        slide_numbers: positions,
+                        slide_number: 42,
+                        ..Context::default()
+                    },
+                    &mut String::new(),
+                    &mut 4096,
+                    &mut 100
+                )
+                .is_err(),
+                "{positions:?}"
+            );
+        }
+        assert!(write(
+            text,
+            &data,
+            Context {
+                slide_numbers: &[2],
+                slide_number: 42,
+                ..Context::default()
+            },
+            &mut String::new(),
+            &mut 20,
+            &mut 100
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn slide_number_atoms_reject_malformed_headers_lengths_and_negative_positions() {
+        let valid = [0u8; 4];
+        let atom = Record {
+            kind: 4056,
+            version: 0,
+            instance: 0,
+            payload: &valid,
+        };
+        assert_eq!(slide_number_position(atom).unwrap(), 0);
+        for invalid in [
+            Record { version: 1, ..atom },
+            Record {
+                instance: 1,
+                ..atom
+            },
+            Record {
+                payload: &valid[..3],
+                ..atom
+            },
+            Record {
+                payload: &[255; 4],
+                ..atom
+            },
+        ] {
+            assert!(slide_number_position(invalid).is_err());
+        }
     }
     fn u32s(n: u32) -> Vec<u8> {
         n.to_le_bytes().to_vec()

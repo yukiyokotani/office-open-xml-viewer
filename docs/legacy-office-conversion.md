@@ -68,13 +68,38 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, phonetic string data, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master foreground objects, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, enabled non-placeholder master objects using the same supported drawing subset; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with
 `reason === 'unsupported-input'`. Accepted documents can still lose the features
 listed above: their warning identifiers are not a fidelity certificate.
+
+PPT master object inheritance follows `SlideFlags.fMasterObjects` independently
+of color-scheme and background inheritance (MS-PPT 2.5.10-11). Live main/title
+master chains are resolved through the persist directory and emitted below
+slide-local objects in ordinary PresentationML shape order (ECMA-376 19.3.1.45).
+The destination slide's resolved color scheme applies to inherited objects.
+Master placeholder exemplars are not copied as visible content; header/footer
+field synthesis remains unsupported. Explicit hidden flags are respected and
+script anchors are omitted before following text or image references.
+One writer shares IDs, image relationships and work/XML budgets across layers.
+Borrowed master chains are cached per conversion with cycle and depth checks;
+expanded output is still charged for every destination slide. Missing local
+drawings retain the warned unpositioned-text fallback without duplicating IDs.
+No renderer, worker protocol or per-format opt-in migration is required.
+Geometry support remains partial: an omitted foreground shape can expose a
+master object that Office would cover. Object inheritance alone is not a
+guarantee of visual fidelity.
+
+Slide-number metacharacters in positioned text, including inherited ordinary
+master objects and outline-referenced text, become static decimal text using
+the document's starting number and live slide order (MS-PPT 2.4.2, 2.9.47).
+Only declared character positions are replaced; literal asterisks remain text.
+Original UTF-16 style boundaries are retained even for multi-digit numbers.
+This does not synthesize missing master placeholders, evaluate arbitrary fields,
+or add dynamic numbering to the generated presentation.
 
 XLS shared-string formatting uses `FormatRun` UTF-16 character offsets and
 `FontIndex` references, including the reserved index-4 gap and ignored terminal
@@ -184,8 +209,9 @@ external picture URL is followed or copied into the output package.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external
-relationship. The converter never evaluates formulas, fields, actions, links,
-or macros. Fixed, content-free warning identifiers report the intentional loss
+relationship. The converter never executes formulas, field programs, actions,
+links, or macros; passive slide-number substitution is described above.
+Fixed, content-free warning identifiers report the intentional loss
 class in the conversion provenance record.
 
 PPT picture frames resolve their one-based BLIP references through the current

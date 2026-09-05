@@ -78,8 +78,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         )? {
             return Err(unsupported("encrypted PowerPoint slide"));
         }
-        let tree = match drawing::render(
+        let drawing = drawing::render_with_masters(
             record.payload,
+            &presentation.object_masters[index],
             outline,
             &mut record_budget,
             &mut text_budget,
@@ -91,24 +92,12 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 types: &presentation.outline_types[index],
                 master: presentation.text_masters[index].as_deref(),
                 shapes: Some(&presentation.shape_masters),
+                outline_slide_numbers: &presentation.outline_slide_numbers[index],
+                slide_number: u32::from(presentation.first_slide_number) + index as u32,
             }),
             Some(&mut media),
-        )? {
-            Some(tree) => tree,
-            None => {
-                fallback = true;
-                let mut text = Vec::new();
-                collect_text(
-                    record.payload,
-                    0,
-                    &mut record_budget,
-                    &mut text,
-                    outline,
-                    &mut text_budget,
-                )?;
-                fallback_text(&text, &mut xml_budget)?
-            }
-        };
+        )?;
+        fallback |= drawing.fallback;
         let background = match presentation.backgrounds[index] {
             Some(paint) => background_xml(
                 &paint,
@@ -123,7 +112,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
             .checked_sub(relationships.len())
             .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
         slides.push((
-            slide_xml(&tree, &background, &mut xml_budget)?,
+            slide_xml(&drawing.tree, &background, &mut xml_budget)?,
             relationships,
         ));
     }
@@ -134,6 +123,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         "legacy-ppt:unsupported-bullet-properties-and-paragraph-offsets-omitted".into(),
         "legacy-ppt:nonuniform-master-text-and-invalid-font-references-omitted".into(),
         "legacy-ppt:custom-geometry-unlinked-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
+        "legacy-ppt:master-placeholder-content-omitted".into(),
     ];
     if fallback {
         warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
@@ -487,10 +477,10 @@ fn slide_xml(tree: &str, background: &str, budget: &mut usize) -> Result<String,
     Ok(xml)
 }
 
-fn fallback_text(blocks: &[String], budget: &mut usize) -> Result<String, String> {
+fn fallback_text(blocks: &[String], id: u32, budget: &mut usize) -> Result<String, String> {
     let mut xml = String::new();
     if !blocks.is_empty() {
-        drawing::append(&mut xml, budget, "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Legacy slide text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"8229600\" cy=\"5943600\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>")?;
+        drawing::append(&mut xml, budget, &format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy slide text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"8229600\" cy=\"5943600\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>"))?;
         drawing::paragraphs(blocks, &mut xml, budget)?;
         drawing::append(&mut xml, budget, "</p:txBody></p:sp>")?;
     }

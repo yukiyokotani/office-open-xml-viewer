@@ -8,11 +8,14 @@ pub(super) struct Presentation<'a> {
     pub slides: Vec<(Record<'a>, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
     pub outline_types: Vec<Vec<u16>>,
+    pub outline_slide_numbers: Vec<Vec<Vec<u32>>>,
+    pub first_slide_number: u16,
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<Record<'a>>,
     pub backgrounds: Vec<Option<paint::Paint>>,
+    pub object_masters: Vec<std::rc::Rc<[Record<'a>]>>,
     pub size: (u32, u32),
 }
 
@@ -101,6 +104,11 @@ pub(super) fn resolve<'a>(
         dimension(u32_at(atom.payload, 0)?)?,
         dimension(u32_at(atom.payload, 4)?)?,
     );
+    // MS-PPT 2.4.2 DocumentAtom: zero is allowed; the upper bound is exclusive.
+    let first_slide_number = u16_at(atom.payload, 32)?;
+    if first_slide_number >= 10000 {
+        return Err(unsupported("invalid PowerPoint first slide number"));
+    }
     let lists: Vec<_> = children
         .iter()
         .filter(|r| r.kind == 4080 && r.instance == 0 && r.version == 15)
@@ -111,6 +119,7 @@ pub(super) fn resolve<'a>(
     let mut slides: Vec<(Record<'a>, Vec<String>)> = Vec::new();
     let mut outline_styles: Vec<Vec<Option<&'a [u8]>>> = Vec::new();
     let mut outline_types: Vec<Vec<u16>> = Vec::new();
+    let mut outline_slide_numbers: Vec<Vec<Vec<u32>>> = Vec::new();
     let mut seen = HashSet::new();
     let mut outline_budget = MAX_TEXT_BYTES;
     for item in parse_records(lists[0].payload, budget)? {
@@ -135,6 +144,7 @@ pub(super) fn resolve<'a>(
                 slides.push((slide, Vec::new()));
                 outline_styles.push(Vec::new());
                 outline_types.push(Vec::new());
+                outline_slide_numbers.push(Vec::new());
             }
             3999 => {
                 let (_, outline) = slides
@@ -149,6 +159,10 @@ pub(super) fn resolve<'a>(
                     .expect("slide exists")
                     .push(text_style::text_type(item)?);
                 outline_styles.last_mut().expect("slide exists").push(None);
+                outline_slide_numbers
+                    .last_mut()
+                    .expect("slide exists")
+                    .push(Vec::new());
             }
             TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
                 let text = slides
@@ -169,6 +183,13 @@ pub(super) fn resolve<'a>(
                 }
                 *slot = Some(item.payload);
             }
+            4056 => {
+                outline_slide_numbers
+                    .last_mut()
+                    .and_then(|v| v.last_mut())
+                    .ok_or_else(|| unsupported("orphan PowerPoint slide-number atom"))?
+                    .push(text_style::slide_number_position(item)?);
+            }
             _ => {}
         }
     }
@@ -176,6 +197,12 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("PowerPoint presentation has no slides"));
     }
     Ok(Presentation {
+        first_slide_number,
+        outline_slide_numbers,
+        object_masters: slides
+            .iter()
+            .map(|(slide, _)| schemes.objects(*slide, budget))
+            .collect::<Result<_, _>>()?,
         backgrounds: slides
             .iter()
             .map(|(slide, _)| schemes.background(*slide, budget))
@@ -278,6 +305,20 @@ pub(crate) mod tests {
         assert_eq!(result.slides.len(), 2);
         assert_eq!(result.slides[0].1, ["second"]);
         assert_eq!(result.slides[1].1, ["first"]);
+    }
+    #[test]
+    fn document_starting_slide_number_accepts_zero_and_rejects_out_of_range() {
+        for first in [0u16, 7, 9999, 10000, u16::MAX] {
+            let (mut stream, edit) = fixture();
+            // Fixture starts with DocumentContainer, then DocumentAtom.
+            stream[48..50].copy_from_slice(&first.to_le_bytes());
+            let result = resolve(&stream, edit, &mut MAX_RECORDS.clone());
+            if first < 10000 {
+                assert_eq!(result.unwrap().first_slide_number, first);
+            } else {
+                assert!(result.err().unwrap().contains("first slide number"));
+            }
+        }
     }
     #[test]
     fn latest_edit_replaces_only_the_persist_objects_it_updates() {

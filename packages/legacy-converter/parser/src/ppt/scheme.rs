@@ -15,6 +15,7 @@ struct Entry {
     parent: Option<u32>,
     main_parent: Option<u32>,
     background_parent: Option<u32>,
+    objects_parent: Option<u32>,
 }
 
 fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
@@ -42,6 +43,9 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
                 if record.kind != 1016 && u16_at(atom.payload, 20)? & 4 != 0 {
                     result.background_parent = Some(master);
                 }
+                if record.kind != 1016 && u16_at(atom.payload, 20)? & 1 != 0 {
+                    result.objects_parent = Some(master);
+                }
             }
             2032 if atom.instance == 1 => {
                 if result.local.is_some() || atom.version != 0 || atom.payload.len() != 32 {
@@ -62,17 +66,19 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 }
 
 #[derive(Default)]
-pub(super) struct Resolver {
+pub(super) struct Resolver<'a> {
     pub shape_masters: shape_master::Resolver,
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
     backgrounds: BTreeMap<u32, Option<paint::Paint>>,
     background_cache: BTreeMap<u32, Option<paint::Paint>>,
+    records: BTreeMap<u32, Record<'a>>,
+    object_cache: BTreeMap<u32, std::rc::Rc<[Record<'a>]>>,
 }
-impl Resolver {
+impl<'a> Resolver<'a> {
     pub fn new(
-        document: &[u8],
+        document: &'a [u8],
         children: &[Record<'_>],
         offsets: &BTreeMap<u32, usize>,
         budget: &mut usize,
@@ -131,6 +137,8 @@ impl Resolver {
             text_styles,
             backgrounds,
             background_cache: BTreeMap::new(),
+            records: master_records.iter().copied().collect(),
+            object_cache: BTreeMap::new(),
         };
         let mut text_budget = MAX_TEXT_BYTES;
         for (id, record) in master_records {
@@ -149,6 +157,52 @@ impl Resolver {
         }
         result.shape_masters.finish(budget)?;
         Ok(result)
+    }
+    /// MS-PPT 2.5.10-11: object inheritance is independent of scheme and
+    /// background inheritance. Retain only borrowed live master records, sharing
+    /// the bounded root-to-leaf layer chain among slides using the same master.
+    pub fn objects(
+        &mut self,
+        slide: Record<'_>,
+        budget: &mut usize,
+    ) -> Result<std::rc::Rc<[Record<'a>]>, String> {
+        let Some(first) = entry(slide, budget)?.objects_parent else {
+            return Ok(std::rc::Rc::from([]));
+        };
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| unsupported("PowerPoint master object work budget exceeded"))?;
+        if let Some(layers) = self.object_cache.get(&first) {
+            return Ok(layers.clone());
+        }
+        let mut path = Vec::new();
+        let mut layers = Vec::new();
+        let mut parent = Some(first);
+        while let Some(id) = parent {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or_else(|| unsupported("PowerPoint master object work budget exceeded"))?;
+            if path.len() >= MAX_DEPTH || path.contains(&id) {
+                return Err(unsupported(
+                    "cyclic or excessive PowerPoint master object inheritance",
+                ));
+            }
+            path.push(id);
+            let record = self
+                .records
+                .get(&id)
+                .ok_or_else(|| unsupported("unresolved PowerPoint master objects"))?;
+            layers.push(*record);
+            parent = self
+                .masters
+                .get(&id)
+                .ok_or_else(|| unsupported("unresolved PowerPoint master object flags"))?
+                .objects_parent;
+        }
+        layers.reverse();
+        let layers: std::rc::Rc<[Record<'a>]> = layers.into();
+        self.object_cache.insert(first, layers.clone());
+        Ok(layers)
     }
     pub fn background(
         &mut self,
@@ -340,6 +394,64 @@ mod tests {
     }
 
     #[test]
+    fn master_object_layers_follow_only_object_flags_and_share_cached_chains() {
+        let main = background_slide(1016, 0, 7, 0);
+        let title = background_slide(1006, 100, 1, 0);
+        let mut resolver = Resolver::default();
+        for (id, bytes) in [(100, &main), (200, &title)] {
+            let r = parsed(bytes);
+            resolver.records.insert(id, r);
+            resolver.masters.insert(id, entry(r, &mut 100).unwrap());
+        }
+        let slide = background_slide(1006, 200, 1, 0);
+        let layers = resolver.objects(parsed(&slide), &mut 100).unwrap();
+        assert_eq!(
+            layers.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            [1016, 1006]
+        );
+        let cached = resolver.objects(parsed(&slide), &mut 100).unwrap();
+        assert!(std::rc::Rc::ptr_eq(&layers, &cached));
+        let unrelated = background_slide(1006, 200, 6, 0);
+        assert!(resolver
+            .objects(parsed(&unrelated), &mut 100)
+            .unwrap()
+            .is_empty());
+        assert!(resolver.objects(parsed(&slide), &mut 0).is_err());
+        resolver.object_cache.clear();
+        resolver.masters.get_mut(&200).unwrap().objects_parent = None;
+        assert_eq!(resolver.objects(parsed(&slide), &mut 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn master_object_cycles_dangling_references_and_depth_fail_without_caching() {
+        let main = background_slide(1016, 0, 7, 0);
+        let slide = background_slide(1006, 1, 1, 0);
+        let mut resolver = Resolver::default();
+        assert!(resolver.objects(parsed(&slide), &mut 100).is_err());
+        for id in 1..=MAX_DEPTH as u32 + 1 {
+            resolver.records.insert(id, parsed(&main));
+            resolver.masters.insert(
+                id,
+                Entry {
+                    objects_parent: Some(id + 1),
+                    ..Entry::default()
+                },
+            );
+        }
+        assert!(resolver
+            .objects(parsed(&slide), &mut 1000)
+            .unwrap_err()
+            .contains("excessive"));
+        assert!(resolver.object_cache.is_empty());
+        resolver.masters.get_mut(&2).unwrap().objects_parent = Some(1);
+        assert!(resolver
+            .objects(parsed(&slide), &mut 100)
+            .unwrap_err()
+            .contains("cyclic"));
+        assert!(resolver.object_cache.is_empty());
+    }
+
+    #[test]
     fn background_inheritance_is_independent_of_scheme_and_master_objects() {
         let main = background_slide(1016, 0, 7, 0x08000000);
         let title = background_slide(1006, 100, 4, 0x654321);
@@ -475,14 +587,7 @@ mod tests {
 
     #[test]
     fn rejects_cycles_missing_masters_and_excessive_inheritance() {
-        let mut r = Resolver {
-            shape_masters: shape_master::Resolver::default(),
-            masters: BTreeMap::new(),
-            cache: BTreeMap::new(),
-            text_styles: BTreeMap::new(),
-            backgrounds: BTreeMap::new(),
-            background_cache: BTreeMap::new(),
-        };
+        let mut r = Resolver::default();
         assert!(r.master(1, &mut Vec::new(), &mut 100).is_err());
         r.masters.insert(
             1,
@@ -491,6 +596,7 @@ mod tests {
                 local: Some([0; 8]),
                 main_parent: None,
                 background_parent: None,
+                objects_parent: None,
             },
         );
         r.masters.insert(
@@ -500,6 +606,7 @@ mod tests {
                 local: Some([0; 8]),
                 main_parent: None,
                 background_parent: None,
+                objects_parent: None,
             },
         );
         assert!(r
@@ -514,6 +621,7 @@ mod tests {
                     local: None,
                     main_parent: None,
                     background_parent: None,
+                    objects_parent: None,
                 },
             );
         }
@@ -549,14 +657,7 @@ mod tests {
 
     #[test]
     fn text_master_cycles_and_budgets_are_independent_of_color_inheritance() {
-        let mut r = Resolver {
-            shape_masters: shape_master::Resolver::default(),
-            masters: BTreeMap::new(),
-            cache: BTreeMap::new(),
-            text_styles: BTreeMap::new(),
-            backgrounds: BTreeMap::new(),
-            background_cache: BTreeMap::new(),
-        };
+        let mut r = Resolver::default();
         for (id, parent) in [(1, 2), (2, 1)] {
             r.masters.insert(
                 id,
@@ -565,6 +666,7 @@ mod tests {
                     parent: None,
                     main_parent: Some(parent),
                     background_parent: None,
+                    objects_parent: None,
                 },
             );
         }
