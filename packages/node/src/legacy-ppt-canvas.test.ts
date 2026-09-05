@@ -12,6 +12,24 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it('inherits a main-master title size only for an actual placeholder, including outline text without direct styles', async () => {
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const master = record(0, 4003, concat(little16(1), little32(0x800), little16(1), little32(0x20000), little16(48)));
+    const outline = concat(record(0, 3999, little32(0)), record(0, 4000, utf16le('Title')));
+    const shape = (position: number) => record(15, 0xf004, concat(
+      record((202 << 4) | 2, 0xf00a, concat(little32(42), little32(0xa00))),
+      record(0, 0xf010, concat(little32(576), little32(576), little32(3456), little32(1728))),
+      record(15, 0xf00d, record(0, 3998, little32(0))),
+      record(15, 0xf011, record(0, 3011, concat(little32(position), new Uint8Array([1, 0, 0, 0])))),
+    ));
+    const slide = concat(record(2, 1007, concat(new Uint8Array(12), little32(100), new Uint8Array(8))), record(15, 1036, record(15, 0xf002, concat(shape(0), shape(0xffffffff)))));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(slide, outline, master), { legacyConversion: { ppt: { converter } } });
+    const [title, ordinary] = presentation.slides[0].elements;
+    if (title.type !== 'shape' || ordinary.type !== 'shape') throw new Error('Expected text shapes');
+    expect(title.textBody?.paragraphs[0]).toMatchObject({ alignment: 'ctr', runs: [{ text: 'Title', fontSize: 48 }] });
+    expect(ordinary.textBody?.paragraphs[0].runs[0]).toMatchObject({ text: 'Title', fontSize: 18 });
+  });
   it.skipIf(!skia)('paints nontext presets, solid lines and transparency through the ordinary renderer', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);

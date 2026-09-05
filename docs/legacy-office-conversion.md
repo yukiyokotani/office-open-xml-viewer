@@ -68,7 +68,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, manual line breaks, unmodified basic presets with explicit solid fill/line colors, line widths and opacity; superseded slides and deleted shapes are not emitted | master text/style and paint-property inheritance, master objects/backgrounds, system/palette color indices, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, media, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, verified-placeholder main-master text-style inheritance, manual line breaks, unmodified basic presets with explicit solid fill/line colors, line widths and opacity; superseded slides and deleted shapes are not emitted | detached-placeholder and title-master shape text overrides, paint-property inheritance, master objects/backgrounds, system/palette color indices, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
@@ -375,8 +375,12 @@ character and paragraph runs are retained for both inline and outline-referenced
 text. Run boundaries count UTF-16 units and include the implicit final paragraph
 mark; invalid counts and surrogate-splitting runs fail closed. Font names are
 escaped and referenced, not embedded or fetched. Literal RGB and scheme colors are
-retained; master text-style inheritance remains unsupported. Missing font sizes
-still use the warned 18-point fallback. Negative paragraph spacing converts from
+retained. For verified placeholders, missing supported character/paragraph
+properties inherit by text type and indentation level from the main master's
+`TextMasterStyleAtom`, then the document's master-style defaults. Direct properties,
+including explicit bold/italic/underline resets, take precedence. Ordinary text
+boxes do not inherit placeholder styles. Missing unresolved font sizes still use
+the warned 18-point fallback. Negative paragraph spacing converts from
 master units, while nonnegative spacing retains its percentage semantics.
 VT, LF and Unicode line separators become DrawingML line breaks within the same
 paragraph; CR remains the PPT paragraph boundary. This follows Unicode UAX #14
@@ -393,8 +397,20 @@ These bounds are resource policy, not normative file-format limits. Text's
 `ColorIndexStruct` and OfficeArt's `fSchemeIndex` have separate index encodings;
 both resolve to literal DrawingML RGB for the existing renderer. `fSystemRGB`
 also contains literal RGB; system/palette indices remain unresolved. Color-scheme
-inheritance does not yet imply support for master objects, backgrounds or text
-style/paint-property inheritance.
+inheritance does not imply support for master objects, backgrounds or paint-property
+inheritance.
+
+Placeholder text inheritance follows [MS-PPT] 2.7.8 and 2.9.35-36/41/44:
+only a direct `PlaceholderAtom` whose position is not `0xFFFFFFFF` enables it.
+The corresponding inline or outline-referenced `TextHeaderAtom` selects the text
+type. Non-placeholder title-like text does not automatically inherit a title style;
+compatibility for detached placeholder metadata remains unsupported. Title-master
+references are followed to the main master, but title-master shape-specific text
+overrides remain omitted. Style tables are parsed once per main master and shared
+across slides; at most 10,000 master references, eight types per master and five
+levels per type can be retained. The master-count limit is resource policy; type
+and level bounds follow the format. Character and paragraph properties beyond the
+supported direct subset, including bullets and custom rulers, remain omitted.
 
 Missing drawing records retain the earlier unpositioned-text fallback with a
 separate warning. Invalid or missing anchors in emitted drawing-backed shapes, ambiguous

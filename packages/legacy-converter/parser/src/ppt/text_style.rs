@@ -1,11 +1,27 @@
 //! Direct PowerPoint text runs: [MS-PPT] 2.9.14/20/41/44–46.
 use super::*;
 
+#[derive(Default, Clone, Copy)]
+pub(super) struct Context<'a> {
+    pub fonts: &'a [String],
+    pub scheme: Option<&'a scheme::Scheme>,
+    pub levels: Option<&'a [Level]>,
+}
+pub(super) fn text_type(atom: Record<'_>) -> Result<u16, String> {
+    if atom.version != 0 || atom.payload.len() != 4 {
+        return Err(unsupported("invalid PowerPoint text header"));
+    }
+    let kind = u32_at(atom.payload, 0)?;
+    if !matches!(kind, 0..=2 | 4..=8) {
+        return Err(unsupported("invalid PowerPoint text type"));
+    }
+    Ok(kind as u16)
+}
+
 pub(super) fn write(
     text: &str,
     style: &[u8],
-    fonts: &[String],
-    scheme: Option<&scheme::Scheme>,
+    context: Context<'_>,
     output: &mut String,
     xml_budget: &mut usize,
     work_budget: &mut usize,
@@ -46,7 +62,14 @@ pub(super) fn write(
             return Err(unsupported("PowerPoint paragraph style splits a paragraph"));
         }
         drawing::append(output, xml_budget, "<a:p>")?;
-        drawing::append(output, xml_budget, &pf[pi].1.xml()?)?;
+        let base = context
+            .levels
+            .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
+        drawing::append(
+            output,
+            xml_budget,
+            &pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml()?,
+        )?;
         let mut start = 0;
         let mut iter = paragraph.char_indices().peekable();
         while let Some((offset, c)) = iter.next() {
@@ -64,7 +87,11 @@ pub(super) fn write(
                 let end = offset + c.len_utf8();
                 write_run(
                     &paragraph[start..end],
-                    &cf[run].1.xml("rPr", fonts, scheme)?,
+                    &cf[run].1.inherit(base.map(|v| &v.character)).xml(
+                        "rPr",
+                        context.fonts,
+                        context.scheme,
+                    )?,
                     output,
                     xml_budget,
                 )?;
@@ -77,7 +104,11 @@ pub(super) fn write(
         drawing::append(
             output,
             xml_budget,
-            &cf[ci].1.xml("endParaRPr", fonts, scheme)?,
+            &cf[ci].1.inherit(base.map(|v| &v.character)).xml(
+                "endParaRPr",
+                context.fonts,
+                context.scheme,
+            )?,
         )?;
         drawing::append(output, xml_budget, "</a:p>")?;
         cp += 1;
@@ -160,6 +191,7 @@ impl Reader<'_, '_> {
     }
 }
 
+#[derive(Clone)]
 struct Character {
     mask: u32,
     style: u16,
@@ -170,6 +202,24 @@ struct Character {
     color: Option<u32>,
 }
 impl Character {
+    fn inherit(&self, base: Option<&Self>) -> Self {
+        let Some(base) = base else {
+            return self.clone();
+        };
+        Self {
+            mask: self.mask | base.mask,
+            style: (base.style & !(self.mask as u16)) | (self.style & self.mask as u16),
+            size: if self.mask & 0x20000 != 0 {
+                self.size
+            } else {
+                base.size
+            },
+            font: self.font.or(base.font),
+            ea: self.ea.or(base.ea),
+            symbol: self.symbol.or(base.symbol),
+            color: self.color.or(base.color),
+        }
+    }
     fn read(r: &mut Reader<'_, '_>) -> Result<Self, String> {
         let mask = r.u32()?;
         if mask & 0x07100000 != 0 {
@@ -255,13 +305,25 @@ impl Character {
     }
 }
 
+#[derive(Clone)]
 struct Paragraph {
     level: u16,
     align: Option<u16>,
     spacing: [Option<i16>; 3],
-    no_bullet: bool,
+    no_bullet: Option<bool>,
 }
 impl Paragraph {
+    fn inherit(&self, base: Option<&Self>) -> Self {
+        let Some(base) = base else {
+            return self.clone();
+        };
+        Self {
+            level: self.level,
+            align: self.align.or(base.align),
+            spacing: std::array::from_fn(|i| self.spacing[i].or(base.spacing[i])),
+            no_bullet: self.no_bullet.or(base.no_bullet),
+        }
+    }
     fn read(r: &mut Reader<'_, '_>, level: u16) -> Result<Self, String> {
         let mask = r.u32()?;
         if mask & 0x03800000 != 0 {
@@ -301,7 +363,11 @@ impl Paragraph {
             level,
             align,
             spacing,
-            no_bullet: mask & 1 != 0 && bullet_flags.is_some_and(|v| v & 1 == 0),
+            no_bullet: if mask & 1 != 0 {
+                bullet_flags.map(|v| v & 1 == 0)
+            } else {
+                None
+            },
         })
     }
     fn xml(&self) -> Result<String, String> {
@@ -327,12 +393,130 @@ impl Paragraph {
                 xml.push_str(&format!("<a:{tag}><a:{kind} val=\"{value}\"/></a:{tag}>"));
             }
         }
-        if self.no_bullet {
+        if self.no_bullet == Some(true) {
             xml.push_str("<a:buNone/>");
         }
         xml.push_str("</a:pPr>");
         Ok(xml)
     }
+}
+
+#[derive(Clone)]
+pub(super) struct Level {
+    paragraph: Paragraph,
+    character: Character,
+}
+pub(super) struct Master {
+    types: std::collections::BTreeMap<u16, Vec<Level>>,
+    defaults: Vec<Level>,
+}
+impl Master {
+    pub fn parse(
+        records: &[Record<'_>],
+        defaults: &[Level],
+        budget: &mut usize,
+    ) -> Result<Self, String> {
+        let mut types = std::collections::BTreeMap::new();
+        for atom in records.iter().filter(|r| r.kind == 4003) {
+            if types.contains_key(&atom.instance) {
+                return Err(unsupported("duplicate PowerPoint master text type"));
+            }
+            let mut levels = read_levels(*atom, budget)?;
+            for (i, level) in levels.iter_mut().enumerate() {
+                level.paragraph = level
+                    .paragraph
+                    .inherit(defaults.get(i).map(|v| &v.paragraph));
+                level.character = level
+                    .character
+                    .inherit(defaults.get(i).map(|v| &v.character));
+            }
+            levels.extend(defaults.iter().skip(levels.len()).cloned());
+            types.insert(atom.instance, levels);
+        }
+        Ok(Self {
+            types,
+            defaults: defaults.to_vec(),
+        })
+    }
+    pub fn levels(&self, kind: u16) -> Option<&[Level]> {
+        self.types
+            .get(&kind)
+            .map(Vec::as_slice)
+            .or_else(|| (!self.defaults.is_empty()).then_some(self.defaults.as_slice()))
+    }
+}
+fn read_levels(atom: Record<'_>, budget: &mut usize) -> Result<Vec<Level>, String> {
+    if atom.version != 0 || !matches!(atom.instance, 0..=2 | 4..=8) {
+        return Err(unsupported("invalid PowerPoint master text style"));
+    }
+    let mut r = Reader {
+        bytes: atom.payload,
+        pos: 0,
+        budget,
+    };
+    let count = usize::from(r.u16()?);
+    if count > 5 {
+        return Err(unsupported("too many PowerPoint master text levels"));
+    }
+    *r.budget = r
+        .budget
+        .checked_sub(count)
+        .ok_or_else(|| unsupported("PowerPoint master text work budget exceeded"))?;
+    let mut levels: Vec<Option<Level>> = vec![None; count];
+    for index in 0..count {
+        // MS-PPT 2.9.36: only text types >=5 include an explicit level field.
+        let level = if atom.instance >= 5 {
+            usize::from(r.u16()?)
+        } else {
+            index
+        };
+        if level >= count || levels[level].is_some() {
+            return Err(unsupported("invalid PowerPoint master text level"));
+        }
+        levels[level] = Some(Level {
+            paragraph: Paragraph::read(&mut r, level as u16)?,
+            character: Character::read(&mut r)?,
+        });
+    }
+    if r.pos != atom.payload.len() {
+        return Err(unsupported("unexpected PowerPoint master text style tail"));
+    }
+    Ok(levels
+        .into_iter()
+        .map(|v| v.expect("every level assigned"))
+        .collect())
+}
+pub(super) fn document_defaults(
+    children: &[Record<'_>],
+    budget: &mut usize,
+) -> Result<Vec<Level>, String> {
+    let mut defaults = None;
+    for env in children
+        .iter()
+        .filter(|r| r.kind == 1010 && r.version == 15)
+    {
+        for atom in parse_records(env.payload, budget)?
+            .iter()
+            .filter(|r| r.kind == 4003)
+        {
+            if defaults.is_some() {
+                return Err(unsupported("duplicate PowerPoint document text defaults"));
+            }
+            defaults = Some(read_levels(*atom, budget)?);
+        }
+    }
+    Ok(defaults.unwrap_or_default())
+}
+
+pub(super) fn default_style(text: &str) -> Vec<u8> {
+    let count = (text.encode_utf16().count() + 1) as u32;
+    [
+        count.to_le_bytes().to_vec(),
+        vec![0; 6],
+        count.to_le_bytes().to_vec(),
+        vec![0; 4],
+    ]
+    .concat()
 }
 
 pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<String>, String> {
@@ -370,6 +554,110 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn master_defaults_merge_by_level_and_direct_false_overrides_true() {
+        // One title level: centered, bold, 48pt. Direct formatting turns bold
+        // off and changes only alignment; absent size must not become 18pt.
+        let data = [
+            u16s(1),
+            u32s(0x800),
+            u16s(1),
+            u32s(0x20001),
+            u16s(1),
+            u16s(48),
+        ]
+        .concat();
+        let record = Record {
+            version: 0,
+            instance: 0,
+            kind: 4003,
+            payload: &data,
+        };
+        let master = Master::parse(&[record], &[], &mut 100).unwrap();
+        let direct = [
+            u32s(2),
+            u16s(0),
+            u32s(0x800),
+            u16s(2),
+            u32s(2),
+            u32s(1),
+            u16s(0),
+        ]
+        .concat();
+        let mut output = String::new();
+        write(
+            "X",
+            &direct,
+            Context {
+                levels: master.levels(0),
+                ..Context::default()
+            },
+            &mut output,
+            &mut 4096,
+            &mut 100,
+        )
+        .unwrap();
+        assert!(output.contains("sz=\"4800\" b=\"0\""));
+        assert!(output.contains("algn=\"r\""));
+        assert!(!output.contains("1800"));
+        let local = [u16s(1), u32s(0), u32s(0x20000), u16s(32)].concat();
+        let merged = Master::parse(
+            &[Record {
+                payload: &local,
+                ..record
+            }],
+            master.levels(0).unwrap(),
+            &mut 100,
+        )
+        .unwrap();
+        let base = &merged.levels(0).unwrap()[0];
+        assert_eq!(base.character.size, 32);
+        assert_eq!(base.character.style & 1, 1);
+        assert_eq!(base.paragraph.align, Some(1));
+    }
+
+    #[test]
+    fn master_style_level_ids_are_present_only_for_extended_text_types() {
+        let data = [
+            u16s(2),
+            u16s(1),
+            u32s(0),
+            u32s(0x20000),
+            u16s(28),
+            u16s(0),
+            u32s(0),
+            u32s(0x20000),
+            u16s(44),
+        ]
+        .concat();
+        let mut atom = Record {
+            version: 0,
+            instance: 6,
+            kind: 4003,
+            payload: &data,
+        };
+        let levels = read_levels(atom, &mut 100).unwrap();
+        assert_eq!(levels[0].character.size, 44);
+        assert_eq!(levels[1].character.size, 28);
+        assert!(read_levels(atom, &mut 1).is_err());
+        atom.instance = 0;
+        assert!(read_levels(atom, &mut 100).is_err());
+        for bad in [
+            vec![6, 0],
+            vec![1, 0],
+            [u16s(1), u16s(1), u32s(0), u32s(0)].concat(),
+        ] {
+            assert!(read_levels(
+                Record {
+                    instance: 6,
+                    payload: &bad,
+                    ..atom
+                },
+                &mut 100
+            )
+            .is_err());
+        }
+    }
     fn u16s(n: u16) -> Vec<u8> {
         n.to_le_bytes().to_vec()
     }
@@ -384,8 +672,10 @@ mod tests {
         write(
             text,
             data,
-            fonts,
-            None,
+            Context {
+                fonts,
+                ..Context::default()
+            },
             &mut output,
             &mut (1024 * 1024),
             &mut MAX_RECORDS.clone(),
@@ -479,14 +769,26 @@ mod tests {
     fn style_work_and_expanded_xml_have_independent_budgets() {
         let data = style(3, u32s(0));
         let mut output = String::new();
-        assert!(
-            write("ab", &data, &[], None, &mut output, &mut 1024, &mut 1)
-                .unwrap_err()
-                .contains("work budget")
-        );
-        assert!(write("ab", &data, &[], None, &mut output, &mut 8, &mut 10)
-            .unwrap_err()
-            .contains("OUTPUT_TOO_LARGE"));
+        assert!(write(
+            "ab",
+            &data,
+            Context::default(),
+            &mut output,
+            &mut 1024,
+            &mut 1
+        )
+        .unwrap_err()
+        .contains("work budget"));
+        assert!(write(
+            "ab",
+            &data,
+            Context::default(),
+            &mut output,
+            &mut 8,
+            &mut 10
+        )
+        .unwrap_err()
+        .contains("OUTPUT_TOO_LARGE"));
     }
 
     #[test]

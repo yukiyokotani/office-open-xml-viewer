@@ -2,12 +2,17 @@
 use super::*;
 use std::collections::BTreeMap;
 
+// Resource policy: each master retains at most eight text types * five levels,
+// plus five document-default levels. Bound decoded styles independently of bytes.
+const MAX_MASTERS: usize = 10_000;
+
 pub(super) type Scheme = [u32; 8];
 
 #[derive(Clone, Copy, Default)]
 struct Entry {
     local: Option<Scheme>,
     parent: Option<u32>,
+    main_parent: Option<u32>,
 }
 
 fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
@@ -20,6 +25,10 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
                     return Err(unsupported("invalid PowerPoint SlideAtom for color scheme"));
                 }
                 atom_seen = true;
+                let master = u32_at(atom.payload, 12)?;
+                if record.kind != 1016 && master != 0 {
+                    result.main_parent = Some(master);
+                }
                 // Main masters are roots: MS-PPT 2.5.10 requires masterIdRef=0.
                 // Their SlideFlags do not identify a parent color scheme.
                 if record.kind == 1016 && u32_at(atom.payload, 12)? != 0 {
@@ -50,6 +59,7 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 pub(super) struct Resolver {
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
+    text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
 }
 impl Resolver {
     pub fn new(
@@ -66,11 +76,16 @@ impl Resolver {
             return Err(unsupported("duplicate PowerPoint master list"));
         }
         let mut masters = BTreeMap::new();
+        let defaults = text_style::document_defaults(children, budget)?;
+        let mut text_styles = BTreeMap::new();
         if let Some(list) = lists.first() {
             if list.version != 15 {
                 return Err(unsupported("invalid PowerPoint master list"));
             }
             for item in parse_records(list.payload, budget)? {
+                if masters.len() >= MAX_MASTERS {
+                    return Err(unsupported("too many PowerPoint masters"));
+                }
                 if item.kind != 1011 || item.version != 0 || item.payload.len() != 20 {
                     return Err(unsupported("invalid PowerPoint master reference"));
                 }
@@ -87,12 +102,48 @@ impl Resolver {
                     return Err(unsupported("invalid PowerPoint master persist object"));
                 }
                 masters.insert(id, entry(record, budget)?);
+                if record.kind == 1016 {
+                    let records = parse_records(record.payload, budget)?;
+                    text_styles.insert(
+                        id,
+                        std::rc::Rc::new(text_style::Master::parse(&records, &defaults, budget)?),
+                    );
+                }
             }
         }
         Ok(Self {
             masters,
             cache: BTreeMap::new(),
+            text_styles,
         })
+    }
+    pub fn text_master(
+        &self,
+        slide: Record<'_>,
+        budget: &mut usize,
+    ) -> Result<Option<std::rc::Rc<text_style::Master>>, String> {
+        let mut parent = entry(slide, budget)?.main_parent;
+        let mut path = Vec::new();
+        while let Some(id) = parent {
+            *budget = budget
+                .checked_sub(1)
+                .ok_or_else(|| unsupported("PowerPoint text master work budget exceeded"))?;
+            if path.len() >= MAX_DEPTH || path.contains(&id) {
+                return Err(unsupported(
+                    "cyclic or excessive PowerPoint text master inheritance",
+                ));
+            }
+            path.push(id);
+            let e = self
+                .masters
+                .get(&id)
+                .ok_or_else(|| unsupported("unresolved PowerPoint text master"))?;
+            if let Some(style) = self.text_styles.get(&id) {
+                return Ok(Some(style.clone()));
+            }
+            parent = e.main_parent;
+        }
+        Ok(None)
     }
     pub fn slide(
         &mut self,
@@ -212,6 +263,15 @@ mod tests {
             Some([0x987654; 8])
         );
         assert_eq!(r.cache.len(), 2);
+        let via_title = r
+            .text_master(parsed(&slide(1006, 200, false, 0)), &mut 100)
+            .unwrap()
+            .unwrap();
+        let direct = r
+            .text_master(parsed(&slide(1006, 100, false, 0)), &mut 100)
+            .unwrap()
+            .unwrap();
+        assert!(std::rc::Rc::ptr_eq(&via_title, &direct));
         // Cached master schemes still charge work on repeated slide references.
         assert!(r.master(200, &mut Vec::new(), &mut 0).is_err());
     }
@@ -221,6 +281,7 @@ mod tests {
         let mut r = Resolver {
             masters: BTreeMap::new(),
             cache: BTreeMap::new(),
+            text_styles: BTreeMap::new(),
         };
         assert!(r.master(1, &mut Vec::new(), &mut 100).is_err());
         r.masters.insert(
@@ -228,6 +289,7 @@ mod tests {
             Entry {
                 parent: Some(2),
                 local: Some([0; 8]),
+                main_parent: None,
             },
         );
         r.masters.insert(
@@ -235,6 +297,7 @@ mod tests {
             Entry {
                 parent: Some(1),
                 local: Some([0; 8]),
+                main_parent: None,
             },
         );
         assert!(r
@@ -247,6 +310,7 @@ mod tests {
                 Entry {
                     parent: Some(i + 1),
                     local: None,
+                    main_parent: None,
                 },
             );
         }
@@ -254,6 +318,62 @@ mod tests {
             .master(1, &mut Vec::new(), &mut 1000)
             .unwrap_err()
             .contains("excessive"));
+    }
+
+    #[test]
+    fn caps_retained_master_styles_before_allocating_another_master() {
+        let document = slide(1016, 0, false, 0);
+        let mut refs = Vec::new();
+        for id in 1..=MAX_MASTERS as u32 + 1 {
+            let mut atom = [0; 20];
+            atom[..4].copy_from_slice(&1u32.to_le_bytes());
+            atom[12..16].copy_from_slice(&id.to_le_bytes());
+            refs.extend(record(0, 1011, &atom));
+        }
+        let list = record(0x1f, 4080, &refs);
+        let mut offsets = BTreeMap::new();
+        offsets.insert(1, 0);
+        let error = Resolver::new(
+            &document,
+            &[parsed(&list)],
+            &offsets,
+            &mut MAX_RECORDS.clone(),
+        )
+        .err()
+        .expect("must reject excessive masters");
+        assert!(error.contains("too many PowerPoint masters"));
+    }
+
+    #[test]
+    fn text_master_cycles_and_budgets_are_independent_of_color_inheritance() {
+        let mut r = Resolver {
+            masters: BTreeMap::new(),
+            cache: BTreeMap::new(),
+            text_styles: BTreeMap::new(),
+        };
+        for (id, parent) in [(1, 2), (2, 1)] {
+            r.masters.insert(
+                id,
+                Entry {
+                    local: None,
+                    parent: None,
+                    main_parent: Some(parent),
+                },
+            );
+        }
+        let input = slide(1006, 1, false, 0);
+        assert!(r
+            .text_master(parsed(&input), &mut 100)
+            .err()
+            .unwrap()
+            .contains("cyclic"));
+        assert!(r.text_master(parsed(&input), &mut 0).is_err());
+        r.masters.remove(&2);
+        assert!(r
+            .text_master(parsed(&input), &mut 100)
+            .err()
+            .unwrap()
+            .contains("unresolved"));
     }
 
     #[test]

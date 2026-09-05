@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 pub(super) struct Presentation<'a> {
     pub slides: Vec<(Record<'a>, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
+    pub outline_types: Vec<Vec<u16>>,
+    pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub size: (u32, u32),
@@ -105,6 +107,7 @@ pub(super) fn resolve<'a>(
     }
     let mut slides: Vec<(Record<'a>, Vec<String>)> = Vec::new();
     let mut outline_styles: Vec<Vec<Option<&'a [u8]>>> = Vec::new();
+    let mut outline_types: Vec<Vec<u16>> = Vec::new();
     let mut seen = HashSet::new();
     let mut outline_budget = MAX_TEXT_BYTES;
     for item in parse_records(lists[0].payload, budget)? {
@@ -128,6 +131,7 @@ pub(super) fn resolve<'a>(
                 }
                 slides.push((slide, Vec::new()));
                 outline_styles.push(Vec::new());
+                outline_types.push(Vec::new());
             }
             3999 => {
                 let (_, outline) = slides
@@ -137,6 +141,10 @@ pub(super) fn resolve<'a>(
                     return Err(unsupported("too many PowerPoint outline text blocks"));
                 }
                 outline.push(String::new());
+                outline_types
+                    .last_mut()
+                    .expect("slide exists")
+                    .push(text_style::text_type(item)?);
                 outline_styles.last_mut().expect("slide exists").push(None);
             }
             TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
@@ -165,6 +173,11 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("PowerPoint presentation has no slides"));
     }
     Ok(Presentation {
+        text_masters: slides
+            .iter()
+            .map(|(slide, _)| schemes.text_master(*slide, budget))
+            .collect::<Result<_, _>>()?,
+        outline_types,
         schemes: slides
             .iter()
             .map(|(slide, _)| schemes.slide(*slide, budget))

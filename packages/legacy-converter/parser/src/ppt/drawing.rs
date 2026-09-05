@@ -8,6 +8,8 @@ pub(super) struct TextContext<'a> {
     pub fonts: &'a [String],
     pub styles: &'a [Option<&'a [u8]>],
     pub scheme: Option<&'a scheme::Scheme>,
+    pub types: &'a [u16],
+    pub master: Option<&'a text_style::Master>,
 }
 
 pub(super) fn render(
@@ -96,6 +98,7 @@ struct Shape<'a> {
     anchor: Option<Rect>,
     child_space: Option<Rect>,
     textbox: Option<Record<'a>>,
+    placeholder: bool,
     props: Properties,
 }
 
@@ -109,6 +112,7 @@ impl<'a> Shape<'a> {
         let mut anchor = None;
         let mut child_space = None;
         let mut textbox = None;
+        let mut placeholder = None;
         let mut props = Properties::default();
         for child in parse_records(record.payload, budget)? {
             match child.kind {
@@ -138,7 +142,22 @@ impl<'a> Shape<'a> {
                     textbox = Some(child);
                 }
                 0xf00b => props.read(child, budget)?,
-                // ClientData contains actions/links/OLE references, not visible text.
+                0xf011 => {
+                    if child.version != 15 {
+                        return Err(unsupported("invalid PowerPoint client data"));
+                    }
+                    // Inspect only direct placeholder metadata. Never descend
+                    // into action/link containers or collect their text.
+                    for atom in parse_records(child.payload, budget)? {
+                        if atom.kind != 3011 {
+                            continue;
+                        }
+                        if placeholder.is_some() || atom.version != 0 || atom.payload.len() != 8 {
+                            return Err(unsupported("invalid PowerPoint placeholder metadata"));
+                        }
+                        placeholder = Some(u32_at(atom.payload, 0)? != u32::MAX);
+                    }
+                }
                 _ => {}
             }
         }
@@ -148,6 +167,7 @@ impl<'a> Shape<'a> {
             anchor,
             child_space,
             textbox,
+            placeholder: placeholder.unwrap_or(false),
             props,
         })
     }
@@ -315,6 +335,7 @@ impl Writer<'_, '_> {
                 let mut style = None;
                 let mut body_seen = false;
                 let mut outline_body = false;
+                let mut text_type = None;
                 // The only source of visible text is this shape's ClientTextbox.
                 let atoms = shape
                     .textbox
@@ -323,6 +344,12 @@ impl Writer<'_, '_> {
                     .unwrap_or_default();
                 for atom in atoms {
                     match atom.kind {
+                        3999 => {
+                            if text_type.is_some() || body_seen {
+                                return Err(unsupported("ambiguous PowerPoint text header"));
+                            }
+                            text_type = Some(text_style::text_type(atom)?);
+                        }
                         TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
                             if body_seen {
                                 return Err(unsupported("duplicate PowerPoint text body"));
@@ -339,6 +366,12 @@ impl Writer<'_, '_> {
                             body_seen = true;
                             outline_body = true;
                             let index = u32_at(atom.payload, 0)? as usize;
+                            if text_type.is_some() {
+                                return Err(unsupported(
+                                    "inline header on PowerPoint outline reference",
+                                ));
+                            }
+                            text_type = self.context.and_then(|c| c.types.get(index).copied());
                             style = self
                                 .context
                                 .and_then(|context| context.styles.get(index).copied().flatten());
@@ -377,15 +410,30 @@ impl Writer<'_, '_> {
                 self.push("<p:txBody>")?;
                 let p = &shape.props;
                 self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
-                if let Some(style) = style {
+                let levels = if shape.placeholder {
+                    self.context
+                        .and_then(|c| c.master)
+                        .and_then(|m| text_type.and_then(|t| m.levels(t)))
+                } else {
+                    None
+                };
+                let default_style = if style.is_none() && levels.is_some() && text.len() == 1 {
+                    Some(text_style::default_style(&text[0]))
+                } else {
+                    None
+                };
+                if let Some(style) = style.or(default_style.as_deref()) {
                     if text.len() != 1 {
                         return Err(unsupported("ambiguous PowerPoint styled text body"));
                     }
                     text_style::write(
                         &text[0],
                         style,
-                        self.context.map_or(&[], |c| c.fonts),
-                        self.context.and_then(|c| c.scheme),
+                        text_style::Context {
+                            fonts: self.context.map_or(&[], |c| c.fonts),
+                            scheme: self.context.and_then(|c| c.scheme),
+                            levels,
+                        },
                         &mut self.output,
                         self.remaining,
                         self.records,
@@ -472,6 +520,68 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn master_text_only_applies_to_verified_placeholders_not_ordinary_text_boxes() {
+        let master_bytes = [
+            1u16.to_le_bytes().to_vec(),
+            0x800u32.to_le_bytes().to_vec(),
+            1u16.to_le_bytes().to_vec(),
+            0x20000u32.to_le_bytes().to_vec(),
+            48u16.to_le_bytes().to_vec(),
+        ]
+        .concat();
+        let master = text_style::Master::parse(
+            &[Record {
+                version: 0,
+                instance: 0,
+                kind: 4003,
+                payload: &master_bytes,
+            }],
+            &[],
+            &mut 100,
+        )
+        .unwrap();
+        let shape = |position: u32, label: &str| {
+            sp(
+                0xa00,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 1152, 576])),
+                    record(
+                        15,
+                        0xf00d,
+                        &[record(0, 3999, &[0; 4]), record(0, 4008, label.as_bytes())].concat(),
+                    ),
+                    record(
+                        15,
+                        0xf011,
+                        &record(0, 3011, &[position.to_le_bytes(), [1, 0, 0, 0]].concat()),
+                    ),
+                ],
+            )
+        };
+        let input = drawing(vec![shape(0, "Title"), shape(u32::MAX, "Ordinary")]);
+        let out = render(
+            &input,
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut 8192,
+            Some(TextContext {
+                fonts: &[],
+                styles: &[],
+                types: &[],
+                scheme: None,
+                master: Some(&master),
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.matches("algn=\"ctr\"").count(), 1);
+        assert_eq!(out.matches("sz=\"4800\"").count(), 2);
+        assert_eq!(out.matches("sz=\"1800\"").count(), 2);
+        assert!(out.contains("Title") && out.contains("Ordinary"));
     }
 
     #[test]

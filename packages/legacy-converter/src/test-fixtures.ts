@@ -64,7 +64,7 @@ export function buildXlsFixture(): Uint8Array {
   )]]);
 }
 
-export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array()): Uint8Array {
+export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array(), masterPayload?: Uint8Array): Uint8Array {
   const record = (version: number, kind: number, payload: Uint8Array) => concat(
     little16(version), little16(kind), little32(payload.length), payload,
   );
@@ -73,10 +73,12 @@ export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8
   const document = record(0x000f, 1000, concat(
     record(1, 1001, documentAtom),
     record(15, 4080, concat(record(0, 1011, slideReference), outlinePayload)),
+    ...(masterPayload ? [record(0x1f, 4080, record(0, 1011, concat(little32(3), new Uint8Array(8), little32(100), new Uint8Array(4))))] : []),
   ));
   const slide = record(0x000f, 1006, slidePayload ?? record(0, 4000, utf16le('Legacy 日本語 slide')));
-  const directoryOffset = document.length + slide.length;
-  const directory = record(0, 0x1772, concat(little32(0x00200001), little32(0), little32(document.length)));
+  const master = masterPayload ? record(15, 1016, masterPayload) : new Uint8Array();
+  const directoryOffset = document.length + slide.length + master.length;
+  const directory = record(0, 0x1772, concat(little32(masterPayload ? 0x00300001 : 0x00200001), little32(0), little32(document.length), ...(masterPayload ? [little32(document.length + slide.length)] : [])));
   const currentEdit = directoryOffset + directory.length;
   const userEdit = record(0, 0x0ff5, concat(new Uint8Array(12), little32(directoryOffset), little32(1), new Uint8Array(8)));
   const currentUserPayload = concat(
@@ -90,7 +92,7 @@ export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8
   );
   const currentUser = record(0, 0x0ff6, currentUserPayload);
   return buildCfb([
-    ['PowerPoint Document', concat(document, slide, directory, userEdit)],
+    ['PowerPoint Document', concat(document, slide, master, directory, userEdit)],
     ['Current User', currentUser],
   ]);
 }
