@@ -1138,6 +1138,15 @@ pub(crate) fn parse_shape(
     } else {
         empty_level_bullets()
     };
+    let inherited_level_colors = if ph_node.is_some()
+        && style_node
+            .and_then(|style| child(style, "fontRef"))
+            .is_none()
+    {
+        lph.lookup_level_colors(&ph_type, ph_idx)
+    } else {
+        std::array::from_fn(|_| None)
+    };
     let text_body = child(sp_node, "txBody").map(|n| {
         parse_text_body(
             n,
@@ -1147,6 +1156,7 @@ pub(crate) fn parse_shape(
             inherited_font_size,
             inherited_font_family,
             inherited_level_font_sizes,
+            inherited_level_colors,
             inherited_level_indents,
             &inherited_level_bullets,
             inherited_bold,
@@ -2210,6 +2220,7 @@ pub(crate) fn parse_table_cell(
             None,
             None,
             [None; 9],
+            std::array::from_fn(|_| None),
             Default::default(), // inherited_level_indents
             &empty_level_bullets(),
             None,
@@ -3470,6 +3481,54 @@ mod style_ref_tests {
 
         assert!(shape.stroke.is_none());
         assert!(matches!(shape.fill, Some(Fill::None)));
+    }
+
+    #[test]
+    fn slide_font_ref_replaces_placeholder_list_level_color() {
+        let theme = PptxTheme::default();
+        let mut placeholders = LayoutPlaceholders::default();
+        placeholders.by_idx_level_colors.insert(
+            7,
+            std::array::from_fn(|level| {
+                if level == 1 {
+                    Some("68217A".to_owned())
+                } else {
+                    None
+                }
+            }),
+        );
+        let doc = roxmltree::Document::parse(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:nvSpPr><p:cNvPr id="1" name="Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="7"/></p:nvPr></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:style><a:fontRef idx="minor"><a:srgbClr val="FFFFFF"/></a:fontRef></p:style>
+              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr lvl="1"/><a:r><a:t>Styled text</a:t></a:r></a:p></p:txBody>
+            </p:sp>"#,
+        )
+        .unwrap();
+        let mut zip = empty_zip();
+
+        let shape = parse_shape(
+            doc.root_element(),
+            &placeholders,
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            &mut zip,
+        )
+        .expect("shape");
+
+        assert_eq!(shape.default_text_color.as_deref(), Some("FFFFFF"));
+        assert_eq!(
+            shape
+                .text_body
+                .as_ref()
+                .and_then(|body| body.paragraphs.first())
+                .and_then(|paragraph| paragraph.def_color.as_deref()),
+            None,
+            "an explicit slide fontRef must remain authoritative over placeholder list styles"
+        );
     }
 
     #[test]

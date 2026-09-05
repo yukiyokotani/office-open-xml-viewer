@@ -4063,9 +4063,10 @@ export function renderTextBody(
   // paths byte-identical.
   eaVertUpright = false,
   // A zero-height table row asks PowerPoint to derive its height from the
-  // natural line box. A positive a:tr@h is instead an authored minimum: use the
-  // glyph-size box when checking whether content actually exceeds that minimum,
-  // so implicit leading alone does not enlarge an already-sufficient row.
+  // natural line box. Office treats a positive a:tr@h as an authored minimum
+  // ([MS-OE376] §2.1.1347): use the glyph-size box when checking whether content
+  // actually exceeds that minimum, so implicit leading alone does not enlarge
+  // an already-sufficient row.
   measureNaturalLineSpacing = measureOnly,
 ): number | void {
   // Vertical text: rotate rendering context so text flows top-to-bottom.
@@ -4437,30 +4438,43 @@ export function renderTextBody(
       // An Office-produced boundary deck confirms that this is independent of
       // the chosen font and of spAutoFit: Meiryo and Arial, fixed and spAutoFit
       // shapes all keep the same omitted-lnSpc pitch at a given point size.
-      // An explicit percentage is instead based directly on that authored size
-      // (ECMA-376 §21.1.2.2.5/.11). Table measurement therefore retains the
-      // natural 120% box only when line spacing is omitted in an auto-height
-      // row. A positive a:tr@h remains a minimum and uses the glyph-size box for
-      // overflow measurement. Neither path substitutes the font's design box
-      // for PowerPoint's natural baseline pitch.
+      // Percentage spacing scales this renderer's PowerPoint-compatible natural
+      // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
+      // Office output supplies the line-box compatibility behaviour). A positive
+      // a:tr@h remains a minimum: a lone terminal line may fit by its glyph box,
+      // while multi-line content must retain every painted line box. Neither
+      // path substitutes the font's design box for the baseline pitch.
       const naturalSingle = maxSizePx * 1.2;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
       // being repeated between every pair of lines under spAutoFit (#1473).
       const implicitSingle = naturalSingle;
-      let lineHeight: number;
+      // Paint and table measurement must agree for explicitly authored
+      // percentage spacing. Positive rows with omitted lnSpc retain the
+      // existing glyph-box containment rule: the implicit leading is not by
+      // itself evidence that PowerPoint grows the authored minimum. An explicit
+      // percentage, however, is part of the authored content extent, and every
+      // line in a multi-line body consumes the painted line box.
+      const isFinalBodyLine = paraIdx === body.paragraphs.length - 1 && isLast;
+      const isOnlyBodyLine = body.paragraphs.length === 1 && lines.length === 1;
+      let paintedLineHeight: number;
       if (para.spaceLine) {
         if (para.spaceLine.type === 'pct') {
-          const percentageBase = measureOnly ? maxSizePx : naturalSingle;
-          lineHeight = percentageBase * (para.spaceLine.val / 100000);
+          paintedLineHeight = naturalSingle * (para.spaceLine.val / 100000);
         } else {
-          lineHeight = para.spaceLine.val * PT_TO_EMU * scale;
+          paintedLineHeight = para.spaceLine.val * PT_TO_EMU * scale;
         }
       } else {
-        lineHeight = measureOnly && !isSpAutoFit
-          ? (measureNaturalLineSpacing ? naturalSingle : maxSizePx)
-          : implicitSingle;
+        paintedLineHeight = implicitSingle;
+      }
+      let lineHeight = paintedLineHeight;
+      if (measureOnly && !isSpAutoFit && !measureNaturalLineSpacing) {
+        if (!para.spaceLine) {
+          lineHeight = maxSizePx;
+        } else if (para.spaceLine.type === 'pct' && isFinalBodyLine && isOnlyBodyLine) {
+          lineHeight = maxSizePx * (para.spaceLine.val / 100000);
+        }
       }
       // PowerPoint retains its established percentage-line advance, but seats
       // glyphs from a tall resolved fallback inside the authored percentage
@@ -6429,15 +6443,25 @@ export function renderTable(
     return w;
   };
 
-  // ── Row heights: ECMA-376 §21.1.3.18 (a:tr@h) is a MINIMUM ────────────────
-  // PowerPoint grows a row to fit its tallest cell's laid-out text (like
-  // Word's "at least" line rule). A literal h=0 therefore becomes
+  // ── Row heights: Office minimum-row semantics ─────────────────────────────
+  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height; [MS-OE376]
+  // §2.1.1347 additionally constrains it to zero or at least the minimum row
+  // height. PowerPoint grows a row to fit its tallest cell's laid-out text. A
+  // literal h=0 therefore becomes
   // content-driven. We measure each cell's text body at its spanned width
   // (reusing the same renderTextBody machinery via measureOnly) and take
   // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
   // its content height across the rows it covers so it doesn't inflate the
   // first row.
-  const rowHeights = el.rows.map(r => emuToPx(r.height, scale));
+  const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
+  const rowHeights = [...authoredRowHeights];
+  const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
+  // The graphic-frame extent is the table's authored outer height. PowerPoint
+  // can leave slack between that extent and the sum of positive a:tr@h minima;
+  // that discrepancy signals that text-driven row growth was present when the
+  // table was authored. When the positive minima already fill the frame, do not
+  // invent growth merely because browser font metrics wrap differently.
+  const hasAuthoredRowGrowthSignal = el.height > authoredRowsTotalEmu;
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
@@ -6447,6 +6471,7 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       if ((cell.rowSpan || 1) > 1) continue;
       if (!cell.textBody) continue;
+      if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
@@ -6470,6 +6495,7 @@ export function renderTable(
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))
         .some((spannedRow) => spannedRow.height === 0);
+      if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
       const needed = (renderTextBody(
         ctx, cell.textBody, 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,

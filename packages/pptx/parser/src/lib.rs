@@ -3124,6 +3124,9 @@ fn produce_slide_unit_with_journal(
             let master_color = master_root
                 .map(|root| parse_master_txstyle_color(root, &theme))
                 .unwrap_or_default();
+            let master_level_colors = master_root
+                .map(|root| parse_master_level_colors(root, &theme))
+                .unwrap_or_default();
             let master_level_bullets = master_root
                 .map(|root| {
                     parse_master_level_bullets(
@@ -3139,6 +3142,7 @@ fn produce_slide_unit_with_journal(
                 theme,
                 master_bg,
                 master_color,
+                master_level_colors,
                 master_level_bullets,
             }
         });
@@ -3149,11 +3153,18 @@ fn produce_slide_unit_with_journal(
         // a clrMapOvr slide passes the OVERRIDE-adjusted pair so its layout colors
         // flip with the override (mirrors the master theme-dependent recompute
         // above), everything else is the frozen bundle maps.
-        let (layout_theme, layout_master_bullets): (&PptxTheme, &HashMap<String, LevelBullets>) =
-            match effective_master.as_ref() {
-                Some(e) => (&e.theme, &e.master_level_bullets),
-                None => (&bundle.theme, &bundle.master_level_bullets),
-            };
+        let (layout_theme, layout_master_colors, layout_master_bullets): (
+            &PptxTheme,
+            &HashMap<String, LevelColors>,
+            &HashMap<String, LevelBullets>,
+        ) = match effective_master.as_ref() {
+            Some(e) => (&e.theme, &e.master_level_colors, &e.master_level_bullets),
+            None => (
+                &bundle.theme,
+                &bundle.master_level_colors,
+                &bundle.master_level_bullets,
+            ),
+        };
         // Build a `ParsedLayout` from a layout XML string with the resolved
         // theme/bullets and this bundle's remaining (theme-independent) maps.
         let build_parsed_layout = |lx: &str, zip: &mut PptxZip| -> ParsedLayout {
@@ -3162,6 +3173,7 @@ fn produce_slide_unit_with_journal(
                 &bundle.master_font_sizes,
                 &bundle.master_font_families,
                 &bundle.master_level_font_sizes,
+                layout_master_colors,
                 &bundle.master_level_indents,
                 layout_master_bullets,
                 &bundle.master_anchors,
@@ -6190,6 +6202,7 @@ mod tests {
                 None,
                 None,
                 [None; 9],
+                std::array::from_fn(|_| None),
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
                 None,
@@ -6276,6 +6289,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &master_indents,
             &HashMap::new(),
             &HashMap::new(),
@@ -6352,6 +6366,7 @@ mod tests {
                 &m_f64,
                 &m_str,
                 &m_lfs,
+                &HashMap::new(),
                 &m_li,
                 &m_lb,
                 &m_str,
@@ -6727,6 +6742,101 @@ mod tests {
             Some("112233".to_string()),
             "an explicit layout idx colour takes priority over the master default"
         );
+    }
+
+    /// ECMA-376 §21.1.2.4: `pPr@lvl="1"` selects `lvl2pPr`. A layout's
+    /// lvl1 colour must not become a body-wide fallback for nested paragraphs;
+    /// the matching master lvl2 colour remains the inherited value when the
+    /// layout leaves lvl2 unspecified.
+    #[test]
+    fn placeholder_text_color_inherits_from_matching_list_level() {
+        let mut theme = HashMap::new();
+        theme.insert("tx1".to_owned(), "505050".to_owned());
+        theme.insert("tx2".to_owned(), "68217A".to_owned());
+
+        let master_xml = r#"<p:sldMaster
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree/></p:cSld>
+          <p:txStyles><p:bodyStyle>
+            <a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:defRPr></a:lvl1pPr>
+            <a:lvl2pPr><a:defRPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:defRPr></a:lvl2pPr>
+          </p:bodyStyle></p:txStyles>
+        </p:sldMaster>"#;
+        let master_doc = roxmltree::Document::parse(master_xml).unwrap();
+        let master_colors = parse_master_level_colors(master_doc.root_element(), &theme);
+
+        let layout_xml = r#"<p:sldLayout
+          xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <p:cSld><p:spTree><p:sp>
+            <p:nvSpPr><p:nvPr><p:ph type="body" idx="10"/></p:nvPr></p:nvSpPr>
+            <p:spPr/>
+            <p:txBody><a:bodyPr/><a:lstStyle>
+              <a:lvl1pPr><a:defRPr><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:defRPr></a:lvl1pPr>
+              <a:lvl2pPr><a:defRPr/></a:lvl2pPr>
+            </a:lstStyle><a:p/></p:txBody>
+          </p:sp></p:spTree></p:cSld>
+        </p:sldLayout>"#;
+        let layout_doc = roxmltree::Document::parse(layout_xml).unwrap();
+        let mut zip = PptxZip::new(Cursor::new(empty_zip_bytes())).unwrap();
+        let placeholders = parse_layout_placeholders(
+            layout_doc.root_element(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &master_colors,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &theme,
+            "ppt/slideLayouts",
+            &HashMap::new(),
+            &mut zip,
+        );
+        let inherited = placeholders.lookup_level_colors("body", Some(10));
+        assert_eq!(inherited[0].as_deref(), Some("68217A"));
+        assert_eq!(inherited[1].as_deref(), Some("505050"));
+
+        let body_xml = r#"<a:txBody xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:bodyPr/><a:lstStyle/><a:p><a:pPr lvl="1"/><a:r><a:t>Nested</a:t></a:r></a:p>
+        </a:txBody>"#;
+        let body_doc = roxmltree::Document::parse(body_xml).unwrap();
+        let body = parse_text_body(
+            body_doc.root_element(),
+            &theme,
+            &HashMap::new(),
+            "ppt/slides",
+            None,
+            None,
+            [None; 9],
+            inherited,
+            Default::default(),
+            &empty_level_bullets(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            ShapeKind::Sp,
+            &mut zip,
+        );
+        assert_eq!(body.paragraphs[0].def_color.as_deref(), Some("505050"));
     }
 
     /// ECMA-376 §20.1.4.2.27 (`CT_TableStyleCellStyle`) — a cell style's fill is
@@ -7136,10 +7246,11 @@ mod tests {
                 &theme,
                 &rels,
                 "ppt/slides",
-                None,               // inherited_font_size
-                None,               // inherited_font_family
-                [None; 9],          // inherited_level_font_sizes
-                Default::default(), // inherited_level_indents
+                None,                          // inherited_font_size
+                None,                          // inherited_font_family
+                [None; 9],                     // inherited_level_font_sizes
+                std::array::from_fn(|_| None), // inherited_level_colors
+                Default::default(),            // inherited_level_indents
                 &empty_level_bullets(),
                 None, // inherited_bold
                 None, // inherited_italic
@@ -7213,6 +7324,7 @@ mod tests {
                 None,
                 None,
                 [None; 9],
+                std::array::from_fn(|_| None),
                 Default::default(),
                 &empty_level_bullets(),
                 None,
@@ -7299,6 +7411,7 @@ mod tests {
                 None,
                 None,
                 [None; 9],
+                std::array::from_fn(|_| None),
                 Default::default(), // inherited_level_indents
                 &empty_level_bullets(),
                 None,
@@ -7389,6 +7502,7 @@ mod tests {
                 None,
                 None,
                 [None; 9],
+                std::array::from_fn(|_| None),
                 Default::default(),
                 &empty_level_bullets(),
                 None,
