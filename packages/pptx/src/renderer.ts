@@ -72,6 +72,7 @@ import {
   DEFAULT_KINSOKU_RULES,
   isCjkBreakChar,
   isUax14NoBreakPair,
+  lineBreakClass,
   containsSeaScript,
   isGraphemeFillText,
   seaMixedBreakOffsets,
@@ -1065,6 +1066,67 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
   return hasBullet ? 0 : Math.max(0, indentPx);
 }
 
+/**
+ * Whether the seam is the explicit hyphen boundary of an alphabetic compound.
+ *
+ * UAX #14 gives HY (U+002D) and HH (for example U+2010) a break opportunity
+ * AFTER the hyphen. Keep this helper deliberately narrower than a full UAX #14
+ * implementation: it accepts only Latin-letter–hyphen–Latin-letter compounds,
+ * rejecting the numeric-range case covered by LB25 and leaving other scripts
+ * (including LB21a's Hebrew exception) to their dedicated layout paths.
+ * DrawingML `latinLnBrk="0"` forbids splitting a Latin word without adding a
+ * hyphen; it does not erase a break opportunity supplied by an authored hyphen.
+ */
+const LATIN_SCALAR_RE = /^\p{Script_Extensions=Latin}$/u;
+const LETTER_SCALAR_RE = /^\p{L}$/u;
+const ASCII_SCALARS_RE = /^[\u0000-\u007f]*$/u;
+
+function isLatinCompoundHyphenBoundary(before: string, hyphen: string, after: string): boolean {
+  const hyphenCp = hyphen.codePointAt(0) as number;
+  // All ASCII scalars other than U+002D are permanently outside HY/HH. Most
+  // tokens take this constant-time path without searching the Unicode table.
+  if (hyphenCp <= 0x7f && hyphenCp !== 0x2d) return false;
+  // HY/HH are punctuation classes, so non-ASCII letters cannot be candidates.
+  if (LETTER_SCALAR_RE.test(hyphen)) return false;
+  const hyphenClass = lineBreakClass(hyphenCp);
+  if (hyphenClass !== 'HY' && hyphenClass !== 'HH') return false;
+  return LATIN_SCALAR_RE.test(before) && LATIN_SCALAR_RE.test(after);
+}
+
+/** Split one non-whitespace Latin token at its authored compound hyphens. */
+function splitLatinCompoundToken(text: string): { text: string; breakBefore: boolean }[] {
+  // The overwhelmingly common ASCII token without U+002D cannot contain an
+  // HY/HH scalar. Avoid a scalar array and per-boundary classification there.
+  if (!text.includes('-') && ASCII_SCALARS_RE.test(text)) {
+    return [{ text, breakBefore: false }];
+  }
+  const chars = [...text];
+  const pieces: { text: string; breakBefore: boolean }[] = [];
+  let start = 0;
+  for (let i = 1; i + 1 < chars.length; i++) {
+    if (!isLatinCompoundHyphenBoundary(chars[i - 1], chars[i], chars[i + 1])) {
+      continue;
+    }
+    const end = i + 1;
+    pieces.push({ text: chars.slice(start, end).join(''), breakBefore: pieces.length > 0 });
+    start = end;
+  }
+  pieces.push({ text: chars.slice(start).join(''), breakBefore: pieces.length > 0 });
+  return pieces;
+}
+
+/** Last two painted text scalars, without joining the whole line. */
+function trailingTextScalars(line: LayoutLine): string[] {
+  const tail: string[] = [];
+  for (let i = line.segments.length - 1; i >= 0 && tail.length < 2; i--) {
+    const segment = line.segments[i];
+    if (segment.isTab || segment.math) continue;
+    const chars = [...segment.text];
+    for (let j = chars.length - 1; j >= 0 && tail.length < 2; j--) tail.unshift(chars[j]);
+  }
+  return tail;
+}
+
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
@@ -1625,10 +1687,17 @@ export function layoutParagraph(
       drawSizePx,
     };
 
-    // Split on whitespace boundaries, keeping the whitespace tokens
-    const tokens = runText.split(/(\s+)/);
+    // Split on whitespace boundaries, keeping the whitespace tokens. Within a
+    // non-whitespace Latin token, retain authored compound hyphens as UAX #14
+    // soft-wrap seams (`non-managed` -> `non-` | `managed`).
+    const tokens = runText.split(/(\s+)/).flatMap((token) => {
+      if (!token) return [];
+      if (/^\s+$/u.test(token)) return [{ text: token, breakBefore: false }];
+      return splitLatinCompoundToken(token);
+    });
 
-    for (const token of tokens) {
+    for (const tokenPart of tokens) {
+      const token = tokenPart.text;
       if (!token) continue;
 
       // ── Tab character ────────────────────────────────────────────────────
@@ -1659,7 +1728,7 @@ export function layoutParagraph(
       }
 
       ctx.font = font;
-      const tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
+      let tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
       const isWhitespace = /^\s+$/.test(token);
 
       // ── Symbol-font characters (Wingdings/Webdings/Symbol) ───────────────
@@ -1896,6 +1965,24 @@ export function layoutParagraph(
           if (start < N) newLine();
         }
         continue;
+      }
+
+      // A formatting-run boundary must not erase an authored hyphen break. The
+      // token splitter above covers an in-run compound; this seam check covers
+      // `non-` and `managed` stored in adjacent runs. Break only when the
+      // combined text no longer fits, preserving greedy single-line layout.
+      if (!fitsW(tokW) && (lineW > 0 || lineHasTab)) {
+        let hyphenBreakBefore = tokenPart.breakBefore;
+        if (!hyphenBreakBefore) {
+          const currentTail = trailingTextScalars(currentLine);
+          const nextHead = [...token][0];
+          hyphenBreakBefore = currentTail.length === 2 && nextHead !== undefined
+            && isLatinCompoundHyphenBoundary(currentTail[0], currentTail[1], nextHead);
+        }
+        if (hyphenBreakBefore) {
+          newLine();
+          tokW = incomingTextAdvance(token, font, lsPx, sourceRunId);
+        }
       }
 
       if (fitsW(tokW)) {
