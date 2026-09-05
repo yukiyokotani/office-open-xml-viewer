@@ -85,7 +85,7 @@ impl Rect {
         }
         // One master unit = 1/576 inch = 1587.5 EMU. Signed rounding to nearest
         // keeps negative off-slide positions instead of clamping them to zero.
-        let emu = |n: i64| (n * 3175 + n.signum()) / 2;
+        let emu = master_to_emu;
         Ok(Self {
             x: emu(left),
             y: emu(top),

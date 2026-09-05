@@ -1,5 +1,6 @@
 //! Direct PowerPoint text runs: [MS-PPT] 2.9.14/20/41/44–46.
 use super::*;
+mod bullet;
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct Context<'a> {
@@ -98,7 +99,7 @@ pub(super) fn write(
         drawing::append(
             output,
             xml_budget,
-            &pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml()?,
+            &pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(context)?,
         )?;
         let mut start = 0;
         let mut iter = paragraph.char_indices().peekable();
@@ -342,7 +343,9 @@ struct Paragraph {
     level: u16,
     align: Option<u16>,
     spacing: [Option<i16>; 3],
-    no_bullet: Option<bool>,
+    bullet: bullet::Bullet,
+    margin: Option<i16>,
+    indent: Option<i16>,
 }
 impl Paragraph {
     fn inherit(&self, base: Option<&Self>) -> Self {
@@ -353,7 +356,9 @@ impl Paragraph {
             level: self.level,
             align: self.align.or(base.align),
             spacing: std::array::from_fn(|i| self.spacing[i].or(base.spacing[i])),
-            no_bullet: self.no_bullet.or(base.no_bullet),
+            bullet: self.bullet.inherit(&base.bullet),
+            margin: self.margin.or(base.margin),
+            indent: self.indent.or(base.indent),
         }
     }
     fn read(r: &mut Reader<'_, '_>, level: u16) -> Result<Self, String> {
@@ -363,21 +368,15 @@ impl Paragraph {
                 "extended PowerPoint paragraph style in base run",
             ));
         }
-        let bullet_flags = r.optional16(mask, 15)?;
-        r.optional16(mask, 0x80)?; // bulletChar
-        r.optional16(mask, 0x10)?; // bulletFontRef
-        r.optional16(mask, 0x40)?; // bulletSize
-        if mask & 0x20 != 0 {
-            r.u32()?;
-        } // bulletColor
+        let bullet = bullet::Bullet::read(r, mask)?;
         let align = r.optional16(mask, 0x800)?;
         let mut spacing = [None; 3];
         for (value, flag) in spacing.iter_mut().zip([0x1000, 0x2000, 0x4000]) {
             *value = r.optional16(mask, flag)?.map(|n| n as i16);
         }
-        for flag in [0x100, 0x400, 0x8000] {
-            r.optional16(mask, flag)?;
-        }
+        let margin = r.optional16(mask, 0x100)?.map(|v| v as i16);
+        let indent = r.optional16(mask, 0x400)?.map(|v| v as i16);
+        r.optional16(mask, 0x8000)?;
         if mask & 0x100000 != 0 {
             let count = usize::from(r.u16()?);
             *r.budget = r
@@ -395,15 +394,30 @@ impl Paragraph {
             level,
             align,
             spacing,
-            no_bullet: if mask & 1 != 0 {
-                bullet_flags.map(|v| v & 1 == 0)
-            } else {
-                None
-            },
+            bullet,
+            margin,
+            indent,
         })
     }
-    fn xml(&self) -> Result<String, String> {
+    fn xml(&self, context: Context<'_>) -> Result<String, String> {
         let mut xml = format!("<a:pPr lvl=\"{}\"", self.level);
+        // Binary text/bullet offsets share a text-body origin. DrawingML indent
+        // is relative to marL, so retain their difference (including hanging).
+        // A negative binary margin cannot be expressed by ST_TextMargin; omit
+        // it and its dependent first-line offset rather than clamp the layout.
+        if let Some(margin) = self
+            .margin
+            .map(|m| master_to_emu(i64::from(m)))
+            .filter(|m| (0..=51_206_400).contains(m))
+        {
+            xml.push_str(&format!(" marL=\"{margin}\""));
+            if let Some(indent) = self.indent {
+                let indent = master_to_emu(i64::from(indent)) - margin;
+                if (-51_206_400..=51_206_400).contains(&indent) {
+                    xml.push_str(&format!(" indent=\"{indent}\""));
+                }
+            }
+        }
         if let Some(align) = self.align {
             let value = ["l", "ctr", "r", "just", "dist", "thaiDist", "justLow"]
                 .get(usize::from(align))
@@ -425,9 +439,7 @@ impl Paragraph {
                 xml.push_str(&format!("<a:{tag}><a:{kind} val=\"{value}\"/></a:{tag}>"));
             }
         }
-        if self.no_bullet == Some(true) {
-            xml.push_str("<a:buNone/>");
-        }
+        xml.push_str(&self.bullet.xml(context));
         xml.push_str("</a:pPr>");
         Ok(xml)
     }
@@ -451,7 +463,9 @@ impl Level {
                 level,
                 align: None,
                 spacing: [None; 3],
-                no_bullet: None,
+                bullet: bullet::Bullet::default(),
+                margin: None,
+                indent: None,
             },
             character: Character {
                 mask: 0,
@@ -659,6 +673,60 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_character_bullet_properties_and_hanging_indent() {
+        // MS-PPT TextPFException: explicit bullet flags, glyph, font, point size,
+        // RGB color, text offset and absolute first-line/bullet offset.
+        let data = [
+            u32s(2),
+            u16s(0),
+            u32s(0x5ff),
+            u16s(15),
+            u16s('&' as u16),
+            u16s(0),
+            u16s((-12i16) as u16),
+            u32s(0xfe332211),
+            u16s(144),
+            u16s(0),
+            u32s(2),
+            u32s(0),
+        ]
+        .concat();
+        let output = xml("X", &data, &["Bullet & Font".into()]).unwrap();
+        assert!(output.contains("marL=\"228600\" indent=\"-228600\""));
+        assert!(output.contains("<a:buClr><a:srgbClr val=\"112233\"/></a:buClr>"));
+        assert!(output.contains("<a:buSzPts val=\"1200\"/>"));
+        assert!(output.contains("<a:buFont typeface=\"Bullet &amp; Font\"/>"));
+        assert!(output.contains("<a:buChar char=\"&amp;\"/>"));
+    }
+    #[test]
+    fn paragraph_offsets_merge_independently_and_obey_ooxml_ranges() {
+        let mut base = Level::empty(0).paragraph;
+        base.margin = Some(144);
+        base.indent = Some(0);
+        let mut direct = Level::empty(0).paragraph;
+        direct.margin = Some(288);
+        let output = direct.inherit(Some(&base)).xml(Context::default()).unwrap();
+        assert!(output.contains("marL=\"457200\" indent=\"-457200\""));
+        direct.indent = Some(432);
+        assert!(direct
+            .xml(Context::default())
+            .unwrap()
+            .contains("indent=\"228600\""));
+        for invalid in [-1, 32767] {
+            direct.margin = Some(invalid);
+            let output = direct.xml(Context::default()).unwrap();
+            assert!(!output.contains("marL="));
+            assert!(!output.contains("indent="));
+        }
+        direct.margin = Some(30000);
+        direct.indent = Some(-32768);
+        let output = direct.xml(Context::default()).unwrap();
+        assert!(output.contains("marL="));
+        assert!(!output.contains("indent="));
+        direct.margin = None;
+        assert!(!direct.xml(Context::default()).unwrap().contains("indent="));
+    }
     #[test]
     fn master_shape_levels_keep_uniform_styles_without_selecting_arbitrary_runs() {
         let style = [

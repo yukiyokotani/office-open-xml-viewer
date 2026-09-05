@@ -17,6 +17,11 @@ mod scheme;
 mod shape_master;
 mod text_style;
 
+// MS-PPT master unit = 1/576 inch = 1587.5 EMU; round signed coordinates.
+fn master_to_emu(value: i64) -> i64 {
+    (value * 3175 + value.signum()) / 2
+}
+
 const DOCUMENT_CONTAINER: u16 = 1000;
 const SLIDE_CONTAINER: u16 = 1006;
 const TEXT_CHARS_ATOM: u16 = 4000;
@@ -131,7 +136,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let bytes = build_pptx(slides, presentation.size, &media.parts(), max_output_bytes)?;
     let mut warnings = vec![
         "legacy-ppt:positioned-text-and-basic-presets".into(),
-        "legacy-ppt:unlinked-placeholder-styles-bullets-and-advanced-text-omitted".into(),
+        "legacy-ppt:unlinked-placeholder-styles-numbering-picture-bullets-rulers-and-advanced-text-omitted".into(),
+        "legacy-ppt:unsupported-bullet-properties-and-paragraph-offsets-omitted".into(),
         "legacy-ppt:nonuniform-master-text-and-invalid-font-references-omitted".into(),
         "legacy-ppt:custom-geometry-inherited-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
     ];

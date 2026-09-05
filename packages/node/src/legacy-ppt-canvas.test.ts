@@ -12,6 +12,44 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it.skipIf(!skia)('renders inherited character bullets and respects a direct no-bullet override', async () => {
+    const { Canvas } = skia as typeof import('skia-canvas');
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const text = record(0, 4000, utf16le('Item'));
+    const masterStyle = record(0, 4001, concat(little32(5), little16(0), little32(0x5ed), little16(13),
+      little16(0x25a0), little16(100), little32(0xfe0000ff), little16(144), little16(0),
+      little32(5), little32(0x20000), little16(20)));
+    const master = record(15, 1036, record(15, 0xf002, record(15, 0xf004, concat(
+      record(0x12, 0xf00a, concat(little32(900), little32(0x800))),
+      record(15, 0xf00d, concat(record(0, 3999, little32(1)), text, masterStyle)),
+    ))));
+    const disabled = record(0, 4001, concat(little32(5), little16(0), little32(1), little16(0), little32(5), little32(0)));
+    const shape = (left: number, noBullet: boolean) => record(15, 0xf004, concat(
+      record(0x12, 0xf00a, concat(little32(left + 1), little32(0xa20))),
+      record(0, 0xf010, concat(little32(576), little32(left), little32(left + 1440), little32(1440))),
+      record(0x13, 0xf00b, concat(little16(0x301), little32(900))),
+      record(15, 0xf00d, concat(record(0, 3999, little32(1)), text, ...(noBullet ? [disabled] : []))),
+    ));
+    const slide = record(15, 1036, record(15, 0xf002, concat(shape(576, false), shape(2304, true))));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(slide, undefined, master), { legacyConversion: { ppt: { converter } } });
+    const paragraphs = presentation.slides[0].elements.map(element => element.type === 'shape' ? element.textBody?.paragraphs[0] : undefined);
+    expect(paragraphs[0]).toMatchObject({ marL: 228600, indent: -228600, bullet: { type: 'char', char: '■', color: 'FF0000', sizePct: 100 } });
+    expect(paragraphs[1]?.bullet).toMatchObject({ type: 'none' });
+    const canvas = new Canvas(960, 720);
+    await renderSlideNode(canvas, presentation, 0, { width: 960, dpr: 1 });
+    const pixels = canvas.getContext('2d').getImageData(0, 0, 960, 720).data;
+    const red = (left: number) => {
+      let count = 0;
+      for (let y = 96; y < 240; y++) for (let x = left; x < left + 240; x++) {
+        const i = (y * 960 + x) * 4;
+        if (pixels[i] > 200 && pixels[i + 1] < 80 && pixels[i + 2] < 80) count++;
+      }
+      return count;
+    };
+    expect(red(96)).toBeGreaterThan(50);
+    expect(red(384)).toBe(0);
+  });
   it.skipIf(!skia)('inherits text through a verified hspMaster link without recoloring explicitly black text', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
