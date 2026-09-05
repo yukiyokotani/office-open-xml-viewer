@@ -5,6 +5,10 @@ use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, relationships};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+#[path = "numbering/restart_tests.rs"]
+mod restart_tests;
+
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
 /// (1pt), `in` (72pt), `pc`/`pi` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A
@@ -54,6 +58,9 @@ pub struct LevelDef {
     /// numerals), or "center". `<w:start>` is unrelated.
     pub lvl_jc: String,
     pub start: u32,
+    /// ECMA-376 17.9.10: one-based last ancestor that resets this level.
+    /// Zero means never; absence (or an invalid index) uses the previous level.
+    restart: Option<u32>,
     /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
     /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
     /// run formatting at use-site so the marker's font axes (ascii/eastAsia)
@@ -113,6 +120,7 @@ impl Default for LevelDef {
             suff: "tab".to_string(),
             lvl_jc: "left".to_string(),
             start: 1,
+            restart: None,
             rpr: RunFmt::default(),
             pic_bullet: None,
             p_style: None,
@@ -143,9 +151,10 @@ pub struct NumberingMap {
     /// ECMA-376 §17.9.7 — numId → per-level FULL `<w:lvl>` replacements from
     /// `<w:num><w:lvlOverride><w:lvl>`: "the numbering level formatting which
     /// shall be substituted for the given numbering level of the abstract
-    /// definition". Formatting only — the abstract's shared running counter is
-    /// untouched (a restart needs `<w:startOverride>`, §17.9.27, tracked in
-    /// `num_overrides`). Consulted before the abstract's levels in `get_level`,
+    /// definition". A replacement alone does not immediately restart a live
+    /// counter (`startOverride`, tracked in `num_overrides`, does that). Its
+    /// `lvlRestart` still controls later ancestor-triggered resets. Consulted
+    /// before the abstract's levels in `get_level`,
     /// so lvlText/numFmt/indents/rPr/pStyle all substitute per-numId.
     num_level_overrides: HashMap<u32, HashMap<u32, LevelDef>>,
     /// per-**abstractNumId** per-level counter. ECMA-376 §17.9: the running
@@ -182,6 +191,12 @@ fn parse_level_def(
         .and_then(|n| attr_w(n, "val"))
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
+    // ECMA-376 17.9.10 also applies to complete level replacements (17.9.5).
+    // MS-OE376 2.1.285(b) records Word ignoring this property in replacements;
+    // keep the normative OOXML behavior instead of adding an Office heuristic.
+    let restart = child_w(lvl_node, "lvlRestart")
+        .and_then(|n| attr_w(n, "val"))
+        .and_then(|v| v.parse::<u32>().ok());
     let format = child_w(lvl_node, "numFmt")
         .and_then(|n| attr_w(n, "val"))
         .unwrap_or_else(|| "decimal".to_string());
@@ -256,6 +271,7 @@ fn parse_level_def(
         suff,
         lvl_jc,
         start,
+        restart,
         rpr,
         pic_bullet,
         p_style,
@@ -367,7 +383,7 @@ impl NumberingMap {
                     overrides.insert(ilvl, start_ov.parse().unwrap_or(1));
                 }
                 // §17.9.7 — a FULL <w:lvl> child substitutes the level's
-                // definition for this numId (formatting only; no restart).
+                // definition for this numId, without an immediate restart.
                 if let Some(lvl_node) = child_w(lvl_ov, "lvl") {
                     level_overrides
                         .insert(ilvl, parse_level_def(lvl_node, ilvl as usize, &pic_bullets));
@@ -429,8 +445,9 @@ impl NumberingMap {
     /// share an abstract definition advance one running count (§17.9 — see the
     /// `counters` field doc). Each level stores its CURRENT displayed value (not
     /// the next): a level's first appearance shows its `start`, each later
-    /// advance adds one, and advancing a level clears all deeper levels (§17.9.25
-    /// default `lvlRestart`). Shallower levels are seeded to their `start` so an
+    /// advance adds one. Advancing a level resets descendants whose effective
+    /// `lvlRestart` includes that ancestor (17.9.10); by default this means all
+    /// deeper levels. Shallower levels are seeded to their `start` so an
     /// ancestor that only prefixes the marker (e.g. `%1.%2`) still resolves when
     /// it is never advanced on its own.
     ///
@@ -450,11 +467,28 @@ impl NumberingMap {
         // `insert` returns true when the pair was NOT already present.
         let first_for_num = self.started.insert((num_id, level));
 
+        // Resolve each live descendant's own policy, including a complete
+        // level replacement. A never-restarting parent does not shield its
+        // children, and merely seeding an ancestor is not an occurrence of it.
+        // Iterate existing counters, never an input-provided restart range.
+        let resets: Vec<u32> = self
+            .counters
+            .get(&key)
+            .into_iter()
+            .flat_map(|counts| counts.keys().copied())
+            .filter(|&deeper| {
+                let threshold = self
+                    .get_level(num_id, deeper)
+                    .and_then(|def| def.restart)
+                    .filter(|&value| value <= deeper)
+                    .unwrap_or(deeper);
+                deeper > level && level < threshold
+            })
+            .collect();
+
         let entry = self.counters.entry(key).or_default();
 
-        // Reset deeper levels (§17.9.25 default lvlRestart).
-        let keys: Vec<u32> = entry.keys().copied().filter(|&l| l > level).collect();
-        for k in keys {
+        for k in resets {
             entry.remove(&k);
         }
 
