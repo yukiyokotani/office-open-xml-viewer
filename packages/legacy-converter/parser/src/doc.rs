@@ -9,12 +9,15 @@
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_text, ROOT_RELS_DOCX};
+mod border;
 mod character;
 mod fkp;
 mod formatting;
 mod paragraph;
 mod sections;
 mod sprm;
+mod table;
+mod table_output;
 
 const FIB_IDENT: u16 = 0xa5ec;
 const FIB_WORD_97: u16 = 0x00c1;
@@ -98,7 +101,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         ("word/document.xml".into(), document_xml),
     ];
     let mut warnings = vec![
-        "legacy-doc:tables-and-embedded-objects-omitted".into(),
+        "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
         "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
     ];
     if formatting.unsupported_character_properties {
@@ -109,6 +112,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     }
     if formatting.unsupported_piece_properties {
         warnings.push("legacy-doc:unsupported-piece-properties-omitted".into());
+    }
+    if formatting.unsupported_table_properties {
+        warnings.push("legacy-doc:unsupported-table-properties-omitted".into());
     }
     if formatting.missing_tables {
         warnings.push("legacy-doc:missing-formatting-tables-default-character-properties".into());
@@ -297,6 +303,7 @@ struct Fields {
 struct Paragraph {
     tokens: Vec<(Token, usize)>,
     end_cp: usize,
+    mark: char,
 }
 
 fn tokenize_with_fields(
@@ -308,6 +315,7 @@ fn tokenize_with_fields(
     let mut paragraphs = vec![Paragraph {
         tokens: Vec::new(),
         end_cp: base_cp,
+        mark: '\0',
     }];
     let mut buffered = String::new();
     let mut buffer_cp = base_cp;
@@ -346,10 +354,12 @@ fn tokenize_with_fields(
                 }
             }
             _ if fields.hidden != 0 => {}
-            '\r' => {
+            '\r' | '\u{7}' => {
+                paragraph.mark = character;
                 paragraphs.push(Paragraph {
                     tokens: Vec::new(),
                     end_cp: cp + 1,
+                    mark: '\0',
                 });
             }
             '\t' => paragraph.tokens.push((Token::Tab, cp)),
@@ -417,6 +427,7 @@ fn build_formatted_document(
     let chunks = sections::split_story(&story.text, sections)?;
     let mut fields = Fields::default();
     for (section_index, chunk) in chunks.iter().enumerate() {
+        let mut table_writer = table_output::Writer::new(max_bytes.saturating_sub(xml.len()));
         let base_cp = if section_index == 0 {
             0
         } else {
@@ -434,6 +445,8 @@ fn build_formatted_document(
                 sections[section_index].end - 1;
         }
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
+            let mut paragraph_xml = String::new();
+            let xml = &mut paragraph_xml;
             let style = if let Some(f) = formatting.as_deref() {
                 story
                     .position(paragraph.end_cp)
@@ -466,15 +479,7 @@ fn build_formatted_document(
             for (token, cp) in &paragraph.tokens {
                 match token {
                     Token::Text(text) => {
-                        write_text_runs(
-                            &mut xml,
-                            text,
-                            *cp,
-                            story,
-                            style,
-                            &mut formatting,
-                            max_bytes,
-                        )?;
+                        write_text_runs(xml, text, *cp, story, style, &mut formatting, max_bytes)?;
                     }
                     _ => {
                         xml.push_str("<w:r>");
@@ -501,7 +506,18 @@ fn build_formatted_document(
             if xml.len() > max_bytes {
                 return Err("OUTPUT_TOO_LARGE".into());
             }
+            let mut table_properties = table::Properties::default();
+            if let Some(f) = formatting.as_deref_mut() {
+                if let Some((_, fc, piece)) = story.position(paragraph.end_cp) {
+                    table_properties = f.table_properties(fc, piece.prm, &story.prcs)?;
+                }
+            }
+            if section_end && table_properties.depth()? != 0 {
+                return Err(unsupported("Word section break inside table"));
+            }
+            table_writer.push(table_properties, paragraph.mark, paragraph_xml)?;
         }
+        xml.push_str(&table_writer.finish()?);
     }
     if let Some(last) = sections.last() {
         xml.push_str(&last.xml);
@@ -625,6 +641,15 @@ mod tests {
         ranges: &[u32],
         properties: &[&[u8]],
     ) -> String {
+        formatted_fixture_kind(pieces, ranges, properties, false)
+    }
+
+    fn formatted_fixture_kind(
+        pieces: &[(&str, usize, bool)],
+        ranges: &[u32],
+        properties: &[&[u8]],
+        paragraph: bool,
+    ) -> String {
         let mut word = vec![0; 4096];
         let mut clx = vec![2];
         clx.extend(((pieces.len() * 12 + 4) as u32).to_le_bytes());
@@ -657,25 +682,59 @@ mod tests {
         table.extend(ranges[0].to_le_bytes());
         table.extend(ranges.last().unwrap().to_le_bytes());
         table.extend(1u32.to_le_bytes());
-        word[0xfe..0x102].copy_from_slice(&12u32.to_le_bytes());
+        let field = if paragraph { 0x106 } else { 0xfe };
+        word[field..field + 4].copy_from_slice(&12u32.to_le_bytes());
         let page = &mut word[512..1024];
         for (i, fc) in ranges.iter().enumerate() {
             page[i * 4..i * 4 + 4].copy_from_slice(&fc.to_le_bytes());
         }
-        let mut offset = 64;
+        let mut offset = 128;
         for (i, bytes) in properties.iter().enumerate() {
             if bytes.is_empty() {
                 continue;
             }
-            page[ranges.len() * 4 + i] = (offset / 2) as u8;
-            page[offset] = bytes.len() as u8;
-            page[offset + 1..offset + 1 + bytes.len()].copy_from_slice(bytes);
-            offset += (bytes.len() + 2) & !1;
+            page[ranges.len() * 4 + i * if paragraph { 13 } else { 1 }] = (offset / 2) as u8;
+            let header = if paragraph && bytes.len() % 2 == 0 {
+                page[offset + 1] = (bytes.len() / 2) as u8;
+                2
+            } else {
+                page[offset] = if paragraph {
+                    bytes.len().div_ceil(2)
+                } else {
+                    bytes.len()
+                } as u8;
+                1
+            };
+            page[offset + header..offset + header + bytes.len()].copy_from_slice(bytes);
+            offset += (bytes.len() + header + 1) & !1;
         }
         page[511] = properties.len() as u8;
         let story = super::read_story(&word, &clx, cp as usize).unwrap();
         let mut f = super::formatting::Formatting::read(&word, &table, &[]).unwrap();
         super::build_formatted_document(&story, &[], Some(&mut f), usize::MAX).unwrap()
+    }
+
+    #[test]
+    fn restores_table_using_the_row_marks_physical_papx() {
+        let xml = formatted_fixture_kind(
+            &[("A\u{7}B\u{7}\u{7}\r", 1500, true)],
+            &[1500, 1502, 1504, 1505, 1506],
+            &[
+                &[0, 0, 0x16, 0x24, 1],
+                &[0, 0, 0x16, 0x24, 1],
+                &[
+                    0, 0, 0x16, 0x24, 1, 0x17, 0x24, 1, 0x21, 0x76, 0, 2, 0xe8, 3,
+                ],
+                &[],
+            ],
+            true,
+        );
+        assert_eq!(xml.matches("<w:tbl>").count(), 1);
+        assert_eq!(xml.matches("<w:tc>").count(), 2);
+        assert_eq!(xml.matches("<w:p>").count(), 3);
+        assert_eq!(xml.matches("<w:gridCol w:w=\"1000\"/>").count(), 2);
+        assert!(xml.contains(">A</w:t>"));
+        assert!(xml.contains(">B</w:t>"));
     }
 
     #[test]

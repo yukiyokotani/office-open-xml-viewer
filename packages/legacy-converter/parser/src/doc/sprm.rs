@@ -1,7 +1,52 @@
 //! Bounded framing shared by Word character and paragraph property readers.
 //! [MS-DOC] 2.2.5 and 2.6 (Sprm); variable-length tab/table exceptions.
 
-use super::{u16_at, unsupported};
+use super::{u16_at, u32_at, unsupported};
+use std::collections::BTreeSet;
+
+/// PHugePapx/PTableProps replace the remaining property array with PrcData.
+/// Share the traversal so paragraph layout and table structure see the same data.
+pub fn paragraph_properties<'a>(
+    mut bytes: &'a [u8],
+    data: &'a [u8],
+    budget: &mut Budget,
+    mut apply: impl FnMut(u16, &[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut visited = BTreeSet::new();
+    loop {
+        let mut sprms = Sprms::new(bytes);
+        let mut first = true;
+        let mut next = None;
+        while let Some((code, operand)) = sprms.next(budget)? {
+            if code == 0x646b || (code == 0x6646 && first) {
+                let offset = u32_at(operand, 0)? as usize;
+                if visited.len() >= 64 || !visited.insert(offset) {
+                    return Err(unsupported("cyclic or excessive Word paragraph data chain"));
+                }
+                let record = data
+                    .get(offset..)
+                    .ok_or_else(|| unsupported("Word paragraph data offset outside Data stream"))?;
+                let size = u16_at(record, 0)? as usize;
+                if size < 10 {
+                    return Err(unsupported("short Word paragraph data record"));
+                }
+                next =
+                    Some(record.get(2..2 + size).ok_or_else(|| {
+                        unsupported("Word paragraph properties outside Data stream")
+                    })?);
+                break;
+            }
+            if code != 0x6646 {
+                apply(code, operand)?;
+            }
+            first = false;
+        }
+        match next {
+            Some(value) => bytes = value,
+            None => return Ok(()),
+        }
+    }
+}
 
 pub struct Budget(usize);
 impl Default for Budget {

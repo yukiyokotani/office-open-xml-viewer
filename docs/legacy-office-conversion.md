@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and table-dependent formatting, advanced character and section properties, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order, slide dimensions, Unicode/Windows-1252 text, outline text references, slide boundaries; superseded and deleted slides are not emitted | masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
 
@@ -88,9 +88,17 @@ The main story is limited to 64 Mi UTF-16 units before decoding repeated pieces
 and one million control characters before constructing paragraphs/tokens.
 Supported paragraph properties resolve through styles, direct PAPX and piece
 properties, including bounded references into the binary Data stream. Fixed,
-minimum and proportional line spacing retain their original units. This still
-does not recover table layout, floating frames or numbering; line wrapping and
-pagination can differ significantly. No existing renderer changes are required.
+minimum and proportional line spacing retain their original units. Table rows
+use the definitions on their terminating marks; nested cells remain nested and
+row marks do not become visible paragraphs. Shared grids retain explicit edges,
+including zero-width cells, and horizontal merges become ordinary OOXML spans.
+Table style inheritance, preferred percentage widths, shading, text rotation,
+floating/frame placement and protection-bookmark table separation are incomplete.
+Unknown optional border-side flags are omitted with a warning, not reinterpreted.
+Nesting (32), rows per section (100,000) and grid boundaries (65,536) have resource
+ceilings. Paragraph text and pending tables remain bounded by the XML budget.
+Floating frames and numbering are still absent; line wrapping and pagination
+can differ significantly. No existing renderer changes are required.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external

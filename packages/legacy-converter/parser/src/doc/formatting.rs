@@ -5,8 +5,8 @@
 
 use super::character::{self, Properties};
 use super::fkp::{self, Index, Kind};
-use super::sprm::{Budget, Sprms};
-use super::{paragraph, u16_at, u32_at, unsupported};
+use super::sprm::{self, Budget, Sprms};
+use super::{paragraph, table, u16_at, unsupported};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Style<'a> {
@@ -30,6 +30,7 @@ pub struct Formatting<'a> {
     pub unsupported_paragraph_properties: bool,
     pub unsupported_piece_properties: bool,
     pub missing_tables: bool,
+    pub unsupported_table_properties: bool,
 }
 
 impl<'a> Formatting<'a> {
@@ -54,6 +55,7 @@ impl<'a> Formatting<'a> {
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
             missing_tables,
+            unsupported_table_properties: false,
         })
     }
 
@@ -103,47 +105,60 @@ impl<'a> Formatting<'a> {
     fn apply_paragraph<'b>(
         &mut self,
         props: &mut paragraph::Properties,
-        mut bytes: &'b [u8],
+        bytes: &'b [u8],
     ) -> Result<(), String>
     where
         'a: 'b,
     {
-        let mut visited = BTreeSet::new();
-        loop {
-            let mut sprms = Sprms::new(bytes);
-            let mut first = true;
-            let mut next = None;
-            while let Some((code, operand)) = sprms.next(&mut self.budget)? {
-                if code == 0x646b || (code == 0x6646 && first) {
-                    // PHugePapx only acts in the first slot; PTableProps may
-                    // occur later. Both replace the rest of the current array.
-                    let offset = u32_at(operand, 0)? as usize;
-                    if visited.len() >= 64 || !visited.insert(offset) {
-                        return Err(unsupported("cyclic or excessive Word paragraph data chain"));
-                    }
-                    let record = self.data.get(offset..).ok_or_else(|| {
-                        unsupported("Word paragraph data offset outside Data stream")
-                    })?;
-                    let size = u16_at(record, 0)? as usize;
-                    if size < 10 {
-                        return Err(unsupported("short Word paragraph data record"));
-                    }
-                    next = Some(record.get(2..2 + size).ok_or_else(|| {
-                        unsupported("Word paragraph properties outside Data stream")
-                    })?);
-                    break;
-                }
-                if code != 0x6646 && (code >> 10) & 7 == 1 && !props.apply(code, operand)? {
-                    self.unsupported_paragraph_properties = true;
-                }
-                first = false;
+        sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand| {
+            if (code >> 10) & 7 == 1
+                && !matches!(code, 0x2416 | 0x2417 | 0x6649 | 0x664a | 0x244b | 0x244c)
+                && !props.apply(code, operand)?
+            {
+                self.unsupported_paragraph_properties = true;
             }
-            match next {
-                Some(value) => bytes = value,
-                None => break,
+            Ok(())
+        })
+    }
+
+    pub fn table_properties(
+        &mut self,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<table::Properties, String> {
+        let mut properties = table::Properties::default();
+        // MS-DOC 2.4.3: structural flags are direct, never inherited from STSH.
+        let direct = self
+            .paragraphs
+            .at(fc)
+            .map_or(&[][..], |(_, r)| r.properties);
+        let direct = if direct.is_empty() {
+            direct
+        } else {
+            &direct[2..]
+        };
+        let piece = if prm & 1 != 0 {
+            *prcs
+                .get((prm >> 1) as usize)
+                .ok_or_else(|| unsupported("Word piece property index outside CLX"))?
+        } else {
+            &[]
+        };
+        for bytes in [direct, piece] {
+            sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand| {
+                if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
+                    self.unsupported_table_properties = true;
+                }
+                Ok(())
+            })?;
+        }
+        if prm & 1 == 0 {
+            if let Some([a, b, value]) = table::prm0(prm) {
+                properties.apply(u16::from_le_bytes([a, b]), &[value])?;
             }
         }
-        Ok(())
+        Ok(properties)
     }
 
     fn chain(&mut self, mut id: usize, kind: u16) -> Result<Vec<usize>, String> {
@@ -221,7 +236,7 @@ impl<'a> Formatting<'a> {
             self.apply_direct(&mut props, &mut style, &paragraph, bytes)?;
         } else if let Some(bytes) = character::prm0(prm) {
             self.apply_direct(&mut props, &mut style, &paragraph, &bytes)?;
-        } else if prm != 0 && paragraph::prm0(prm).is_none() {
+        } else if prm != 0 && paragraph::prm0(prm).is_none() && table::prm0(prm).is_none() {
             self.unsupported_piece_properties = true;
         }
         props.xml(&self.fonts)
@@ -413,6 +428,7 @@ mod tests {
             unsupported_paragraph_properties: false,
             unsupported_piece_properties: false,
             missing_tables: true,
+            unsupported_table_properties: false,
         }
     }
 
@@ -542,7 +558,9 @@ mod tests {
     #[test]
     fn supported_paragraph_prm_does_not_report_character_loss() {
         let mut f = empty();
-        f.run_xml(0, 0, 0x0100 | (0x09 << 1), &[]).unwrap();
+        for code in [0x09, 0x18, 0x19] {
+            f.run_xml(0, 0, 0x0100 | (code << 1), &[]).unwrap();
+        }
         assert!(!f.unsupported_piece_properties && !f.unsupported_character_properties);
     }
 }
