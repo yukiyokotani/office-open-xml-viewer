@@ -20,6 +20,10 @@ mod formatting;
 mod header_fields;
 mod headers;
 mod notes;
+// Keep the list decoder out of production until its OOXML serialization and
+// counter-continuation integration are verified together.
+#[cfg(test)]
+mod numbering;
 mod paragraph;
 mod pictures;
 mod sections;
