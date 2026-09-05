@@ -1053,20 +1053,15 @@ function pictureBulletSizePt(
 
 /** First-line indent (ECMA-376 §21.1.2.2.7 `a:pPr@indent`) resolved to the px
  *  amount the FIRST line's TEXT is shifted right / narrowed by. A positive indent
- *  on a non-bullet paragraph eats into the first line's width and shifts its
- *  start right. Two cases resolve to 0:
- *   - a BULLETED paragraph: `indent` is the marker's hanging gutter, positioned
- *     separately by the bullet/textX geometry (`bulletX = textX + raw indentPx`),
- *     so it does not reduce the text's first-line width here;
- *   - a NEGATIVE indent on a NON-bullet paragraph: clamped to 0. (Known gap:
- *     §21.1.2.2.7 would place such a first line left of marL; honoring that
- *     leftward overhang into the marL gutter is unimplemented. Clamping keeps
- *     the wrap budget and the draw offset in agreement rather than split-brain.)
+ *  on a non-bullet paragraph narrows the first line and shifts its start right;
+ *  a negative indent extends that line left of marL. Only a BULLETED paragraph
+ *  resolves to 0: `indent` is the marker's hanging gutter, positioned separately
+ *  (`bulletX = textX + raw indentPx`), not a change to the text's wrap width.
  *  Shared by the spAutoFit measurement ({@link naturalWidthExceedsBbox}), the
  *  wrap budget ({@link layoutParagraph}) and the draw-side `textXOffset`, so the
  *  three paths can never disagree. */
 function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
-  return hasBullet ? 0 : Math.max(0, indentPx);
+  return hasBullet ? 0 : indentPx;
 }
 
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
@@ -1109,8 +1104,8 @@ export function naturalWidthExceedsBbox(
     const marLPx = emuToPx(para.marL, scale);
     const marRPx = emuToPx(para.marR, scale);
     const indentPx = emuToPx(para.indent, scale);
-    // The first-line indent is consumed only by a NON-bullet paragraph and only
-    // when positive (firstLineIndentPxFor) — the SAME amount the wrap and draw
+    // The signed first-line indent is consumed only by a NON-bullet paragraph
+    // (firstLineIndentPxFor) — the SAME amount the wrap and draw
     // passes use, so the measurement can't disagree with what actually renders.
     const firstLineIndent = firstLineIndentPxFor(paragraphHasBullet(para), indentPx);
     const textMaxW = bw - lPad - rPad - marLPx - marRPx - firstLineIndent;
@@ -1248,8 +1243,8 @@ export function layoutParagraph(
     if (trimmed !== run.text) terminalText.set(run, trimmed);
     if (trimmed.length > 0 || run.fieldType != null) scanningTerminalWhitespace = false;
   }
-  // The first line's wrap budget is narrower by a POSITIVE first-line indent
-  // (it occupies indentPx of the line); continuation lines use the full width.
+  // The first line's wrap budget subtracts its signed indent: positive narrows
+  // the region, negative extends it left of marL. Continuations use full width.
   // `lines.length === 0` ⇒ still filling the first line (newLine() pushes to it).
   const lineMaxW = () => maxWidthPx - (lines.length === 0 ? firstLineIndentPx : 0);
   let currentLine: LayoutLine = { segments: [] };
@@ -1291,7 +1286,7 @@ export function layoutParagraph(
 
   /** Leading pen for the current line in the reading frame, matching the paint
    *  pass's `leadingIndentPx`: RTL right-anchors at marR (no first-line indent);
-   *  LTR starts at marL plus the first line's positive indent. */
+   *  LTR starts at marL plus the first line's signed indent. */
   const lineStartPen = (): number =>
     baseRtl ? marRPxL : marLPx + (lines.length === 0 ? firstLineIndentPx : 0);
 
@@ -4284,16 +4279,15 @@ export function renderTextBody(
     const textX    = bx + lPad + marLPx;
     // The marker seats at the RAW (signed) indent — a hanging gutter is negative,
     // so this is deliberately NOT routed through firstLineIndentPxFor (which is
-    // the first-line TEXT shift, clamped ≥ 0). Keep them distinct.
+    // the non-bullet first-line TEXT shift). Keep them distinct.
     const bulletX  = bx + lPad + marLPx + indentPx;
     const textMaxW = colWidth - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
-    // A positive first-line indent narrows ONLY the first line's wrap budget
+    // A signed first-line indent changes ONLY the first line's wrap budget
     // (continuation lines keep the full width). firstLineIndentPxFor keeps this
     // in lockstep with the draw-side `textXOffset` (§below) and the
-    // naturalWidthExceedsBbox measurement; a bullet's gutter / a negative
-    // (hanging) indent contribute 0.
+    // naturalWidthExceedsBbox measurement; a bullet's gutter contributes 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
     const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
@@ -4409,11 +4403,8 @@ export function renderTextBody(
       // layout body lstStyle) get pushed ~10 px below the placeholder top and
       // collide with the chart title sitting just below in the slide.
       const topGap  = isFirst && paraIdx > 0 ? spaceBeforePx : 0;
-      // Non-bullet first-line indent, clamped ≥ 0 via firstLineIndentPxFor so the
-      // draw offset matches the wrap budget and the spAutoFit measurement. A
-      // negative ("hanging") indent is NOT honored at draw time — it would shift
-      // the first line left of marL while the wrap pass keeps full width, so the
-      // two would disagree; we clamp both to 0.
+      // Preserve the signed non-bullet first-line indent in draw, wrapping and
+      // spAutoFit measurement alike. Continuation lines remain at marL.
       const textXOffset = isFirst ? firstLineIndentPxFor(hasBullet, indentPx) : 0;
 
       // Picture bullets, like char/number markers, are drawn only on the

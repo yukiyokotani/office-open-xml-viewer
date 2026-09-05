@@ -162,9 +162,12 @@ DrawingML `marL` and relative `indent`, after per-level inheritance. Negative or
 out-of-range left margins and offsets outside the DrawingML schema bounds are
 omitted, not clamped. A first-line offset without a resolved text offset is also
 omitted. `TextRulerAtom` overrides and tab stops remain unsupported. The ordinary
-PPTX renderer currently does not honor negative first-line indents on non-bullet
-paragraphs, so correctly retaining those offsets can still expose alignment
-differences. This is a known OOXML rendering gap, not a binary-specific exception.
+PPTX renderer preserves signed non-bullet first-line indents consistently in
+measurement, wrapping and painting: a negative indent extends the first line
+left of `marL`, while continuation lines keep that margin. This is general
+DrawingML support, not a binary-specific rendering exception. Font metrics,
+tabs and unsupported geometry can still cause visible differences from Office;
+preserving offsets does not guarantee layout equivalence.
 
 ## Custom converter contract
 
