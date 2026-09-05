@@ -12,6 +12,7 @@ use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
 mod drawing;
 mod paint;
 mod persist;
+mod scheme;
 mod text_style;
 
 const DOCUMENT_CONTAINER: u16 = 1000;
@@ -78,6 +79,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
             Some(drawing::TextContext {
                 fonts: &presentation.fonts,
                 styles: &presentation.outline_styles[index],
+                scheme: presentation.schemes[index].as_ref(),
             }),
         )? {
             Some(tree) => tree,
@@ -100,7 +102,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let bytes = build_pptx(slides, presentation.size, max_output_bytes)?;
     let mut warnings = vec![
         "legacy-ppt:positioned-text-and-basic-presets".into(),
-        "legacy-ppt:master-styles-bullets-scheme-colors-and-advanced-text-omitted".into(),
+        "legacy-ppt:master-text-styles-bullets-and-advanced-text-omitted".into(),
         "legacy-ppt:custom-geometry-inherited-and-advanced-paint-media-and-actions-omitted".into(),
     ];
     if fallback {

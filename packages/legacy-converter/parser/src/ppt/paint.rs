@@ -1,5 +1,5 @@
 //! Direct OfficeArt preset geometry and solid paint, without renderer extensions.
-use super::unsupported;
+use super::{scheme, unsupported};
 
 #[derive(Default)]
 pub(super) struct Paint {
@@ -86,7 +86,11 @@ impl Paint {
             _ => None,
         }
     }
-    pub fn xml(&self, kind: u16) -> String {
+    #[cfg(test)]
+    fn xml(&self, kind: u16) -> String {
+        self.xml_with_scheme(kind, None)
+    }
+    pub fn xml_with_scheme(&self, kind: u16, scheme: Option<&scheme::Scheme>) -> String {
         let no_paint = "<a:noFill/><a:ln><a:noFill/></a:ln>";
         if self.geometry(kind).is_none() {
             return no_paint.into();
@@ -114,6 +118,7 @@ impl Paint {
             solid(
                 self.fill.unwrap_or(0xffffff),
                 self.fill_alpha.unwrap_or(65536),
+                scheme,
             )
         } else {
             None
@@ -124,7 +129,11 @@ impl Paint {
             && self.line_type.unwrap_or(0) == 0
             && self.dash.unwrap_or(0) == 0
         {
-            solid(self.line.unwrap_or(0), self.line_alpha.unwrap_or(65536))
+            solid(
+                self.line.unwrap_or(0),
+                self.line_alpha.unwrap_or(65536),
+                scheme,
+            )
         } else {
             None
         };
@@ -141,12 +150,8 @@ impl Paint {
     }
 }
 
-fn solid(color: u32, opacity: u32) -> Option<String> {
-    // MS-ODRAW 2.2.2: ignore FF sentinel and unresolved scheme/system/palette
-    // references. High three reserved bits do not change literal RGB values.
-    if color >> 24 == 0xff || color & 0x1f000000 != 0 {
-        return None;
-    }
+fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<String> {
+    let color = scheme::drawing(color, scheme)?;
     let mut xml = format!(
         "<a:solidFill><a:srgbClr val=\"{:02X}{:02X}{:02X}\">",
         color & 255,

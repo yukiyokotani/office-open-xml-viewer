@@ -7,6 +7,7 @@ pub(super) struct Presentation<'a> {
     pub slides: Vec<(Record<'a>, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
     pub fonts: Vec<String>,
+    pub schemes: Vec<Option<scheme::Scheme>>,
     pub size: (u32, u32),
 }
 
@@ -82,6 +83,7 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("invalid PowerPoint document persist object"));
     }
     let children = parse_records(record.payload, budget)?;
+    let mut schemes = scheme::Resolver::new(document, &children, &offsets, budget)?;
     let fonts = text_style::fonts(&children, budget)?;
     let atom = children
         .iter()
@@ -163,6 +165,10 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("PowerPoint presentation has no slides"));
     }
     Ok(Presentation {
+        schemes: slides
+            .iter()
+            .map(|(slide, _)| schemes.slide(*slide, budget))
+            .collect::<Result<_, _>>()?,
         slides,
         outline_styles,
         fonts,

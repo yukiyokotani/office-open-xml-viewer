@@ -7,6 +7,7 @@ use super::*;
 pub(super) struct TextContext<'a> {
     pub fonts: &'a [String],
     pub styles: &'a [Option<&'a [u8]>],
+    pub scheme: Option<&'a scheme::Scheme>,
 }
 
 pub(super) fn render(
@@ -368,7 +369,7 @@ impl Writer<'_, '_> {
                 // Unsupported geometry may still carry text. Preserve its text
                 // frame, but never paint an invented rectangle in its place.
                 let text_box = u8::from(shape.kind == 202 || preset.is_none());
-                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), shape.props.paint.xml(shape.kind)))?;
+                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), shape.props.paint.xml_with_scheme(shape.kind, self.context.and_then(|c| c.scheme))))?;
                 if text.is_empty() {
                     self.push("</p:sp>")?;
                     return Ok(());
@@ -384,6 +385,7 @@ impl Writer<'_, '_> {
                         &text[0],
                         style,
                         self.context.map_or(&[], |c| c.fonts),
+                        self.context.and_then(|c| c.scheme),
                         &mut self.output,
                         self.remaining,
                         self.records,

@@ -5,6 +5,7 @@ pub(super) fn write(
     text: &str,
     style: &[u8],
     fonts: &[String],
+    scheme: Option<&scheme::Scheme>,
     output: &mut String,
     xml_budget: &mut usize,
     work_budget: &mut usize,
@@ -63,7 +64,7 @@ pub(super) fn write(
                 let end = offset + c.len_utf8();
                 write_run(
                     &paragraph[start..end],
-                    &cf[run].1.xml("rPr", fonts)?,
+                    &cf[run].1.xml("rPr", fonts, scheme)?,
                     output,
                     xml_budget,
                 )?;
@@ -73,7 +74,11 @@ pub(super) fn write(
         while cf[ci].0 <= cp {
             ci += 1;
         }
-        drawing::append(output, xml_budget, &cf[ci].1.xml("endParaRPr", fonts)?)?;
+        drawing::append(
+            output,
+            xml_budget,
+            &cf[ci].1.xml("endParaRPr", fonts, scheme)?,
+        )?;
         drawing::append(output, xml_budget, "</a:p>")?;
         cp += 1;
     }
@@ -197,7 +202,12 @@ impl Character {
             color,
         })
     }
-    fn xml(&self, tag: &str, fonts: &[String]) -> Result<String, String> {
+    fn xml(
+        &self,
+        tag: &str,
+        fonts: &[String],
+        scheme: Option<&scheme::Scheme>,
+    ) -> Result<String, String> {
         let mut xml = format!("<a:{tag} sz=\"{}\"", u32::from(self.size) * 100);
         for (bit, name) in [(1, "b"), (2, "i")] {
             if self.mask & bit != 0 {
@@ -215,7 +225,7 @@ impl Character {
             });
         }
         let mut children = String::new();
-        if let Some(color) = self.color.filter(|c| c >> 24 == 0xfe) {
+        if let Some(color) = self.color.and_then(|c| scheme::text(c, scheme)) {
             children.push_str(&format!(
                 "<a:solidFill><a:srgbClr val=\"{:02X}{:02X}{:02X}\"/></a:solidFill>",
                 color & 255,
@@ -375,6 +385,7 @@ mod tests {
             text,
             data,
             fonts,
+            None,
             &mut output,
             &mut (1024 * 1024),
             &mut MAX_RECORDS.clone(),
@@ -468,10 +479,12 @@ mod tests {
     fn style_work_and_expanded_xml_have_independent_budgets() {
         let data = style(3, u32s(0));
         let mut output = String::new();
-        assert!(write("ab", &data, &[], &mut output, &mut 1024, &mut 1)
-            .unwrap_err()
-            .contains("work budget"));
-        assert!(write("ab", &data, &[], &mut output, &mut 8, &mut 10)
+        assert!(
+            write("ab", &data, &[], None, &mut output, &mut 1024, &mut 1)
+                .unwrap_err()
+                .contains("work budget")
+        );
+        assert!(write("ab", &data, &[], None, &mut output, &mut 8, &mut 10)
             .unwrap_err()
             .contains("OUTPUT_TOO_LARGE"));
     }
