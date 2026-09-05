@@ -41,6 +41,7 @@ import {
   subscribePptxLayout,
   type PptxLayoutPublication,
 } from './presentation-layout-events';
+import { createPptxLoadingLayer } from './loading-indicator';
 
 /**
  * Debounce window (ms) after the last `setScale` in a zoom burst before the
@@ -1067,26 +1068,7 @@ export class PptxScrollViewer implements ZoomableViewer {
       'position:absolute;top:0;left:0;width:100%;height:100%;' +
       'overflow:hidden;pointer-events:none;';
     wrapper.appendChild(highlightLayer);
-    const loadingLayer = document.createElement('span');
-    loadingLayer.style.cssText = [
-      'position:absolute',
-      'top:0',
-      'right:0',
-      'bottom:0',
-      'left:0',
-      'display:none',
-      'align-items:center',
-      'justify-content:center',
-      'background:rgba(255,255,255,0.72)',
-      'pointer-events:none',
-      'z-index:4',
-    ].join(';');
-    loadingLayer.setAttribute('role', 'status');
-    loadingLayer.setAttribute('aria-live', 'polite');
-    loadingLayer.setAttribute('aria-label', 'Loading slide');
-    const progress = document.createElement('progress');
-    progress.setAttribute('aria-hidden', 'true');
-    loadingLayer.appendChild(progress);
+    const loadingLayer = createPptxLoadingLayer(document);
     wrapper.appendChild(loadingLayer);
     let commentMarkerLayer: HTMLDivElement | null = null;
     let commentMargin: HTMLDivElement | null = null;

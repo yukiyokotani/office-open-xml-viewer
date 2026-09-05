@@ -43,8 +43,9 @@
 // twins), POLYPOLYGON16/POLYPOLYLINE16 (+ 32-bit twins), MOVETOEX, LINETO,
 // RECTANGLE, ELLIPSE, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
 // SETBKMODE, BITBLT, STRETCHDIBITS (minimal DIB decoder), EOF.
-// Path clipping IS handled: BEGINPATH/ENDPATH/CLOSEFIGURE build a path and
-// SELECTCLIPPATH applies it as a clip (scoped by SAVEDC/RESTOREDC).
+// GDI path brackets are handled: BEGINPATH/ENDPATH/CLOSEFIGURE accumulate
+// geometry for FILLPATH/STROKEPATH/STROKEANDFILLPATH or SELECTCLIPPATH (the
+// clip remains scoped by SAVEDC/RESTOREDC).
 // Ignored (no-op, skipped by nSize): GDICOMMENT (may hold EMF+, out of scope),
 // SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
 // and any unrecognized iType.
@@ -95,6 +96,9 @@ const EMR = {
   BEGINPATH: 59,
   ENDPATH: 60,
   CLOSEFIGURE: 61,
+  FILLPATH: 62,
+  STROKEANDFILLPATH: 63,
+  STROKEPATH: 64,
   SELECTCLIPPATH: 67,
   EXTCREATEFONTINDIRECTW: 82,
   EXTTEXTOUTW: 84,
@@ -575,12 +579,12 @@ function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
   c.skip(16); // RECTL rclBounds — drawing uses world transform, not bounds
   const count = c.u32();
   if (count < 2 || count > 0x100000) return;
-  if (!s.curPen || s.curPen.stroke == null) {
+  if (!s.inPath && (!s.curPen || s.curPen.stroke == null)) {
     // still drop current position to the last point for ...TO continuity callers
     return;
   }
   const { ctx } = s;
-  ctx.beginPath();
+  if (!s.inPath) ctx.beginPath();
   let lx = 0;
   let ly = 0;
   for (let i = 0; i < count; i++) {
@@ -592,10 +596,12 @@ function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
     lx = xl;
     ly = yl;
   }
-  ctx.strokeStyle = s.curPen.stroke;
-  ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
-  ctx.stroke();
-  s.drew = true;
+  if (!s.inPath && s.curPen?.stroke != null) {
+    ctx.strokeStyle = s.curPen.stroke;
+    ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    ctx.stroke();
+    s.drew = true;
+  }
   s.curX = lx;
   s.curY = ly;
 }
@@ -607,11 +613,13 @@ function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
   const count = c.u32();
   if (count < 1 || count > 0x100000) return;
   const { ctx } = s;
-  const draw = s.curPen != null && s.curPen.stroke != null;
+  const draw = s.inPath || (s.curPen != null && s.curPen.stroke != null);
   if (draw) {
-    ctx.beginPath();
-    const [px0, py0] = toPx(s, s.curX, s.curY);
-    ctx.moveTo(px0, py0);
+    if (!s.inPath) {
+      ctx.beginPath();
+      const [px0, py0] = toPx(s, s.curX, s.curY);
+      ctx.moveTo(px0, py0);
+    }
   }
   for (let i = 0; i < count; i++) {
     if (c.remaining < 4) break;
@@ -623,7 +631,7 @@ function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
     s.curX = xl;
     s.curY = yl;
   }
-  if (draw && s.curPen) {
+  if (draw && !s.inPath && s.curPen) {
     ctx.strokeStyle = s.curPen.stroke as string;
     ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
     ctx.stroke();
@@ -687,12 +695,12 @@ function strokePolyBezier(
     }
     return;
   }
-  const draw = s.curPen != null && s.curPen.stroke != null;
+  const draw = s.inPath || (s.curPen != null && s.curPen.stroke != null);
   const { ctx } = s;
   if (draw) {
-    ctx.beginPath();
+    if (!s.inPath) ctx.beginPath();
     const start = isTo ? toPx(s, s.curX, s.curY) : toPx(s, pts[0][0], pts[0][1]);
-    ctx.moveTo(start[0], start[1]);
+    if (!isTo || !s.inPath) ctx.moveTo(start[0], start[1]);
   }
   let i = isTo ? 0 : 1;
   for (; i + 2 < pts.length + (isTo ? 1 : 0); i += 3) {
@@ -709,7 +717,7 @@ function strokePolyBezier(
     s.curX = end[0];
     s.curY = end[1];
   }
-  if (draw && s.curPen) {
+  if (draw && !s.inPath && s.curPen) {
     ctx.strokeStyle = s.curPen.stroke as string;
     ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
     ctx.stroke();
@@ -793,6 +801,24 @@ function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number
     ctx.stroke();
     s.drew = true;
   }
+}
+
+/** Consume the current path with the selected brush and/or pen ([MS-EMF] 2.3.10). */
+function paintSelectedPath(s: PlayState, fill: boolean, stroke: boolean): void {
+  if (fill && s.curBrush?.fill != null) {
+    s.ctx.fillStyle = s.curBrush.fill;
+    s.ctx.fill(s.fillRule);
+    s.drew = true;
+  }
+  if (stroke && s.curPen?.stroke != null) {
+    s.ctx.strokeStyle = s.curPen.stroke;
+    s.ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+    s.ctx.stroke();
+    s.drew = true;
+  }
+  // EMR_FILLPATH / STROKEPATH / STROKEANDFILLPATH close the path bracket.
+  // Clear Canvas's persistent current path so later records cannot repaint it.
+  s.ctx.beginPath();
 }
 
 // ── object creators ──────────────────────────────────────────────────────────
@@ -1297,6 +1323,18 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           s.inPath = false;
           break;
         }
+        case EMR.FILLPATH: {
+          paintSelectedPath(s, true, false);
+          break;
+        }
+        case EMR.STROKEANDFILLPATH: {
+          paintSelectedPath(s, true, true);
+          break;
+        }
+        case EMR.STROKEPATH: {
+          paintSelectedPath(s, false, true);
+          break;
+        }
         case EMR.SELECTCLIPPATH: {
           // Use the path just defined as the clip region (intersecting the
           // current clip — the common RGN_AND case, and what a following blit
@@ -1404,20 +1442,27 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
         case EMR.MOVETOEX: {
           s.curX = c.i32();
           s.curY = c.i32();
+          if (s.inPath) {
+            const [px, py] = toPx(s, s.curX, s.curY);
+            s.ctx.moveTo(px, py);
+          }
           break;
         }
         case EMR.LINETO: {
           const xl = c.i32();
           const yl = c.i32();
-          if (s.curPen && s.curPen.stroke != null) {
+          if (s.inPath) {
+            const [px1, py1] = toPx(s, xl, yl);
+            s.ctx.lineTo(px1, py1);
+          } else if (s.curPen && s.curPen.stroke != null) {
             const [px0, py0] = toPx(s, s.curX, s.curY);
             const [px1, py1] = toPx(s, xl, yl);
-            ctx.beginPath();
-            ctx.moveTo(px0, py0);
-            ctx.lineTo(px1, py1);
-            ctx.strokeStyle = s.curPen.stroke;
-            ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
-            ctx.stroke();
+            s.ctx.beginPath();
+            s.ctx.moveTo(px0, py0);
+            s.ctx.lineTo(px1, py1);
+            s.ctx.strokeStyle = s.curPen.stroke;
+            s.ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+            s.ctx.stroke();
             s.drew = true;
           }
           s.curX = xl;

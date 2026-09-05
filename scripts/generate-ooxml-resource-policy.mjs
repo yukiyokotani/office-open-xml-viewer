@@ -58,6 +58,7 @@ function readPolicy(root) {
     'maxPptxSlideJsonBytes',
     'maxPptxSharedDependencyXmlBytes',
     'maxXmlDomComplexity',
+    'maxPptxSlideXmlDomComplexity',
     'maxPptxSharedDependencyProjectionBytes',
     'maxPptxSharedCacheEntries',
     'maxPptxSharedCacheProjectionBytes',
@@ -163,8 +164,8 @@ function render(policy) {
   };
   return {
     ...outputs,
-    typescript: `${outputs.typescript}export const HARD_MAX_DOCX_MARKDOWN_BYTES = ${hard.maxDocxMarkdownBytes};\nexport const HARD_MAX_EMBEDDED_FONT_BYTES = ${hard.maxEmbeddedFontBytes};\n`,
-    rust: `${outputs.rust}pub const HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES: u64 = ${hard.maxWorkbookCachedCellContentUtf8Bytes};\npub const HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES: u64 = ${hard.maxWorkbookCachedJsonBytes};\npub const HARD_MAX_DOCX_MARKDOWN_BYTES: u64 = ${hard.maxDocxMarkdownBytes};\npub const HARD_MAX_EMBEDDED_FONT_BYTES: u64 = ${hard.maxEmbeddedFontBytes};\n`,
+    typescript: `${outputs.typescript}export const HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY = ${hard.maxPptxSlideXmlDomComplexity};\nexport const HARD_MAX_DOCX_MARKDOWN_BYTES = ${hard.maxDocxMarkdownBytes};\nexport const HARD_MAX_EMBEDDED_FONT_BYTES = ${hard.maxEmbeddedFontBytes};\n`,
+    rust: `${outputs.rust}pub const HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY: u64 = ${hard.maxPptxSlideXmlDomComplexity};\npub const HARD_MAX_XLSX_WORKBOOK_CACHED_CELL_CONTENT_UTF8_BYTES: u64 = ${hard.maxWorkbookCachedCellContentUtf8Bytes};\npub const HARD_MAX_XLSX_WORKBOOK_CACHED_JSON_BYTES: u64 = ${hard.maxWorkbookCachedJsonBytes};\npub const HARD_MAX_DOCX_MARKDOWN_BYTES: u64 = ${hard.maxDocxMarkdownBytes};\npub const HARD_MAX_EMBEDDED_FONT_BYTES: u64 = ${hard.maxEmbeddedFontBytes};\n`,
   };
 }
 

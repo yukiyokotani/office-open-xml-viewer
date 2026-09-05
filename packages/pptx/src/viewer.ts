@@ -51,6 +51,7 @@ import {
   subscribePptxLayout,
   type PptxLayoutPublication,
 } from './presentation-layout-events';
+import { createPptxLoadingLayer } from './loading-indicator';
 
 const borrowedPresentationOption = Symbol('PptxViewer.borrowedPresentation');
 type InternalPptxViewerOptions = PptxViewerOptions & {
@@ -278,23 +279,7 @@ export class PptxViewer implements ZoomableViewer {
     this.textLayer = overlays.textLayer;
     this.highlightLayer = overlays.highlightLayer;
     this.elementLayer = overlays.elementLayer;
-    this._loadingLayer = this.wrapper.ownerDocument.createElement('span');
-    this._loadingLayer.style.cssText = [
-      'position:absolute',
-      'inset:0',
-      'display:none',
-      'align-items:center',
-      'justify-content:center',
-      'background:rgba(255,255,255,0.72)',
-      'pointer-events:none',
-      'z-index:4',
-    ].join(';');
-    this._loadingLayer.setAttribute('role', 'status');
-    this._loadingLayer.setAttribute('aria-live', 'polite');
-    this._loadingLayer.setAttribute('aria-label', 'Loading slide');
-    const progress = this.wrapper.ownerDocument.createElement('progress');
-    progress.setAttribute('aria-hidden', 'true');
-    this._loadingLayer.appendChild(progress);
+    this._loadingLayer = createPptxLoadingLayer(this.wrapper.ownerDocument);
     this.wrapper.insertBefore(this._loadingLayer, this.elementLayer);
     if (this.textLayer && (opts.onSelectionContextChange || opts.enableElementSelection)) {
       this.selectionChangeListener = () => this._emitSelectionContextChange();

@@ -236,8 +236,9 @@ test.describe('visual regression', () => {
 });
 
 const PPTX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
-  ? readdirSync('public/private')
+  ? readdirSync('public/private/pptx')
       .filter((file) => file.endsWith('.pptx') && !file.startsWith('~$'))
+      .map((file) => `pptx/${file}`)
       .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
   : [];
 

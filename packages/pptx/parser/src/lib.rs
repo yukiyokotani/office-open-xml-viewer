@@ -18,7 +18,8 @@ use ooxml_common::resource::{
     HARD_MAX_PPTX_MATERIALIZED_SLIDE_JSON_BYTES, HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
     HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES, HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
     HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES, HARD_MAX_PPTX_SLIDE_JSON_BYTES,
-    HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_XML_DOM_COMPLEXITY,
+    HARD_MAX_PPTX_SLIDE_XML_BYTES, HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY,
+    HARD_MAX_XML_DOM_COMPLEXITY,
 };
 use std::collections::HashMap;
 #[cfg(test)]
@@ -81,6 +82,7 @@ thread_local! {
 struct PptxInternalLimits {
     shared_dependency_xml_bytes: u64,
     xml_dom_complexity: u64,
+    slide_xml_dom_complexity: u64,
     shared_dependency_projection_bytes: u64,
     shared_cache_entries: u64,
     shared_cache_projection_bytes: u64,
@@ -96,6 +98,7 @@ impl Default for PptxInternalLimits {
         Self {
             shared_dependency_xml_bytes: HARD_MAX_PPTX_SHARED_DEPENDENCY_XML_BYTES,
             xml_dom_complexity: HARD_MAX_XML_DOM_COMPLEXITY,
+            slide_xml_dom_complexity: HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY,
             shared_dependency_projection_bytes: HARD_MAX_PPTX_SHARED_DEPENDENCY_PROJECTION_BYTES,
             shared_cache_entries: HARD_MAX_PPTX_SHARED_CACHE_ENTRIES,
             shared_cache_projection_bytes: HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES,
@@ -137,7 +140,14 @@ fn pptx_slide_xml_limit() -> u64 {
 /// Keeping this wrapper PPTX-local prevents an uncalibrated node ceiling from
 /// changing DOCX/XLSX's shared `parse_guarded` compatibility behavior.
 fn parse_preflighted_pptx_xml(xml: &str) -> Result<roxmltree::Document<'_>, GuardedParseError> {
-    let nodes_limit = u32::try_from(pptx_internal_limits().xml_dom_complexity).unwrap_or(u32::MAX);
+    parse_preflighted_pptx_xml_with_limit(xml, pptx_internal_limits().xml_dom_complexity)
+}
+
+fn parse_preflighted_pptx_xml_with_limit(
+    xml: &str,
+    complexity_limit: u64,
+) -> Result<roxmltree::Document<'_>, GuardedParseError> {
+    let nodes_limit = u32::try_from(complexity_limit).unwrap_or(u32::MAX);
     parse_guarded_with_node_limit(xml, nodes_limit)
 }
 
@@ -1141,6 +1151,7 @@ fn read_bounded_pptx_xml(
     path: &str,
     limit_u64: u64,
     kind: HardResourceLimitKind,
+    complexity_limit: u64,
 ) -> Result<String, String> {
     const SCRATCH_BYTES: usize = 8 * 1024;
     let limit = usize::try_from(limit_u64)
@@ -1178,7 +1189,6 @@ fn read_bounded_pptx_xml(
     }
     let xml = String::from_utf8(bytes)
         .map_err(|error| format!("ZIP entry is not valid UTF-8 ({path}): {error}"))?;
-    let complexity_limit = pptx_internal_limits().xml_dom_complexity;
     if xml_dom_complexity_exceeds(&xml, complexity_limit) {
         reporter.observe_hard_limit(
             HardResourceLimitKind::XmlDomComplexity,
@@ -1199,6 +1209,7 @@ fn read_primary_slide_xml(zip: &mut PptxZip, path: &str) -> Result<String, Strin
         path,
         pptx_slide_xml_limit(),
         HardResourceLimitKind::PptxSlideXmlBytes,
+        pptx_internal_limits().slide_xml_dom_complexity,
     )
 }
 
@@ -1215,6 +1226,7 @@ fn read_pptx_dependency_xml(
         path,
         pptx_internal_limits().shared_dependency_xml_bytes,
         HardResourceLimitKind::PptxSharedDependencyXmlBytes,
+        pptx_internal_limits().xml_dom_complexity,
     )
     .map_err(Into::into)
 }
@@ -1801,7 +1813,10 @@ fn parse_slide(
     // overflows the fixed WASM stack and traps *inside* `Document::parse` before
     // our own depth-guarded shape walk runs. The nesting-depth pre-check that
     // rejects it now lives in `parse_preflighted_pptx_xml`.
-    let doc = parse_preflighted_pptx_xml(xml)?;
+    let doc = parse_preflighted_pptx_xml_with_limit(
+        xml,
+        pptx_internal_limits().slide_xml_dom_complexity,
+    )?;
     let root = doc.root_element(); // <p:sld>
     let hidden = slide_is_hidden(root);
     let c_sld = child(root, "cSld");
@@ -3150,6 +3165,8 @@ fn produce_slide_unit_with_journal(
                 &bundle.master_level_indents,
                 layout_master_bullets,
                 &bundle.master_anchors,
+                &bundle.master_text_insets,
+                &bundle.master_auto_fit,
                 &bundle.master_transforms,
                 &bundle.master_alignments,
                 &bundle.master_ea_ln_brk,
@@ -3995,11 +4012,19 @@ mod tests {
             .to_owned()
     }
 
+    fn first_para_space_before(data: &[u8]) -> Option<i64> {
+        let json = parse_pptx_native(data).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["slides"][0]["elements"][0]["textBody"]["paragraphs"][0]["spaceBefore"].as_i64()
+    }
+
     // body placeholder (idx=1) with no explicit algn anywhere except master bodyStyle="l".
     const BODY_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Text Placeholder 5"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
 
     // An unrelated centred typeless placeholder (idx=10) in the layout — the leak source.
     const TYPELESS_CTR_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Centered obj"/><p:cNvSpPr/><p:nvPr><p:ph idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn="ctr"/></a:lstStyle><a:p/></p:txBody></p:sp>"#;
+
+    const TYPELESS_SPACED_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="10" name="Spaced obj"/><p:cNvSpPr/><p:nvPr><p:ph idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr><a:spcBef><a:spcPts val="1200"/></a:spcBef></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp>"#;
 
     #[test]
     fn align_inherit_body_no_layout_algn_is_left() {
@@ -4034,6 +4059,15 @@ mod tests {
         assert_eq!(
             first_para_alignment(&build_align_pptx(BODY_SP, TYPELESS_CTR_SP, no_body_algn)),
             "l"
+        );
+    }
+
+    #[test]
+    fn paragraph_spacing_ignores_unrelated_layout_placeholder() {
+        assert_eq!(
+            first_para_space_before(&build_align_pptx(BODY_SP, TYPELESS_SPACED_SP, DEFAULT_TXSTYLES)),
+            None,
+            "an idx-bound body placeholder must not borrow paragraph spacing from a sibling layout slot"
         );
     }
 
@@ -4771,6 +4805,27 @@ mod tests {
         let invalid_doc = roxmltree::Document::parse(invalid).unwrap();
         let invalid_run = parse_run(invalid_doc.root_element(), None, &theme, &rels).unwrap();
         assert_eq!(invalid_run.color, None);
+    }
+
+    #[test]
+    fn test_parse_run_treats_uniform_gradient_text_fill_as_its_exact_color() {
+        let uniform = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><gradFill><gsLst><gs pos="0"><srgbClr val="353535"/></gs><gs pos="100000"><srgbClr val="353535"/></gs></gsLst><lin ang="5400000"/></gradFill></rPr><t>uniform</t></r>"#;
+        let varying = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><gradFill><gsLst><gs pos="0"><srgbClr val="353535"/></gs><gs pos="100000"><srgbClr val="FFFFFF"/></gs></gsLst><lin ang="5400000"/></gradFill></rPr><t>varying</t></r>"#;
+        let partly_unresolved = r#"<r xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><rPr><gradFill><gsLst><gs pos="0"><srgbClr val="353535"/></gs><gs pos="100000"><schemeClr val="missing"/></gs></gsLst><lin ang="5400000"/></gradFill></rPr><t>unresolved</t></r>"#;
+        let theme = HashMap::new();
+        let rels = HashMap::new();
+
+        let uniform_doc = roxmltree::Document::parse(uniform).unwrap();
+        let uniform_run = parse_run(uniform_doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(uniform_run.color.as_deref(), Some("353535"));
+
+        let varying_doc = roxmltree::Document::parse(varying).unwrap();
+        let varying_run = parse_run(varying_doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(varying_run.color, None);
+
+        let unresolved_doc = roxmltree::Document::parse(partly_unresolved).unwrap();
+        let unresolved_run = parse_run(unresolved_doc.root_element(), None, &theme, &rels).unwrap();
+        assert_eq!(unresolved_run.color, None);
     }
 
     /// ECMA-376 §21.1.2.3.9; ST_TextCapsType §20.1.10.64 — cap="all" /
@@ -6148,6 +6203,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -6230,6 +6286,8 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             "",
             &HashMap::new(),
             &mut zip,
@@ -6296,6 +6354,8 @@ mod tests {
                 &m_lfs,
                 &m_li,
                 &m_lb,
+                &m_str,
+                &HashMap::new(),
                 &m_str,
                 &m_tf,
                 &m_str,
@@ -6736,13 +6796,12 @@ mod tests {
             Some("B83903"),
             "firstRow header fill should be accent2 orange"
         );
-        // band1H = accent2 + `<a:tint val="20000">`. Table styles use the literal
-        // ECMA-376 tint (val·input + (1-val)·white), giving a near-white wash —
-        // NOT the saturated linear-lerp. 0.2·B83903 + 0.8·white = F1D7CD.
+        // band1H = accent2 + `<a:tint val="20000">`. PowerPoint applies the
+        // retained-input blend in linear sRGB, then gamma-encodes for display.
         assert_eq!(
             solid(&def.band1_h.fill).as_deref(),
-            Some("F1D7CD"),
-            "band1H tint should be the literal near-white wash, not a saturated lerp"
+            Some("F3E8E7"),
+            "table-style tint should use PowerPoint's linear-light colour pipeline"
         );
 
         // Text colours from tcTxStyle.
@@ -7088,6 +7147,7 @@ mod tests {
                 None, // inherited_reflection
                 None, // inherited_anchor
                 None, // inherited_text_insets
+                None, // inherited_auto_fit
                 None, // inherited_alignment
                 None, // inherited_ea_ln_brk
                 None, // inherited_space_before
@@ -7155,6 +7215,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -7251,6 +7312,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 ShapeKind::Sp,
                 &mut zip,
             );
@@ -7329,6 +7391,7 @@ mod tests {
                 [None; 9],
                 Default::default(),
                 &empty_level_bullets(),
+                None,
                 None,
                 None,
                 None,
@@ -10351,6 +10414,27 @@ mod tests {
     }
 
     #[test]
+    fn default_dom_budget_accepts_a_large_but_bounded_timing_tree() {
+        let timing_nodes = r#"<p:cTn id="1" dur="1"/>"#.repeat(72_000);
+        let xml = format!(
+            r#"<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">{timing_nodes}</p:timing>"#
+        );
+        let limit = PptxInternalLimits::default().slide_xml_dom_complexity;
+
+        assert!((xml.len() as u64) < HARD_MAX_PPTX_SLIDE_XML_BYTES);
+        assert!(
+            xml_dom_complexity_exceeds(&xml, HARD_MAX_XML_DOM_COMPLEXITY),
+            "the fixture must cover the legitimate slide class rejected by the shared XML budget"
+        );
+        assert!(
+            !xml_dom_complexity_exceeds(&xml, limit),
+            "ordinary animation timing markup within the slide byte ceiling must fit the DOM budget"
+        );
+        parse_preflighted_pptx_xml_with_limit(&xml, limit)
+            .expect("the defense-in-depth node cap must admit the same bounded timing tree");
+    }
+
+    #[test]
     fn slide_cursor_random_access_credit_replay_ack_and_fixed_oracle() {
         let data = build_three_slide_deck(usize::MAX, "");
         let legacy_data = data.clone();
@@ -10920,7 +11004,7 @@ mod tests {
 
         {
             let _limits = InternalLimitsOverride::set(PptxInternalLimits {
-                xml_dom_complexity: exact,
+                slide_xml_dom_complexity: exact,
                 ..PptxInternalLimits::default()
             });
             let mut archive = PptxArchive::new(data.clone(), None, None, None).unwrap();
@@ -10931,7 +11015,7 @@ mod tests {
         }
 
         let _limits = InternalLimitsOverride::set(PptxInternalLimits {
-            xml_dom_complexity: exact - 1,
+            slide_xml_dom_complexity: exact - 1,
             ..PptxInternalLimits::default()
         });
         let mut archive = PptxArchive::new(data, None, None, None).unwrap();

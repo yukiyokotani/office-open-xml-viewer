@@ -60,7 +60,11 @@ describe('PptxViewer progressive layout', () => {
     ) as PptxViewer;
     const wrapper = canvas.parentElement as FakeEl;
     const loading = wrapper.children.find((child) =>
-      child.children.some((grandchild) => grandchild.tag === 'progress'))!;
+      child.children.some((grandchild) =>
+        grandchild.className === 'ooxml-pptx-progress-circle'))!;
+
+    expect(loading.children.some((child) => child.tag === 'progress')).toBe(false);
+    expect(loading.children[0]?.style['border-radius']).toBe('50%');
 
     const navigation = viewer.goToSlide(2);
     expect(loading.style.display).toBe('flex');

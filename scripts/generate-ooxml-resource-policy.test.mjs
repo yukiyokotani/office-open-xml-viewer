@@ -26,6 +26,7 @@ function fixture(policy = {
     maxPptxSlideJsonBytes: 640,
     maxPptxSharedDependencyXmlBytes: 160,
     maxXmlDomComplexity: 20,
+    maxPptxSlideXmlDomComplexity: 24,
     maxPptxSharedDependencyProjectionBytes: 320,
     maxPptxSharedCacheEntries: 25,
     maxPptxSharedCacheProjectionBytes: 960,
@@ -126,6 +127,10 @@ test('generates matching TypeScript and Rust constants from one policy source', 
   );
   assert.match(
     readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
+    /HARD_MAX_PPTX_SLIDE_XML_DOM_COMPLEXITY: u64 = 24/,
+  );
+  assert.match(
+    readFileSync(path.join(root, 'packages/ooxml-common/src/resource-policy.generated.rs'), 'utf8'),
     /HARD_MAX_PPTX_SHARED_CACHE_PROJECTION_BYTES: u64 = 960/,
   );
   assert.match(
@@ -202,6 +207,7 @@ test('rejects invalid or internally inconsistent policy values', (context) => {
       maxPptxSlideJsonBytes: 640,
       maxPptxSharedDependencyXmlBytes: 160,
       maxXmlDomComplexity: 20,
+      maxPptxSlideXmlDomComplexity: 24,
       maxPptxSharedDependencyProjectionBytes: 320,
       maxPptxSharedCacheEntries: 25,
       maxPptxSharedCacheProjectionBytes: 960,
