@@ -11,6 +11,7 @@ use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
 
 mod drawing;
 mod persist;
+mod text_style;
 
 const DOCUMENT_CONTAINER: u16 = 1000;
 const SLIDE_CONTAINER: u16 = 1006;
@@ -58,7 +59,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     // markup and escaping must not amplify repeated short text beyond this cap.
     let mut xml_budget = 256 * 1024 * 1024;
     let mut fallback = false;
-    for (record, outline) in &presentation.slides {
+    for (index, (record, outline)) in presentation.slides.iter().enumerate() {
         if contains_record(
             record.payload,
             DOCUMENT_ENCRYPTION_ATOM,
@@ -73,6 +74,10 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
             &mut record_budget,
             &mut text_budget,
             &mut xml_budget,
+            Some(drawing::TextContext {
+                fonts: &presentation.fonts,
+                styles: &presentation.outline_styles[index],
+            }),
         )? {
             Some(tree) => tree,
             None => {
@@ -94,7 +99,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let bytes = build_pptx(slides, presentation.size, max_output_bytes)?;
     let mut warnings = vec![
         "legacy-ppt:positioned-text-only".into(),
-        "legacy-ppt:masters-text-formatting-shapes-media-and-actions-omitted".into(),
+        "legacy-ppt:master-styles-bullets-scheme-colors-and-advanced-text-omitted".into(),
+        "legacy-ppt:visible-shape-geometry-media-and-actions-omitted".into(),
     ];
     if fallback {
         warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
@@ -342,7 +348,8 @@ fn decode_text(record: Record<'_>) -> Result<String, String> {
         Ok(record
             .payload
             .iter()
-            .map(|byte| decode_windows_1252(*byte))
+            // MS-PPT 2.9.43: compressed UTF-16 low bytes, not Windows-1252.
+            .map(|byte| char::from(*byte))
             .collect())
     }
 }
@@ -476,21 +483,6 @@ fn theme() -> String {
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Legacy conversion"><a:themeElements><a:clrScheme name="Legacy"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="Legacy"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Legacy"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="25400"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.into()
 }
 
-fn decode_windows_1252(byte: u8) -> char {
-    const SPECIAL: [char; 32] = [
-        '\u{20ac}', '\u{0081}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}',
-        '\u{2021}', '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008d}',
-        '\u{017d}', '\u{008f}', '\u{0090}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}',
-        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}', '\u{2122}', '\u{0161}', '\u{203a}',
-        '\u{0153}', '\u{009d}', '\u{017e}', '\u{0178}',
-    ];
-    if (0x80..=0x9f).contains(&byte) {
-        SPECIAL[(byte - 0x80) as usize]
-    } else {
-        char::from(byte)
-    }
-}
-
 fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())
 }
@@ -512,6 +504,18 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
+
+    #[test]
+    fn text_bytes_are_zero_high_byte_unicode_not_ansi() {
+        let text = super::decode_text(super::Record {
+            version: 0,
+            instance: 0,
+            kind: 4008,
+            payload: &[0x80, 0x91, 0xe9],
+        })
+        .unwrap();
+        assert_eq!(text, "\u{80}\u{91}é");
+    }
 
     #[test]
     fn rejects_record_offsets_before_doing_pointer_arithmetic() {

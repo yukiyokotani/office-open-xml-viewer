@@ -64,7 +64,7 @@ export function buildXlsFixture(): Uint8Array {
   )]]);
 }
 
-export function buildPptFixture(slidePayload?: Uint8Array): Uint8Array {
+export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array()): Uint8Array {
   const record = (version: number, kind: number, payload: Uint8Array) => concat(
     little16(version), little16(kind), little32(payload.length), payload,
   );
@@ -72,7 +72,7 @@ export function buildPptFixture(slidePayload?: Uint8Array): Uint8Array {
   const slideReference = concat(little32(2), new Uint8Array(16));
   const document = record(0x000f, 1000, concat(
     record(1, 1001, documentAtom),
-    record(15, 4080, record(0, 1011, slideReference)),
+    record(15, 4080, concat(record(0, 1011, slideReference), outlinePayload)),
   ));
   const slide = record(0x000f, 1006, slidePayload ?? record(0, 4000, utf16le('Legacy 日本語 slide')));
   const directoryOffset = document.length + slide.length;

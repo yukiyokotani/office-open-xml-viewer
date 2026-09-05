@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashSet};
 
 pub(super) struct Presentation<'a> {
     pub slides: Vec<(Record<'a>, Vec<String>)>,
+    pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
+    pub fonts: Vec<String>,
     pub size: (u32, u32),
 }
 
@@ -80,6 +82,7 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("invalid PowerPoint document persist object"));
     }
     let children = parse_records(record.payload, budget)?;
+    let fonts = text_style::fonts(&children, budget)?;
     let atom = children
         .iter()
         .find(|r| r.kind == 1001)
@@ -99,6 +102,7 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("missing or duplicate PowerPoint slide list"));
     }
     let mut slides: Vec<(Record<'a>, Vec<String>)> = Vec::new();
+    let mut outline_styles: Vec<Vec<Option<&'a [u8]>>> = Vec::new();
     let mut seen = HashSet::new();
     let mut outline_budget = MAX_TEXT_BYTES;
     for item in parse_records(lists[0].payload, budget)? {
@@ -121,6 +125,7 @@ pub(super) fn resolve<'a>(
                     return Err(unsupported("invalid PowerPoint slide persist object"));
                 }
                 slides.push((slide, Vec::new()));
+                outline_styles.push(Vec::new());
             }
             3999 => {
                 let (_, outline) = slides
@@ -130,6 +135,7 @@ pub(super) fn resolve<'a>(
                     return Err(unsupported("too many PowerPoint outline text blocks"));
                 }
                 outline.push(String::new());
+                outline_styles.last_mut().expect("slide exists").push(None);
             }
             TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
                 let text = slides
@@ -140,13 +146,28 @@ pub(super) fn resolve<'a>(
                 charge_text(&mut outline_budget, decoded.len())?;
                 text.push_str(&decoded);
             }
+            4001 => {
+                let slot = outline_styles
+                    .last_mut()
+                    .and_then(|styles| styles.last_mut())
+                    .ok_or_else(|| unsupported("orphan PowerPoint outline style"))?;
+                if item.version != 0 || slot.is_some() {
+                    return Err(unsupported("invalid PowerPoint outline style"));
+                }
+                *slot = Some(item.payload);
+            }
             _ => {}
         }
     }
     if slides.is_empty() {
         return Err(unsupported("PowerPoint presentation has no slides"));
     }
-    Ok(Presentation { slides, size })
+    Ok(Presentation {
+        slides,
+        outline_styles,
+        fonts,
+        size,
+    })
 }
 
 fn dimension(master_units: u32) -> Result<u32, String> {

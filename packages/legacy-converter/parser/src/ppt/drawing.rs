@@ -3,12 +3,19 @@
 //! Output uses ECMA-376 DrawingML CT_(Group)Transform2D, never binary-aware paint.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct TextContext<'a> {
+    pub fonts: &'a [String],
+    pub styles: &'a [Option<&'a [u8]>],
+}
+
 pub(super) fn render(
     slide: &[u8],
     outline: &[String],
     records: &mut usize,
     text: &mut usize,
     xml: &mut usize,
+    context: Option<TextContext<'_>>,
 ) -> Result<Option<String>, String> {
     let children = parse_records(slide, records)?;
     let mut drawings = children.iter().filter(|r| r.kind == 1036);
@@ -25,6 +32,7 @@ pub(super) fn render(
         remaining: xml,
         output: String::new(),
         id: 1,
+        context,
     };
     for dg in parse_records(drawing.payload, writer.records)? {
         if dg.kind != 0xf002 || dg.version != 15 {
@@ -232,6 +240,7 @@ struct Writer<'a, 'b> {
     remaining: &'b mut usize,
     output: String,
     id: u32,
+    context: Option<TextContext<'a>>,
 }
 impl Writer<'_, '_> {
     fn push(&mut self, value: &str) -> Result<(), String> {
@@ -296,23 +305,42 @@ impl Writer<'_, '_> {
                     return Ok(());
                 };
                 let mut text = Vec::new();
+                let mut style = None;
+                let mut body_seen = false;
+                let mut outline_body = false;
                 // The only source of visible text is this shape's ClientTextbox.
                 for atom in parse_records(textbox.payload, self.records)? {
                     match atom.kind {
                         TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
+                            if body_seen {
+                                return Err(unsupported("duplicate PowerPoint text body"));
+                            }
+                            body_seen = true;
                             let value = decode_text(atom)?;
                             charge_text(self.text, value.len())?;
                             push_text(&mut text, value)?;
                         }
                         3998 => {
-                            let value = self
-                                .outline
-                                .get(u32_at(atom.payload, 0)? as usize)
-                                .ok_or_else(|| {
-                                    unsupported("PowerPoint outline text index out of range")
-                                })?;
+                            if body_seen || style.is_some() {
+                                return Err(unsupported("ambiguous PowerPoint outline text body"));
+                            }
+                            body_seen = true;
+                            outline_body = true;
+                            let index = u32_at(atom.payload, 0)? as usize;
+                            style = self
+                                .context
+                                .and_then(|context| context.styles.get(index).copied().flatten());
+                            let value = self.outline.get(index).ok_or_else(|| {
+                                unsupported("PowerPoint outline text index out of range")
+                            })?;
                             charge_text(self.text, value.len())?;
                             push_text(&mut text, value.clone())?;
+                        }
+                        4001 => {
+                            if atom.version != 0 || style.is_some() || outline_body {
+                                return Err(unsupported("invalid PowerPoint text style record"));
+                            }
+                            style = Some(atom.payload);
                         }
                         // Do not descend into interactive/action containers.
                         _ => {}
@@ -328,7 +356,21 @@ impl Writer<'_, '_> {
                 self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody>", shape.transform(anchor, None)))?;
                 let p = &shape.props;
                 self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
-                paragraphs(&text, &mut self.output, self.remaining)?;
+                if let Some(style) = style {
+                    if text.len() != 1 {
+                        return Err(unsupported("ambiguous PowerPoint styled text body"));
+                    }
+                    text_style::write(
+                        &text[0],
+                        style,
+                        self.context.map_or(&[], |c| c.fonts),
+                        &mut self.output,
+                        self.remaining,
+                        self.records,
+                    )?;
+                } else {
+                    paragraphs(&text, &mut self.output, self.remaining)?;
+                }
                 self.push("</p:txBody></p:sp>")?;
             }
             _ => {}
@@ -351,24 +393,12 @@ pub(super) fn paragraphs(
     budget: &mut usize,
 ) -> Result<(), String> {
     for block in blocks {
-        for line in block.split(['\r', '\n']) {
-            append(output, budget, "<a:p><a:r><a:rPr sz=\"1800\"/><a:t>")?;
+        for line in block.split('\r') {
+            append(output, budget, "<a:p>")?;
             // Bounded chunks prevent XML escaping of one large atom from allocating
             // a multiple of the entire input before the XML budget is checked.
-            let mut remaining = line;
-            while !remaining.is_empty() {
-                let mut end = remaining.len().min(1024);
-                while !remaining.is_char_boundary(end) {
-                    end -= 1;
-                }
-                append(output, budget, &xml_text(&remaining[..end]))?;
-                remaining = &remaining[end..];
-            }
-            append(
-                output,
-                budget,
-                "</a:t></a:r><a:endParaRPr sz=\"1800\"/></a:p>",
-            )?;
+            text_style::write_run(line, "<a:rPr sz=\"1800\"/>", output, budget)?;
+            append(output, budget, "<a:endParaRPr sz=\"1800\"/></a:p>")?;
         }
     }
     Ok(())
@@ -407,6 +437,7 @@ mod tests {
             &mut MAX_RECORDS.clone(),
             &mut MAX_TEXT_BYTES.clone(),
             &mut (256 * 1024 * 1024),
+            None,
         )
         .map(|x| x.unwrap_or_default())
     }
@@ -419,6 +450,23 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn does_not_apply_inline_style_to_an_outline_reference() {
+        for atoms in [
+            [record(0, 4001, &[]), record(0, 3998, &[0; 4])].concat(),
+            [record(0, 3998, &[0; 4]), record(0, 4001, &[])].concat(),
+        ] {
+            let bytes = drawing(vec![sp(
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                    record(15, 0xf00d, &atoms),
+                ],
+            )]);
+            assert!(xml(&bytes).is_err());
+        }
     }
 
     #[test]
@@ -505,6 +553,7 @@ mod tests {
             remaining: &mut (1024 * 1024),
             output: String::new(),
             id: 1,
+            context: None,
         };
         let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
         assert!(writer
@@ -611,7 +660,8 @@ mod tests {
             &[],
             &mut MAX_RECORDS.clone(),
             &mut MAX_TEXT_BYTES.clone(),
-            &mut 1024
+            &mut 1024,
+            None,
         )
         .is_err());
     }

@@ -12,6 +12,27 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it('retains outline-referenced size and paragraph alignment in the ordinary parser model', async () => {
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const outline = concat(
+      record(0, 3999, little32(0)), record(0, 4000, utf16le('Wide')),
+      record(0, 4001, concat(
+        little32(5), little16(0), little32(0x800), little16(1),
+        little32(5), little32(0x20000), little16(48),
+      )),
+    );
+    const drawing = record(15, 1036, record(15, 0xf002, record(15, 0xf004, concat(
+      record((202 << 4) | 2, 0xf00a, concat(little32(42), little32(0x200))),
+      record(0, 0xf010, concat(little32(576), little32(576), little32(3456), little32(1728))),
+      record(15, 0xf00d, record(0, 3998, little32(0))),
+    ))));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(drawing, outline), { legacyConversion: { ppt: { converter } } });
+    const element = presentation.slides[0].elements[0];
+    expect(element.type).toBe('shape');
+    if (element.type !== 'shape') throw new Error('Expected converted text shape');
+    expect(element.textBody?.paragraphs[0]).toMatchObject({ alignment: 'ctr', runs: [{ text: 'Wide', fontSize: 48 }] });
+  });
   it.skipIf(!skia)('renders two binary text frames at their own positions through the ordinary PPTX Canvas renderer', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(
