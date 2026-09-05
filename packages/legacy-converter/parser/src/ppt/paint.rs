@@ -1,4 +1,4 @@
-//! Direct OfficeArt preset geometry and solid paint, without renderer extensions.
+//! OfficeArt preset geometry and solid paint, without renderer extensions.
 use super::{scheme, unsupported};
 
 #[derive(Clone, Copy, Default)]
@@ -6,10 +6,10 @@ pub(super) struct Paint {
     pub custom_geometry: bool,
     fill_ok: Option<bool>,
     line_ok: Option<bool>,
-    fill_rect: bool,
+    fill_rect: Option<bool>,
     fill_type: Option<u32>,
     fill: Option<u32>,
-    fill_blip: u32,
+    fill_blip: Option<u32>,
     fill_alpha: Option<u32>,
     filled: Option<bool>,
     line_type: Option<u32>,
@@ -20,6 +20,31 @@ pub(super) struct Paint {
     dash: Option<u32>,
 }
 impl Paint {
+    /// Explicit hspMaster supplies defaults (MS-ODRAW 1.1, 2.2.40, 2.3.2.1).
+    /// Preserve absence until the full chain is resolved, especially Boolean
+    /// use bits: explicit false must win over inherited true. Colors stay in
+    /// their source representation until the destination slide resolves them.
+    pub fn inherit(&self, parent: &Self) -> Self {
+        Self {
+            // Unsupported inherited adjustments/paths must not turn into an
+            // invented unadjusted preset. Geometry reconstruction remains absent.
+            custom_geometry: self.custom_geometry || parent.custom_geometry,
+            fill_ok: self.fill_ok.or(parent.fill_ok),
+            line_ok: self.line_ok.or(parent.line_ok),
+            fill_rect: self.fill_rect.or(parent.fill_rect),
+            fill_type: self.fill_type.or(parent.fill_type),
+            fill: self.fill.or(parent.fill),
+            fill_blip: self.fill_blip.or(parent.fill_blip),
+            fill_alpha: self.fill_alpha.or(parent.fill_alpha),
+            filled: self.filled.or(parent.filled),
+            line_type: self.line_type.or(parent.line_type),
+            line: self.line.or(parent.line),
+            line_alpha: self.line_alpha.or(parent.line_alpha),
+            lined: self.lined.or(parent.lined),
+            width: self.width.or(parent.width),
+            dash: self.dash.or(parent.dash),
+        }
+    }
     pub fn property(&mut self, id: u16, value: u32) -> Result<(), String> {
         // MS-ODRAW 2.3.6: customized vertices/segments/adjustments require their
         // own geometry conversion; never apply a preset over these overrides.
@@ -38,7 +63,7 @@ impl Paint {
             0x180 => self.fill_type = Some(value),
             0x181 => self.fill = Some(value),
             // Caller validates fBid on this one-based BStore reference.
-            0x4186 => self.fill_blip = value,
+            0x4186 => self.fill_blip = Some(value),
             0x182 | 0x1c1 => {
                 if value > 65536 {
                     return Err(unsupported("invalid PowerPoint paint opacity"));
@@ -56,7 +81,7 @@ impl Paint {
                     self.filled = Some(value & 0x10 != 0);
                 }
                 if value & 0x00020000 != 0 {
-                    self.fill_rect = value & 2 != 0;
+                    self.fill_rect = Some(value & 2 != 0);
                 }
             }
             0x1ff if value & 0x00080000 != 0 => self.lined = Some(value & 8 != 0),
@@ -95,7 +120,7 @@ impl Paint {
         if !self.filled.unwrap_or(true) || !self.fill_ok.unwrap_or(true) {
             return Some("<a:noFill/>".into());
         }
-        if self.fill_rect || self.fill_type.unwrap_or(0) != 0 {
+        if self.fill_rect.unwrap_or(false) || self.fill_type.unwrap_or(0) != 0 {
             return None;
         }
         solid(
@@ -106,11 +131,14 @@ impl Paint {
     }
     pub fn background_image(&self) -> Option<(u32, u32)> {
         (self.fill_type == Some(3)
-            && self.fill_blip != 0
-            && !self.fill_rect
+            && self.fill_blip.unwrap_or(0) != 0
+            && !self.fill_rect.unwrap_or(false)
             && self.filled.unwrap_or(true)
             && self.fill_ok.unwrap_or(true))
-        .then_some((self.fill_blip, self.fill_alpha.unwrap_or(65536)))
+        .then_some((
+            self.fill_blip.unwrap_or(0),
+            self.fill_alpha.unwrap_or(65536),
+        ))
     }
     #[cfg(test)]
     fn xml(&self, kind: u16) -> String {
@@ -121,8 +149,8 @@ impl Paint {
         if self.geometry(kind).is_none() {
             return no_paint.into();
         }
-        // Only direct paint is reconstructed until drawing/master defaults are
-        // resolved. An absent paint layer stays omitted, with a conversion warning.
+        // Direct and explicitly linked master paint are reconstructed. Drawing
+        // defaults and unlinked masters remain absent, with a conversion warning.
         // Within an explicit layer, use the normative MS-ODRAW property defaults.
         let fill_set = self.fill.is_some()
             || self.filled.is_some()
@@ -138,7 +166,7 @@ impl Paint {
             && fill_set
             && self.filled.unwrap_or(true)
             && self.fill_ok.unwrap_or(true)
-            && !self.fill_rect
+            && !self.fill_rect.unwrap_or(false)
             && self.fill_type.unwrap_or(0) == 0
         {
             solid(
@@ -197,6 +225,76 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inherited_paint_keeps_values_independent_from_boolean_use_bits() {
+        let mut master = Paint::default();
+        for (id, value) in [
+            (0x181, 255),
+            (0x182, 32768),
+            (0x1c0, 0xff0000),
+            (0x1cb, 25400),
+        ] {
+            master.property(id, value).unwrap();
+        }
+        let mut local = Paint::default();
+        local.property(0x1bf, 0).unwrap(); // Unused false is not an override.
+        let inherited = local.inherit(&master);
+        let xml = inherited.xml(1);
+        assert!(xml.contains("FF0000"));
+        assert!(xml.contains("0000FF"));
+        assert!(xml.contains("50000"));
+        assert!(xml.contains("w=\"25400\""));
+        local.property(0x1bf, 0x00100000).unwrap();
+        local.property(0x1ff, 0x00080000).unwrap();
+        assert_eq!(
+            local.inherit(&master).xml(1),
+            "<a:noFill/><a:ln><a:noFill/></a:ln>"
+        );
+        local.property(0x1bf, 0x00100010).unwrap();
+        local.property(0x181, 0xff00).unwrap();
+        let xml = local.inherit(&master).xml(1);
+        assert!(xml.contains("00FF00"));
+        assert!(xml.contains("50000"));
+        assert!(!xml.contains("0000FF"));
+    }
+
+    #[test]
+    fn unsupported_inherited_paint_is_not_replaced_with_solid_defaults() {
+        let mut master = Paint::default();
+        master.property(0x180, 4).unwrap(); // Gradient.
+        master.property(0x1c0, 255).unwrap();
+        master.property(0x1ce, 1).unwrap(); // Dashed line, not yet supported.
+        let mut local = Paint::default();
+        local.property(0x181, 0xff00).unwrap();
+        assert_eq!(
+            local.inherit(&master).xml(1),
+            "<a:noFill/><a:ln><a:noFill/></a:ln>"
+        );
+        local.property(0x180, 0).unwrap();
+        assert!(local.inherit(&master).xml(1).contains("00FF00"));
+        master.property(0x1bf, 0x00020002).unwrap();
+        assert!(!local.inherit(&master).xml(1).contains("00FF00"));
+        local.property(0x1bf, 0x00020000).unwrap(); // Explicitly clear inherited fill rectangle.
+        assert!(local.inherit(&master).xml(1).contains("00FF00"));
+        master.custom_geometry = true;
+        assert!(local.inherit(&master).geometry(1).is_none());
+    }
+
+    #[test]
+    fn inherited_scheme_color_resolves_at_destination_not_master() {
+        let mut master = Paint::default();
+        master.property(0x181, 0x08000004).unwrap();
+        let inherited = Paint::default().inherit(&master);
+        let mut scheme = [0; 8];
+        scheme[4] = 0x563412;
+        assert!(inherited
+            .xml_with_scheme(1, Some(&scheme))
+            .contains("123456"));
+        scheme[4] = 0xabcdef;
+        assert!(inherited
+            .xml_with_scheme(1, Some(&scheme))
+            .contains("EFCDAB"));
+    }
     #[test]
     fn background_fill_has_no_geometry_or_line_and_respects_use_bits() {
         let mut p = Paint::default();

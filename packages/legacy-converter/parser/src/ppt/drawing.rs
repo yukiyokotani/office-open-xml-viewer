@@ -428,6 +428,7 @@ pub(super) fn master_shapes(
                 text_type: kind,
                 direct,
                 base: base.clone(),
+                paint: shape.props.paint,
             })?;
         }
         Ok(())
@@ -517,6 +518,10 @@ impl Writer<'_, '_> {
                 if shape.omitted() {
                     return Ok(());
                 }
+                let paint = match (shape.master(), self.context.and_then(|c| c.shapes)) {
+                    (Some(id), Some(shapes)) => shape.props.paint.inherit(shapes.paint(id)?),
+                    _ => shape.props.paint,
+                };
                 if shape.kind == 75 && shape.props.picture != 0 {
                     let index = shape.props.picture;
                     if self
@@ -534,7 +539,7 @@ impl Writer<'_, '_> {
                         if left + right >= 100000 || top + bottom >= 100000 {
                             return Err(unsupported("empty PowerPoint picture crop"));
                         }
-                        self.push(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Legacy picture {id}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rImg{index}\"/><a:srcRect l=\"{left}\" t=\"{top}\" r=\"{right}\" b=\"{bottom}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{}</p:spPr></p:pic>", shape.transform(anchor, None), shape.props.paint.xml_with_scheme(1, self.context.and_then(|c| c.scheme))))?;
+                        self.push(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Legacy picture {id}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rImg{index}\"/><a:srcRect l=\"{left}\" t=\"{top}\" r=\"{right}\" b=\"{bottom}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{}</p:spPr></p:pic>", shape.transform(anchor, None), paint.xml_with_scheme(1, self.context.and_then(|c| c.scheme))))?;
                     }
                 }
                 let mut text = Vec::new();
@@ -597,7 +602,7 @@ impl Writer<'_, '_> {
                         _ => {}
                     }
                 }
-                let preset = shape.props.paint.geometry(shape.kind);
+                let preset = paint.geometry(shape.kind);
                 if text.is_empty() && preset.is_none() {
                     return Ok(());
                 }
@@ -608,7 +613,7 @@ impl Writer<'_, '_> {
                 // Unsupported geometry may still carry text. Preserve its text
                 // frame, but never paint an invented rectangle in its place.
                 let text_box = u8::from(shape.kind == 202 || preset.is_none());
-                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), shape.props.paint.xml_with_scheme(shape.kind, self.context.and_then(|c| c.scheme))))?;
+                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), paint.xml_with_scheme(shape.kind, self.context.and_then(|c| c.scheme))))?;
                 if text.is_empty() {
                     self.push("</p:sp>")?;
                     return Ok(());

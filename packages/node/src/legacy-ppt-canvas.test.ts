@@ -12,6 +12,38 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it.skipIf(!skia)('inherits solid master paint only through active links and honors direct color and no-paint overrides', async () => {
+    const { Canvas } = skia as typeof import('skia-canvas');
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const properties = (entries: [number, number][]) => record((entries.length << 4) | 3, 0xf00b, concat(...entries.map(([id, value]) => concat(little16(id), little32(value)))));
+    const master = record(15, 1036, record(15, 0xf002, record(15, 0xf004, concat(
+      record(0x12, 0xf00a, concat(little32(900), little32(0x800))),
+      properties([[0x181, 255], [0x1c0, 0xff0000], [0x1cb, 91440]]),
+    ))));
+    const shape = (index: number, direct: [number, number][], active = true) => {
+      const left = 576 + index * 864;
+      return record(15, 0xf004, concat(
+        record(0x12, 0xf00a, concat(little32(index + 1), little32(active ? 0xa20 : 0xa00))),
+        record(0, 0xf010, concat(little32(576), little32(left), little32(left + 576), little32(1152))),
+        properties([[0x301, active ? 900 : 999], ...direct]),
+      ));
+    };
+    const slide = record(15, 1036, record(15, 0xf002, concat(
+      shape(0, [[0x1bf, 0]]), shape(1, [[0x181, 0xff00]]),
+      shape(2, [[0x1bf, 0x00100000], [0x1ff, 0x00080000]]), shape(3, [], false),
+    )));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(slide, undefined, master), { legacyConversion: { ppt: { converter } } });
+    const canvas = new Canvas(960, 720);
+    await renderSlideNode(canvas, presentation, 0, { width: 960, dpr: 1 });
+    const pixel = (x: number, y: number) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data);
+    expect(pixel(140, 140)).toEqual([255, 0, 0, 255]);
+    expect(pixel(284, 140)).toEqual([0, 255, 0, 255]);
+    expect(pixel(428, 140)).toEqual([255, 255, 255, 255]);
+    expect(pixel(572, 140)).toEqual([255, 255, 255, 255]);
+    expect(pixel(96, 140)).toEqual([0, 0, 255, 255]);
+    expect(pixel(384, 140)).toEqual([255, 255, 255, 255]);
+  });
   it.skipIf(!skia)('renders inherited character bullets and respects a direct no-bullet override', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);

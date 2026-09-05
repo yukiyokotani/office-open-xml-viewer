@@ -10,6 +10,7 @@ pub(super) struct Node {
     pub text_type: Option<u16>,
     pub direct: Vec<Option<text_style::Level>>,
     pub base: Option<Rc<text_style::Master>>,
+    pub paint: paint::Paint,
 }
 #[derive(Default)]
 pub(super) struct Resolver {
@@ -18,6 +19,7 @@ pub(super) struct Resolver {
 }
 struct Resolved {
     levels: Rc<Vec<text_style::Level>>,
+    paint: paint::Paint,
     depth: usize,
 }
 impl Resolver {
@@ -36,7 +38,7 @@ impl Resolver {
         for id in self.nodes.keys().copied().collect::<Vec<_>>() {
             self.resolve(id, &mut Vec::new(), budget)?;
         }
-        // Parsing metadata is no longer needed once owned immutable levels exist.
+        // Parsing metadata is no longer needed once immutable levels/paint exist.
         self.nodes.clear();
         Ok(())
     }
@@ -44,6 +46,12 @@ impl Resolver {
         self.resolved
             .get(&id)
             .map(|v| v.levels.as_slice())
+            .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
+    }
+    pub fn paint(&self, id: u32) -> Result<&paint::Paint, String> {
+        self.resolved
+            .get(&id)
+            .map(|v| &v.paint)
             .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
     }
     fn resolve(
@@ -78,6 +86,10 @@ impl Resolver {
             .transpose()?;
         let depth = parent.map_or(1, |parent| self.resolved[&parent].depth + 1);
         let node = &self.nodes[&id];
+        let paint = match parent {
+            Some(parent) => node.paint.inherit(&self.resolved[&parent].paint),
+            None => node.paint,
+        };
         let base = inherited.as_ref().map(|v| v.as_slice()).or_else(|| {
             node.base
                 .as_ref()
@@ -100,6 +112,7 @@ impl Resolver {
             id,
             Resolved {
                 levels: levels.clone(),
+                paint,
                 depth,
             },
         );
@@ -117,7 +130,30 @@ mod tests {
             text_type: None,
             direct: Vec::new(),
             base: None,
+            paint: paint::Paint::default(),
         }
+    }
+    #[test]
+    fn paint_resolves_through_cached_chains_without_losing_explicit_false() {
+        let mut r = Resolver::default();
+        let mut root = node(1, None);
+        root.paint.property(0x181, 255).unwrap();
+        root.paint.property(0x1c0, 0xff0000).unwrap();
+        let mut middle = node(2, Some(1));
+        middle.paint.property(0x1bf, 0x00100000).unwrap();
+        let mut leaf = node(3, Some(2));
+        leaf.paint.property(0x1bf, 0x00100010).unwrap();
+        r.insert(root).unwrap();
+        r.insert(middle).unwrap();
+        r.insert(leaf).unwrap();
+        r.finish(&mut 100).unwrap();
+        let middle = r.paint(2).unwrap().xml_with_scheme(1, None);
+        assert!(!middle.contains("FF0000"));
+        assert!(middle.contains("0000FF"));
+        let leaf = r.paint(3).unwrap().xml_with_scheme(1, None);
+        assert!(leaf.contains("FF0000"));
+        assert!(leaf.contains("0000FF"));
+        assert!(r.paint(4).is_err());
     }
     #[test]
     fn resolves_chains_reuses_cache_and_releases_parse_metadata() {

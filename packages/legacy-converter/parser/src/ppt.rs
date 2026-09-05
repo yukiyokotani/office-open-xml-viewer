@@ -139,7 +139,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         "legacy-ppt:unlinked-placeholder-styles-numbering-picture-bullets-rulers-and-advanced-text-omitted".into(),
         "legacy-ppt:unsupported-bullet-properties-and-paragraph-offsets-omitted".into(),
         "legacy-ppt:nonuniform-master-text-and-invalid-font-references-omitted".into(),
-        "legacy-ppt:custom-geometry-inherited-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
+        "legacy-ppt:custom-geometry-unlinked-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
     ];
     if fallback {
         warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
