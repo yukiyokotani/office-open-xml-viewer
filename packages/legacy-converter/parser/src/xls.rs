@@ -50,6 +50,26 @@ struct BoundSheet {
     offset: usize,
     name: String,
     sheet_type: u8,
+    visibility: SheetVisibility,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum SheetVisibility {
+    #[default]
+    Visible,
+    Hidden,
+    VeryHidden,
+}
+
+impl SheetVisibility {
+    fn attribute(self) -> &'static str {
+        // ECMA-376 18.2.19: omitted sheet/@state means visible.
+        match self {
+            Self::Visible => "",
+            Self::Hidden => " state=\"hidden\"",
+            Self::VeryHidden => " state=\"veryHidden\"",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +84,7 @@ enum CellValue {
 
 #[derive(Default)]
 struct SheetData {
+    visibility: SheetVisibility,
     rows: BTreeMap<u16, BTreeMap<u16, CellValue>>,
     cell_styles: BTreeMap<(u16, u16), u16>,
     geometry: geometry::Geometry,
@@ -238,6 +259,13 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
     let offset = usize::try_from(u32_at(data, 0)?)
         .map_err(|_| unsupported("BIFF sheet offset is too large"))?;
     let sheet_type = data[5];
+    // MS-XLS 2.4.28: hsState occupies two bits; the other six MUST be ignored.
+    let visibility = match data[4] & 3 {
+        0 => SheetVisibility::Visible,
+        1 => SheetVisibility::Hidden,
+        2 => SheetVisibility::VeryHidden,
+        _ => return Err(unsupported("invalid BIFF sheet visibility")),
+    };
     let chars = data[6] as usize;
     let high_byte = (data[7] & 0x01) != 0;
     let name = decode_biff_chars(data, 8, chars, high_byte)?.0;
@@ -248,6 +276,7 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
         offset,
         name,
         sheet_type,
+        visibility,
     })
 }
 
@@ -521,7 +550,10 @@ fn parse_sheet(
             "BOUNDSHEET8 does not point to a BIFF8 worksheet",
         ));
     }
-    let mut output = SheetData::default();
+    let mut output = SheetData {
+        visibility: sheet.visibility,
+        ..SheetData::default()
+    };
     let mut cell_count = 0usize;
     let mut pending_formula_string = None;
     let mut nested_substreams = 0usize;
@@ -857,10 +889,11 @@ fn build_xlsx(
     for (index, (name, sheet)) in sheets.iter().enumerate() {
         let id = index + 1;
         workbook.push_str(&format!(
-            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"/>",
+            "<sheet name=\"{}\" sheetId=\"{}\" r:id=\"rId{}\"{}/>",
             xml_attr(name),
             id,
-            id
+            id,
+            sheet.visibility.attribute()
         ));
         workbook_rels.push_str(&format!(
             "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{}.xml\"/>",
@@ -1031,6 +1064,22 @@ mod tests {
     use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
 
     #[test]
+    fn sheet_visibility_uses_only_the_two_defined_bits() {
+        for flags in 0..=u8::MAX {
+            let parsed = super::parse_bound_sheet(&[0, 0, 0, 0, flags, 0, 1, 0, b'A']);
+            if flags & 3 == 3 {
+                assert!(parsed.unwrap_err().contains("invalid BIFF sheet visibility"));
+            } else {
+                let expected = ["", " state=\"hidden\"", " state=\"veryHidden\""];
+                assert_eq!(
+                    parsed.unwrap().visibility.attribute(),
+                    expected[usize::from(flags & 3)]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn saved_custom_view_cannot_override_the_current_print_settings() {
         use super::*;
         let bof = [0, 6, 0x10, 0];
@@ -1070,6 +1119,7 @@ mod tests {
             offset: 0,
             name: "Sheet".into(),
             sheet_type: 0,
+            visibility: SheetVisibility::Visible,
         };
         let output = parse_sheet(&records, &sheet, &[]).unwrap();
         assert!(output.print.xml().contains("<oddHeader></oddHeader>"));
@@ -1113,6 +1163,7 @@ mod tests {
             offset: 0,
             name: "S".into(),
             sheet_type: 0,
+            visibility: SheetVisibility::Visible,
         };
         assert!(parse_sheet(&records, &sheet, &[]).unwrap().rows.is_empty());
         assert!(parse_sheet(&records[..4], &sheet, &[]).is_err());
