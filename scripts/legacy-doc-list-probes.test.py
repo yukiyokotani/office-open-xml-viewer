@@ -14,6 +14,36 @@ W = "{" + NS["w"] + "}"
 
 
 class ProbeTests(unittest.TestCase):
+    def test_interactions_cover_conflicting_right_indent_and_twip_boundaries(self):
+        cases = probes.matrix("interactions")
+        self.assertEqual(len(cases), 64)
+        by_id = {c["id"]: c for c in cases}
+        self.assertEqual(len(by_id), 64)
+        for case in cases:
+            self.assertEqual(case["parameters"]["list_right"], 720)
+            if case["parent"]:
+                original = by_id[case["parent"]]["parameters"]
+                changed = [k for k, v in case["parameters"].items() if original[k] != v]
+                self.assertEqual(changed, case["changed"])
+                self.assertLessEqual(len(changed), 1)
+        for rtl in [False, True]:
+            subset = [c for c in cases if c["parameters"]["rtl"] == rtl]
+            for value in [-1, 0, 1, 719, 720, 721]:
+                self.assertTrue(any(c["parameters"]["direct_right"] == value for c in subset))
+            self.assertTrue(any(all(c["parameters"][k] == 0 for k in
+                ["direct_left", "direct_right", "direct_first"]) for c in subset))
+        with ZipFile(BytesIO(probes.build(cases))) as z:
+            doc = E.fromstring(z.read("word/document.xml"))
+            self.assertEqual(len(doc.findall(".//w:p", NS)), 256)
+            paragraphs = doc.findall("w:body/w:p", NS)
+            levels = E.fromstring(z.read("word/numbering.xml")).findall("w:abstractNum/w:lvl", NS)
+            for i, case in enumerate(cases):
+                self.assertEqual(levels[i].find("w:pPr/w:ind", NS).get(W + "right"), "720")
+                expected = case["parameters"]["direct_right"]
+                if expected is not None:
+                    ind = paragraphs[4*i + 2].find("w:pPr/w:ind", NS)
+                    self.assertEqual(ind.get(W + "right"), str(expected))
+
     def test_matrix_changes_one_parameter_and_has_unchanged_repeats(self):
         cases = probes.matrix()
         self.assertEqual(len(cases), 64)

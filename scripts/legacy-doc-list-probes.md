@@ -33,6 +33,21 @@ list-level bidi settings, and tab suffix/stop/clear behavior. It is not an
 exhaustive factorial design. Expand interactions and boundary cases based on
 observed results rather than fitting a private sample.
 
+The optional second phase uses a nonzero list-level right indent so direct
+right indents actually conflict with a retained list value. It also examines
+one-twip boundaries around zero and matching list indents, cumulative left/right/
+first-line overrides, and conflicting list/paragraph bidi in both directions:
+
+```sh
+python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-interactions --phase interactions
+```
+
+This creates another 64 cases, identified by `Q` rather than `P`. Its manifest
+records the experiment phase. The default `P` cases and authored DOCX remain
+unchanged. One-twip differences may be below PDF text-coordinate precision;
+inspect binary values and quantify export rounding instead of treating a
+visually indistinguishable pair as proof of equivalent formatting semantics.
+
 ## Required local Office sequence
 
 1. Record Word version/build, platform, installed/substituted fonts and relevant

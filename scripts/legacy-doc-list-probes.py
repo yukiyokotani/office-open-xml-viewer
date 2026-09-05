@@ -23,7 +23,11 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-def matrix():
+def matrix(phase="baseline"):
+    if phase == "interactions":
+        return interaction_matrix()
+    if phase != "baseline":
+        raise ValueError("unknown experiment phase")
     cases = []
 
     def add(parent, **changes):
@@ -65,6 +69,38 @@ def matrix():
         add(tab_stop, direct_tab=1440)
         add(tab_stop, direct_tab="clear")
         # An unchanged repeat detects order-dependent conversion/export drift.
+        add(base)
+    return cases
+
+
+def interaction_matrix():
+    """Conflict and one-twip boundaries; outcomes must be measured in Word."""
+    cases = []
+
+    def add(parent, **changes):
+        values = {**parent["parameters"], **changes}
+        case = {"id": f"Q{len(cases) + 1:03}", "parent": parent["id"],
+                "changed": list(changes), "parameters": values}
+        cases.append(case)
+        return case
+
+    for original in (case for case in matrix() if case["parent"] is None):
+        base = {"id": f"Q{len(cases) + 1:03}", "parent": None, "changed": [],
+                "parameters": {**original["parameters"], "list_right": 720}}
+        cases.append(base)
+        for key, values in [
+            ("direct_right", [-720, -1, 0, 1, 719, 720, 721, 1440]),
+            ("direct_left", [-1, 0, 1, 719, 720, 721]),
+            ("direct_first", [-720, -361, -360, -359, -1, 0, 1, 359, 360, 361]),
+        ]:
+            for value in values:
+                add(base, **{key: value})
+        left = add(base, direct_left=0)
+        both = add(left, direct_right=0)
+        add(both, direct_first=0)
+        bidi = add(base, list_bidi=not base["parameters"]["rtl"])
+        add(bidi, direct_left=0)
+        add(bidi, direct_right=0)
         add(base)
     return cases
 
@@ -189,12 +225,14 @@ def build(cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new directory; existing paths are rejected")
+    parser.add_argument("--phase", choices=["baseline", "interactions"], default="baseline")
     args = parser.parse_args()
-    cases = matrix()
+    cases = matrix(args.phase)
     payload = build(cases)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "list-indent-probes.docx").write_bytes(payload)
-    manifest = {"phase": "authored-not-office-verified", "inputSha256": sha256(payload).hexdigest(),
+    manifest = {"phase": "authored-not-office-verified", "experiment": args.phase,
+                "inputSha256": sha256(payload).hexdigest(),
                 "units": "twips", "cases": cases,
                 "oracle": "Word PDF from a saved and reopened DOC; not the source DOCX PDF",
                 "inference": "none; inspect saved binary properties before classifying outcomes"}
