@@ -68,7 +68,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order, slide dimensions, Unicode/Windows-1252 text, outline text references, slide boundaries; superseded and deleted slides are not emitted | masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, Unicode/Windows-1252 text and outline references, individual text-frame anchors, nested group coordinates, shape rotation/flips, direct text margins/wrapping/vertical anchoring; superseded slides and deleted shapes are not emitted | master/style inheritance, character and paragraph formatting, manual line-break fidelity, visible shape geometry/fills/borders, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
@@ -349,8 +349,24 @@ legacy-specific renderer behavior or change per-format opt-in defaults.
 Resource policy for PPT reconstruction additionally limits each of retained
 outline text and emitted slide text to 128 MiB, and charges persist-directory
 entries against the record-work budget. Repeated references cannot bypass the
-text limit. XLS style tables are bounded, repeated fills/borders are interned,
+text limit. Expanded slide XML is capped at 256 MiB across the presentation;
+escaping and paragraph markup are charged before appending. Shape property
+entries share the record-work budget, group nesting is bounded to 64, and each
+slide can emit at most 100,000 shapes/groups. These are implementation resource
+policies, not file-format limits. XLS style tables are bounded, repeated fills/borders are interned,
 and the BIFF column-256 default-format sentinel never creates an extra column.
+
+PPT text-frame reconstruction follows [MS-PPT] `OfficeArtClientAnchor` and
+`OfficeArtClientTextbox`, and [MS-ODRAW] group/child anchors and shape properties.
+Only a shape's own text container supplies its text; action data is not traversed
+for display content. Child coordinate systems are preserved as ordinary PPTX
+groups. Text-only frames intentionally have no visible fill or outline; they do
+not claim to reproduce the source shape's geometry. Text still uses a warned
+18-point fallback until character/paragraph and master styles are implemented.
+Missing drawing records retain the earlier unpositioned-text fallback with a
+separate warning. Invalid or missing anchors in drawing-backed text, ambiguous
+coordinate spaces and zero-scale groups fail closed instead of guessing positions.
+No migration is required and the independent per-format opt-ins are unchanged.
 
 Treat converted OOXML as a derived search/view representation, preserve the
 original binary as the authoritative source, and gate production use on a

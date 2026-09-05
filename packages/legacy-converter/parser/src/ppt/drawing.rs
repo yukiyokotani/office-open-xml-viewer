@@ -1,0 +1,618 @@
+//! Positioned text-only reconstruction of the live slide's OfficeArt tree.
+//! [MS-PPT] 2.5.13, 2.7.1, 2.9.76 and [MS-ODRAW] 2.2.14/16/38/39/40.
+//! Output uses ECMA-376 DrawingML CT_(Group)Transform2D, never binary-aware paint.
+use super::*;
+
+pub(super) fn render(
+    slide: &[u8],
+    outline: &[String],
+    records: &mut usize,
+    text: &mut usize,
+    xml: &mut usize,
+) -> Result<Option<String>, String> {
+    let children = parse_records(slide, records)?;
+    let mut drawings = children.iter().filter(|r| r.kind == 1036);
+    let Some(drawing) = drawings.next() else {
+        return Ok(None);
+    };
+    if drawings.next().is_some() || drawing.version != 15 {
+        return Err(unsupported("invalid PowerPoint drawing container"));
+    }
+    let mut writer = Writer {
+        outline,
+        records,
+        text,
+        remaining: xml,
+        output: String::new(),
+        id: 1,
+    };
+    for dg in parse_records(drawing.payload, writer.records)? {
+        if dg.kind != 0xf002 || dg.version != 15 {
+            return Err(unsupported("invalid PowerPoint OfficeArt drawing"));
+        }
+        for child in parse_records(dg.payload, writer.records)? {
+            writer.node(child, false, 0)?;
+        }
+    }
+    Ok(Some(writer.output))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rect {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+impl Rect {
+    fn read(record: Record<'_>) -> Result<Self, String> {
+        let b = record.payload;
+        let values: Vec<i64> = match (record.kind, record.version, b.len()) {
+            (0xf010, 0, 8) => b
+                .chunks_exact(2)
+                .map(|v| i16::from_le_bytes([v[0], v[1]]) as i64)
+                .collect(),
+            (0xf010 | 0xf00f, 0, 16) | (0xf009, 1, 16) => b
+                .chunks_exact(4)
+                .map(|v| i32::from_le_bytes(v.try_into().expect("four bytes")) as i64)
+                .collect(),
+            _ => return Err(unsupported("invalid PowerPoint shape anchor")),
+        };
+        // PPT RectStruct is top/left/right/bottom; OfficeArt child/group bounds
+        // are left/top/right/bottom. Convert all coordinate spaces consistently.
+        let (left, top) = if record.kind == 0xf010 {
+            (values[1], values[0])
+        } else {
+            (values[0], values[1])
+        };
+        if values[2] < left || values[3] < top {
+            return Err(unsupported("inverted PowerPoint shape anchor"));
+        }
+        // One master unit = 1/576 inch = 1587.5 EMU. Signed rounding to nearest
+        // keeps negative off-slide positions instead of clamping them to zero.
+        let emu = |n: i64| (n * 3175 + n.signum()) / 2;
+        Ok(Self {
+            x: emu(left),
+            y: emu(top),
+            w: emu(values[2]) - emu(left),
+            h: emu(values[3]) - emu(top),
+        })
+    }
+}
+
+struct Shape<'a> {
+    flags: u32,
+    anchor: Option<Rect>,
+    child_space: Option<Rect>,
+    textbox: Option<Record<'a>>,
+    props: Properties,
+}
+
+impl<'a> Shape<'a> {
+    fn read(record: Record<'a>, nested: bool, budget: &mut usize) -> Result<Self, String> {
+        if record.kind != 0xf004 || record.version != 15 {
+            return Err(unsupported("invalid PowerPoint shape container"));
+        }
+        let mut flags = None;
+        let mut anchor = None;
+        let mut child_space = None;
+        let mut textbox = None;
+        let mut props = Properties::default();
+        for child in parse_records(record.payload, budget)? {
+            match child.kind {
+                0xf00a => {
+                    if flags.is_some() || child.version != 2 || child.payload.len() != 8 {
+                        return Err(unsupported("invalid PowerPoint shape flags"));
+                    }
+                    flags = Some(u32_at(child.payload, 4)?);
+                }
+                0xf010 | 0xf00f => {
+                    if anchor.is_some() || (child.kind == 0xf00f) != nested {
+                        return Err(unsupported("ambiguous PowerPoint shape coordinate space"));
+                    }
+                    anchor = Some(Rect::read(child)?);
+                }
+                0xf009 => {
+                    if child_space.is_some() {
+                        return Err(unsupported("duplicate PowerPoint group bounds"));
+                    }
+                    child_space = Some(Rect::read(child)?);
+                }
+                0xf00d => {
+                    if textbox.is_some() || child.version != 15 {
+                        return Err(unsupported("invalid PowerPoint shape text container"));
+                    }
+                    textbox = Some(child);
+                }
+                0xf00b => props.read(child, budget)?,
+                // ClientData contains actions/links/OLE references, not visible text.
+                _ => {}
+            }
+        }
+        Ok(Self {
+            flags: flags.ok_or_else(|| unsupported("missing PowerPoint shape flags"))?,
+            anchor,
+            child_space,
+            textbox,
+            props,
+        })
+    }
+    fn omitted(&self) -> bool {
+        self.flags & (8 | 16 | 1024) != 0
+    }
+    fn transform(&self, anchor: Rect, group: Option<Rect>) -> String {
+        let mut xml = format!("<a:xfrm rot=\"{}\" flipH=\"{}\" flipV=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/>", self.props.rotation, (self.flags >> 6) & 1, (self.flags >> 7) & 1, anchor.x, anchor.y, anchor.w, anchor.h);
+        if let Some(ch) = group {
+            xml.push_str(&format!(
+                "<a:chOff x=\"{}\" y=\"{}\"/><a:chExt cx=\"{}\" cy=\"{}\"/>",
+                ch.x, ch.y, ch.w, ch.h
+            ));
+        }
+        xml.push_str("</a:xfrm>");
+        xml
+    }
+}
+
+struct Properties {
+    rotation: i64,
+    margins: [u32; 4],
+    wrap: &'static str,
+    anchor: &'static str,
+    center: bool,
+}
+impl Default for Properties {
+    fn default() -> Self {
+        Self {
+            rotation: 0,
+            margins: [91440, 45720, 91440, 45720],
+            wrap: "square",
+            anchor: "t",
+            center: false,
+        }
+    }
+}
+impl Properties {
+    fn read(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+        // [MS-ODRAW] 2.2.7–9: six-byte property entries precede complex data.
+        // Even ignored complex properties must fit; never use their payload as XML.
+        if record.version != 3 {
+            return Err(unsupported("invalid PowerPoint shape property table"));
+        }
+        *budget = budget
+            .checked_sub(usize::from(record.instance))
+            .ok_or_else(|| unsupported("PowerPoint shape property work budget exceeded"))?;
+        let len = usize::from(record.instance) * 6;
+        let entries = record
+            .payload
+            .get(..len)
+            .ok_or_else(|| unsupported("truncated PowerPoint shape properties"))?;
+        let mut end = len;
+        for entry in entries.chunks_exact(6) {
+            let opid = u16_at(entry, 0)?;
+            let value = u32_at(entry, 2)?;
+            if opid & 0x8000 != 0 {
+                end = end
+                    .checked_add(value as usize)
+                    .filter(|n| *n <= record.payload.len())
+                    .ok_or_else(|| unsupported("truncated PowerPoint complex shape property"))?;
+                continue;
+            }
+            if opid & 0x4000 != 0 {
+                continue;
+            }
+            match opid {
+                // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> 1/60000 degree.
+                4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
+                0x81..=0x84 => {
+                    if value > 0x132f540 {
+                        return Err(unsupported("invalid PowerPoint text margin"));
+                    }
+                    self.margins[usize::from(opid - 0x81)] = value;
+                }
+                0x85 => self.wrap = if value == 2 { "none" } else { "square" },
+                0x87 if value <= 5 => {
+                    self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
+                    self.center = value >= 3;
+                }
+                _ => {}
+            }
+        }
+        if end != record.payload.len() {
+            return Err(unsupported("unexpected PowerPoint property data"));
+        }
+        Ok(())
+    }
+}
+
+struct Writer<'a, 'b> {
+    outline: &'a [String],
+    records: &'b mut usize,
+    text: &'b mut usize,
+    remaining: &'b mut usize,
+    output: String,
+    id: u32,
+}
+impl Writer<'_, '_> {
+    fn push(&mut self, value: &str) -> Result<(), String> {
+        append(&mut self.output, self.remaining, value)
+    }
+    fn next_id(&mut self) -> Result<u32, String> {
+        // Independent resource policy; IDs are output-local, never source actions.
+        if self.id >= 100_001 {
+            return Err(unsupported("too many PowerPoint drawing shapes"));
+        }
+        self.id += 1;
+        Ok(self.id)
+    }
+    fn node(&mut self, record: Record<'_>, nested: bool, depth: usize) -> Result<(), String> {
+        if depth > MAX_DEPTH {
+            return Err(unsupported("PowerPoint drawing nesting is too deep"));
+        }
+        match record.kind {
+            0xf003 => {
+                if record.version != 15 {
+                    return Err(unsupported("invalid PowerPoint group container"));
+                }
+                let children = parse_records(record.payload, self.records)?;
+                let first = children
+                    .first()
+                    .ok_or_else(|| unsupported("empty PowerPoint group"))?;
+                let group = Shape::read(*first, nested, self.records)?;
+                if group.omitted() {
+                    return Ok(());
+                }
+                if group.flags & 1 == 0 {
+                    return Err(unsupported("missing PowerPoint group flag"));
+                }
+                let patriarch = group.flags & 4 != 0;
+                if patriarch && nested {
+                    return Err(unsupported("nested PowerPoint patriarch group"));
+                }
+                if !patriarch {
+                    let anchor = group
+                        .anchor
+                        .ok_or_else(|| unsupported("missing PowerPoint group anchor"))?;
+                    let child_space = group
+                        .child_space
+                        .filter(|r| r.w > 0 && r.h > 0)
+                        .ok_or_else(|| unsupported("invalid PowerPoint group coordinate space"))?;
+                    let id = self.next_id()?;
+                    self.push(&format!("<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"{id}\" name=\"Legacy group {id}\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>{}</p:grpSpPr>", group.transform(anchor, Some(child_space))))?;
+                }
+                for child in &children[1..] {
+                    self.node(*child, !patriarch, depth + 1)?;
+                }
+                if !patriarch {
+                    self.push("</p:grpSp>")?;
+                }
+            }
+            0xf004 => {
+                let shape = Shape::read(record, nested, self.records)?;
+                if shape.omitted() {
+                    return Ok(());
+                }
+                let Some(textbox) = shape.textbox else {
+                    return Ok(());
+                };
+                let mut text = Vec::new();
+                // The only source of visible text is this shape's ClientTextbox.
+                for atom in parse_records(textbox.payload, self.records)? {
+                    match atom.kind {
+                        TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
+                            let value = decode_text(atom)?;
+                            charge_text(self.text, value.len())?;
+                            push_text(&mut text, value)?;
+                        }
+                        3998 => {
+                            let value = self
+                                .outline
+                                .get(u32_at(atom.payload, 0)? as usize)
+                                .ok_or_else(|| {
+                                    unsupported("PowerPoint outline text index out of range")
+                                })?;
+                            charge_text(self.text, value.len())?;
+                            push_text(&mut text, value.clone())?;
+                        }
+                        // Do not descend into interactive/action containers.
+                        _ => {}
+                    }
+                }
+                if text.is_empty() {
+                    return Ok(());
+                }
+                let anchor = shape
+                    .anchor
+                    .ok_or_else(|| unsupported("missing PowerPoint text shape anchor"))?;
+                let id = self.next_id()?;
+                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody>", shape.transform(anchor, None)))?;
+                let p = &shape.props;
+                self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
+                paragraphs(&text, &mut self.output, self.remaining)?;
+                self.push("</p:txBody></p:sp>")?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn append(output: &mut String, budget: &mut usize, value: &str) -> Result<(), String> {
+    *budget = budget
+        .checked_sub(value.len())
+        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+    output.push_str(value);
+    Ok(())
+}
+
+pub(super) fn paragraphs(
+    blocks: &[String],
+    output: &mut String,
+    budget: &mut usize,
+) -> Result<(), String> {
+    for block in blocks {
+        for line in block.split(['\r', '\n']) {
+            append(output, budget, "<a:p><a:r><a:rPr sz=\"1800\"/><a:t>")?;
+            // Bounded chunks prevent XML escaping of one large atom from allocating
+            // a multiple of the entire input before the XML budget is checked.
+            let mut remaining = line;
+            while !remaining.is_empty() {
+                let mut end = remaining.len().min(1024);
+                while !remaining.is_char_boundary(end) {
+                    end -= 1;
+                }
+                append(output, budget, &xml_text(&remaining[..end]))?;
+                remaining = &remaining[end..];
+            }
+            append(
+                output,
+                budget,
+                "</a:t></a:r><a:endParaRPr sz=\"1800\"/></a:p>",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::persist::tests::record;
+    use super::*;
+
+    fn ints(values: &[i32]) -> Vec<u8> {
+        values.iter().flat_map(|n| n.to_le_bytes()).collect()
+    }
+    fn sp(flags: i32, children: Vec<Vec<u8>>) -> Vec<u8> {
+        record(
+            15,
+            0xf004,
+            &[
+                vec![record((202 << 4) | 2, 0xf00a, &ints(&[42, flags]))],
+                children,
+            ]
+            .concat()
+            .concat(),
+        )
+    }
+    fn text(value: &str) -> Vec<u8> {
+        record(15, 0xf00d, &record(0, 4008, value.as_bytes()))
+    }
+    fn drawing(shapes: Vec<Vec<u8>>) -> Vec<u8> {
+        record(15, 1036, &record(15, 0xf002, &shapes.concat()))
+    }
+    fn xml(bytes: &[u8]) -> Result<String, String> {
+        render(
+            bytes,
+            &["Outline".into()],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+        )
+        .map(|x| x.unwrap_or_default())
+    }
+
+    fn properties(values: &[(u16, u32)]) -> Vec<u8> {
+        let payload: Vec<u8> = values
+            .iter()
+            .flat_map(|(id, value)| {
+                [id.to_le_bytes().to_vec(), value.to_le_bytes().to_vec()].concat()
+            })
+            .collect();
+        record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn preserves_signed_rotation_flips_and_emu_text_margins() {
+        let bytes = drawing(vec![sp(
+            0x2c0,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                text("Rotated"),
+                properties(&[
+                    (4, (-45i32 * 65536) as u32),
+                    (0x81, 12700),
+                    (0x82, 25400),
+                    (0x83, 38100),
+                    (0x84, 50800),
+                    (0x85, 2),
+                    (0x87, 4),
+                ]),
+            ],
+        )]);
+        let out = xml(&bytes).unwrap();
+        assert!(out.contains("rot=\"-2700000\" flipH=\"1\" flipV=\"1\""));
+        assert!(out.contains("wrap=\"none\" anchor=\"ctr\" anchorCtr=\"1\" lIns=\"12700\" tIns=\"25400\" rIns=\"38100\" bIns=\"50800\""));
+    }
+
+    #[test]
+    fn validates_complex_property_tails_and_charges_property_work() {
+        let malformed = drawing(vec![sp(0x200, vec![properties(&[(0x8380, 100)])])]);
+        assert!(xml(&malformed)
+            .unwrap_err()
+            .contains("complex shape property"));
+        let opts = properties(&[(4, 0), (0x85, 0)]);
+        let entry = parse_records(&opts, &mut 1).unwrap()[0];
+        assert!(Properties::default()
+            .read(entry, &mut 1)
+            .unwrap_err()
+            .contains("work budget"));
+    }
+
+    #[test]
+    fn escapes_multibyte_text_across_chunks_without_losing_unicode() {
+        let text = format!("{}日本語<&", "x".repeat(1023));
+        let mut output = String::new();
+        paragraphs(&[text], &mut output, &mut 4096).unwrap();
+        assert!(output.contains("日本語&lt;&amp;"));
+    }
+
+    #[test]
+    fn rejects_zero_group_scale_missing_anchors_and_deep_nesting() {
+        let group_header = sp(
+            0x201,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                record(1, 0xf009, &ints(&[0, 0, 0, 576])),
+            ],
+        );
+        assert!(xml(&drawing(vec![record(15, 0xf003, &group_header)])).is_err());
+        assert!(xml(&drawing(vec![sp(0, vec![text("missing")])])).is_err());
+        let mut group = sp(
+            0x202,
+            vec![record(0, 0xf00f, &ints(&[0, 0, 576, 576])), text("deep")],
+        );
+        for _ in 0..=MAX_DEPTH {
+            group = record(
+                15,
+                0xf003,
+                &[
+                    sp(
+                        0x203,
+                        vec![
+                            record(0, 0xf00f, &ints(&[0, 0, 576, 576])),
+                            record(1, 0xf009, &ints(&[0, 0, 576, 576])),
+                        ],
+                    ),
+                    group,
+                ]
+                .concat(),
+            );
+        }
+        let mut writer = Writer {
+            outline: &[],
+            records: &mut MAX_RECORDS.clone(),
+            text: &mut MAX_TEXT_BYTES.clone(),
+            remaining: &mut (1024 * 1024),
+            output: String::new(),
+            id: 1,
+        };
+        let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
+        assert!(writer
+            .node(record, true, 0)
+            .unwrap_err()
+            .contains("nesting"));
+    }
+
+    #[test]
+    fn separate_frames_use_ppt_top_left_order_and_both_anchor_widths() {
+        let small: Vec<u8> = [144i16, -288, 576, 432]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        let bytes = drawing(vec![
+            sp(0x200, vec![record(0, 0xf010, &small), text("First")]),
+            sp(
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[576, 1152, 1728, 864])),
+                    text("Second"),
+                ],
+            ),
+        ]);
+        let out = xml(&bytes).unwrap();
+        assert_eq!(out.matches("<p:sp>").count(), 2);
+        assert!(out.contains("<a:off x=\"-457200\" y=\"228600\"/>"));
+        assert!(out.contains("<a:ext cx=\"1371600\" cy=\"457200\"/>"));
+        assert!(out.contains("<a:off x=\"1828800\" y=\"914400\"/>"));
+        assert!(out.find("First").unwrap() < out.find("Second").unwrap());
+    }
+
+    #[test]
+    fn preserves_group_coordinates_and_resolves_only_owned_outline_text() {
+        let group = record(
+            15,
+            0xf003,
+            &[
+                sp(
+                    0x201,
+                    vec![
+                        record(0, 0xf010, &ints(&[288, 576, 1728, 864])),
+                        record(1, 0xf009, &ints(&[100, 200, 500, 600])),
+                    ],
+                ),
+                sp(
+                    0x202,
+                    vec![
+                        record(0, 0xf00f, &ints(&[100, 300, 300, 400])),
+                        record(15, 0xf00d, &record(0, 3998, &ints(&[0]))),
+                    ],
+                ),
+            ]
+            .concat(),
+        );
+        let out = xml(&drawing(vec![group])).unwrap();
+        assert!(out.contains("<p:grpSp>"));
+        assert!(out.contains("<a:chOff x=\"158750\" y=\"317500\"/>"));
+        assert!(out.contains("<a:chExt cx=\"635000\" cy=\"635000\"/>"));
+        assert!(out.contains("<a:off x=\"158750\" y=\"476250\"/>"));
+        assert_eq!(out.matches("Outline").count(), 1);
+        assert!(out.contains("id=\"2\""));
+        assert!(out.contains("id=\"3\""));
+    }
+
+    #[test]
+    fn skips_deleted_shapes_and_does_not_collect_client_data_text() {
+        let anchor = record(0, 0xf010, &ints(&[0, 0, 576, 576]));
+        let out = xml(&drawing(vec![
+            sp(0x208, vec![anchor.clone(), text("Deleted")]),
+            sp(0x210, vec![anchor.clone(), text("OLE")]),
+            sp(
+                0x200,
+                vec![
+                    anchor,
+                    text("Visible"),
+                    record(15, 0xf011, &record(0, 4008, b"Action")),
+                ],
+            ),
+        ]))
+        .unwrap();
+        assert!(out.contains("Visible"));
+        for omitted in ["Deleted", "OLE", "Action"] {
+            assert!(!out.contains(omitted));
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_anchors_and_unbounded_xml() {
+        assert!(xml(&drawing(vec![sp(
+            0x200,
+            vec![record(0, 0xf010, &[0; 7]), text("x")]
+        )]))
+        .is_err());
+        let bytes = drawing(vec![sp(
+            0x200,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                text("\r".repeat(100).as_str()),
+            ],
+        )]);
+        assert!(render(
+            &bytes,
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut 1024
+        )
+        .is_err());
+    }
+}

@@ -9,6 +9,7 @@
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
 
+mod drawing;
 mod persist;
 
 const DOCUMENT_CONTAINER: u16 = 1000;
@@ -53,6 +54,10 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let presentation = persist::resolve(&document, current_edit, &mut record_budget)?;
     let mut slides = Vec::new();
     let mut text_budget = MAX_TEXT_BYTES;
+    // Limit retained expanded XML independently of ZIP compression. Paragraph
+    // markup and escaping must not amplify repeated short text beyond this cap.
+    let mut xml_budget = 256 * 1024 * 1024;
+    let mut fallback = false;
     for (record, outline) in &presentation.slides {
         if contains_record(
             record.payload,
@@ -62,25 +67,39 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         )? {
             return Err(unsupported("encrypted PowerPoint slide"));
         }
-        let mut text = Vec::new();
-        collect_text(
+        let tree = match drawing::render(
             record.payload,
-            0,
-            &mut record_budget,
-            &mut text,
             outline,
+            &mut record_budget,
             &mut text_budget,
-        )?;
-        slides.push(text);
+            &mut xml_budget,
+        )? {
+            Some(tree) => tree,
+            None => {
+                fallback = true;
+                let mut text = Vec::new();
+                collect_text(
+                    record.payload,
+                    0,
+                    &mut record_budget,
+                    &mut text,
+                    outline,
+                    &mut text_budget,
+                )?;
+                fallback_text(&text, &mut xml_budget)?
+            }
+        };
+        slides.push(slide_xml(&tree, &mut xml_budget)?);
     }
-    let bytes = build_pptx(&slides, presentation.size, max_output_bytes)?;
-    Ok(PptConversion {
-        bytes,
-        warnings: vec![
-            "legacy-ppt:slide-text-only".into(),
-            "legacy-ppt:masters-formatting-media-and-actions-omitted".into(),
-        ],
-    })
+    let bytes = build_pptx(slides, presentation.size, max_output_bytes)?;
+    let mut warnings = vec![
+        "legacy-ppt:positioned-text-only".into(),
+        "legacy-ppt:masters-text-formatting-shapes-media-and-actions-omitted".into(),
+    ];
+    if fallback {
+        warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
+    }
+    Ok(PptConversion { bytes, warnings })
 }
 
 /// Parse the sole CurrentUserAtom from the Current User stream.
@@ -346,7 +365,7 @@ fn push_text(output: &mut Vec<String>, text: String) -> Result<(), String> {
 }
 
 fn build_pptx(
-    slides: &[Vec<String>],
+    slides: Vec<String>,
     size: (u32, u32),
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, String> {
@@ -376,7 +395,7 @@ fn build_pptx(
         ),
         ("ppt/theme/theme1.xml".into(), theme()),
     ];
-    for (index, slide) in slides.iter().enumerate() {
+    for (index, slide) in slides.into_iter().enumerate() {
         let id = index + 1;
         content_types.push_str(&format!(
             "<Override PartName=\"/ppt/slides/slide{id}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
@@ -390,7 +409,7 @@ fn build_pptx(
             "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{id}.xml\"/>",
             id + 1
         ));
-        parts.push((format!("ppt/slides/slide{id}.xml"), slide_xml(slide)));
+        parts.push((format!("ppt/slides/slide{id}.xml"), slide));
         parts.push((format!("ppt/slides/_rels/slide{id}.xml.rels"), slide_rels()));
     }
     content_types.push_str("</Types>");
@@ -402,24 +421,29 @@ fn build_pptx(
     write_package(&parts, max_output_bytes)
 }
 
-fn slide_xml(blocks: &[String]) -> String {
+fn slide_xml(tree: &str, budget: &mut usize) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#,
     );
+    let end = "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
+    // The tree has already been charged. Only charge the slide wrapper here.
+    *budget = budget
+        .checked_sub(xml.len() + end.len())
+        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+    xml.push_str(tree);
+    xml.push_str(end);
+    Ok(xml)
+}
+
+fn fallback_text(blocks: &[String], budget: &mut usize) -> Result<String, String> {
+    let mut xml = String::new();
     if !blocks.is_empty() {
-        xml.push_str("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Legacy slide text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"8229600\" cy=\"5943600\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>");
-        for block in blocks {
-            for line in block.split(['\r', '\n']) {
-                xml.push_str("<a:p><a:r><a:rPr lang=\"ja-JP\" sz=\"1800\"/><a:t>");
-                xml.push_str(&xml_text(line));
-                xml.push_str("</a:t></a:r><a:endParaRPr lang=\"ja-JP\" sz=\"1800\"/></a:p>");
-            }
-        }
-        xml.push_str("</p:txBody></p:sp>");
+        drawing::append(&mut xml, budget, "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Legacy slide text\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"457200\" y=\"457200\"/><a:ext cx=\"8229600\" cy=\"5943600\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\"/><a:lstStyle/>")?;
+        drawing::paragraphs(blocks, &mut xml, budget)?;
+        drawing::append(&mut xml, budget, "</p:txBody></p:sp>")?;
     }
-    xml.push_str("</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
-    xml
+    Ok(xml)
 }
 
 fn slide_rels() -> String {
