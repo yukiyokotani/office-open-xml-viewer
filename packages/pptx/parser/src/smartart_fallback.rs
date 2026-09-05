@@ -308,6 +308,7 @@ fn append_point_paragraphs(
         None,
         None,
         Default::default(),
+        std::array::from_fn(|_| None),
         Default::default(),
         &empty_level_bullets(),
         None,

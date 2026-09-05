@@ -69,6 +69,45 @@ pub(crate) fn merge_level_sizes(
     out
 }
 
+/// Per-list-level default text colours. Index 0..=8 maps to
+/// `lvl1pPr`..`lvl9pPr` (ECMA-376 §21.1.2.4). Keeping these per level is
+/// essential: applying a layout's lvl1 colour as a body-wide fallback makes a
+/// `pPr@lvl="1"` paragraph inherit the wrong tier.
+pub(crate) type LevelColors = [Option<String>; 9];
+
+pub(crate) fn read_level_colors(
+    list_style: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelColors {
+    let mut out: LevelColors = std::array::from_fn(|_| None);
+    for (lvl, slot) in out.iter_mut().enumerate() {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        *slot = list_style
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == tag)
+            .and_then(|lp| child(lp, "defRPr"))
+            .and_then(|rp| text_property_color(rp, theme));
+    }
+    out
+}
+
+pub(crate) fn extract_level_colors(
+    tx_body: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> LevelColors {
+    child(tx_body, "lstStyle")
+        .map(|list_style| read_level_colors(list_style, theme))
+        .unwrap_or_else(|| std::array::from_fn(|_| None))
+}
+
+pub(crate) fn has_any_level_color(colors: &LevelColors) -> bool {
+    colors.iter().any(Option::is_some)
+}
+
+pub(crate) fn merge_level_colors(primary: &LevelColors, fallback: &LevelColors) -> LevelColors {
+    std::array::from_fn(|lvl| primary[lvl].clone().or_else(|| fallback[lvl].clone()))
+}
+
 /// Per-list-level paragraph indents (EMU) — the `marL`/`marR`/`indent` attributes
 /// of a `<a:lvlNpPr>` (ECMA-376 §21.1.2.4.13; `lvlNpPr` is a
 /// `CT_TextParagraphProperties`, so these are attributes ON the level element
@@ -452,6 +491,7 @@ pub(crate) fn parse_text_body(
     inherited_font_size: Option<f64>,
     inherited_font_family: Option<String>,
     inherited_level_font_sizes: LevelFontSizes,
+    inherited_level_colors: LevelColors,
     inherited_level_indents: LevelIndents,
     inherited_level_bullets: &LevelBullets,
     inherited_bold: Option<bool>,
@@ -640,6 +680,8 @@ pub(crate) fn parse_text_body(
     // their size by `lvl` so nested bullets shrink (ECMA-376 §21.1.2.4).
     let own_level_sizes = extract_level_font_sizes(tx_body);
     let effective_level_sizes = merge_level_sizes(&own_level_sizes, &inherited_level_font_sizes);
+    let own_level_colors = extract_level_colors(tx_body, theme);
+    let effective_level_colors = merge_level_colors(&own_level_colors, &inherited_level_colors);
     // Effective per-list-level indents: this shape's own lstStyle wins per
     // axis/level, else the layout/master inherited per-level indents. A paragraph
     // that omits marL/marR/indent picks them by `lvl` from this cascade before
@@ -726,6 +768,17 @@ pub(crate) fn parse_text_body(
             )
         })
         .collect();
+
+    // A paragraph's own pPr > defRPr remains the most specific colour. When
+    // absent, inherit the defRPr fill from the matching list level rather than
+    // the text body's lvl1 default. `pPr@lvl="1"` selects lvl2pPr.
+    for paragraph in &mut paragraphs {
+        if paragraph.def_color.is_none() {
+            paragraph.def_color = effective_level_colors
+                .get(paragraph.lvl as usize)
+                .and_then(Clone::clone);
+        }
+    }
 
     // ECMA-376 §21.1.2.3.9, ST_TextCapsType §20.1.10.64: a run inherits
     // cap="all"/"small" from the shape's own lstStyle defRPr, else from the

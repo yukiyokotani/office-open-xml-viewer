@@ -12,11 +12,12 @@ use crate::shape::{
     extract_decorative_shapes, resolve_picture_shape_properties, PictureShapeProperties,
 };
 use crate::text::{
-    empty_level_bullets, extract_level_bullets, extract_level_font_sizes, extract_level_indents,
-    extract_lvl1_font_size, has_any_level_bullet, has_any_level_indent, has_any_level_size,
-    merge_level_bullets, merge_level_indents, merge_level_sizes, read_level_bullets,
+    empty_level_bullets, extract_level_bullets, extract_level_colors, extract_level_font_sizes,
+    extract_level_indents, extract_lvl1_font_size, has_any_level_bullet, has_any_level_color,
+    has_any_level_indent, has_any_level_size, merge_level_bullets, merge_level_colors,
+    merge_level_indents, merge_level_sizes, read_level_bullets, read_level_colors,
     read_level_font_sizes, read_level_indents, text_property_color, BuMarker, LevelBullets,
-    LevelFontSizes, LevelIndents,
+    LevelColors, LevelFontSizes, LevelIndents,
 };
 use crate::theme::{
     bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
@@ -70,6 +71,9 @@ pub(crate) struct LayoutPlaceholders {
     /// Per-list-level default font sizes (pt) per placeholder type.
     pub(crate) by_type_level_sizes: HashMap<String, LevelFontSizes>,
     pub(crate) by_type_master_level_sizes: HashMap<String, LevelFontSizes>,
+    pub(crate) by_idx_level_colors: HashMap<u32, LevelColors>,
+    pub(crate) by_type_level_colors: HashMap<String, LevelColors>,
+    pub(crate) by_type_master_level_colors: HashMap<String, LevelColors>,
     /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) per
     /// placeholder idx — what a paragraph with no own `marL`/`marR`/`indent`
     /// inherits from the authored list-style cascade (ECMA-376 §21.1.2.4.13),
@@ -374,6 +378,35 @@ impl LayoutPlaceholders {
                 }
             })
             .unwrap_or([None; 9])
+    }
+
+    pub(crate) fn lookup_level_colors(&self, ph_type: &str, ph_idx: Option<u32>) -> LevelColors {
+        if let Some(i) = ph_idx {
+            return self
+                .by_idx_level_colors
+                .get(&i)
+                .cloned()
+                .or_else(|| self.by_type_master_level_colors.get(ph_type).cloned())
+                .or_else(|| {
+                    if ph_type == "obj" {
+                        self.by_type_master_level_colors.get("").cloned()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| std::array::from_fn(|_| None));
+        }
+        self.by_type_level_colors
+            .get(ph_type)
+            .cloned()
+            .or_else(|| {
+                if ph_type == "body" {
+                    self.by_type_level_colors.get("").cloned()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| std::array::from_fn(|_| None))
     }
 
     /// Per-list-level inherited paragraph indents (lvl1..lvl9). Same idx-strict
@@ -1204,6 +1237,57 @@ pub(crate) fn parse_master_level_font_sizes(
     map
 }
 
+/// Per-list-level default run colours from the master placeholder cascade.
+/// Per-placeholder list styles win per level; missing levels fall back to the
+/// matching master txStyles category.
+pub(crate) fn parse_master_level_colors(
+    root: roxmltree::Node<'_, '_>,
+    theme: &HashMap<String, String>,
+) -> HashMap<String, LevelColors> {
+    let mut specific: HashMap<String, LevelColors> = HashMap::new();
+    if let Some(sp_tree) = child(root, "cSld").and_then(|n| child(n, "spTree")) {
+        for sp in sp_tree
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sp")
+        {
+            if let Some(ph) = sp
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "ph")
+            {
+                let ph_type = attr(&ph, "type").unwrap_or_default();
+                if let Some(tx_body) = child(sp, "txBody") {
+                    let colors = extract_level_colors(tx_body, theme);
+                    if has_any_level_color(&colors) {
+                        specific.entry(ph_type).or_insert(colors);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut generic: HashMap<String, LevelColors> = HashMap::new();
+    if let Some(tx_styles) = child(root, "txStyles") {
+        for (style_name, ph_types) in MASTER_TXSTYLE_PH_TYPES {
+            if let Some(style_node) = child(tx_styles, style_name) {
+                let colors = read_level_colors(style_node, theme);
+                if has_any_level_color(&colors) {
+                    for ph_type in *ph_types {
+                        generic.insert((*ph_type).to_owned(), colors.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    for (ph_type, colors) in generic {
+        specific
+            .entry(ph_type)
+            .and_modify(|current| *current = merge_level_colors(current, &colors))
+            .or_insert(colors);
+    }
+    specific
+}
+
 /// Per-list-level paragraph indents (`marL`/`marR`/`indent`, EMU) from the master,
 /// keyed by ph_type. Mirrors `parse_master_level_font_sizes` exactly (same per-shape
 /// lstStyle then `txStyles` tiers via `MASTER_TXSTYLE_PH_TYPES`): a master body
@@ -1550,6 +1634,7 @@ pub(crate) fn parse_layout_placeholders(
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_colors: &HashMap<String, LevelColors>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
@@ -1572,6 +1657,7 @@ pub(crate) fn parse_layout_placeholders(
         by_type_master_font_size: master_font_sizes.clone(),
         by_type_master_font_family: master_font_families.clone(),
         by_type_master_level_sizes: master_level_font_sizes.clone(),
+        by_type_master_level_colors: master_level_colors.clone(),
         by_type_master_level_indents: master_level_indents.clone(),
         by_type_master_level_bullets: master_level_bullets.clone(),
         by_type_master_anchor: master_anchors.clone(),
@@ -1628,6 +1714,9 @@ pub(crate) fn parse_layout_placeholders(
         let layout_level_sizes: LevelFontSizes = child(sp, "txBody")
             .map(extract_level_font_sizes)
             .unwrap_or([None; 9]);
+        let layout_level_colors: LevelColors = child(sp, "txBody")
+            .map(|tx_body| extract_level_colors(tx_body, theme))
+            .unwrap_or_else(|| std::array::from_fn(|_| None));
         // Per-level indents (marL/marR/indent) from the layout placeholder's own
         // lstStyle, the inherited list-indent cascade (ECMA-376 §21.1.2.4.13).
         let layout_level_indents: LevelIndents = child(sp, "txBody")
@@ -1797,6 +1886,14 @@ pub(crate) fn parse_layout_placeholders(
                 if has_any_level_size(&level_sizes) {
                     lph.by_idx_level_sizes.entry(idx).or_insert(level_sizes);
                 }
+                let empty_colors: LevelColors = std::array::from_fn(|_| None);
+                let level_colors = merge_level_colors(
+                    &layout_level_colors,
+                    master_level_colors.get(&ph_type).unwrap_or(&empty_colors),
+                );
+                if has_any_level_color(&level_colors) {
+                    lph.by_idx_level_colors.entry(idx).or_insert(level_colors);
+                }
                 // Per-level indents: layout lstStyle wins per axis/level, else master.
                 let level_indents = merge_level_indents(
                     &layout_level_indents,
@@ -1896,6 +1993,16 @@ pub(crate) fn parse_layout_placeholders(
                 lph.by_type_level_sizes
                     .entry(ph_type.clone())
                     .or_insert(type_level_sizes);
+            }
+            let empty_colors: LevelColors = std::array::from_fn(|_| None);
+            let type_level_colors = merge_level_colors(
+                &layout_level_colors,
+                master_level_colors.get(&ph_type).unwrap_or(&empty_colors),
+            );
+            if has_any_level_color(&type_level_colors) {
+                lph.by_type_level_colors
+                    .entry(ph_type.clone())
+                    .or_insert(type_level_colors);
             }
             let type_level_indents = merge_level_indents(
                 &layout_level_indents,
@@ -2013,6 +2120,11 @@ pub(crate) fn parse_layout_placeholders(
             .entry(ph_type.clone())
             .or_insert(*value);
     }
+    for (ph_type, value) in master_level_colors {
+        lph.by_type_level_colors
+            .entry(ph_type.clone())
+            .or_insert_with(|| value.clone());
+    }
     for (ph_type, value) in master_level_indents {
         lph.by_type_level_indents
             .entry(ph_type.clone())
@@ -2092,6 +2204,7 @@ pub(crate) fn parse_layout(
     master_font_sizes: &HashMap<String, f64>,
     master_font_families: &HashMap<String, String>,
     master_level_font_sizes: &HashMap<String, LevelFontSizes>,
+    master_level_colors: &HashMap<String, LevelColors>,
     master_level_indents: &HashMap<String, LevelIndents>,
     master_level_bullets: &HashMap<String, LevelBullets>,
     master_anchors: &HashMap<String, String>,
@@ -2122,6 +2235,7 @@ pub(crate) fn parse_layout(
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
+        master_level_colors,
         master_level_indents,
         master_level_bullets,
         master_anchors,
@@ -2190,6 +2304,7 @@ pub(crate) struct ParsedMaster {
     pub(crate) master_font_sizes: HashMap<String, f64>,
     pub(crate) master_font_families: HashMap<String, String>,
     pub(crate) master_level_font_sizes: HashMap<String, LevelFontSizes>,
+    pub(crate) master_level_colors: HashMap<String, LevelColors>,
     pub(crate) master_level_indents: HashMap<String, LevelIndents>,
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
     pub(crate) master_anchors: HashMap<String, String>,
@@ -2223,6 +2338,8 @@ pub(crate) struct EffectiveMaster {
     pub(crate) master_bg: Option<Fill>,
     /// Master txStyles placeholder colors re-resolved against `theme`.
     pub(crate) master_color: HashMap<String, String>,
+    /// Master list-level colours re-resolved against `theme`.
+    pub(crate) master_level_colors: HashMap<String, LevelColors>,
     /// Master per-level bullet colors re-resolved against `theme`.
     pub(crate) master_level_bullets: HashMap<String, LevelBullets>,
 }
@@ -2315,6 +2432,9 @@ pub(crate) fn build_master_bundle(
     let master_level_font_sizes = master_root
         .map(parse_master_level_font_sizes)
         .unwrap_or_default();
+    let master_level_colors = master_root
+        .map(|root| parse_master_level_colors(root, &theme))
+        .unwrap_or_default();
     let master_level_indents = master_root
         .map(parse_master_level_indents)
         .unwrap_or_default();
@@ -2367,6 +2487,7 @@ pub(crate) fn build_master_bundle(
         master_font_sizes,
         master_font_families,
         master_level_font_sizes,
+        master_level_colors,
         master_level_indents,
         master_level_bullets,
         master_anchors,
@@ -2417,6 +2538,7 @@ mod placeholder_geometry_tests {
             master_font_sizes,
             &HashMap::<String, String>::new(),
             &HashMap::<String, LevelFontSizes>::new(),
+            &HashMap::<String, LevelColors>::new(),
             &HashMap::<String, LevelIndents>::new(),
             &HashMap::<String, LevelBullets>::new(),
             &HashMap::<String, String>::new(),
@@ -2677,6 +2799,7 @@ mod placeholder_geometry_tests {
 
         let placeholders = parse_layout_placeholders(
             doc.root_element(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
