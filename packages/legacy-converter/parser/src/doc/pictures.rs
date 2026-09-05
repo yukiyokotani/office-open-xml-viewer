@@ -45,14 +45,14 @@ impl<'a> Store<'a> {
         }
         self.occurrences += 1;
         let id = self.occurrences;
-        let [cx, cy] = picture.extent;
-        let [top, bottom, left, right] = picture.crop;
-        let [flip_h, flip_v] = picture.flip.map(u8::from);
-        let rotation = picture.rotation;
-        // ECMA-376 20.4.2.8, 20.2.2.5, 20.1.8.55. Namespace declarations
-        // are local so documents without pictures retain the same XML bytes.
-        Ok(format!(
-            r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{id}" name="Legacy picture {id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{id}" name="Legacy picture {id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rImg{offset}"/><a:srcRect l="{left}" t="{top}" r="{right}" b="{bottom}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="{rotation}" flipH="{flip_h}" flipV="{flip_v}"><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+        Ok(picture.xml(
+            id,
+            &format!("rImg{offset}"),
+            &format!(
+                r#"<wp:inline><wp:extent cx="{}" cy="{}"/>"#,
+                picture.extent[0], picture.extent[1]
+            ),
+            "</wp:inline>",
         ))
     }
     pub fn relationships(&self) -> String {
@@ -74,12 +74,26 @@ impl<'a> Store<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct Picture<'a> {
-    image: Image<'a>,
-    extent: [i64; 2],
-    crop: [i64; 4],
-    flip: [bool; 2],
-    rotation: i64,
+pub(super) struct Picture<'a> {
+    pub image: Image<'a>,
+    pub extent: [i64; 2],
+    pub crop: [i64; 4],
+    pub flip: [bool; 2],
+    pub rotation: i64,
+}
+
+impl Picture<'_> {
+    /// Ordinary DrawingML content, shared by inline and floating DOC pictures.
+    /// All caller-supplied fragments are generated from validated numeric/enumerated values.
+    pub fn xml(&self, id: u32, relationship: &str, opening: &str, closing: &str) -> String {
+        let [cx, cy] = self.extent;
+        let [top, bottom, left, right] = self.crop;
+        let [flip_h, flip_v] = self.flip.map(u8::from);
+        let rotation = self.rotation;
+        format!(
+            r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{opening}<wp:docPr id="{id}" name="Legacy picture {id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{id}" name="Legacy picture {id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{relationship}"/><a:srcRect l="{left}" t="{top}" r="{right}" b="{bottom}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="{rotation}" flipH="{flip_h}" flipV="{flip_v}"><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>{closing}</w:drawing>"#
+        )
+    }
 }
 
 fn read<'a>(
@@ -177,17 +191,28 @@ fn extent(data: &[u8], goal: usize, scale: usize) -> Result<i64, String> {
 }
 
 #[derive(Default)]
-struct Options {
+pub(super) struct Options {
     shape: Option<u16>,
     passive_picture: bool,
     blips: usize,
-    pib: Option<usize>,
-    crop: [i64; 4],
+    pub pib: Option<usize>,
+    pub crop: [i64; 4],
     flip: [bool; 2],
-    rotation: i64,
+    pub rotation: i64,
 }
 impl Options {
     fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+        self.apply_mode(record, budget, true)
+    }
+    pub fn apply_indexed(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+        self.apply_mode(record, budget, false)
+    }
+    fn apply_mode(
+        &mut self,
+        record: Record<'_>,
+        budget: &mut usize,
+        inline: bool,
+    ) -> Result<(), String> {
         if record.version != 3 {
             return Err(unsupported("invalid Word picture option version"));
         }
@@ -205,14 +230,20 @@ impl Options {
             let value = u32_at(entry, 2)?;
             // MS-ODRAW 2.2.15: all BLIP-valued properties consume a slot,
             // regardless of fBid/fComplex/op. The visible picture is pib.
-            if matches!(
-                id,
-                0x104 | 0x10f | 0x186 | 0x1c5 | 0x545 | 0x585 | 0x5c5 | 0x605
-            ) {
+            if inline
+                && matches!(
+                    id,
+                    0x104 | 0x10f | 0x186 | 0x1c5 | 0x545 | 0x585 | 0x5c5 | 0x605
+                )
+            {
                 if id == 0x104 {
                     self.pib = Some(self.blips);
                 }
                 self.blips += 1;
+                continue;
+            }
+            if !inline && key == 0x4104 {
+                self.pib = (value as usize).checked_sub(1);
                 continue;
             }
             if key & 0x8000 != 0 {

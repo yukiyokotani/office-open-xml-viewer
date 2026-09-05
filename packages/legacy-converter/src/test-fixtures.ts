@@ -1,5 +1,5 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
   const textOffset = 0x400;
@@ -39,9 +39,19 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     view.setUint32(0xca, table.length + dop.length, true);
     view.setUint32(0xce, sectionTable.length, true);
   }
+  const floating = options.floatingAnchors ?? new Uint8Array();
+  const drawing = options.drawingGroupData ?? new Uint8Array();
+  if (floating.length) {
+    view.setUint32(0x1da, table.length + dop.length + sectionTable.length, true);
+    view.setUint32(0x1de, floating.length, true);
+  }
+  if (drawing.length) {
+    view.setUint32(0x22a, table.length + dop.length + sectionTable.length + floating.length, true);
+    view.setUint32(0x22e, drawing.length, true);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop, sectionTable)],
+    ['0Table', concat(table, dop, sectionTable, floating, drawing)],
     ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }

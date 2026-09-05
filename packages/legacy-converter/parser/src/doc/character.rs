@@ -23,10 +23,13 @@ pub struct Picture {
 }
 
 impl Picture {
+    pub fn passive_special(self) -> bool {
+        self.special && !self.data && !self.ole && !self.object
+    }
     /// MS-DOC 2.6.1: only a special U+0001 without binary-data/OLE flags
     /// denotes a PICFAndOfficeArtData. The caller checks the character code.
     pub fn inline_location(self) -> Result<Option<usize>, String> {
-        if !self.special || self.data || self.ole || self.object {
+        if !self.passive_special() {
             return Ok(None);
         }
         let location = self

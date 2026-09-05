@@ -236,6 +236,19 @@ impl<'a> Formatting<'a> {
             .inline_location()
     }
 
+    pub fn floating_picture_allowed(
+        &mut self,
+        style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<bool, String> {
+        Ok(self
+            .run_properties(style, fc, prm, prcs)?
+            .picture
+            .passive_special())
+    }
+
     fn run_properties(
         &mut self,
         paragraph_style: usize,

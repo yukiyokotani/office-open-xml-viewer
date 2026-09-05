@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master foreground objects, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
@@ -140,8 +140,24 @@ the existing DOCX parser and renderer remain unchanged. Unsupported inline
 pictures emit a loss warning. Restoring image extents can change line heights
 and pagination; this is not a claim of complete Word layout fidelity.
 
-The picture cache is document-owned and limited to 100,000 source locations,
-one million record/property/marker operations and 128 MiB of retained media.
+DOC floating JPEG/PNG picture frames use main-story `PlcfSpa` anchors and
+`OfficeArtClientAnchor` indices (MS-DOC 2.8.27, 2.9.168, 2.9.253). The drawing
+store's delayed BLIPs refer to `WordDocument`, not the inline picture `Data`
+stream (2.9.171). Explicit signed positions relative to the page, margin,
+column or paragraph, rectangular extents, cropping, flips, top/bottom and
+square wrapping, front/behind placement, and overlap/anchor settings become
+ordinary DrawingML anchors (ECMA-376 20.4.2.3). No DOC-specific layout or paint
+path is introduced. Header drawings and nested groups are not reassigned to
+the body. Rotated or alignment-based floating positions, tight/through wrap
+contours, non-picture shapes and non-raster media remain omitted with a loss
+warning. Alignment-based positions require further reconciliation of producer
+values with the published OfficeArt position-origin enumeration; the converter
+does not guess that mapping. Restored floating pictures can alter wrapping;
+preserving an anchor does not establish Word-compatible pagination.
+
+The inline and floating picture caches are document-owned and each limited to
+100,000 source locations/anchors, one million record/property/marker operations
+and 128 MiB of retained media. Floating occurrences also have a 100,000 limit.
 Raster dimension validation is shared with PPT. Repeated references reuse the
 same borrowed image bytes and package part, with unique drawing occurrence IDs.
 These are resource policies, not binary-format limits. No source filename or
