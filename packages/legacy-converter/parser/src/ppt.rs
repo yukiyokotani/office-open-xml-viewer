@@ -7,9 +7,10 @@
 //! 2.9.40 through 2.9.42. Unsupported/encrypted containers fail closed.
 
 use crate::cfb::CompoundFile;
-use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
+use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_PPTX};
 
 mod drawing;
+mod media;
 mod paint;
 mod persist;
 mod scheme;
@@ -55,6 +56,12 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let current_user = cfb.stream("Current User").map_err(unsupported)?;
     let current_edit = parse_current_user_atom(&current_user, &mut record_budget)?;
     let presentation = persist::resolve(&document, current_edit, &mut record_budget)?;
+    let pictures = if cfb.has_entry("Pictures") && !presentation.image_entries.is_empty() {
+        cfb.stream("Pictures").map_err(unsupported)?
+    } else {
+        Vec::new()
+    };
+    let mut media = media::Store::new(&presentation.image_entries, &pictures);
     let mut slides = Vec::new();
     let mut text_budget = MAX_TEXT_BYTES;
     // Limit retained expanded XML independently of ZIP compression. Paragraph
@@ -62,6 +69,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let mut xml_budget = 256 * 1024 * 1024;
     let mut fallback = false;
     for (index, (record, outline)) in presentation.slides.iter().enumerate() {
+        media.begin_slide();
         if contains_record(
             record.payload,
             DOCUMENT_ENCRYPTION_ATOM,
@@ -83,6 +91,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 types: &presentation.outline_types[index],
                 master: presentation.text_masters[index].as_deref(),
             }),
+            Some(&mut media),
         )? {
             Some(tree) => tree,
             None => {
@@ -99,13 +108,17 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 fallback_text(&text, &mut xml_budget)?
             }
         };
-        slides.push(slide_xml(&tree, &mut xml_budget)?);
+        let relationships = media.relationships();
+        xml_budget = xml_budget
+            .checked_sub(relationships.len())
+            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+        slides.push((slide_xml(&tree, &mut xml_budget)?, relationships));
     }
-    let bytes = build_pptx(slides, presentation.size, max_output_bytes)?;
+    let bytes = build_pptx(slides, presentation.size, &media.parts(), max_output_bytes)?;
     let mut warnings = vec![
         "legacy-ppt:positioned-text-and-basic-presets".into(),
         "legacy-ppt:detached-placeholder-styles-bullets-and-advanced-text-omitted".into(),
-        "legacy-ppt:custom-geometry-inherited-and-advanced-paint-media-and-actions-omitted".into(),
+        "legacy-ppt:custom-geometry-inherited-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
     ];
     if fallback {
         warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());
@@ -377,8 +390,9 @@ fn push_text(output: &mut Vec<String>, text: String) -> Result<(), String> {
 }
 
 fn build_pptx(
-    slides: Vec<String>,
+    slides: Vec<(String, String)>,
     size: (u32, u32),
+    media: &[(String, &[u8])],
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let mut content_types = String::from(
@@ -407,7 +421,10 @@ fn build_pptx(
         ),
         ("ppt/theme/theme1.xml".into(), theme()),
     ];
-    for (index, slide) in slides.into_iter().enumerate() {
+    if !media.is_empty() {
+        content_types.push_str("<Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpg\" ContentType=\"image/jpeg\"/>");
+    }
+    for (index, (slide, image_rels)) in slides.into_iter().enumerate() {
         let id = index + 1;
         content_types.push_str(&format!(
             "<Override PartName=\"/ppt/slides/slide{id}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
@@ -422,7 +439,10 @@ fn build_pptx(
             id + 1
         ));
         parts.push((format!("ppt/slides/slide{id}.xml"), slide));
-        parts.push((format!("ppt/slides/_rels/slide{id}.xml.rels"), slide_rels()));
+        parts.push((
+            format!("ppt/slides/_rels/slide{id}.xml.rels"),
+            slide_rels(&image_rels),
+        ));
     }
     content_types.push_str("</Types>");
     presentation.push_str(&format!("</p:sldIdLst><p:sldSz cx=\"{}\" cy=\"{}\" type=\"custom\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>", size.0, size.1));
@@ -430,7 +450,13 @@ fn build_pptx(
     parts.push(("[Content_Types].xml".into(), content_types));
     parts.push(("ppt/presentation.xml".into(), presentation));
     parts.push(("ppt/_rels/presentation.xml.rels".into(), presentation_rels));
-    write_package(&parts, max_output_bytes)
+    write_package_bytes(
+        parts
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_bytes()))
+            .chain(media.iter().map(|(name, body)| (name.as_str(), *body))),
+        max_output_bytes,
+    )
 }
 
 fn slide_xml(tree: &str, budget: &mut usize) -> Result<String, String> {
@@ -458,9 +484,11 @@ fn fallback_text(blocks: &[String], budget: &mut usize) -> Result<String, String
     Ok(xml)
 }
 
-fn slide_rels() -> String {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#.into()
+fn slide_rels(images: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>{images}</Relationships>"#
+    )
 }
 
 fn slide_master() -> String {

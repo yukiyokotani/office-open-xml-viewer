@@ -10,6 +10,7 @@ pub(super) struct Presentation<'a> {
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
+    pub image_entries: Vec<Record<'a>>,
     pub size: (u32, u32),
 }
 
@@ -173,6 +174,7 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("PowerPoint presentation has no slides"));
     }
     Ok(Presentation {
+        image_entries: media::catalog(&children, budget)?,
         text_masters: slides
             .iter()
             .map(|(slide, _)| schemes.text_master(*slide, budget))

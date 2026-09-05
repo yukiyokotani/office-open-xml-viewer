@@ -6,12 +6,19 @@ pub fn write_package(
     parts: &[(String, String)],
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, String> {
-    let _projected_uncompressed = parts.iter().try_fold(0usize, |total, (name, body)| {
-        total
-            .checked_add(name.len())
-            .and_then(|value| value.checked_add(body.len()))
-            .ok_or_else(|| "generated OOXML size overflow".to_string())
-    })?;
+    write_package_bytes(
+        parts
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_bytes())),
+        max_output_bytes,
+    )
+}
+
+/// Borrow binary media without cloning it into UTF-8 or a second part buffer.
+pub fn write_package_bytes<'a>(
+    parts: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let cursor = BoundedCursor::new(max_output_bytes);
     let mut writer = zip::ZipWriter::new(cursor);
     let options = SimpleFileOptions::default()
@@ -19,7 +26,7 @@ pub fn write_package(
         .unix_permissions(0o644);
     for (name, body) in parts {
         writer.start_file(name, options).map_err(zip_error)?;
-        writer.write_all(body.as_bytes()).map_err(io_error)?;
+        writer.write_all(body).map_err(io_error)?;
     }
     let output = writer.finish().map_err(zip_error)?.into_inner();
     if output.len() > max_output_bytes {
@@ -126,3 +133,32 @@ pub const ROOT_RELS_XLSX: &str = r#"<?xml version="1.0" encoding="UTF-8" standal
 
 pub const ROOT_RELS_PPTX: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn binary_parts_round_trip_without_utf8_conversion_and_obey_output_limit() {
+        let binary = [0, 255, 128, 1];
+        let parts = [
+            ("part.xml", b"<part/>".as_slice()),
+            ("media.png", binary.as_slice()),
+        ];
+        let bytes = write_package_bytes(parts, 4096).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        let mut actual = Vec::new();
+        archive
+            .by_name("media.png")
+            .unwrap()
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, binary);
+        assert_eq!(write_package_bytes(parts, bytes.len()).unwrap(), bytes);
+        assert_eq!(
+            write_package_bytes(parts, bytes.len() - 1).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+    }
+}

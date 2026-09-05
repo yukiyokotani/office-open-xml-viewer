@@ -4,14 +4,63 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { createLegacyOfficeWasmConverter } from '../../legacy-converter/src/index.ts';
 import { buildPptFixture, concat, little16, little32, utf16le } from '../../legacy-converter/src/test-fixtures.ts';
-import { materializePptxPresentation } from './pptx.ts';
-import { renderSlideNode } from './render.ts';
+import { materializePptxPresentation, openPptxPresentation } from './pptx.ts';
+import { renderSlideNode, type NodeCanvasFactory } from './render.ts';
 import { loadSkiaForTests } from './test-imports.ts';
 
 const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it.skipIf(!skia)('renders embedded and delayed raster pictures with cropping and flips using ordinary PPTX images', async () => {
+    const { Canvas } = skia as typeof import('skia-canvas');
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const source = new Canvas(20, 10);
+    const context = source.getContext('2d');
+    context.fillStyle = '#ff0000'; context.fillRect(0, 0, 10, 10);
+    context.fillStyle = '#0000ff'; context.fillRect(10, 0, 10, 10);
+    const png = new Uint8Array(await source.toBuffer('png'));
+    const jpeg = new Uint8Array(await source.toBuffer('jpg'));
+    const pngBlip = record(0x6e00, 0xf01e, concat(new Uint8Array(17), png));
+    const jpegBlip = record(0x46b0, 0xf01d, concat(new Uint8Array(33), jpeg));
+    const entry = (type: number, size: number, offset: number, embedded: Uint8Array) => record((type << 4) | 2, 0xf007, concat(
+      new Uint8Array([type, type]), new Uint8Array(18), little32(size), little32(1), little32(offset), new Uint8Array(4), embedded,
+    ));
+    const picture = (left: number, index: number, cropLeft = 0, flip = false) => record(15, 0xf004, concat(
+      record((75 << 4) | 2, 0xf00a, concat(little32(42), little32(0xa00 | (flip ? 0x40 : 0)))),
+      record(0, 0xf010, concat(little32(576), little32(left), little32(left + 1152), little32(1152))),
+      record(0x23, 0xf00b, concat(little16(0x4104), little32(index), little16(0x102), little32(cropLeft))),
+    ));
+    const drawing = record(15, 1036, record(15, 0xf002, concat(picture(576, 1), picture(2304, 1, 32768), picture(4032, 2, 0, true))));
+    const input = buildPptFixture(drawing, undefined, undefined, {
+      entries: [entry(6, pngBlip.length, 0xffffffff, pngBlip), entry(5, jpegBlip.length, 23, new Uint8Array())],
+      pictures: concat(new Uint8Array(23), jpegBlip),
+    });
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(input, { legacyConversion: { ppt: { converter } } });
+    expect(presentation.slides[0].elements).toMatchObject([
+      { type: 'picture', imagePath: 'ppt/media/image1.png' },
+      { type: 'picture', imagePath: 'ppt/media/image1.png', srcRect: { l: 0.5, t: 0, r: 0, b: 0 } },
+      { type: 'picture', imagePath: 'ppt/media/image2.jpg', flipH: true },
+    ]);
+    const canvas = new Canvas(960, 720);
+    const factory: NodeCanvasFactory = {
+      createCanvas: (w, h) => new Canvas(w, h) as unknown as ReturnType<NodeCanvasFactory['createCanvas']>,
+      loadImage: (bytes) => (skia as typeof import('skia-canvas')).loadImage(Buffer.from(new Uint8Array(bytes))) as unknown as ReturnType<NodeCanvasFactory['loadImage']>,
+    };
+    const session = await openPptxPresentation(input, { legacyConversion: { ppt: { converter } } });
+    try {
+      expect(new Uint8Array(await (await session.getImage('ppt/media/image1.png', 'image/png')).arrayBuffer())).toEqual(png);
+      await session.renderSlide(canvas, presentation.slides[0], { width: 960, dpr: 1, factory });
+    } finally { await session.close(); }
+    const pixel = (x: number, y: number) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data);
+    expect(pixel(120, 130)).toEqual([255, 0, 0, 255]);
+    expect(pixel(260, 130)).toEqual([0, 0, 255, 255]);
+    expect(pixel(420, 130)).toEqual([0, 0, 255, 255]);
+    // JPEG is lossy; test dominant colors away from the source boundary.
+    expect(pixel(700, 130)[2]).toBeGreaterThan(240);
+    expect(pixel(830, 130)[0]).toBeGreaterThan(240);
+  });
   it('inherits a main-master title size only for an actual placeholder, including outline text without direct styles', async () => {
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
     const master = record(0, 4003, concat(little16(1), little32(0x800), little16(1), little32(0x20000), little16(48)));

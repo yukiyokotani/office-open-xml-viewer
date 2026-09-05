@@ -12,13 +12,14 @@ pub(super) struct TextContext<'a> {
     pub master: Option<&'a text_style::Master>,
 }
 
-pub(super) fn render(
+pub(super) fn render<'a>(
     slide: &[u8],
-    outline: &[String],
+    outline: &'a [String],
     records: &mut usize,
     text: &mut usize,
     xml: &mut usize,
-    context: Option<TextContext<'_>>,
+    context: Option<TextContext<'a>>,
+    media: Option<&mut media::Store<'a>>,
 ) -> Result<Option<String>, String> {
     let children = parse_records(slide, records)?;
     let mut drawings = children.iter().filter(|r| r.kind == 1036);
@@ -36,6 +37,7 @@ pub(super) fn render(
         output: String::new(),
         id: 1,
         context,
+        media,
     };
     for dg in parse_records(drawing.payload, writer.records)? {
         if dg.kind != 0xf002 || dg.version != 15 {
@@ -188,6 +190,8 @@ impl<'a> Shape<'a> {
 }
 
 struct Properties {
+    picture: u32,
+    crop: [i64; 4],
     paint: paint::Paint,
     rotation: i64,
     margins: [u32; 4],
@@ -198,6 +202,8 @@ struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            picture: 0,
+            crop: [0; 4],
             paint: paint::Paint::default(),
             rotation: 0,
             margins: [91440, 45720, 91440, 45720],
@@ -237,9 +243,22 @@ impl Properties {
                 continue;
             }
             if opid & 0x4000 != 0 {
+                if opid == 0x4104 {
+                    self.picture = value;
+                }
                 continue;
             }
             match opid {
+                // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
+                // fractions become DrawingML 1/1000 percentages without clamping.
+                0x100..=0x103 => {
+                    let value = i64::from(value as i32) * 100000;
+                    let value = (value + value.signum() * 32768) / 65536;
+                    i32::try_from(value).map_err(|_| {
+                        unsupported("PowerPoint crop exceeds DrawingML percentage range")
+                    })?;
+                    self.crop[usize::from(opid - 0x100)] = value;
+                }
                 // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> 1/60000 degree.
                 4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
                 0x81..=0x84 => {
@@ -264,6 +283,7 @@ impl Properties {
 }
 
 struct Writer<'a, 'b> {
+    media: Option<&'b mut media::Store<'a>>,
     outline: &'a [String],
     records: &'b mut usize,
     text: &'b mut usize,
@@ -330,6 +350,26 @@ impl Writer<'_, '_> {
                 let shape = Shape::read(record, nested, self.records)?;
                 if shape.omitted() {
                     return Ok(());
+                }
+                if shape.kind == 75 && shape.props.picture != 0 {
+                    let index = shape.props.picture;
+                    if self
+                        .media
+                        .as_deref_mut()
+                        .map(|m| m.reference(index, self.records))
+                        .transpose()?
+                        .unwrap_or(false)
+                    {
+                        let anchor = shape
+                            .anchor
+                            .ok_or_else(|| unsupported("missing PowerPoint picture anchor"))?;
+                        let id = self.next_id()?;
+                        let [top, bottom, left, right] = shape.props.crop;
+                        if left + right >= 100000 || top + bottom >= 100000 {
+                            return Err(unsupported("empty PowerPoint picture crop"));
+                        }
+                        self.push(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Legacy picture {id}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rImg{index}\"/><a:srcRect l=\"{left}\" t=\"{top}\" r=\"{right}\" b=\"{bottom}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>{}</p:spPr></p:pic>", shape.transform(anchor, None), shape.props.paint.xml_with_scheme(1, self.context.and_then(|c| c.scheme))))?;
+                    }
                 }
                 let mut text = Vec::new();
                 let mut style = None;
@@ -508,6 +548,7 @@ mod tests {
             &mut MAX_TEXT_BYTES.clone(),
             &mut (256 * 1024 * 1024),
             None,
+            None,
         )
         .map(|x| x.unwrap_or_default())
     }
@@ -520,6 +561,34 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn picture_properties_require_blip_reference_bit_and_preserve_signed_crop() {
+        let bytes = properties(&[
+            (0x104, 9),
+            (0x4104, 2),
+            (0x100, 16384),
+            (0x101, (-8192i32) as u32),
+            (0x102, 32768),
+            (0x103, 0),
+        ]);
+        let mut props = Properties::default();
+        props
+            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
+            .unwrap();
+        assert_eq!(props.picture, 2);
+        assert_eq!(props.crop, [25000, -12500, 50000, 0]);
+        let bytes = properties(&[(0x104, 7)]);
+        let mut props = Properties::default();
+        props
+            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
+            .unwrap();
+        assert_eq!(props.picture, 0);
+        let bytes = properties(&[(0x100, i32::MAX as u32)]);
+        assert!(props
+            .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
+            .is_err());
     }
 
     #[test]
@@ -575,6 +644,7 @@ mod tests {
                 scheme: None,
                 master: Some(&master),
             }),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -643,6 +713,7 @@ mod tests {
                 output: String::new(),
                 id,
                 context: None,
+                media: None,
             };
             let record = parse_records(&bytes, &mut MAX_RECORDS.clone()).unwrap()[0];
             assert!(writer.node(record, false, 0).unwrap_err().contains(message));
@@ -751,6 +822,7 @@ mod tests {
             output: String::new(),
             id: 1,
             context: None,
+            media: None,
         };
         let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
         assert!(writer
@@ -858,6 +930,7 @@ mod tests {
             &mut MAX_RECORDS.clone(),
             &mut MAX_TEXT_BYTES.clone(),
             &mut 1024,
+            None,
             None,
         )
         .is_err());

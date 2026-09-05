@@ -64,7 +64,7 @@ export function buildXlsFixture(): Uint8Array {
   )]]);
 }
 
-export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array(), masterPayload?: Uint8Array): Uint8Array {
+export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8Array = new Uint8Array(), masterPayload?: Uint8Array, media?: { entries: Uint8Array[]; pictures?: Uint8Array }): Uint8Array {
   const record = (version: number, kind: number, payload: Uint8Array) => concat(
     little16(version), little16(kind), little32(payload.length), payload,
   );
@@ -74,6 +74,7 @@ export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8
     record(1, 1001, documentAtom),
     record(15, 4080, concat(record(0, 1011, slideReference), outlinePayload)),
     ...(masterPayload ? [record(0x1f, 4080, record(0, 1011, concat(little32(3), new Uint8Array(8), little32(100), new Uint8Array(4))))] : []),
+    ...(media ? [record(15, 1035, record(15, 0xf000, record((media.entries.length << 4) | 15, 0xf001, concat(...media.entries))))] : []),
   ));
   const slide = record(0x000f, 1006, slidePayload ?? record(0, 4000, utf16le('Legacy 日本語 slide')));
   const master = masterPayload ? record(15, 1016, masterPayload) : new Uint8Array();
@@ -94,6 +95,7 @@ export function buildPptFixture(slidePayload?: Uint8Array, outlinePayload: Uint8
   return buildCfb([
     ['PowerPoint Document', concat(document, slide, master, directory, userEdit)],
     ['Current User', currentUser],
+    ...(media?.pictures ? [['Pictures', media.pictures] as const] : []),
   ]);
 }
 
