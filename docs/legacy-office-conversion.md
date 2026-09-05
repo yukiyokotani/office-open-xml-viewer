@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | character/paragraph formatting, advanced section properties, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | paragraph layout, table-dependent character formatting, advanced character and section properties, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order, slide dimensions, Unicode/Windows-1252 text, outline text references, slide boundaries; superseded and deleted slides are not emitted | masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
 
@@ -75,6 +75,18 @@ binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with
 `reason === 'unsupported-input'`. Accepted documents can still lose the features
 listed above: their warning identifiers are not a fidelity certificate.
+
+DOC character properties follow physical FKP ranges through the logical CLX
+piece table, including UTF-16 positions and displayed-field gaps. Supported
+style properties are resolved into ordinary OOXML run properties; fonts are
+referenced by name, not embedded or downloaded. Missing formatting tables use
+explicitly warned defaults. Style depth, formatting pages/runs and property
+application work have converter resource limits; these are implementation
+policies, not limits of the Office file format. The generated DOC main XML part
+also has a 256 MiB resource ceiling, separate from the output ZIP byte limit.
+The main story is limited to 64 Mi UTF-16 units before decoding repeated pieces.
+Character formatting alone
+does not recover paragraph spacing or table layout and can still change wrapping.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external

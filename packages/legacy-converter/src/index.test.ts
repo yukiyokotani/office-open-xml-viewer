@@ -32,7 +32,7 @@ describe('purpose-built legacy Office WASM converter', () => {
     expect(result).toMatchObject({
       engine: 'silurus-legacy-office',
       engineVersion: '0.1.0',
-      warnings: expect.arrayContaining(['legacy-doc:main-story-plain-text-only']),
+      warnings: expect.arrayContaining(['legacy-doc:missing-formatting-tables-default-character-properties']),
     });
   });
 
