@@ -52,7 +52,15 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         let data = tail
             .get(2..2 + size)
             .ok_or_else(|| unsupported("truncated Word section properties"))?;
-        let properties = Properties::parse(data, &mut budget)?;
+        let mut properties = Properties::parse(data, &mut budget)?;
+        // FibBase.lid records the producer's installation language (MS-DOC
+        // 2.5.2). Apply only the LCIDs explicitly listed in 2.6.4, not the
+        // document text's language, the converter host locale or a guessed
+        // base language. Explicit distances, including zero, take priority.
+        let default = header_distance_for_install_lid(u16_at(word, 6)?);
+        for distance in &mut properties.margins[4..] {
+            *distance = distance.or(default);
+        }
         sections.push(Section {
             end,
             xml: properties.xml()?,
@@ -61,6 +69,20 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         previous = end;
     }
     Ok(sections)
+}
+
+// MS-DOC 2.6.4 sprmSDyaHdrTop / sprmSDyaHdrBottom share this default table.
+// Unlisted/unknown installation languages remain unresolved and warned about.
+fn header_distance_for_install_lid(lid: u16) -> Option<i32> {
+    match lid {
+        1025 | 1028 | 1031 | 1032 | 1033 | 1034 | 1036 | 1037 | 1040 | 1041 | 1042 | 1046
+        | 1049 | 1050 | 1053 | 1062 | 1086 | 1104 | 2052 | 2070 => Some(720),
+        1026 | 1027 | 1029 | 1030 | 1035 | 1038 | 1039 | 1043 | 1044 | 1045 | 1048 | 1051
+        | 1055 | 1058 | 1059 | 1060 | 1061 | 1067 | 1068 | 1069 | 1078 | 1079 | 1087 | 1088
+        | 1089 | 1092 | 2074 => Some(708),
+        1063 => Some(567),
+        _ => None,
+    }
 }
 
 // CPs count UTF-16 units, not Rust characters or UTF-8 bytes. A form feed at
@@ -323,11 +345,10 @@ impl Properties {
             }
         );
         if let [Some(top), Some(right), Some(bottom), Some(left), header, footer] = self.margins {
-            // Conversion policy: headers/footers are not emitted yet. Preserve
-            // known body margins even when locale-dependent header/footer
-            // distances are absent, using neutral zero distances for these
-            // absent stories to satisfy CT_PageMar's required attributes.
-            // This does not claim to recover the producer's locale defaults.
+            // Recovery policy: retain known body margins when the stored
+            // installation language cannot resolve a missing header/footer
+            // distance. Zero satisfies CT_PageMar's required attributes;
+            // incomplete_margins keeps this unresolved recovery diagnostic.
             let header = header.unwrap_or(0);
             let footer = footer.unwrap_or(0);
             xml.push_str(&format!("<w:pgMar w:top=\"{top}\" w:right=\"{right}\" w:bottom=\"{bottom}\" w:left=\"{left}\" w:header=\"{header}\" w:footer=\"{footer}\" w:gutter=\"{}\"/>",self.gutter));
@@ -382,6 +403,51 @@ impl Properties {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stored_install_language_resolves_only_missing_header_distances() {
+        // MS-DOC 2.5.2 FibBase.lid and 2.6.4 sprmSDyaHdrTop/Bottom.
+        for (lid, default) in [
+            (1033u16, 720),
+            (1036, 720),
+            (1041, 720),
+            (1043, 708),
+            (1063, 567),
+            (0, 0),
+            (0xffff, 0),
+        ] {
+            for explicit in [None, Some(0), Some(900)] {
+                let mut properties = [
+                    prl(0x9023, 1440),
+                    prl(0x9024, 1440),
+                    prl(0xb021, 1440),
+                    prl(0xb022, 1440),
+                ]
+                .concat();
+                if let Some(value) = explicit {
+                    properties.extend(prl(0xb017, value));
+                }
+                let mut word = vec![0; 512];
+                word[6..8].copy_from_slice(&lid.to_le_bytes());
+                word[0xce..0xd2].copy_from_slice(&20u32.to_le_bytes());
+                word[300..302].copy_from_slice(&(properties.len() as u16).to_le_bytes());
+                word[302..302 + properties.len()].copy_from_slice(&properties);
+                let mut table = vec![0; 20];
+                table[4..8].copy_from_slice(&3u32.to_le_bytes());
+                table[10..14].copy_from_slice(&300u32.to_le_bytes());
+                let sections = read(&word, &table, 3).unwrap();
+                assert!(
+                    sections[0].xml.contains(&format!(
+                        "w:header=\"{}\" w:footer=\"{default}\"",
+                        explicit.unwrap_or(default)
+                    )),
+                    "lid={lid}, explicit={explicit:?}: {}",
+                    sections[0].xml
+                );
+                assert_eq!(sections[0].incomplete_margins, default == 0);
+            }
+        }
+    }
+
     #[test]
     fn preserves_section_vertical_flow_and_explicit_horizontal_reset() {
         let vertical = prl(0x5033, 1);

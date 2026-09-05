@@ -4,8 +4,8 @@
 //! text, paragraphs, tabs, line breaks, page breaks, and displayed field results.
 //! Section geometry, character formatting and passive JPEG/PNG pictures
 //! (inline and explicitly positioned main-story floats) are preserved.
-//! Advanced floating drawings, revisions,
-//! headers/footers, notes, and OLE are
+//! Formatted header/footer stories use ordinary OOXML parts; passive page fields
+//! retain their dynamic meaning. Advanced floating drawings, revisions, notes, and OLE are
 //! deliberately not inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and
 //! 2.9.177 (PlcPcd). Unsupported/encrypted inputs fail closed.
 
@@ -16,6 +16,8 @@ mod character;
 mod fkp;
 mod floating;
 mod formatting;
+mod header_fields;
+mod headers;
 mod paragraph;
 mod pictures;
 mod sections;
@@ -51,6 +53,8 @@ enum Token {
     ColumnBreak,
     Picture,
     FloatingPicture,
+    FieldBegin(String),
+    FieldEnd,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
@@ -75,7 +79,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         "0Table"
     };
     let table = cfb.stream(table_name).map_err(unsupported)?;
-    let default_tab_twips = settings::default_tab_twips(&word, &table)?;
+    let document_settings = settings::read(&word, &table)?;
     let ccp_text = usize::try_from(u32_at(&word, CCP_TEXT_OFFSET)?)
         .map_err(|_| unsupported("Word main story is too large"))?;
     let fc_clx = usize::try_from(u32_at(&word, FC_CLX_OFFSET)?)
@@ -89,7 +93,11 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         .get(fc_clx..clx_end)
         .ok_or_else(|| unsupported("Word CLX lies outside its table stream"))?;
     let story = read_story(&word, clx, ccp_text)?;
-    let sections = sections::read(&word, &table, ccp_text)?;
+    let mut sections = sections::read(&word, &table, ccp_text)?;
+    let headers = headers::read(&word, &table, clx, sections.len())?;
+    if let Some(headers) = &headers {
+        headers.attach_references(&mut sections);
+    }
     let data = if cfb.has_entry("Data") {
         cfb.stream("Data").map_err(unsupported)?
     } else {
@@ -106,11 +114,24 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         Some(&mut floating),
         MAX_DOCUMENT_XML_BYTES,
     )?;
+    let document_picture_relationships = pictures.relationships();
+    let header_parts = headers
+        .as_ref()
+        .map(|h| {
+            h.build_parts(
+                &mut formatting,
+                &mut pictures,
+                MAX_DOCUMENT_XML_BYTES.saturating_sub(document_xml.len()),
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
     let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#.to_string();
-    if default_tab_twips.is_some() {
+    if document_settings.is_some() {
         content_types.push_str(r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#);
     }
+    content_types.push_str(&header_parts.content_types);
     let mut media = pictures.parts();
     media.extend(floating.parts());
     if !media.is_empty() {
@@ -123,26 +144,40 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         ("word/document.xml".into(), document_xml),
     ];
     let mut relationships = String::new();
-    if let Some(interval) = default_tab_twips {
-        parts.push(("word/settings.xml".into(), settings::xml(interval)));
+    if let Some(properties) = &document_settings {
+        parts.push(("word/settings.xml".into(), properties.xml()));
         relationships.push_str(r#"<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#);
     }
-    relationships.push_str(&pictures.relationships());
+    relationships.push_str(&document_picture_relationships);
     relationships.push_str(&floating.relationships());
+    relationships.push_str(&header_parts.relationships);
+    parts.extend(header_parts.parts);
     if !relationships.is_empty() {
         parts.push(("word/_rels/document.xml.rels".into(), format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#)));
     }
     let mut warnings = vec![
         "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
-        "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
+        "legacy-doc:notes-and-advanced-section-properties-omitted".into(),
     ];
+    if header_parts.omitted_floating {
+        warnings.push("legacy-doc:header-footer-floating-drawings-omitted".into());
+    }
+    if headers
+        .as_ref()
+        .is_some_and(|h| h.story.text.contains('\u{13}'))
+    {
+        warnings.push(
+            "legacy-doc:header-footer-fields-use-cached-results-except-supported-page-fields"
+                .into(),
+        );
+    }
     if pictures.omitted {
         warnings.push("legacy-doc:unsupported-inline-pictures-omitted".into());
     }
     if floating.omitted {
         warnings.push("legacy-doc:unsupported-floating-drawings-omitted".into());
     }
-    if default_tab_twips.is_none() {
+    if document_settings.is_none() {
         warnings.push("legacy-doc:missing-document-properties-default-tab-interval".into());
     }
     if formatting.unsupported_character_properties {
@@ -165,6 +200,13 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     }
     if sections.iter().any(|s| s.incomplete_margins) {
         warnings.push("legacy-doc:incomplete-section-margin-defaults".into());
+    }
+    if parts
+        .iter()
+        .try_fold(0usize, |sum, (_, body)| sum.checked_add(body.len()))
+        .is_none_or(|size| size > MAX_DOCUMENT_XML_BYTES)
+    {
+        return Err("OUTPUT_TOO_LARGE".into());
     }
     Ok(DocConversion {
         bytes: write_package_bytes(
@@ -212,11 +254,26 @@ fn decode_piece_table(word: &[u8], clx: &[u8], ccp_text: usize) -> Result<String
 }
 
 fn read_story<'a>(word: &[u8], clx: &'a [u8], ccp_text: usize) -> Result<Story<'a>, String> {
+    read_story_range(word, clx, 0, ccp_text)
+}
+
+// Decode one aggregate story, preserving its physical formatting locations.
+// Header CPs are relative to the header document, not the main/footnote text.
+fn read_story_range<'a>(
+    word: &[u8],
+    clx: &'a [u8],
+    start: usize,
+    length: usize,
+) -> Result<Story<'a>, String> {
     // Logical pieces may repeatedly reference the same physical bytes. Bound
     // decoded main-story work before copying, independently of input ZIP/CFB size.
-    if ccp_text > MAX_MAIN_STORY_UNITS {
+    if length > MAX_MAIN_STORY_UNITS {
         return Err(unsupported("Word main story character budget exceeded"));
     }
+    let ccp_text = start
+        .checked_add(length)
+        .filter(|n| *n <= i32::MAX as usize)
+        .ok_or_else(|| unsupported("Word story character range overflow"))?;
     let mut offset = 0usize;
     let mut prcs = Vec::new();
     while clx.get(offset) == Some(&0x01) {
@@ -258,7 +315,7 @@ fn read_story<'a>(word: &[u8], clx: &'a [u8], ccp_text: usize) -> Result<Story<'
     }
     let cp_bytes = (piece_count + 1) * 4;
     let pcd_start = cp_bytes;
-    let mut output = String::with_capacity(ccp_text.min(1024 * 1024));
+    let mut output = String::with_capacity(length.min(1024 * 1024));
     let mut pieces = Vec::new();
     let mut expected_cp = 0usize;
     for index in 0..piece_count {
@@ -273,29 +330,40 @@ fn read_story<'a>(word: &[u8], clx: &'a [u8], ccp_text: usize) -> Result<Story<'
         if cp_start >= ccp_text {
             break;
         }
-        let chars = cp_end.min(ccp_text) - cp_start;
+        if cp_end <= start {
+            continue;
+        }
+        let selected_start = cp_start.max(start);
+        let chars = cp_end.min(ccp_text) - selected_start;
         let pcd = pcd_start + index * 8;
         let raw_fc = u32_at(plc, pcd + 2)?;
         let compressed = (raw_fc & 0x4000_0000) != 0;
-        let file_offset = usize::try_from(raw_fc & 0x3fff_ffff)
+        let raw_offset = usize::try_from(raw_fc & 0x3fff_ffff)
             .map_err(|_| unsupported("Word piece offset is too large"))?;
+        let width = if compressed { 1 } else { 2 };
+        let file_offset = (if compressed {
+            raw_offset / 2
+        } else {
+            raw_offset
+        })
+        .checked_add(
+            (selected_start - cp_start)
+                .checked_mul(width)
+                .ok_or_else(|| unsupported("Word piece offset overflow"))?,
+        )
+        .ok_or_else(|| unsupported("Word piece offset overflow"))?;
         let prm = u16_at(plc, pcd + 6)?;
         if prm & 1 != 0 && (prm >> 1) as usize >= prcs.len() {
             return Err(unsupported("Word piece property index outside CLX"));
         }
         pieces.push(Piece {
-            start: cp_start,
-            end: cp_end.min(ccp_text),
-            fc: if compressed {
-                file_offset / 2
-            } else {
-                file_offset
-            },
-            width: if compressed { 1 } else { 2 },
+            start: selected_start - start,
+            end: cp_end.min(ccp_text) - start,
+            fc: file_offset,
+            width,
             prm,
         });
         if compressed {
-            let file_offset = file_offset / 2;
             let end = file_offset
                 .checked_add(chars)
                 .ok_or_else(|| unsupported("Word text piece range overflow"))?;
@@ -456,15 +524,46 @@ fn build_document_xml(text: &str, sections: &[sections::Section]) -> Result<Stri
 fn build_formatted_document(
     story: &Story<'_>,
     sections: &[sections::Section],
+    formatting: Option<&mut formatting::Formatting<'_>>,
+    pictures: Option<&mut pictures::Store<'_>>,
+    floating: Option<&mut floating::Store<'_>>,
+    max_bytes: usize,
+) -> Result<String, String> {
+    build_formatted_story(
+        story,
+        Content::Document(sections),
+        formatting,
+        pictures,
+        floating,
+        max_bytes,
+    )
+}
+
+enum Content<'a> {
+    Document(&'a [sections::Section]),
+    HeaderFooter {
+        kind: &'static str,
+        text: &'a str,
+        cp: usize,
+        fields: &'a header_fields::Table,
+    },
+}
+
+fn build_formatted_story(
+    story: &Story<'_>,
+    content: Content<'_>,
     mut formatting: Option<&mut formatting::Formatting<'_>>,
     mut pictures: Option<&mut pictures::Store<'_>>,
     mut floating: Option<&mut floating::Store<'_>>,
     max_bytes: usize,
 ) -> Result<String, String> {
+    let (text, sections, story_cp) = match content {
+        Content::Document(sections) => (story.text.as_str(), sections, 0),
+        Content::HeaderFooter { text, cp, .. } => (text, &[][..], cp),
+    };
     // Every control can introduce a paragraph, token or field-stack entry.
     // Charge before constructing these arrays, not only after XML expansion.
-    if story
-        .text
+    if text
         .bytes()
         .filter(|b| *b < 32)
         .take(MAX_STORY_CONTROLS + 1)
@@ -473,16 +572,24 @@ fn build_formatted_document(
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
-    let mut xml = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let mut xml = match content {
+        Content::Document(_) => String::from(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
-    );
-    let chunks = sections::split_story(&story.text, sections)?;
+        ),
+        Content::HeaderFooter { kind, .. } => {
+            let tag = if kind == "header" { "hdr" } else { "ftr" };
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:{tag} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#
+            )
+        }
+    };
+    let chunks = sections::split_story(text, sections)?;
     let mut fields = Fields::default();
     for (section_index, chunk) in chunks.iter().enumerate() {
         let mut table_writer = table_output::Writer::new(max_bytes.saturating_sub(xml.len()));
         let base_cp = if section_index == 0 {
-            0
+            story_cp
         } else {
             sections[section_index - 1].end
         };
@@ -492,6 +599,9 @@ fn build_formatted_document(
             base_cp,
             section_index + 1 == chunks.len(),
         );
+        if let Content::HeaderFooter { fields, .. } = content {
+            fields.restore(chunk, base_cp, &mut paragraphs);
+        }
         if section_index + 1 < chunks.len() {
             // split_story removed this paragraph's section-break character.
             paragraphs.last_mut().expect("opening paragraph").end_cp =
@@ -531,6 +641,20 @@ fn build_formatted_document(
             }
             for (token, cp) in &paragraph.tokens {
                 match token {
+                    Token::FieldBegin(instruction) => {
+                        xml.push_str("<w:r>");
+                        if let Some(f) = formatting.as_deref_mut() {
+                            if let Some((_, fc, piece)) = story.position(*cp) {
+                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
+                            }
+                        }
+                        xml.push_str("<w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\">");
+                        xml.push_str(&xml_text(instruction));
+                        xml.push_str("</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>");
+                    }
+                    Token::FieldEnd => {
+                        xml.push_str("<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>")
+                    }
                     Token::Text(text) => {
                         write_text_runs(xml, text, *cp, story, style, &mut formatting, max_bytes)?;
                     }
@@ -608,7 +732,11 @@ fn build_formatted_document(
                             Token::LineBreak => "<w:br/>",
                             Token::PageBreak => "<w:br w:type=\"page\"/>",
                             Token::ColumnBreak => "<w:br w:type=\"column\"/>",
-                            Token::Text(_) | Token::Picture | Token::FloatingPicture => {
+                            Token::Text(_)
+                            | Token::Picture
+                            | Token::FloatingPicture
+                            | Token::FieldBegin(_)
+                            | Token::FieldEnd => {
                                 unreachable!()
                             }
                         });
@@ -636,14 +764,22 @@ fn build_formatted_document(
         }
         xml.push_str(&table_writer.finish()?);
     }
-    if let Some(last) = sections.last() {
-        xml.push_str(&last.xml);
-    } else {
-        // Existing compatibility policy when no section table is available;
-        // explicitly warned, not inferred from the file's name or content.
-        xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>");
+    if let Content::Document(_) = content {
+        if let Some(last) = sections.last() {
+            xml.push_str(&last.xml);
+        } else {
+            // Existing compatibility policy when no section table is available;
+            // explicitly warned, not inferred from the file's name or content.
+            xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>");
+        }
+        xml.push_str("</w:body></w:document>");
+    } else if let Content::HeaderFooter { kind, .. } = content {
+        xml.push_str(if kind == "header" {
+            "</w:hdr>"
+        } else {
+            "</w:ftr>"
+        });
     }
-    xml.push_str("</w:body></w:document>");
     if xml.len() > max_bytes {
         return Err("OUTPUT_TOO_LARGE".into());
     }
@@ -1018,6 +1154,14 @@ mod tests {
             decode_piece_table(&word, &clx, units.len()).unwrap(),
             source
         );
+        let range = super::read_story_range(&word, &clx, 6, 3).unwrap();
+        assert_eq!(range.text, "日本語");
+        assert_eq!(range.position(0).unwrap().1, 44);
+        assert_eq!(range.position(2).unwrap().1, 48);
+        assert!(range.position(3).is_none());
+        assert!(super::read_story_range(&word, &clx, units.len(), 1).is_err());
+        assert!(super::read_story_range(&word, &clx, usize::MAX, 1).is_err());
+        assert!(super::read_story_range(&word, &clx, 0, super::MAX_MAIN_STORY_UNITS + 1).is_err());
     }
 
     #[test]

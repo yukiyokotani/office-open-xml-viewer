@@ -1,11 +1,12 @@
 //! DOC inline PICF/OfficeArt pictures (MS-DOC 2.9.190-193; MS-ODRAW 2.2.15).
 use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{raster::Image, record_with_end, Record};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Store<'a> {
     data: &'a [u8],
     cache: BTreeMap<usize, Option<Picture<'a>>>,
+    part_offsets: BTreeSet<usize>,
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
@@ -16,6 +17,7 @@ impl<'a> Store<'a> {
         Self {
             data,
             cache: BTreeMap::new(),
+            part_offsets: BTreeSet::new(),
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
@@ -44,6 +46,7 @@ impl<'a> Store<'a> {
             return Err(unsupported("Word picture occurrence budget exceeded"));
         }
         self.occurrences += 1;
+        self.part_offsets.insert(offset);
         let id = self.occurrences;
         Ok(picture.xml(
             id,
@@ -56,7 +59,10 @@ impl<'a> Store<'a> {
         ))
     }
     pub fn relationships(&self) -> String {
-        self.cache.iter().filter_map(|(offset, picture)| picture.map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
+        self.part_offsets.iter().filter_map(|offset| self.cache[offset].map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
+    }
+    pub fn begin_part(&mut self) {
+        self.part_offsets.clear();
     }
     pub fn parts(&self) -> Vec<(String, &'a [u8])> {
         self.cache
@@ -379,6 +385,12 @@ mod tests {
         assert!(store.drawing(0).unwrap().contains("docPr id=\"2\""));
         assert_eq!(store.budget, budget);
         assert_eq!(store.parts().len(), 1);
+        assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
+        store.begin_part();
+        assert!(store.relationships().is_empty());
+        assert_eq!(store.parts().len(), 1); // The media remains shared.
+        assert!(store.drawing(0).unwrap().contains("docPr id=\"3\""));
+        assert_eq!(store.budget, budget);
         assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
         assert_eq!(store.remaining_bytes, 128 * 1024 * 1024 - png().len());
         let mut store = Store::new(&data);

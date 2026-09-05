@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping, formatted header/footer variants and supported passive page-number fields | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, header/footer floating drawings, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, phonetic string data, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
@@ -188,6 +188,28 @@ Nesting (32), rows per section (100,000) and grid boundaries (65,536) have resou
 ceilings. Paragraph text and pending tables remain bounded by the XML budget.
 Floating frames and numbering are still absent; line wrapping and pagination
 can differ significantly. No existing renderer changes are required.
+
+DOC header/footer stories follow MS-DOC 2.3.3 and 2.8.22: the six separator
+stories are not page headers, and each section has even/default/first header
+and footer slots. Zero-length ranges inherit the previous section's matching
+variant; an explicit blank paragraph creates an empty part instead. Guard marks
+are removed, while paragraph/table formatting and supported inline pictures
+use the same physical piece/FKP resolution as the main story. Image relationships
+are scoped to their containing part. Document-facing-page and section-title-page
+flags become ordinary OOXML settings (ECMA-376 17.10); no legacy-specific
+renderer path is added.
+
+Unnested, unlocked PAGE and NUMPAGES fields with supported general formatting
+switches retain their dynamic meaning in headers/footers. The field table's
+lock flag keeps cached text, and private field results are suppressed.
+Other field instructions are discarded while their cached display is retained;
+they are not evaluated and cannot open links, files, macros or external services.
+Header floating drawings, advanced field switches, numbering restarts/formats
+from section properties, and exact Office pagination remain incomplete.
+Each aggregate main/header story has a 64 Mi UTF-16-unit decoding ceiling and
+one million controls; headers additionally allow at most 4,096 nonempty parts.
+The aggregate generated XML has a 256 MiB ceiling. These are resource policies,
+not format limits. No migration or opt-in API change is required.
 
 Custom paragraph tabs resolve `sprmPChgTabsPapx` and `sprmPChgTabs` through the
 same style/PAPX/PRM cascade (MS-DOC 2.9.179-183). Deletions remove inherited stops
@@ -565,9 +587,12 @@ Neither whole-corpus Office equality nor Canvas display equality has been reache
 DOC section decoding is bounded to 16,384 sections and one million property
 operations per input (resource policy, not format limits). Intermediate section
 properties remain attached to the section-ending paragraph; manual page breaks
-are distinct from section breaks. Missing header/footer distances use zero only
-for the currently omitted header/footer stories, with an explicit warning;
-known body margins are retained. The producer's locale defaults are not guessed.
+are distinct from section breaks. Missing header/footer distances use the
+MS-DOC §2.6.4 defaults for the stored producer installation LCID when that LCID
+is listed by the specification. Explicit values, including zero, win. Unlisted
+languages retain the unresolved-margin warning and zero-distance recovery;
+known body margins are retained. The host locale and document text language are
+not used to guess the producer's installation settings.
 XLS saved custom-view print records cannot override the active worksheet's print
 settings, and undefined printer fields are not emitted. These changes do not add
 legacy-specific renderer behavior or change per-format opt-in defaults.

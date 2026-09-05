@@ -1,13 +1,22 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
-  const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
+  const sectionEnds = options.sectionEnds ?? [text.length];
+  if (options.headers && options.headers.length !== sectionEnds.length * 6) throw new Error('Expected six header/footer variants per section');
+  const footnotes = options.footnotes ?? '';
+  // Six empty separator stories, six per-section stories, and a final guard.
+  const headerStories = options.headers?.map(t => t ? `${t}\r` : '') ?? [];
+  const headerText = options.headers ? `${headerStories.join('')}\r` : '';
+  const allText = text + footnotes + headerText;
+  const units = Array.from({ length: allText.length }, (_, index) => allText.charCodeAt(index));
   const textOffset = 0x400;
   const word = new Uint8Array(textOffset + units.length * 2);
   const view = new DataView(word.buffer);
   view.setUint16(0, 0xa5ec, true);
   view.setUint16(2, 0x00c1, true);
-  view.setUint32(0x4c, units.length, true);
+  view.setUint32(0x4c, text.length, true);
+  view.setUint32(0x50, footnotes.length, true);
+  view.setUint32(0x54, headerText.length, true);
   view.setUint32(0x1a2, 0, true);
   units.forEach((unit, index) => view.setUint16(textOffset + index * 2, unit, true));
   const pieceProperties = concat(options.paragraphProperties ?? new Uint8Array(), options.characterProperties ?? new Uint8Array());
@@ -24,18 +33,20 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   view.setUint32(0x1a6, table.length, true);
   const dop = options.defaultTabTwips === undefined ? new Uint8Array() : new Uint8Array(500);
   if (dop.length) {
+    dop[0] = options.facingPages ? 1 : 0;
     // MS-DOC 2.7.2: DopBase.dxaTab at byte 10 of the Dop97 prefix.
     new DataView(dop.buffer).setUint16(10, options.defaultTabTwips as number, true);
     view.setUint32(0x192, table.length, true);
     view.setUint32(0x196, dop.length, true);
   }
   let sectionTable: Uint8Array = new Uint8Array();
-  if (options.sectionProperties) {
-    if (options.sectionProperties.length > 254) throw new Error('Synthetic Sepx overlaps text');
-    view.setUint16(0x300, options.sectionProperties.length, true);
-    word.set(options.sectionProperties, 0x302);
-    // PlcfSed: two CP boundaries and one 12-byte Sed (fcSepx at offset 2).
-    sectionTable = concat(little32(0), little32(units.length), little16(0), little32(0x300), new Uint8Array(6));
+  if (options.sectionProperties || options.headers || options.sectionEnds) {
+    const properties = options.sectionProperties ?? new Uint8Array();
+    if (properties.length > 254) throw new Error('Synthetic Sepx overlaps text');
+    view.setUint16(0x300, properties.length, true);
+    word.set(properties, 0x302);
+    // PlcfSed: CP boundaries followed by 12-byte Seds sharing this fixture's Sepx.
+    sectionTable = concat(little32(0), ...sectionEnds.map(little32), ...sectionEnds.map(() => concat(little16(0), little32(0x300), new Uint8Array(6))));
     view.setUint32(0xca, table.length + dop.length, true);
     view.setUint32(0xce, sectionTable.length, true);
   }
@@ -49,9 +60,31 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     view.setUint32(0x22a, table.length + dop.length + sectionTable.length + floating.length, true);
     view.setUint32(0x22e, drawing.length, true);
   }
+  let headerTable: Uint8Array = new Uint8Array();
+  if (options.headers) {
+    const cps = [0, 0, 0, 0, 0, 0, 0];
+    for (const story of headerStories) cps.push((cps.at(-1) as number) + story.length);
+    cps.push(0xffffffff); // Undefined final PlcfHdd CP must be ignored.
+    headerTable = concat(...cps.map(little32));
+    view.setUint32(0xf2, table.length + dop.length + sectionTable.length + floating.length + drawing.length, true);
+    view.setUint32(0xf6, headerTable.length, true);
+  }
+  const fieldCps: number[] = [], fieldRecords: Uint8Array[] = [];
+  for (let cp = 0; cp < headerText.length; cp++) {
+    const ch = headerText.charCodeAt(cp);
+    if (ch >= 0x13 && ch <= 0x15) {
+      fieldCps.push(cp);
+      fieldRecords.push(new Uint8Array([ch, ch === 0x15 ? 0x80 | (options.lockedHeaderFields ? 0x10 : 0) : 0]));
+    }
+  }
+  const fieldTable = fieldCps.length ? concat(...fieldCps.map(little32), little32(headerText.length + 2), ...fieldRecords) : new Uint8Array();
+  if (fieldTable.length) {
+    view.setUint32(0x122, table.length + dop.length + sectionTable.length + floating.length + drawing.length + headerTable.length, true);
+    view.setUint32(0x126, fieldTable.length, true);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop, sectionTable, floating, drawing)],
+    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable)],
     ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }

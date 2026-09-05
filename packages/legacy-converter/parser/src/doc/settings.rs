@@ -2,7 +2,13 @@
 //! All supported DOP versions begin with the same 84-byte DopBase.
 use super::{u16_at, u32_at, unsupported};
 
-pub(super) fn default_tab_twips(word: &[u8], table: &[u8]) -> Result<Option<u16>, String> {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Properties {
+    pub default_tab_twips: u16,
+    pub even_and_odd_headers: bool,
+}
+
+pub(super) fn read(word: &[u8], table: &[u8]) -> Result<Option<Properties>, String> {
     let size = u32_at(word, 0x196)? as usize;
     // Recovery policy for incomplete documents and minimal synthetic fixtures:
     // the normative lcbDop is nonzero. The caller warns and retains the OOXML
@@ -23,18 +29,33 @@ pub(super) fn default_tab_twips(word: &[u8], table: &[u8]) -> Result<Option<u16>
     if interval == 0 {
         return Err(unsupported("zero Word default tab interval"));
     }
-    Ok(Some(interval))
+    // MS-DOC 2.7.3 DopBase.fFacingPages explicitly maps to evenAndOddHeaders.
+    Ok(Some(Properties {
+        default_tab_twips: interval,
+        even_and_odd_headers: dop[0] & 1 != 0,
+    }))
 }
 
-pub(super) fn xml(interval: u16) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="{interval}"/></w:settings>"#
-    )
+impl Properties {
+    pub(super) fn xml(&self) -> String {
+        let interval = self.default_tab_twips;
+        let facing = if self.even_and_odd_headers {
+            "<w:evenAndOddHeaders/>"
+        } else {
+            ""
+        };
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="{interval}"/>{facing}</w:settings>"#
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn default_tab_twips(word: &[u8], table: &[u8]) -> Result<Option<u16>, String> {
+        Ok(read(word, table)?.map(|p| p.default_tab_twips))
+    }
 
     fn fixture(size: u32, interval: u16) -> (Vec<u8>, Vec<u8>) {
         let mut word = vec![0; 0x19a];
@@ -53,7 +74,11 @@ mod tests {
             for interval in [1, 360, 720, 2160, u16::MAX] {
                 let (word, table) = fixture(size, interval);
                 assert_eq!(default_tab_twips(&word, &table).unwrap(), Some(interval));
-                assert!(xml(interval).contains(&format!("w:val=\"{interval}\"")));
+                assert!(read(&word, &table)
+                    .unwrap()
+                    .unwrap()
+                    .xml()
+                    .contains(&format!("w:val=\"{interval}\"")));
             }
         }
     }
