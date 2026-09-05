@@ -108,11 +108,23 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 fallback_text(&text, &mut xml_budget)?
             }
         };
+        let background = match presentation.backgrounds[index] {
+            Some(paint) => background_xml(
+                &paint,
+                presentation.schemes[index].as_ref(),
+                &mut media,
+                &mut record_budget,
+            )?,
+            None => String::new(),
+        };
         let relationships = media.relationships();
         xml_budget = xml_budget
             .checked_sub(relationships.len())
             .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
-        slides.push((slide_xml(&tree, &mut xml_budget)?, relationships));
+        slides.push((
+            slide_xml(&tree, &background, &mut xml_budget)?,
+            relationships,
+        ));
     }
     let bytes = build_pptx(slides, presentation.size, &media.parts(), max_output_bytes)?;
     let mut warnings = vec![
@@ -459,11 +471,41 @@ fn build_pptx(
     )
 }
 
-fn slide_xml(tree: &str, budget: &mut usize) -> Result<String, String> {
+fn background_xml(
+    paint: &paint::Paint,
+    scheme: Option<&scheme::Scheme>,
+    media: &mut media::Store<'_>,
+    budget: &mut usize,
+) -> Result<String, String> {
+    let fill = if let Some((index, opacity)) = paint.background_image() {
+        if !media.reference(index, budget)? {
+            return Ok(String::new());
+        }
+        let alpha = if opacity == 65536 {
+            String::new()
+        } else {
+            format!(
+                "<a:alphaModFix amt=\"{}\"/>",
+                (u64::from(opacity) * 100000 + 32768) / 65536
+            )
+        };
+        format!("<a:blipFill><a:blip r:embed=\"rImg{index}\">{alpha}</a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>")
+    } else {
+        let Some(fill) = paint.background_fill(scheme) else {
+            return Ok(String::new());
+        };
+        fill
+    };
+    Ok(format!("<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>"))
+}
+
+fn slide_xml(tree: &str, background: &str, budget: &mut usize) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#,
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld>"#,
     );
+    xml.push_str(background);
+    xml.push_str(r#"<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#);
     let end = "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
     // The tree has already been charged. Only charge the slide wrapper here.
     *budget = budget

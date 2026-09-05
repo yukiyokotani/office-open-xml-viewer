@@ -1,7 +1,7 @@
 //! Direct OfficeArt preset geometry and solid paint, without renderer extensions.
 use super::{scheme, unsupported};
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Paint {
     pub custom_geometry: bool,
     fill_ok: Option<bool>,
@@ -9,6 +9,7 @@ pub(super) struct Paint {
     fill_rect: bool,
     fill_type: Option<u32>,
     fill: Option<u32>,
+    fill_blip: u32,
     fill_alpha: Option<u32>,
     filled: Option<bool>,
     line_type: Option<u32>,
@@ -36,6 +37,8 @@ impl Paint {
             }
             0x180 => self.fill_type = Some(value),
             0x181 => self.fill = Some(value),
+            // Caller validates fBid on this one-based BStore reference.
+            0x4186 => self.fill_blip = value,
             0x182 | 0x1c1 => {
                 if value > 65536 {
                     return Err(unsupported("invalid PowerPoint paint opacity"));
@@ -85,6 +88,29 @@ impl Paint {
             20 => Some("line"),
             _ => None,
         }
+    }
+    /// Background paint has no geometry or line, and must not acquire a fake
+    /// preset merely to extract its fill (PresentationML CT_BackgroundProperties).
+    pub fn background_fill(&self, scheme: Option<&scheme::Scheme>) -> Option<String> {
+        if !self.filled.unwrap_or(true) || !self.fill_ok.unwrap_or(true) {
+            return Some("<a:noFill/>".into());
+        }
+        if self.fill_rect || self.fill_type.unwrap_or(0) != 0 {
+            return None;
+        }
+        solid(
+            self.fill.unwrap_or(0xffffff),
+            self.fill_alpha.unwrap_or(65536),
+            scheme,
+        )
+    }
+    pub fn background_image(&self) -> Option<(u32, u32)> {
+        (self.fill_type == Some(3)
+            && self.fill_blip != 0
+            && !self.fill_rect
+            && self.filled.unwrap_or(true)
+            && self.fill_ok.unwrap_or(true))
+        .then_some((self.fill_blip, self.fill_alpha.unwrap_or(65536)))
     }
     #[cfg(test)]
     fn xml(&self, kind: u16) -> String {
@@ -171,6 +197,25 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn background_fill_has_no_geometry_or_line_and_respects_use_bits() {
+        let mut p = Paint::default();
+        p.property(0x181, 0x112233).unwrap();
+        p.property(0x182, 32768).unwrap();
+        p.property(0x1c0, 0xff).unwrap();
+        p.custom_geometry = true;
+        let xml = p.background_fill(None).unwrap();
+        assert!(xml.contains("332211"));
+        assert!(xml.contains("50000"));
+        assert!(!xml.contains("a:ln"));
+        p.property(0x180, 3).unwrap();
+        p.property(0x4186, 9).unwrap();
+        assert_eq!(p.background_image(), Some((9, 32768)));
+        assert!(p.background_fill(None).is_none());
+        p.property(0x1bf, 0x00100000).unwrap();
+        assert!(p.background_image().is_none());
+        assert_eq!(p.background_fill(None).unwrap(), "<a:noFill/>");
+    }
     #[test]
     fn maps_only_supported_unmodified_presets() {
         let mut p = Paint::default();

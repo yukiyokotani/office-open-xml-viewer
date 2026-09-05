@@ -1,4 +1,5 @@
-//! Slide/master color schemes: MS-PPT 2.4.14.1-2, 2.5.10-15, 2.12.1-2.
+//! Current master resolution for schemes, text and backgrounds.
+//! MS-PPT 2.4.14.1-2, 2.5.10-15, 2.12.1-2.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -13,6 +14,7 @@ struct Entry {
     local: Option<Scheme>,
     parent: Option<u32>,
     main_parent: Option<u32>,
+    background_parent: Option<u32>,
 }
 
 fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
@@ -37,6 +39,9 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
                 if record.kind != 1016 && u16_at(atom.payload, 20)? & 2 != 0 {
                     result.parent = Some(u32_at(atom.payload, 12)?);
                 }
+                if record.kind != 1016 && u16_at(atom.payload, 20)? & 4 != 0 {
+                    result.background_parent = Some(master);
+                }
             }
             2032 if atom.instance == 1 => {
                 if result.local.is_some() || atom.version != 0 || atom.payload.len() != 32 {
@@ -56,10 +61,13 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
     Ok(result)
 }
 
+#[derive(Default)]
 pub(super) struct Resolver {
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
+    backgrounds: BTreeMap<u32, Option<paint::Paint>>,
+    background_cache: BTreeMap<u32, Option<paint::Paint>>,
 }
 impl Resolver {
     pub fn new(
@@ -78,6 +86,7 @@ impl Resolver {
         let mut masters = BTreeMap::new();
         let defaults = text_style::document_defaults(children, budget)?;
         let mut text_styles = BTreeMap::new();
+        let mut backgrounds = BTreeMap::new();
         if let Some(list) = lists.first() {
             if list.version != 15 {
                 return Err(unsupported("invalid PowerPoint master list"));
@@ -102,6 +111,7 @@ impl Resolver {
                     return Err(unsupported("invalid PowerPoint master persist object"));
                 }
                 masters.insert(id, entry(record, budget)?);
+                backgrounds.insert(id, drawing::background(record.payload, budget)?);
                 if record.kind == 1016 {
                     let records = parse_records(record.payload, budget)?;
                     text_styles.insert(
@@ -115,7 +125,49 @@ impl Resolver {
             masters,
             cache: BTreeMap::new(),
             text_styles,
+            backgrounds,
+            background_cache: BTreeMap::new(),
         })
+    }
+    pub fn background(
+        &mut self,
+        slide: Record<'_>,
+        budget: &mut usize,
+    ) -> Result<Option<paint::Paint>, String> {
+        match entry(slide, budget)?.background_parent {
+            Some(id) => self.master_background(id, &mut Vec::new(), budget),
+            None => drawing::background(slide.payload, budget),
+        }
+    }
+    fn master_background(
+        &mut self,
+        id: u32,
+        path: &mut Vec<u32>,
+        budget: &mut usize,
+    ) -> Result<Option<paint::Paint>, String> {
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| unsupported("PowerPoint background work budget exceeded"))?;
+        if let Some(value) = self.background_cache.get(&id) {
+            return Ok(*value);
+        }
+        if path.len() >= MAX_DEPTH || path.contains(&id) {
+            return Err(unsupported(
+                "cyclic or excessive PowerPoint background inheritance",
+            ));
+        }
+        let e = *self
+            .masters
+            .get(&id)
+            .ok_or_else(|| unsupported("unresolved PowerPoint background master"))?;
+        path.push(id);
+        let result = match e.background_parent {
+            Some(parent) => self.master_background(parent, path, budget)?,
+            None => self.backgrounds.get(&id).copied().flatten(),
+        };
+        path.pop();
+        self.background_cache.insert(id, result);
+        Ok(result)
     }
     pub fn text_master(
         &self,
@@ -234,6 +286,130 @@ mod tests {
         parse_record_at(bytes, 0, &mut 100).unwrap()
     }
 
+    fn background_slide(kind: u16, parent: u32, flags: u16, color: u32) -> Vec<u8> {
+        let mut atom = [0; 24];
+        atom[12..16].copy_from_slice(&parent.to_le_bytes());
+        atom[20..22].copy_from_slice(&flags.to_le_bytes());
+        let shape = record(
+            15,
+            0xf004,
+            &[
+                record(
+                    0x12,
+                    0xf00a,
+                    &[1u32.to_le_bytes(), 0xc00u32.to_le_bytes()].concat(),
+                ),
+                record(
+                    0x13,
+                    0xf00b,
+                    &[0x181u16.to_le_bytes().as_slice(), &color.to_le_bytes()].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        record(
+            15,
+            kind,
+            &[
+                record(2, 1007, &atom),
+                record(15, 1036, &record(15, 0xf002, &shape)),
+            ]
+            .concat(),
+        )
+    }
+
+    #[test]
+    fn background_inheritance_is_independent_of_scheme_and_master_objects() {
+        let main = background_slide(1016, 0, 7, 0x08000000);
+        let title = background_slide(1006, 100, 4, 0x654321);
+        let document = [&main[..], &title].concat();
+        let mut references = Vec::new();
+        for (persist, id) in [(1u32, 100u32), (2, 200)] {
+            references.extend(record(
+                0,
+                1011,
+                &[
+                    persist.to_le_bytes().as_slice(),
+                    &[0; 8],
+                    &id.to_le_bytes(),
+                    &[0; 4],
+                ]
+                .concat(),
+            ));
+        }
+        let list = record(0x1f, 4080, &references);
+        let mut r = Resolver::new(
+            &document,
+            &[parsed(&list)],
+            &BTreeMap::from([(1, 0), (2, main.len())]),
+            &mut 1000,
+        )
+        .unwrap();
+        // Background bit alone inherits through title to main. Scheme index is
+        // retained until paint, using the destination slide's current scheme.
+        let input = background_slide(1006, 200, 4, 0x123456);
+        let paint = r.background(parsed(&input), &mut 100).unwrap().unwrap();
+        assert!(paint
+            .background_fill(Some(&[0xabcdef; 8]))
+            .unwrap()
+            .contains("EFCDAB"));
+        assert!(paint
+            .background_fill(Some(&[0x123456; 8]))
+            .unwrap()
+            .contains("563412"));
+        assert_eq!(r.background_cache.len(), 2);
+        assert!(r.master_background(200, &mut Vec::new(), &mut 0).is_err());
+        // Scheme/objects bits do not inherit the background.
+        let local = background_slide(1006, 200, 3, 0x123456);
+        assert!(r
+            .background(parsed(&local), &mut 100)
+            .unwrap()
+            .unwrap()
+            .background_fill(None)
+            .unwrap()
+            .contains("563412"));
+    }
+
+    #[test]
+    fn background_cycles_dangling_ids_and_depth_are_bounded() {
+        let mut r = Resolver::default();
+        for (id, parent) in [(1, 2), (2, 1)] {
+            r.masters.insert(
+                id,
+                Entry {
+                    background_parent: Some(parent),
+                    ..Entry::default()
+                },
+            );
+        }
+        assert!(r
+            .master_background(1, &mut Vec::new(), &mut 100)
+            .err()
+            .unwrap()
+            .contains("cyclic"));
+        assert!(r.background_cache.is_empty());
+        r.masters.remove(&2);
+        assert!(r
+            .master_background(1, &mut Vec::new(), &mut 100)
+            .err()
+            .unwrap()
+            .contains("unresolved"));
+        for id in 1..=MAX_DEPTH as u32 + 1 {
+            r.masters.insert(
+                id,
+                Entry {
+                    background_parent: Some(id + 1),
+                    ..Entry::default()
+                },
+            );
+        }
+        assert!(r
+            .master_background(1, &mut Vec::new(), &mut 1000)
+            .err()
+            .unwrap()
+            .contains("excessive"));
+    }
+
     #[test]
     fn resolves_master_ids_through_persist_offsets_and_respects_local_scheme() {
         let old = slide(1016, 0, false, 0x123456);
@@ -282,6 +458,8 @@ mod tests {
             masters: BTreeMap::new(),
             cache: BTreeMap::new(),
             text_styles: BTreeMap::new(),
+            backgrounds: BTreeMap::new(),
+            background_cache: BTreeMap::new(),
         };
         assert!(r.master(1, &mut Vec::new(), &mut 100).is_err());
         r.masters.insert(
@@ -290,6 +468,7 @@ mod tests {
                 parent: Some(2),
                 local: Some([0; 8]),
                 main_parent: None,
+                background_parent: None,
             },
         );
         r.masters.insert(
@@ -298,6 +477,7 @@ mod tests {
                 parent: Some(1),
                 local: Some([0; 8]),
                 main_parent: None,
+                background_parent: None,
             },
         );
         assert!(r
@@ -311,6 +491,7 @@ mod tests {
                     parent: Some(i + 1),
                     local: None,
                     main_parent: None,
+                    background_parent: None,
                 },
             );
         }
@@ -350,6 +531,8 @@ mod tests {
             masters: BTreeMap::new(),
             cache: BTreeMap::new(),
             text_styles: BTreeMap::new(),
+            backgrounds: BTreeMap::new(),
+            background_cache: BTreeMap::new(),
         };
         for (id, parent) in [(1, 2), (2, 1)] {
             r.masters.insert(
@@ -358,6 +541,7 @@ mod tests {
                     local: None,
                     parent: None,
                     main_parent: Some(parent),
+                    background_parent: None,
                 },
             );
         }

@@ -245,6 +245,8 @@ impl Properties {
             if opid & 0x4000 != 0 {
                 if opid == 0x4104 {
                     self.picture = value;
+                } else if opid == 0x4186 {
+                    self.paint.property(opid, value)?;
                 }
                 continue;
             }
@@ -280,6 +282,48 @@ impl Properties {
         }
         Ok(())
     }
+}
+
+/// A slide background is the ungrouped OfficeArt background shape, not an
+/// arbitrary full-slide rectangle. Never inspect nested client/action data.
+pub(super) fn background(slide: &[u8], budget: &mut usize) -> Result<Option<paint::Paint>, String> {
+    let children = parse_records(slide, budget)?;
+    let mut drawings = children.iter().filter(|r| r.kind == 1036);
+    let Some(drawing) = drawings.next() else {
+        return Ok(None);
+    };
+    if drawings.next().is_some() || drawing.version != 15 {
+        return Err(unsupported("invalid PowerPoint background drawing"));
+    }
+    let groups = parse_records(drawing.payload, budget)?;
+    if groups.len() != 1 || groups[0].kind != 0xf002 || groups[0].version != 15 {
+        return Err(unsupported(
+            "invalid PowerPoint background OfficeArt drawing",
+        ));
+    }
+    let mut result = None;
+    for record in parse_records(groups[0].payload, budget)? {
+        if record.kind != 0xf004 {
+            continue;
+        }
+        // Only the flag record is needed to decide whether this is a background.
+        let flags: Vec<_> = parse_records(record.payload, budget)?
+            .into_iter()
+            .filter(|r| r.kind == 0xf00a)
+            .collect();
+        if flags.len() != 1 || flags[0].version != 2 || flags[0].payload.len() != 8 {
+            return Err(unsupported("invalid PowerPoint background shape flags"));
+        }
+        let value = u32_at(flags[0].payload, 4)?;
+        if value & 1024 == 0 || value & (8 | 16) != 0 {
+            continue;
+        }
+        if result.is_some() {
+            return Err(unsupported("duplicate PowerPoint background shapes"));
+        }
+        result = Some(Shape::read(record, false, budget)?.props.paint);
+    }
+    Ok(result)
 }
 
 struct Writer<'a, 'b> {
@@ -561,6 +605,34 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn backgrounds_are_explicit_ungrouped_live_shapes_without_anchor_requirements() {
+        let bg = sp(0xc00, vec![properties(&[(0x181, 0x123456)])]);
+        let input = drawing(vec![bg.clone()]);
+        assert!(background(&input, &mut 100)
+            .unwrap()
+            .unwrap()
+            .background_fill(None)
+            .unwrap()
+            .contains("563412"));
+        assert!(xml(&input).unwrap().is_empty()); // Never emit a foreground rectangle.
+        for flag in [0x800, 0xc08, 0xc10] {
+            assert!(background(&drawing(vec![sp(flag, vec![])]), &mut 100)
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            background(&drawing(vec![record(15, 0xf003, &bg)]), &mut 100)
+                .unwrap()
+                .is_none()
+        );
+        assert!(background(&drawing(vec![bg.clone(), bg]), &mut 100)
+            .err()
+            .unwrap()
+            .contains("duplicate"));
+        assert!(background(&input, &mut 1).is_err());
     }
 
     #[test]
