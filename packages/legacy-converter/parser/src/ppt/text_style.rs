@@ -387,6 +387,7 @@ struct Paragraph {
     bullet: bullet::Bullet,
     margin: Option<i16>,
     indent: Option<i16>,
+    default_tab: Option<i16>,
 }
 impl Paragraph {
     fn inherit(&self, base: Option<&Self>) -> Self {
@@ -400,6 +401,7 @@ impl Paragraph {
             bullet: self.bullet.inherit(&base.bullet),
             margin: self.margin.or(base.margin),
             indent: self.indent.or(base.indent),
+            default_tab: self.default_tab.or(base.default_tab),
         }
     }
     fn read(r: &mut Reader<'_, '_>, level: u16) -> Result<Self, String> {
@@ -417,7 +419,7 @@ impl Paragraph {
         }
         let margin = r.optional16(mask, 0x100)?.map(|v| v as i16);
         let indent = r.optional16(mask, 0x400)?.map(|v| v as i16);
-        r.optional16(mask, 0x8000)?;
+        let default_tab = r.optional16(mask, 0x8000)?.map(|v| v as i16);
         if mask & 0x100000 != 0 {
             let count = usize::from(r.u16()?);
             *r.budget = r
@@ -438,10 +440,20 @@ impl Paragraph {
             bullet,
             margin,
             indent,
+            default_tab,
         })
     }
     fn xml(&self, context: Context<'_>) -> Result<String, String> {
         let mut xml = format!("<a:pPr lvl=\"{}\"", self.level);
+        // MS-PPT 2.9.20 / 2.2.29: signed master units, not points or a
+        // percentage. ECMA-376 21.1.2.2.7 defTabSz uses ST_Coordinate32.
+        // Preserve explicit zero/negative values; absence alone inherits.
+        if let Some(value) = self.default_tab {
+            xml.push_str(&format!(
+                " defTabSz=\"{}\"",
+                master_to_emu(i64::from(value))
+            ));
+        }
         // Binary text/bullet offsets share a text-body origin. DrawingML indent
         // is relative to marL, so retain their difference (including hanging).
         // A negative binary margin cannot be expressed by ST_TextMargin; omit
@@ -507,6 +519,7 @@ impl Level {
                 bullet: bullet::Bullet::default(),
                 margin: None,
                 indent: None,
+                default_tab: None,
             },
             character: Character {
                 mask: 0,
@@ -714,6 +727,62 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_default_tab_size_units_and_explicit_zero_overrides() {
+        for value in [i16::MIN, -1, 0, 1, 288, 575, 576, i16::MAX] {
+            let bytes = [u32s(0x8000), value.to_le_bytes().to_vec()].concat();
+            let mut budget = 100;
+            let mut reader = Reader {
+                bytes: &bytes,
+                pos: 0,
+                budget: &mut budget,
+            };
+            let direct = Paragraph::read(&mut reader, 0).unwrap();
+            assert_eq!(reader.pos, bytes.len());
+            let expected = format!("defTabSz=\"{}\"", master_to_emu(i64::from(value)));
+            assert!(direct.xml(Context::default()).unwrap().contains(&expected));
+            let empty = Level::empty(0).paragraph;
+            assert!(empty
+                .inherit(Some(&direct))
+                .xml(Context::default())
+                .unwrap()
+                .contains(&expected));
+        }
+        let mut base = Level::empty(0).paragraph;
+        let base_bytes = [u32s(0x8000), u16s(288)].concat();
+        base = Paragraph::read(
+            &mut Reader {
+                bytes: &base_bytes,
+                pos: 0,
+                budget: &mut 100,
+            },
+            0,
+        )
+        .unwrap()
+        .inherit(Some(&base));
+        let zero_bytes = [u32s(0x8000), u16s(0)].concat();
+        let direct = Paragraph::read(
+            &mut Reader {
+                bytes: &zero_bytes,
+                pos: 0,
+                budget: &mut 100,
+            },
+            0,
+        )
+        .unwrap();
+        assert!(direct
+            .inherit(Some(&base))
+            .xml(Context::default())
+            .unwrap()
+            .contains("defTabSz=\"0\""));
+        assert!(!Level::empty(0)
+            .paragraph
+            .xml(Context::default())
+            .unwrap()
+            .contains("defTabSz"));
+    }
+
     #[test]
     fn preserves_character_bullet_properties_and_hanging_indent() {
         // MS-PPT TextPFException: explicit bullet flags, glyph, font, point size,

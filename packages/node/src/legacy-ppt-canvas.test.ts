@@ -12,6 +12,43 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it.skipIf(!skia)('retains distinct binary default tab intervals through conversion, parsing and painting', async () => {
+    const { Canvas } = skia as typeof import('skia-canvas');
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const shape = (id: number, top: number, tab: number) => record(15, 0xf004, concat(
+      record((202 << 4) | 2, 0xf00a, concat(little32(id), little32(0x200))),
+      record(0, 0xf010, concat(little32(top), little32(576), little32(4032), little32(top + 576))),
+      record(15, 0xf00d, concat(
+        record(0, 3999, little32(1)), record(0, 4000, utf16le('A\tB')),
+        record(0, 4001, concat(
+          little32(4), little16(0), little32(0x8000), little16(tab),
+          little32(1), little32(0x20000), little16(24),
+          little32(3), little32(0x60000), little16(24), little32(0xfe0000ff),
+        )),
+      )),
+    ));
+    const drawing = record(15, 1036, record(15, 0xf002, concat(shape(1, 576, 288), shape(2, 1440, 576))));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(drawing), { legacyConversion: { ppt: { converter } } });
+    expect(presentation.slides[0].elements.map(element => element.type === 'shape' ? element.textBody?.paragraphs[0].defTabSz : undefined))
+      .toEqual([457200, 914400]);
+    const canvas = new Canvas(960, 720);
+    try {
+      await renderSlideNode(canvas, presentation, 0, {width: 960, dpr: 1});
+      const pixels = canvas.getContext('2d').getImageData(0, 0, 960, 720).data;
+      const redStart = (top: number) => {
+        let left = 960;
+        for (let y = top; y < top + 96; y++) for (let x = 0; x < 960; x++) {
+          const at = (y * 960 + x) * 4;
+          if (pixels[at] > 200 && pixels[at + 1] < 80 && pixels[at + 2] < 80 && pixels[at + 3] > 0) left = Math.min(left, x);
+        }
+        expect(left).toBeLessThan(960);
+        return left;
+      };
+      // The slide is 10 inches wide: a half-inch tab difference is 48 px.
+      expect(redStart(240) - redStart(96)).toBe(48);
+    } finally {canvas.width = 1; canvas.height = 1;}
+  });
   it.skipIf(!skia)('inherits solid master paint only through active links and honors direct color and no-paint overrides', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);

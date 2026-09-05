@@ -146,6 +146,15 @@ Original UTF-16 style boundaries are retained even for multi-digit numbers.
 This does not synthesize missing master placeholders, evaluate arbitrary fields,
 or add dynamic numbering to the generated presentation.
 
+PPT paragraph default tab intervals are retained through direct and supported
+master text-style inheritance (MS-PPT 2.9.20/2.2.29). Signed master-unit values
+become ordinary DrawingML `defTabSz` coordinates (ECMA-376 21.1.2.2.7), including
+explicit zero instead of accidentally inheriting another interval. The existing
+OOXML parser/renderer uses positive intervals; nonpositive values remain in the
+package but currently use the viewer's fallback interval. Custom tab-stop lists
+and TextRuler properties remain unsupported. No migration, legacy-specific
+renderer change, or opt-in API change is required.
+
 XLS shared-string formatting uses `FormatRun` UTF-16 character offsets and
 `FontIndex` references, including the reserved index-4 gap and ignored terminal
 run (MS-XLS 2.5.129, 2.5.132 and 2.5.293). Run fonts become ordinary
