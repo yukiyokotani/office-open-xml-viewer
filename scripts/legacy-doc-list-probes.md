@@ -48,6 +48,20 @@ unchanged. One-twip differences may be below PDF text-coordinate precision;
 inspect binary values and quantify export rounding instead of treating a
 visually indistinguishable pair as proof of equivalent formatting semantics.
 
+The third phase varies the paragraph styles of two paragraphs sharing one list:
+the same custom style, Normal, custom followed by Normal, or two distinct custom
+styles with identical properties. Each pattern is exercised with absent direct
+indentation, direct-left zero/1440, direct-first-line zero, and combined zeros,
+in both directions, with unchanged repeats:
+
+```sh
+python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-style-association --phase style-association
+```
+
+This creates 48 `R` cases without changing the authored `P` or `Q` files. It
+attempts to obtain unlinked binary controls; the source style pattern alone
+does not establish whether Word will create or retain a list-style association.
+
 ## Required local Office sequence
 
 1. Record Word version/build, platform, installed/substituted fonts and relevant
@@ -140,3 +154,38 @@ indentation when numbering is removed, not a general direct-format override.
 Do not present an inferred positive-reference precedence rule as mandated by
 these sections. A compatibility implementation needs an explicitly reviewed
 scope, counterexamples, and approval; no such override is introduced here.
+
+### Additional style-association controls
+
+The third phase was saved and reopened in the same local Word version, then
+exported to a 48-page direct-DOC PDF. All 96 numbered paragraphs were mapped
+through their physical paragraph marks, PAPX, positive `iLfo`, selected LFO and
+LSTF. They have level zero, no LFO formatting overrides, and empty piece
+properties. Of these paragraphs, 84 use `rgistdPara[0] = 0x0fff` (unlinked),
+and 12 use a linked style. All selected lists are single-level lists.
+
+The unlinked LTR alternating-style controls retain list-left 720 and first-line
+-360 twips in both physical and logical LVL properties. Conflicting direct
+PAPX values remain present. Their measured direct-DOC PDF positions are:
+
+| Direct left / first-line (twips) | Marker x (points) | Continuation x (points) |
+| --- | ---: | ---: |
+| absent / absent | 90 | 108 |
+| 0 / absent | 54 | 72 |
+| 1440 / absent | 126 | 144 |
+| absent / 0 | 108 | 108 |
+| 0 / 0 | 72 | 72 |
+
+Both paragraphs in each case exhibit these anchors. Word-reconverted OOXML
+also retains the conflicting direct indents. Thus the observed direct-indent
+effect is not limited to linked lists. This does not establish a general
+precedence rule for other properties, levels, overrides, or piece properties.
+
+Source style patterns did not uniquely determine the saved association: an
+unchanged custom-style baseline repeat became unlinked although the first
+baseline was linked, with the same selected PDF anchors. Consequently the
+generator does not promise a particular association from a particular pattern,
+and this run does not establish Word's association-creation algorithm. Inspect
+the saved binary on every run. All 48 occupied page regions were reviewed as
+contact sheets; this is not a full-resolution visual equivalence or browser
+self-VRT claim. No converter or renderer compatibility rule was changed.

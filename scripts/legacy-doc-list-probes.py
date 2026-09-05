@@ -26,6 +26,8 @@ from docx.shared import Inches, Pt, RGBColor
 def matrix(phase="baseline"):
     if phase == "interactions":
         return interaction_matrix()
+    if phase == "style-association":
+        return style_association_matrix()
     if phase != "baseline":
         raise ValueError("unknown experiment phase")
     cases = []
@@ -112,6 +114,36 @@ def element(name, **attributes):
     return result
 
 
+def style_association_matrix():
+    """Try to separate paragraph-style association from direct indentation.
+
+    Word may still associate all saved lists with a style. Only inspection of
+    the saved LSTF.rgistdPara establishes whether an unlinked control exists.
+    """
+    cases = []
+
+    def add(parent, **changes):
+        case = {"id": f"R{len(cases) + 1:03}", "parent": parent["id"],
+                "changed": list(changes),
+                "parameters": {**parent["parameters"], **changes}}
+        cases.append(case)
+        return case
+
+    for original in (case for case in matrix() if case["parent"] is None):
+        base = {"id": f"R{len(cases) + 1:03}", "parent": None, "changed": [],
+                "parameters": {**original["parameters"], "paragraph_styles": "uniform"}}
+        cases.append(base)
+        groups = [base] + [add(base, paragraph_styles=mode)
+                           for mode in ["normal", "mixed-normal", "alternating"]]
+        for group in groups:
+            left = add(group, direct_left=0)
+            add(group, direct_left=1440)
+            add(group, direct_first=0)
+            add(left, direct_first=0)
+            add(group)
+    return cases
+
+
 def add_indent(parent, left=None, right=None, first=None, empty=False):
     if not empty and left is None and right is None and first is None:
         return
@@ -165,12 +197,22 @@ def build(cases):
     for index, case in enumerate(cases):
         p = case["parameters"]
         identity = index + 1
-        style = doc.styles.add_style("Probe" + case["id"], WD_STYLE_TYPE.PARAGRAPH)
-        style.base_style = normal
+        style_mode = p.get("paragraph_styles", "uniform")
+        if style_mode not in ["uniform", "normal", "mixed-normal", "alternating"]:
+            raise ValueError("unknown paragraph style pattern")
+        style = normal if style_mode == "normal" else doc.styles.add_style(
+            "Probe" + case["id"], WD_STYLE_TYPE.PARAGRAPH)
+        if style is not normal:
+            style.base_style = normal
         style_ppr = style.element.get_or_add_pPr()
         if p["numbering_in_style"]:
             add_reference(style_ppr, identity)
         add_indent(style_ppr, left=p["style_left"], first=p["style_first"])
+        alternate = None
+        if style_mode == "alternating":
+            alternate = doc.styles.add_style("Probe" + case["id"] + "Alternate", WD_STYLE_TYPE.PARAGRAPH)
+            alternate.base_style = normal
+            alternate.element.append(deepcopy(style_ppr))
         abstract = element("abstractNum", abstractNumId=identity)
         abstract.append(element("multiLevelType", val="singleLevel"))
         level = element("lvl", ilvl=0)
@@ -196,7 +238,12 @@ def build(cases):
         heading.paragraph_format.page_break_before = index > 0
         doc.add_paragraph("Compare the marker, first line, continuation line and wrapped text.")
         for label in ["First", "Second"]:
-            paragraph = doc.add_paragraph(style=style)
+            paragraph_style = style
+            if label == "Second" and style_mode == "mixed-normal":
+                paragraph_style = normal
+            elif label == "Second" and style_mode == "alternating":
+                paragraph_style = alternate
+            paragraph = doc.add_paragraph(style=paragraph_style)
             props = paragraph._p.get_or_add_pPr()
             if not p["numbering_in_style"]:
                 add_reference(props, identity)
@@ -225,7 +272,7 @@ def build(cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new directory; existing paths are rejected")
-    parser.add_argument("--phase", choices=["baseline", "interactions"], default="baseline")
+    parser.add_argument("--phase", choices=["baseline", "interactions", "style-association"], default="baseline")
     args = parser.parse_args()
     cases = matrix(args.phase)
     payload = build(cases)

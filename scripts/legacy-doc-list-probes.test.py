@@ -14,6 +14,56 @@ W = "{" + NS["w"] + "}"
 
 
 class ProbeTests(unittest.TestCase):
+    def test_style_association_keeps_one_list_across_distinct_paragraph_styles(self):
+        cases = probes.matrix("style-association")
+        self.assertEqual(len(cases), 48)
+        by_id = {c["id"]: c for c in cases}
+        self.assertEqual(len(by_id), 48)
+        for case in cases:
+            if case["parent"]:
+                original = by_id[case["parent"]]["parameters"]
+                changed = [k for k, v in case["parameters"].items() if original[k] != v]
+                self.assertEqual(changed, case["changed"])
+                self.assertLessEqual(len(changed), 1)
+        self.assertEqual(sum(c["parent"] is not None and not c["changed"] for c in cases), 8)
+        with ZipFile(BytesIO(probes.build(cases))) as z:
+            doc = E.fromstring(z.read("word/document.xml"))
+            style_defs = E.fromstring(z.read("word/styles.xml"))
+            paragraphs = doc.findall("w:body/w:p", NS)
+            self.assertEqual(len(paragraphs), 192)
+            for i, case in enumerate(cases):
+                pair = paragraphs[4*i+2:4*i+4]
+                self.assertEqual([p.find("w:pPr/w:numPr/w:numId", NS).get(W+"val") for p in pair], [str(i+1)]*2)
+                styles = [p.find("w:pPr/w:pStyle", NS) for p in pair]
+                styles = [s.get(W+"val") if s is not None else None for s in styles]
+                main = "Probe" + case["id"]
+                expected = {"uniform": [main, main], "normal": [None, None],
+                            "mixed-normal": [main, None], "alternating": [main, main+"Alternate"]}
+                self.assertEqual(styles, expected[case["parameters"]["paragraph_styles"]])
+                if case["parameters"]["paragraph_styles"] == "alternating":
+                    definitions = [style_defs.xpath("w:style[@w:styleId=$id]", namespaces=NS, id=s)[0] for s in styles]
+                    self.assertEqual([d.find("w:basedOn", NS).get(W+"val") for d in definitions], ["Normal"]*2)
+                    self.assertEqual(E.tostring(definitions[0].find("w:pPr", NS)),
+                                     E.tostring(definitions[1].find("w:pPr", NS)))
+
+    def test_all_phases_remain_deterministic_and_passive(self):
+        for phase in ["baseline", "interactions", "style-association"]:
+            with self.subTest(phase=phase):
+                cases = probes.matrix(phase)
+                payload = probes.build(cases)
+                self.assertEqual(payload, probes.build(cases))
+                with ZipFile(BytesIO(payload)) as z:
+                    self.assertFalse(any(any(s in name.lower() for s in ["vba", "activex", "embeddings"]) for name in z.namelist()))
+                    for name in z.namelist():
+                        if name.endswith(".rels"):
+                            self.assertFalse(any(r.get("TargetMode") == "External" for r in E.fromstring(z.read(name))))
+                    doc = E.fromstring(z.read("word/document.xml"))
+                    self.assertFalse(doc.findall(".//w:fldChar", NS))
+                    self.assertFalse(doc.findall(".//w:fldSimple", NS))
+                    numbering = E.fromstring(z.read("word/numbering.xml"))
+                    self.assertEqual(len(numbering.findall("w:abstractNum", NS)), len(cases))
+                    self.assertEqual(len(numbering.findall("w:num", NS)), len(cases))
+
     def test_interactions_cover_conflicting_right_indent_and_twip_boundaries(self):
         cases = probes.matrix("interactions")
         self.assertEqual(len(cases), 64)
