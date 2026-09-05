@@ -12,7 +12,9 @@ use crate::ooxml::{write_package, xml_text, ROOT_RELS_DOCX};
 mod character;
 mod fkp;
 mod formatting;
+mod paragraph;
 mod sections;
+mod sprm;
 
 const FIB_IDENT: u16 = 0xa5ec;
 const FIB_WORD_97: u16 = 0x00c1;
@@ -24,6 +26,7 @@ const MAX_PIECES: usize = 1_000_000;
 // Resource policy independent of the caller's compressed output ZIP ceiling.
 const MAX_DOCUMENT_XML_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MAIN_STORY_UNITS: usize = 64 * 1024 * 1024;
+const MAX_STORY_CONTROLS: usize = 1_000_000;
 
 pub struct DocConversion {
     pub bytes: Vec<u8>,
@@ -75,7 +78,12 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         .ok_or_else(|| unsupported("Word CLX lies outside its table stream"))?;
     let story = read_story(&word, clx, ccp_text)?;
     let sections = sections::read(&word, &table, ccp_text)?;
-    let mut formatting = formatting::Formatting::read(&word, &table)?;
+    let data = if cfb.has_entry("Data") {
+        cfb.stream("Data").map_err(unsupported)?
+    } else {
+        Vec::new()
+    };
+    let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
     let document_xml = build_formatted_document(
         &story,
         &sections,
@@ -90,11 +98,17 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         ("word/document.xml".into(), document_xml),
     ];
     let mut warnings = vec![
-        "legacy-doc:paragraph-layout-tables-and-embedded-objects-omitted".into(),
+        "legacy-doc:tables-and-embedded-objects-omitted".into(),
         "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
     ];
     if formatting.unsupported_character_properties {
         warnings.push("legacy-doc:unsupported-character-properties-omitted".into());
+    }
+    if formatting.unsupported_paragraph_properties {
+        warnings.push("legacy-doc:unsupported-paragraph-properties-omitted".into());
+    }
+    if formatting.unsupported_piece_properties {
+        warnings.push("legacy-doc:unsupported-piece-properties-omitted".into());
     }
     if formatting.missing_tables {
         warnings.push("legacy-doc:missing-formatting-tables-default-character-properties".into());
@@ -384,6 +398,18 @@ fn build_formatted_document(
     mut formatting: Option<&mut formatting::Formatting<'_>>,
     max_bytes: usize,
 ) -> Result<String, String> {
+    // Every control can introduce a paragraph, token or field-stack entry.
+    // Charge before constructing these arrays, not only after XML expansion.
+    if story
+        .text
+        .bytes()
+        .filter(|b| *b < 32)
+        .take(MAX_STORY_CONTROLS + 1)
+        .count()
+        > MAX_STORY_CONTROLS
+    {
+        return Err(unsupported("Word story structure budget exceeded"));
+    }
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
@@ -428,6 +454,7 @@ fn build_formatted_document(
                 // own character properties determine empty-paragraph metrics.
                 if let Some(f) = formatting.as_deref_mut() {
                     if let Some((_, fc, piece)) = story.position(paragraph.end_cp) {
+                        xml.push_str(&f.paragraph_xml(style, fc, piece.prm, &story.prcs)?);
                         xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
                     }
                 }
@@ -647,7 +674,7 @@ mod tests {
         }
         page[511] = properties.len() as u8;
         let story = super::read_story(&word, &clx, cp as usize).unwrap();
-        let mut f = super::formatting::Formatting::read(&word, &table).unwrap();
+        let mut f = super::formatting::Formatting::read(&word, &table, &[]).unwrap();
         super::build_formatted_document(&story, &[], Some(&mut f), usize::MAX).unwrap()
     }
 
@@ -691,7 +718,7 @@ mod tests {
             &[1500, 1502],
             &[&[0x43, 0x4a, 36, 0]],
         );
-        assert!(xml.contains("<w:p><w:pPr><w:rPr><w:sz w:val=\"36\"/></w:rPr></w:pPr></w:p>"));
+        assert!(xml.contains("<w:rPr><w:sz w:val=\"36\"/></w:rPr></w:pPr></w:p>"));
         assert!(!xml.contains("<w:t"));
     }
 
@@ -712,6 +739,16 @@ mod tests {
                 "OUTPUT_TOO_LARGE"
             );
         }
+        let story = super::Story {
+            text: "\t".repeat(super::MAX_STORY_CONTROLS + 1),
+            pieces: vec![],
+            prcs: vec![],
+        };
+        assert!(
+            super::build_formatted_document(&story, &[], None, usize::MAX)
+                .unwrap_err()
+                .contains("structure budget")
+        );
     }
 
     #[test]
