@@ -15,7 +15,7 @@ import {
   commitPageFlowTransition,
   createBodyPaginationState,
   createCanonicalPageDraft,
-  addPageFootnoteReserve,
+  addPageFootnoteReserves,
   setBodyBalanceTarget,
   type BodyPageTransitionFactory,
   type BodyPaginationState,
@@ -1010,7 +1010,6 @@ function* paginateBodyPassSteps(
   const commitFootnotes = (
     ids: readonly string[],
     layouts: readonly NoteLayout[],
-    reservePt: number,
   ) => {
     let retained = footnoteIdsByPage.get(state.flow.pageIndex);
     if (!retained) {
@@ -1021,11 +1020,14 @@ function* paginateBodyPassSteps(
     const retainedLayouts = footnoteLayoutsByPage.get(state.flow.pageIndex) ?? [];
     retainedLayouts.push(...layouts);
     footnoteLayoutsByPage.set(state.flow.pageIndex, retainedLayouts);
+    // The retained note band sums individual advances in document order.
+    // Adding independently summed reference groups changes floating-point
+    // association and can disagree with that exact geometry authority.
+    state = addPageFootnoteReserves(state, layouts.map(note => note.advancePt));
     footnoteReserveByPage.set(
       state.flow.pageIndex,
-      (footnoteReserveByPage.get(state.flow.pageIndex) ?? 0) + reservePt,
+      state.footnoteReservePt,
     );
-    state = addPageFootnoteReserve(state, reservePt);
   };
   // §17.11.21 / §17.18.34 assign each note to the physical page that paints
   // its reference. Growing that page-wide band must not clip a deeper column
@@ -1245,7 +1247,7 @@ function* paginateBodyPassSteps(
             allocations,
             acquired.placement,
           );
-          commitFootnotes(notes.ids, notes.layouts, notes.reservePt);
+          commitFootnotes(notes.ids, notes.layouts);
           if (acquired.flowRegistryDelta) {
             session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
           }
@@ -1449,7 +1451,7 @@ function* paginateBodyPassSteps(
           selected.fragment.advancePt + notes.reservePt,
           freshPageExtent(state),
         );
-        commitFootnotes(notes.ids, notes.layouts, notes.reservePt);
+        commitFootnotes(notes.ids, notes.layouts);
         if (acquired.flowRegistryDelta) {
           const acceptedDelta = paragraphFlowRegistryDeltaForAcceptedFragment(
             acquired.flowRegistryDelta,
@@ -1618,7 +1620,7 @@ function* paginateBodyPassSteps(
           allocations,
           acquired.placement,
         );
-        commitFootnotes(notes.ids, notes.layouts, notes.reservePt);
+        commitFootnotes(notes.ids, notes.layouts);
         if (acquired.flowRegistryDelta) {
           session.commitFlowRegistryDelta(bindTableFlowRegistryDeltaToAcceptedOccurrence(
             acquired.flowRegistryDelta,
@@ -1805,8 +1807,11 @@ function composePageStories(
     const footer = acquire('footer');
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteAdvancePt = retainedNotes.reduce((sum, note) => sum + note.advancePt, 0);
-    const pageStoryRegion = page.sectionRegions[0];
-    const noteBlockEndPt = pageStoryRegion?.blockEndPt
+    // ECMA-376 17.11.21 / 17.18.34: pageBottom notes use the physical
+    // page's reserved body edge. Earlier continuous regions end inside the
+    // body and must not pull the page-wide note band into preceding text.
+    const noteRegion = page.sectionRegions.at(-1);
+    const noteBlockEndPt = noteRegion?.blockEndPt
       ?? Math.max(
         0,
         page.section.geometry.pageHeight - Math.abs(page.section.geometry.marginBottom),
@@ -1833,9 +1838,9 @@ function composePageStories(
       widthPt: noteInlineEndPt - noteInlineStartPt,
       heightPt: noteAdvancePt,
     });
-    const notePhysicalBounds = pageStoryRegion
+    const notePhysicalBounds = noteRegion
       ? Object.freeze(transformRect(
-          pageStoryRegion.coordinateSpace.logicalToPhysical,
+          noteRegion.coordinateSpace.logicalToPhysical,
           noteLogicalBounds,
         ))
       : noteLogicalBounds;
@@ -1859,7 +1864,7 @@ function composePageStories(
       ...(notes.length > 0 ? [Object.freeze({
         id: `notes:page:${page.pageIndex}`,
         kind: 'footnote' as const,
-        ...(pageStoryRegion ? { sectionRegionId: pageStoryRegion.id } : {}),
+        ...(noteRegion ? { sectionRegionId: noteRegion.id } : {}),
         logicalBounds: noteLogicalBounds,
         physicalBounds: notePhysicalBounds,
       })] : []),

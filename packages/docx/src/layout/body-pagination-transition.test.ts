@@ -9,7 +9,7 @@ import {
   createPageFlowState,
 } from './paginator.js';
 import {
-  addPageFootnoteReserve,
+  addPageFootnoteReserves,
   commitPageFlowTransition,
   createBodyPaginationState,
   createCanonicalPageDraft,
@@ -125,6 +125,32 @@ describe('immutable canonical page transitions', () => {
     })).toThrow(/section-owned page identity/);
   });
 
+  it('retains per-note arithmetic order and rejects invalid reserve groups atomically', () => {
+    const flowSection = createPageFlowSectionContext({
+      sectionOccurrenceId: 'section:0',
+      geometry: section.geometry,
+      columns: section.columns,
+      textDirection: section.textDirection,
+    });
+    const initial = createBodyPaginationState(createPageFlowState(flowSection), draft(0));
+    const first = addPageFootnoteReserves(initial, [0.1]);
+    const next = addPageFootnoteReserves(first, [0.2, 0.3]);
+    expect(next.footnoteReservePt).toBe(0.1 + 0.2 + 0.3);
+    expect(first.footnoteReservePt).toBe(0.1);
+    expect(initial.footnoteReservePt).toBe(0);
+    expect(next.pages).toEqual(first.pages);
+    expect(Object.isFrozen(next)).toBe(true);
+    expect(Object.isFrozen(next.pages)).toBe(true);
+    expect(addPageFootnoteReserves(first, [])).toBe(first);
+    expect(addPageFootnoteReserves(first, [0, 0])).toBe(first);
+    for (const invalid of [-1, NaN, Infinity]) {
+      expect(() => addPageFootnoteReserves(first, [0.2, invalid])).toThrow(RangeError);
+      expect(first.footnoteReservePt).toBe(0.1);
+    }
+    expect(() => addPageFootnoteReserves(initial, [Number.MAX_VALUE, Number.MAX_VALUE]))
+      .toThrow(/must be finite/);
+  });
+
   it('opens a new draft without mutating the prior state or page', () => {
     const flowSection = createPageFlowSectionContext({
       sectionOccurrenceId: 'section:0',
@@ -134,9 +160,9 @@ describe('immutable canonical page transitions', () => {
     });
     const originalPage = draft(0);
     const original = setBodyBalanceTarget(
-      addPageFootnoteReserve(
+      addPageFootnoteReserves(
         createBodyPaginationState(createPageFlowState(flowSection), originalPage),
-        12,
+        [12],
       ),
       48,
     );

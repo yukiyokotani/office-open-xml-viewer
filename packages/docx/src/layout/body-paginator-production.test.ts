@@ -1296,6 +1296,125 @@ describe('canonical body producer', () => {
       .toEqual([[0], [1, 2]]);
   });
 
+  it('accumulates fractional note heights in retained order, independently of reference grouping', () => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const heights = new Map([['a', 0.1], ['b', 0.2], ['c', 0.3]]);
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => {
+          const ids = input.source.path[0] === 0 ? ['a'] : ['b', 'c'];
+          const layout = paragraphWithFootnote('body', input.source, 10, ids[0]!);
+          const line = layout.lines[0]!;
+          return {
+            layout: { ...layout, lines: [{ ...line, placements: ids.map(id => ({
+              ...line.placements[0]!, noteReference: { kind: 'footnote' as const, id },
+            })) }] },
+            blockExtentPt: 10, fragmentation: { kind: 'indivisible' },
+          };
+        },
+        layoutNotes: request => request.referenceIds.map(id => {
+          const heightPt = heights.get(id)!;
+          const bounds = { ...request.container.bounds, heightPt };
+          return {
+            kind: 'note', id: `footnote:${id}:page:${request.pageIndex}`,
+            source: { story: 'footnote', storyInstance: id, path: [] },
+            flowDomainId: request.container.id, ordinaryFlow: true,
+            flowBounds: bounds, inkBounds: bounds, advancePt: heightPt, separator: [],
+            story: { story: 'footnote', blocks: [], flowBounds: bounds, inkBounds: bounds, advancePt: heightPt, diagnostics: [] },
+          };
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 10, leadContentExtentPt: 10 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const layout = paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1].map(index => ({
+        kind: 'body-block', block: {
+          kind: 'paragraph', source: source(index), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: false,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        },
+      })),
+    }, services, { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(1);
+    const page = layout.pages[0]!;
+    expect(page.layers.notes).toHaveLength(3);
+    expect(page.flowDomains.find(domain => domain.kind === 'footnote')?.logicalBounds.heightPt)
+      .toBe(0.1 + 0.2 + 0.3);
+  });
+
+  it.each([0, 16])('places page-bottom notes after all continuous regions with footer extent %s', (footerExtent) => {
+    // ECMA-376 17.11.21 / 17.18.34: pageBottom is the physical page's
+    // reserved body edge, not the end of an earlier continuous section.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input }) => ({
+          layout: input.source.path[0] === 2
+            ? paragraphWithFootnote('last-region-note', input.source, 10, 'last')
+            : paragraph(`prior-${input.source.path[0]}`, input.source, 10),
+          blockExtentPt: 10,
+          fragmentation: { kind: 'indivisible' },
+        }),
+        measureTable: () => { throw new Error('unused'); },
+        measureStoryExtent: () => footerExtent,
+        measureFootnoteReserve: () => 10,
+        measureFollowingBlock: () => ({ fullExtentPt: 10, leadContentExtentPt: 10 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const owner = {
+      ...bodyOwner(),
+      footers: { default: { story: 'footer' as const, storyInstance: 'default', path: [] }, first: null, even: null },
+    };
+    const block = (index: number) => ({
+      kind: 'body-block' as const,
+      block: {
+        kind: 'paragraph' as const, source: source(index), pageBreakBefore: false,
+        keepLines: false, keepNext: false, widowControl: false,
+        spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+      },
+    });
+    const incoming = (index: number) => ({
+      kind: 'begin-section' as const, source: source(index),
+      section: { ...owner, sectionOccurrenceId: `section:${index}`, startType: 'continuous' as const },
+    });
+    const layout = paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: owner,
+      sequence: [block(0), incoming(1), block(1), incoming(2), block(2)],
+    }, services, { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(1);
+    const page = layout.pages[0]!;
+    expect(page.sectionRegions).toHaveLength(3);
+    const lastRegion = page.sectionRegions.at(-1)!;
+    const note = page.layers.notes[0]!;
+    expect(note.flowBounds.yPt + note.flowBounds.heightPt).toBe(lastRegion.blockEndPt);
+    expect(note.flowBounds.yPt).toBe(footerExtent === 0 ? 80 : 69);
+    expect(page.flowDomains.find(domain => domain.kind === 'footnote')?.sectionRegionId)
+      .toBe(lastRegion.id);
+    expect(page.layers.body.every(node => node.flowBounds.yPt + node.flowBounds.heightPt <= note.flowBounds.yPt))
+      .toBe(true);
+  });
+
   it('retains a placed paragraph footnote across a continuous section boundary', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },

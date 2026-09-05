@@ -85,16 +85,25 @@ export function setBodyBalanceTarget(
   return retain({ ...state, balanceTargetPt });
 }
 
-export function addPageFootnoteReserve(
+export function addPageFootnoteReserves(
   state: BodyPaginationState,
-  additionalPt: number,
+  additionalExtentsPt: readonly number[],
 ): BodyPaginationState {
-  if (!Number.isFinite(additionalPt) || additionalPt < 0) {
-    throw new RangeError('A footnote reserve increment must be finite and non-negative');
+  let footnoteReservePt = state.footnoteReservePt;
+  for (const additionalPt of additionalExtentsPt) {
+    if (!Number.isFinite(additionalPt) || additionalPt < 0) {
+      throw new RangeError('A footnote reserve increment must be finite and non-negative');
+    }
+    footnoteReservePt += additionalPt;
   }
-  return additionalPt === 0 ? state : retain({
+  if (!Number.isFinite(footnoteReservePt)) {
+    throw new RangeError('A footnote reserve must be finite');
+  }
+  // Preserve each note's addition order without copying the page sequence
+  // once per note in a multi-reference group.
+  return footnoteReservePt === state.footnoteReservePt ? state : retain({
     ...state,
-    footnoteReservePt: state.footnoteReservePt + additionalPt,
+    footnoteReservePt,
   });
 }
 

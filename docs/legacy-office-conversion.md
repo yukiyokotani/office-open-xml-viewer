@@ -239,11 +239,12 @@ floating drawings remain incomplete. Literal custom marks are retained with
 the standard `customMarkFollows` attribute, but the existing OOXML viewer does
 not yet honor that attribute when numbering/painting references; an extra
 number can appear. No legacy-only renderer is added to compensate for this
-shared limitation. Complex note-bearing documents still have unresolved shared
-OOXML layout failures, including body/note overlap rejection and excessive
-memory use in long documents. Preserving the note content does not yet imply
-successful rendering for every converted document. No migration or opt-in API
-change is required.
+shared limitation. Page-bottom notes now use the page's terminal continuous
+section region, avoiding placement inside an earlier region's body text.
+Complex note-bearing documents still have unresolved shared OOXML layout
+failures, including excessive memory use in long documents. Preserving the note
+content does not yet imply successful rendering for every converted document.
+No migration or opt-in API change is required.
 
 Paragraph borders retain top, bottom, logical left/right and between edges from
 both Brc80 and Brc operands (MS-DOC 2.6.2, 2.9.16/17/21). The converter resolves
