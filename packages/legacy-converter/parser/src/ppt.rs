@@ -10,6 +10,7 @@ use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_text, ROOT_RELS_PPTX};
 
 mod drawing;
+mod paint;
 mod persist;
 mod text_style;
 
@@ -98,9 +99,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     }
     let bytes = build_pptx(slides, presentation.size, max_output_bytes)?;
     let mut warnings = vec![
-        "legacy-ppt:positioned-text-only".into(),
+        "legacy-ppt:positioned-text-and-basic-presets".into(),
         "legacy-ppt:master-styles-bullets-scheme-colors-and-advanced-text-omitted".into(),
-        "legacy-ppt:visible-shape-geometry-media-and-actions-omitted".into(),
+        "legacy-ppt:custom-geometry-inherited-and-advanced-paint-media-and-actions-omitted".into(),
     ];
     if fallback {
         warnings.push("legacy-ppt:missing-drawing-unpositioned-text-fallback".into());

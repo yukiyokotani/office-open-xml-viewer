@@ -1,4 +1,4 @@
-//! Positioned text-only reconstruction of the live slide's OfficeArt tree.
+//! Positioned text and basic preset reconstruction of the live slide's OfficeArt tree.
 //! [MS-PPT] 2.5.13, 2.7.1, 2.9.76 and [MS-ODRAW] 2.2.14/16/38/39/40.
 //! Output uses ECMA-376 DrawingML CT_(Group)Transform2D, never binary-aware paint.
 use super::*;
@@ -90,6 +90,7 @@ impl Rect {
 }
 
 struct Shape<'a> {
+    kind: u16,
     flags: u32,
     anchor: Option<Rect>,
     child_space: Option<Rect>,
@@ -103,6 +104,7 @@ impl<'a> Shape<'a> {
             return Err(unsupported("invalid PowerPoint shape container"));
         }
         let mut flags = None;
+        let mut kind = 0;
         let mut anchor = None;
         let mut child_space = None;
         let mut textbox = None;
@@ -114,6 +116,7 @@ impl<'a> Shape<'a> {
                         return Err(unsupported("invalid PowerPoint shape flags"));
                     }
                     flags = Some(u32_at(child.payload, 4)?);
+                    kind = child.instance;
                 }
                 0xf010 | 0xf00f => {
                     if anchor.is_some() || (child.kind == 0xf00f) != nested {
@@ -139,6 +142,7 @@ impl<'a> Shape<'a> {
             }
         }
         Ok(Self {
+            kind,
             flags: flags.ok_or_else(|| unsupported("missing PowerPoint shape flags"))?,
             anchor,
             child_space,
@@ -163,6 +167,7 @@ impl<'a> Shape<'a> {
 }
 
 struct Properties {
+    paint: paint::Paint,
     rotation: i64,
     margins: [u32; 4],
     wrap: &'static str,
@@ -172,6 +177,7 @@ struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            paint: paint::Paint::default(),
             rotation: 0,
             margins: [91440, 45720, 91440, 45720],
             wrap: "square",
@@ -200,6 +206,9 @@ impl Properties {
             let opid = u16_at(entry, 0)?;
             let value = u32_at(entry, 2)?;
             if opid & 0x8000 != 0 {
+                if matches!(opid & 0x3fff, 0x145..=0x150) {
+                    self.paint.custom_geometry = true;
+                }
                 end = end
                     .checked_add(value as usize)
                     .filter(|n| *n <= record.payload.len())
@@ -223,7 +232,7 @@ impl Properties {
                     self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
                     self.center = value >= 3;
                 }
-                _ => {}
+                _ => self.paint.property(opid, value)?,
             }
         }
         if end != record.payload.len() {
@@ -301,15 +310,17 @@ impl Writer<'_, '_> {
                 if shape.omitted() {
                     return Ok(());
                 }
-                let Some(textbox) = shape.textbox else {
-                    return Ok(());
-                };
                 let mut text = Vec::new();
                 let mut style = None;
                 let mut body_seen = false;
                 let mut outline_body = false;
                 // The only source of visible text is this shape's ClientTextbox.
-                for atom in parse_records(textbox.payload, self.records)? {
+                let atoms = shape
+                    .textbox
+                    .map(|t| parse_records(t.payload, self.records))
+                    .transpose()?
+                    .unwrap_or_default();
+                for atom in atoms {
                     match atom.kind {
                         TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
                             if body_seen {
@@ -346,14 +357,23 @@ impl Writer<'_, '_> {
                         _ => {}
                     }
                 }
-                if text.is_empty() {
+                let preset = shape.props.paint.geometry(shape.kind);
+                if text.is_empty() && preset.is_none() {
                     return Ok(());
                 }
                 let anchor = shape
                     .anchor
-                    .ok_or_else(|| unsupported("missing PowerPoint text shape anchor"))?;
+                    .ok_or_else(|| unsupported("missing PowerPoint shape anchor"))?;
                 let id = self.next_id()?;
-                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy text {id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody>", shape.transform(anchor, None)))?;
+                // Unsupported geometry may still carry text. Preserve its text
+                // frame, but never paint an invented rectangle in its place.
+                let text_box = u8::from(shape.kind == 202 || preset.is_none());
+                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), shape.props.paint.xml(shape.kind)))?;
+                if text.is_empty() {
+                    self.push("</p:sp>")?;
+                    return Ok(());
+                }
+                self.push("<p:txBody>")?;
                 let p = &shape.props;
                 self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
                 if let Some(style) = style {
@@ -450,6 +470,71 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn preserves_nontext_geometry_paint_and_stacking_order() {
+        let shape = |kind: u16, label: Option<&str>| {
+            let mut atoms = vec![
+                record((kind << 4) | 2, 0xf00a, &ints(&[42, 0xa00])),
+                record(0, 0xf010, &ints(&[144, 288, 864, 720])),
+                properties(&[(0x181, 0x00563412), (0x1c0, 255), (0x1cb, 25400)]),
+            ];
+            if let Some(label) = label {
+                atoms.push(text(label));
+            }
+            record(15, 0xf004, &atoms.concat())
+        };
+        let out = xml(&drawing(vec![shape(3, None), shape(1, Some("Label"))])).unwrap();
+        assert_eq!(out.matches("<p:sp>").count(), 2);
+        assert_eq!(out.matches("<p:txBody>").count(), 1);
+        assert!(out.contains("prst=\"ellipse\""));
+        assert!(out.contains("<a:ln w=\"25400\">"));
+        assert!(out.contains("val=\"123456\""));
+        assert!(out.find("ellipse").unwrap() < out.find("Label").unwrap());
+        assert!(!out.contains("txBox=\"1\""));
+    }
+
+    #[test]
+    fn adjusted_shapes_keep_text_without_painting_a_fake_preset() {
+        let anchor = record(0, 0xf010, &ints(&[0, 0, 576, 576]));
+        let options = properties(&[(0x147, 100), (0x181, 255)]);
+        let bytes = drawing(vec![
+            sp(0xa00, vec![anchor.clone(), options.clone()]),
+            sp(0xa00, vec![anchor, options, text("Custom outline")]),
+        ]);
+        let out = xml(&bytes).unwrap();
+        assert_eq!(out.matches("<p:sp>").count(), 1);
+        assert!(out.contains("Custom outline"));
+        assert!(!out.contains("solidFill"));
+        let complex = record(0x13, 0xf00b, &[0x45, 0x81, 0, 0, 0, 0]);
+        let out = xml(&drawing(vec![sp(0xa00, vec![complex])])).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn nontext_shapes_share_shape_count_and_xml_budgets() {
+        let bytes = sp(
+            0xa00,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                properties(&[(0x181, 255)]),
+            ],
+        );
+        for (id, budget, message) in [(100_001, 4096, "too many"), (1, 1, "OUTPUT_TOO_LARGE")] {
+            let mut xml_budget = budget;
+            let mut writer = Writer {
+                outline: &[],
+                records: &mut MAX_RECORDS.clone(),
+                text: &mut MAX_TEXT_BYTES.clone(),
+                remaining: &mut xml_budget,
+                output: String::new(),
+                id,
+                context: None,
+            };
+            let record = parse_records(&bytes, &mut MAX_RECORDS.clone()).unwrap()[0];
+            assert!(writer.node(record, false, 0).unwrap_err().contains(message));
+        }
     }
 
     #[test]

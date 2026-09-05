@@ -68,7 +68,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual text-frame anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline/literal colors, paragraph alignment/spacing, manual line breaks; superseded slides and deleted shapes are not emitted | master/style inheritance, scheme colors, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, visible shape geometry/fills/borders, charts, notes, media, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline/literal colors, paragraph alignment/spacing, manual line breaks, unmodified basic presets with explicit solid fill/line colors, line widths and opacity; superseded slides and deleted shapes are not emitted | master/style and paint inheritance, scheme/system/palette color references, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
@@ -360,8 +360,17 @@ PPT text-frame reconstruction follows [MS-PPT] `OfficeArtClientAnchor` and
 `OfficeArtClientTextbox`, and [MS-ODRAW] group/child anchors and shape properties.
 Only a shape's own text container supplies its text; action data is not traversed
 for display content. Child coordinate systems are preserved as ordinary PPTX
-groups. Text-only frames intentionally have no visible fill or outline; they do
-not claim to reproduce the source shape's geometry. Direct `StyleTextPropAtom`
+groups. Basic unmodified rectangles, ellipses, diamonds, isosceles/right triangles,
+straight lines and text boxes map from [MS-ODRAW] `MSOSPT` to ordinary DrawingML
+presets. Shapes without text retain their place in the drawing order. Explicit
+solid fill/line properties retain literal RGB, opacity and line width; geometry
+and style Boolean use bits can independently suppress paint. Entirely absent
+paint layers stay transparent pending master/drawing-default resolution. Within
+an explicit layer, unspecified properties use the documented MS-ODRAW defaults;
+this is not a claim of complete inheritance support. Unresolved colors, nonsolid
+paint and custom fill rectangles are omitted, not substituted with guessed colors.
+Unknown or customized geometry keeps its text as a transparent frame, without
+painting a replacement rectangle. Direct `StyleTextPropAtom`
 character and paragraph runs are retained for both inline and outline-referenced
 text. Run boundaries count UTF-16 units and include the implicit final paragraph
 mark; invalid counts and surrogate-splitting runs fail closed. Font names are
@@ -373,7 +382,7 @@ VT, LF and Unicode line separators become DrawingML line breaks within the same
 paragraph; CR remains the PPT paragraph boundary. This follows Unicode UAX #14
 BK/LF semantics and does not add a binary-specific renderer path.
 Missing drawing records retain the earlier unpositioned-text fallback with a
-separate warning. Invalid or missing anchors in drawing-backed text, ambiguous
+separate warning. Invalid or missing anchors in emitted drawing-backed shapes, ambiguous
 coordinate spaces and zero-scale groups fail closed instead of guessing positions.
 No migration is required and the independent per-format opt-ins are unchanged.
 
