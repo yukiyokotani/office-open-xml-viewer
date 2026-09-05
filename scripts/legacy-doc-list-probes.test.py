@@ -63,6 +63,12 @@ class ProbeTests(unittest.TestCase):
                     numbering = E.fromstring(z.read("word/numbering.xml"))
                     self.assertEqual(len(numbering.findall("w:abstractNum", NS)), len(cases))
                     self.assertEqual(len(numbering.findall("w:num", NS)), len(cases))
+                    # ECMA-376 CT_Numbering is a sequence, not a choice:
+                    # all abstractNum definitions precede every num instance.
+                    # Word repair of malformed sources must not become evidence
+                    # for a list-formatting precedence or suffix rule.
+                    self.assertEqual([E.QName(child).localname for child in numbering],
+                                     ["abstractNum"] * len(cases) + ["num"] * len(cases))
 
     def test_interactions_cover_conflicting_right_indent_and_twip_boundaries(self):
         cases = probes.matrix("interactions")

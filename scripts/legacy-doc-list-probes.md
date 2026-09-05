@@ -66,6 +66,11 @@ does not establish whether Word will create or retain a list-style association.
 
 1. Record Word version/build, platform, installed/substituted fonts and relevant
    compatibility settings. Preserve the authored DOCX and manifest unchanged.
+   Check source conformance before interpreting Office output. In particular,
+   `CT_Numbering` requires all `abstractNum` elements before all `num` elements;
+   interleaving them is not an equivalent way to author the experiment. A
+   repaired malformed source is evidence about repair, not by itself a rule
+   for valid numbering. The generator tests check this order in every phase.
 2. Open a disposable copy in local Word. Save it as Word 97-2003 DOC. Record any
    compatibility warnings; do not silently approve an unexpected operation.
 3. Close that saved document. Reopen the saved DOC, not the original DOCX or an
