@@ -9,6 +9,10 @@ use std::collections::{HashMap, HashSet};
 #[path = "numbering/restart_tests.rs"]
 mod restart_tests;
 
+#[cfg(test)]
+#[path = "numbering/legal_tests.rs"]
+mod legal_tests;
+
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
 /// (1pt), `in` (72pt), `pc`/`pi` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A
@@ -61,6 +65,9 @@ pub struct LevelDef {
     /// ECMA-376 17.9.10: one-based last ancestor that resets this level.
     /// Zero means never; absence (or an invalid index) uses the previous level.
     restart: Option<u32>,
+    /// ECMA-376 17.9.4: use decimal for every placeholder in this level's
+    /// marker, without changing the referenced levels' own number formats.
+    legal: bool,
     /// ECMA-376 §17.9.6 `<w:lvl><w:rPr>` — the level's run (character) properties
     /// for the number/bullet glyph itself. Merged OVER the paragraph's resolved
     /// run formatting at use-site so the marker's font axes (ascii/eastAsia)
@@ -121,6 +128,7 @@ impl Default for LevelDef {
             lvl_jc: "left".to_string(),
             start: 1,
             restart: None,
+            legal: false,
             rpr: RunFmt::default(),
             pic_bullet: None,
             p_style: None,
@@ -197,6 +205,7 @@ fn parse_level_def(
     let restart = child_w(lvl_node, "lvlRestart")
         .and_then(|n| attr_w(n, "val"))
         .and_then(|v| v.parse::<u32>().ok());
+    let legal = bool_prop(lvl_node, "isLgl").unwrap_or(false);
     let format = child_w(lvl_node, "numFmt")
         .and_then(|n| attr_w(n, "val"))
         .unwrap_or_else(|| "decimal".to_string());
@@ -272,6 +281,7 @@ fn parse_level_def(
         lvl_jc,
         start,
         restart,
+        legal,
         rpr,
         pic_bullet,
         p_style,
@@ -555,10 +565,18 @@ impl NumberingMap {
                     .copied()
                     .unwrap_or_else(|| self.get_start(num_id, k))
             };
-            let fmt = self
-                .get_level(num_id, k)
-                .map(|l| l.format.as_str())
-                .unwrap_or(lvl.format.as_str());
+            // 17.9.4 applies to this marker's entire displayed level text,
+            // including its own placeholder. Keep authored formats intact so
+            // other markers continue to use their own definitions. MS-OE376
+            // 2.1.280(b) documents Word retaining `none`; this path follows the
+            // normative decimal rule, without a format-specific exception.
+            let fmt = if lvl.legal {
+                "decimal"
+            } else {
+                self.get_level(num_id, k)
+                    .map(|l| l.format.as_str())
+                    .unwrap_or(lvl.format.as_str())
+            };
             text = text.replace(&format!("%{}", k + 1), &format_counter(val, fmt));
         }
         text
