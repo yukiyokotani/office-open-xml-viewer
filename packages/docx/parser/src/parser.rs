@@ -632,7 +632,7 @@ fn resolve_section_refs(
         .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
     {
         merge_section_refs(sp, rel_map, &mut running);
-        let title_page = child_w(sp, "titlePg").is_some();
+        let title_page = bool_prop(sp, "titlePg").unwrap_or(false);
         out.push((sp.id(), running.clone(), title_page));
     }
     out
@@ -973,7 +973,7 @@ fn preflight_document_body(
             merge_section_refs(sect_pr, &environment.rel_map, &mut running_refs);
             sections.push(StreamedSectionFact {
                 refs: running_refs.clone(),
-                title_page: child_w(sect_pr, "titlePg").is_some(),
+                title_page: bool_prop(sect_pr, "titlePg").unwrap_or(false),
             });
         }
 
@@ -4514,7 +4514,9 @@ fn parse_section(
     props.margin_left = geom.margin_left;
     props.header_distance = geom.header_distance;
     props.footer_distance = geom.footer_distance;
-    props.title_page = child_w(sp, "titlePg").is_some();
+    // ECMA-376 17.10.6: an explicit false uses the ordinary page header;
+    // only a present element with an omitted val defaults to true.
+    props.title_page = bool_prop(sp, "titlePg").unwrap_or(false);
     // ECMA-376 §17.6.22 — the body (final) section's start type. Non-final
     // sections carry their start type on their own SectionBreak marker; the
     // paginator needs the final section's here to resolve the boundary INTO it.
@@ -28290,6 +28292,45 @@ mod streamed_body_equivalence_tests {
             serde_json::to_value(streamed).unwrap(),
             serde_json::to_value(compatibility).unwrap()
         );
+    }
+
+    #[test]
+    fn title_page_honors_boolean_values_in_final_and_streamed_sections() {
+        // ECMA-376 17.10.6 / 17.17.4: absence is false; an empty
+        // titlePg is true, but explicit false is NOT element presence.
+        for w in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
+            for (toggle, expected) in [
+                ("", false),
+                ("<w:titlePg/>", true),
+                ("<w:titlePg w:val=\"1\"/>", true),
+                ("<w:titlePg w:val=\"true\"/>", true),
+                ("<w:titlePg w:val=\"on\"/>", true),
+                ("<w:titlePg w:val=\"0\"/>", false),
+                ("<w:titlePg w:val=\"false\"/>", false),
+                ("<w:titlePg w:val=\"off\"/>", false),
+            ] {
+                let xml = format!(
+                    r#"<w:document xmlns:w="{w}"><w:body>
+                  <w:p><w:pPr><w:sectPr>{toggle}</w:sectPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>
+                  <w:p><w:r><w:t>B</w:t></w:r></w:p><w:sectPr>{toggle}</w:sectPr>
+                </w:body></w:document>"#
+                );
+                let data = build_docx(&xml);
+                for parser in [parse, parse_streamed] {
+                    let document = parse_with(&data, parser);
+                    assert_eq!(document.section.title_page, expected, "{toggle}");
+                    let flags: Vec<_> = document
+                        .body
+                        .iter()
+                        .filter_map(|element| match element {
+                            BodyElement::SectionBreak { title_page, .. } => Some(*title_page),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(flags, [expected], "{toggle}");
+                }
+            }
+        }
     }
 
     #[test]
