@@ -14,6 +14,24 @@ import { createLegacyOfficeWasmConverter } from './index.js';
 
 const runPrivateCorpus = process.env.OOXML_LEGACY_CORPUS === '1';
 const corpusTest = runPrivateCorpus ? describe : describe.skip;
+const corpusRoot = process.env.OOXML_LEGACY_CORPUS_ROOT;
+
+async function corpusFiles(format: (typeof formats)[number]): Promise<{ directory: string; names: string[] }> {
+  const directory = corpusRoot ? join(corpusRoot, 'packages', format.to, 'public', 'private') : fileURLToPath(format.directory);
+  const names: string[] = [];
+  // Retain relative directories: equal basenames are distinct corpus inputs.
+  async function walk(relative: string): Promise<void> {
+    for (const entry of await readdir(join(directory, relative), { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~$')) continue;
+      const path = join(relative, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile()) names.push(path);
+      // Do not follow symlinks out of the selected corpus.
+    }
+  }
+  await walk('');
+  return { directory, names: names.sort() };
+}
 
 const formats = [
   {
@@ -42,16 +60,13 @@ const formats = [
 }>;
 
 corpusTest('local Office-produced legacy corpus', () => {
-  it('has a legacy counterpart for every modern private sample', async () => {
+  it('discovers nonempty binary inputs without requiring a lossless OOXML round trip', async () => {
     for (const format of formats) {
-      const names = (await readdir(format.directory)).filter(isCorpusFile);
-      const modern = names.filter((name) => extension(name) === format.to);
+      const { names } = await corpusFiles(format);
       const legacy = new Set(names.filter((name) => extension(name) === format.from));
 
-      expect(legacy.size).toBe(modern.length);
-      for (const name of modern) {
-        expect(legacy.has(replaceExtension(name, format.from))).toBe(true);
-      }
+      // Native binary documents may not have an Office-upgraded counterpart.
+      expect(legacy.size).toBeGreaterThan(0);
     }
   });
 
@@ -70,13 +85,12 @@ corpusTest('local Office-produced legacy corpus', () => {
     const converter = createLegacyOfficeWasmConverter({ wasm: converterWasm });
 
     for (const format of formats) {
-      const names = (await readdir(format.directory))
-        .filter((name) => isCorpusFile(name) && extension(name) === format.from)
-        .sort();
+      const { directory, names: allNames } = await corpusFiles(format);
+      const names = allNames.filter((name) => extension(name) === format.from);
       expect(names.length).toBeGreaterThan(0);
 
       for (const name of names) {
-        const source = await readFile(join(fileURLToPath(format.directory), name));
+        const source = await readFile(join(directory, name));
         const result = await converter.convert({
           bytes: source,
           from: format.from,
@@ -94,14 +108,6 @@ corpusTest('local Office-produced legacy corpus', () => {
   }, 300_000);
 });
 
-function isCorpusFile(name: string): boolean {
-  return !name.startsWith('~$') && name.includes('.');
-}
-
 function extension(name: string): string {
   return name.slice(name.lastIndexOf('.') + 1).toLowerCase();
-}
-
-function replaceExtension(name: string, next: LegacyOfficeFormat): string {
-  return `${name.slice(0, name.lastIndexOf('.'))}.${next}`;
 }

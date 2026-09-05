@@ -66,8 +66,8 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page breaks, displayed field results | formatting, sections, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print settings, charts, drawings, external links, pre-BIFF8 sheets |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | character/paragraph formatting, advanced section properties, headers/footers, notes, lists, tables, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order, slide dimensions, Unicode/Windows-1252 text, outline text references, slide boundaries; superseded and deleted slides are not emitted | masters/layout fidelity, formatting, shapes, charts, notes, media, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
@@ -255,22 +255,26 @@ visual fidelity evaluation against Office, fuzzing, and resource measurements
 remain part of
 [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
 
-## Fidelity acceptance gate
+## Best-effort fidelity evaluation
 
-Parser acceptance is a smoke test, **not converter completion**. The acceptance
-target is complete content and display preservation of the supported corpus,
-with explicit accounting for every page, sheet, slide, drawing, and text run.
-Byte-identical ZIP files are not required. Pairing a legacy file with its original
+Parser acceptance is a smoke test, **not converter completion**. The target is
+useful best-effort preservation of the binary input's content and display, with
+missing content and visual differences explicitly reported. Pixel equality and
+byte-identical ZIP files are not required for each incremental improvement.
+Pairing a legacy file with its original
 OOXML is useful for investigation, but does not prove fidelity: saving to an old
 format can itself change or remove features. Use Office opening the actual legacy
-file as the conversion oracle. In particular, rebuilt/down-saved corpus members
+file as the visual reference. Office's upgraded OOXML is useful for mapping
+binary records to XML, but conversion itself can change layout and is not an
+absolute visual oracle. In particular, rebuilt/down-saved corpus members
 must not silently be treated as lossless copies of their original OOXML.
 
 The local macOS oracle opens disposable copies using installed Microsoft Office,
 with macros disabled and Word/Excel external-link updates disabled, and exports
 both the legacy file and this converter's OOXML to PDF. It compares page counts,
 page sizes, and every pixel at 96 DPI. Missing pages, export errors, and any pixel
-difference fail the run. No blur, registration, resized comparison, or relaxed
+difference make the exact-comparison run nonzero; this is a diagnostic finding,
+not a requirement to add sample-specific adjustments. No blur, registration, resized comparison, or relaxed
 threshold hides a discrepancy. PDFs, page images, difference images, source/output
 hashes, converter WASM hash, and a report stay in a newly created local temporary
 directory; no private artifact is committed or uploaded.
@@ -280,6 +284,13 @@ pnpm --filter @silurus/ooxml-legacy-converter wasm
 node scripts/legacy-office-fidelity.mjs --format=xls --limit=10 --python=python3
 python3 scripts/legacy-office-compare.test.py
 ```
+
+To reuse an already exported binary-input reference, explicitly supply
+`--format=doc --input=PATH --reference-pdf=PATH` (or the matching XLS/PPT format).
+Both paths are required together. The tool hashes the supplied PDF and exports
+only the candidate OOXML through Office; it never infers PDF provenance from a
+filename. The corpus smoke test also accepts `OOXML_LEGACY_CORPUS_ROOT` for a
+separate local checkout and discovers nested files without following symlinks.
 
 The oracle requires Office for macOS, macOS automation permission for each Office
 application, Poppler (`pdftoppm`), and Python with Pillow and pypdf. Omit `--format`
@@ -295,11 +306,21 @@ automation permission is granted. Word and Excel PDF export have been exercised;
 the PowerPoint export path is not yet validated end to end. Do not weaken this
 guard to obtain a passing report.
 
-Office-versus-Office PDF comparison isolates conversion loss. It is necessary but
-not sufficient for the viewer's final acceptance: compare the converted OOXML's
+Office-versus-Office PDF comparison helps isolate conversion loss. It is not
+sufficient for the viewer's evaluation: compare the converted OOXML's
 Canvas output to the same Office oracle separately. Keep renderer self-regression
 tests against the previous renderer separate from both fidelity comparisons.
 Neither whole-corpus Office equality nor Canvas display equality has been reached.
+
+DOC section decoding is bounded to 16,384 sections and one million property
+operations per input (resource policy, not format limits). Intermediate section
+properties remain attached to the section-ending paragraph; manual page breaks
+are distinct from section breaks. Missing header/footer distances use zero only
+for the currently omitted header/footer stories, with an explicit warning;
+known body margins are retained. The producer's locale defaults are not guessed.
+XLS saved custom-view print records cannot override the active worksheet's print
+settings, and undefined printer fields are not emitted. These changes do not add
+legacy-specific renderer behavior or change per-format opt-in defaults.
 
 Resource policy for PPT reconstruction additionally limits each of retained
 outline text and emitted slide text to 128 MiB, and charges persist-directory

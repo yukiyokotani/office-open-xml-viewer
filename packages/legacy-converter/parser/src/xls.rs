@@ -12,6 +12,7 @@ use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
 mod geometry;
+mod print;
 mod styles;
 
 const BOF: u16 = 0x0809;
@@ -62,8 +63,10 @@ struct SheetData {
     rows: BTreeMap<u16, BTreeMap<u16, CellValue>>,
     cell_styles: BTreeMap<(u16, u16), u16>,
     geometry: geometry::Geometry,
+    print: print::PrintSettings,
     merged: Vec<(u16, u16, u16, u16)>,
     formula_results: bool,
+    custom_views_omitted: bool,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
@@ -136,6 +139,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
     let mut converted = Vec::new();
     let mut skipped_non_worksheets = false;
     let mut formula_results = false;
+    let mut incomplete_print_margins = false;
+    let mut custom_views_omitted = false;
     for sheet in sheets {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
@@ -146,6 +151,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             styles.validate_xf(*index)?;
         }
         data.geometry.validate_styles(&styles)?;
+        incomplete_print_margins |= data.print.incomplete_margins();
+        custom_views_omitted |= data.custom_views_omitted;
         formula_results |= data.formula_results;
         converted.push((sheet.name, data));
     }
@@ -157,10 +164,16 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
     let bytes = build_xlsx(&converted, &styles.xml()?, date1904, max_output_bytes)?;
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-        "legacy-xls:rich-text-runs-and-print-settings-omitted".into(),
+        "legacy-xls:rich-text-runs-print-areas-titles-and-extended-headers-omitted".into(),
     ];
     if styles.extensions_omitted {
         warnings.push("legacy-xls:extended-styles-omitted".into());
+    }
+    if incomplete_print_margins {
+        warnings.push("legacy-xls:incomplete-print-margins-omitted".into());
+    }
+    if custom_views_omitted {
+        warnings.push("legacy-xls:saved-custom-views-omitted".into());
     }
     if formula_results {
         warnings.push("legacy-xls:formulas-replaced-with-cached-results".into());
@@ -468,6 +481,7 @@ fn parse_sheet(
     let mut pending_formula_string = None;
     let mut nested_substreams = 0usize;
     let mut found_eof = false;
+    let mut custom_view = false;
     for record in &all_records[start_index + 1..] {
         // [MS-XLS] 2.1.7: an embedded chart has its own BOF/EOF
         // substream. Its records are not worksheet cells or geometry.
@@ -487,6 +501,26 @@ fn parse_sheet(
         if nested_substreams != 0 {
             continue;
         }
+        // [MS-XLS] 2.1.7.20.6 CUSTOMVIEW: its print settings belong
+        // to a saved view, not the currently displayed worksheet.
+        if record.kind == 0x01aa {
+            if custom_view {
+                return Err(unsupported("nested BIFF custom view"));
+            }
+            custom_view = true;
+            output.custom_views_omitted = true;
+            continue;
+        }
+        if record.kind == 0x01ab {
+            if !custom_view {
+                return Err(unsupported("orphan BIFF custom view end"));
+            }
+            custom_view = false;
+            continue;
+        }
+        if custom_view {
+            continue;
+        }
         if record.kind != STRING {
             pending_formula_string = None;
         }
@@ -498,6 +532,7 @@ fn parse_sheet(
             output.cell_styles.insert(position, u16_at(record.data, 4)?);
         }
         output.geometry.read(record)?;
+        output.print.read(record)?;
         if record.kind == 0x0208 {
             output.rows.entry(u16_at(record.data, 0)?).or_default();
         }
@@ -608,7 +643,7 @@ fn parse_sheet(
             _ => {}
         }
     }
-    if !found_eof {
+    if !found_eof || custom_view {
         return Err(unsupported("unterminated BIFF worksheet substream"));
     }
     Ok(output)
@@ -809,6 +844,7 @@ fn build_sheet_xml(sheet: &SheetData) -> String {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
     );
+    xml.push_str(&sheet.print.sheet_properties());
     xml.push_str(&sheet.geometry.xml());
     xml.push_str("<sheetData>");
     for (row, cells) in &sheet.rows {
@@ -861,6 +897,7 @@ fn build_sheet_xml(sheet: &SheetData) -> String {
         }
         xml.push_str("</mergeCells>");
     }
+    xml.push_str(&sheet.print.xml());
     xml.push_str("</worksheet>");
     xml
 }
@@ -929,6 +966,52 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
+
+    #[test]
+    fn saved_custom_view_cannot_override_the_current_print_settings() {
+        use super::*;
+        let bof = [0, 6, 0x10, 0];
+        let records = [
+            Record {
+                kind: BOF,
+                offset: 0,
+                data: &bof,
+            },
+            Record {
+                kind: 0x14,
+                offset: 8,
+                data: &[],
+            },
+            Record {
+                kind: 0x1aa,
+                offset: 12,
+                data: &[0; 64],
+            },
+            Record {
+                kind: 0x14,
+                offset: 80,
+                data: &[1, 0, 0, b'X'],
+            },
+            Record {
+                kind: 0x1ab,
+                offset: 88,
+                data: &[0; 2],
+            },
+            Record {
+                kind: EOF,
+                offset: 94,
+                data: &[],
+            },
+        ];
+        let sheet = BoundSheet {
+            offset: 0,
+            name: "Sheet".into(),
+            sheet_type: 0,
+        };
+        let output = parse_sheet(&records, &sheet, &[]).unwrap();
+        assert!(output.print.xml().contains("<oddHeader></oddHeader>"));
+        assert!(parse_sheet(&records[..4], &sheet, &[]).is_err());
+    }
 
     #[test]
     fn worksheet_ignores_cells_in_nested_chart_substreams() {
@@ -1008,6 +1091,19 @@ mod tests {
         let offset = stream.len() as u32;
         stream[bound..bound + 4].copy_from_slice(&offset.to_le_bytes());
         stream.extend(rec(0x0809, &[0, 6, 0x10, 0]));
+        // Print layout must survive independently of cell styles.
+        stream.extend(rec(0x0081, &[0, 1])); // fit to pages
+        for kind in 0x0026..=0x0029 {
+            stream.extend(rec(kind, &0.5f64.to_le_bytes()));
+        }
+        let mut setup = vec![0u8; 34];
+        setup[..16].copy_from_slice(&[9, 0, 75, 0, 3, 0, 2, 0, 0, 0, 0x89, 0, 88, 2, 88, 2]);
+        setup[16..24].copy_from_slice(&0.25f64.to_le_bytes());
+        setup[24..32].copy_from_slice(&0.3f64.to_le_bytes());
+        setup[32] = 1;
+        stream.extend(rec(0x00a1, &setup));
+        stream.extend(rec(0x0014, &[4, 0, 0, b'&', b'L', b'&', b'P']));
+        stream.extend(rec(0x001b, &[1, 0, 4, 0, 0, 0, 255, 63]));
         stream.extend(rec(0x0225, &[0, 0, 0x2c, 1])); // default 15 pt
         stream.extend(rec(0x007d, &[0, 0, 2, 0, 0, 20, 1, 0, 3, 0, 0, 0]));
         let mut row = [0u8; 16];
@@ -1041,6 +1137,14 @@ mod tests {
         assert!(styles.contains("<left style=\"thin\">"));
         assert!(styles.contains("horizontal=\"center\"") && styles.contains("wrapText=\"1\""));
         let sheet = part("xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("fitToPage=\"1\""));
+        assert!(sheet.contains("<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.5\" bottom=\"0.5\" header=\"0.25\" footer=\"0.3\"/>"));
+        assert!(sheet.contains("orientation=\"landscape\"") && sheet.contains("scale=\"75\""));
+        assert!(
+            sheet.contains("firstPageNumber=\"3\"") && sheet.contains("pageOrder=\"overThenDown\"")
+        );
+        assert!(sheet.contains("<oddHeader>&amp;L&amp;P</oddHeader>"));
+        assert!(sheet.contains("<brk id=\"4\" min=\"0\" max=\"16383\" man=\"1\"/>"));
         assert!(sheet.contains("<c r=\"A1\" s=\"1\"><v>1</v></c>"));
         assert!(sheet.contains("<c r=\"B1\" s=\"1\"/>"));
         assert!(sheet.contains("<c r=\"A2\" s=\"1\"/>") && sheet.contains("<c r=\"B2\" s=\"1\"/>"));

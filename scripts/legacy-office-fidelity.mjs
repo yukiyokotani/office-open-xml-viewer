@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import init, { convert_legacy_office } from '../packages/legacy-converter/src/wasm/legacy_office_converter.js';
 
@@ -13,13 +13,15 @@ const exec = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const families = { doc: ['docx', 'com.microsoft.Word'], xls: ['xlsx', 'com.microsoft.Excel'], ppt: ['pptx', 'com.microsoft.Powerpoint'] };
 const options = new Map(process.argv.slice(2).map(arg => {
-  const match = /^--(format|limit|python)=(.+)$/.exec(arg);
-  if (!match) throw new Error('usage: node scripts/legacy-office-fidelity.mjs [--format=doc|xls|ppt] [--limit=N] [--python=PATH]');
+  const match = /^--(format|limit|python|input|reference-pdf)=(.+)$/.exec(arg);
+  if (!match) throw new Error('usage: node scripts/legacy-office-fidelity.mjs [--format=doc|xls|ppt] [--limit=N] [--python=PATH] [--input=PATH --reference-pdf=PATH]');
   return [match[1], match[2]];
 }));
 if (process.platform !== 'darwin') throw new Error('The Office oracle requires locally installed Office for macOS.');
 const selected = options.has('format') ? [options.get('format')] : Object.keys(families);
 if (selected.some(f => !families[f])) throw new Error('Unknown Office format');
+if (options.has('input') !== options.has('reference-pdf')) throw new Error('input and reference-pdf must be supplied together');
+if (options.has('input') && (selected.length !== 1 || extname(options.get('input')).toLowerCase() !== `.${selected[0]}`)) throw new Error('An explicit input requires its matching --format');
 const limit = Number(options.get('limit') ?? Number.MAX_SAFE_INTEGER);
 if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
 const python = options.get('python') ?? 'python3';
@@ -35,8 +37,8 @@ const report = { oracle: 'local-office-pdf', comparison: 'exact-raster-at-96-dpi
 console.log(`Local report directory: ${runDirectory}`);
 for (const family of selected) {
   const [modern, container] = families[family];
-  const sourceDirectory = join(root, `packages/${modern}/public/private`);
-  const names = (await readdir(sourceDirectory)).filter(n => !n.startsWith('~$') && n.toLowerCase().endsWith(`.${family}`)).sort().slice(0, limit);
+  const sourceDirectory = options.has('input') ? dirname(resolve(options.get('input'))) : join(root, `packages/${modern}/public/private`);
+  const names = options.has('input') ? [basename(options.get('input'))] : (await readdir(sourceDirectory, { recursive: true })).filter(n => !n.split(/[\\/]/).some(part => part.startsWith('.') || part.startsWith('~$')) && n.toLowerCase().endsWith(`.${family}`)).sort().slice(0, limit);
   if (!names.length) throw new Error(`No local ${family} corpus found`);
   // Office's sandbox can access its own private container without granting
   // access to the original corpus. Only disposable copies are opened.
@@ -59,6 +61,14 @@ for (const family of selected) {
       await writeFile(original, source, { flag: 'wx' });
       await writeFile(converted, bytes, { flag: 'wx' });
       for (const [label, file] of [['source', original], ['converted', converted]]) {
+        if (label === 'source' && options.has('reference-pdf')) {
+          // Explicitly supplied oracle; never guess provenance from filenames.
+          const reference = await readFile(resolve(options.get('reference-pdf')));
+          entry.referencePdfSha256 = hash(reference);
+          entry.referenceOrigin = 'caller-supplied-binary-rendering-reference';
+          await writeFile(join(directory, 'source.pdf'), reference, { flag: 'wx' });
+          continue;
+        }
         const pdf = join(staging, `${id}-${label}.pdf`);
         await exec('osascript', [join(root, 'scripts/legacy-office-export.applescript'), family, file, pdf], { timeout: 270_000, maxBuffer: 1024 * 1024 });
         await copyFile(pdf, join(directory, `${label}.pdf`));

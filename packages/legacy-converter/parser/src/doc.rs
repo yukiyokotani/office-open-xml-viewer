@@ -2,12 +2,14 @@
 //!
 //! The reader accepts Word 97-2003 FIB/CLX piece tables and preserves main-story
 //! text, paragraphs, tabs, line breaks, page breaks, and displayed field results.
-//! Formatting, sections, drawings, revisions, headers/footers, notes, and OLE are
+//! Section page geometry is preserved. Formatting, drawings, revisions,
+//! headers/footers, notes, and OLE are
 //! deliberately not inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and
 //! 2.9.177 (PlcPcd). Unsupported/encrypted inputs fail closed.
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_text, ROOT_RELS_DOCX};
+mod sections;
 
 const FIB_IDENT: u16 = 0xa5ec;
 const FIB_WORD_97: u16 = 0x00c1;
@@ -28,6 +30,7 @@ enum Token {
     Tab,
     LineBreak,
     PageBreak,
+    ColumnBreak,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
@@ -65,8 +68,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         .get(fc_clx..clx_end)
         .ok_or_else(|| unsupported("Word CLX lies outside its table stream"))?;
     let text = decode_piece_table(&word, clx, ccp_text)?;
-    let paragraphs = tokenize_story(&text);
-    let document_xml = build_document_xml(&paragraphs);
+    let sections = sections::read(&word, &table, ccp_text)?;
+    let document_xml = build_document_xml(&text, &sections)?;
     let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
     let parts = [
@@ -74,12 +77,20 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         ("_rels/.rels".into(), ROOT_RELS_DOCX.to_string()),
         ("word/document.xml".into(), document_xml),
     ];
+    let mut warnings = vec![
+        "legacy-doc:main-story-plain-text-only".into(),
+        "legacy-doc:formatting-and-embedded-objects-omitted".into(),
+        "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
+    ];
+    if sections.is_empty() {
+        warnings.push("legacy-doc:missing-section-table-default-page-geometry".into());
+    }
+    if sections.iter().any(|s| s.incomplete_margins) {
+        warnings.push("legacy-doc:incomplete-section-margin-defaults".into());
+    }
     Ok(DocConversion {
         bytes: write_package(&parts, max_output_bytes)?,
-        warnings: vec![
-            "legacy-doc:main-story-plain-text-only".into(),
-            "legacy-doc:formatting-and-embedded-objects-omitted".into(),
-        ],
+        warnings,
     })
 }
 
@@ -170,10 +181,14 @@ fn decode_piece_table(word: &[u8], clx: &[u8], ccp_text: usize) -> Result<String
     Ok(output)
 }
 
+#[cfg(test)]
 fn tokenize_story(text: &str) -> Vec<Vec<Token>> {
+    tokenize_with_fields(text, &mut Vec::new(), true)
+}
+
+fn tokenize_with_fields(text: &str, fields: &mut Vec<bool>, trim_final: bool) -> Vec<Vec<Token>> {
     let mut paragraphs = vec![Vec::new()];
     let mut buffered = String::new();
-    let mut fields: Vec<bool> = Vec::new();
     let flush = |paragraph: &mut Vec<Token>, buffered: &mut String| {
         if !buffered.is_empty() {
             paragraph.push(Token::Text(std::mem::take(buffered)));
@@ -218,7 +233,7 @@ fn tokenize_story(text: &str) -> Vec<Vec<Token>> {
                     .expect("opening paragraph")
                     .push(Token::LineBreak);
             }
-            '\u{0c}' => {
+            '\u{0c}' | '\u{0e}' => {
                 flush(
                     paragraphs.last_mut().expect("opening paragraph"),
                     &mut buffered,
@@ -226,7 +241,11 @@ fn tokenize_story(text: &str) -> Vec<Vec<Token>> {
                 paragraphs
                     .last_mut()
                     .expect("opening paragraph")
-                    .push(Token::PageBreak);
+                    .push(if character == '\u{0c}' {
+                        Token::PageBreak
+                    } else {
+                        Token::ColumnBreak
+                    });
             }
             '\u{20}'..='\u{10ffff}' => buffered.push(character),
             _ => {}
@@ -236,35 +255,56 @@ fn tokenize_story(text: &str) -> Vec<Vec<Token>> {
         paragraphs.last_mut().expect("opening paragraph"),
         &mut buffered,
     );
-    if paragraphs.len() > 1 && paragraphs.last().is_some_and(Vec::is_empty) {
+    if trim_final && paragraphs.len() > 1 && paragraphs.last().is_some_and(Vec::is_empty) {
         paragraphs.pop();
     }
     paragraphs
 }
 
-fn build_document_xml(paragraphs: &[Vec<Token>]) -> String {
+fn build_document_xml(text: &str, sections: &[sections::Section]) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
     );
-    for paragraph in paragraphs {
-        xml.push_str("<w:p>");
-        for token in paragraph {
-            match token {
-                Token::Text(text) => {
-                    xml.push_str("<w:r><w:t xml:space=\"preserve\">");
-                    xml.push_str(&xml_text(text));
-                    xml.push_str("</w:t></w:r>");
-                }
-                Token::Tab => xml.push_str("<w:r><w:tab/></w:r>"),
-                Token::LineBreak => xml.push_str("<w:r><w:br/></w:r>"),
-                Token::PageBreak => xml.push_str("<w:r><w:br w:type=\"page\"/></w:r>"),
+    let chunks = sections::split_story(text, sections)?;
+    let mut fields = Vec::new();
+    for (section_index, chunk) in chunks.iter().enumerate() {
+        let paragraphs =
+            tokenize_with_fields(chunk, &mut fields, section_index + 1 == chunks.len());
+        for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
+            xml.push_str("<w:p>");
+            // ECMA-376 17.6.17/18: intermediate sectPr is in the final
+            // paragraph's pPr; only the last section is a direct body child.
+            if section_index + 1 < chunks.len() && paragraph_index + 1 == paragraphs.len() {
+                xml.push_str("<w:pPr>");
+                xml.push_str(&sections[section_index].xml);
+                xml.push_str("</w:pPr>");
             }
+            for token in paragraph {
+                match token {
+                    Token::Text(text) => {
+                        xml.push_str("<w:r><w:t xml:space=\"preserve\">");
+                        xml.push_str(&xml_text(text));
+                        xml.push_str("</w:t></w:r>");
+                    }
+                    Token::Tab => xml.push_str("<w:r><w:tab/></w:r>"),
+                    Token::LineBreak => xml.push_str("<w:r><w:br/></w:r>"),
+                    Token::PageBreak => xml.push_str("<w:r><w:br w:type=\"page\"/></w:r>"),
+                    Token::ColumnBreak => xml.push_str("<w:r><w:br w:type=\"column\"/></w:r>"),
+                }
+            }
+            xml.push_str("</w:p>");
         }
-        xml.push_str("</w:p>");
     }
-    xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>");
-    xml
+    if let Some(last) = sections.last() {
+        xml.push_str(&last.xml);
+    } else {
+        // Existing compatibility policy when no section table is available;
+        // explicitly warned, not inferred from the file's name or content.
+        xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>");
+    }
+    xml.push_str("</w:body></w:document>");
+    Ok(xml)
 }
 
 fn decode_windows_1252(byte: u8) -> char {
@@ -303,6 +343,64 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{decode_piece_table, tokenize_story, Token};
+
+    #[test]
+    fn keeps_the_empty_paragraph_that_owns_a_section_break() {
+        let sections = [
+            super::sections::Section {
+                end: 3,
+                xml: "<w:sectPr/>".into(),
+                incomplete_margins: false,
+            },
+            super::sections::Section {
+                end: 5,
+                xml: "<w:sectPr/>".into(),
+                incomplete_margins: false,
+            },
+        ];
+        let xml = super::build_document_xml("A\r\u{c}B\r", &sections).unwrap();
+        assert!(xml.contains("</w:r></w:p><w:p><w:pPr><w:sectPr/></w:pPr></w:p>"));
+    }
+
+    #[test]
+    fn writes_section_properties_at_their_ooxml_positions_without_extra_page_breaks() {
+        let sections = [
+            super::sections::Section {
+                end: 2,
+                xml: "<w:sectPr><w:type w:val=\"continuous\"/></w:sectPr>".into(),
+                incomplete_margins: false,
+            },
+            super::sections::Section {
+                end: 6,
+                xml: "<w:sectPr/>".into(),
+                incomplete_margins: false,
+            },
+        ];
+        let xml = super::build_document_xml("A\u{c}B\u{c}\u{e}C", &sections).unwrap();
+        assert!(xml.contains("<w:p><w:pPr><w:sectPr>"));
+        assert!(xml.ends_with("</w:p><w:sectPr/></w:body></w:document>"));
+        assert_eq!(xml.matches("w:type=\"page\"").count(), 1);
+        assert_eq!(xml.matches("w:type=\"column\"").count(), 1);
+    }
+
+    #[test]
+    fn field_instructions_remain_hidden_across_section_boundaries() {
+        let sections = [
+            super::sections::Section {
+                end: 3,
+                xml: "<w:sectPr/>".into(),
+                incomplete_margins: false,
+            },
+            super::sections::Section {
+                end: 8,
+                xml: "<w:sectPr/>".into(),
+                incomplete_margins: false,
+            },
+        ];
+        let xml = super::build_document_xml("\u{13}X\u{c}Y\u{14}OK\u{15}", &sections).unwrap();
+        assert!(!xml.contains('X') && !xml.contains('Y'));
+        assert!(xml.contains("OK"));
+    }
 
     #[test]
     fn decodes_a_unicode_piece_table() {
