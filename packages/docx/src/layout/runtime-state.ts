@@ -80,7 +80,7 @@ const verticalGlyphMeasurementServices = new WeakMap<
 >();
 const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
 
-/** One synchronous paginateBody invocation owns this memo. It never enters
+/** One pagination invocation owns this memo. It never enters
  * LayoutServices or DocumentLayout; field-acquisition service views inherit the
  * same private handle through createLayoutServicesRuntimeView. */
 export interface ParagraphAcquisitionRuntimeCache {
@@ -96,7 +96,17 @@ const paragraphAcquisitionCaches = new WeakMap<
 
 function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCache {
   const identities = new WeakMap<object, number>();
-  const results = new WeakMap<object, Map<string, unknown>>();
+  interface Entry {
+    readonly owner: Map<string, Entry>;
+    readonly key: string;
+    readonly value: unknown;
+  }
+  const results = new WeakMap<object, Map<string, Entry>>();
+  const recency = new Map<Entry, true>();
+  // Operational memo policy, not an OOXML limit or a heap-byte guarantee.
+  // Final page layouts retain their own geometry; older acquisition envelopes
+  // are disposable and must not grow with every paragraph/placement/pass.
+  const maxEntries = 128;
   let nextIdentity = 1;
   return Object.freeze({
     objectIdentity(value: object): number {
@@ -109,7 +119,11 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
       return retained;
     },
     get(input: object, key: string): unknown {
-      return results.get(input)?.get(key);
+      const entry = results.get(input)?.get(key);
+      if (!entry) return undefined;
+      recency.delete(entry);
+      recency.set(entry, true);
+      return entry.value;
     },
     set(input: object, key: string, value: unknown): void {
       let byKey = results.get(input);
@@ -117,7 +131,16 @@ function createParagraphAcquisitionRuntimeCache(): ParagraphAcquisitionRuntimeCa
         byKey = new Map();
         results.set(input, byKey);
       }
-      byKey.set(key, value);
+      const previous = byKey.get(key);
+      if (previous) recency.delete(previous);
+      if (recency.size === maxEntries) {
+        const oldest = recency.keys().next().value!;
+        oldest.owner.delete(oldest.key);
+        recency.delete(oldest);
+      }
+      const entry: Entry = { owner: byKey, key, value };
+      byKey.set(key, entry);
+      recency.set(entry, true);
     },
   });
 }

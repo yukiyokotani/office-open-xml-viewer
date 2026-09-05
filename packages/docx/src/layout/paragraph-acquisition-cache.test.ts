@@ -149,6 +149,19 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('reacquires identical geometry after its memo candidate is evicted', () => {
+    const services = scopedServices();
+    const input = paragraphAcquisitionInput(textParagraph(), source);
+    const first = acquireParagraphResult(input, options(services));
+    const cache = paragraphAcquisitionCacheOf(services)!;
+    for (let index = 0; index < 128; index++) cache.set({}, `evict:${index}`, {});
+    const second = acquireParagraphResult(input, options(services));
+    expect(second).not.toBe(first);
+    expect(second.layout).toEqual(first.layout);
+    expect(second.measured).toEqual(first.measured);
+    expect(acquireParagraphResult(input, options(services))).toBe(second);
+  });
+
   it('reuses the immutable result across initial and field service views', () => {
     const services = scopedServices();
     const fieldView = createFieldAcquisitionServicesView(services, { totalPages: 1 });

@@ -241,10 +241,13 @@ not yet honor that attribute when numbering/painting references; an extra
 number can appear. No legacy-only renderer is added to compensate for this
 shared limitation. Page-bottom notes now use the page's terminal continuous
 section region, avoiding placement inside an earlier region's body text.
-Complex note-bearing documents still have unresolved shared OOXML layout
-failures, including excessive memory use in long documents. Preserving the note
-content does not yet imply successful rendering for every converted document.
-No migration or opt-in API change is required.
+The shared DOCX paginator now keeps at most 128 recent paragraph acquisition
+candidates, releasing older measurement copies that previously caused heap
+exhaustion in long note-bearing documents. This is a cache-retention policy,
+not an OOXML limit or an overall heap-byte guarantee: retained document geometry
+and other resources still require substantial memory for large documents.
+Preserving note content does not imply exact Office pagination or successful
+rendering for every input. No migration or opt-in API change is required.
 
 Paragraph borders retain top, bottom, logical left/right and between edges from
 both Brc80 and Brc operands (MS-DOC 2.6.2, 2.9.16/17/21). The converter resolves
