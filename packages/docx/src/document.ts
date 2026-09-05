@@ -703,11 +703,12 @@ export class DocxDocument {
               exact: true,
               complete: true,
             });
-            if (publishedLayout !== null) {
-              progressiveDocument._layoutObservers.notify(
-                'onLayoutComplete', opts.onLayoutComplete,
-              );
-            }
+            // The terminal success callback fires exactly once per load,
+            // whether or not any partial was published — consumers must not
+            // have to infer completion from document speed.
+            progressiveDocument._layoutObservers.notify(
+              'onLayoutComplete', opts.onLayoutComplete,
+            );
             // Nothing was published: there was nothing to show early, so
             // load() resolves here, on the layout that would have been built
             // anyway. Resolving an already-resolved deferred is a no-op.
@@ -965,9 +966,10 @@ export class DocxDocument {
     // A load whose worker published nothing resolves here instead — there was
     // never anything to show early, so `load()` waited for the real document.
     progressive.firstPublication.resolve();
-    if (progressive.published) {
-      this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
-    }
+    // The terminal success callback fires exactly once per load, published
+    // partials or not; `settled` above keeps the failure path from ever
+    // adding a second notification.
+    this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
   }
 
   /** Bookmark pages and the review anchor projections are derived from the
