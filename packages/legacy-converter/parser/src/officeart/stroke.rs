@@ -3,6 +3,26 @@
 //! 20.1.10.31-34). No geometry, colors, or renderer-specific policy.
 use super::unsupported;
 
+/// MS-ODRAW 2.3.8.17 / 2.4.15 and ECMA-376 20.1.10.49 give the same
+/// repeating bit patterns for these names. Custom lineDashStyle is separate.
+pub(crate) fn preset_dash(value: u32) -> Option<&'static str> {
+    [
+        "solid",
+        "sysDash",
+        "sysDot",
+        "sysDashDot",
+        "sysDashDotDot",
+        "dot",
+        "dash",
+        "lgDash",
+        "dashDot",
+        "lgDashDot",
+        "lgDashDotDot",
+    ]
+    .get(value as usize)
+    .copied()
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Details {
     // Property order: start/end kind, start width/length, end width/length,
@@ -82,6 +102,13 @@ fn miter_percentage(value: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_dash_enums_cannot_become_a_solid_line() {
+        assert_eq!(preset_dash(0), Some("solid"));
+        assert_eq!(preset_dash(10), Some("lgDashDotDot"));
+        assert_eq!(preset_dash(11), None);
+        assert_eq!(preset_dash(u32::MAX), None);
+    }
     #[test]
     fn maps_all_supported_ends_and_dimensions() {
         for (kind, name) in ["none", "triangle", "stealth", "diamond", "oval", "arrow"]

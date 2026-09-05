@@ -95,7 +95,12 @@ impl Paint {
                 }
                 self.width = Some(value);
             }
-            0x1ce => self.dash = Some(value),
+            0x1ce => {
+                if crate::officeart::stroke::preset_dash(value).is_none() {
+                    return Err(unsupported("invalid OfficeArt line dashing"));
+                }
+                self.dash = Some(value);
+            }
             _ => self.details.property(id, value)?,
         }
         Ok(())
@@ -198,7 +203,6 @@ impl Paint {
             && self.lined.unwrap_or(true)
             && self.line_ok.unwrap_or(true)
             && self.line_type.unwrap_or(0) == 0
-            && self.dash.unwrap_or(0) == 0
         {
             solid(
                 self.line.unwrap_or(0),
@@ -210,8 +214,13 @@ impl Paint {
         };
         let mut xml = fill.unwrap_or_else(|| "<a:noFill/>".into());
         if let Some(line) = line {
+            let dash = self
+                .dash
+                .and_then(crate::officeart::stroke::preset_dash)
+                .map(|name| format!("<a:prstDash val=\"{name}\"/>"))
+                .unwrap_or_default();
             xml.push_str(&format!(
-                "<a:ln w=\"{}\" cap=\"{}\">{line}{}</a:ln>",
+                "<a:ln w=\"{}\" cap=\"{}\">{line}{dash}{}</a:ln>",
                 self.width.unwrap_or(9525),
                 self.details.cap(),
                 self.details.children_xml()
@@ -244,6 +253,43 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_dash_presets_retain_the_line_and_inherit_explicit_solid() {
+        for (value, name) in [
+            "solid",
+            "sysDash",
+            "sysDot",
+            "sysDashDot",
+            "sysDashDotDot",
+            "dot",
+            "dash",
+            "lgDash",
+            "dashDot",
+            "lgDashDot",
+            "lgDashDotDot",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut parent = Paint::default();
+            parent.property(0x1c0, 0xff0000).unwrap();
+            parent.property(0x1ce, value as u32).unwrap();
+            let inherited = Paint::default().inherit(&parent).xml(20);
+            assert!(inherited.contains("<a:solidFill><a:srgbClr val=\"0000FF\""));
+            assert!(inherited.contains(&format!("<a:prstDash val=\"{name}\"/>")));
+            assert!(inherited.find("a:prstDash").unwrap() < inherited.find("a:round").unwrap());
+            let mut child = Paint::default();
+            child.property(0x1ce, 0).unwrap();
+            assert!(child
+                .inherit(&parent)
+                .xml(20)
+                .contains("<a:prstDash val=\"solid\"/>"));
+            child.property(0x1ff, 0x00080000).unwrap();
+            assert!(!child.inherit(&parent).xml(1).contains("a:prstDash"));
+        }
+        assert!(Paint::default().property(0x1ce, 11).is_err());
+    }
+
     #[test]
     fn straight_connector_preserves_its_preset_without_inventing_a_fill() {
         let mut p = Paint::default();
@@ -354,13 +400,13 @@ mod tests {
         let mut master = Paint::default();
         master.property(0x180, 4).unwrap(); // Gradient.
         master.property(0x1c0, 255).unwrap();
-        master.property(0x1ce, 1).unwrap(); // Dashed line, not yet supported.
+        master.property(0x1ce, 1).unwrap(); // Supported dashed outline, independent of fill.
         let mut local = Paint::default();
         local.property(0x181, 0xff00).unwrap();
-        assert_eq!(
-            local.inherit(&master).xml(1),
-            "<a:noFill/><a:ln><a:noFill/></a:ln>"
-        );
+        let xml = local.inherit(&master).xml(1);
+        assert!(xml.starts_with("<a:noFill/><a:ln"));
+        assert!(xml.contains("<a:prstDash val=\"sysDash\"/>"));
+        assert!(!xml.contains("00FF00"));
         local.property(0x180, 0).unwrap();
         assert!(local.inherit(&master).xml(1).contains("00FF00"));
         master.property(0x1bf, 0x00020002).unwrap();
