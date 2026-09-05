@@ -56,7 +56,7 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   ]);
 }
 
-export function buildXlsFixture(): Uint8Array {
+export function buildXlsFixture(options: { sharedString?: Uint8Array; styleRecords?: Uint8Array } = {}): Uint8Array {
   const bof = (kind: number) => biffRecord(0x0809, concat(
     little16(0x0600), little16(kind), little16(0), little16(0),
   ));
@@ -66,11 +66,12 @@ export function buildXlsFixture(): Uint8Array {
   );
   const string = utf16le('日本語');
   const sst = concat(
-    little32(1), little32(1), little16(3), new Uint8Array([1]), string,
+    little32(1), little32(1), options.sharedString ?? concat(little16(3), new Uint8Array([1]), string),
   );
   const globals = concat(
     bof(0x0005),
     biffRecord(0x0085, boundSheet),
+    options.styleRecords ?? new Uint8Array(),
     biffRecord(0x00fc, sst),
     biffRecord(0x000a, new Uint8Array()),
   );
@@ -88,6 +89,7 @@ export function buildXlsFixture(): Uint8Array {
   return buildCfb([['Workbook', concat(
     bof(0x0005),
     biffRecord(0x0085, boundSheet),
+    options.styleRecords ?? new Uint8Array(),
     biffRecord(0x00fc, sst),
     biffRecord(0x000a, new Uint8Array()),
     sheet,

@@ -67,7 +67,7 @@ legacy document in Microsoft Office.
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
+| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, phonetic string data, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master foreground objects, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
@@ -75,6 +75,25 @@ binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with
 `reason === 'unsupported-input'`. Accepted documents can still lose the features
 listed above: their warning identifiers are not a fidelity certificate.
+
+XLS shared-string formatting uses `FormatRun` UTF-16 character offsets and
+`FontIndex` references, including the reserved index-4 gap and ignored terminal
+run (MS-XLS 2.5.129, 2.5.132 and 2.5.293). Run fonts become ordinary
+SpreadsheetML `r/rPr/rFont` properties (ECMA-376 18.4.4-7); an unformatted prefix
+retains the cell font, while explicit normal formatting resets bold/italic and
+other run properties. Continued character fragments are joined before decoding
+UTF-16, so surrogate pairs spanning record boundaries stay intact. Phonetic
+extensions are skipped, not promoted into visible text. Invalid live font
+references, unordered/out-of-range run starts and surrogate-splitting boundaries
+reject the input rather than attaching formatting to the wrong characters.
+The converter shares immutable encoded string fragments between cells and
+caches run font properties for one workbook, encoding each entry before reading
+the next. Resource policies cap SST entries and total format runs at one million
+each, retained encoded strings at 256 MiB and aggregate
+worksheet XML at 256 MiB, independently of the compressed output limit.
+Retained run properties still depend on existing OOXML parser/renderer support;
+automatic font-color resets and advanced font effects do not have verified
+visual parity. This does not change the per-format opt-in API.
 
 DOC character properties follow physical FKP ranges through the logical CLX
 piece table, including UTF-16 positions and displayed-field gaps. Supported

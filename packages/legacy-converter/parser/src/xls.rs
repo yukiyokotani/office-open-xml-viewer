@@ -1,18 +1,21 @@
 //! BIFF8 (`.xls`) compatibility subset.
 //!
 //! The converter preserves worksheet names, scalar/string/boolean/error values,
-//! cached formula results, merged-cell ranges, BIFF8 cell styles and geometry.
+//! cached formula results, merged-cell ranges, BIFF8 cell styles, shared-string
+//! character formatting and geometry.
 //! Formula token programs, drawings, charts, external links, and macros are never evaluated
 //! or copied. See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
 use std::collections::{BTreeMap, HashSet};
+use std::rc::Rc;
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
 mod geometry;
 mod print;
+mod rich;
 mod styles;
 
 const BOF: u16 = 0x0809;
@@ -54,6 +57,7 @@ enum CellValue {
     Blank,
     Number(f64),
     Text(String),
+    SharedString(Rc<str>),
     Bool(bool),
     Error(String),
 }
@@ -118,7 +122,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
                     fragments.push(next.data);
                     continued += 1;
                 }
-                shared_strings = parse_sst(&fragments)?;
+                let mut encoder = rich::Encoder::new(&styles);
+                shared_strings = parse_sst_with(&fragments, |text| encoder.encode(text))?;
                 saw_sst = true;
             }
             _ => {}
@@ -164,7 +169,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
     let bytes = build_xlsx(&converted, &styles.xml()?, date1904, max_output_bytes)?;
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
-        "legacy-xls:rich-text-runs-print-areas-titles-and-extended-headers-omitted".into(),
+        "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
     ];
     if styles.extensions_omitted {
         warnings.push("legacy-xls:extended-styles-omitted".into());
@@ -246,7 +251,23 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
     })
 }
 
+#[cfg(test)]
 fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
+    Ok(parse_sst_elements(fragments)?
+        .into_iter()
+        .map(|s| s.text)
+        .collect())
+}
+
+#[cfg(test)]
+fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
+    parse_sst_with(fragments, Ok)
+}
+
+fn parse_sst_with<T>(
+    fragments: &[&[u8]],
+    mut retain: impl FnMut(rich::Text) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
     let total_bytes = fragments.iter().try_fold(0usize, |total, fragment| {
         total
             .checked_add(fragment.len())
@@ -256,12 +277,17 @@ fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
     let counts = cursor.read_fixed(8, "truncated SST record")?;
     let unique = usize::try_from(u32_at(counts, 4)?)
         .map_err(|_| unsupported("BIFF shared string count is too large"))?;
-    if unique > MAX_CELLS || unique > total_bytes.saturating_sub(8) / 3 {
+    // Resource policy, separate from BIFF's cell/record limits. Encode each
+    // entry immediately instead of retaining all decoded strings and runs
+    // alongside their expanded XML representations.
+    if unique > 1_000_000 || unique > total_bytes.saturating_sub(8) / 3 {
         return Err(unsupported("too many BIFF shared strings"));
     }
     let mut strings = Vec::with_capacity(unique);
+    let mut run_budget = 1_000_000usize;
     for _ in 0..unique {
         let header = cursor.read_fixed(3, "split or truncated BIFF string header")?;
+        let header_fragment = cursor.fragment;
         let chars = u16_at(header, 0)? as usize;
         let flags = header[2];
         let rich_runs = if (flags & 0x08) != 0 {
@@ -277,13 +303,24 @@ fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
         } else {
             0
         };
-        strings.push(cursor.read_characters(chars, (flags & 0x01) != 0)?);
-        cursor.skip_variable(
-            rich_runs
-                .checked_mul(4)
-                .and_then(|size| size.checked_add(ext_size))
-                .ok_or_else(|| unsupported("BIFF string size overflow"))?,
-        )?;
+        if cursor.fragment != header_fragment || ext_size > i32::MAX as usize {
+            return Err(unsupported(
+                "split BIFF string header or negative extension size",
+            ));
+        }
+        run_budget = run_budget
+            .checked_sub(rich_runs)
+            .ok_or_else(|| unsupported("BIFF rich-text run budget exceeded"))?;
+        let units = cursor.read_characters(chars, (flags & 0x01) != 0)?;
+        let mut runs = Vec::with_capacity(rich_runs);
+        for _ in 0..rich_runs {
+            // Unlike continued character data, formatting bytes have no
+            // compression option. Keep the variable-field cursor separate.
+            let bytes = cursor.read_variable_four()?;
+            runs.push((u16_at(&bytes, 0)?, u16_at(&bytes, 2)?));
+        }
+        cursor.skip_variable(ext_size)?;
+        strings.push(retain(rich::Text::new(&units, &runs)?)?);
     }
     Ok(strings)
 }
@@ -327,8 +364,8 @@ impl<'a, 'b> SstCursor<'a, 'b> {
         &mut self,
         mut remaining: usize,
         mut high_byte: bool,
-    ) -> Result<String, String> {
-        let mut output = String::new();
+    ) -> Result<Vec<u16>, String> {
+        let mut output = Vec::with_capacity(remaining);
         while remaining > 0 {
             if self.current_fragment_exhausted() {
                 self.fragment += 1;
@@ -368,14 +405,22 @@ impl<'a, 'b> SstCursor<'a, 'b> {
                 let units = bytes
                     .chunks_exact(2)
                     .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
-                output.extend(char::decode_utf16(units).map(|value| value.unwrap_or('\u{fffd}')));
+                output.extend(units);
             } else {
-                output.extend(bytes.iter().map(|byte| char::from(*byte)));
+                output.extend(bytes.iter().map(|byte| u16::from(*byte)));
             }
             self.offset += byte_count;
             remaining -= take;
         }
         Ok(output)
+    }
+
+    fn read_variable_four(&mut self) -> Result<[u8; 4], String> {
+        let mut result = [0; 4];
+        for byte in &mut result {
+            *byte = self.read_fixed(1, "truncated BIFF format run")?[0];
+        }
+        Ok(result)
     }
 
     fn skip_variable(&mut self, mut remaining: usize) -> Result<(), String> {
@@ -465,7 +510,7 @@ fn decode_biff_chars(
 fn parse_sheet(
     all_records: &[Record<'_>],
     sheet: &BoundSheet,
-    shared_strings: &[String],
+    shared_strings: &[Rc<str>],
 ) -> Result<SheetData, String> {
     let start_index = all_records
         .binary_search_by_key(&sheet.offset, |record| record.offset)
@@ -575,7 +620,7 @@ fn parse_sheet(
                     &mut output,
                     row,
                     column,
-                    CellValue::Text(value),
+                    CellValue::SharedString(value),
                     &mut cell_count,
                 )?;
             }
@@ -806,6 +851,9 @@ fn build_xlsx(
         ("_rels/.rels".into(), ROOT_RELS_XLSX.to_string()),
         ("xl/styles.xml".into(), styles.into()),
     ];
+    // Resource policy: rich run markup must not multiply without a bound when
+    // the same SST entry is referenced by many cells or sheets.
+    let mut remaining_sheet_xml = 256 * 1024 * 1024usize;
     for (index, (name, sheet)) in sheets.iter().enumerate() {
         let id = index + 1;
         workbook.push_str(&format!(
@@ -822,10 +870,11 @@ fn build_xlsx(
             "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
             id
         ));
-        parts.push((
-            format!("xl/worksheets/sheet{id}.xml"),
-            build_sheet_xml(sheet),
-        ));
+        let sheet_xml = build_sheet_xml(sheet, remaining_sheet_xml)?;
+        remaining_sheet_xml = remaining_sheet_xml
+            .checked_sub(sheet_xml.len())
+            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+        parts.push((format!("xl/worksheets/sheet{id}.xml"), sheet_xml));
     }
     workbook.push_str("</sheets></workbook>");
     workbook_rels.push_str(&format!(
@@ -839,7 +888,7 @@ fn build_xlsx(
     write_package(&parts, max_output_bytes)
 }
 
-fn build_sheet_xml(sheet: &SheetData) -> String {
+fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
@@ -875,12 +924,23 @@ fn build_sheet_xml(sheet: &SheetData) -> String {
                         xml_text(value)
                     ));
                 }
+                CellValue::SharedString(value) => {
+                    if value.len() > max_bytes.saturating_sub(xml.len()) {
+                        return Err("OUTPUT_TOO_LARGE".into());
+                    }
+                    xml.push_str(&format!("{cell} t=\"inlineStr\"><is>"));
+                    xml.push_str(value);
+                    xml.push_str("</is></c>");
+                }
                 CellValue::Bool(value) => {
                     xml.push_str(&format!("{cell} t=\"b\"><v>{}</v></c>", u8::from(*value)));
                 }
                 CellValue::Error(value) => {
                     xml.push_str(&format!("{cell} t=\"e\"><v>{}</v></c>", xml_text(value)));
                 }
+            }
+            if xml.len() > max_bytes {
+                return Err("OUTPUT_TOO_LARGE".into());
             }
         }
         xml.push_str("</row>");
@@ -899,7 +959,10 @@ fn build_sheet_xml(sheet: &SheetData) -> String {
     }
     xml.push_str(&sheet.print.xml());
     xml.push_str("</worksheet>");
-    xml
+    if xml.len() > max_bytes {
+        return Err("OUTPUT_TOO_LARGE".into());
+    }
+    Ok(xml)
 }
 
 fn minimal_styles() -> String {

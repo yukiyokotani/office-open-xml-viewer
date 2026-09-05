@@ -126,14 +126,36 @@ impl<'a> Styles<'a> {
     }
 
     fn font(&self, data: &[u8]) -> Result<String, String> {
+        self.font_xml(data, false)
+    }
+
+    pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
+        // MS-XLS 2.5.129: FontIndex 4 is reserved, indices above it are one-based.
+        let offset = usize::from(index - u16::from(index > 4));
+        let data = self
+            .fonts
+            .get(offset)
+            .filter(|_| index != 4)
+            .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))?;
+        self.font_xml(data, true)
+    }
+
+    fn font_xml(&self, data: &[u8], run: bool) -> Result<String, String> {
         if data.len() < 16 {
             return Err(unsupported("truncated BIFF font"));
         }
         let (name, _) = decode_biff_chars(data, 16, usize::from(data[14]), data[15] & 1 != 0)?;
-        let mut xml = format!("<font><name val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&name), f64::from(u16_at(data, 0)?) / 20.0, self.color(u16_at(data, 4)?), data[11], data[12]);
+        let (tag, name_tag) = if run {
+            ("rPr", "rFont")
+        } else {
+            ("font", "name")
+        };
+        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&name), f64::from(u16_at(data, 0)?) / 20.0, self.color(u16_at(data, 4)?), data[11], data[12]);
         // OOXML exposes only bold/normal, not arbitrary LOGFONT weight.
         if u16_at(data, 6)? == 700 {
             xml.push_str("<b/>");
+        } else if run {
+            xml.push_str("<b val=\"0\"/>");
         }
         for (mask, tag) in [
             (2, "i"),
@@ -145,10 +167,18 @@ impl<'a> Styles<'a> {
         ] {
             if data[2] & mask != 0 {
                 xml.push_str(&format!("<{tag}/>"));
+            } else if run {
+                xml.push_str(&format!("<{tag} val=\"0\"/>"));
             }
         }
         let underline = match data[10] {
-            0 => None,
+            0 => {
+                if run {
+                    Some("none")
+                } else {
+                    None
+                }
+            }
             1 => Some("single"),
             2 => Some("double"),
             0x21 => Some("singleAccounting"),
@@ -159,12 +189,16 @@ impl<'a> Styles<'a> {
             xml.push_str(&format!("<u val=\"{value}\"/>"));
         }
         match u16_at(data, 8)? {
-            0 => {}
+            0 => {
+                if run {
+                    xml.push_str("<vertAlign val=\"baseline\"/>");
+                }
+            }
             1 => xml.push_str("<vertAlign val=\"superscript\"/>"),
             2 => xml.push_str("<vertAlign val=\"subscript\"/>"),
             _ => return Err(unsupported("invalid BIFF font script")),
         }
-        xml.push_str("</font>");
+        xml.push_str(&format!("</{tag}>"));
         Ok(xml)
     }
 
