@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone)]
 pub struct Properties {
+    tabs: super::tabs::Stops,
     flags: BTreeMap<&'static str, bool>,
     line: (u16, &'static str),
     before: u16,
@@ -26,6 +27,7 @@ pub struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            tabs: super::tabs::Stops::default(),
             flags: BTreeMap::from([
                 ("widowControl", true),
                 ("kinsoku", true),
@@ -87,6 +89,7 @@ impl Properties {
             return Ok(true);
         }
         match code {
+            0xc60d | 0xc615 => self.tabs.apply(operand, code == 0xc615)?,
             0x6412 => {
                 let line = signed(operand)?;
                 let multiple = u16_at(operand, 2)?;
@@ -190,6 +193,10 @@ impl Properties {
             "adjustRightInd",
             "snapToGrid",
         ] {
+            if key == "suppressAutoHyphens" {
+                // CT_PPrBase places tabs after shading/borders and before this flag.
+                xml.push_str(&self.tabs.xml());
+            }
             if let Some(value) = self.flags.get(key) {
                 xml.push_str(&format!("<w:{key} w:val=\"{}\"/>", u8::from(*value)));
             }

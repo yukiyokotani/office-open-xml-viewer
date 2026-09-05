@@ -480,6 +480,27 @@ mod tests {
     }
 
     #[test]
+    fn custom_tabs_resolve_style_additions_then_direct_deletions_and_replacements() {
+        let mut f = empty();
+        f.styles = vec![Some(Style {
+            kind: 1,
+            base: 0xfff,
+            chpx: &[],
+            // Two tabs: 720 left/dotted, 1440 right/no leader.
+            papx: &[0x0d, 0xc6, 8, 0, 2, 0xd0, 2, 0xa0, 5, 8, 2],
+        })];
+        let original = f.paragraph_xml(0, 0, 0, &[]).unwrap();
+        assert!(original.contains("<w:tab w:val=\"left\" w:pos=\"720\" w:leader=\"dot\"/>"));
+        // Delete at 740 (+20 twips from inherited 720), replace 1440 with center.
+        let modified = f
+            .paragraph_xml(0, 0, 1, &[&[0x0d, 0xc6, 7, 1, 0xe4, 2, 1, 0xa0, 5, 1]])
+            .unwrap();
+        assert!(!modified.contains("w:pos=\"720\""));
+        assert!(modified.contains("<w:tab w:val=\"center\" w:pos=\"1440\" w:leader=\"none\"/>"));
+        assert_eq!(f.paragraph_xml(0, 0, 0, &[]).unwrap(), original);
+        assert!(!f.unsupported_paragraph_properties);
+    }
+    #[test]
     fn inherited_paragraph_layout_is_overridden_by_piece_properties() {
         let mut f = empty();
         f.styles = vec![Some(Style {

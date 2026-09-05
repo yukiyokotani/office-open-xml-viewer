@@ -18,6 +18,7 @@ mod sections;
 mod sprm;
 mod table;
 mod table_output;
+mod tabs;
 
 const FIB_IDENT: u16 = 0xa5ec;
 const FIB_WORD_97: u16 = 0x00c1;

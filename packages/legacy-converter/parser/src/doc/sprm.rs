@@ -56,9 +56,12 @@ impl Default for Budget {
 }
 impl Budget {
     pub fn take(&mut self) -> Result<(), String> {
+        self.take_many(1)
+    }
+    fn take_many(&mut self, amount: usize) -> Result<(), String> {
         self.0 = self
             .0
-            .checked_sub(1)
+            .checked_sub(amount)
             .ok_or_else(|| unsupported("Word formatting operation budget exceeded"))?;
         Ok(())
     }
@@ -111,6 +114,11 @@ impl<'a> Sprms<'a> {
         let operand = bytes
             .get(..size)
             .ok_or_else(|| unsupported("truncated Word formatting operand"))?;
+        if matches!(code, 0xc60d | 0xc615) {
+            // Charge variable tab edits, not just their enclosing SPRM. Range
+            // deletion is logarithmic plus removed entries, not a full-set scan.
+            budget.take_many(operand.len())?;
+        }
         self.bytes = &bytes[size..];
         Ok(Some((code, operand)))
     }
@@ -119,6 +127,18 @@ impl<'a> Sprms<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extended_tabs_are_framed_without_consuming_the_following_sprm() {
+        let mut b = vec![0x15, 0xc6, 255, 64];
+        b.extend([0u8; 256]);
+        b.push(0);
+        b.extend([0x07, 0x24, 1]);
+        let mut p = Sprms::new(&b);
+        let mut budget = Budget::default();
+        assert_eq!(p.next(&mut budget).unwrap().unwrap().1.len(), 259);
+        assert_eq!(p.next(&mut budget).unwrap(), Some((0x2407, &[1][..])));
+        assert!(Sprms::new(&b).next(&mut Budget(259)).is_err());
+    }
     #[test]
     fn skips_unknown_variable_operands_and_rejects_truncation() {
         let mut budget = Budget::default();

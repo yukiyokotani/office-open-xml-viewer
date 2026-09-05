@@ -1,7 +1,7 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(): Uint8Array {
-  const text = 'Hello 日本語\rSecond paragraph';
-  const units = Array.from(text, (character) => character.charCodeAt(0));
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array } = {}): Uint8Array {
+  const text = options.text ?? 'Hello 日本語\rSecond paragraph';
+  const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
   const textOffset = 0x400;
   const word = new Uint8Array(textOffset + units.length * 2);
   const view = new DataView(word.buffer);
@@ -9,17 +9,18 @@ export function buildDocFixture(): Uint8Array {
   view.setUint16(2, 0x00c1, true);
   view.setUint32(0x4c, units.length, true);
   view.setUint32(0x1a2, 0, true);
-  view.setUint32(0x1a6, 21, true);
   units.forEach((unit, index) => view.setUint16(textOffset + index * 2, unit, true));
   const table = concat(
+    ...(options.paragraphProperties ? [new Uint8Array([1]), little16(options.paragraphProperties.length), options.paragraphProperties] : []),
     new Uint8Array([0x02]),
     little32(16),
     little32(0),
     little32(units.length),
     little16(0),
     little32(textOffset),
-    little16(0),
+    little16(options.paragraphProperties ? 1 : 0),
   );
+  view.setUint32(0x1a6, table.length, true);
   return buildCfb([
     ['WordDocument', word],
     ['0Table', table],
