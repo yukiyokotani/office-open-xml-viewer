@@ -1096,7 +1096,7 @@ mod tests {
         assert_eq!(out.matches("<p:sp>").count(), 2);
         assert_eq!(out.matches("<p:txBody>").count(), 1);
         assert!(out.contains("prst=\"ellipse\""));
-        assert!(out.contains("<a:ln w=\"25400\">"));
+        assert!(out.contains("<a:ln w=\"25400\" cap=\"flat\">"));
         assert!(out.contains("val=\"123456\""));
         assert!(out.find("ellipse").unwrap() < out.find("Label").unwrap());
         assert!(!out.contains("txBox=\"1\""));

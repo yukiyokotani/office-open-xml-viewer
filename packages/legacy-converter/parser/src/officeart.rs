@@ -1,6 +1,7 @@
 //! Bounded OfficeArt / PowerPoint record headers (MS-ODRAW 2.2.1).
 pub(crate) mod geometry;
 pub(crate) mod raster;
+pub(crate) mod stroke;
 
 fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())

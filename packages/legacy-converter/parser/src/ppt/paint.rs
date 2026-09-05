@@ -3,6 +3,7 @@ use super::{scheme, unsupported};
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Paint {
+    details: crate::officeart::stroke::Details,
     pub custom_geometry: bool,
     fill_ok: Option<bool>,
     line_ok: Option<bool>,
@@ -26,6 +27,7 @@ impl Paint {
     /// their source representation until the destination slide resolves them.
     pub fn inherit(&self, parent: &Self) -> Self {
         Self {
+            details: self.details.inherit(&parent.details),
             // Unsupported inherited adjustments/paths must not turn into an
             // invented unadjusted preset. Explicit paths are decoded separately.
             custom_geometry: self.custom_geometry || parent.custom_geometry,
@@ -94,7 +96,7 @@ impl Paint {
                 self.width = Some(value);
             }
             0x1ce => self.dash = Some(value),
-            _ => {}
+            _ => self.details.property(id, value)?,
         }
         Ok(())
     }
@@ -171,7 +173,8 @@ impl Paint {
             || self.line_type.is_some()
             || self.line_alpha.is_some()
             || self.width.is_some()
-            || self.dash.is_some();
+            || self.dash.is_some()
+            || self.details.specified();
         let fill = if allow_fill
             && fill_set
             && self.filled.unwrap_or(true)
@@ -205,8 +208,10 @@ impl Paint {
         let mut xml = fill.unwrap_or_else(|| "<a:noFill/>".into());
         if let Some(line) = line {
             xml.push_str(&format!(
-                "<a:ln w=\"{}\">{line}</a:ln>",
-                self.width.unwrap_or(9525)
+                "<a:ln w=\"{}\" cap=\"{}\">{line}{}</a:ln>",
+                self.width.unwrap_or(9525),
+                self.details.cap(),
+                self.details.children_xml()
             ));
         } else {
             xml.push_str("<a:ln><a:noFill/></a:ln>");
@@ -236,6 +241,62 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn line_decorations_caps_and_joins_reach_drawingml() {
+        let mut p = Paint::default();
+        for (id, value) in [
+            (0x1c0, 0),
+            (0x1d0, 1),
+            (0x1d1, 5),
+            (0x1d2, 0),
+            (0x1d3, 2),
+            (0x1d4, 2),
+            (0x1d5, 0),
+            (0x1d6, 0),
+            (0x1d7, 0),
+        ] {
+            p.property(id, value).unwrap();
+        }
+        let xml = p.xml(20);
+        assert!(xml.contains("cap=\"rnd\""));
+        assert!(xml.contains("<a:bevel/>"));
+        assert!(xml.contains("<a:headEnd type=\"triangle\" w=\"sm\" len=\"lg\"/>"));
+        assert!(xml.contains("<a:tailEnd type=\"arrow\" w=\"lg\" len=\"sm\"/>"));
+        p.property(0x1ff, 0x00080000).unwrap();
+        assert_eq!(p.xml(1), "<a:noFill/><a:ln><a:noFill/></a:ln>");
+    }
+
+    #[test]
+    fn decorations_inherit_with_explicit_none_and_miter_defaults() {
+        let mut parent = Paint::default();
+        for (id, value) in [(0x1c0, 0), (0x1d0, 3), (0x1d1, 4), (0x1d6, 1), (0x1d7, 1)] {
+            parent.property(id, value).unwrap();
+        }
+        let mut child = Paint::default();
+        child.property(0x1d0, 0).unwrap();
+        child.property(0x1d4, 0).unwrap();
+        let xml = child.inherit(&parent).xml(20);
+        assert!(!xml.contains("type=\"diamond\""));
+        assert!(xml.contains("<a:tailEnd type=\"oval\" w=\"sm\" len=\"med\"/>"));
+        assert!(xml.contains("cap=\"sq\""));
+        assert!(xml.contains("<a:miter lim=\"800000\"/>"));
+        child.property(0x1cc, 0x00018000).unwrap();
+        assert!(child
+            .inherit(&parent)
+            .xml(20)
+            .contains("<a:miter lim=\"150000\"/>"));
+    }
+
+    #[test]
+    fn arrow_editability_flags_do_not_hide_end_decorations() {
+        let mut p = Paint::default();
+        p.property(0x1d1, 1).unwrap();
+        // MS-ODRAW 2.3.8.38: fArrowheadsOK controls editing, not rendering.
+        p.property(0x1ff, 0x00100000).unwrap();
+        assert!(p.xml(20).contains("<a:tailEnd type=\"triangle\""));
+        assert!(p.xml(20).contains("<a:round/>"));
+    }
+
     #[test]
     fn inherited_paint_keeps_values_independent_from_boolean_use_bits() {
         let mut master = Paint::default();
@@ -356,7 +417,7 @@ mod tests {
         }
         let xml = p.xml(3);
         assert!(xml.contains("val=\"123456\"><a:alpha val=\"50000\"/>"));
-        assert!(xml.contains("<a:ln w=\"25400\">"));
+        assert!(xml.contains("<a:ln w=\"25400\" cap=\"flat\">"));
         assert!(xml.contains("val=\"ABCDEF\""));
     }
     #[test]
