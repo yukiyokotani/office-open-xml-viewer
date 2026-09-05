@@ -2741,7 +2741,8 @@ function renderWarpedText(
 
   // Lay each paragraph out flat at the natural size (no wrap — WordArt fits the
   // shape width itself). Collect every line's segments in order.
-  const lines: Array<{ line: LayoutLine; alignment: Paragraph['alignment'] }> = [];
+  const lines: Array<{ line: LayoutLine; alignment: Paragraph['alignment']; baseline: number }> = [];
+  let flatTop = 0;
   for (const para of body.paragraphs) {
     const paraDefaultFontSizePx =
       para.defFontSize != null ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontSizePx;
@@ -2761,7 +2762,19 @@ function renderWarpedText(
       rc,
       0,
     );
-    for (const line of laid) lines.push({ line, alignment: para.alignment });
+    if (lines.length > 0) flatTop += (para.spaceBefore ?? 0) / 100 * PT_TO_EMU * scale;
+    for (const line of laid) {
+      const size = line.segments.reduce((max, seg) => Math.max(max, seg.sizePx), 0) || paraDefaultFontSizePx;
+      // Same natural line box as ordinary PowerPoint text. The independent
+      // flat/Follow Path Office controls cover 50–200%, fixed point spacing,
+      // mixed sizes and paragraph gaps; no warp-specific pitch multiplier.
+      const height = para.spaceLine?.type === 'pts'
+        ? para.spaceLine.val * PT_TO_EMU * scale
+        : size * 1.2 * (para.spaceLine ? para.spaceLine.val / 100000 : 1);
+      lines.push({ line, alignment: para.alignment, baseline: flatTop + height * 0.8 });
+      flatTop += height;
+    }
+    flatTop += (para.spaceAfter ?? 0) / 100 * PT_TO_EMU * scale;
   }
   if (lines.length === 0) return;
 
@@ -2786,8 +2799,24 @@ function renderWarpedText(
   };
 
   const lineCount = lines.length;
+  // Follow Path is not the paired-edge vertical-band operation in §20.1.9.19.
+  // Office-produced controls show concentric ellipses: clockwise paths anchor
+  // the last line, counterclockwise paths the first. Derive winding from the
+  // authored path, not screen up/down (adjusted arches can cross either half).
+  const p0 = env.top[0];
+  const p1 = env.top[1];
+  const clockwise = p0 && p1
+    ? (p0.x - boxW / 2) * (p1.y - boxH / 2) - (p0.y - boxH / 2) * (p1.x - boxW / 2) > 0
+    : true;
+  const anchoredBaseline = lines[clockwise ? lineCount - 1 : 0]!.baseline;
   for (let li = 0; li < lineCount; li++) {
     const { line, alignment } = lines[li];
+    const outset = env.singleEdge
+      ? Math.max(0, clockwise ? anchoredBaseline - lines[li]!.baseline : lines[li]!.baseline - anchoredBaseline)
+      : 0;
+    const lineEnv = outset > 0
+      ? buildWarpEnvelope(preset, adj, boxW + 2 * outset, boxH + 2 * outset) ?? env
+      : env;
     // Per-line vertical band [v0, v1] of the envelope's height. One line fills
     // the whole band; multiple lines split it evenly top→bottom.
     const v0 = li / lineCount;
@@ -2854,7 +2883,7 @@ function renderWarpedText(
     const warpBoxH = env.singleEdge ? inkH : inkH / (v1 - v0);
     // Follow Path: fraction of the arc the natural-width text actually spans.
     // 1 for paired-edge (no clamp); ≤1 for arch/circle.
-    const followScale = followPathUScale(env, totalW);
+    const followScale = followPathUScale(lineEnv, totalW);
     // A Follow Path warp keeps the text's natural arc length, but its paragraph
     // alignment still selects where that shorter segment sits on the path.
     // PowerPoint-generated circular diagrams commonly use centred paragraphs;
@@ -2862,13 +2891,6 @@ function renderWarpedText(
     const followOffset = env.singleEdge
       ? (1 - followScale) * (alignment === 'r' ? 1 : alignment === 'ctr' ? 0.5 : 0)
       : 0;
-    // Follow Path has one authored baseline curve. Manual breaks and separate
-    // paragraphs form additional natural-height lines on the INSIDE of that
-    // curve; they do not all reuse the identical baseline. Select the normal
-    // that points toward the shape centre so this works for both Arch Up and
-    // Arch Down without preset-name branching. The 120% pitch is the same
-    // natural PowerPoint line spacing used by ordinary text below.
-    const followLineOffset = env.singleEdge ? li * maxSize * 1.2 : 0;
 
     // Walk glyphs left→right. `penW` accumulates the flat advance so each glyph's
     // CENTRE maps to its u fraction; the glyph is drawn at a per-glyph transform.
@@ -2887,7 +2909,7 @@ function renderWarpedText(
         const chW = ctx.measureText(ch).width + ls;
         // Blend the per-line vertical band into the baseline fraction so line 2
         // sits below line 1 within the envelope.
-        const bandFrac = v0 + baselineFrac * (v1 - v0);
+        const bandFrac = env.singleEdge ? baselineFrac : v0 + baselineFrac * (v1 - v0);
 
         // Paired-edge (envelope) presets: the envelope map is NON-affine within a
         // glyph (on Inflate/Deflate the vertical stretch varies across the glyph's
@@ -2926,16 +2948,9 @@ function renderWarpedText(
         // naturally sized, paragraph-aligned arc segment rather than the whole
         // path. `followScale` is 1 for paired-edge presets (unchanged).
         const u = followOffset + ((penW + chW / 2) / totalW) * followScale;
-        const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
-        if (followLineOffset !== 0) {
-          const nx = -Math.sin(g.angle);
-          const ny = Math.cos(g.angle);
-          const toCentreX = boxW / 2 - g.x;
-          const toCentreY = boxH / 2 - g.y;
-          const inward = nx * toCentreX + ny * toCentreY >= 0 ? 1 : -1;
-          g.x += nx * followLineOffset * inward;
-          g.y += ny * followLineOffset * inward;
-        }
+        const g = warpGlyphTransform(lineEnv, u, warpBoxH, bandFrac);
+        g.x -= outset;
+        g.y -= outset;
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
         ctx.rotate(g.angle);

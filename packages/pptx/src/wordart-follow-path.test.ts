@@ -167,7 +167,7 @@ function warpBodyWithBreak(preset: string, first: string, second: string): TextB
 // Follow Path should visibly compress its span.
 const BOX_W = 620; // 6.2in → 620px
 const BOX_H = 150; // 1.5in → 150px
-const SCALE = 1; // fontSize already in px via measureText; scale is passthrough here
+const SCALE = 1 / 12700; // 40 pt becomes 40 px; match the mocked pixel geometry.
 
 /** Horizontal device-space span of all placed glyph origins. */
 function span(glyphs: Array<{ x: number }>): number {
@@ -215,13 +215,88 @@ describe('WordArt Follow Path — single-edge span (issue #846)', () => {
     expect(glyphs[0]!.y).toBeCloseTo(expected.y, 1);
   });
 
-  it('places lines after a manual break on distinct inward baselines', () => {
+  it('keeps the last clockwise line on the authored arch and expands preceding lines', () => {
     const { ctx, glyphs } = trackingCtx();
     renderTextBody(ctx, warpBodyWithBreak('textArchUp', 'Top', 'Bottom'), 0, 0, BOX_W, BOX_H, SCALE);
 
     const topY = glyphs.slice(0, 3).reduce((sum, glyph) => sum + glyph.y, 0) / 3;
     const bottomY = glyphs.slice(3).reduce((sum, glyph) => sum + glyph.y, 0) / 6;
     expect(bottomY - topY).toBeGreaterThan(20);
+    expect(topY).toBeLessThan(0);
+    expect(bottomY).toBeLessThan(10);
+  });
+
+  it('expands later counterclockwise lines outside the lower arch', () => {
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, warpBodyWithBreak('textArchDown', 'A', 'A'), 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[1]!.y - glyphs[0]!.y).toBeCloseTo(48, 0);
+    expect(glyphs[0]!.y).toBeGreaterThan(BOX_H);
+  });
+
+  it('honours fixed line spacing independently of the font size', () => {
+    const body = warpBodyWithBreak('textArchUp', 'A', 'A');
+    body.paragraphs[0]!.spaceLine = { type: 'pts', val: 18 };
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, body, 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[1]!.y - glyphs[0]!.y).toBeCloseTo(18, 0);
+  });
+
+  it('retains paragraph spacing only between paragraphs', () => {
+    const body = warpBody('textArchUp', 'A');
+    body.paragraphs[0]!.spaceBefore = 1200;
+    body.paragraphs[0]!.spaceAfter = 600;
+    body.paragraphs.push({ ...body.paragraphs[0]! });
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, body, 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[1]!.y - glyphs[0]!.y).toBeCloseTo(66, 0);
+    expect(glyphs[1]!.y).toBeLessThan(10);
+  });
+
+  it.each([50, 100, 150, 200])('uses %i%% authored line spacing', (percent) => {
+    const body = warpBodyWithBreak('textArchUp', 'A', 'A');
+    body.paragraphs[0]!.spaceLine = { type: 'pct', val: percent * 1000 };
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, body, 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[1]!.y - glyphs[0]!.y).toBeCloseTo(48 * percent / 100, 0);
+  });
+
+  it('accumulates mixed-size line boxes before anchoring the last baseline', () => {
+    const body = warpBody('textArchUp', 'A');
+    body.paragraphs = [16, 32, 48].map(size => ({ ...body.paragraphs[0]!, runs: [run('A', { fontSize: size })] }));
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, body, 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[1]!.y - glyphs[0]!.y).toBeCloseTo(34.56, 0);
+    expect(glyphs[2]!.y - glyphs[1]!.y).toBeCloseTo(53.76, 0);
+    expect(glyphs[2]!.y).toBeLessThan(10);
+  });
+
+  it.each([135, 225])('uses path winding for a %i degree downward arch', (angle) => {
+    const body = warpBodyWithBreak('textArchDown', 'A', 'A');
+    body.textWarp!.adj = [angle * 60000];
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, body, 0, 0, BOX_W, BOX_H, SCALE);
+    // These authored counterclockwise arcs are on the TOP half; following
+    // screen-down instead of path winding would reverse the outward order.
+    expect(glyphs[1]!.y).toBeLessThan(glyphs[0]!.y - 40);
+  });
+
+  it('anchors the final circle line and expands preceding lines radially', () => {
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, warpBodyWithBreak('textCircle', 'A', 'A'), 0, 0, BOX_W, BOX_H, SCALE);
+    expect(glyphs[0]!.x - glyphs[1]!.x).toBeCloseTo(48, 0);
+    expect(glyphs[1]!.x).toBeGreaterThan(BOX_W - 10);
+  });
+
+  it('recomputes each line on its expanded ellipse, including arc-length alignment', () => {
+    const body = warpBodyWithBreak('textArchUp', 'ABCDEFG', 'ABCDEFG');
+    const multi = trackingCtx();
+    renderTextBody(multi.ctx, body, 0, 0, 200, 180, SCALE);
+    const outer = trackingCtx();
+    renderTextBody(outer.ctx, warpBody('textArchUp', 'ABCDEFG'), -48, -48, 296, 276, SCALE);
+    for (let i = 0; i < 7; i++) {
+      expect(multi.glyphs[i]!.x).toBeCloseTo(outer.glyphs[i]!.x, 6);
+      expect(multi.glyphs[i]!.y).toBeCloseTo(outer.glyphs[i]!.y, 6);
+    }
   });
 
   it('textCircle keeps the word compact rather than scattering around the ellipse', () => {
