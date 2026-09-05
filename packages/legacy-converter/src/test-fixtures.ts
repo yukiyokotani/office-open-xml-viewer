@@ -1,5 +1,5 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; defaultTabTwips?: number } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
   const textOffset = 0x400;
@@ -28,9 +28,19 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     view.setUint32(0x192, table.length, true);
     view.setUint32(0x196, dop.length, true);
   }
+  let sectionTable: Uint8Array = new Uint8Array();
+  if (options.sectionProperties) {
+    if (options.sectionProperties.length > 254) throw new Error('Synthetic Sepx overlaps text');
+    view.setUint16(0x300, options.sectionProperties.length, true);
+    word.set(options.sectionProperties, 0x302);
+    // PlcfSed: two CP boundaries and one 12-byte Sed (fcSepx at offset 2).
+    sectionTable = concat(little32(0), little32(units.length), little16(0), little32(0x300), new Uint8Array(6));
+    view.setUint32(0xca, table.length + dop.length, true);
+    view.setUint32(0xce, sectionTable.length, true);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop)],
+    ['0Table', concat(table, dop, sectionTable)],
   ]);
 }
 

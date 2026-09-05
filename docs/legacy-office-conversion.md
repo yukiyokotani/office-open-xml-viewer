@@ -119,6 +119,17 @@ Only the shared DOP prefix is interpreted; this does not claim preservation of
 other document settings or version-specific compatibility flags. List generation
 remains unsupported. Preserving tabs does not imply Word pagination equivalence.
 
+Section text flow preserves the basic top-to-bottom, right-to-left-column mode
+(`sprmSTextFlow` / `msotxflTtoBA`, MS-DOC 2.6.4 and MS-ODRAW 2.4.5) as ordinary
+`w:sectPr/w:textDirection w:val="tbRl"` (ECMA-376 17.6.20, 17.18.93 and Part 4
+14.11.7). Each section resolves its own properties; an explicit horizontal reset
+does not retain a previous vertical direction. Existing DOCX layout and Canvas
+painting handle the orientation, with no binary-only renderer path. Other
+rotation variants and version-dependent column-direction modes remain omitted
+under the advanced-section-property warning; unknown enumeration values reject.
+This does not yet preserve frame/cell text directions, drawings, list markers,
+all East Asian character formatting, or exact Word line wrapping.
+
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external
 relationship. The converter never evaluates formulas, fields, actions, links,

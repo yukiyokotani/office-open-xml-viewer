@@ -116,6 +116,7 @@ struct Properties {
     grid: u16,
     line_pitch: Option<u16>,
     char_space: i32,
+    text_flow: Option<&'static str>,
 }
 
 impl Properties {
@@ -139,6 +140,7 @@ impl Properties {
             grid: 0,
             line_pitch: None,
             char_space: 0,
+            text_flow: None,
         };
         while !bytes.is_empty() {
             *budget = budget
@@ -280,6 +282,22 @@ impl Properties {
                     }
                     p.char_space = v;
                 }
+                0x5033 => {
+                    // MS-DOC 2.6.4 sprmSTextFlow -> MS-ODRAW 2.4.5 MSOTXFL.
+                    // TtoBA: glyph sequence top-to-bottom, columns right-to-left.
+                    // ECMA-376 17.6.20 / 17.18.93 and Part 4 14.11.7:
+                    // Transitional tbRl is the matching section-flow token.
+                    p.text_flow = match u16_at(value, 0)? {
+                        0 => None,
+                        1 => Some("tbRl"),
+                        // Rotation variants and the Word-version-dependent
+                        // VertN column direction are not inferred from this
+                        // base-flow mapping. Covered by the existing advanced
+                        // section-property omission warning.
+                        2..=5 => None,
+                        _ => return Err(unsupported("invalid Word section text flow")),
+                    };
+                }
                 _ => {} // Remaining properties are covered by the lossy-conversion warning.
             }
         }
@@ -339,11 +357,11 @@ impl Properties {
             "<w:vAlign w:val=\"{}\"/>",
             ["top", "center", "both", "bottom"][usize::from(self.vertical)]
         ));
-        for (name, value) in [
-            ("titlePg", self.title),
-            ("bidi", self.bidi),
-            ("rtlGutter", self.rtl_gutter),
-        ] {
+        xml.push_str(&format!("<w:titlePg w:val=\"{}\"/>", u8::from(self.title)));
+        if let Some(flow) = self.text_flow {
+            xml.push_str(&format!("<w:textDirection w:val=\"{flow}\"/>"));
+        }
+        for (name, value) in [("bidi", self.bidi), ("rtlGutter", self.rtl_gutter)] {
             xml.push_str(&format!("<w:{name} w:val=\"{}\"/>", u8::from(value)));
         }
         if self.grid != 0 {
@@ -364,6 +382,56 @@ impl Properties {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_section_vertical_flow_and_explicit_horizontal_reset() {
+        let vertical = prl(0x5033, 1);
+        let xml = Properties::parse(&vertical, &mut 100)
+            .unwrap()
+            .xml()
+            .unwrap();
+        assert!(xml.contains("<w:textDirection w:val=\"tbRl\"/>"));
+        assert!(xml.find("<w:titlePg").unwrap() < xml.find("<w:textDirection").unwrap());
+        assert!(xml.find("<w:textDirection").unwrap() < xml.find("<w:bidi").unwrap());
+        let horizontal = [vertical, prl(0x5033, 0)].concat();
+        let xml = Properties::parse(&horizontal, &mut 100)
+            .unwrap()
+            .xml()
+            .unwrap();
+        assert!(!xml.contains("tbRl"));
+        assert!(Properties::parse(&prl(0x5033, 6), &mut 100).is_err());
+        assert!(Properties::parse(&prl(0x5033, -1), &mut 100).is_err());
+    }
+
+    #[test]
+    fn unsupported_rotation_variants_do_not_retain_a_previous_flow() {
+        for flow in 2..=5 {
+            let bytes = [prl(0x5033, 1), prl(0x5033, flow)].concat();
+            let xml = Properties::parse(&bytes, &mut 100).unwrap().xml().unwrap();
+            assert!(!xml.contains("textDirection"));
+        }
+    }
+
+    #[test]
+    fn each_section_resolves_its_flow_independently() {
+        for flows in [[0, 1], [1, 0]] {
+            let mut word = vec![0; 512];
+            word[0xce..0xd2].copy_from_slice(&36u32.to_le_bytes());
+            let mut table = vec![0; 36];
+            table[4..8].copy_from_slice(&2u32.to_le_bytes());
+            table[8..12].copy_from_slice(&4u32.to_le_bytes());
+            for (index, flow) in flows.into_iter().enumerate() {
+                let offset = 400 + index * 10;
+                table[14 + index * 12..18 + index * 12]
+                    .copy_from_slice(&(offset as u32).to_le_bytes());
+                word[offset..offset + 2].copy_from_slice(&4u16.to_le_bytes());
+                word[offset + 2..offset + 6].copy_from_slice(&prl(0x5033, flow));
+            }
+            let sections = read(&word, &table, 4).unwrap();
+            for (section, flow) in sections.iter().zip(flows) {
+                assert_eq!(section.xml.contains("tbRl"), flow == 1);
+            }
+        }
+    }
     #[test]
     fn rejects_invalid_section_ranges_and_out_of_stream_properties() {
         let mut word = vec![0; 512];
