@@ -2,7 +2,7 @@
 //! using their encoded operand size, never interpreted as text or executed.
 //! [MS-DOC] 2.2.5, 2.6.1, 2.9.327; ECMA-376 17.3.2 (run properties).
 
-use super::{u16_at, unsupported};
+use super::{u16_at, u32_at, unsupported};
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
 
@@ -10,6 +10,32 @@ use std::collections::BTreeMap;
 pub struct Properties {
     values: BTreeMap<&'static str, String>,
     pub fonts: [Option<usize>; 4],
+    pub picture: Picture,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Picture {
+    pub special: bool,
+    pub data: bool,
+    pub ole: bool,
+    pub object: bool,
+    pub location: Option<i32>,
+}
+
+impl Picture {
+    /// MS-DOC 2.6.1: only a special U+0001 without binary-data/OLE flags
+    /// denotes a PICFAndOfficeArtData. The caller checks the character code.
+    pub fn inline_location(self) -> Result<Option<usize>, String> {
+        if !self.special || self.data || self.ole || self.object {
+            return Ok(None);
+        }
+        let location = self
+            .location
+            .ok_or_else(|| unsupported("Word picture lacks a data location"))?;
+        usize::try_from(location)
+            .map(Some)
+            .map_err(|_| unsupported("negative Word picture data location"))
+    }
 }
 
 impl Default for Properties {
@@ -17,19 +43,26 @@ impl Default for Properties {
         Self {
             values: BTreeMap::from([("sz", "20".into())]),
             fonts: [None; 4],
+            picture: Picture::default(),
         }
     }
 }
 
 impl Properties {
-    pub fn reset_to(&mut self, paragraph: &Self) {
+    pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
         // Of the reset exceptions in sprmCPlain/CIstd, these are the supported
-        // properties. Revision metadata and object placeholders remain omitted.
+        // properties. Revision metadata remains omitted. CIstd preserves
+        // CFObj; CPlain does not include it in its exception list.
+        let mut picture = self.picture;
+        if !preserve_object {
+            picture.object = paragraph.picture.object;
+        }
         let preserved: Vec<_> = ["rtl", "cs", "highlight", "webHidden"]
             .iter()
             .map(|key| (*key, self.values.get(key).cloned()))
             .collect();
         *self = paragraph.clone();
+        self.picture = picture;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -40,6 +73,35 @@ impl Properties {
     }
 
     pub fn apply(&mut self, code: u16, operand: &[u8], style: &Self) -> Result<bool, String> {
+        match code {
+            0x6a03 => {
+                self.picture.location = Some(u32_at(operand, 0)? as i32);
+                return Ok(true);
+            }
+            0x0855 => {
+                self.picture.special = match operand[0] {
+                    0 => false,
+                    1 => true,
+                    0x80 => style.picture.special,
+                    0x81 => !style.picture.special,
+                    _ => return Err(unsupported("invalid Word special-character toggle")),
+                };
+                return Ok(true);
+            }
+            0x0806 | 0x080a | 0x0856 => {
+                if operand[0] > 1 {
+                    return Err(unsupported("invalid Word picture/object flag"));
+                }
+                let value = operand[0] != 0;
+                match code {
+                    0x0806 => self.picture.data = value,
+                    0x080a => self.picture.ole = value,
+                    _ => self.picture.object = value,
+                }
+                return Ok(true);
+            }
+            _ => {}
+        }
         let flag = match code {
             0x0835 => Some("b"),
             0x0836 => Some("i"),
@@ -211,6 +273,40 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picture_metadata_survives_style_reset_without_becoming_run_xml() {
+        let base = Properties::default();
+        let mut props = base.clone();
+        for (code, bytes) in [
+            (0x0855, vec![1]),
+            (0x6a03, 123i32.to_le_bytes().to_vec()),
+            (0x0856, vec![1]),
+        ] {
+            assert!(props.apply(code, &bytes, &base).unwrap());
+        }
+        props.reset_to(&base, true);
+        assert!(props.picture.object);
+        assert_eq!(props.picture.inline_location().unwrap(), None);
+        props.reset_to(&base, false);
+        assert_eq!(props.picture.inline_location().unwrap(), Some(123));
+        assert!(!props.xml(&[]).unwrap().contains("123"));
+        for code in [0x0806, 0x080a, 0x0856] {
+            let mut active = props.clone();
+            active.apply(code, &[1], &base).unwrap();
+            active.apply(0x6a03, &(-1i32).to_le_bytes(), &base).unwrap();
+            assert_eq!(
+                active.picture.inline_location().unwrap(),
+                None,
+                "active objects must not dereference even an invalid offset"
+            );
+            assert!(active.apply(code, &[2], &base).is_err());
+        }
+        props.apply(0x6a03, &(-1i32).to_le_bytes(), &base).unwrap();
+        assert!(props.picture.inline_location().is_err());
+        props.apply(0x0855, &[0], &base).unwrap();
+        assert_eq!(props.picture.inline_location().unwrap(), None);
+    }
     #[test]
     fn repeated_toggle_is_relative_to_style_not_previous_direct_value() {
         let mut style = Properties::default();
@@ -243,7 +339,7 @@ mod tests {
         let mut p = base.clone();
         p.apply(0x085a, &[1], &base).unwrap();
         p.apply(0x4a43, &[40, 0], &base).unwrap();
-        p.reset_to(&base);
+        p.reset_to(&base, false);
         let xml = p.xml(&[]).unwrap();
         assert!(xml.contains("w:sz w:val=\"20\""));
         assert!(xml.contains("w:rtl w:val=\"1\""));

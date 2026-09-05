@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master foreground objects, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
@@ -129,6 +129,23 @@ rotation variants and version-dependent column-direction modes remain omitted
 under the advanced-section-property warning; unknown enumeration values reject.
 This does not yet preserve frame/cell text directions, drawings, list markers,
 all East Asian character formatting, or exact Word line wrapping.
+
+DOC inline pictures follow `sprmCFSpec` and `sprmCPicLocation` through the same
+style/CHPX/CLX cascade as other character properties. Only passive picture-frame
+JPEG/PNG BLIPs are retained; binary-data and OLE markers are not dereferenced.
+`PICMID` supplies the scaled display extent (MS-DOC 2.9.190-193). Inline BLIPs
+are matched by property encounter order, not their ignored index or complex flag
+(MS-ODRAW 2.2.15). Cropping and transforms become ordinary DrawingML pictures;
+the existing DOCX parser and renderer remain unchanged. Unsupported inline
+pictures emit a loss warning. Restoring image extents can change line heights
+and pagination; this is not a claim of complete Word layout fidelity.
+
+The picture cache is document-owned and limited to 100,000 source locations,
+one million record/property/marker operations and 128 MiB of retained media.
+Raster dimension validation is shared with PPT. Repeated references reuse the
+same borrowed image bytes and package part, with unique drawing occurrence IDs.
+These are resource policies, not binary-format limits. No source filename or
+external picture URL is followed or copied into the output package.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external

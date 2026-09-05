@@ -1,5 +1,5 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
   const textOffset = 0x400;
@@ -10,15 +10,16 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   view.setUint32(0x4c, units.length, true);
   view.setUint32(0x1a2, 0, true);
   units.forEach((unit, index) => view.setUint16(textOffset + index * 2, unit, true));
+  const pieceProperties = concat(options.paragraphProperties ?? new Uint8Array(), options.characterProperties ?? new Uint8Array());
   const table = concat(
-    ...(options.paragraphProperties ? [new Uint8Array([1]), little16(options.paragraphProperties.length), options.paragraphProperties] : []),
+    ...(pieceProperties.length ? [new Uint8Array([1]), little16(pieceProperties.length), pieceProperties] : []),
     new Uint8Array([0x02]),
     little32(16),
     little32(0),
     little32(units.length),
     little16(0),
     little32(textOffset),
-    little16(options.paragraphProperties ? 1 : 0),
+    little16(pieceProperties.length ? 1 : 0),
   );
   view.setUint32(0x1a6, table.length, true);
   const dop = options.defaultTabTwips === undefined ? new Uint8Array() : new Uint8Array(500);
@@ -41,6 +42,7 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   return buildCfb([
     ['WordDocument', word],
     ['0Table', concat(table, dop, sectionTable)],
+    ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }
 

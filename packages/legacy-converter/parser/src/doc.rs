@@ -2,18 +2,20 @@
 //!
 //! The reader accepts Word 97-2003 FIB/CLX piece tables and preserves main-story
 //! text, paragraphs, tabs, line breaks, page breaks, and displayed field results.
-//! Section page geometry and a character-formatting subset are preserved. Drawings, revisions,
+//! Section geometry, character formatting and passive inline JPEG/PNG pictures
+//! are preserved. Floating drawings, revisions,
 //! headers/footers, notes, and OLE are
 //! deliberately not inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and
 //! 2.9.177 (PlcPcd). Unsupported/encrypted inputs fail closed.
 
 use crate::cfb::CompoundFile;
-use crate::ooxml::{write_package, xml_text, ROOT_RELS_DOCX};
+use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_DOCX};
 mod border;
 mod character;
 mod fkp;
 mod formatting;
 mod paragraph;
+mod pictures;
 mod sections;
 mod settings;
 mod sprm;
@@ -45,6 +47,7 @@ enum Token {
     LineBreak,
     PageBreak,
     ColumnBreak,
+    Picture,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
@@ -90,10 +93,12 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         Vec::new()
     };
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
+    let mut pictures = pictures::Store::new(&data);
     let document_xml = build_formatted_document(
         &story,
         &sections,
         Some(&mut formatting),
+        Some(&mut pictures),
         MAX_DOCUMENT_XML_BYTES,
     )?;
     let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -101,20 +106,32 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     if default_tab_twips.is_some() {
         content_types.push_str(r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#);
     }
+    let media = pictures.parts();
+    if !media.is_empty() {
+        content_types.push_str(r#"<Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/>"#);
+    }
     content_types.push_str("</Types>");
-    let mut parts = vec![
+    let mut parts: Vec<(String, String)> = vec![
         ("[Content_Types].xml".into(), content_types),
         ("_rels/.rels".into(), ROOT_RELS_DOCX.to_string()),
         ("word/document.xml".into(), document_xml),
     ];
+    let mut relationships = String::new();
     if let Some(interval) = default_tab_twips {
         parts.push(("word/settings.xml".into(), settings::xml(interval)));
-        parts.push(("word/_rels/document.xml.rels".into(), r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#.into()));
+        relationships.push_str(r#"<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#);
+    }
+    relationships.push_str(&pictures.relationships());
+    if !relationships.is_empty() {
+        parts.push(("word/_rels/document.xml.rels".into(), format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#)));
     }
     let mut warnings = vec![
         "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
         "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
     ];
+    if pictures.omitted {
+        warnings.push("legacy-doc:unsupported-inline-pictures-omitted".into());
+    }
     if default_tab_twips.is_none() {
         warnings.push("legacy-doc:missing-document-properties-default-tab-interval".into());
     }
@@ -140,7 +157,13 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         warnings.push("legacy-doc:incomplete-section-margin-defaults".into());
     }
     Ok(DocConversion {
-        bytes: write_package(&parts, max_output_bytes)?,
+        bytes: write_package_bytes(
+            parts
+                .iter()
+                .map(|(name, body)| (name.as_str(), body.as_bytes()))
+                .chain(media.iter().map(|(name, bytes)| (name.as_str(), *bytes))),
+            max_output_bytes,
+        )?,
         warnings,
     })
 }
@@ -380,6 +403,7 @@ fn tokenize_with_fields(
             '\u{0b}' => paragraph.tokens.push((Token::LineBreak, cp)),
             '\u{0c}' => paragraph.tokens.push((Token::PageBreak, cp)),
             '\u{0e}' => paragraph.tokens.push((Token::ColumnBreak, cp)),
+            '\u{1}' => paragraph.tokens.push((Token::Picture, cp)),
             '\u{20}'..='\u{10ffff}' => {
                 if buffered.is_empty() {
                     buffer_cp = cp;
@@ -412,6 +436,7 @@ fn build_document_xml(text: &str, sections: &[sections::Section]) -> Result<Stri
         },
         sections,
         None,
+        None,
         usize::MAX,
     )
 }
@@ -420,6 +445,7 @@ fn build_formatted_document(
     story: &Story<'_>,
     sections: &[sections::Section],
     mut formatting: Option<&mut formatting::Formatting<'_>>,
+    mut pictures: Option<&mut pictures::Store<'_>>,
     max_bytes: usize,
 ) -> Result<String, String> {
     // Every control can introduce a paragraph, token or field-stack entry.
@@ -495,6 +521,37 @@ fn build_formatted_document(
                     Token::Text(text) => {
                         write_text_runs(xml, text, *cp, story, style, &mut formatting, max_bytes)?;
                     }
+                    Token::Picture => {
+                        if let Some(store) = pictures.as_deref_mut() {
+                            let mut drawing = None;
+                            if let Some(f) = formatting.as_deref_mut() {
+                                if let Some((_, fc, piece)) = story.position(*cp) {
+                                    if let Some(offset) = f.inline_picture_location(
+                                        style,
+                                        fc,
+                                        piece.prm,
+                                        &story.prcs,
+                                    )? {
+                                        let content = store.drawing(offset)?;
+                                        if !content.is_empty() {
+                                            drawing = Some((
+                                                f.run_xml(style, fc, piece.prm, &story.prcs)?,
+                                                content,
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((properties, content)) = drawing {
+                                xml.push_str("<w:r>");
+                                xml.push_str(&properties);
+                                xml.push_str(&content);
+                                xml.push_str("</w:r>");
+                            } else {
+                                store.omitted = true;
+                            }
+                        }
+                    }
                     _ => {
                         xml.push_str("<w:r>");
                         if let Some(f) = formatting.as_deref_mut() {
@@ -507,7 +564,7 @@ fn build_formatted_document(
                             Token::LineBreak => "<w:br/>",
                             Token::PageBreak => "<w:br w:type=\"page\"/>",
                             Token::ColumnBreak => "<w:br w:type=\"column\"/>",
-                            Token::Text(_) => unreachable!(),
+                            Token::Text(_) | Token::Picture => unreachable!(),
                         });
                         xml.push_str("</w:r>");
                     }
@@ -725,7 +782,7 @@ mod tests {
         page[511] = properties.len() as u8;
         let story = super::read_story(&word, &clx, cp as usize).unwrap();
         let mut f = super::formatting::Formatting::read(&word, &table, &[]).unwrap();
-        super::build_formatted_document(&story, &[], Some(&mut f), usize::MAX).unwrap()
+        super::build_formatted_document(&story, &[], Some(&mut f), None, usize::MAX).unwrap()
     }
 
     #[test]
@@ -808,7 +865,7 @@ mod tests {
                 prcs: vec![],
             };
             assert_eq!(
-                super::build_formatted_document(&story, &[], None, 1024).unwrap_err(),
+                super::build_formatted_document(&story, &[], None, None, 1024).unwrap_err(),
                 "OUTPUT_TOO_LARGE"
             );
         }
@@ -818,7 +875,7 @@ mod tests {
             prcs: vec![],
         };
         assert!(
-            super::build_formatted_document(&story, &[], None, usize::MAX)
+            super::build_formatted_document(&story, &[], None, None, usize::MAX)
                 .unwrap_err()
                 .contains("structure budget")
         );

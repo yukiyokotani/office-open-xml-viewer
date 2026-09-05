@@ -220,6 +220,29 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<String, String> {
+        let props = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        props.xml(&self.fonts)
+    }
+
+    pub fn inline_picture_location(
+        &mut self,
+        style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Option<usize>, String> {
+        self.run_properties(style, fc, prm, prcs)?
+            .picture
+            .inline_location()
+    }
+
+    fn run_properties(
+        &mut self,
+        paragraph_style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Properties, String> {
         let paragraph = self.paragraph_base(paragraph_style)?;
         let mut props = paragraph.clone();
         let mut style = paragraph.clone();
@@ -239,7 +262,7 @@ impl<'a> Formatting<'a> {
         } else if prm != 0 && paragraph::prm0(prm).is_none() && table::prm0(prm).is_none() {
             self.unsupported_piece_properties = true;
         }
-        props.xml(&self.fonts)
+        Ok(props)
     }
 
     fn apply_direct(
@@ -260,11 +283,11 @@ impl<'a> Formatting<'a> {
                     let mut character_style = paragraph.clone();
                     self.apply_style(&mut character_style, id, 2)?;
                     // Reset exceptions survive both the reset and style application.
-                    props.reset_to(&character_style);
+                    props.reset_to(&character_style, true);
                     *style = character_style;
                 }
                 0x2a33 => {
-                    props.reset_to(paragraph);
+                    props.reset_to(paragraph, false);
                     *style = paragraph.clone();
                 }
                 _ => {

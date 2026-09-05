@@ -8,6 +8,7 @@ use wasm_bindgen::prelude::*;
 
 mod cfb;
 mod doc;
+mod officeart;
 mod ooxml;
 mod ppt;
 mod xls;

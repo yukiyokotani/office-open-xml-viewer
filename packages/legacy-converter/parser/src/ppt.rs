@@ -43,13 +43,7 @@ pub struct PptConversion {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Record<'a> {
-    version: u8,
-    instance: u16,
-    kind: u16,
-    payload: &'a [u8],
-}
+use crate::officeart::Record;
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptConversion, String> {
     if cfb.has_entry("EncryptedSummary") {
@@ -270,39 +264,7 @@ fn parse_record_with_end<'a>(
     offset: usize,
     budget: &mut usize,
 ) -> Result<(Record<'a>, usize), String> {
-    if *budget == 0 {
-        return Err(unsupported("too many PowerPoint records"));
-    }
-    *budget -= 1;
-    let remaining = bytes
-        .get(offset..)
-        .filter(|tail| tail.len() >= 8)
-        .ok_or_else(|| unsupported("truncated PowerPoint record header"))?;
-    let options = u16_at(remaining, 0)?;
-    let kind = u16_at(remaining, 2)?;
-    let size = usize::try_from(u32_at(remaining, 4)?)
-        .map_err(|_| unsupported("PowerPoint record is too large"))?;
-    let end = offset
-        .checked_add(8)
-        .and_then(|start| start.checked_add(size))
-        .ok_or_else(|| unsupported("PowerPoint record range overflow"))?;
-    let payload = bytes
-        .get(offset + 8..end)
-        .ok_or_else(|| {
-            unsupported(format!(
-                "truncated PowerPoint record at offset {offset}: declared {size} bytes with {} available",
-                bytes.len().saturating_sub(offset + 8),
-            ))
-        })?;
-    Ok((
-        Record {
-            version: (options & 0x000f) as u8,
-            instance: options >> 4,
-            kind,
-            payload,
-        },
-        end,
-    ))
+    crate::officeart::record_with_end(bytes, offset, budget, "PowerPoint")
 }
 
 fn contains_record(
