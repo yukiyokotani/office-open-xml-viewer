@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs and custom tab stops, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | document-wide default tab interval, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master foreground objects, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
@@ -109,8 +109,15 @@ stops preserve signed positions, alignment and leaders as ordinary `w:tabs`
 lines; bar-tab leaders and unused descriptor bits are ignored as specified.
 Variable-length edits consume the formatting-work budget, and the resolved set
 has a 256-stop resource cap independent of the per-record 64-entry format limit.
-Document-wide default tab intervals and list generation are still unsupported.
-Preserving custom stops does not imply full Word pagination equivalence.
+The document-wide default interval is read from `DopBase.dxaTab` (MS-DOC
+2.7.2) and written into a related `word/settings.xml` part as `w:defaultTabStop`
+(ECMA-376 17.15.1.25). The ordinary DOCX parser and layout retain precedence of
+custom paragraph stops over automatic stops. Missing document properties use
+the OOXML default with a warning as an explicit recovery policy; a present but
+truncated DOP or zero interval is rejected, not silently assigned new spacing.
+Only the shared DOP prefix is interpreted; this does not claim preservation of
+other document settings or version-specific compatibility flags. List generation
+remains unsupported. Preserving tabs does not imply Word pagination equivalence.
 
 Every output package is created from scratch and contains no source macro,
 VBA/Excel 4.0 program, ActiveX control, OLE object, hyperlink action, or external

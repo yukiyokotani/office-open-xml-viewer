@@ -49,6 +49,21 @@ describe('purpose-built legacy Office WASM converter', () => {
     expect(markdown).toContain('日本語');
   });
 
+  it('validates DOC settings packages and rejects zero automatic-tab intervals', async () => {
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    for (const defaultTabTwips of [1, 360, 720, 2160, 65535]) {
+      const result = await converter.convert(request('doc', 'docx', buildDocFixture({ defaultTabTwips })));
+      await validateConvertedOoxml(asBytes(result.bytes), 'docx');
+      expect(docx_to_markdown(asBytes(result.bytes))).toContain('Hello 日本語');
+      expect(result.warnings ?? []).not.toContain('legacy-doc:missing-document-properties-default-tab-interval');
+    }
+    await expect(converter.convert(request('doc', 'docx', buildDocFixture({ defaultTabTwips: 0 }))))
+      .rejects.toMatchObject({ reason: 'unsupported-input' });
+    await expect(converter.convert({
+      ...request('doc', 'docx', buildDocFixture({ defaultTabTwips: 360 })), maxOutputBytes: 128,
+    })).rejects.toMatchObject({ reason: 'output-too-large' });
+  });
+
   it('converts PowerPoint Unicode text atoms into parser-readable PPTX', async () => {
     const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
     const result = await converter.convert(request('ppt', 'pptx', buildPptFixture()));

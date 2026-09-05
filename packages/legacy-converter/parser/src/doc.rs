@@ -15,6 +15,7 @@ mod fkp;
 mod formatting;
 mod paragraph;
 mod sections;
+mod settings;
 mod sprm;
 mod table;
 mod table_output;
@@ -68,6 +69,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         "0Table"
     };
     let table = cfb.stream(table_name).map_err(unsupported)?;
+    let default_tab_twips = settings::default_tab_twips(&word, &table)?;
     let ccp_text = usize::try_from(u32_at(&word, CCP_TEXT_OFFSET)?)
         .map_err(|_| unsupported("Word main story is too large"))?;
     let fc_clx = usize::try_from(u32_at(&word, FC_CLX_OFFSET)?)
@@ -94,17 +96,28 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         Some(&mut formatting),
         MAX_DOCUMENT_XML_BYTES,
     )?;
-    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
-    let parts = [
-        ("[Content_Types].xml".into(), content_types.to_string()),
+    let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#.to_string();
+    if default_tab_twips.is_some() {
+        content_types.push_str(r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#);
+    }
+    content_types.push_str("</Types>");
+    let mut parts = vec![
+        ("[Content_Types].xml".into(), content_types),
         ("_rels/.rels".into(), ROOT_RELS_DOCX.to_string()),
         ("word/document.xml".into(), document_xml),
     ];
+    if let Some(interval) = default_tab_twips {
+        parts.push(("word/settings.xml".into(), settings::xml(interval)));
+        parts.push(("word/_rels/document.xml.rels".into(), r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#.into()));
+    }
     let mut warnings = vec![
         "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
         "legacy-doc:headers-footers-and-advanced-section-properties-omitted".into(),
     ];
+    if default_tab_twips.is_none() {
+        warnings.push("legacy-doc:missing-document-properties-default-tab-interval".into());
+    }
     if formatting.unsupported_character_properties {
         warnings.push("legacy-doc:unsupported-character-properties-omitted".into());
     }

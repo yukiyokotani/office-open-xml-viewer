@@ -1,5 +1,5 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; defaultTabTwips?: number } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const units = Array.from({ length: text.length }, (_, index) => text.charCodeAt(index));
   const textOffset = 0x400;
@@ -21,9 +21,16 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     little16(options.paragraphProperties ? 1 : 0),
   );
   view.setUint32(0x1a6, table.length, true);
+  const dop = options.defaultTabTwips === undefined ? new Uint8Array() : new Uint8Array(500);
+  if (dop.length) {
+    // MS-DOC 2.7.2: DopBase.dxaTab at byte 10 of the Dop97 prefix.
+    new DataView(dop.buffer).setUint16(10, options.defaultTabTwips as number, true);
+    view.setUint32(0x192, table.length, true);
+    view.setUint32(0x196, dop.length, true);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', table],
+    ['0Table', concat(table, dop)],
   ]);
 }
 
