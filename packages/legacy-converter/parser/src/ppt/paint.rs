@@ -27,7 +27,7 @@ impl Paint {
     pub fn inherit(&self, parent: &Self) -> Self {
         Self {
             // Unsupported inherited adjustments/paths must not turn into an
-            // invented unadjusted preset. Geometry reconstruction remains absent.
+            // invented unadjusted preset. Explicit paths are decoded separately.
             custom_geometry: self.custom_geometry || parent.custom_geometry,
             fill_ok: self.fill_ok.or(parent.fill_ok),
             line_ok: self.line_ok.or(parent.line_ok),
@@ -149,6 +149,16 @@ impl Paint {
         if self.geometry(kind).is_none() {
             return no_paint.into();
         }
+        self.xml_with_custom_geometry(scheme, kind != 20, true)
+    }
+    /// The caller has reconstructed explicit custom paths. Geometry and path
+    /// paint vetoes stay separate from style inheritance and property defaults.
+    pub fn xml_with_custom_geometry(
+        &self,
+        scheme: Option<&scheme::Scheme>,
+        allow_fill: bool,
+        allow_line: bool,
+    ) -> String {
         // Direct and explicitly linked master paint are reconstructed. Drawing
         // defaults and unlinked masters remain absent, with a conversion warning.
         // Within an explicit layer, use the normative MS-ODRAW property defaults.
@@ -162,7 +172,7 @@ impl Paint {
             || self.line_alpha.is_some()
             || self.width.is_some()
             || self.dash.is_some();
-        let fill = if kind != 20
+        let fill = if allow_fill
             && fill_set
             && self.filled.unwrap_or(true)
             && self.fill_ok.unwrap_or(true)
@@ -177,7 +187,8 @@ impl Paint {
         } else {
             None
         };
-        let line = if line_set
+        let line = if allow_line
+            && line_set
             && self.lined.unwrap_or(true)
             && self.line_ok.unwrap_or(true)
             && self.line_type.unwrap_or(0) == 0

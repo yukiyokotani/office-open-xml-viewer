@@ -67,7 +67,7 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 
 #[derive(Default)]
 pub(super) struct Resolver<'a> {
-    pub shape_masters: shape_master::Resolver,
+    pub shape_masters: shape_master::Resolver<'a>,
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,

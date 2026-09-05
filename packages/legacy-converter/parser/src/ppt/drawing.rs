@@ -2,6 +2,7 @@
 //! [MS-PPT] 2.5.13, 2.7.1, 2.9.76 and [MS-ODRAW] 2.2.14/16/38/39/40.
 //! Output uses ECMA-376 DrawingML CT_(Group)Transform2D, never binary-aware paint.
 use super::*;
+use crate::officeart::geometry;
 
 #[derive(Clone, Copy)]
 pub(super) struct TextContext<'a> {
@@ -10,7 +11,7 @@ pub(super) struct TextContext<'a> {
     pub scheme: Option<&'a scheme::Scheme>,
     pub types: &'a [u16],
     pub master: Option<&'a text_style::Master>,
-    pub shapes: Option<&'a shape_master::Resolver>,
+    pub shapes: Option<&'a shape_master::Resolver<'a>>,
     pub outline_slide_numbers: &'a [Vec<u32>],
     pub slide_number: u32,
 }
@@ -129,7 +130,7 @@ struct Shape<'a> {
     child_space: Option<Rect>,
     textbox: Option<Record<'a>>,
     placeholder: bool,
-    props: Properties,
+    props: Properties<'a>,
 }
 
 impl<'a> Shape<'a> {
@@ -223,7 +224,8 @@ impl<'a> Shape<'a> {
     }
 }
 
-struct Properties {
+struct Properties<'a> {
+    geometry: geometry::Geometry<'a>,
     hidden: bool,
     script: bool,
     master: Option<u32>,
@@ -236,9 +238,10 @@ struct Properties {
     anchor: &'static str,
     center: bool,
 }
-impl Default for Properties {
+impl Default for Properties<'_> {
     fn default() -> Self {
         Self {
+            geometry: geometry::Geometry::default(),
             hidden: false,
             script: false,
             master: None,
@@ -253,8 +256,8 @@ impl Default for Properties {
         }
     }
 }
-impl Properties {
-    fn read(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
+impl<'a> Properties<'a> {
+    fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
         // [MS-ODRAW] 2.2.7–9: six-byte property entries precede complex data.
         // Even ignored complex properties must fit; never use their payload as XML.
         if record.version != 3 {
@@ -276,11 +279,17 @@ impl Properties {
                 if matches!(opid & 0x3fff, 0x145..=0x150) {
                     self.paint.custom_geometry = true;
                 }
+                let start = end;
                 end = end
                     .checked_add(value as usize)
                     .filter(|n| *n <= record.payload.len())
                     .ok_or_else(|| unsupported("truncated PowerPoint complex shape property"))?;
+                self.geometry
+                    .complex(opid & 0x3fff, &record.payload[start..end]);
                 continue;
+            }
+            if matches!(opid & 0x3fff, 0x145 | 0x146) {
+                self.geometry.scalar(opid & 0x3fff, value)?;
             }
             if opid & 0x4000 != 0 {
                 if opid == 0x4104 {
@@ -325,7 +334,10 @@ impl Properties {
                     self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
                     self.center = value >= 3;
                 }
-                _ => self.paint.property(opid, value)?,
+                _ => {
+                    self.geometry.scalar(opid, value)?;
+                    self.paint.property(opid, value)?;
+                }
             }
         }
         if end != record.payload.len() {
@@ -377,19 +389,19 @@ pub(super) fn background(slide: &[u8], budget: &mut usize) -> Result<Option<pain
     Ok(result)
 }
 
-pub(super) fn master_shapes(
-    slide: &[u8],
+pub(super) fn master_shapes<'a>(
+    slide: &'a [u8],
     base: Option<std::rc::Rc<text_style::Master>>,
-    output: &mut shape_master::Resolver,
+    output: &mut shape_master::Resolver<'a>,
     budget: &mut usize,
     text_budget: &mut usize,
 ) -> Result<(), String> {
-    fn visit(
-        record: Record<'_>,
+    fn visit<'a>(
+        record: Record<'a>,
         nested: bool,
         depth: usize,
         base: &Option<std::rc::Rc<text_style::Master>>,
-        output: &mut shape_master::Resolver,
+        output: &mut shape_master::Resolver<'a>,
         budget: &mut usize,
         text_budget: &mut usize,
     ) -> Result<(), String> {
@@ -468,6 +480,7 @@ pub(super) fn master_shapes(
                 direct,
                 base: base.clone(),
                 paint: shape.props.paint,
+                geometry: shape.props.geometry,
             })?;
         }
         Ok(())
@@ -690,7 +703,24 @@ impl Writer<'_, '_> {
                     return Err(unsupported("ambiguous PowerPoint slide-number text body"));
                 }
                 let preset = paint.geometry(shape.kind);
-                if text.is_empty() && preset.is_none() {
+                // Picture clipping is a distinct path; this restores foreground
+                // vector shapes, including master objects, without painting an
+                // extra vector shape over a picture frame.
+                let geometry = match (shape.master(), self.context.and_then(|c| c.shapes)) {
+                    (Some(id), Some(shapes)) => shape.props.geometry.inherit(shapes.geometry(id)?),
+                    _ => shape.props.geometry,
+                };
+                let custom = if shape.kind == 75 {
+                    None
+                } else {
+                    // The existing PPTX model has one paint per shape. Keep
+                    // mixed per-path paint unsupported rather than discard its
+                    // flags or introduce legacy-specific rendering behavior.
+                    geometry
+                        .decode(self.records)?
+                        .filter(|g| g.uniform_paint().is_some())
+                };
+                if text.is_empty() && preset.is_none() && custom.is_none() {
                     return Ok(());
                 }
                 let anchor = shape
@@ -699,8 +729,24 @@ impl Writer<'_, '_> {
                 let id = self.next_id()?;
                 // Unsupported geometry may still carry text. Preserve its text
                 // frame, but never paint an invented rectangle in its place.
-                let text_box = u8::from(shape.kind == 202 || preset.is_none());
-                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}</p:spPr>", shape.transform(anchor, None), preset.unwrap_or("rect"), paint.xml_with_scheme(shape.kind, self.context.and_then(|c| c.scheme))))?;
+                let text_box =
+                    u8::from(shape.kind == 202 || (preset.is_none() && custom.is_none()));
+                self.push(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Legacy shape {id}\"/><p:cNvSpPr txBox=\"{text_box}\"/><p:nvPr/></p:nvSpPr><p:spPr>{}", shape.transform(anchor, None)))?;
+                let scheme = self.context.and_then(|c| c.scheme);
+                if let Some(custom) = custom {
+                    let (fill, stroke) = custom
+                        .uniform_paint()
+                        .expect("uniform paths filtered above");
+                    custom.write_xml(&mut self.output, self.remaining)?;
+                    self.push(&paint.xml_with_custom_geometry(scheme, fill, stroke))?;
+                } else {
+                    self.push(&format!(
+                        "<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}",
+                        preset.unwrap_or("rect"),
+                        paint.xml_with_scheme(shape.kind, scheme)
+                    ))?;
+                }
+                self.push("</p:spPr>")?;
                 if text.is_empty() {
                     self.push("</p:sp>")?;
                     return Ok(());

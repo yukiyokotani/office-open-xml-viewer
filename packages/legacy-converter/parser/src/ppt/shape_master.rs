@@ -4,26 +4,28 @@ use std::{collections::BTreeMap, rc::Rc};
 
 // Resource policy for retained master-shape metadata, independent of slide count.
 const MAX_MASTER_SHAPES: usize = 100_000;
-pub(super) struct Node {
+pub(super) struct Node<'a> {
     pub id: u32,
     pub parent: Option<u32>,
     pub text_type: Option<u16>,
     pub direct: Vec<Option<text_style::Level>>,
     pub base: Option<Rc<text_style::Master>>,
     pub paint: paint::Paint,
+    pub geometry: crate::officeart::geometry::Geometry<'a>,
 }
 #[derive(Default)]
-pub(super) struct Resolver {
-    nodes: BTreeMap<u32, Node>,
-    resolved: BTreeMap<u32, Resolved>,
+pub(super) struct Resolver<'a> {
+    nodes: BTreeMap<u32, Node<'a>>,
+    resolved: BTreeMap<u32, Resolved<'a>>,
 }
-struct Resolved {
+struct Resolved<'a> {
     levels: Rc<Vec<text_style::Level>>,
     paint: paint::Paint,
+    geometry: crate::officeart::geometry::Geometry<'a>,
     depth: usize,
 }
-impl Resolver {
-    pub fn insert(&mut self, node: Node) -> Result<(), String> {
+impl<'a> Resolver<'a> {
+    pub fn insert(&mut self, node: Node<'a>) -> Result<(), String> {
         if self.nodes.len() + self.resolved.len() >= MAX_MASTER_SHAPES {
             return Err(unsupported("PowerPoint master shape limit exceeded"));
         }
@@ -53,6 +55,12 @@ impl Resolver {
             .get(&id)
             .map(|v| &v.paint)
             .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
+    }
+    pub fn geometry(&self, id: u32) -> Result<&crate::officeart::geometry::Geometry<'a>, String> {
+        self.resolved
+            .get(&id)
+            .map(|v| &v.geometry)
+            .ok_or_else(|| unsupported("unresolved PowerPoint master geometry"))
     }
     fn resolve(
         &mut self,
@@ -90,6 +98,10 @@ impl Resolver {
             Some(parent) => node.paint.inherit(&self.resolved[&parent].paint),
             None => node.paint,
         };
+        let geometry = match parent {
+            Some(parent) => node.geometry.inherit(&self.resolved[&parent].geometry),
+            None => node.geometry,
+        };
         let base = inherited.as_ref().map(|v| v.as_slice()).or_else(|| {
             node.base
                 .as_ref()
@@ -113,6 +125,7 @@ impl Resolver {
             Resolved {
                 levels: levels.clone(),
                 paint,
+                geometry,
                 depth,
             },
         );
@@ -123,7 +136,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn node(id: u32, parent: Option<u32>) -> Node {
+    fn node<'a>(id: u32, parent: Option<u32>) -> Node<'a> {
         Node {
             id,
             parent,
@@ -131,6 +144,7 @@ mod tests {
             direct: Vec::new(),
             base: None,
             paint: paint::Paint::default(),
+            geometry: crate::officeart::geometry::Geometry::default(),
         }
     }
     #[test]

@@ -4,7 +4,7 @@ use super::*;
 use std::collections::{BTreeMap, HashSet};
 
 pub(super) struct Presentation<'a> {
-    pub shape_masters: shape_master::Resolver,
+    pub shape_masters: shape_master::Resolver<'a>,
     pub slides: Vec<(Record<'a>, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
     pub outline_types: Vec<Vec<u16>>,
