@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
 import json
+import re
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
@@ -28,6 +29,8 @@ def matrix(phase="baseline"):
         return interaction_matrix()
     if phase == "style-association":
         return style_association_matrix()
+    if phase == "bidi-boundaries":
+        return bidi_boundary_matrix()
     if phase != "baseline":
         raise ValueError("unknown experiment phase")
     cases = []
@@ -157,6 +160,63 @@ def add_indent(parent, left=None, right=None, first=None, empty=False):
     parent.append(element("ind", **attrs))
 
 
+def bidi_boundary_matrix():
+    """Separate punctuation/run boundaries from list indentation.
+
+    Strong Latin text with w:rtl=true is explicitly unspecified by ECMA-376
+    17.3.2.30, so these controls use only absent or explicitly false run rtl.
+    """
+    cases = []
+
+    def add(parent, **changes):
+        case = {"id": f"S{len(cases) + 1:03}", "parent": parent["id"],
+                "changed": list(changes), "parameters": {**parent["parameters"], **changes}}
+        cases.append(case)
+        return case
+
+    for original in (case for case in matrix() if case["parent"] is None):
+        base = {"id": f"S{len(cases) + 1:03}", "parent": None, "changed": [],
+                "parameters": {**original["parameters"], "terminal_punctuation": ".",
+                               "text_runs": "whole", "run_rtl": None, "numbered": True}}
+        cases.append(base)
+        punctuation = {value: add(base, terminal_punctuation=value) for value in ["", "!", ":", "?"]}
+        for group in [base, punctuation["!"]]:
+            for mode in ["punctuation", "words"]:
+                add(group, text_runs=mode)
+        plain = add(base, numbered=False)
+        add(plain, terminal_punctuation="")
+        add(plain, text_runs="punctuation")
+        explicit_off = add(base, run_rtl=False)
+        add(explicit_off, text_runs="punctuation")
+        add(base)
+        add(plain)
+    return cases
+
+
+def add_bidi_probe_text(paragraph, label, params):
+    terminal = params["terminal_punctuation"]
+    mode = params["text_runs"]
+    if terminal not in ["", ".", "!", ":", "?"] or mode not in ["whole", "punctuation", "words"]:
+        raise ValueError("unknown bidi boundary condition")
+    if params["run_rtl"] not in [None, False]:
+        raise ValueError("strong Latin rtl=true is not a defined-behavior control")
+    texts = [label + " marker line alpha bravo charlie delta",
+             "Continuation line alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa"]
+    for index, text in enumerate(texts):
+        if index:
+            paragraph.add_run().add_break()
+        if mode == "punctuation" and terminal:
+            pieces = [text, terminal]
+        elif mode == "words":
+            pieces = re.findall(r"\S+\s*|\s+", text + terminal)
+        else:
+            pieces = [text + terminal]
+        for piece in pieces:
+            run = paragraph.add_run(piece)
+            if params["run_rtl"] is False:
+                run._r.get_or_add_rPr().append(element("rtl", val=0))
+
+
 def add_tabs(parent, value):
     if value is not None:
         tabs = element("tabs")
@@ -186,6 +246,11 @@ def build(cases):
     title = doc.styles["Title"]
     title.font.name, title.font.size = "Arial", Pt(18)
     title.font.color.rgb = normal.font.color.rgb = RGBColor(0, 0, 0)
+    boundary_experiment = any("terminal_punctuation" in case["parameters"] for case in cases)
+    if boundary_experiment:
+        # Keep P/Q/R bytes unchanged; the new probe title has no decorative rule.
+        for border in title.element.xpath("./w:pPr/w:pBdr"):
+            border.getparent().remove(border)
     for style in [normal, title]:
         fonts = style.element.get_or_add_rPr().get_or_add_rFonts()
         for field in ["ascii", "hAnsi", "eastAsia", "cs"]:
@@ -234,9 +299,10 @@ def build(cases):
         instance = element("num", numId=identity)
         instance.append(element("abstractNumId", val=identity))
         instances.append(instance)
-        heading = doc.add_paragraph("List indentation probe " + case["id"], "Title")
+        heading = doc.add_paragraph(("Bidirectional text probe " if boundary_experiment else "List indentation probe ") + case["id"], "Title")
         heading.paragraph_format.page_break_before = index > 0
-        doc.add_paragraph("Compare the marker, first line, continuation line and wrapped text.")
+        doc.add_paragraph("Compare word order and punctuation before and after saving as DOC."
+                          if boundary_experiment else "Compare the marker, first line, continuation line and wrapped text.")
         for label in ["First", "Second"]:
             paragraph_style = style
             if label == "Second" and style_mode == "mixed-normal":
@@ -245,17 +311,20 @@ def build(cases):
                 paragraph_style = alternate
             paragraph = doc.add_paragraph(style=paragraph_style)
             props = paragraph._p.get_or_add_pPr()
-            if not p["numbering_in_style"]:
+            if not p["numbering_in_style"] and p.get("numbered", True):
                 add_reference(props, identity)
             add_tabs(props, p["direct_tab"])
             props.append(element("bidi", val=int(p["rtl"])))
             add_indent(props, p["direct_left"], p["direct_right"], p["direct_first"], p["empty_direct_ind"])
-            run = paragraph.add_run(label + " marker line alpha bravo charlie delta.")
-            run.add_break()
-            run.add_text("Continuation line alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa.")
+            if "terminal_punctuation" in p:
+                add_bidi_probe_text(paragraph, label, p)
+            else:
+                run = paragraph.add_run(label + " marker line alpha bravo charlie delta.")
+                run.add_break()
+                run.add_text("Continuation line alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa.")
     numbering.extend(definitions + instances)
     doc.core_properties.author = doc.core_properties.last_modified_by = ""
-    doc.core_properties.title = "List indentation probes"
+    doc.core_properties.title = "Bidirectional text probes" if boundary_experiment else "List indentation probes"
     doc.core_properties.created = doc.core_properties.modified = datetime(2000, 1, 1, tzinfo=timezone.utc)
     raw = BytesIO()
     doc.save(raw)
@@ -272,7 +341,7 @@ def build(cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new directory; existing paths are rejected")
-    parser.add_argument("--phase", choices=["baseline", "interactions", "style-association"], default="baseline")
+    parser.add_argument("--phase", choices=["baseline", "interactions", "style-association", "bidi-boundaries"], default="baseline")
     args = parser.parse_args()
     cases = matrix(args.phase)
     payload = build(cases)

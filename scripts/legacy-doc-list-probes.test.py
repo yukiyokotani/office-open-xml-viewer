@@ -14,6 +14,64 @@ W = "{" + NS["w"] + "}"
 
 
 class ProbeTests(unittest.TestCase):
+    def test_bidi_boundaries_change_one_parameter_with_plain_and_repeat_controls(self):
+        cases = probes.matrix("bidi-boundaries")
+        self.assertEqual(len(cases), 32)
+        by_id = {case["id"]: case for case in cases}
+        self.assertEqual(len(by_id), 32)
+        for case in cases:
+            if case["parent"]:
+                previous = by_id[case["parent"]]["parameters"]
+                actual = [key for key, value in case["parameters"].items() if previous[key] != value]
+                self.assertEqual(actual, case["changed"])
+                self.assertLessEqual(len(actual), 1)
+        for rtl in [False, True]:
+            subset = [c for c in cases if c["parameters"]["rtl"] == rtl]
+            self.assertEqual(len(subset), 16)
+            self.assertEqual({c["parameters"]["terminal_punctuation"] for c in subset}, {"", ".", "!", ":", "?"})
+            self.assertEqual({c["parameters"]["text_runs"] for c in subset}, {"whole", "punctuation", "words"})
+            self.assertEqual({c["parameters"]["run_rtl"] for c in subset}, {None, False})
+            self.assertEqual({c["parameters"]["numbered"] for c in subset}, {False, True})
+            self.assertEqual(sum(c["parent"] is not None and not c["changed"] for c in subset), 2)
+
+    def test_bidi_source_preserves_run_boundaries_without_changing_logical_text(self):
+        cases = probes.matrix("bidi-boundaries")
+        with ZipFile(BytesIO(probes.build(cases))) as z:
+            doc = E.fromstring(z.read("word/document.xml"))
+            paragraphs = doc.findall("w:body/w:p", NS)
+            self.assertEqual(len(paragraphs), 128)
+            for index, case in enumerate(cases):
+                params = case["parameters"]
+                for label, paragraph in zip(["First", "Second"], paragraphs[index*4+2:index*4+4]):
+                    self.assertEqual(paragraph.find("w:pPr/w:bidi", NS).get(W+"val"), str(int(params["rtl"])))
+                    self.assertEqual(paragraph.find("w:pPr/w:numPr", NS) is not None, params["numbered"])
+                    text = "".join(paragraph.xpath(".//w:t/text()", namespaces=NS))
+                    self.assertEqual(text, label + " marker line alpha bravo charlie delta" + params["terminal_punctuation"]
+                        + "Continuation line alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa"
+                        + params["terminal_punctuation"])
+                    self.assertEqual(len(paragraph.findall(".//w:br", NS)), 1)
+                    runs = paragraph.findall("w:r", NS)
+                    text_runs = [run for run in runs if run.find("w:t", NS) is not None]
+                    for run in text_runs:
+                        mark = run.find("w:rPr/w:rtl", NS)
+                        if params["run_rtl"] is None:
+                            self.assertIsNone(mark)
+                        else:
+                            self.assertEqual(mark.get(W+"val"), "0")
+                    pieces = ["".join(run.xpath("w:t/text()", namespaces=NS)) for run in text_runs]
+                    if params["text_runs"] == "punctuation" and params["terminal_punctuation"]:
+                        self.assertEqual(pieces.count(params["terminal_punctuation"]), 2)
+                    elif params["text_runs"] == "words":
+                        self.assertGreater(len(pieces), 20)
+                    else:
+                        self.assertEqual(len(text_runs), 2)
+
+    def test_bidi_controls_reject_undefined_strong_latin_rtl_true(self):
+        cases = probes.matrix("bidi-boundaries")
+        cases[0]["parameters"]["run_rtl"] = True
+        with self.assertRaisesRegex(ValueError, "not a defined-behavior control"):
+            probes.build(cases)
+
     def test_style_association_keeps_one_list_across_distinct_paragraph_styles(self):
         cases = probes.matrix("style-association")
         self.assertEqual(len(cases), 48)
@@ -47,7 +105,7 @@ class ProbeTests(unittest.TestCase):
                                      E.tostring(definitions[1].find("w:pPr", NS)))
 
     def test_all_phases_remain_deterministic_and_passive(self):
-        for phase in ["baseline", "interactions", "style-association"]:
+        for phase in ["baseline", "interactions", "style-association", "bidi-boundaries"]:
             with self.subTest(phase=phase):
                 cases = probes.matrix(phase)
                 payload = probes.build(cases)

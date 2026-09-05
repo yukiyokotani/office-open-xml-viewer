@@ -62,6 +62,34 @@ This creates 48 `R` cases without changing the authored `P` or `Q` files. It
 attempts to obtain unlinked binary controls; the source style pattern alone
 does not establish whether Word will create or retain a list-style association.
 
+The fourth phase isolates bidirectional word ordering from indentation:
+
+```sh
+python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-bidi-boundaries --phase bidi-boundaries
+```
+
+It creates 32 `S` conditions, half LTR and half RTL. Controls vary terminal
+punctuation (absent, period, exclamation mark, colon, question mark), source run
+boundaries (whole line, separate punctuation, separate words), absent versus
+explicitly false run-level `w:rtl`, and numbered versus plain paragraphs. Every
+non-baseline case changes at most one parameter from its recorded parent;
+unchanged numbered/plain repeats are included. The existing `P`, `Q` and `R`
+inputs remain byte-identical. These `S` inputs are not Office-verified outputs.
+
+Strong Latin text with `w:rtl=true` is deliberately excluded: ECMA-376
+17.3.2.30 leaves that combination unspecified. Paragraph `w:bidi` (17.3.1.6)
+and run direction must be recorded separately. Word can merge source runs when
+saving, so authored run boundaries do not establish saved binary boundaries.
+Inspect actual text, run properties, PAPX/CHPX/PCD and Word-reconverted XML
+before classifying outcomes.
+
+For these cases, compare the full word sequence and punctuation position as
+well as marker, first-line and continuation coordinates. A punctuation-only
+odd embedding level must not be treated as proof that an entire Latin word
+should move. Keep Unicode UAX #9 character-level ordering, renderer segment
+ordering, and observed Word punctuation placement separate. Passing a
+word-order test is not approval of an indentation rule or whole-page fidelity.
+
 ## Required local Office sequence
 
 1. Record Word version/build, platform, installed/substituted fonts and relevant
