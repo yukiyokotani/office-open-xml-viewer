@@ -82,3 +82,61 @@ prove which binary list formatting properties Word retained.
 Generated DOCX/DOC/PDF files, local manifests and visual comparisons stay outside
 version control. Existing private references must not be replaced automatically.
 This script changes no shipped converter, parser, renderer or opt-in contract.
+
+## Observed scope and unresolved precedence
+
+Both phases have been exercised with local Word 16.112.3 on macOS. Each saved
+DOC was closed, reopened, and exported directly to a 64-page PDF. Separate
+Word-reconverted DOCX files were retained for mapping comparisons. These are
+observations of that Word version, not a normative amendment to MS-DOC.
+
+The 256 numbered paragraphs across the two phases all have positive `iLfo`,
+empty piece-property records, and a Word-generated paragraph-style association
+in the selected binary list. Consequently, an input DOCX without `w:pStyle`
+inside its list level did **not** produce an unlinked binary control. Do not
+claim coverage of unlinked lists, negative `iLfo`, or nonempty PCD from these
+experiments.
+
+The saved DOC retains conflicting direct indentation properties, including
+explicit zero, but Word removes some direct properties equal to the selected
+list value. In the interaction phase, the list retains logical left/right
+indentation of 720 twips and first-line indentation of -360 twips.
+
+For the LTR continuation line, the observed PDF x positions are:
+
+| Direct left indent (twips) | Direct-DOC PDF x (points) |
+| ---: | ---: |
+| -1 | 71.949936 |
+| 0 | 72.000000 |
+| 1 | 72.050064 |
+| 719 | 107.949936 |
+| 720 | 108.000000 |
+| 721 | 108.050064 |
+
+The converter under investigation places all these continuations at 108 points.
+Word-reconverted OOXML rendered by the same unchanged diagnostic renderer
+preserves the corresponding direct-left positions. First-line boundary cases
+also move the marker while leaving the continuation start unchanged. This
+rules out an explicit-zero-only explanation for the tested conflict.
+
+This is not evidence for preserving every property present before list
+formatting: the baseline style-indentation controls behave differently from
+direct PAPX conflicts. Nor does the left edge of an LTR continuation establish
+the effective right indent. Right-indent changes require line-wrap/right-edge
+analysis; RTL starts also depend on text widths and wrapping.
+
+Unchanged repeats have small differences in extracted interior word boxes
+(observed examples include 0.000672 and 0.013752 points), even when the selected
+line-start anchors agree. No fitted acceptance tolerance or pixel-equivalence
+claim follows from these observations. Occupied-region contact sheets were
+reviewed, and both converter-output and Word-OOXML diagnostic renders produced
+64 pages per phase. These Node/Skia runs are not browser self-VRT approval.
+
+MS-DOC 2.4.6.6 part 2 and 2.4.6.3 part 3 describe applying list paragraph
+properties after direct properties. Section 2.6.2 explicitly protects logical
+left and first-line indentation for negative `iLfo`; it does not explain the
+positive-reference observations above. `LVLF.fIndentSav` describes removing
+indentation when numbering is removed, not a general direct-format override.
+Do not present an inferred positive-reference precedence rule as mandated by
+these sections. A compatibility implementation needs an explicitly reviewed
+scope, counterexamples, and approval; no such override is introduced here.
