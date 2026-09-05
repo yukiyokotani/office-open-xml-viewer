@@ -121,6 +121,14 @@ These properties use the ordinary PPTX parser and renderer, with no opt-in API
 change or migration. They do not restore unsupported connector geometry or
 guarantee Office-identical arrow sizing and shaft trimming.
 
+Unadjusted straight connectors (`msosptStraightConnector1`, MS-ODRAW 2.4.24)
+also retain their static DrawingML `straightConnector1` path, including zero
+width/height, line styling and arrow ends. They do not acquire a fill. Conversion
+preserves the saved geometry; it does not recreate editable endpoint bindings
+or run a routing algorithm. Bent/curved connector presets and adjusted geometry
+remain outside this preset mapping, and the existing rotation/group-transform
+limitations still apply to connector placement.
+
 Slide-number metacharacters in positioned text, including inherited ordinary
 master objects and outline-referenced text, become static decimal text using
 the document's starting number and live slide order (MS-PPT 2.4.2, 2.9.47).

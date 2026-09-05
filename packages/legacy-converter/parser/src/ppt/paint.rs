@@ -113,6 +113,9 @@ impl Paint {
             5 => Some("triangle"),
             6 => Some("rtTriangle"),
             20 => Some("line"),
+            // MS-ODRAW 2.4.24: distinct from msosptLine. Preserve the
+            // static preset path, not editable endpoint bindings/rerouting.
+            32 => Some("straightConnector1"),
             _ => None,
         }
     }
@@ -151,7 +154,7 @@ impl Paint {
         if self.geometry(kind).is_none() {
             return no_paint.into();
         }
-        self.xml_with_custom_geometry(scheme, kind != 20, true)
+        self.xml_with_custom_geometry(scheme, !matches!(kind, 20 | 32), true)
     }
     /// The caller has reconstructed explicit custom paths. Geometry and path
     /// paint vetoes stay separate from style inheritance and property defaults.
@@ -241,6 +244,22 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn straight_connector_preserves_its_preset_without_inventing_a_fill() {
+        let mut p = Paint::default();
+        p.property(0x181, 255).unwrap();
+        p.property(0x1c0, 0xff0000).unwrap();
+        p.property(0x1d1, 5).unwrap();
+        assert_eq!(p.geometry(32), Some("straightConnector1"));
+        let xml = p.xml(32);
+        assert!(xml.starts_with("<a:noFill/><a:ln"));
+        assert!(xml.contains("val=\"0000FF\""));
+        assert!(xml.contains("type=\"arrow\""));
+        p.property(0x147, 10800).unwrap();
+        assert_eq!(p.geometry(32), None);
+        assert_eq!(p.xml(32), "<a:noFill/><a:ln><a:noFill/></a:ln>");
+    }
+
     #[test]
     fn line_decorations_caps_and_joins_reach_drawingml() {
         let mut p = Paint::default();
