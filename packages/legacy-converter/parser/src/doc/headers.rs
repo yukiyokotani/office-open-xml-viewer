@@ -2,7 +2,7 @@
 //! Empty CP ranges inherit; nonempty blank paragraphs explicitly clear a header.
 use super::{
     build_formatted_story, formatting, header_fields, pictures, read_story_range, sections, u32_at,
-    unsupported, Content, Story, MAX_STORY_CONTROLS,
+    unsupported, Content, Story, StoryParts, MAX_STORY_CONTROLS,
 };
 use std::ops::Range;
 
@@ -16,14 +16,6 @@ pub(super) struct Entry {
     pub index: usize,
     pub cp: usize,
     pub text: Range<usize>,
-}
-
-#[derive(Default)]
-pub(super) struct Parts {
-    pub parts: Vec<(String, String)>,
-    pub relationships: String,
-    pub content_types: String,
-    pub omitted_floating: bool,
 }
 
 impl Headers<'_> {
@@ -43,8 +35,8 @@ impl Headers<'_> {
         formatting: &mut formatting::Formatting<'_>,
         pictures: &mut pictures::Store<'_>,
         mut remaining: usize,
-    ) -> Result<Parts, String> {
-        let mut output = Parts::default();
+    ) -> Result<StoryParts, String> {
+        let mut output = StoryParts::default();
         for entry in &self.entries {
             let text = &self.story.text[entry.text.clone()];
             if text.ends_with('\u{7}') {

@@ -236,7 +236,7 @@ impl<'a> Formatting<'a> {
             .inline_location()
     }
 
-    pub fn floating_picture_allowed(
+    pub fn passive_special_character(
         &mut self,
         style: usize,
         fc: usize,

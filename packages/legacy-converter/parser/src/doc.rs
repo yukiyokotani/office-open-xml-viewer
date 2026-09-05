@@ -5,7 +5,8 @@
 //! Section geometry, character formatting and passive JPEG/PNG pictures
 //! (inline and explicitly positioned main-story floats) are preserved.
 //! Formatted header/footer stories use ordinary OOXML parts; passive page fields
-//! retain their dynamic meaning. Advanced floating drawings, revisions, notes, and OLE are
+//! retain their dynamic meaning. Note content uses ordinary OOXML parts.
+//! Advanced floating drawings, revisions, and OLE are
 //! deliberately not inferred. See [MS-DOC] 2.5.1 (FIB), 2.8.35 (Clx), and
 //! 2.9.177 (PlcPcd). Unsupported/encrypted inputs fail closed.
 
@@ -18,6 +19,7 @@ mod floating;
 mod formatting;
 mod header_fields;
 mod headers;
+mod notes;
 mod paragraph;
 mod pictures;
 mod sections;
@@ -55,6 +57,16 @@ enum Token {
     FloatingPicture,
     FieldBegin(String),
     FieldEnd,
+    NoteMarker,
+    NoteReference(notes::Reference),
+}
+
+#[derive(Default)]
+struct StoryParts {
+    parts: Vec<(String, String)>,
+    relationships: String,
+    content_types: String,
+    omitted_floating: bool,
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
@@ -93,6 +105,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         .get(fc_clx..clx_end)
         .ok_or_else(|| unsupported("Word CLX lies outside its table stream"))?;
     let story = read_story(&word, clx, ccp_text)?;
+    let note_stories = notes::read_all(&word, &table, clx)?;
     let mut sections = sections::read(&word, &table, ccp_text)?;
     let headers = headers::read(&word, &table, clx, sections.len())?;
     if let Some(headers) = &headers {
@@ -104,11 +117,12 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         Vec::new()
     };
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
+    let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let mut pictures = pictures::Store::new(&data);
     let mut floating = floating::Store::read(&word, &table, ccp_text)?;
-    let document_xml = build_formatted_document(
+    let document_xml = build_formatted_story(
         &story,
-        &sections,
+        Content::Document(&sections, Some(&note_references)),
         Some(&mut formatting),
         Some(&mut pictures),
         Some(&mut floating),
@@ -126,12 +140,28 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         })
         .transpose()?
         .unwrap_or_default();
+    let mut note_parts = StoryParts::default();
+    let mut remaining = MAX_DOCUMENT_XML_BYTES.saturating_sub(document_xml.len());
+    for (_, xml) in &header_parts.parts {
+        remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
+    }
+    for notes in note_stories.iter().flatten() {
+        let output = notes.build_parts(&mut formatting, &mut pictures, remaining)?;
+        for (_, xml) in &output.parts {
+            remaining = remaining.checked_sub(xml.len()).ok_or("OUTPUT_TOO_LARGE")?;
+        }
+        note_parts.parts.extend(output.parts);
+        note_parts.content_types.push_str(&output.content_types);
+        note_parts.relationships.push_str(&output.relationships);
+        note_parts.omitted_floating |= output.omitted_floating;
+    }
     let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#.to_string();
     if document_settings.is_some() {
         content_types.push_str(r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#);
     }
     content_types.push_str(&header_parts.content_types);
+    content_types.push_str(&note_parts.content_types);
     let mut media = pictures.parts();
     media.extend(floating.parts());
     if !media.is_empty() {
@@ -151,16 +181,31 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     relationships.push_str(&document_picture_relationships);
     relationships.push_str(&floating.relationships());
     relationships.push_str(&header_parts.relationships);
+    relationships.push_str(&note_parts.relationships);
     parts.extend(header_parts.parts);
+    parts.extend(note_parts.parts);
     if !relationships.is_empty() {
         parts.push(("word/_rels/document.xml.rels".into(), format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#)));
     }
     let mut warnings = vec![
         "legacy-doc:advanced-table-formatting-and-embedded-objects-omitted".into(),
-        "legacy-doc:notes-and-advanced-section-properties-omitted".into(),
+        "legacy-doc:advanced-section-properties-omitted".into(),
     ];
     if header_parts.omitted_floating {
         warnings.push("legacy-doc:header-footer-floating-drawings-omitted".into());
+    }
+    if note_stories.iter().flatten().any(|n| !n.entries.is_empty()) {
+        warnings.push("legacy-doc:note-numbering-and-custom-separators-incomplete".into());
+    }
+    if note_parts.omitted_floating {
+        warnings.push("legacy-doc:note-floating-drawings-omitted".into());
+    }
+    if note_stories
+        .iter()
+        .flatten()
+        .any(|n| n.story.text.contains('\u{13}'))
+    {
+        warnings.push("legacy-doc:note-fields-use-cached-results".into());
     }
     if headers
         .as_ref()
@@ -482,6 +527,7 @@ fn tokenize_with_fields(
             '\u{0c}' => paragraph.tokens.push((Token::PageBreak, cp)),
             '\u{0e}' => paragraph.tokens.push((Token::ColumnBreak, cp)),
             '\u{1}' => paragraph.tokens.push((Token::Picture, cp)),
+            '\u{2}' => paragraph.tokens.push((Token::NoteMarker, cp)),
             '\u{8}' => paragraph.tokens.push((Token::FloatingPicture, cp)),
             '\u{20}'..='\u{10ffff}' => {
                 if buffered.is_empty() {
@@ -521,6 +567,7 @@ fn build_document_xml(text: &str, sections: &[sections::Section]) -> Result<Stri
     )
 }
 
+#[cfg(test)]
 fn build_formatted_document(
     story: &Story<'_>,
     sections: &[sections::Section],
@@ -531,7 +578,7 @@ fn build_formatted_document(
 ) -> Result<String, String> {
     build_formatted_story(
         story,
-        Content::Document(sections),
+        Content::Document(sections, None),
         formatting,
         pictures,
         floating,
@@ -540,7 +587,14 @@ fn build_formatted_document(
 }
 
 enum Content<'a> {
-    Document(&'a [sections::Section]),
+    Document(&'a [sections::Section], Option<&'a notes::References>),
+    Note {
+        kind: notes::Kind,
+        id: usize,
+        text: &'a str,
+        cp: usize,
+        automatic: bool,
+    },
     HeaderFooter {
         kind: &'static str,
         text: &'a str,
@@ -558,8 +612,9 @@ fn build_formatted_story(
     max_bytes: usize,
 ) -> Result<String, String> {
     let (text, sections, story_cp) = match content {
-        Content::Document(sections) => (story.text.as_str(), sections, 0),
+        Content::Document(sections, _) => (story.text.as_str(), sections, 0),
         Content::HeaderFooter { text, cp, .. } => (text, &[][..], cp),
+        Content::Note { text, cp, .. } => (text, &[][..], cp),
     };
     // Every control can introduce a paragraph, token or field-stack entry.
     // Charge before constructing these arrays, not only after XML expansion.
@@ -573,10 +628,11 @@ fn build_formatted_story(
         return Err(unsupported("Word story structure budget exceeded"));
     }
     let mut xml = match content {
-        Content::Document(_) => String::from(
+        Content::Document(..) => String::from(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
         ),
+        Content::Note { kind, id, .. } => format!("<w:{} w:id=\"{id}\">", kind.tag()),
         Content::HeaderFooter { kind, .. } => {
             let tag = if kind == "header" { "hdr" } else { "ftr" };
             format!(
@@ -601,6 +657,9 @@ fn build_formatted_story(
         );
         if let Content::HeaderFooter { fields, .. } = content {
             fields.restore(chunk, base_cp, &mut paragraphs);
+        }
+        if let Content::Document(_, Some(references)) = content {
+            references.restore(&mut paragraphs);
         }
         if section_index + 1 < chunks.len() {
             // split_story removed this paragraph's section-break character.
@@ -641,6 +700,43 @@ fn build_formatted_story(
             }
             for (token, cp) in &paragraph.tokens {
                 match token {
+                    Token::NoteReference(reference) => {
+                        xml.push_str("<w:r>");
+                        if let Some(f) = formatting.as_deref_mut() {
+                            if let Some((_, fc, piece)) = story.position(*cp) {
+                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
+                            }
+                        }
+                        xml.push_str(&reference.xml());
+                        xml.push_str("</w:r>");
+                    }
+                    Token::NoteMarker => {
+                        if let Content::Note {
+                            kind,
+                            automatic: true,
+                            ..
+                        } = content
+                        {
+                            if let Some(f) = formatting.as_deref_mut() {
+                                let (_, fc, piece) = story
+                                    .position(*cp)
+                                    .ok_or_else(|| unsupported("Word note marker outside story"))?;
+                                if !f.passive_special_character(
+                                    style,
+                                    fc,
+                                    piece.prm,
+                                    &story.prcs,
+                                )? {
+                                    return Err(unsupported(
+                                        "Word note marker lacks special-character property",
+                                    ));
+                                }
+                                xml.push_str("<w:r>");
+                                xml.push_str(&f.run_xml(style, fc, piece.prm, &story.prcs)?);
+                                xml.push_str(&format!("<w:{}Ref/></w:r>", kind.tag()));
+                            }
+                        }
+                    }
                     Token::FieldBegin(instruction) => {
                         xml.push_str("<w:r>");
                         if let Some(f) = formatting.as_deref_mut() {
@@ -663,7 +759,7 @@ fn build_formatted_story(
                             let mut drawing = None;
                             if let Some(f) = formatting.as_deref_mut() {
                                 if let Some((_, fc, piece)) = story.position(*cp) {
-                                    if f.floating_picture_allowed(
+                                    if f.passive_special_character(
                                         style,
                                         fc,
                                         piece.prm,
@@ -739,6 +835,7 @@ fn build_formatted_story(
                             | Token::FieldEnd => {
                                 unreachable!()
                             }
+                            Token::NoteMarker | Token::NoteReference(_) => unreachable!(),
                         });
                         xml.push_str("</w:r>");
                     }
@@ -764,7 +861,7 @@ fn build_formatted_story(
         }
         xml.push_str(&table_writer.finish()?);
     }
-    if let Content::Document(_) = content {
+    if let Content::Document(..) = content {
         if let Some(last) = sections.last() {
             xml.push_str(&last.xml);
         } else {
@@ -773,6 +870,8 @@ fn build_formatted_story(
             xml.push_str("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>");
         }
         xml.push_str("</w:body></w:document>");
+    } else if let Content::Note { kind, .. } = content {
+        xml.push_str(&format!("</w:{}>", kind.tag()));
     } else if let Content::HeaderFooter { kind, .. } = content {
         xml.push_str(if kind == "header" {
             "</w:hdr>"

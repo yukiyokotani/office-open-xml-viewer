@@ -1,13 +1,16 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
+export interface BinaryNoteFixture { cp: number; text: string; automatic?: boolean }
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: readonly BinaryNoteFixture[]; endnotes?: readonly BinaryNoteFixture[]; comments?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const sectionEnds = options.sectionEnds ?? [text.length];
   if (options.headers && options.headers.length !== sectionEnds.length * 6) throw new Error('Expected six header/footer variants per section');
-  const footnotes = options.footnotes ?? '';
+  const noteText = (notes: readonly BinaryNoteFixture[] | undefined) => notes?.length ? notes.map(n => n.text).join('') + '\r' : '';
+  const footnotes = noteText(options.footnotes), endnotes = noteText(options.endnotes);
+  const comments = options.comments ?? '';
   // Six empty separator stories, six per-section stories, and a final guard.
   const headerStories = options.headers?.map(t => t ? `${t}\r` : '') ?? [];
   const headerText = options.headers ? `${headerStories.join('')}\r` : '';
-  const allText = text + footnotes + headerText;
+  const allText = text + footnotes + headerText + comments + endnotes;
   const units = Array.from({ length: allText.length }, (_, index) => allText.charCodeAt(index));
   const textOffset = 0x400;
   const word = new Uint8Array(textOffset + units.length * 2);
@@ -17,6 +20,8 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   view.setUint32(0x4c, text.length, true);
   view.setUint32(0x50, footnotes.length, true);
   view.setUint32(0x54, headerText.length, true);
+  view.setUint32(0x5c, comments.length, true);
+  view.setUint32(0x60, endnotes.length, true);
   view.setUint32(0x1a2, 0, true);
   units.forEach((unit, index) => view.setUint16(textOffset + index * 2, unit, true));
   const pieceProperties = concat(options.paragraphProperties ?? new Uint8Array(), options.characterProperties ?? new Uint8Array());
@@ -91,9 +96,23 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     view.setUint32(0x122, table.length + dop.length + sectionTable.length + floating.length + drawing.length + headerTable.length, true);
     view.setUint32(0x126, fieldTable.length, true);
   }
+  const noteTables: Uint8Array[] = [];
+  let noteOffset = table.length + dop.length + sectionTable.length + floating.length + drawing.length + headerTable.length + fieldTable.length;
+  for (const [notes, offset] of [[options.footnotes, 0xaa], [options.endnotes, 0x20a]] as const) {
+    if (!notes?.length) continue;
+    const references = concat(...notes.map(n => little32(n.cp)), little32(0xffffffff), ...notes.map(n => little16(n.automatic === false ? 0 : 1)));
+    const boundaries = [0];
+    for (const note of notes) boundaries.push((boundaries.at(-1) as number) + note.text.length);
+    const ranges = concat(...boundaries.map(little32), little32(0xffffffff));
+    view.setUint32(offset, noteOffset, true); view.setUint32(offset + 4, references.length, true);
+    noteOffset += references.length;
+    view.setUint32(offset + 8, noteOffset, true); view.setUint32(offset + 12, ranges.length, true);
+    noteOffset += ranges.length;
+    noteTables.push(references, ranges);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable)],
+    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable, ...noteTables)],
     ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }

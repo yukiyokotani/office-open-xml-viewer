@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping, formatted header/footer variants and supported passive page-number fields | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, header/footer floating drawings, notes, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, lists, advanced floating drawings, non-raster images, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, phonetic string data, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
@@ -222,6 +222,28 @@ Each aggregate main/header story has a 64 Mi UTF-16-unit decoding ceiling and
 one million controls; headers additionally allow at most 4,096 nonempty parts.
 The aggregate generated XML has a 256 MiB ceiling. These are resource policies,
 not format limits. No migration or opt-in API change is required.
+
+Footnote and endnote text now retains its paragraphs, character formatting,
+supported tables and inline pictures in ordinary `footnotes.xml`/`endnotes.xml`
+parts. The converter joins the main-story reference PLC with the corresponding
+note-text PLC (MS-DOC 2.3.2/5, 2.8.16/17/19/20), preserving UTF-16 positions
+across the main, footnote, header and comment documents. Automatic reference
+characters require the special-character property. An empty reference PLC is
+distinct from a malformed or missing text range. Fields retain cached text;
+their instructions are not emitted or executed. The aggregate decoded note
+text has a 64 Mi UTF-16-unit budget and each kind allows at most 65,536 notes,
+in addition to the existing XML/structure budgets. These are resource policies.
+
+Note numbering formats/restarts/offsets, positioning, custom separators and
+floating drawings remain incomplete. Literal custom marks are retained with
+the standard `customMarkFollows` attribute, but the existing OOXML viewer does
+not yet honor that attribute when numbering/painting references; an extra
+number can appear. No legacy-only renderer is added to compensate for this
+shared limitation. Complex note-bearing documents still have unresolved shared
+OOXML layout failures, including body/note overlap rejection and excessive
+memory use in long documents. Preserving the note content does not yet imply
+successful rendering for every converted document. No migration or opt-in API
+change is required.
 
 Paragraph borders retain top, bottom, logical left/right and between edges from
 both Brc80 and Brc operands (MS-DOC 2.6.2, 2.9.16/17/21). The converter resolves

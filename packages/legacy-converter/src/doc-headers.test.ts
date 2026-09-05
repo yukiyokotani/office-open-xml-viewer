@@ -19,9 +19,9 @@ async function convert(bytes: Uint8Array) {
 describe('binary Word header/footer stories', () => {
   it('restores all six variants after footnotes, with physical piece formatting and no guard paragraphs', async () => {
     const parts = await convert(buildDocFixture({
-      text: 'Body\r', footnotes: 'NOT A HEADER\r',
+      text: 'Body\u0002\r', footnotes: [{ cp: 4, text: '\u0002NOT A HEADER\r' }],
       headers: ['EH\r', 'OH😀\r', 'EF\r', 'OF\r', 'FH\r', 'FF\r'],
-      characterProperties: concat(little16(0x0835), new Uint8Array([1])),
+      characterProperties: concat(little16(0x0835), new Uint8Array([1, 0x55, 0x08, 1])),
       defaultTabTwips: 720, facingPages: true,
       sectionProperties: concat(little16(0x300a), new Uint8Array([1])),
     }));
