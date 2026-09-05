@@ -2063,6 +2063,105 @@ function assertBodyKernelServiceOwner(root) {
 
 const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?:old|previous|alternate)[a-z0-9]*(?:engine|layout|path|algorithm)|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
 
+const CONVERSION_MODULE = '@silurus/ooxml-core/internal/legacy-office-conversion';
+const CONVERSION_BINDER = 'bindLegacyOfficeConversionSignal';
+const CONVERSION_TYPES = new Set([
+  'LegacyOfficeConversionFailureReason', 'LegacyOfficeConversionInput',
+  'LegacyOfficeConversionOptions', 'LegacyOfficeConversionRecord',
+  'LegacyOfficeConversionResult', 'LegacyOfficeConverter',
+  'LegacyOfficeFormatConversionOptions', 'LegacyOfficeFormat',
+]);
+
+function namedConversionImport(node, name) {
+  if (!ts.isImportSpecifier(node) || node.propertyName || node.name.text !== name || node.isTypeOnly) return false;
+  const declaration = node.parent.parent.parent;
+  return ts.isImportDeclaration(declaration)
+    && !declaration.importClause.isTypeOnly
+    && ts.isStringLiteral(declaration.moduleSpecifier)
+    && declaration.moduleSpecifier.text === CONVERSION_MODULE;
+}
+
+function hasConversionImport(source, name) {
+  return source.statements.some(statement => ts.isImportDeclaration(statement)
+    && statement.importClause?.namedBindings
+    && ts.isNamedImports(statement.importClause.namedBindings)
+    && statement.importClause.namedBindings.elements.some(node => namedConversionImport(node, name)));
+}
+
+function propertyAccess(node, object, name) {
+  return ts.isPropertyAccessExpression(node) && node.name.text === name
+    && ts.isIdentifier(node.expression) && node.expression.text === object;
+}
+
+function viewerConversionCall(node, source) {
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)
+    || node.expression.text !== CONVERSION_BINDER || node.arguments.length !== 3
+    || !ts.isStringLiteral(node.arguments[1]) || node.arguments[1].text !== 'docx'
+    || !hasConversionImport(source, CONVERSION_BINDER)) return false;
+  const options = node.arguments[0];
+  return ts.isPropertyAccessExpression(options) && options.name.text === 'legacyConversion'
+    && ts.isPropertyAccessExpression(options.expression) && options.expression.name.text === '_opts'
+    && options.expression.expression.kind === ts.SyntaxKind.ThisKeyword;
+}
+
+function hasLocalConversionBinding(node, source) {
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (!ts.isBlock(parent)) continue;
+    return parent.statements.some(statement => ts.isVariableStatement(statement)
+      && statement.declarationList.declarations.some(declaration => ts.isIdentifier(declaration.name)
+        && declaration.name.text === 'conversion' && declaration.initializer
+        && viewerConversionCall(declaration.initializer, source)));
+  }
+  return false;
+}
+
+// A legacy *file* is normalized into OOXML before acquisition. That public API
+// is not an old layout/paint algorithm. Recognize only the reviewed syntax at
+// the three acquisition adapters and the unaliased public re-export; the same
+// names in layout, flags, other calls or local declarations remain forbidden.
+function isInputConversionIdentifier(node, file, source) {
+  const parent = node.parent;
+  if (file === `${DOCX_SOURCE}/index.ts` && ts.isExportSpecifier(parent)
+    && parent.name === node && !parent.propertyName) {
+    const declaration = parent.parent.parent;
+    return ts.isExportDeclaration(declaration)
+      && declaration.moduleSpecifier && ts.isStringLiteral(declaration.moduleSpecifier)
+      && declaration.moduleSpecifier.text === '@silurus/ooxml-core'
+      && (node.text === 'LegacyOfficeConversionError'
+        || (CONVERSION_TYPES.has(node.text) && (parent.isTypeOnly || declaration.isTypeOnly)));
+  }
+  if (file === `${DOCX_SOURCE}/document.ts` && node.text === 'legacyConversion'
+    && ts.isPropertyAccessExpression(parent) && parent.name === node
+    && propertyAccess(parent, 'opts', 'legacyConversion')) {
+    const call = parent.parent;
+    return ts.isCallExpression(call) && ts.isIdentifier(call.expression)
+      && call.expression.text === 'resolveOfficeInputWithOptionalConversion'
+      && hasConversionImport(source, call.expression.text)
+      && call.arguments.length === 4 && call.arguments[2] === parent
+      && ts.isStringLiteral(call.arguments[1]) && call.arguments[1].text === 'docx';
+  }
+  if (file !== `${DOCX_SOURCE}/viewer.ts` && file !== `${DOCX_SOURCE}/scroll-viewer.ts`) return false;
+  if (node.text === CONVERSION_BINDER) {
+    return namedConversionImport(parent, CONVERSION_BINDER)
+      || (ts.isCallExpression(parent) && parent.expression === node
+        && ts.isVariableDeclaration(parent.parent) && parent.parent.initializer === parent
+        && ts.isIdentifier(parent.parent.name) && parent.parent.name.text === 'conversion'
+        && viewerConversionCall(parent, source));
+  }
+  if (node.text !== 'legacyConversion') return false;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+    return viewerConversionCall(parent.parent, source);
+  }
+  if (!ts.isPropertyAssignment(parent) || parent.name !== node
+    || !propertyAccess(parent.initializer, 'conversion', 'options')) return false;
+  const object = parent.parent;
+  const call = object.parent;
+  return ts.isObjectLiteralExpression(object) && ts.isCallExpression(call)
+    && propertyAccess(call.expression, 'DocxDocument', 'load')
+    && call.arguments.length === 2 && call.arguments[1] === object
+    && hasLocalConversionBinding(node, source);
+}
+
 function matchingIdentifierCounts(root, predicate) {
   const counts = {};
   const sourceRoot = resolve(root, DOCX_SOURCE);
@@ -2070,7 +2169,7 @@ function matchingIdentifierCounts(root, predicate) {
     const source = sourceFile(path);
     const file = posixPath(relative(root, path));
     const visit = (node) => {
-      if (ts.isIdentifier(node) && predicate(node.text)) {
+      if (ts.isIdentifier(node) && predicate(node.text, node, file, source)) {
         const key = `${file}#${node.text}`;
         counts[key] = (counts[key] ?? 0) + 1;
       }
@@ -2685,7 +2784,8 @@ function currentLegacyInventory(root) {
   return {
     version: 3,
     legacySymbolCounts: identifierCounts(root),
-    migrationIdentifierCounts: matchingIdentifierCounts(root, (name) => MIGRATION_IDENTIFIER.test(name)),
+    migrationIdentifierCounts: matchingIdentifierCounts(root, (name, node, file, source) =>
+      MIGRATION_IDENTIFIER.test(name) && !isInputConversionIdentifier(node, file, source)),
     rendererImportEdges: rendererImportEdges(root),
   };
 }

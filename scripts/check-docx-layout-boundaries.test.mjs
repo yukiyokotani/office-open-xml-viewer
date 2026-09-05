@@ -418,6 +418,54 @@ test('rejects migration flags and silent alternate layout fallbacks', () => {
   }
 });
 
+const conversionImport = "import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';\n";
+const conversionViewer = conversionImport + `
+async function load(source, signal) {
+  const conversion = bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'docx', signal);
+  return DocxDocument.load(source, { legacyConversion: conversion.options });
+}
+`;
+
+test('accepts legacy file conversion only at the OOXML acquisition boundary', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-input-conversion-');
+  write(root, 'packages/docx/src/viewer.ts', conversionViewer);
+  write(root, 'packages/docx/src/scroll-viewer.ts', conversionViewer);
+  write(root, 'packages/docx/src/document.ts', `
+import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+async function load(buffer, opts) {
+  return resolveOfficeInputWithOptionalConversion(buffer, 'docx', opts.legacyConversion, opts.password);
+}
+`);
+  write(root, 'packages/docx/src/index.ts', `
+export { LegacyOfficeConversionError, type LegacyOfficeConversionOptions, type LegacyOfficeConverter } from '@silurus/ooxml-core';
+`);
+  const result = runChecker(root, '--final');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('conversion names do not exempt layout flags, alternate calls or arbitrary exports', () => {
+  const cases = [
+    ['layout/conversion.ts', conversionViewer],
+    ['viewer.ts', 'const legacyConversion = true;'],
+    ['viewer.ts', conversionImport + 'if (this._opts.legacyConversion) oldRenderer();'],
+    ['viewer.ts', conversionViewer.replace('DocxDocument.load', 'AlternateDocument.load')],
+    ['viewer.ts', conversionViewer.replace("'docx'", "'old-layout'")],
+    ['viewer.ts', conversionViewer.replace("@silurus/ooxml-core/internal/legacy-office-conversion", './alternate-layout')],
+    ['viewer.ts', conversionImport + 'const saved = bindLegacyOfficeConversionSignal;'],
+    ['viewer.ts', conversionImport + 'function bindLegacyOfficeConversionSignal() {}'],
+    ['viewer.ts', conversionImport + "if (bindLegacyOfficeConversionSignal(this._opts.legacyConversion, 'docx', signal)) oldRenderer();"],
+    ['viewer.ts', conversionImport + 'DocxDocument.load(source, { legacyConversion: conversion.options });'],
+    ['index.ts', "export { LegacyOfficeConverter } from './alternate-layout';"],
+    ['index.ts', "export { LegacyOfficeConversionError as legacyRenderer } from '@silurus/ooxml-core';"],
+    ['document.ts', 'if (opts.legacyConversion) oldRenderer();'],
+  ];
+  for (const [file, source] of cases) {
+    const root = initializeCanonicalFixture('docx-layout-boundary-conversion-abuse-');
+    write(root, `packages/docx/src/${file}`, source);
+    expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', `${file}: ${source}`, '--final');
+  }
+});
+
 test('rejects renderer-owned acquisition state from the final architecture', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-render-state-');
   write(
