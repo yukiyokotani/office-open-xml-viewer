@@ -292,9 +292,34 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       expect(formatOrdinalNumber(5, 'ordinalText' as NumberFormat)).toBe('5');
       expect(formatOrdinalNumber(5, 'thaiCounting' as NumberFormat)).toBe('5');
       expect(formatOrdinalNumber(5, 'vietnameseCounting' as NumberFormat)).toBe('5');
-      expect(formatOrdinalNumber(5, 'none' as NumberFormat)).toBe('5');
       expect(formatOrdinalNumber(5, 'custom' as NumberFormat)).toBe('5');
       expect(formatOrdinalNumber(5, undefined)).toBe('5');
     });
+  });
+
+  it('suppresses numbering only for the explicit none format', () => {
+    for (const value of [0, 1, 5, -1, 2147483646]) {
+      expect(formatOrdinalNumber(value, 'none')).toBe('');
+      expect(formatOrdinalNumber(value, undefined)).toBe(String(value));
+    }
+  });
+
+  it.each(['upperRoman', 'lowerRoman', 'upperLetter', 'lowerLetter', 'hebrew2',
+    'arabicAlpha', 'russianUpper', 'thaiLetters', 'aiueo'])('bounds output expansion for %s', fmt => {
+    // A valid 32-bit DOC section start must not expand to millions of glyphs.
+    expect(() => formatOrdinalNumber(2147483646, fmt)).toThrow(/number-format output budget/i);
+    for (const value of [Infinity, NaN, 1.5, Number.MAX_VALUE]) {
+      expect(formatOrdinalNumber(value, fmt)).toBe(String(value));
+    }
+  });
+
+  it('checks exact repeated-output boundaries before allocating', () => {
+    expect(formatOrdinalNumber(4096 * 26, 'upperLetter')).toHaveLength(4096);
+    expect(() => formatOrdinalNumber(4096 * 26 + 1, 'upperLetter')).toThrow(RangeError);
+    expect(formatOrdinalNumber(4096 * 1000, 'upperRoman')).toHaveLength(4096);
+    expect(() => formatOrdinalNumber(4096 * 1000 + 1, 'upperRoman')).toThrow(RangeError);
+    expect(formatOrdinalNumber(4096 * 22, 'hebrew2')).toHaveLength(4096);
+    expect(() => formatOrdinalNumber(4096 * 22 + 1, 'hebrew2')).toThrow(RangeError);
+    expect(formatOrdinalNumber(2147483646, 'decimal')).toBe('2147483646');
   });
 });

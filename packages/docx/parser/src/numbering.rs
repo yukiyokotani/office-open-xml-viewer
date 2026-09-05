@@ -540,6 +540,11 @@ impl NumberingMap {
 // the reference values. `bullet` is a list-only concern (no §17.18.59 numeric
 // meaning) and stays Rust-only.
 fn format_counter(n: u32, format: &str) -> String {
+    // ECMA-376 17.18.59: `none` suppresses the number, including start=0.
+    // Mirror the shared TS field formatter instead of using decimal fallback.
+    if format == "none" {
+        return String::new();
+    }
     if format == "bullet" {
         return "•".to_string();
     }
@@ -1463,7 +1468,7 @@ mod tests {
             // Documented residual / spell-outs fall back to decimal.
             ("cardinalText", &[(5, "5")]),
             ("thaiCounting", &[(5, "5")]),
-            ("none", &[(5, "5")]),
+            ("none", &[(0, ""), (1, ""), (5, "")]),
         ];
         for (fmt, rows) in cases {
             for (input, expected) in *rows {

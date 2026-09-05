@@ -15,7 +15,7 @@
 // Latin/roman core, the CJK counting/legal systems, the RTL Hebrew/Arabic
 // alphabets, and the positional digit substitutions (Thai/Hindi/full-width/…).
 //
-// A DOCUMENTED RESIDUAL degrades to `decimal` (so a page number is never blank):
+// A DOCUMENTED RESIDUAL degrades to `decimal` (except explicit `none`):
 //   * The language SPELL-OUT formats — `cardinalText`, `ordinalText`, `ordinal`,
 //     `thaiCounting`, `vietnameseCounting`, `hindiCounting`, `bahtText`,
 //     `dollarText`, `custom` — §17.18.59 defines these only as "the textual
@@ -80,9 +80,9 @@ export type NumberFormat =
   // Other algorithmic systems.
   | 'hex'
   | 'numberInDash'
+  | 'none'
   // Accepted but rendered as decimal (documented residual) — kept in the type so
   // callers can pass a raw parsed value without a cast for the common ones.
-  | 'none'
   | 'cardinalText'
   | 'ordinalText'
   | 'ordinal'
@@ -110,15 +110,26 @@ const ROMAN_TABLE: ReadonlyArray<readonly [number, string]> = [
   [1, 'I'],
 ];
 
+// Resource policy, not an OOXML numeric limit: one formatted ordinal may emit
+// at most 4096 UTF-16 units. Check before repeat/allocation, not after building
+// the string. Huge valid section starts can otherwise expand to millions of
+// Roman/alphabetic glyphs. Throw rather than silently changing the numbering.
+const MAX_NUMBER_FORMAT_UNITS = 4096;
+function checkNumberFormatSize(units: number): void {
+  if (units > MAX_NUMBER_FORMAT_UNITS) {
+    throw new RangeError('Number-format output budget exceeded');
+  }
+}
+
 /** Uppercase roman numerals for a positive integer. Caller guarantees n ≥ 1. */
 function toUpperRoman(n: number): string {
   let out = '';
   let rem = n;
   for (const [value, glyph] of ROMAN_TABLE) {
-    while (rem >= value) {
-      out += glyph;
-      rem -= value;
-    }
+    const count = Math.floor(rem / value);
+    checkNumberFormatSize(out.length + count * glyph.length);
+    out += glyph.repeat(count);
+    rem %= value;
   }
   return out;
 }
@@ -136,6 +147,7 @@ function repeatAlphabet(n: number, glyphs: readonly string[]): string {
   const size = glyphs.length;
   const repeats = Math.floor((n - 1) / size) + 1;
   const glyph = glyphs[(n - 1) % size];
+  checkNumberFormatSize(repeats * glyph.length);
   return glyph.repeat(repeats);
 }
 
@@ -352,9 +364,15 @@ function toChineseCounting(n: number, digits: readonly string[]): string {
 
 /** ECMA-376 §17.18.59 ST_NumberFormat converter dispatch. Non-native formats —
  *  and zero / negative values under a format that has no glyph for them (roman,
- *  letters) — fall back to Arabic decimal, so the result is never empty.
- *  `undefined`/absent `fmt` is the spec default `decimal`. */
+ *  letters) — fall back to Arabic decimal. Explicit `none` suppresses output;
+ *  `undefined`/absent `fmt` is the spec default `decimal`.
+ *  Resource policy: expanding formats throw above 4096 UTF-16 output units. */
 export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): string {
+  if (fmt === 'none') return '';
+  // The format algorithms require an exact integer. Preserve the existing
+  // decimal recovery convention without entering loops on Infinity or indexing
+  // an alphabet with a fraction/unsafe integer.
+  if (!Number.isSafeInteger(n)) return String(n);
   switch (fmt) {
     // Roman.
     case 'upperRoman':
@@ -518,6 +536,7 @@ function toHebrew2(n: number): string {
   // stops — "equal to or less than the size of the set", so 44 → ת + 1×ת).
   const subtractions = Math.floor((n - 1) / size);
   const remainder = n - size * subtractions; // 1..22
+  checkNumberFormatSize(1 + subtractions);
   return HEBREW_ALPHABET[remainder - 1] + 'ת'.repeat(subtractions);
 }
 
