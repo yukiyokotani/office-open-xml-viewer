@@ -321,6 +321,7 @@ fn append_point_paragraphs(
         None,
         None,
         None,
+        None,
         ShapeKind::Sp,
         zip,
     );

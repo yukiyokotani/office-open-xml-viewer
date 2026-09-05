@@ -82,14 +82,17 @@ const EMR = {
   CREATEPEN: 38,
   CREATEBRUSHINDIRECT: 39,
   DELETEOBJECT: 40,
+  MOVETOEX: 27,
   BEGINPATH: 59,
   ENDPATH: 60,
   CLOSEFIGURE: 61,
+  FILLPATH: 62,
   SELECTCLIPPATH: 67,
   EXTCREATEFONTINDIRECTW: 82,
   EXTTEXTOUTW: 84,
   POLYGON16: 86,
   POLYLINE16: 87,
+  POLYBEZIERTO16: 88,
   CREATEDIBPATTERNBRUSHPT: 94,
 } as const;
 
@@ -950,6 +953,53 @@ describe('playEmf — picture frame mapping + path clip', () => {
     expect(m.calls.some((c) => c.op === 'fill')).toBe(false); // in-path polygon not filled
     expect(m.calls.some((c) => c.op === 'save')).toBe(true);
     expect(m.calls.some((c) => c.op === 'restore')).toBe(true);
+  });
+
+  it('fills a bracketed Bézier path when EMR_FILLPATH consumes it', () => {
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x0000ff00).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.BEGINPATH, () => {}),
+      record(EMR.MOVETOEX, (w) => w.i32(10).i32(50)),
+      record(EMR.POLYBEZIERTO16, (w) =>
+        w.i32(10).i32(10).i32(90).i32(90).u32(3)
+          .i16(25).i16(10).i16(75).i16(10).i16(90).i16(50),
+      ),
+      record(EMR.CLOSEFIGURE, () => {}),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.FILLPATH, (w) => w.i32(10).i32(10).i32(90).i32(90)),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    expect(m.calls.find((call) => call.op === 'moveTo')?.args).toEqual([10, 50]);
+    expect(m.calls.some((call) => call.op === 'bezierCurveTo')).toBe(true);
+    expect(m.calls.filter((call) => call.op === 'fill')).toHaveLength(1);
+    expect(m.styles.fill).toEqual(['#00ff00']);
+  });
+
+  it('accumulates a bracketed polyline even when no pen is selected', () => {
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x0000ff00).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.BEGINPATH, () => {}),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(10).i32(10).i32(90).i32(90).u32(3)
+          .i16(10).i16(10).i16(90).i16(10).i16(90).i16(90),
+      ),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.FILLPATH, (w) => w.i32(10).i32(10).i32(90).i32(90)),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+
+    expect(playEmf(file, m.ctx, 100, 100)).toBe(true);
+    expect(m.calls.filter((call) => call.op === 'lineTo')).toHaveLength(2);
+    expect(m.calls.filter((call) => call.op === 'stroke')).toHaveLength(0);
+    expect(m.calls.filter((call) => call.op === 'fill')).toHaveLength(1);
   });
 
   it('decodes a 4bpp DIB pattern brush (MATLAB bar-chart fill colour)', () => {

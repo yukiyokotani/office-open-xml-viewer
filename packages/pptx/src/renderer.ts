@@ -2741,7 +2741,7 @@ function renderWarpedText(
 
   // Lay each paragraph out flat at the natural size (no wrap — WordArt fits the
   // shape width itself). Collect every line's segments in order.
-  const lines: LayoutLine[] = [];
+  const lines: Array<{ line: LayoutLine; alignment: Paragraph['alignment'] }> = [];
   for (const para of body.paragraphs) {
     const paraDefaultFontSizePx =
       para.defFontSize != null ? para.defFontSize * PT_TO_EMU * scale : bodyDefaultFontSizePx;
@@ -2761,7 +2761,7 @@ function renderWarpedText(
       rc,
       0,
     );
-    for (const l of laid) lines.push(l);
+    for (const line of laid) lines.push({ line, alignment: para.alignment });
   }
   if (lines.length === 0) return;
 
@@ -2787,7 +2787,7 @@ function renderWarpedText(
 
   const lineCount = lines.length;
   for (let li = 0; li < lineCount; li++) {
-    const line = lines[li];
+    const { line, alignment } = lines[li];
     // Per-line vertical band [v0, v1] of the envelope's height. One line fills
     // the whole band; multiple lines split it evenly top→bottom.
     const v0 = li / lineCount;
@@ -2840,19 +2840,35 @@ function renderWarpedText(
     // "Follow Path" semantics place the text at its NATURAL width along the
     // arc without stretching the glyphs (vScale stays 1 inside
     // warpGlyphTransform); they keep the flat renderer's 0.8 ascent fallback
-    // for the baseline drop below the arc. The text also follows the path for
-    // only its natural arc-length span from the start (stAng): a glyph's `u`
-    // fraction is scaled by naturalWidth/arcLength via `followPathUScale`, so a
-    // word narrower than the arc occupies a LEADING segment of the path rather
-    // than being scattered over the whole ellipse. Paired-edge presets return
-    // scale 1 (they stretch the flat ink box to fill the envelope width).
+    // for the baseline drop below the arc. A glyph's `u` fraction is scaled by
+    // naturalWidth/arcLength via `followPathUScale`, and paragraph alignment
+    // chooses where that compact segment sits on the path. Paired-edge presets
+    // return scale 1 (they stretch the flat ink box to fill the envelope width).
     const inkH = maxA + maxD > 0 ? maxA + maxD : maxSize;
     const baselineFrac = env.singleEdge ? 0.8 : inkH > 0 ? maxA / inkH : 0.8;
     const hScale = env.singleEdge ? 1 : boxW / totalW;
-    const warpBoxH = env.singleEdge ? boxH : inkH / (v1 - v0);
+    // `warpGlyphTransform` expects the FLAT line box height. For Follow Path
+    // presets this determines only the small baseline-to-curve descent. Passing
+    // the entire shape height displaced short text by tens of pixels normal to
+    // the arc (and, after shape rotation, outside the intended ring segment).
+    const warpBoxH = env.singleEdge ? inkH : inkH / (v1 - v0);
     // Follow Path: fraction of the arc the natural-width text actually spans.
     // 1 for paired-edge (no clamp); ≤1 for arch/circle.
     const followScale = followPathUScale(env, totalW);
+    // A Follow Path warp keeps the text's natural arc length, but its paragraph
+    // alignment still selects where that shorter segment sits on the path.
+    // PowerPoint-generated circular diagrams commonly use centred paragraphs;
+    // pinning every short label to stAng piles the labels onto a wedge edge.
+    const followOffset = env.singleEdge
+      ? (1 - followScale) * (alignment === 'r' ? 1 : alignment === 'ctr' ? 0.5 : 0)
+      : 0;
+    // Follow Path has one authored baseline curve. Manual breaks and separate
+    // paragraphs form additional natural-height lines on the INSIDE of that
+    // curve; they do not all reuse the identical baseline. Select the normal
+    // that points toward the shape centre so this works for both Arch Up and
+    // Arch Down without preset-name branching. The 120% pitch is the same
+    // natural PowerPoint line spacing used by ordinary text below.
+    const followLineOffset = env.singleEdge ? li * maxSize * 1.2 : 0;
 
     // Walk glyphs left→right. `penW` accumulates the flat advance so each glyph's
     // CENTRE maps to its u fraction; the glyph is drawn at a per-glyph transform.
@@ -2881,8 +2897,8 @@ function renderWarpedText(
         // its own centre-u) so the mapping converges to PowerPoint's continuous
         // outline warp (§20.1.9.19). Needs no auxiliary canvas, so it runs
         // unconditionally (main thread, worker, headless node alike). The
-        // single-edge (Follow Path) branch below is UNCHANGED (byte-identical):
-        // its glyphs are rigidly rotated onto a baseline, already exact per glyph.
+        // single-edge (Follow Path) branch below keeps rigid per-glyph rotation;
+        // its separate placement rules preserve natural size and alignment.
         if (!env.singleEdge && chW > 0) {
           drawWarpedGlyphStrips(
             ctx,
@@ -2906,11 +2922,20 @@ function renderWarpedText(
         }
 
         // Horizontal fraction of THIS glyph's centre along the whole line,
-        // scaled by the Follow Path factor so single-edge (arch/circle) text
-        // spans only its natural arc length from the start rather than the whole
+        // scaled and offset so single-edge (arch/circle) text spans only its
+        // naturally sized, paragraph-aligned arc segment rather than the whole
         // path. `followScale` is 1 for paired-edge presets (unchanged).
-        const u = ((penW + chW / 2) / totalW) * followScale;
+        const u = followOffset + ((penW + chW / 2) / totalW) * followScale;
         const g = warpGlyphTransform(env, u, warpBoxH, bandFrac);
+        if (followLineOffset !== 0) {
+          const nx = -Math.sin(g.angle);
+          const ny = Math.cos(g.angle);
+          const toCentreX = boxW / 2 - g.x;
+          const toCentreY = boxH / 2 - g.y;
+          const inward = nx * toCentreX + ny * toCentreY >= 0 ? 1 : -1;
+          g.x += nx * followLineOffset * inward;
+          g.y += ny * followLineOffset * inward;
+        }
         ctx.save();
         ctx.translate(boxX + g.x, boxY + g.y);
         ctx.rotate(g.angle);
@@ -3249,6 +3274,30 @@ function paintWithRasterEffects(
     );
     ctx.restore();
   }
+}
+
+/**
+ * Resolve the rotation PowerPoint uses for text in a singly-reflected shape.
+ *
+ * ECMA-376 §20.1.7.6 permits rotation and axis flips in the same transform.
+ * For a one-axis reflection, two decompositions describe the same geometry:
+ * rotating by another 180 degrees while exchanging flipH and flipV leaves the
+ * shape matrix unchanged. PowerPoint chooses the decomposition whose text
+ * rotation is in the readable -90..90 degree half-plane. Geometry continues
+ * to use the authored transform verbatim; only its unmirrored text frame uses
+ * this equivalent rotation.
+ */
+export function reflectedShapeTextRotation(
+  rotation: number,
+  flipH: boolean,
+  flipV: boolean,
+): number {
+  if (flipH === flipV || !Number.isFinite(rotation)) return rotation;
+
+  let readable = ((rotation + 180) % 360 + 360) % 360 - 180;
+  if (readable > 90) readable -= 180;
+  else if (readable < -90) readable += 180;
+  return Object.is(readable, -0) ? 0 : readable;
 }
 
 function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: number, themeDefaultColor = '#000000', slideNumber?: number, rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 }, onTextRun?: TextRunCallback, fetchImage?: FetchImage) {
@@ -3801,6 +3850,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // Render text inside the rotation context so text follows shape rotation
   if (el.textBody) {
     const defaultTextColor = shapeDefaultTextColor(el, rc);
+    const textRotation = reflectedShapeTextRotation(el.rotation, el.flipH, el.flipV);
     ctx.save();
     if (el.flipH || el.flipV) {
       const cx = x + w / 2;
@@ -3810,6 +3860,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       ctx.translate(cx, cy);
       if (el.flipH) ctx.scale(-1, 1);
       if (el.flipV) ctx.scale(1, -1);
+      ctx.translate(-cx, -cy);
+    }
+    const rotationDelta = (textRotation - el.rotation) % 360;
+    if (rotationDelta !== 0) {
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((rotationDelta * Math.PI) / 180);
       ctx.translate(-cx, -cy);
     }
     // For ellipses, PowerPoint positions text relative to the inscribed rectangle
@@ -3836,8 +3894,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       const tr = presetTextRect(geom, x, y, w, h, el.adj, el.adj2);
       if (tr) { tx = tr.tx; ty = tr.ty; tw = tr.tw; th = tr.th; }
     }
-    // Pass el.rotation so the text-layer overlay can CSS-rotate the shape div to match.
-    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, el.rotation, false, false, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
+    // Carry the same readable rotation into the selectable text overlay.
+    renderTextBody(ctx, el.textBody, tx, ty, tw, th, scale, defaultTextColor, textRotation, false, false, themeDefaultColor, slideNumber, rc, shapeTextRunCallback, false, fetchImage);
     ctx.restore();
   }
 

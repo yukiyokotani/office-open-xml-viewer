@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderTextBody } from './renderer.js';
+import { buildWarpEnvelope, warpGlyphTransform } from '@silurus/ooxml-core';
 import type { TextBody, Paragraph } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
 
@@ -13,9 +14,8 @@ import type { TextRunData } from '@silurus/ooxml-core';
  * These tests drive `renderTextBody` against a mock 2D context that tracks the
  * current transform matrix (CTM) through save/restore/translate/rotate/scale, so
  * the FINAL device-space position of each warped glyph is recoverable. The
- * horizontal ink SPAN of the placed glyphs is the observable that the issue is
- * about: before the fix it grows to the full arc; after, it matches the shape's
- * natural-width fraction of that arc.
+ * horizontal ink SPAN and centre of the placed glyphs are the observables that
+ * matter: the natural-width arc segment must also honour paragraph alignment.
  */
 
 // 2×3 affine matrix [a,b,c,d,e,f] mapping (x,y) → (a·x+c·y+e, b·x+d·y+f).
@@ -111,9 +111,13 @@ function run(text: string, over: Partial<TextRunData> = {}): TextRunData {
   };
 }
 
-function warpBody(preset: string, text: string): TextBody {
+function warpBody(
+  preset: string,
+  text: string,
+  alignment: Paragraph['alignment'] = 'ctr',
+): TextBody {
   const para: Paragraph = {
-    alignment: 'ctr',
+    alignment,
     marL: 0,
     marR: 0,
     indent: 0,
@@ -148,6 +152,16 @@ function warpBody(preset: string, text: string): TextBody {
   } as TextBody;
 }
 
+function warpBodyWithBreak(preset: string, first: string, second: string): TextBody {
+  const body = warpBody(preset, first);
+  body.paragraphs[0]!.runs = [
+    run(first),
+    { type: 'break' },
+    run(second),
+  ];
+  return body;
+}
+
 // The sample-16 WordArt boxes are 6.2in × 1.5in. At SCALE below, that box is
 // BOX_W × BOX_H px. A short word ("Arch Up") is far narrower than the arch, so
 // Follow Path should visibly compress its span.
@@ -163,7 +177,7 @@ function span(glyphs: Array<{ x: number }>): number {
 }
 
 describe('WordArt Follow Path — single-edge span (issue #846)', () => {
-  it('textArchUp places the word within its natural width, not the whole arc', () => {
+  it('textArchUp centres a centred word within its natural-width arc segment', () => {
     const { ctx, glyphs } = trackingCtx();
     renderTextBody(ctx, warpBody('textArchUp', 'Arch Up'), 0, 0, BOX_W, BOX_H, SCALE);
     expect(glyphs.length).toBeGreaterThan(0);
@@ -172,6 +186,42 @@ describe('WordArt Follow Path — single-edge span (issue #846)', () => {
     // stay far below the box width — the word does NOT wrap around the ellipse.
     const s = span(glyphs);
     expect(s).toBeLessThan(BOX_W * 0.5);
+    const xs = glyphs.map(({ x }) => x);
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(BOX_W / 2, -1);
+  });
+
+  it('places left- and right-aligned text at the corresponding path ends', () => {
+    const left = trackingCtx();
+    renderTextBody(left.ctx, warpBody('textArchUp', 'Arch Up', 'l'), 0, 0, BOX_W, BOX_H, SCALE);
+    const right = trackingCtx();
+    renderTextBody(right.ctx, warpBody('textArchUp', 'Arch Up', 'r'), 0, 0, BOX_W, BOX_H, SCALE);
+
+    const leftXs = left.glyphs.map(({ x }) => x);
+    const rightXs = right.glyphs.map(({ x }) => x);
+    expect(Math.max(...leftXs)).toBeLessThan(BOX_W / 2);
+    expect(Math.min(...rightXs)).toBeGreaterThan(BOX_W / 2);
+  });
+
+  it('offsets an arch baseline by the glyph ink box, not the shape height', () => {
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, warpBody('textArchUp', 'A'), 0, 0, BOX_W, BOX_H, SCALE);
+
+    const env = buildWarpEnvelope('textArchUp', [], BOX_W, BOX_H)!;
+    const inkHeight = 7 + 2;
+    const expected = warpGlyphTransform(env, 0.5, inkHeight, 0.8);
+    expect(glyphs).toHaveLength(1);
+    // fillText is offset by half the glyph advance; the flattened arc's centre
+    // tangent is within a small sampling angle of horizontal.
+    expect(glyphs[0]!.y).toBeCloseTo(expected.y, 1);
+  });
+
+  it('places lines after a manual break on distinct inward baselines', () => {
+    const { ctx, glyphs } = trackingCtx();
+    renderTextBody(ctx, warpBodyWithBreak('textArchUp', 'Top', 'Bottom'), 0, 0, BOX_W, BOX_H, SCALE);
+
+    const topY = glyphs.slice(0, 3).reduce((sum, glyph) => sum + glyph.y, 0) / 3;
+    const bottomY = glyphs.slice(3).reduce((sum, glyph) => sum + glyph.y, 0) / 6;
+    expect(bottomY - topY).toBeGreaterThan(20);
   });
 
   it('textCircle keeps the word compact rather than scattering around the ellipse', () => {

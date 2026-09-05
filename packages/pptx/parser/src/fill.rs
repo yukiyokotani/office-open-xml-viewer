@@ -878,22 +878,20 @@ pub(crate) fn parse_background<F: FnMut(&str) -> Option<String>>(
     None
 }
 
-/// Resolve a table-style `<a:fill>` wrapper's colour. Identical to `parse_fill`
-/// for the common solid/no-fill cases, except `<a:tint>` uses the literal
-/// ECMA-376 §20.1.2.3.34 formula (`TintMode::WordLiteral`) so a band's
-/// `accent + tint 20%` renders as the near-white wash PowerPoint draws, rather
-/// than the saturated linear-lerp used for SmartArt accents. Gradient/pattern/
-/// blip fills (rare in table styles) defer to the generic `parse_fill`.
+/// Resolve a table-style `<a:fill>` wrapper's colour. PowerPoint applies the
+/// ECMA-376 §20.1.2.3.34 retained-input tint in linear sRGB for these DrawingML
+/// fills, just as it does for other presentation fills. Gradient/pattern/blip
+/// fills (rare in table styles) defer to the generic `parse_fill`.
 pub(crate) fn parse_table_style_fill(
     fill_wrapper: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
 ) -> Option<Fill> {
-    use ooxml_common::color::TintMode::WordLiteral;
+    use ooxml_common::color::TintMode::PowerPointLinear;
     for c in fill_wrapper.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
             "noFill" => return Some(Fill::None),
             "solidFill" => {
-                return parse_color_node_tint(c, theme, WordLiteral)
+                return parse_color_node_tint(c, theme, PowerPointLinear)
                     .map(|color| Fill::Solid { color });
             }
             _ => {}

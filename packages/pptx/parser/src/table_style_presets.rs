@@ -268,7 +268,11 @@ fn themed_style_1(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> Ta
 }
 
 fn themed_style_2(theme: &HashMap<String, String>, accent_idx: Option<u8>) -> TableStyleDef {
-    if let Some(a) = accent(theme, accent_idx) {
+    // The zero-accent catalogue entry is the neutral "Themed Style 2": it has
+    // no body fill and uses dk1 only for its grid. Treating `None` as dk1 here
+    // makes the entire table black. The accent variants are the only members
+    // that author a whole-table fill.
+    if let Some(a) = accent_idx.and_then(|idx| accent(theme, Some(idx))) {
         let lt = lt1(theme).unwrap_or_else(|| "FFFFFF".into());
         let outer_color = apply_transforms(&a, &[("tint", 50000)]);
         let outer = Some(stroke(&outer_color));
@@ -962,6 +966,27 @@ mod tests {
             Some(Fill::Solid { color }) => Some(color),
             _ => None,
         }
+    }
+
+    #[test]
+    fn themed_style_2_without_an_accent_keeps_the_table_body_unfilled() {
+        let theme = HashMap::from([
+            ("dk1".to_owned(), "000000".to_owned()),
+            ("lt1".to_owned(), "FFFFFF".to_owned()),
+            ("accent1".to_owned(), "4668C5".to_owned()),
+        ]);
+        let style = lookup_builtin_table_style("{5940675A-B579-460E-94D1-54222C63F5DA}", &theme)
+            .expect("built-in Themed Style 2");
+
+        assert_eq!(solid_color(&style.whole_tbl.fill), None);
+        assert!(matches!(
+            style.whole_tbl.borders.inside_h,
+            TableLineStyle::Stroke(_)
+        ));
+        assert!(matches!(
+            style.whole_tbl.borders.inside_v,
+            TableLineStyle::Stroke(_)
+        ));
     }
 
     /// The built-in Medium Style 2 / Accent 1 table is the default produced by
