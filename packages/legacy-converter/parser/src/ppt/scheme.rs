@@ -63,6 +63,7 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 
 #[derive(Default)]
 pub(super) struct Resolver {
+    pub shape_masters: shape_master::Resolver,
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
@@ -87,6 +88,7 @@ impl Resolver {
         let defaults = text_style::document_defaults(children, budget)?;
         let mut text_styles = BTreeMap::new();
         let mut backgrounds = BTreeMap::new();
+        let mut master_records = Vec::new();
         if let Some(list) = lists.first() {
             if list.version != 15 {
                 return Err(unsupported("invalid PowerPoint master list"));
@@ -111,6 +113,7 @@ impl Resolver {
                     return Err(unsupported("invalid PowerPoint master persist object"));
                 }
                 masters.insert(id, entry(record, budget)?);
+                master_records.push((id, record));
                 backgrounds.insert(id, drawing::background(record.payload, budget)?);
                 if record.kind == 1016 {
                     let records = parse_records(record.payload, budget)?;
@@ -121,13 +124,31 @@ impl Resolver {
                 }
             }
         }
-        Ok(Self {
+        let mut result = Self {
+            shape_masters: shape_master::Resolver::default(),
             masters,
             cache: BTreeMap::new(),
             text_styles,
             backgrounds,
             background_cache: BTreeMap::new(),
-        })
+        };
+        let mut text_budget = MAX_TEXT_BYTES;
+        for (id, record) in master_records {
+            let base = if record.kind == 1016 {
+                result.text_styles.get(&id).cloned()
+            } else {
+                result.text_master(record, budget)?
+            };
+            drawing::master_shapes(
+                record.payload,
+                base,
+                &mut result.shape_masters,
+                budget,
+                &mut text_budget,
+            )?;
+        }
+        result.shape_masters.finish(budget)?;
+        Ok(result)
     }
     pub fn background(
         &mut self,
@@ -455,6 +476,7 @@ mod tests {
     #[test]
     fn rejects_cycles_missing_masters_and_excessive_inheritance() {
         let mut r = Resolver {
+            shape_masters: shape_master::Resolver::default(),
             masters: BTreeMap::new(),
             cache: BTreeMap::new(),
             text_styles: BTreeMap::new(),
@@ -528,6 +550,7 @@ mod tests {
     #[test]
     fn text_master_cycles_and_budgets_are_independent_of_color_inheritance() {
         let mut r = Resolver {
+            shape_masters: shape_master::Resolver::default(),
             masters: BTreeMap::new(),
             cache: BTreeMap::new(),
             text_styles: BTreeMap::new(),

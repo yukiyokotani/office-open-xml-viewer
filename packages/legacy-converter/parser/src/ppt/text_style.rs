@@ -18,14 +18,12 @@ pub(super) fn text_type(atom: Record<'_>) -> Result<u16, String> {
     Ok(kind as u16)
 }
 
-pub(super) fn write(
-    text: &str,
-    style: &[u8],
-    context: Context<'_>,
-    output: &mut String,
-    xml_budget: &mut usize,
-    work_budget: &mut usize,
-) -> Result<(), String> {
+struct Runs {
+    paragraphs: Vec<(usize, Paragraph)>,
+    characters: Vec<(usize, Character)>,
+}
+
+fn read_runs(text: &str, style: &[u8], work_budget: &mut usize) -> Result<Runs, String> {
     // TextHeaderAtom adds an implicit CR; run counts include that character.
     let length = text.encode_utf16().count() + 1;
     let mut reader = Reader {
@@ -52,6 +50,38 @@ pub(super) fn write(
     if reader.pos != style.len() {
         return Err(unsupported("unexpected PowerPoint text style tail"));
     }
+    // Validate shared boundaries once, including master exemplars that are not
+    // themselves emitted. Never accept half of a UTF-16 surrogate pair.
+    let (mut cp, mut run) = (0, 0);
+    for character in text.chars() {
+        cp += character.len_utf16();
+        if cf[run].0 < cp {
+            return Err(unsupported(
+                "PowerPoint character style splits a surrogate pair",
+            ));
+        }
+        if cf[run].0 == cp {
+            run += 1;
+        }
+    }
+    Ok(Runs {
+        paragraphs: pf,
+        characters: cf,
+    })
+}
+
+pub(super) fn write(
+    text: &str,
+    style: &[u8],
+    context: Context<'_>,
+    output: &mut String,
+    xml_budget: &mut usize,
+    work_budget: &mut usize,
+) -> Result<(), String> {
+    let Runs {
+        paragraphs: pf,
+        characters: cf,
+    } = read_runs(text, style, work_budget)?;
     let (mut pi, mut ci, mut cp) = (0, 0, 0);
     for paragraph in text.split('\r') {
         while pf[pi].0 <= cp {
@@ -191,7 +221,7 @@ impl Reader<'_, '_> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Character {
     mask: u32,
     style: u16,
@@ -285,9 +315,11 @@ impl Character {
         }
         for (id, name) in [(self.font, "latin"), (self.ea, "ea"), (self.symbol, "sym")] {
             if let Some(id) = id {
-                let font = fonts
-                    .get(usize::from(id))
-                    .ok_or_else(|| unsupported("PowerPoint font index out of range"))?;
+                // An unsupported font reference must not invent a font or
+                // discard otherwise usable inherited text properties.
+                let Some(font) = fonts.get(usize::from(id)) else {
+                    continue;
+                };
                 children.push_str(&format!(
                     "<a:{name} typeface=\"{}\"/>",
                     crate::ooxml::xml_attr(font)
@@ -305,7 +337,7 @@ impl Character {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Paragraph {
     level: u16,
     align: Option<u16>,
@@ -401,10 +433,83 @@ impl Paragraph {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct Level {
     paragraph: Paragraph,
     character: Character,
+}
+impl Level {
+    pub fn inherit(&self, base: Option<&Self>) -> Self {
+        Self {
+            paragraph: self.paragraph.inherit(base.map(|b| &b.paragraph)),
+            character: self.character.inherit(base.map(|b| &b.character)),
+        }
+    }
+    pub fn empty(level: u16) -> Self {
+        Self {
+            paragraph: Paragraph {
+                level,
+                align: None,
+                spacing: [None; 3],
+                no_bullet: None,
+            },
+            character: Character {
+                mask: 0,
+                style: 0,
+                size: 18,
+                font: None,
+                ea: None,
+                symbol: None,
+                color: None,
+            },
+        }
+    }
+}
+
+/// Supported master-shape subset: uniform formatting within each indent level.
+/// Conflicting exemplar runs do not justify choosing an arbitrary first run.
+pub(super) fn shape_levels(
+    text: &str,
+    style: &[u8],
+    budget: &mut usize,
+) -> Result<Vec<Option<Level>>, String> {
+    let Runs {
+        paragraphs: pf,
+        characters: cf,
+    } = read_runs(text, style, budget)?;
+    let mut levels = vec![None; 5];
+    let mut conflict = [false; 5];
+    let (mut pi, mut ci, mut cp) = (0, 0, 0);
+    for paragraph in text.split('\r') {
+        while pf[pi].0 <= cp {
+            pi += 1;
+        }
+        let end = cp + paragraph.encode_utf16().count() + 1;
+        if pf[pi].0 < end {
+            return Err(unsupported("PowerPoint master style splits a paragraph"));
+        }
+        let level = usize::from(pf[pi].1.level);
+        while cp < end {
+            while cf[ci].0 <= cp {
+                ci += 1;
+            }
+            let value = Level {
+                paragraph: pf[pi].1.clone(),
+                character: cf[ci].1.clone(),
+            };
+            if levels[level].as_ref().is_some_and(|old| old != &value) {
+                conflict[level] = true;
+            }
+            levels[level] = Some(value);
+            cp = cf[ci].0.min(end);
+        }
+    }
+    for (value, conflicting) in levels.iter_mut().zip(conflict) {
+        if conflicting {
+            *value = None;
+        }
+    }
+    Ok(levels)
 }
 pub(super) struct Master {
     types: std::collections::BTreeMap<u16, Vec<Level>>,
@@ -554,6 +659,63 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn master_shape_levels_keep_uniform_styles_without_selecting_arbitrary_runs() {
+        let style = [
+            u32s(4),
+            u16s(0),
+            u32s(0),
+            u32s(4),
+            u32s(0x60001),
+            u16s(1),
+            u16s(36),
+            u32s(0xfeffffff),
+        ]
+        .concat();
+        let levels = shape_levels("one", &style, &mut 100).unwrap();
+        let level = levels[0].as_ref().unwrap();
+        assert_eq!(level.character.color, Some(0xfeffffff));
+        assert_eq!(level.character.size, 36);
+        let mixed = [
+            u32s(4),
+            u16s(0),
+            u32s(0),
+            u32s(2),
+            u32s(0x40000),
+            u32s(0xfeffffff),
+            u32s(2),
+            u32s(0x40000),
+            u32s(0xfe000000),
+        ]
+        .concat();
+        assert!(shape_levels("one", &mixed, &mut 100).unwrap()[0].is_none());
+        assert!(shape_levels("one", &style, &mut 1).is_err());
+        // Two paragraphs at separate levels retain separate colors.
+        let distinct = [
+            u32s(2),
+            u16s(0),
+            u32s(0),
+            u32s(2),
+            u16s(1),
+            u32s(0),
+            u32s(2),
+            u32s(0x40000),
+            u32s(0xfeffffff),
+            u32s(2),
+            u32s(0x40000),
+            u32s(0xfe000000),
+        ]
+        .concat();
+        let levels = shape_levels("a\rb", &distinct, &mut 100).unwrap();
+        assert_eq!(
+            levels[0].as_ref().unwrap().character.color,
+            Some(0xfeffffff)
+        );
+        assert_eq!(
+            levels[1].as_ref().unwrap().character.color,
+            Some(0xfe000000)
+        );
+    }
     #[test]
     fn master_defaults_merge_by_level_and_direct_false_overrides_true() {
         // One title level: centered, bold, 48pt. Direct formatting turns bold
@@ -812,8 +974,8 @@ mod tests {
         let children = parse_records(&env, &mut 100).unwrap();
         assert_eq!(fonts(&children, &mut 100).unwrap(), ["Name"]);
         let data = style(2, [u32s(0x10000), u16s(1)].concat());
-        assert!(xml("x", &data, &["Name".into()])
-            .unwrap_err()
-            .contains("font index"));
+        let output = xml("x", &data, &["Name".into()]).unwrap();
+        assert!(output.contains("<a:t>x</a:t>"));
+        assert!(!output.contains("typeface=")); // Omit invalid references; never guess an index.
     }
 }

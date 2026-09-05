@@ -14,6 +14,7 @@ mod media;
 mod paint;
 mod persist;
 mod scheme;
+mod shape_master;
 mod text_style;
 
 const DOCUMENT_CONTAINER: u16 = 1000;
@@ -90,6 +91,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 scheme: presentation.schemes[index].as_ref(),
                 types: &presentation.outline_types[index],
                 master: presentation.text_masters[index].as_deref(),
+                shapes: Some(&presentation.shape_masters),
             }),
             Some(&mut media),
         )? {
@@ -129,7 +131,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let bytes = build_pptx(slides, presentation.size, &media.parts(), max_output_bytes)?;
     let mut warnings = vec![
         "legacy-ppt:positioned-text-and-basic-presets".into(),
-        "legacy-ppt:detached-placeholder-styles-bullets-and-advanced-text-omitted".into(),
+        "legacy-ppt:unlinked-placeholder-styles-bullets-and-advanced-text-omitted".into(),
+        "legacy-ppt:nonuniform-master-text-and-invalid-font-references-omitted".into(),
         "legacy-ppt:custom-geometry-inherited-and-advanced-paint-unsupported-media-and-actions-omitted".into(),
     ];
     if fallback {

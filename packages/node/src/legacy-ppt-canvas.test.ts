@@ -12,6 +12,48 @@ const skia = await loadSkiaForTests();
 const converterWasm = readFile(new URL('../../legacy-converter/src/wasm/legacy_office_converter_bg.wasm', import.meta.url));
 
 describe('binary PowerPoint to ordinary Canvas rendering', () => {
+  it.skipIf(!skia)('inherits text through a verified hspMaster link without recoloring explicitly black text', async () => {
+    const { Canvas } = skia as typeof import('skia-canvas');
+    const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);
+    const text = record(0, 4000, utf16le('Text'));
+    const style = (mask: number, data: Uint8Array) => record(0, 4001, concat(little32(5), little16(0), little32(0), little32(5), little32(mask), data));
+    const master = record(15, 1036, record(15, 0xf002, record(15, 0xf004, concat(
+      record(0x12, 0xf00a, concat(little32(900), little32(0x800))),
+      record(15, 0xf00d, concat(record(0, 3999, little32(0)), text, style(0x60001, concat(little16(1), little16(36), little32(0xfeffffff))))),
+    ))));
+    const shape = (left: number, active: boolean, black = false, id = 900) => record(15, 0xf004, concat(
+      record(0x12, 0xf00a, concat(little32(left + 1), little32(0xa00 | (active ? 0x20 : 0)))),
+      record(0, 0xf010, concat(little32(576), little32(left), little32(left + 1440), little32(1440))),
+      record(0x13, 0xf00b, concat(little16(0x301), little32(id))),
+      record(15, 0xf011, record(0, 3011, concat(little32(0xffffffff), new Uint8Array([15, 0, 0, 0])))),
+      record(15, 0xf00d, concat(record(0, 3999, little32(6)), text, ...(black ? [style(0x40000, little32(0xfe000000))] : []))),
+    ));
+    const slide = record(15, 1036, record(15, 0xf002, concat(shape(576, true), shape(2304, true, true), shape(4032, false))));
+    const converter = createLegacyOfficeWasmConverter({ wasm: await converterWasm });
+    const presentation = await materializePptxPresentation(buildPptFixture(slide, undefined, master), { legacyConversion: { ppt: { converter } } });
+    const runs = presentation.slides[0].elements.map(element => element.type === 'shape' ? element.textBody?.paragraphs[0].runs[0] : undefined);
+    expect(runs[0]).toMatchObject({ text: 'Text', fontSize: 36, bold: true, color: 'FFFFFF' });
+    expect(runs[1]).toMatchObject({ text: 'Text', fontSize: 36, bold: true, color: '000000' });
+    expect(runs[2]).toMatchObject({ text: 'Text', fontSize: 18 });
+    // Render against an explicit dark background: inheritance, not contrast logic,
+    // makes only the first frame white; the direct black override stays black.
+    presentation.slides[0].background = { fillType: 'solid', color: '10263F' };
+    const canvas = new Canvas(960, 720);
+    await renderSlideNode(canvas, presentation, 0, { width: 960, dpr: 1 });
+    const pixels = canvas.getContext('2d').getImageData(0, 0, 960, 720).data;
+    const white = (left: number) => {
+      let count = 0;
+      for (let y = 96; y < 240; y++) for (let x = left; x < left + 240; x++) {
+        const i = (y * 960 + x) * 4;
+        if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] > 240) count++;
+      }
+      return count;
+    };
+    expect(white(96)).toBeGreaterThan(100);
+    expect(white(384)).toBe(0);
+    const dangling = record(15, 1036, record(15, 0xf002, shape(576, true, false, 999)));
+    await expect(materializePptxPresentation(buildPptFixture(dangling, undefined, master), { legacyConversion: { ppt: { converter } } })).rejects.toMatchObject({ reason: 'unsupported-input' });
+  });
   it.skipIf(!skia)('paints inherited scheme-colored backgrounds behind foreground shapes', async () => {
     const { Canvas } = skia as typeof import('skia-canvas');
     const record = (options: number, kind: number, payload: Uint8Array) => concat(little16(options), little16(kind), little32(payload.length), payload);

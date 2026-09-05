@@ -68,7 +68,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid | custom tab stops, frames, list/style-remapping and conditional table styles, advanced table/character/section properties, headers/footers, notes, lists, drawings, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names, scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, rich-text runs, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, verified-placeholder main-master text-style inheritance, manual line breaks, unmodified basic presets with explicit solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | detached-placeholder and title-master shape text overrides, paint-property inheritance, master foreground objects, system/palette color indices, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with explicit solid fill/line colors, line widths and opacity, embedded/delayed JPEG and PNG picture frames with signed cropping, local/inherited solid and stretched-image backgrounds; superseded slides and deleted shapes are not emitted | unlinked placeholder and nonuniform master text overrides, paint-property inheritance, master foreground objects, system/palette color indices, bullets and paragraph indents/tabs, advanced character formatting, embedded fonts, adjusted/custom geometry, gradients/patterns, dashed/compound lines, arrows/effects, custom fill rectangles, charts, notes, vector/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
@@ -131,10 +131,20 @@ fills become PresentationML `p:bgPr` before the shape tree. Master scheme-color
 references resolve against the destination slide's active scheme. Image bytes
 and relationships use the same bounded store as picture frames. Gradient,
 pattern, texture and custom-rectangle background fills remain unsupported.
-Background fidelity alone does not imply readable or correct foreground text:
-missing text-color inheritance can leave dark fallback text on a recovered dark
-background. No contrast-based recoloring or sample-specific background suppression
-is applied; this remains a known converter fidelity limitation.
+Background fidelity alone does not imply complete foreground-text fidelity.
+Explicit `fHaveMaster` / `hspMaster` links (MS-ODRAW 2.2.40 / 2.3.2.1) now
+resolve against live master shapes, independently of placeholder-position metadata.
+Uniform character/paragraph formatting at each master indent level overrides the
+containing master's text-type defaults; direct slide-run properties still win,
+including explicit black text and false bold/italic values. Referenced master
+chains are checked for missing IDs, cycles and excessive depth. Only immutable
+resolved levels remain after parsing; master-shape metadata has a 100,000-node
+resource cap. Exemplar text itself, actions and links are never copied.
+Nonuniform exemplar formatting at a level is omitted with a warning rather than
+selecting an arbitrary run. Unsupported font indices are also omitted, leaving
+normal font fallback without guessing a replacement index. Unlinked placeholder
+formatting and other unsupported text properties remain fidelity limitations.
+No contrast-based recoloring or sample-specific background suppression is applied.
 
 ## Custom converter contract
 

@@ -4,6 +4,7 @@ use super::*;
 use std::collections::{BTreeMap, HashSet};
 
 pub(super) struct Presentation<'a> {
+    pub shape_masters: shape_master::Resolver,
     pub slides: Vec<(Record<'a>, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
     pub outline_types: Vec<Vec<u16>>,
@@ -189,6 +190,7 @@ pub(super) fn resolve<'a>(
             .iter()
             .map(|(slide, _)| schemes.slide(*slide, budget))
             .collect::<Result<_, _>>()?,
+        shape_masters: schemes.shape_masters,
         slides,
         outline_styles,
         fonts,

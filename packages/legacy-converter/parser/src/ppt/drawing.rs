@@ -10,6 +10,7 @@ pub(super) struct TextContext<'a> {
     pub scheme: Option<&'a scheme::Scheme>,
     pub types: &'a [u16],
     pub master: Option<&'a text_style::Master>,
+    pub shapes: Option<&'a shape_master::Resolver>,
 }
 
 pub(super) fn render<'a>(
@@ -95,6 +96,7 @@ impl Rect {
 }
 
 struct Shape<'a> {
+    id: u32,
     kind: u16,
     flags: u32,
     anchor: Option<Rect>,
@@ -110,6 +112,7 @@ impl<'a> Shape<'a> {
             return Err(unsupported("invalid PowerPoint shape container"));
         }
         let mut flags = None;
+        let mut id = 0;
         let mut kind = 0;
         let mut anchor = None;
         let mut child_space = None;
@@ -123,6 +126,7 @@ impl<'a> Shape<'a> {
                         return Err(unsupported("invalid PowerPoint shape flags"));
                     }
                     flags = Some(u32_at(child.payload, 4)?);
+                    id = u32_at(child.payload, 0)?;
                     kind = child.instance;
                 }
                 0xf010 | 0xf00f => {
@@ -164,6 +168,7 @@ impl<'a> Shape<'a> {
             }
         }
         Ok(Self {
+            id,
             kind,
             flags: flags.ok_or_else(|| unsupported("missing PowerPoint shape flags"))?,
             anchor,
@@ -175,6 +180,9 @@ impl<'a> Shape<'a> {
     }
     fn omitted(&self) -> bool {
         self.flags & (8 | 16 | 1024) != 0
+    }
+    fn master(&self) -> Option<u32> {
+        (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
     }
     fn transform(&self, anchor: Rect, group: Option<Rect>) -> String {
         let mut xml = format!("<a:xfrm rot=\"{}\" flipH=\"{}\" flipV=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/>", self.props.rotation, (self.flags >> 6) & 1, (self.flags >> 7) & 1, anchor.x, anchor.y, anchor.w, anchor.h);
@@ -190,6 +198,7 @@ impl<'a> Shape<'a> {
 }
 
 struct Properties {
+    master: Option<u32>,
     picture: u32,
     crop: [i64; 4],
     paint: paint::Paint,
@@ -202,6 +211,7 @@ struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            master: None,
             picture: 0,
             crop: [0; 4],
             paint: paint::Paint::default(),
@@ -251,6 +261,8 @@ impl Properties {
                 continue;
             }
             match opid {
+                // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
+                0x301 => self.master = Some(value),
                 // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
                 // fractions become DrawingML 1/1000 percentages without clamping.
                 0x100..=0x103 => {
@@ -324,6 +336,116 @@ pub(super) fn background(slide: &[u8], budget: &mut usize) -> Result<Option<pain
         result = Some(Shape::read(record, false, budget)?.props.paint);
     }
     Ok(result)
+}
+
+pub(super) fn master_shapes(
+    slide: &[u8],
+    base: Option<std::rc::Rc<text_style::Master>>,
+    output: &mut shape_master::Resolver,
+    budget: &mut usize,
+    text_budget: &mut usize,
+) -> Result<(), String> {
+    fn visit(
+        record: Record<'_>,
+        nested: bool,
+        depth: usize,
+        base: &Option<std::rc::Rc<text_style::Master>>,
+        output: &mut shape_master::Resolver,
+        budget: &mut usize,
+        text_budget: &mut usize,
+    ) -> Result<(), String> {
+        if depth >= MAX_DEPTH {
+            return Err(unsupported("PowerPoint master drawing depth exceeded"));
+        }
+        if record.kind == 0xf003 {
+            if record.version != 15 {
+                return Err(unsupported("invalid PowerPoint master group"));
+            }
+            let children = parse_records(record.payload, budget)?;
+            let first = children
+                .first()
+                .ok_or_else(|| unsupported("empty PowerPoint master group"))?;
+            let group = Shape::read(*first, nested, budget)?;
+            if group.flags & 1 == 0 || (nested && group.flags & 4 != 0) {
+                return Err(unsupported("invalid PowerPoint master group flags"));
+            }
+            if group.omitted() {
+                return Ok(());
+            }
+            let child_nested = group.flags & 4 == 0;
+            visit(*first, nested, depth + 1, base, output, budget, text_budget)?;
+            for child in &children[1..] {
+                visit(
+                    *child,
+                    child_nested,
+                    depth + 1,
+                    base,
+                    output,
+                    budget,
+                    text_budget,
+                )?;
+            }
+        } else if record.kind == 0xf004 {
+            let shape = Shape::read(record, nested, budget)?;
+            if shape.omitted() {
+                return Ok(());
+            }
+            let (mut kind, mut text, mut style) = (None, None, None);
+            if let Some(textbox) = shape.textbox {
+                for atom in parse_records(textbox.payload, budget)? {
+                    match atom.kind {
+                        3999 => {
+                            if kind.is_some() {
+                                return Err(unsupported("duplicate master text header"));
+                            }
+                            kind = Some(text_style::text_type(atom)?);
+                        }
+                        TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
+                            if text.is_some() {
+                                return Err(unsupported("duplicate master text body"));
+                            }
+                            let decoded = decode_text(atom)?;
+                            charge_text(text_budget, decoded.len())?;
+                            text = Some(decoded);
+                        }
+                        4001 => {
+                            if style.is_some() || atom.version != 0 {
+                                return Err(unsupported("invalid master text style"));
+                            }
+                            style = Some(atom.payload);
+                        }
+                        _ => {} // Actions, links and metacharacter evaluation remain absent.
+                    }
+                }
+            }
+            let direct = match (text.as_deref(), style) {
+                (Some(text), Some(style)) => text_style::shape_levels(text, style, budget)?,
+                _ => Vec::new(),
+            };
+            output.insert(shape_master::Node {
+                id: shape.id,
+                parent: shape.master(),
+                text_type: kind,
+                direct,
+                base: base.clone(),
+            })?;
+        }
+        Ok(())
+    }
+    for drawing in parse_records(slide, budget)?
+        .into_iter()
+        .filter(|r| r.kind == 1036)
+    {
+        for dg in parse_records(drawing.payload, budget)? {
+            if dg.kind != 0xf002 || dg.version != 15 {
+                return Err(unsupported("invalid master OfficeArt drawing"));
+            }
+            for child in parse_records(dg.payload, budget)? {
+                visit(child, false, 0, &base, output, budget, text_budget)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 struct Writer<'a, 'b> {
@@ -494,7 +616,13 @@ impl Writer<'_, '_> {
                 self.push("<p:txBody>")?;
                 let p = &shape.props;
                 self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
-                let levels = if shape.placeholder {
+                let linked = match (shape.master(), self.context.and_then(|c| c.shapes)) {
+                    (Some(id), Some(shapes)) => Some(shapes.levels(id)?),
+                    _ => None,
+                };
+                let levels = if linked.is_some() {
+                    linked
+                } else if shape.placeholder {
                     self.context
                         .and_then(|c| c.master)
                         .and_then(|m| text_type.and_then(|t| m.levels(t)))
@@ -715,6 +843,7 @@ mod tests {
                 types: &[],
                 scheme: None,
                 master: Some(&master),
+                shapes: None,
             }),
             None,
         )
