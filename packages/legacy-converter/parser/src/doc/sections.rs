@@ -139,6 +139,9 @@ struct Properties {
     line_pitch: Option<u16>,
     char_space: i32,
     text_flow: Option<&'static str>,
+    page_format: &'static str,
+    page_restart: bool,
+    page_start: u32,
 }
 
 impl Properties {
@@ -163,6 +166,9 @@ impl Properties {
             line_pitch: None,
             char_space: 0,
             text_flow: None,
+            page_format: "decimal",
+            page_restart: false,
+            page_start: 0,
         };
         while !bytes.is_empty() {
             *budget = budget
@@ -192,6 +198,12 @@ impl Properties {
                 .ok_or_else(|| unsupported("truncated Word section SPRM"))?;
             bytes = &bytes[size..];
             match sprm {
+                0x300e => p.page_format = page_number_format(value[0])?,
+                // MS-DOC 2.2.5: later modifiers of the same property win.
+                // The older 16-bit operand has a SHOULD, not MUST, maximum
+                // of 32766. Do not reinterpret it as signed or clamp it.
+                0x501c => p.page_start = u32::from(u16_at(value, 0)?),
+                0x7044 => p.page_start = u32_at(value, 0)?,
                 0x3009 => {
                     if value[0] > 4 {
                         return Err(unsupported("invalid Word section break type"));
@@ -264,7 +276,7 @@ impl Properties {
                         p.spaces[index] = v;
                     }
                 }
-                0x3005 | 0x3019 | 0x300a | 0x3228 | 0x322a => {
+                0x3005 | 0x3019 | 0x300a | 0x3011 | 0x3228 | 0x322a => {
                     if value[0] > 1 {
                         return Err(unsupported("invalid Word section Boolean"));
                     }
@@ -273,6 +285,7 @@ impl Properties {
                         0x3005 => p.equal = v,
                         0x3019 => p.separator = v,
                         0x300a => p.title = v,
+                        0x3011 => p.page_restart = v,
                         0x3228 => p.bidi = v,
                         _ => p.rtl_gutter = v,
                     }
@@ -353,6 +366,20 @@ impl Properties {
             let footer = footer.unwrap_or(0);
             xml.push_str(&format!("<w:pgMar w:top=\"{top}\" w:right=\"{right}\" w:bottom=\"{bottom}\" w:left=\"{left}\" w:header=\"{header}\" w:footer=\"{footer}\" w:gutter=\"{}\"/>",self.gutter));
         }
+        // MS-DOC 2.6.4 SNfcPgn/SFPgnRestart/SPgnStart97/SPgnStart ->
+        // ECMA-376 17.6.12 pgNumType. A dormant start MUST be ignored.
+        // Validate only the effective restart, after all modifiers are applied.
+        // Omission preserves decimal continuation, independently per section.
+        if self.page_restart || self.page_format != "decimal" {
+            xml.push_str(&format!("<w:pgNumType w:fmt=\"{}\"", self.page_format));
+            if self.page_restart {
+                if self.page_start > 2147483646 {
+                    return Err(unsupported("invalid Word page-number restart"));
+                }
+                xml.push_str(&format!(" w:start=\"{}\"", self.page_start));
+            }
+            xml.push_str("/>");
+        }
         xml.push_str(&format!(
             "<w:cols w:num=\"{}\" w:equalWidth=\"{}\" w:sep=\"{}\"",
             self.columns,
@@ -400,9 +427,165 @@ impl Properties {
     }
 }
 
+// MS-OSHARED 2.2.1.3 MSONFC -> ECMA-376 17.18.59 ST_NumberFormat.
+// Tokens use the actual OOXML schema spelling (lowercase aiueo/iroha).
+// For the non-counting bullet format, use the decimal fallback permitted by
+// MS-DOC 2.6.4 SNfcPgn and documented for Word in its implementation note.
+// Preserve `none`, whose specified meaning is to suppress the number.
+fn page_number_format(value: u8) -> Result<&'static str, String> {
+    const FORMATS: [&str; 60] = [
+        "decimal",
+        "upperRoman",
+        "lowerRoman",
+        "upperLetter",
+        "lowerLetter",
+        "ordinal",
+        "cardinalText",
+        "ordinalText",
+        "hex",
+        "chicago",
+        "ideographDigital",
+        "japaneseCounting",
+        "aiueo",
+        "iroha",
+        "decimalFullWidth",
+        "decimalHalfWidth",
+        "japaneseLegal",
+        "japaneseDigitalTenThousand",
+        "decimalEnclosedCircle",
+        "decimalFullWidth2",
+        "aiueoFullWidth",
+        "irohaFullWidth",
+        "decimalZero",
+        "decimal",
+        "ganada",
+        "chosung",
+        "decimalEnclosedFullstop",
+        "decimalEnclosedParen",
+        "decimalEnclosedCircleChinese",
+        "ideographEnclosedCircle",
+        "ideographTraditional",
+        "ideographZodiac",
+        "ideographZodiacTraditional",
+        "taiwaneseCounting",
+        "ideographLegalTraditional",
+        "taiwaneseCountingThousand",
+        "taiwaneseDigital",
+        "chineseCounting",
+        "chineseLegalSimplified",
+        "chineseCountingThousand",
+        "decimal",
+        "koreanDigital",
+        "koreanCounting",
+        "koreanLegal",
+        "koreanDigital2",
+        "hebrew1",
+        "arabicAlpha",
+        "hebrew2",
+        "arabicAbjad",
+        "hindiVowels",
+        "hindiConsonants",
+        "hindiNumbers",
+        "hindiCounting",
+        "thaiLetters",
+        "thaiNumbers",
+        "thaiCounting",
+        "vietnameseCounting",
+        "numberInDash",
+        "russianLower",
+        "russianUpper",
+    ];
+    if value == 0xff {
+        return Ok("none");
+    }
+    FORMATS
+        .get(usize::from(value))
+        .copied()
+        .ok_or_else(|| unsupported("invalid Word page-number format"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn section_xml(bytes: &[u8]) -> String {
+        Properties::parse(bytes, &mut 100).unwrap().xml().unwrap()
+    }
+
+    #[test]
+    fn page_numbering_continues_by_default_and_ignores_dormant_start_values() {
+        for bytes in [
+            vec![],
+            prl(0x501c, 25),
+            [vec![0x11, 0x30, 1], prl(0x501c, 25), vec![0x11, 0x30, 0]].concat(),
+        ] {
+            assert!(!section_xml(&bytes).contains("pgNumType"));
+        }
+        assert!(section_xml(&[0x11, 0x30, 1])
+            .contains("<w:pgNumType w:fmt=\"decimal\" w:start=\"0\"/>"));
+        assert!(Properties::parse(&[0x11, 0x30, 2], &mut 100).is_err());
+    }
+
+    #[test]
+    fn page_number_start_uses_unsigned_widths_and_the_last_applied_modifier() {
+        for start in [0u32, 1, 32766, 32767, 65535, 65536, 2147483646] {
+            let mut bytes = vec![0x11, 0x30, 1];
+            if start <= u16::MAX as u32 {
+                bytes.extend(prl(0x501c, start as u16 as i16));
+                assert!(section_xml(&bytes).contains(&format!("w:start=\"{start}\"")));
+            }
+            bytes.extend(0x7044u16.to_le_bytes());
+            bytes.extend(start.to_le_bytes());
+            let xml = section_xml(&bytes);
+            assert!(xml.contains(&format!("w:start=\"{start}\"")));
+            assert!(xml.find("<w:pgNumType").unwrap() < xml.find("<w:cols").unwrap());
+        }
+        let bytes = [
+            vec![0x11, 0x30, 1],
+            prl(0x501c, 9),
+            0x7044u16.to_le_bytes().to_vec(),
+            123456u32.to_le_bytes().to_vec(),
+        ]
+        .concat();
+        assert!(section_xml(&bytes).contains("w:start=\"123456\""));
+        for start in [2147483647u32, u32::MAX] {
+            let bytes = [vec![0x44, 0x70], start.to_le_bytes().to_vec()].concat();
+            // MUST ignore a dormant start, including an out-of-range value.
+            assert!(!section_xml(&bytes).contains("pgNumType"));
+            assert!(
+                Properties::parse(&[bytes, vec![0x11, 0x30, 1]].concat(), &mut 100)
+                    .unwrap()
+                    .xml()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn section_number_formats_map_to_ooxml_without_changing_continuation() {
+        for (value, name) in [
+            (1, "upperRoman"),
+            (2, "lowerRoman"),
+            (3, "upperLetter"),
+            (4, "lowerLetter"),
+            (0x0c, "aiueo"),
+            (0x0d, "iroha"),
+            (0x16, "decimalZero"),
+            (0x28, "decimal"),
+            (0x3b, "russianUpper"),
+            (0xff, "none"),
+        ] {
+            let xml = section_xml(&[0x0e, 0x30, value]);
+            if name == "decimal" {
+                assert!(!xml.contains("pgNumType"));
+            } else {
+                assert!(xml.contains(&format!("<w:pgNumType w:fmt=\"{name}\"/>")));
+            }
+            assert!(!xml.contains("w:start="));
+        }
+        assert!(!section_xml(&[0x0e, 0x30, 2, 0x0e, 0x30, 0]).contains("pgNumType"));
+        assert!(Properties::parse(&[0x0e, 0x30, 0x60], &mut 100).is_err());
+    }
+
     #[test]
     fn stored_install_language_resolves_only_missing_header_distances() {
         // MS-DOC 2.5.2 FibBase.lid and 2.6.4 sprmSDyaHdrTop/Bottom.

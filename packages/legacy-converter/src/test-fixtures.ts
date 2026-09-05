@@ -1,5 +1,5 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const sectionEnds = options.sectionEnds ?? [text.length];
   if (options.headers && options.headers.length !== sectionEnds.length * 6) throw new Error('Expected six header/footer variants per section');
@@ -41,12 +41,21 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   }
   let sectionTable: Uint8Array = new Uint8Array();
   if (options.sectionProperties || options.headers || options.sectionEnds) {
-    const properties = options.sectionProperties ?? new Uint8Array();
-    if (properties.length > 254) throw new Error('Synthetic Sepx overlaps text');
-    view.setUint16(0x300, properties.length, true);
-    word.set(properties, 0x302);
-    // PlcfSed: CP boundaries followed by 12-byte Seds sharing this fixture's Sepx.
-    sectionTable = concat(little32(0), ...sectionEnds.map(little32), ...sectionEnds.map(() => concat(little16(0), little32(0x300), new Uint8Array(6))));
+    const supplied = options.sectionProperties ?? new Uint8Array();
+    const shared = supplied instanceof Uint8Array;
+    const properties = shared ? [supplied] : supplied;
+    if (!shared && properties.length !== sectionEnds.length) throw new Error('Expected one Sepx per section');
+    let offset = 0x300;
+    const offsets = properties.map(bytes => {
+      if (offset + 2 + bytes.length > textOffset) throw new Error('Synthetic Sepx overlaps text');
+      const start = offset;
+      view.setUint16(start, bytes.length, true);
+      word.set(bytes, start + 2);
+      offset += 2 + bytes.length;
+      return start;
+    });
+    // PlcfSed: CP boundaries followed by 12-byte Seds, optionally sharing Sepx.
+    sectionTable = concat(little32(0), ...sectionEnds.map(little32), ...sectionEnds.map((_, i) => concat(little16(0), little32(offsets[shared ? 0 : i]), new Uint8Array(6))));
     view.setUint32(0xca, table.length + dop.length, true);
     view.setUint32(0xce, sectionTable.length, true);
   }

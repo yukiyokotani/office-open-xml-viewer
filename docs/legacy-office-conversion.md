@@ -204,8 +204,20 @@ switches retain their dynamic meaning in headers/footers. The field table's
 lock flag keeps cached text, and private field results are suppressed.
 Other field instructions are discarded while their cached display is retained;
 they are not evaluated and cannot open links, files, macros or external services.
-Header floating drawings, advanced field switches, numbering restarts/formats
-from section properties, and exact Office pagination remain incomplete.
+Section page-number formats, continuation and explicit restarts become ordinary
+`w:pgNumType` (MS-DOC 2.6.4; MS-OSHARED 2.2.1.3; ECMA-376 17.6.12). A stored
+start is ignored unless restart is enabled; an enabled restart without an
+explicit start retains the binary format's default zero. Both unsigned 16-bit
+and 32-bit starts are supported. Formats reset independently per section; the
+non-counting bullet format uses the decimal fallback allowed by MS-DOC.
+`none` suppresses the number. Language-dependent/unsupported number formats
+retain their OOXML token, but the shared renderer may still display decimal.
+The shared field-number formatter bounds each expanded ordinal to 4,096 UTF-16
+units before allocating repeated glyphs. Exceeding this resource budget fails
+rendering instead of changing the format; large decimal starts remain supported.
+This does not restore active main-story fields: their cached display remains.
+Header floating drawings, advanced field switches, chapter-number prefixes,
+and exact Office pagination remain incomplete.
 Each aggregate main/header story has a 64 Mi UTF-16-unit decoding ceiling and
 one million controls; headers additionally allow at most 4,096 nonempty parts.
 The aggregate generated XML has a 256 MiB ceiling. These are resource policies,
