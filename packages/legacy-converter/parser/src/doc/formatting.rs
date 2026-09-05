@@ -502,6 +502,35 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_border_style_cascade_and_piece_resets_do_not_mutate_the_cache() {
+        let mut f = empty();
+        f.styles = vec![
+            Some(Style {
+                kind: 1,
+                base: 0xfff,
+                chpx: &[],
+                papx: &[0x24, 0x64, 8, 1, 2, 0, 0x26, 0x64, 8, 1, 2, 0],
+            }),
+            Some(Style {
+                kind: 1,
+                base: 0,
+                chpx: &[],
+                papx: &[0x50, 0xc6, 8, 0xff, 0, 0, 0, 16, 3, 0, 0],
+            }),
+        ];
+        let before = f.paragraph_xml(1, 0, 0, &[]).unwrap();
+        assert!(before.contains("<w:top w:val=\"single\""));
+        assert!(before.contains("<w:bottom w:val=\"double\""));
+        let cleared = f
+            .paragraph_xml(1, 0, 1, &[&[0x50, 0xc6, 8, 0, 0, 0, 0xff, 0, 0, 0, 0]])
+            .unwrap();
+        assert!(cleared.contains("<w:top w:val=\"single\""));
+        assert!(cleared.contains("<w:bottom w:val=\"none\""));
+        assert_eq!(before, f.paragraph_xml(1, 0, 0, &[]).unwrap());
+        assert!(!f.unsupported_paragraph_properties);
+    }
+
+    #[test]
     fn rejects_style_cycles_and_invalid_complex_piece_references() {
         let mut f = empty();
         f.styles = vec![Some(Style {

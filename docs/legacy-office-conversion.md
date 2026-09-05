@@ -223,6 +223,19 @@ one million controls; headers additionally allow at most 4,096 nonempty parts.
 The aggregate generated XML has a 256 MiB ceiling. These are resource policies,
 not format limits. No migration or opt-in API change is required.
 
+Paragraph borders retain top, bottom, logical left/right and between edges from
+both Brc80 and Brc operands (MS-DOC 2.6.2, 2.9.16/17/21). The converter resolves
+style inheritance and direct/piece overrides per edge, then projects logical
+sides after the final paragraph direction is known. Width, spacing, color and
+applicable shadow/frame flags become ordinary `w:pBdr` (ECMA-376 17.3.1.24).
+This also restores paragraph rules in supported headers, footers and table cells.
+Explicit `none` clears an edge. As input recovery, the converter also recognizes
+the documented NilBrc/Brc80MayBeNil no-border sentinels in paragraph operands,
+where Office can store them, and preserves them as `nil`; this is distinct from
+the ordinary Brc value constraints. Adjacency/group painting remains owned by
+the existing OOXML renderer. Binary PGP grouping metadata, paragraph shading,
+frames and exact Office border-effect appearance remain incomplete.
+
 Custom paragraph tabs resolve `sprmPChgTabsPapx` and `sprmPChgTabs` through the
 same style/PAPX/PRM cascade (MS-DOC 2.9.179-183). Deletions remove inherited stops
 within the specified range, including the normative 25-twip minimum tolerance;

@@ -1,7 +1,7 @@
 //! Paragraph layout from [MS-DOC] 2.6.2, LSPD and XAS to ECMA-376
 //! 17.3.1 / CT_PPrBase. Values retain their units; no font/pixel fitting.
 
-use super::{u16_at, unsupported};
+use super::{border::Border, u16_at, unsupported};
 use std::collections::BTreeMap;
 
 #[derive(Clone)]
@@ -22,6 +22,7 @@ pub struct Properties {
     chars: [Option<i16>; 3],
     alignment: (u8, bool),
     text_alignment: Option<&'static str>,
+    borders: [Option<Border>; 5],
 }
 
 impl Default for Properties {
@@ -52,6 +53,7 @@ impl Default for Properties {
             chars: [None; 3],
             alignment: (0, false),
             text_alignment: None,
+            borders: std::array::from_fn(|_| None),
         }
     }
 }
@@ -89,6 +91,18 @@ impl Properties {
             return Ok(true);
         }
         match code {
+            0x6424..=0x6428 => {
+                let side = usize::from(code - 0x6424);
+                self.borders[side] = Some(Border::paragraph(operand, true, side)?);
+            }
+            0xc64e..=0xc652 => {
+                // MS-DOC 2.9.21: BrcOperand.cb MUST be 8, excluding cb.
+                if operand.len() != 9 || operand[0] != 8 {
+                    return Err(unsupported("invalid Word paragraph border operand"));
+                }
+                let side = usize::from(code - 0xc64e);
+                self.borders[side] = Some(Border::paragraph(&operand[1..], false, side)?);
+            }
             0xc60d | 0xc615 => self.tabs.apply(operand, code == 0xc615)?,
             0x6412 => {
                 let line = signed(operand)?;
@@ -194,6 +208,26 @@ impl Properties {
             "snapToGrid",
         ] {
             if key == "suppressAutoHyphens" {
+                // MS-DOC 2.6.2 PBrcLeft/Right are logical. ECMA-376
+                // 17.3.1.17/28 left/right are physical, so resolve after bidi.
+                // Keep grouping as ordinary pBdr; the existing OOXML layout
+                // owns adjacency, spacing and between-border decisions.
+                if self.borders.iter().any(Option::is_some) {
+                    xml.push_str("<w:pBdr>");
+                    let rtl = self.flags.get("bidi") == Some(&true);
+                    for (side, index) in [
+                        ("top", 0),
+                        ("left", if rtl { 3 } else { 1 }),
+                        ("bottom", 2),
+                        ("right", if rtl { 1 } else { 3 }),
+                        ("between", 4),
+                    ] {
+                        if let Some(border) = &self.borders[index] {
+                            xml.push_str(&border.xml(side));
+                        }
+                    }
+                    xml.push_str("</w:pBdr>");
+                }
                 // CT_PPrBase places tabs after shading/borders and before this flag.
                 xml.push_str(&self.tabs.xml());
             }
@@ -326,6 +360,72 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paragraph_borders_preserve_each_side_and_schema_order() {
+        let mut p = Properties::default();
+        assert!(!p.xml().contains("pBdr"));
+        for code in 0x6424..=0x6428 {
+            assert!(p.apply(code, &[8, 1, 2, 3]).unwrap());
+        }
+        let xml = p.xml();
+        let border = xml
+            .split("<w:pBdr>")
+            .nth(1)
+            .unwrap()
+            .split("</w:pBdr>")
+            .next()
+            .unwrap();
+        let mut offset = 0;
+        for side in ["top", "left", "bottom", "right", "between"] {
+            let at = border.find(&format!("<w:{side} ")).unwrap();
+            assert!(at >= offset);
+            offset = at;
+            assert!(border[at..].starts_with(&format!(
+                "<w:{side} w:val=\"single\" w:sz=\"8\" w:color=\"0000FF\" w:space=\"3\""
+            )));
+        }
+        assert!(xml.find("</w:pBdr>").unwrap() < xml.find("<w:kinsoku").unwrap());
+    }
+
+    #[test]
+    fn modern_border_replaces_only_its_side_and_explicit_none_clears_it() {
+        let mut p = Properties::default();
+        p.apply(0x6424, &[8, 1, 2, 0]).unwrap();
+        p.apply(0x6426, &[8, 1, 2, 0]).unwrap();
+        assert!(p
+            .apply(0xc650, &[8, 0x12, 0x34, 0x56, 0, 16, 3, 7, 0])
+            .unwrap());
+        let xml = p.xml();
+        assert!(xml.contains("<w:top w:val=\"single\""));
+        assert!(
+            xml.contains("<w:bottom w:val=\"double\" w:sz=\"16\" w:color=\"123456\" w:space=\"7\"")
+        );
+        p.apply(0xc650, &[8, 0, 0, 0, 0xff, 0, 0, 0, 0]).unwrap();
+        assert!(p.xml().contains("<w:bottom w:val=\"none\""));
+        assert!(p.xml().contains("<w:top w:val=\"single\""));
+        p.apply(0xc650, &[8, 0, 1, 2, 3, 255, 255, 255, 255])
+            .unwrap();
+        assert!(p.xml().contains("<w:bottom w:val=\"nil\"/>"));
+        assert!(p.xml().contains("<w:top w:val=\"single\""));
+        for bad in [&[0][..], &[7, 0, 0, 0, 0, 0, 0, 0], &[8, 0, 0]] {
+            assert!(p.apply(0xc650, bad).is_err());
+        }
+    }
+
+    #[test]
+    fn paragraph_borders_resolve_logical_sides_after_the_final_bidi_setting() {
+        let mut p = Properties::default();
+        p.apply(0x6425, &[8, 1, 2, 0]).unwrap();
+        p.apply(0xc651, &[8, 255, 0, 0, 0, 8, 3, 0, 0]).unwrap();
+        p.apply(0x2441, &[1]).unwrap();
+        let xml = p.xml();
+        assert!(xml.contains("<w:left w:val=\"double\""));
+        assert!(xml.contains("<w:right w:val=\"single\""));
+        p.apply(0x2441, &[0]).unwrap();
+        assert!(p.xml().contains("<w:left w:val=\"single\""));
+        assert!(p.xml().contains("<w:right w:val=\"double\""));
+    }
+
     #[test]
     fn negative_line_spacing_is_exact_even_when_multiplier_flag_is_set() {
         let mut p = Properties::default();
