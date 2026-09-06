@@ -1,4 +1,4 @@
-//! Native preparation evidence, not drawing emission. MS-XLS 2.4.170/181,
+//! Owned sheet anchor preparation, not drawing emission. MS-XLS 2.4.170/181,
 //! 2.5.143/193-195; MS-ODRAW 2.2.13-17/40. Keep raw cell fractions intact.
 use super::{
     parse_bound_sheet, u16_at, u32_at, unsupported, Record, BIFF8, BOF, BOUNDSHEET8, EOF, FILEPASS,
@@ -42,7 +42,19 @@ pub struct DrawingAnchor {
     pub picture: Option<PictureReference>,
 }
 
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(super) fn workbook(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
+    workbook_with_policy(records, false)
+}
+
+pub(super) fn projectable(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
+    workbook_with_policy(records, true)
+}
+
+fn workbook_with_policy(
+    records: &[Record<'_>],
+    projectable_only: bool,
+) -> Result<Vec<DrawingAnchor>, String> {
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF workbook"))?;
@@ -88,7 +100,7 @@ pub(super) fn workbook(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, Str
         let end = starts.get(ordinal + 1).map_or(records.len(), |s| s.0);
         let data = assemble(&records[start..end], &mut work, &mut remaining)?;
         if let Some(mut drawing) = data {
-            walk(&mut drawing, tab, &mut work, &mut output)?;
+            walk_with_policy(&mut drawing, tab, &mut work, &mut output, projectable_only)?;
         }
     }
     Ok(output)
@@ -192,21 +204,32 @@ fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {
     })
 }
 
+#[cfg(test)]
 fn walk(
     drawing: &mut Drawing<'_>,
     sheet: usize,
     work: &mut usize,
     output: &mut Vec<DrawingAnchor>,
 ) -> Result<(), String> {
+    walk_with_policy(drawing, sheet, work, output, false)
+}
+
+fn walk_with_policy(
+    drawing: &mut Drawing<'_>,
+    sheet: usize,
+    work: &mut usize,
+    output: &mut Vec<DrawingAnchor>,
+    projectable_only: bool,
+) -> Result<(), String> {
     let (root, end) = record_with_end(&drawing.bytes, 0, work, "XLS drawing")?;
     if root.kind != 0xf002 || root.version != 15 || root.instance != 0 || end != drawing.bytes.len()
     {
         return Err(unsupported("invalid BIFF sheet drawing root"));
     }
-    let mut stack = vec![(8usize, end, 0usize, false, true)];
+    let mut stack = vec![(8usize, end, 0usize, false, true, false)];
     let mut ids = HashSet::new();
     let mut objects = HashSet::new();
-    while let Some((mut at, end, depth, group, mut first)) = stack.pop() {
+    while let Some((mut at, end, depth, group, mut first, mut excluded)) = stack.pop() {
         if depth > MAX_DEPTH {
             return Err(unsupported("BIFF drawing group depth exceeded"));
         }
@@ -217,6 +240,7 @@ fn walk(
             {
                 return Err(unsupported("invalid BIFF drawing group child"));
             }
+            let group_head = group && first;
             first = false;
             if matches!(record.kind, 0xf003 | 0xf004)
                 && (record.version != 15 || record.instance != 0)
@@ -226,8 +250,8 @@ fn walk(
             if record.kind == 0xf003 {
                 // Resume siblings after the owned group; bounded stack, no
                 // recursive descent into arbitrary application-specific data.
-                stack.push((next, end, depth, group, false));
-                stack.push((at + 8, next, depth + 1, true, true));
+                stack.push((next, end, depth, group, false, excluded));
+                stack.push((at + 8, next, depth + 1, true, true, excluded));
                 break;
             }
             if record.kind == 0xf004 {
@@ -235,10 +259,12 @@ fn walk(
                     (at + 8, None, None, None, false);
                 let mut object_data = None;
                 let mut picture = picture::Properties::default();
+                let mut child_anchor = false;
                 while position < next {
                     let (child, child_end) =
                         record_with_end(&drawing.bytes[..next], position, work, "XLS shape")?;
                     match child.kind {
+                        0xf00f => child_anchor = true,
                         0xf00b => picture.read(child, work)?,
                         0xf00a => {
                             if shape.is_some() || child.version != 2 || child.payload.len() != 8 {
@@ -310,11 +336,23 @@ fn walk(
                 }
                 let (shape_id, shape_flags) =
                     shape.ok_or_else(|| unsupported("missing BIFF shape identity"))?;
+                if group_head {
+                    // Only the top-level patriarch is transparent to sheet
+                    // coordinates. Nested group transforms are not flattened.
+                    excluded |= depth != 1
+                        || shape_flags & 5 != 5
+                        || shape_flags & (8 | 16 | 64 | 128 | 1024) != 0
+                        || picture.excluded();
+                }
                 if let Some((behavior, from, to)) = anchor {
                     let (object_id, object_type, object_flags) = object
                         .ok_or_else(|| unsupported("BIFF cell anchor has no owned object"))?;
                     if output.len() >= MAX_OBJECTS {
                         return Err(unsupported("BIFF retained anchor budget exceeded"));
+                    }
+                    if projectable_only && (excluded || depth > 1 || child_anchor) {
+                        at = next;
+                        continue;
                     }
                     output.push(DrawingAnchor {
                         sheet,

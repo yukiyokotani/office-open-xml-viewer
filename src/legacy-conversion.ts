@@ -7,6 +7,13 @@ import {
   LEGACY_OFFICE_WASM_ENGINE_VERSION,
   type LegacyOfficeWasmConverterOptions,
 } from '../packages/legacy-converter/src/index.js';
+import { attachXlsFontMeasurement } from '../packages/legacy-converter/src/xls-font-worker.js';
+import type { LegacyXlsFontMeasurement } from '../packages/legacy-converter/src/xls-font-metrics.js';
+
+export interface LegacyOfficeWasmWorkerConverterOptions extends LegacyOfficeConversionWorkerAdapterOptions {
+  /** Runs on the main thread; only font metadata and a numeric width cross the worker boundary. */
+  readonly measureXlsNormalFont?: LegacyXlsFontMeasurement;
+}
 import {
   createDisposableWorkerLegacyOfficeConverter,
   type LegacyOfficeConversionWorkerAdapterOptions,
@@ -20,11 +27,11 @@ import {
  * opt-in entry is the only normal path that bundles the converter Worker/WASM.
  */
 export function createLegacyOfficeWasmWorkerConverter(
-  options: LegacyOfficeConversionWorkerAdapterOptions = {},
+  options: LegacyOfficeWasmWorkerConverterOptions = {},
 ): LegacyOfficeConverter {
   const wasmUrl = new URL(legacyOfficeWasmAssetUrl, import.meta.url).href;
   return createDisposableWorkerLegacyOfficeConverter(
-    () => configuredLegacyOfficeWorker(new LegacyOfficeWasmWorker(), wasmUrl),
+    () => configuredLegacyOfficeWorker(new LegacyOfficeWasmWorker(), wasmUrl, options.measureXlsNormalFont),
     options,
   );
 }
@@ -32,10 +39,12 @@ export function createLegacyOfficeWasmWorkerConverter(
 function configuredLegacyOfficeWorker(
   worker: Worker,
   converterWasmUrl: string,
+  measure?: LegacyXlsFontMeasurement,
 ): LegacyOfficeConversionWorker {
+  const detach = measure ? attachXlsFontMeasurement(worker, measure) : undefined;
   return {
     postMessage(message: LegacyOfficeWorkerRequest, transfer: Transferable[]) {
-      worker.postMessage({ ...message, converterWasmUrl }, transfer);
+      worker.postMessage({ ...message, converterWasmUrl, measureXlsNormalFont: Boolean(measure) }, transfer);
     },
     addEventListener(type: string, listener: EventListener) {
       worker.addEventListener(type, listener);
@@ -44,6 +53,7 @@ function configuredLegacyOfficeWorker(
       worker.removeEventListener(type, listener);
     },
     terminate() {
+      detach?.();
       worker.terminate();
     },
   };
@@ -55,6 +65,7 @@ export {
   LEGACY_OFFICE_WASM_ENGINE_VERSION,
   type LegacyOfficeWasmConverterOptions,
 };
+export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from '../packages/legacy-converter/src/xls-font-metrics.js';
 
 export {
   createDisposableWorkerLegacyOfficeConverter,

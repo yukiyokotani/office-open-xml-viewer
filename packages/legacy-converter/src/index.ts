@@ -1,6 +1,8 @@
 import type { InitInput } from './wasm/legacy_office_converter.js';
 import wasmAssetUrl from './wasm/legacy_office_converter_bg.wasm?url';
 import type { LegacyOfficeConverter } from '@silurus/ooxml-core';
+import type { LegacyXlsFontMeasurement } from './xls-font-metrics.js';
+export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from './xls-font-metrics.js';
 import {
   createLegacyOfficeWasmConverterFromSource,
   LEGACY_OFFICE_WASM_ENGINE,
@@ -15,6 +17,9 @@ export interface LegacyOfficeWasmConverterOptions {
    * useful in Node and in bundlers that do not rewrite `new URL()` assets.
    */
   readonly wasm?: InitInput;
+  /** Enable passive XLS pictures using real Normal-font metrics. One pending
+   * measurement per converter; unavailable metrics omit pictures with a warning. */
+  readonly measureXlsNormalFont?: LegacyXlsFontMeasurement;
 }
 
 /**
@@ -25,7 +30,7 @@ export interface LegacyOfficeWasmConverterOptions {
 export function createLegacyOfficeWasmConverter(
   options: LegacyOfficeWasmConverterOptions = {},
 ): LegacyOfficeConverter {
-  return createLegacyOfficeWasmConverterFromSource(() => resolveWasm(options.wasm));
+  return createLegacyOfficeWasmConverterFromSource(() => resolveWasm(options.wasm), options.measureXlsNormalFont);
 }
 
 async function resolveWasm(override: InitInput | undefined): Promise<InitInput> {

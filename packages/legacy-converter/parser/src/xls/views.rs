@@ -22,6 +22,9 @@ pub(super) fn read_window(data: &[u8], count: &mut usize) -> Result<(), String> 
 pub(super) struct SheetViews(Vec<u16>);
 
 impl SheetViews {
+    pub(super) fn displays_formulas(&self) -> bool {
+        self.0.iter().any(|flags| flags & 1 != 0)
+    }
     pub(super) fn read(&mut self, record: &Record<'_>) -> Result<(), String> {
         if record.kind != WINDOW2 {
             return Ok(());

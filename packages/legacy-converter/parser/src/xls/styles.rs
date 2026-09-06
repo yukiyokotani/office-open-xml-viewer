@@ -57,7 +57,47 @@ pub(super) struct Styles<'a> {
     pub extensions_omitted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NormalFont {
+    pub name: String,
+    pub size_points: f64,
+    pub bold: bool,
+    pub italic: bool,
+}
+
 impl<'a> Styles<'a> {
+    /// MS-XLS 2.2.6.1.2.2: Normal references XF zero, not FONT zero.
+    /// Return no measurement request for font variants we cannot reproduce.
+    pub(super) fn normal_font(&self) -> Option<NormalFont> {
+        let xf = self.xfs.first()?;
+        if u16_at(xf, 4).ok()? & 4 == 0 {
+            return None;
+        }
+        let index = u16_at(xf, 0).ok()?;
+        if index == 4 {
+            return None;
+        }
+        let font = self.fonts.get(usize::from(index - u16::from(index > 4)))?;
+        if font.len() < 16 || font[2] & 0xf0 != 0 || u16_at(font, 8).ok()? != 0 {
+            return None;
+        }
+        let weight = u16_at(font, 6).ok()?;
+        let size = u16_at(font, 0).ok()?;
+        if !matches!(weight, 400 | 700) || size == 0 {
+            return None;
+        }
+        let (name, _) =
+            decode_biff_chars(font, 16, usize::from(font[14]), font[15] & 1 != 0).ok()?;
+        if name.is_empty() {
+            return None;
+        }
+        Some(NormalFont {
+            name,
+            size_points: f64::from(size) / 20.0,
+            bold: weight == 700,
+            italic: font[2] & 2 != 0,
+        })
+    }
     pub fn parse(records: &[Record<'a>]) -> Result<Self, String> {
         let mut styles = Self {
             fonts: vec![],
@@ -352,6 +392,89 @@ mod tests {
         data[14] = 1;
         data.push(b'F');
         data
+    }
+    #[test]
+    fn normal_measurement_resolves_style_xf_and_reserved_font_gap() {
+        let first = font();
+        let mut last = font();
+        last[16] = b'Z';
+        last[2] = 2;
+        last[6..8].copy_from_slice(&700u16.to_le_bytes());
+        let mut xf = [0; 20];
+        xf[0] = 5;
+        xf[4] = 4;
+        let mut records: Vec<_> = [&first, &first, &first, &first, &last]
+            .into_iter()
+            .map(|f| Record {
+                kind: 0x31,
+                offset: 0,
+                data: f,
+            })
+            .collect();
+        records.push(Record {
+            kind: 0xe0,
+            offset: 0,
+            data: &xf,
+        });
+        let s = Styles::parse(&records).unwrap();
+        assert_eq!(
+            s.normal_font(),
+            Some(NormalFont {
+                name: "Z".into(),
+                size_points: 10.0,
+                bold: true,
+                italic: true
+            })
+        );
+        for index in [4, 6] {
+            let mut bad = xf;
+            bad[0] = index;
+            let s = Styles::parse(&[Record {
+                kind: 0xe0,
+                offset: 0,
+                data: &bad,
+            }])
+            .unwrap();
+            assert_eq!(s.normal_font(), None);
+        }
+        for (offset, value) in [(4, 0), (0, 4)] {
+            let mut bad = xf;
+            bad[offset] = value;
+            let mut local = records[..5].to_vec();
+            local.push(Record {
+                kind: 0xe0,
+                offset: 0,
+                data: &bad,
+            });
+            assert_eq!(Styles::parse(&local).unwrap().normal_font(), None);
+        }
+    }
+
+    #[test]
+    fn unsupported_font_variants_do_not_request_guessed_measurements() {
+        for (offset, value) in [(2, 64), (2, 128), (8, 1), (6, 0)] {
+            let mut font = font();
+            font[offset] = value;
+            if offset == 6 {
+                font[7] = 0;
+            }
+            let mut xf = [0; 20];
+            xf[4] = 4;
+            let s = Styles::parse(&[
+                Record {
+                    kind: 0x31,
+                    offset: 0,
+                    data: &font,
+                },
+                Record {
+                    kind: 0xe0,
+                    offset: 0,
+                    data: &xf,
+                },
+            ])
+            .unwrap();
+            assert_eq!(s.normal_font(), None);
+        }
     }
     #[test]
     fn checksum_bound_extended_rgb_colors_override_only_the_owned_xf() {

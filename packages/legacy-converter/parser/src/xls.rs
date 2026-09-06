@@ -3,8 +3,9 @@
 //! The converter preserves worksheet names, scalar/string/boolean/error values,
 //! cached formula results, merged-cell ranges, BIFF8 cell styles, shared-string
 //! character formatting and geometry.
-//! Formula token programs, drawings, charts, external links, and macros are never evaluated
-//! or copied. See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
+//! Formula token programs, charts, external links, and macros are never evaluated
+//! or copied. Passive picture projection requires host-measured Normal-font metrics.
+//! See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
 use std::collections::{BTreeMap, HashSet};
@@ -13,11 +14,10 @@ use std::rc::Rc;
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
-#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(crate) mod drawing_anchors;
-#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 mod drawing_media;
 mod geometry;
+mod pictures;
 mod print;
 mod rich;
 mod styles;
@@ -47,7 +47,9 @@ const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
-pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+pub(crate) fn inspect_images(
+    cfb: &CompoundFile<'_>,
+) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
     let workbook = cfb
         .stream("Workbook")
         .or_else(|_| cfb.stream("Book"))
@@ -67,7 +69,9 @@ pub(crate) fn inspect_anchors(
 }
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
-pub(crate) fn inspect_pictures(cfb: &CompoundFile<'_>) -> Result<crate::XlsPictureInspection, String> {
+pub(crate) fn inspect_pictures(
+    cfb: &CompoundFile<'_>,
+) -> Result<crate::XlsPictureInspection, String> {
     let workbook = cfb
         .stream("Workbook")
         .or_else(|_| cfb.stream("Book"))
@@ -80,7 +84,10 @@ pub(crate) fn inspect_pictures(cfb: &CompoundFile<'_>) -> Result<crate::XlsPictu
         .collect();
     let images = drawing_media::selected(&records, &indices)?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
-    anchors.retain(|a| a.picture.is_some_and(|p| supported.contains(&p.store_index)));
+    anchors.retain(|a| {
+        a.picture
+            .is_some_and(|p| supported.contains(&p.store_index))
+    });
     Ok(crate::XlsPictureInspection { anchors, images })
 }
 
@@ -140,6 +147,58 @@ struct SheetData {
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsConversion, String> {
+    prepare(cfb, false)?.finish(max_output_bytes, None)
+}
+
+/// Owned parse result: no CFB/BIFF slices survive preparation. This boundary
+/// permits host font measurement without retaining or parsing the source again.
+pub(crate) struct PreparedXls {
+    sheets: Vec<(String, SheetData)>,
+    styles: String,
+    date1904: bool,
+    window_count: usize,
+    warnings: Vec<String>,
+    pub(crate) font: Option<styles::NormalFont>,
+    pictures: pictures::Pictures,
+}
+
+impl PreparedXls {
+    pub(crate) fn finish(
+        mut self,
+        max_output_bytes: usize,
+        mdw: Option<f64>,
+    ) -> Result<XlsConversion, String> {
+        if mdw.is_some_and(|v| !v.is_finite() || v.fract() != 0.0 || !(1.0..=4096.0).contains(&v)) {
+            return Err(unsupported("invalid measured XLS maximum digit width"));
+        }
+        let mdw = mdw.filter(|_| self.font.is_some());
+        if mdw.is_none() && !self.pictures.is_empty() {
+            self.warnings
+                .push("legacy-xls:unmeasured-pictures-omitted".into());
+        }
+        let drawings = mdw.map(|m| self.pictures.emit(&self.sheets, m, &mut self.warnings));
+        if drawings.as_ref().is_some_and(|d| !d.sheets.is_empty()) {
+            self.warnings[0] =
+                "legacy-xls:unsupported-drawings-conditional-formatting-and-external-links-omitted"
+                    .into();
+        }
+        let bytes = build_xlsx_with_drawings(
+            &self.sheets,
+            &self.styles,
+            self.date1904,
+            self.window_count,
+            max_output_bytes,
+            mdw,
+            drawings.as_ref(),
+        )?;
+        Ok(XlsConversion {
+            bytes,
+            warnings: self.warnings,
+        })
+    }
+}
+
+pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<PreparedXls, String> {
     let workbook = cfb
         .stream("Workbook")
         .or_else(|_| cfb.stream("Book"))
@@ -214,7 +273,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
     let mut formula_results = false;
     let mut incomplete_print_margins = false;
     let mut custom_views_omitted = false;
-    for sheet in sheets {
+    let mut tabs = Vec::new();
+    for (tab, sheet) in sheets.into_iter().enumerate() {
         if sheet.sheet_type != 0 {
             skipped_non_worksheets = true;
             continue;
@@ -229,19 +289,14 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
         custom_views_omitted |= data.custom_views_omitted;
         formula_results |= data.formula_results;
         converted.push((sheet.name, data));
+        tabs.push(tab);
     }
     if converted.is_empty() {
         return Err(unsupported(
             "BIFF workbook contains no supported worksheets",
         ));
     }
-    let bytes = build_xlsx(
-        &converted,
-        &styles.xml()?,
-        date1904,
-        window_count,
-        max_output_bytes,
-    )?;
+    let styles_xml = styles.xml()?;
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
         "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
@@ -261,7 +316,33 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
-    Ok(XlsConversion { bytes, warnings })
+    let pictures = if with_pictures {
+        match pictures::Pictures::prepare(&records, &tabs) {
+            Ok(value) => value,
+            Err(_) => {
+                // Optional passive content fails closed without discarding
+                // otherwise valid cells. Never copy the rejected image bytes.
+                warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
+                pictures::Pictures::default()
+            }
+        }
+    } else {
+        pictures::Pictures::default()
+    };
+    let font = if with_pictures && !pictures.is_empty() {
+        styles.normal_font()
+    } else {
+        None
+    };
+    Ok(PreparedXls {
+        sheets: converted,
+        styles: styles_xml,
+        date1904,
+        window_count,
+        warnings,
+        font,
+        pictures,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -912,12 +993,14 @@ fn decode_rk(raw: u32) -> f64 {
     value
 }
 
-fn build_xlsx(
+fn build_xlsx_with_drawings(
     sheets: &[(String, SheetData)],
     styles: &str,
     date1904: bool,
     window_count: usize,
     max_output_bytes: usize,
+    mdw: Option<f64>,
+    drawings: Option<&pictures::Parts>,
 ) -> Result<Vec<u8>, String> {
     let mut workbook = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -970,7 +1053,13 @@ fn build_xlsx(
             "<Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
             id
         ));
-        let sheet_xml = build_sheet_xml(sheet, remaining_sheet_xml)?;
+        let has_drawing = drawings.is_some_and(|d| d.sheets.contains(&index));
+        let sheet_xml = build_sheet_xml_with_drawings(
+            sheet,
+            remaining_sheet_xml,
+            if has_drawing { mdw } else { None },
+            has_drawing,
+        )?;
         remaining_sheet_xml = remaining_sheet_xml
             .checked_sub(sheet_xml.len())
             .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
@@ -981,21 +1070,50 @@ fn build_xlsx(
         "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>",
         sheets.len() + 1
     ));
+    if let Some(drawings) = drawings {
+        content_types.push_str(&drawings.types);
+    }
     content_types.push_str("</Types>");
     parts.push(("xl/workbook.xml".into(), workbook));
     parts.push(("xl/_rels/workbook.xml.rels".into(), workbook_rels));
     parts.push(("[Content_Types].xml".into(), content_types));
-    write_package(&parts, max_output_bytes)
+    if let Some(drawings) = drawings {
+        crate::ooxml::write_package_bytes(
+            parts
+                .iter()
+                .chain(drawings.xml.iter())
+                .map(|(n, b)| (n.as_str(), b.as_bytes()))
+                .chain(
+                    drawings
+                        .media
+                        .iter()
+                        .map(|(n, b)| (n.as_str(), b.as_slice())),
+                ),
+            max_output_bytes,
+        )
+    } else {
+        write_package(&parts, max_output_bytes)
+    }
 }
 
+#[cfg(test)]
 fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String> {
+    build_sheet_xml_with_drawings(sheet, max_bytes, None, false)
+}
+
+fn build_sheet_xml_with_drawings(
+    sheet: &SheetData,
+    max_bytes: usize,
+    mdw: Option<f64>,
+    drawing: bool,
+) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
     );
     xml.push_str(&sheet.print.sheet_properties());
     xml.push_str(&sheet.views.xml());
-    xml.push_str(&sheet.geometry.xml());
+    xml.push_str(&sheet.geometry.xml_with_metrics(mdw));
     xml.push_str("<sheetData>");
     for (row, cells) in &sheet.rows {
         xml.push_str(&format!(
@@ -1059,6 +1177,9 @@ fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String
         xml.push_str("</mergeCells>");
     }
     xml.push_str(&sheet.print.xml());
+    if drawing {
+        xml.push_str("<drawing xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"legacyDrawing\"/>");
+    }
     xml.push_str("</worksheet>");
     if xml.len() > max_bytes {
         return Err("OUTPUT_TOO_LARGE".into());
@@ -1166,7 +1287,10 @@ mod tests {
         assert!(xml.contains("showZeros=\"0\""));
         assert!(xml.contains("rightToLeft=\"1\""));
         assert!(xml.contains("<sheetData></sheetData>"));
-        assert_eq!(build_sheet_xml(&sheet, xml.len() - 1).unwrap_err(), "OUTPUT_TOO_LARGE");
+        assert_eq!(
+            build_sheet_xml(&sheet, xml.len() - 1).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
     }
 
     #[test]
@@ -1174,7 +1298,9 @@ mod tests {
         for flags in 0..=u8::MAX {
             let parsed = super::parse_bound_sheet(&[0, 0, 0, 0, flags, 0, 1, 0, b'A']);
             if flags & 3 == 3 {
-                assert!(parsed.unwrap_err().contains("invalid BIFF sheet visibility"));
+                assert!(parsed
+                    .unwrap_err()
+                    .contains("invalid BIFF sheet visibility"));
             } else {
                 let expected = ["", " state=\"hidden\"", " state=\"veryHidden\""];
                 assert_eq!(

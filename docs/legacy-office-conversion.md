@@ -580,11 +580,68 @@ DrawingML support, not a binary-specific rendering exception. Font metrics,
 tabs and unsupported geometry can still cause visible differences from Office;
 preserving offsets does not guarantee layout equivalence.
 
+## Measured XLS picture conversion
+
+No migration is required. DOC, XLS and PPT remain separate format opt-ins, and
+the converter still produces ordinary macro-free OOXML for the existing parsers
+and renderers. Passive XLS pictures additionally need the workbook's actual
+Normal-font metrics. Enable them with `measureXlsNormalFont` on either
+`createLegacyOfficeWasmConverter` or `createLegacyOfficeWasmWorkerConverter`:
+
+```typescript
+const converter = createLegacyOfficeWasmWorkerConverter({
+  measureXlsNormalFont: async (font, signal) => {
+    // Application-owned: load this font from your trusted font collection,
+    // measure digits 0–9 at font.sizePoints / 72 * 96 CSS pixels (including
+    // font.bold / font.italic), and round the maximum measured advance.
+    // Return undefined if the intended font is unavailable. Do not substitute
+    // a guessed width or treat an untrusted font.family as a resource URL.
+    return measureInstalledNormalFont(font, signal);
+  },
+});
+```
+
+The callback returns an integer width from 1 to 4096 pixels, or `undefined`.
+The upper limit is resource policy, not an Office font-layout rule. Load the
+same font used by the viewer before measuring. Callback rejection fails the
+conversion; unavailable metrics omit pictures with an explicit warning.
+Direct converters retain at most one prepared XLS model while measuring;
+another measured XLS request reports `capacity-exceeded`. The worker adapter
+keeps its existing bounded queue and concurrency settings. Cancellation frees
+the prepared model or terminates its worker, aborts the host measurement signal,
+and discards late replies. Apply a conversion timeout if a font loader can hang.
+
+The worker sends only a bounded font descriptor to the main thread and receives
+a numeric width or failure. Functions and WASM pointers never cross realms.
+CFB/BIFF parsing is performed once; the owned cell/style/picture data survives
+measurement without retaining the parser's source slices. DOC and PPT never
+invoke this XLS hook, and omitting the hook preserves the previous output path.
+
+The current subset emits owned, explicitly sized, embedded PNG/JPEG/validated
+EMF picture frames outside nested groups. It preserves cell-relative anchor
+offsets, movement/resize behavior, crop and local flip/rotation attributes in
+ordinary SpreadsheetDrawing XML. Coordinate conversion uses MS-XLS 2.5.193 and
+ECMA-376 18.3.1.13/81, not a fixed assumed digit width. Normal font selection
+follows XF zero and its FontIndex (MS-XLS 2.2.6.1.2.2/2.5.129).
+
+Nested group transforms, active/linked objects, unsupported font variants,
+picture effects and unresolved geometry remain best-effort omissions. A rejected
+optional drawing/media stage drops pictures with a warning while preserving
+otherwise valid cells; it never repairs or copies rejected payloads. The shared
+image validators are unchanged. Geometry prefix construction has a cumulative
+two-million-operation budget, in addition to the existing drawing/media limits.
+Output ZIP bytes are bounded and repeated image references reuse one media part.
+This is not a claim of complete Excel display fidelity: the ordinary XLSX
+renderer also has its own DrawingML capability limits. In particular, the
+current XLSX image model does not expose the saved flip/rotation attributes,
+and its fixed-size handling currently specializes `editAs="oneCell"`; retaining
+those properties in OOXML does not establish their full display fidelity yet.
+
 ## XLS drawing inspection for development
 
-XLS drawing conversion is not enabled yet. A native-only inspection helper can
+Separately, a native-only inspection helper can
 extract the supported passive PNG, JPEG and EMF entries from a BIFF8 global
-image store while sheet ownership and font-dependent placement are developed:
+image store without requiring font metrics or generating an OOXML package:
 
 ```sh
 cargo run -p legacy-office-converter --features inspection \
@@ -649,22 +706,16 @@ once. It returns only anchors with a corresponding supported image. Unused
 catalog entries are not inflated; an invalid referenced image or out-of-range
 index still fails inspection. There is no fallback to another image, file or URL.
 The anchor and media stages each retain their separate two-million-work budget.
-This is preparation for OOXML emission, not worksheet image display support or
-an assertion of complete inherited visibility/geometry.
+This raw inspection is not an assertion of complete inherited visibility or
+geometry. The measured production path applies additional picture eligibility.
 
 Anchor inspection limits cumulative drawing bytes to 128 MiB, record work to
 two million, substream/group nesting to 32, retained anchors to 65,536, and
 per-sheet shape/client identities to 65,536. The disjoint ranges prevent repeated
 scanning through overlapping worksheet references. Native metadata does not prove
 visibility, image eligibility or complete object validity: non-picture objects,
-deleted shapes and OLE-marked shapes can have anchors too. No production WASM,
-worker, public conversion option or OOXML rendering behavior is changed.
-
-Worksheet placement still needs image-store binding, complete shape eligibility
-and conversion of cell-relative offsets to OOXML coordinates. Horizontal
-offsets require the normal font's measured digit width; a fixed assumed width
-would introduce layout errors. Measurement transport, anchor placement, cropping
-and grouping remain integration work. No migration is required.
+deleted shapes and OLE-marked shapes can have anchors too. These development
+helpers remain separate from the measured runtime conversion described above.
 
 ## Custom converter contract
 

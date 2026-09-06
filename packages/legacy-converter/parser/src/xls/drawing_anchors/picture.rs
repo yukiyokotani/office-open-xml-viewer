@@ -26,6 +26,11 @@ pub(super) struct Properties {
 }
 
 impl Properties {
+    pub(super) fn excluded(&self) -> bool {
+        // A rotated parent requires group-transform composition, which the
+        // current ordinary-picture projection deliberately does not perform.
+        self.excluded || self.rotation != 0
+    }
     pub(super) fn read(&mut self, record: ArtRecord<'_>, work: &mut usize) -> Result<(), String> {
         if self.seen {
             return Err(unsupported("duplicate BIFF picture property table"));

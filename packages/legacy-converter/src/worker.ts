@@ -5,14 +5,16 @@ import {
 } from '@silurus/ooxml-core';
 import type { InitInput } from './wasm/legacy_office_converter.js';
 import { createLegacyOfficeWasmConverterFromSource } from './engine.js';
+import { requestXlsFontMeasurement } from './xls-font-worker.js';
 
 type ConfiguredWorkerRequest = LegacyOfficeWorkerRequest & {
   readonly converterWasmUrl?: unknown;
+  readonly measureXlsNormalFont?: unknown;
 };
 
-let resolveWasm: ((source: InitInput) => void) | undefined;
+let resolveWasm: ((source: { wasm: InitInput; measure: boolean }) => void) | undefined;
 let rejectWasm: ((error: Error) => void) | undefined;
-const wasmSource = new Promise<InitInput>((resolve, reject) => {
+const wasmSource = new Promise<{ wasm: InitInput; measure: boolean }>((resolve, reject) => {
   resolveWasm = resolve;
   rejectWasm = reject;
 });
@@ -24,7 +26,7 @@ globalThis.addEventListener('message', ((event: MessageEvent<ConfiguredWorkerReq
     return;
   }
   try {
-    resolveWasm?.(new URL(value));
+    resolveWasm?.({ wasm: new URL(value), measure: event.data.measureXlsNormalFont === true });
   } catch {
     rejectWasm?.(new Error('invalid converter WASM URL'));
   }
@@ -44,7 +46,12 @@ const workerScope: LegacyOfficeConversionWorkerScope = {
   },
 };
 
-installLegacyOfficeConversionWorkerHandler(
-  workerScope,
-  createLegacyOfficeWasmConverterFromSource(() => wasmSource),
-);
+let converter: ReturnType<typeof createLegacyOfficeWasmConverterFromSource> | undefined;
+installLegacyOfficeConversionWorkerHandler(workerScope, {
+  async convert(input) {
+    const config = await wasmSource;
+    converter ??= createLegacyOfficeWasmConverterFromSource(() => config.wasm,
+      config.measure ? requestXlsFontMeasurement(globalThis) : undefined);
+    return converter.convert(input);
+  },
+});

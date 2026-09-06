@@ -1,7 +1,9 @@
-//! Development image extraction for XLS drawing integration.
+//! Bounded passive image extraction for XLS drawing integration.
 //! MS-XLS 2.1.7.20.3 (including implementation note 6), 2.4.58/171;
 //! MS-ODRAW 2.2.12/20/22. No shape placement or active-object evaluation.
-use super::{u16_at, unsupported, Record, BOF, EOF, FILEPASS};
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+use super::{u16_at, BOF, FILEPASS};
+use super::{unsupported, Record, EOF};
 use crate::officeart::{raster, record_with_end};
 
 const MAX_DRAWING_BYTES: usize = 128 * 1024 * 1024;
@@ -37,8 +39,9 @@ pub(super) fn selected(
     Ok(output)
 }
 
-/// Inspect the global image store only. Do not call it from shipped conversion
-/// until image ownership and font-dependent sheet coordinates are integrated.
+/// Native-only catalog inspection. Production conversion uses owned, selected
+/// references instead of exposing every global catalog entry.
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
     let first = records
         .first()
@@ -58,6 +61,7 @@ pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<(u32, &'static str, V
     extract(&bytes, &mut work, MAX_MEDIA_BYTES)
 }
 
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 fn extract(
     bytes: &[u8],
     work: &mut usize,

@@ -147,6 +147,66 @@ pub struct LegacyConversionOutput {
     warnings: String,
 }
 
+/// Owned XLS model retained only while the host measures its Normal font.
+/// `finish` consumes the model even on failure; `free` also releases it.
+#[wasm_bindgen]
+pub struct PreparedLegacyXls {
+    inner: Option<xls::PreparedXls>,
+}
+
+#[wasm_bindgen]
+impl PreparedLegacyXls {
+    pub fn font_name(&self) -> Option<String> {
+        self.inner.as_ref()?.font.as_ref().map(|f| f.name.clone())
+    }
+    pub fn font_size_points(&self) -> Option<f64> {
+        self.inner.as_ref()?.font.as_ref().map(|f| f.size_points)
+    }
+    pub fn font_bold(&self) -> bool {
+        self.inner
+            .as_ref()
+            .and_then(|p| p.font.as_ref())
+            .is_some_and(|f| f.bold)
+    }
+    pub fn font_italic(&self) -> bool {
+        self.inner
+            .as_ref()
+            .and_then(|p| p.font.as_ref())
+            .is_some_and(|f| f.italic)
+    }
+    pub fn finish(
+        &mut self,
+        max_output_bytes: u32,
+        maximum_digit_width: Option<f64>,
+    ) -> Result<LegacyConversionOutput, JsValue> {
+        let prepared = self
+            .inner
+            .take()
+            .ok_or_else(|| JsValue::from_str("XLS model already consumed"))?;
+        let output = prepared
+            .finish(max_output_bytes as usize, maximum_digit_width)
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(LegacyConversionOutput {
+            bytes: Some(output.bytes),
+            warnings: output.warnings.join("\n"),
+        })
+    }
+}
+
+#[wasm_bindgen]
+pub fn prepare_legacy_xls(data: Vec<u8>) -> Result<PreparedLegacyXls, JsValue> {
+    let prepare = || -> Result<_, String> {
+        let cfb = cfb::CompoundFile::open(&data).map_err(|e| format!("UNSUPPORTED:{e}"))?;
+        if cfb.has_entry("WordDocument") || !(cfb.has_entry("Workbook") || cfb.has_entry("Book")) {
+            return Err("UNSUPPORTED:CFB stream family does not match XLS".into());
+        }
+        xls::prepare(&cfb, true)
+    };
+    prepare()
+        .map(|inner| PreparedLegacyXls { inner: Some(inner) })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 #[wasm_bindgen]
 impl LegacyConversionOutput {
     /// Transfer the generated OOXML package out of WASM exactly once.

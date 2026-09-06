@@ -10,12 +10,23 @@ pub(super) struct Geometry {
     default_row: Option<(u16, u16)>,
     base_width: Option<u16>,
     default_column: Option<(u16, u16, u16)>,
+    digit_width: Option<u16>,
+    unknown_digit_width: bool,
 }
 
 impl Geometry {
     pub fn read(&mut self, record: &Record<'_>) -> Result<(), String> {
         let data = record.data;
         match record.kind {
+            // MS-XLS 2.4.98, record 153: two-byte DxGCol, already in
+            // 1/256 Normal digit widths. Do not interpret an unknown layout.
+            0x0099 => {
+                if data.len() == 2 {
+                    self.digit_width = Some(u16_at(data, 0)?);
+                } else {
+                    self.unknown_digit_width = true;
+                }
+            }
             0x0208 => {
                 let row = u16_at(data, 0)?;
                 let height = u16_at(data, 6)?;
@@ -87,7 +98,12 @@ impl Geometry {
         xml
     }
 
+    #[cfg(test)]
     pub fn xml(&self) -> String {
+        self.xml_with_metrics(None)
+    }
+
+    pub(super) fn xml_with_metrics(&self, mdw: Option<f64>) -> String {
         let mut xml = String::new();
         if let Some((height, flags)) = self.default_row {
             xml.push_str(&format!("<sheetFormatPr defaultRowHeight=\"{}\" customHeight=\"{}\" zeroHeight=\"{}\" thickTop=\"{}\" thickBottom=\"{}\"", f64::from(height) / 20.0, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1, (flags >> 3) & 1));
@@ -96,11 +112,11 @@ impl Geometry {
             if let Some(width) = self.base_width {
                 xml.push_str(&format!(" baseColWidth=\"{width}\""));
             }
-            if let Some((width, _, _)) = self.default_column {
-                xml.push_str(&format!(
-                    " defaultColWidth=\"{}\"",
-                    f64::from(width) / 256.0
-                ));
+            if let Some(width) = mdw
+                .and_then(|m| self.default_width(m))
+                .or_else(|| self.default_column.map(|c| f64::from(c.0)))
+            {
+                xml.push_str(&format!(" defaultColWidth=\"{}\"", width / 256.0));
             }
             xml.push_str("/>");
         }
@@ -114,11 +130,103 @@ impl Geometry {
         }
         xml
     }
+
+    fn default_width(&self, mdw: f64) -> Option<f64> {
+        if self.unknown_digit_width {
+            return None;
+        }
+        self.digit_width
+            .map(f64::from)
+            .or_else(|| self.default_column.map(|c| f64::from(c.0)))
+            // ECMA-376 18.3.1.13/81: base character count excludes the
+            // normative four margin pixels and one gridline pixel.
+            .or_else(|| {
+                self.base_width
+                    .map(|w| ((f64::from(w) + 5.0 / mdw) * 256.0).trunc())
+            })
+    }
+
+    pub(super) fn column_emu(&self, col: u16, mdw: f64) -> Option<f64> {
+        let width = if let Some(&(width, _, flags)) = self.columns.get(&col) {
+            if flags & 1 != 0 {
+                return Some(0.0);
+            }
+            f64::from(width)
+        } else {
+            self.default_width(mdw)?
+        };
+        Some(((width + (128.0 / mdw).trunc()) / 256.0 * mdw).trunc() * 9525.0)
+    }
+
+    pub(super) fn has_sheet_defaults(&self) -> bool {
+        self.default_row.is_some()
+    }
+
+    pub(super) fn row_emu(&self, row: u16) -> Option<f64> {
+        if let Some(&(height, flags)) = self.rows.get(&row) {
+            Some(if flags & 32 != 0 {
+                0.0
+            } else {
+                f64::from(height) * 635.0
+            })
+        } else {
+            self.default_row.map(|(height, flags)| {
+                if flags & 2 != 0 {
+                    0.0
+                } else {
+                    f64::from(height) * 635.0
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn measured_width_uses_normative_padding_and_explicit_digit_width_precedence() {
+        let mut geometry = Geometry::default();
+        assert_eq!(geometry.column_emu(0, 7.0), None);
+        geometry
+            .read(&Record {
+                kind: 0x55,
+                offset: 0,
+                data: &[8, 0],
+            })
+            .unwrap();
+        geometry
+            .read(&Record {
+                kind: 0x225,
+                offset: 0,
+                data: &[0, 0, 44, 1],
+            })
+            .unwrap();
+        assert_eq!(geometry.column_emu(0, 7.0), Some(61.0 * 9525.0));
+        assert!(geometry
+            .xml_with_metrics(Some(7.0))
+            .contains("defaultColWidth=\"8.7109375\""));
+        assert!(!geometry.xml().contains("defaultColWidth"));
+        geometry
+            .read(&Record {
+                kind: 0x99,
+                offset: 0,
+                data: &[0, 10],
+            })
+            .unwrap();
+        assert_eq!(geometry.column_emu(0, 7.0), Some(70.0 * 9525.0));
+        assert_eq!(geometry.column_emu(0, 9.0), Some(90.0 * 9525.0));
+        assert_eq!(geometry.row_emu(0), Some(300.0 * 635.0));
+        geometry
+            .read(&Record {
+                kind: 0x7d,
+                offset: 0,
+                data: &[0, 0, 0, 0, 0, 12, 0, 0, 1, 0],
+            })
+            .unwrap();
+        assert_eq!(geometry.column_emu(0, 7.0), Some(0.0));
+        assert_eq!(geometry.column_emu(1, 7.0), Some(70.0 * 9525.0));
+    }
     #[test]
     fn column_256_sets_default_width_without_creating_an_extra_column() {
         let mut geometry = Geometry::default();
