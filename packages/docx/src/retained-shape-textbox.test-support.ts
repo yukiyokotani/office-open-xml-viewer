@@ -113,7 +113,9 @@ export function acquireShapeTextBoxForTest(
       documentHasEastAsianText: state?.docEastAsian
         ?? shape.textBlocks?.some((block) => /[\u3000-\u9fff\uf900-\ufaff]/u.test(block.text))
         ?? false,
-      resolvedLocalFonts: state?.resolvedLocalFonts ?? services.text.localMetrics,
+      resolvedLocalFonts: state?.resolvedLocalFonts
+        ?? services.text.fontMetrics
+        ?? services.text.localMetrics,
       layoutServices: services,
     },
     input: textBoxAcquisitionInput(shape, source),

@@ -1,7 +1,7 @@
 import { withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
-import type { ResolvedLocalFontMetric } from './layout/text.js';
-import { snapshotLocalMetrics } from './layout/text.js';
+import type { ResolvedFontMetric } from './layout/text.js';
+import { snapshotFontMetrics } from './layout/text.js';
 import type { MathLayoutResource } from './layout/resources.js';
 import type { BodyLayoutKernel } from './layout/body-layout-kernel.js';
 import type { LayoutServices } from './layout/types.js';
@@ -27,11 +27,15 @@ import {
   attachBodyLayoutKernel,
   attachLayoutSourceStore,
 } from './layout/runtime-state.js';
+import {
+  docxResolvedFontMetricCandidates,
+  type DocxResolvedFontMetricCandidate,
+} from './document-content.js';
 
 function createConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
 ): BodyLayoutKernel {
   return createProductionBodyLayoutRuntime(
     source,
@@ -43,16 +47,23 @@ function createConcreteBodyLayoutKernel(
 export function createLayoutServices(
   input: DocxDocumentModel | LayoutSourceStore,
   options: {
-    readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+    readonly localMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
+    readonly fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
     readonly useGoogleFonts?: boolean;
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     readonly embeddedFaces?: readonly FontFace[];
     readonly googleFaces?: readonly FontFace[];
+    readonly measureResolvedFontMetrics?: boolean;
+    readonly resolvedFontMetricCandidates?: readonly DocxResolvedFontMetricCandidate[];
   } = {},
 ): LayoutServices {
   const source = isLayoutSourceStore(input) ? input : layoutSourceStore(input);
+  const resolvedFontMetricCandidates = options.resolvedFontMetricCandidates
+    ?? (isLayoutSourceStore(input)
+      ? []
+      : docxResolvedFontMetricCandidates(input, source.fontFamilyCharsets));
   // Main-thread layout must use an element-backed canvas when one is available:
   // OpenType `vert` is selected through the canvas element's CSS feature state,
   // and an OffscreenCanvas cannot prove or paint that feature route. Workers
@@ -133,20 +144,31 @@ export function createLayoutServices(
       });
     },
   });
-  const localMetrics = snapshotLocalMetrics(options.localMetrics);
+  const localMetrics = snapshotFontMetrics(options.localMetrics);
+  const inputFontMetrics = snapshotFontMetrics({
+    ...localMetrics,
+    ...options.fontMetrics,
+  });
   const services = createProductionLayoutServices(source, {
     ...options,
+    resolvedFontMetricCandidates,
     localMetrics,
+    fontMetrics: inputFontMetrics,
     measureContext: context,
     verticalGlyphMeasurement,
   });
+  // The production service may add metrics proven from the concrete
+  // Canvas-selected face. The body kernel (including empty paragraph-mark
+  // measurement) must receive that same immutable snapshot rather than the
+  // pre-probe caller input.
+  const fontMetrics = services.text.fontMetrics ?? inputFontMetrics;
   attachLayoutSourceStore(services, source);
   attachBodyLayoutKernel(
     services,
     createConcreteBodyLayoutKernel(
       source,
       context,
-      localMetrics,
+      fontMetrics,
     ),
   );
   return services;

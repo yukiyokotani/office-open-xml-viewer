@@ -4,7 +4,6 @@ import {
   preloadGoogleFonts,
   releaseOwnedBitmap,
   unloadGoogleFonts,
-  unloadLocalFontMetrics,
   unregisterEmbeddedFonts,
   WorkerBridge,
   defaultDpr,
@@ -45,7 +44,7 @@ import { createLayoutServices } from './layout-runtime.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { loadDocxLocalFontMetrics } from './local-font-metrics';
+import { docxResolvedFontMetricCandidates } from './document-content.js';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
@@ -380,8 +379,6 @@ export class DocxDocument {
    *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
    *  so a web font shared with another open document survives until both go). */
   private _googleFontFaces: FontFace[] = [];
-  /** Exact local faces used for version-adaptive Office line metrics. */
-  private _localMetricFontFaces: FontFace[] = [];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -559,17 +556,15 @@ export class DocxDocument {
       // the worker's zip-entry extraction) before the lazy first pagination, so
       // text measures/draws with the authored typeface. Worker mode does this
       // inside the worker (before it paginates); here it runs on the main thread.
+      let embeddedMetrics: Awaited<ReturnType<typeof loadEmbeddedFonts>>['metrics'] | undefined;
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         const loadingDocument = doc;
-        doc._embeddedFontFaces = await loadEmbeddedFonts(
+        const loadedEmbedded = await loadEmbeddedFonts(
           doc._document,
           (p) => loadingDocument.getFontBytes(p),
         );
-      }
-      let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
-      if (doc._mode === 'main' && doc._document) {
-        localMetrics = await loadDocxLocalFontMetrics(doc._document);
-        doc._localMetricFontFaces = localMetrics.faces;
+        doc._embeddedFontFaces = loadedEmbedded.faces;
+        embeddedMetrics = loadedEmbedded.metrics;
       }
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
@@ -583,7 +578,12 @@ export class DocxDocument {
         const layoutDocument = doc;
         const runtime = documentLayoutRuntimeOf(doc);
         runtime.services = createLayoutServices(doc._source, {
-          localMetrics: localMetrics?.metrics,
+          fontMetrics: embeddedMetrics,
+          measureResolvedFontMetrics: true,
+          resolvedFontMetricCandidates: docxResolvedFontMetricCandidates(
+            doc._document,
+            doc._source.fontFamilyCharsets,
+          ),
           useGoogleFonts: !!opts.useGoogleFonts,
           embeddedFaces: doc._embeddedFontFaces,
           googleFaces: doc._googleFontFaces,
@@ -1214,10 +1214,6 @@ export class DocxDocument {
     if (this._googleFontFaces.length > 0) {
       unloadGoogleFonts(this._googleFontFaces);
       this._googleFontFaces = [];
-    }
-    if (this._localMetricFontFaces.length > 0) {
-      unloadLocalFontMetrics(this._localMetricFontFaces);
-      this._localMetricFontFaces = [];
     }
     // Release both image owners keyed by this document's stable loader: the
     // shared decoded owner (base + derived colour surfaces) and the SVG lookup

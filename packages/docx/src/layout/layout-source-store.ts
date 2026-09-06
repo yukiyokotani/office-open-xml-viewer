@@ -1,4 +1,3 @@
-import type { LocalFontMetricRequest } from '@silurus/ooxml-core';
 import type {
   BodyElement,
   DocNote,
@@ -69,7 +68,6 @@ export interface LayoutSourceFontFacts {
   readonly embeddedFonts: readonly EmbeddedFontRef[];
   readonly renderedFamilies: readonly string[];
   readonly preloadNames: readonly (string | null | undefined)[];
-  readonly localMetricRequests: readonly LocalFontMetricRequest[];
   readonly defaultBodyFontSizePt: number;
 }
 

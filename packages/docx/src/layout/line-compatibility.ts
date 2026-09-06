@@ -1,13 +1,17 @@
+import type { OpenTypeLineMetrics } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { LineSpacing, TabStop } from '../types.js';
 
 export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
   id: 'word-east-asian-grid-line-allocation',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/layout/compatibility.test.ts#pins East Asian grid allocation and the untabled Far East metric factor',
+    kind: 'office-observation',
+    syntheticFixtureId: 'word-font-metrics-resource-matrix',
+    application: 'Microsoft Word',
+    version: '16.111.1',
+    platform: 'macOS 26.5.2',
   },
-  description: 'For an East Asian single-spaced line on a document grid, preserve the measured whole-cell allocation from the intended face design height and use the established 1.3-times-em fallback only when that design height is unavailable.',
+  description: 'Across eight East-Asian font resources, six sizes, and no-grid/grid/useFELayout variants, Word allocates East-Asian single lines as 1.3 times the selected face hhea ascent-plus-descent box. The matrix also observed that ratio for Latin text when every rFonts slot named the same East-Asian face, but mixed-slot Office documents provide counterexamples to a family-wide Latin override; this rule therefore remains East-Asian-only. Resource identity and glyph coverage are required; a family name alone carries no metric.',
 });
 
 export const WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT = defineCompatibilityRule({
@@ -707,6 +711,31 @@ export function wordRunVerticalAlignRaisePt(
 }
 
 export const WORD_FAR_EAST_SINGLE_LINE_FACTOR = 1.3;
+
+/** Word's observed Far-East line allocation applied to the selected face's
+ * OpenType hhea glyph box. The face loader supplies the metrics; this rule does
+ * not infer them from a family name. */
+export function wordOpenTypeEastAsianSingleLineRatio(
+  metrics: Readonly<OpenTypeLineMetrics>,
+): number {
+  if (!(metrics.unitsPerEm > 0)) return 0;
+  const glyphBox = Math.max(0, metrics.hheaAscent)
+    + Math.max(0, -metrics.hheaDescent);
+  return glyphBox > 0
+    ? (glyphBox / metrics.unitsPerEm) * WORD_FAR_EAST_SINGLE_LINE_FACTOR
+    : 0;
+}
+
+/** Word's observed Far-East allocation for a browser-resolved exact face.
+ * Identity and glyph coverage are proved by the resource loader; this pure
+ * projection deliberately contains no family-name registry. */
+export function wordResolvedEastAsianSingleLineRatio(
+  canvasFontBoxRatio: number,
+): number {
+  if (!Number.isFinite(canvasFontBoxRatio)
+    || !(canvasFontBoxRatio > 0)) return 0;
+  return canvasFontBoxRatio * WORD_FAR_EAST_SINGLE_LINE_FACTOR;
+}
 
 /** Compatibility projection governed by
  * {@link WORD_MS_MINCHO_EMPTY_EAST_ASIAN_MARK_HEIGHT}. */

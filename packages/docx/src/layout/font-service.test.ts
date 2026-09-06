@@ -649,7 +649,7 @@ describe('font layout services', () => {
     const make = (lineHeightRatio: number) => createTextLayoutService({
       fonts: createFontResolver(faces),
       localMetrics: {
-        meiryo: { family: '__ooxml_local_meiryo', lineHeightRatio },
+        authored: { family: '__ooxml_local_authored', lineHeightRatio },
       },
       measurer: {
         fingerprint: 'metrics-v1',
@@ -658,6 +658,6 @@ describe('font layout services', () => {
     });
 
     expect(make(1.3).fingerprint).not.toBe(make(1.31).fingerprint);
-    expect(Object.isFrozen(make(1.3).localMetrics.meiryo)).toBe(true);
+    expect(Object.isFrozen(make(1.3).localMetrics.authored)).toBe(true);
   });
 });

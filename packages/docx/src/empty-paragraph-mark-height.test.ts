@@ -214,7 +214,65 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
   });
 
-  it('uses the MS Mincho Far East single-line height for an empty East Asian mark', () => {
+  it('uses an arbitrary resolved font resource metric for an empty East Asian mark', () => {
+    const family = 'Arbitrary Embedded EA';
+    const p = {
+      ...para(''),
+      defaultFontSize: 12,
+      defaultFontFamily: 'Century',
+      defaultFontFamilyEastAsia: family,
+    } as DocParagraph;
+    const ctx = {
+      font: '',
+      measureText: () => ({
+        width: 12,
+        fontBoundingBoxAscent: 10.3125,
+        fontBoundingBoxDescent: 1.6875,
+        actualBoundingBoxAscent: 10.3125,
+        actualBoundingBoxDescent: 1.6875,
+      } as TextMetrics),
+    } as unknown as CanvasRenderingContext2D;
+
+    expect(paragraphMarkLineHeight(
+      p,
+      1,
+      { type: null, linePitchPt: null },
+      false,
+      false,
+      ctx,
+      {},
+      null,
+      {
+        'arbitrary embedded ea': {
+          family,
+          eastAsianLineHeightRatio: 1.3,
+        },
+      },
+      undefined,
+      {
+        fontSizePt: 12,
+        fonts: { complexScript: 'Times New Roman' },
+        themeFonts: {
+          ascii: family,
+          highAnsi: family,
+          eastAsia: family,
+        },
+        themeFontPresence: {
+          ascii: true,
+          highAnsi: true,
+          eastAsia: true,
+          complexScript: false,
+        },
+        weight: 400,
+        style: 'normal',
+        complexScript: false,
+        fontHint: 'eastAsia',
+        eastAsiaLanguage: 'ja-jp',
+      },
+    )).toBeCloseTo(15.6, 5);
+  });
+
+  it('retains the observed MS Mincho height for an unresolved empty East Asian mark', () => {
     const p = {
       ...para(''),
       defaultFontSize: 12,
@@ -266,7 +324,8 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     )).toBeCloseTo(15.6, 5);
   });
 
-  it('keeps the following East-Asian line on page two in the observed MS Mincho fixture', async () => {
+  it('uses the same arbitrary resource metric for pagination and paint', async () => {
+    const family = 'Arbitrary Embedded EA';
     const observedParagraph = (text: string, shading?: string): DocParagraph => ({
       ...para(text),
       runs: text === ''
@@ -276,16 +335,16 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
             ...textRun(text),
             fontSize: 12,
             fontFamily: 'Century',
-            fontFamilyEastAsia: 'ＭＳ 明朝',
+            fontFamilyEastAsia: family,
           } as DocParagraph['runs'][number]],
       defaultFontSize: 12,
       defaultFontFamily: 'Century',
-      defaultFontFamilyEastAsia: 'ＭＳ 明朝',
+      defaultFontFamilyEastAsia: family,
       shading,
       paragraphMarkFontFacts: {
         fontSize: 12,
         fontFamily: 'Century',
-        fontFamilyEastAsia: 'ＭＳ 明朝',
+        fontFamilyEastAsia: family,
         fontHint: 'eastAsia',
         langEastAsia: 'ja-jp',
       },
@@ -299,14 +358,20 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     model.section.pageHeight = 39;
     model.fontFamilyClasses = {};
     const measurement = makeResolvedMetricCanvas();
+    const resolved = {
+      'arbitrary embedded ea': {
+        family,
+        eastAsianLineHeightRatio: 1.3,
+      },
+    };
     const services = createLayoutServices(model, {
       measureContext: measurement.canvas.getContext('2d') as CanvasRenderingContext2D,
+      fontMetrics: resolved,
     });
 
-    // Word records the empty 12pt MS Mincho EA mark as a 15.6pt line. Together
-    // with the two 12pt visible lines this is 39.6pt, so the final line starts
-    // on page two. Treating the mark as the font's raw 12pt design box would
-    // incorrectly fit all three lines into the 39pt first-page band.
+    // The resolved 1.3-em East-Asian mark plus the two 12pt visible lines is
+    // 39.6pt, so the final line starts on page two. Omitting the resource metric
+    // would incorrectly fit all three lines into the 39pt first-page band.
     const layout = layoutDocument(model, services, { currentDateMs: 0 });
     expect(layout.pages).toHaveLength(2);
 

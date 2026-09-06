@@ -7,7 +7,7 @@ import {
 } from '../line-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
-import type { DocRun, DocxDocumentModel } from '../types.js';
+import type { DocParagraph, DocRun, DocxDocumentModel } from '../types.js';
 import type { InternalDocxDocumentModel, InternalFieldRun } from '../parser-model.js';
 import type { TextLayoutService } from './text.js';
 import { mathResourceKey } from './resources.js';
@@ -377,20 +377,153 @@ describe('production layout service integration', () => {
     expect(present.text.fingerprint).not.toBe(absent.text.fingerprint);
   });
 
-  it('takes one deeply immutable local-metric snapshot at the document boundary', () => {
+  it('keeps embedded resource metrics separate from local-font resolution', () => {
+    const family = 'Arbitrary Embedded Face';
+    const services = createLayoutServices(model({
+      embeddedFonts: [{
+        fontName: family,
+        style: 'regular',
+        partPath: 'word/fonts/font1.odttf',
+        fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+    }), {
+      measureContext: measureContext(),
+      embeddedFaces: [{
+        family,
+        weight: 'normal',
+        style: 'normal',
+        status: 'loaded',
+      } as FontFace],
+      fontMetrics: {
+        'arbitrary embedded face': {
+          family,
+          requestedFamily: family,
+          weight: 400,
+          style: 'normal',
+          sourceIdentity: 'embedded:word/fonts/font1.odttf',
+          eastAsianLineHeightRatio: 1.43,
+        },
+      },
+    });
+
+    expect(services.text.shape({
+      text: '国',
+      fontSizePt: 10,
+      fonts: { eastAsia: family },
+    }).spans[0]?.font).toMatchObject({
+      source: 'embedded',
+      requestedFamily: family,
+      resolvedFamily: family,
+    });
+    expect(services.text.fontMetrics?.['arbitrary embedded face'])
+      .toMatchObject({ eastAsianLineHeightRatio: 1.43 });
+  });
+
+  it('does not apply a regular embedded metric to an unavailable bold tuple', () => {
+    const family = 'Arbitrary Embedded Face';
+    const document = model({
+      embeddedFonts: [{
+        fontName: family,
+        style: 'regular',
+        partPath: 'word/fonts/font1.odttf',
+        fontKey: '{00000000-0000-0000-0000-000000000000}',
+      }],
+      body: [{
+        type: 'paragraph',
+        runs: [textRun('国', { fontFamilyEastAsia: family, bold: true })],
+      } as DocxDocumentModel['body'][number]],
+    });
+    const services = createLayoutServices(document, {
+      measureContext: measureContext(),
+      embeddedFaces: [{
+        family,
+        weight: 'normal',
+        style: 'normal',
+        status: 'loaded',
+      } as FontFace],
+      fontMetrics: {
+        'arbitrary embedded face': {
+          family,
+          requestedFamily: family,
+          weight: 400,
+          style: 'normal',
+          sourceIdentity: 'embedded:word/fonts/font1.odttf',
+          eastAsianLineHeightRatio: 1.43,
+        },
+      },
+    });
+
+    const [segment] = buildSegments((document.body[0] as DocParagraph).runs, {
+      pageIndex: 0,
+      totalPages: 1,
+      layoutServices: services,
+      resolvedLocalFonts: services.text.fontMetrics,
+    });
+    expect('text' in segment && segment.resolvedEastAsianLineHeightRatio).toBeUndefined();
+  });
+
+  it('derives Word line metrics from any authored East-Asian face proven by Canvas', () => {
+    let font = '12px serif';
+    const ctx = {
+      ...measureContext(),
+      get font() { return font; },
+      set font(value: string) { font = value; },
+      measureText(text: string) {
+        const selected = font.includes('Unlisted CJK Face');
+        return {
+          width: selected ? 100 : 92,
+          actualBoundingBoxAscent: selected ? 80 : 78,
+          actualBoundingBoxDescent: selected ? 21 : 20,
+          fontBoundingBoxAscent: selected ? 106 : 90,
+          fontBoundingBoxDescent: selected ? 44 : 25,
+        } as TextMetrics;
+      },
+    } as CanvasRenderingContext2D;
+    const document = model({
+      body: [{
+        type: 'paragraph',
+        runs: [
+          textRun('国', { fontFamilyEastAsia: 'Unlisted CJK Face' }),
+          textRun('語', { fontFamilyEastAsia: 'Fallback Only Face' }),
+        ],
+      } as DocxDocumentModel['body'][number]],
+    });
+    (document as unknown as { fontFamilyCharsets: Record<string, string> }).fontFamilyCharsets = {
+      'Unlisted CJK Face': '80',
+      'Fallback Only Face': '80',
+    };
+    const services = createLayoutServices(document, {
+      measureContext: ctx,
+      measureResolvedFontMetrics: true,
+    });
+
+    expect(services.text.fontMetrics?.['unlisted cjk face']).toMatchObject({
+      family: 'Unlisted CJK Face',
+      sourceIdentity: 'canvas-resolved:Unlisted CJK Face',
+      fontBoxRatio: 1.5,
+    });
+    expect(services.text.fontMetrics?.['unlisted cjk face']?.lineHeightRatio)
+      .toBeUndefined();
+    expect(services.text.fontMetrics?.['unlisted cjk face']?.eastAsianLineHeightRatio)
+      .toBeCloseTo(1.95, 12);
+    expect(services.text.fontMetrics?.['fallback only face']).toBeUndefined();
+    expect(font).toBe('12px serif');
+  });
+
+  it('takes one deeply immutable font-resource metric snapshot at the document boundary', () => {
     const callerMetric = {
       family: '__local_authored',
       lineHeightRatio: 1.25,
       requestedFamily: 'Authored Sans',
       weight: 400,
       style: 'normal' as const,
-      sourceIdentity: 'local:Authored Sans',
+      sourceIdentity: 'embedded:test-face',
       synthesized: false,
     };
     const caller: Record<string, typeof callerMetric> = { 'authored sans:400:normal': callerMetric };
     const services = createLayoutServices(model(), {
       measureContext: measureContext(),
-      localMetrics: caller,
+      fontMetrics: caller,
     });
     const before = services.text.fingerprint;
 
@@ -405,7 +538,7 @@ describe('production layout service integration', () => {
         requestedFamily: 'Authored Sans',
         weight: 400,
         style: 'normal',
-        sourceIdentity: 'local:Authored Sans',
+        sourceIdentity: 'embedded:test-face',
         synthesized: false,
       },
     });

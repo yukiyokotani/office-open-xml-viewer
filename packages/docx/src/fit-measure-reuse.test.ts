@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { layoutDocument } from './document-layout.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import type { ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types';
 
@@ -86,7 +88,13 @@ function doc(body: BodyElement[], pageHeight = 400): DocxDocumentModel {
 /** A serialisable projection of a layout's fragment partitions + placements — enough
  *  to prove the reuse produced the SAME layout as a fresh measurement. */
 function projection(model: DocxDocumentModel) {
-  return layoutDocument(model).pages.map((page) =>
+  const services = createLayoutServices(model, {
+    localMetrics: testFontSnapshot([{
+      family: 'Times New Roman',
+      lineHeightRatio: 2355 / 2048,
+    }]),
+  });
+  return layoutDocument(model, services, { currentDateMs: 0 }).pages.map((page) =>
     page.layers.body.filter((node): node is ParagraphLayout => node.kind === 'paragraph').map((f) => {
       return {
         continuation: f.continuation,

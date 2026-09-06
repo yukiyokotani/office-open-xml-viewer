@@ -1,5 +1,5 @@
 import type { BodyElement, DocParagraph, DocTable, DocTableCell, DocRun, ImageRun, ChartRun, ShapeRun, SectionProps } from '../types';
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { type FloatRect, FLOAT_OVERLAP_EPS, isWrapFloat } from '../float-layout.js';
 import { type FrameBox, computeFrameBox, frameXContainer, pushFloatRect } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
@@ -72,7 +72,7 @@ import {
 export function createProductionBodyLayoutRuntime(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
 ) {
   prepareBodyFrameMetadata(source.blocks.body);
   const model = source.acquisition;
@@ -97,7 +97,7 @@ function buildMeasureState(
   section: SectionProps,
   fontFamilyClasses: Record<string, string> = {},
   layoutSettings: DocumentLayoutSettings,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   layoutServices: LayoutServices,
   layoutOptions?: LayoutOptions,
 ): BodyAcquisitionState {
@@ -352,7 +352,7 @@ function buildMeasureState(
 function buildConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
   measureContext: MeasurementTextContext | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>>,
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>>,
 ): BodyLayoutKernel {
   const ordinaryAcquisitionInputForAdjacentGroup = (
     group: ReturnType<typeof combineAdjacentTableLayoutInputs>,

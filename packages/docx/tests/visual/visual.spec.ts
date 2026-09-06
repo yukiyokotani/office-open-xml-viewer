@@ -262,8 +262,9 @@ test.describe('docx visual regression', () => {
 });
 
 const DOCX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
-  ? readdirSync('public/private')
+  ? readdirSync('public/private/docx')
       .filter((file) => file.endsWith('.docx') && !file.startsWith('~$'))
+      .map((file) => `docx/${file}`)
       .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
   : [];
 

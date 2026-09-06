@@ -2,8 +2,8 @@ import type { LayoutDiagnostic } from './types.js';
 import {
   classifyFontGeneric,
   graphemeClusterOffsets,
-  normalizeLocalFontMetricFamily,
-  type ResolvedLocalFontMetric,
+  normalizeFontMetricFamily,
+  type ResolvedFontMetric,
 } from '@silurus/ooxml-core';
 import type {
   FontResolution,
@@ -11,7 +11,7 @@ import type {
   FontStyle,
 } from './font-service.js';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
-export type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+export type { ResolvedFontMetric, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
   DocParagraph,
@@ -356,7 +356,11 @@ export interface TextShapeResult extends GlyphMeasurement {
 
 export interface TextLayoutService {
   readonly fingerprint: string;
-  readonly localMetrics: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  /** Geometry keyed by a resolved resource identity. This is the authoritative
+   * metric snapshot used by layout. */
+  readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
+  /** @deprecated Compatibility alias for {@link fontMetrics}. */
+  readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
 }
@@ -364,7 +368,10 @@ export interface TextLayoutService {
 export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
   readonly measurer: GlyphMeasurer;
-  readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>>;
+  readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
+  /** Exact local aliases also participate in resolution; retained separately
+   * from resource-only metrics so an embedded face is never mislabeled local. */
+  readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
 }
@@ -395,43 +402,55 @@ function defaultGenericForSlot(
   return slot === 'eastAsia' ? 'sans-serif' : 'serif';
 }
 
-const LOCAL_METRIC_SNAPSHOT = Symbol('docx.localMetricSnapshot');
-type LocalMetricSnapshot = Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> & {
-  readonly [LOCAL_METRIC_SNAPSHOT]: true;
+const FONT_METRIC_SNAPSHOT = Symbol('docx.fontMetricSnapshot');
+type FontMetricSnapshot = Readonly<Record<string, Readonly<ResolvedFontMetric>>> & {
+  readonly [FONT_METRIC_SNAPSHOT]: true;
 };
 
 /** Copy successful face routes once at the document boundary. The brand lets
  * downstream services share the same deeply frozen object without retaining
  * caller-owned mutable records. */
-export function snapshotLocalMetrics(
-  input: Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> = {},
-): Readonly<Record<string, Readonly<ResolvedLocalFontMetric>>> {
-  if ((input as Partial<LocalMetricSnapshot>)[LOCAL_METRIC_SNAPSHOT]) return input;
+export function snapshotFontMetrics(
+  input: Readonly<Record<string, Readonly<ResolvedFontMetric>>> = {},
+): Readonly<Record<string, Readonly<ResolvedFontMetric>>> {
+  if ((input as Partial<FontMetricSnapshot>)[FONT_METRIC_SNAPSHOT]) return input;
   const entries = Object.entries(input)
     .map(([key, metric]) => {
-      if (!metric.family?.trim()) throw new TypeError(`Local metric ${key} requires a family`);
+      if (!metric.family?.trim()) throw new TypeError(`Font metric ${key} requires a family`);
       if (metric.lineHeightRatio !== undefined
         && (!Number.isFinite(metric.lineHeightRatio) || metric.lineHeightRatio < 0)) {
-        throw new RangeError(`Local metric ${key} lineHeightRatio must be finite and non-negative`);
+        throw new RangeError(`Font metric ${key} lineHeightRatio must be finite and non-negative`);
+      }
+      if (metric.eastAsianLineHeightRatio !== undefined
+        && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
+        throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
+      }
+      if (metric.fontBoxRatio !== undefined
+        && (!Number.isFinite(metric.fontBoxRatio) || metric.fontBoxRatio <= 0)) {
+        throw new RangeError(`Font metric ${key} fontBoxRatio must be finite and positive`);
       }
       if (metric.weight !== undefined
         && (!Number.isFinite(metric.weight) || metric.weight < 1 || metric.weight > 1000)) {
-        throw new RangeError(`Local metric ${key} weight must be finite and between 1 and 1000`);
+        throw new RangeError(`Font metric ${key} weight must be finite and between 1 and 1000`);
       }
-      const copy: ResolvedLocalFontMetric = {
+      const copy: ResolvedFontMetric = {
         family: metric.family,
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
+        ...(metric.eastAsianLineHeightRatio === undefined
+          ? {}
+          : { eastAsianLineHeightRatio: metric.eastAsianLineHeightRatio }),
+        ...(metric.fontBoxRatio === undefined ? {} : { fontBoxRatio: metric.fontBoxRatio }),
         ...(metric.requestedFamily === undefined ? {} : { requestedFamily: metric.requestedFamily }),
         ...(metric.weight === undefined ? {} : { weight: metric.weight }),
         ...(metric.style === undefined ? {} : { style: metric.style }),
         ...(metric.sourceIdentity === undefined ? {} : { sourceIdentity: metric.sourceIdentity }),
         ...(metric.synthesized === undefined ? {} : { synthesized: metric.synthesized }),
       };
-      return [normalizeLocalFontMetricFamily(key), Object.freeze(copy)] as const;
+      return [normalizeFontMetricFamily(key), Object.freeze(copy)] as const;
     })
     .sort(([a], [b]) => a.localeCompare(b));
-  const snapshot = Object.fromEntries(entries) as LocalMetricSnapshot;
-  Object.defineProperty(snapshot, LOCAL_METRIC_SNAPSHOT, { value: true });
+  const snapshot = Object.fromEntries(entries) as FontMetricSnapshot;
+  Object.defineProperty(snapshot, FONT_METRIC_SNAPSHOT, { value: true });
   return Object.freeze(snapshot);
 }
 
@@ -536,7 +555,10 @@ function requestedFamily(
  * authored East Asian and complex-script faces.
  */
 export function createTextLayoutService(input: TextLayoutServiceInput): TextLayoutService {
-  const localMetrics = snapshotLocalMetrics(input.localMetrics);
+  const fontMetrics = snapshotFontMetrics({
+    ...input.localMetrics,
+    ...input.fontMetrics,
+  });
   const genericFamilies = Object.freeze(Object.fromEntries(
     Object.entries(input.genericFamilies ?? {})
       .map(([family, generic]) => [family.trim().toLocaleLowerCase('en-US'), generic])
@@ -550,7 +572,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const fingerprint = stableFingerprint('text', {
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
-    localMetrics,
+    fontMetrics,
     eastAsiaFontCharsets,
     genericFamilies,
   });
@@ -611,7 +633,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const shapeCache = new Map<string, TextShapeResult>();
   return Object.freeze({
     fingerprint,
-    localMetrics,
+    fontMetrics,
+    localMetrics: fontMetrics,
     resolve,
     shape(request: Readonly<TextShapeRequest>): TextShapeResult {
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {

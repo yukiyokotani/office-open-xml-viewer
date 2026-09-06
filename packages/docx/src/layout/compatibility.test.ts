@@ -76,6 +76,8 @@ import {
   wordDegenerateLineSpacingIsSingle,
   wordEastAsianGridLineCells,
   wordFarEastSingleLinePx,
+  wordOpenTypeEastAsianSingleLineRatio,
+  wordResolvedEastAsianSingleLineRatio,
   wordFirstJustifiedContentSegment,
   wordGridAtLeastLineHeightPx,
   wordGridRightIndentAdjustmentPt,
@@ -736,6 +738,28 @@ describe('layout compatibility inventory', () => {
     expect(wordEastAsianGridLineCells(0, 18)).toBe(1);
     expect(wordFarEastSingleLinePx(22, 10)).toBe(22);
     expect(wordFarEastSingleLinePx(0, 10)).toBe(13);
+    expect(wordOpenTypeEastAsianSingleLineRatio({
+      unitsPerEm: 2048,
+      hheaAscent: 1802,
+      hheaDescent: -455,
+      hheaLineGap: 1024,
+      typoAscent: 1600,
+      typoDescent: -400,
+      typoLineGap: 200,
+      winAscent: 1900,
+      winDescent: 736,
+      useTypoMetrics: true,
+      hasEastAsianCmap: true,
+    })).toBeCloseTo(((1802 + 455) * 1.3) / 2048, 12);
+    expect(wordOpenTypeEastAsianSingleLineRatio({
+      unitsPerEm: 2048,
+      hheaAscent: -1,
+      hheaDescent: 1,
+      hheaLineGap: 0,
+      hasEastAsianCmap: true,
+    })).toBe(0);
+    expect(wordResolvedEastAsianSingleLineRatio(1.25)).toBeCloseTo(1.625, 12);
+    expect(wordResolvedEastAsianSingleLineRatio(Number.POSITIVE_INFINITY)).toBe(0);
     expect(wordUseFeLayoutInheritedGridHeightPx(36, 18, 1.15)).toBe(36);
     expect(wordUseFeLayoutInheritedGridHeightPx(18, 18, 1.15)).toBeCloseTo(20.7, 12);
   });

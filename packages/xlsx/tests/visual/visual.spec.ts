@@ -235,8 +235,9 @@ test.describe('xlsx visual regression', () => {
 });
 
 const XLSX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
-  ? readdirSync('public/private')
+  ? readdirSync('public/private/xlsx')
       .filter((file) => file.endsWith('.xlsx') && !file.startsWith('~$'))
+      .map((file) => `xlsx/${file}`)
       .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
   : [];
 

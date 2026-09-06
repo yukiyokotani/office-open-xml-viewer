@@ -8,6 +8,7 @@ import type {
 } from '../types.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 
 const EMPTY_STORY = Object.freeze({ default: null, first: null, even: null });
 
@@ -17,6 +18,7 @@ export function layoutBodyModel(
   measureContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Readonly<Record<string, string>> = {},
   settings?: DocSettings,
+  fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>,
 ): DocumentLayout {
   const model: DocxDocumentModel = {
     body: [...body],
@@ -28,7 +30,7 @@ export function layoutBodyModel(
     fontFamilyClasses: { ...fontFamilyClasses },
     ...(settings ? { settings } : {}),
   };
-  const services = createLayoutServices(model, { measureContext });
+  const services = createLayoutServices(model, { measureContext, fontMetrics });
   return layoutDocument(model, services, { currentDateMs: 0 });
 }
 
@@ -38,6 +40,7 @@ export function layoutBodyTableRowAdvances(
   section: SectionProps,
   measureContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   settings?: DocSettings,
+  fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>,
 ): readonly number[] {
   const layout = layoutBodyModel(
     [{ type: 'table', ...table } as BodyElement],
@@ -45,6 +48,7 @@ export function layoutBodyTableRowAdvances(
     measureContext,
     {},
     settings,
+    fontMetrics,
   );
   const retainedTable = layout.pages
     .flatMap((page) => page.layers.body)

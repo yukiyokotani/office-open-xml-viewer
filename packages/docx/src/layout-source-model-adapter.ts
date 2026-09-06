@@ -4,7 +4,6 @@ import { docxFontPreloadNames } from './google-fonts.js';
 import { resolveDocumentLayoutSettings } from './layout-context.js';
 import { getDefaultFontSize } from './line-layout.js';
 import { docDefaultFontSizePt } from './layout/measurement-environment.js';
-import { docxLocalMetricRequests } from './local-font-metrics.js';
 import {
   normalizeInternalDocumentModel,
   normalizeOwnedInternalDocumentModel,
@@ -472,7 +471,6 @@ function buildLayoutSourceModelAdapter(
     embeddedFonts: [...(privateDocument.embeddedFonts ?? [])],
     renderedFamilies: docxRenderedFontFamilies(privateDocument),
     preloadNames: docxFontPreloadNames(privateDocument),
-    localMetricRequests: docxLocalMetricRequests(privateDocument),
     defaultBodyFontSizePt: docDefaultFontSizePt(privateDocument),
   };
 

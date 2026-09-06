@@ -143,6 +143,7 @@ export {
   registerEmbeddedFonts,
   unregisterEmbeddedFonts,
   deobfuscateOdttf,
+  embeddedFontBytesAreWithinLimit,
   type EmbeddedFontFace,
 } from './fonts/embedded';
 // Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
@@ -151,6 +152,15 @@ export {
 // SCRIPT_GOOGLE_FONTS below.
 export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
+export {
+  parseOpenTypeLineMetrics,
+  type OpenTypeLineMetrics,
+} from './fonts/open-type-metrics';
+export {
+  measureResolvedCanvasFontBoxRatio,
+  type CanvasFontBoxProbeContext,
+  type CanvasFontBoxProbeOptions,
+} from './fonts/canvas-font-box';
 export {
   classifyCjkFont,
   classifyFontGeneric,
@@ -678,17 +688,23 @@ export {
   sanitizeHyperlinkUrl,
   openExternalHyperlink,
 } from './interaction/hyperlink';
-// Format-agnostic font design line-metrics (OS/2 win / hhea sums) for faces the
-// browser substitutes with different metrics — shared so docx (Word's design
-// line box), pptx and xlsx can size line boxes / floor single-line height
-// uniformly instead of each under-measuring a substituted Meiryo/Sakkal face.
+// Legacy family-name compatibility profiles retained for callers that cannot
+// inspect the selected font resource. New DOCX resource paths consume parsed or
+// measured metrics instead of adding more family-specific profiles here.
 export {
   fontWinLineHeightRatio,
   intendedSingleLinePx,
   correctLineMetrics,
 } from './text/line-metrics';
-// Exact local-font metric probing. Shared contract for docx/xlsx/pptx; format
-// packages supply only their evidence-backed Office line-height policy.
+// Resolved font-resource metrics used when a loader owns concrete bytes or a
+// browser-selected face.
+export {
+  normalizeFontMetricFamily,
+  type ResolvedFontMetric,
+} from './fonts/resource-metrics';
+// Backward-compatible exact-local resource loader. Format packages should not
+// add family-specific requests; DOCX now derives its metrics from resolved
+// resources and no longer uses this API for a Meiryo-only path.
 export {
   loadLocalFontMetrics,
   unloadLocalFontMetrics,

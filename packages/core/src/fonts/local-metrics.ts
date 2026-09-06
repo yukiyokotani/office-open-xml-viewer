@@ -3,7 +3,8 @@ import { activeFontSet, withFontCeiling } from './preload.js';
 
 /** A family-level local-font measurement request. This API is shared by all
  * OOXML formats; each format decides which Office behavior requires a measured
- * multiplier and supplies the evidence-backed value. */
+ * multiplier and supplies the evidence-backed value. Do not add family-specific
+ * requests when the selected font resource can be measured directly. */
 export interface LocalFontMetricRequest {
   /** Authored OOXML family name used as the lookup key. */
   family: string;
