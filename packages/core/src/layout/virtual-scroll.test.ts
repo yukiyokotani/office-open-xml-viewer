@@ -287,7 +287,8 @@ describe('fractional item-start navigation targets', () => {
   it('keeps a viewport just before a fractional boundary on the preceding item', () => {
     expect(computeVisibleRange(heights, 10, 110, 50, 0).topIndex).toBe(0);
     expect(computeVisibleRange(heights, 10, 220, 50, 0).topIndex).toBe(1);
-    expect(computeUniformVisibleWindow(3, 100.4, 10, 110, 50, 0).topIndex).toBe(0);
+    // viewportHeight 0 mirrors PPTX's arbitrary coordinate-to-slide lookup.
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 110, 0, 0).topIndex).toBe(0);
   });
 
   it('keeps the exact item boundary inclusive', () => {
