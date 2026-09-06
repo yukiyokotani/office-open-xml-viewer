@@ -2,6 +2,7 @@ export {
   computeUniformVisibleWindow,
   computeVisibleWindow,
   createVirtualScrollGeometry,
+  resolveItemStartScrollTop,
   type VirtualScrollGeometry,
   type VisibleRange,
   type VisibleWindow,

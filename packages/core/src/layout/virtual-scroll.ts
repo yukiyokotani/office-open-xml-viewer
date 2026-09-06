@@ -18,10 +18,7 @@ export interface VisibleWindow {
    *  onVisiblePageChange. A viewport top strictly inside the gap BETWEEN items i
    *  and i+1 is attributed to item i (gap = trailing padding of the preceding
    *  item — the standard virtualization convention; mount-safe, and flips to i+1
-   *  at `offsets[i+1]`). Exception: the flip happens up to
-   *  TOP_EDGE_ROUNDING_EPSILON (1 CSS px) EARLY, because fractional offsets meet
-   *  a browser-snapped integer scrollTop at exactly that boundary — see the
-   *  constant's doc. */
+   *  exactly at `offsets[i+1]`). */
   topIndex: number;
   /** `leading` + Σ heights + (n-1)*gap + `trailing` (gap between items only, none
    *  after the last) → spacer height. With no padding this reduces to
@@ -61,18 +58,18 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
- * Rounding tolerance at the top-edge boundary, in CSS px. Item offsets are
- * fractional (pt × a fractional fit/zoom scale, e.g. 1193.4), but browsers
- * snap a programmatic `scrollTop` to an integer, landing strictly BELOW the
- * target item's offset — without this tolerance `scrollToPage(k)` reports
- * `topIndex` k−1 even though item k is what the viewport top shows.
+ * Resolve a programmatic item-start scroll target for a scroll surface that may
+ * quantize assigned offsets to whole CSS pixels. Rounding forward guarantees a
+ * fractional item start cannot land just before that item. The result remains
+ * clamped to the real maximum, which may itself be fractional near the end.
  *
- * Exactly 1 px: it covers the integer snap and nothing more. A viewport top
- * deeper inside the gap still belongs to the preceding item (the user is
- * reading its tail), so a wider band — e.g. gap/2 — would misattribute
- * genuine scroll positions, not just rounding artifacts.
+ * Keep this adjustment on navigation targets rather than visible-range queries:
+ * those queries also serve manual scrolling and arbitrary coordinate lookup,
+ * where an epsilon would move the documented item boundary.
  */
-const TOP_EDGE_ROUNDING_EPSILON = 1;
+export function resolveItemStartScrollTop(target: number, maxTop: number): number {
+  return Math.min(Math.max(0, maxTop), Math.ceil(Math.max(0, target)));
+}
 
 /** Build the variable-height prefix geometry once per layout/scale revision. */
 export function createVirtualScrollGeometry(
@@ -110,16 +107,11 @@ export function computeVisibleWindow(
     return { start: 0, end: -1, topIndex: 0, offsets, totalHeight: 0 };
   }
 
-  // The top edge gets TOP_EDGE_ROUNDING_EPSILON slack: a scrollTop snapped by
-  // the browser to an integer just below a fractional item start still counts
-  // as that item. The bottom edge needs no such slack — a sub-pixel difference
-  // there never changes which items intersect the viewport.
-  const topEdge = scrollTop + TOP_EDGE_ROUNDING_EPSILON;
   let lo = 0;
   let hi = n;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (offsets[mid] <= topEdge) lo = mid + 1;
+    if (offsets[mid] <= scrollTop) lo = mid + 1;
     else hi = mid;
   }
   const topIndex = clamp(lo - 1, 0, n - 1);
@@ -157,14 +149,10 @@ export function computeUniformVisibleWindow(
   const leading = pad?.leading ?? 0;
   const trailing = pad?.trailing ?? 0;
   const stride = itemHeight + gap;
-  // Same boundary rule as computeVisibleWindow: the +1 px slack only ever
-  // flips the single boundary the browser's integer scrollTop snap can cross,
-  // because a real slide stride is always ≫ 1 px.
-  const topEdge = scrollTop + TOP_EDGE_ROUNDING_EPSILON;
   const topIndex = clamp(
-    topEdge < leading
+    scrollTop < leading
       ? 0
-      : stride > 0 ? Math.floor((topEdge - leading) / stride) : itemCount - 1,
+      : stride > 0 ? Math.floor((scrollTop - leading) / stride) : itemCount - 1,
     0,
     itemCount - 1,
   );
