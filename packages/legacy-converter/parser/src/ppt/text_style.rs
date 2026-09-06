@@ -9,6 +9,7 @@ pub(super) struct Context<'a> {
     pub levels: Option<&'a [Level]>,
     pub slide_numbers: &'a [u32],
     pub slide_number: u32,
+    pub ruler_tabs: Option<ruler::Tabs<'a>>,
 }
 
 /// MS-PPT 2.9.47 / 2.2.30: this is a passive positional substitution, not
@@ -118,11 +119,17 @@ pub(super) fn write(
         let base = context
             .levels
             .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
-        drawing::append(
-            output,
-            xml_budget,
-            &pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(context)?,
-        )?;
+        let properties = pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(context)?;
+        if let Some(tabs) = context.ruler_tabs {
+            let prefix = properties
+                .strip_suffix("</a:pPr>")
+                .expect("paragraph XML owns closing tag");
+            drawing::append(output, xml_budget, prefix)?;
+            tabs.write(output, xml_budget, work_budget)?;
+            drawing::append(output, xml_budget, "</a:pPr>")?;
+        } else {
+            drawing::append(output, xml_budget, &properties)?;
+        }
         let mut start = 0;
         let mut iter = paragraph.char_indices().peekable();
         while let Some((offset, c)) = iter.next() {

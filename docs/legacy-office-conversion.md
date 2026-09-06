@@ -68,7 +68,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, lists, advanced floating drawings, non-raster images other than EMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands and manual page breaks | formula programs, phonetic string data, extended styles/themes/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, drawings, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG and EMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets and tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles, charts, notes, WMF/PICT/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG and EMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles, charts, notes, WMF/PICT/DIB/TIFF/other image formats, picture effects and foreground image fills, audio/video, transitions, animations, actions, OLE |
 
 XLS worksheet visibility is preserved as OOXML metadata. Display follows the
 existing `XlsxViewer` `hiddenSheetMode` option; its default remains `'show'`.
@@ -81,6 +81,28 @@ their content remain in the presentation. Display follows the existing
 Master visibility is not inherited. Transitions, sounds, and actions remain
 omitted. No migration or additional opt-in is required for this metadata fix;
 PPT conversion still requires its existing per-format opt-in.
+
+PPT local text-body ruler custom tabs are preserved as explicit DrawingML
+paragraph tab lists, including signed positions, all four alignment values, and
+an explicitly empty list. This applies to owned inline text and outline text
+references, including master objects that are themselves rendered. No migration
+is required; PPT conversion retains its existing independent opt-in.
+
+The converter reads the local `TextRulerAtom` (MS-PPT 2.9.23-24, 2.9.29-30)
+without inventing a paragraph-margin adjustment. It charges both decoding and
+each paragraph's tab emission against the existing work and XML budgets. The
+ordinary PPTX parser and renderer consume the output. Ruler margin/indent fields,
+ruler default intervals, document default rulers, linked-master ruler inheritance,
+and conflicting direct paragraph tab arrays remain unsupported.
+Malformed local tab records fail rather than producing a partially decoded list.
+Multiple local ruler records are rejected as unsupported ambiguity; the inline
+record grammar permits them, but precedence is not inferred by this subset.
+This is not a claim of full binary/Office visual equality.
+Local Office-reference checks confirm that restoring these stops improves
+tab-separated text, but residual RTL anchoring and ruler-indent differences
+remain. Fidelity checks must load the intended fonts: fallback metrics can cause
+extra wrapping even when the tab position matches Office. These checks are
+separate from byte-exact previous-converter/unchanged-renderer comparisons.
 
 PPT paragraph text direction is retained as DrawingML `a:pPr/@rtl`
 (MS-PPT 2.9.20/21 and 2.13.30; ECMA-376 21.1.2.2.7). Supported master and
@@ -813,7 +835,7 @@ overrides remain omitted. Style tables are parsed once per main master and share
 across slides; at most 10,000 master references, eight types per master and five
 levels per type can be retained. The master-count limit is resource policy; type
 and level bounds follow the format. Character and paragraph properties beyond the
-supported direct subset, including bullets and custom rulers, remain omitted.
+supported direct subset, including inherited custom rulers, remain omitted.
 
 Missing drawing records retain the earlier unpositioned-text fallback with a
 separate warning. Invalid or missing anchors in emitted drawing-backed shapes, ambiguous

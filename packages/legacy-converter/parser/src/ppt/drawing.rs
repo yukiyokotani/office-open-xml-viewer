@@ -620,6 +620,8 @@ impl Writer<'_, '_> {
                 let mut outline_body = false;
                 let mut text_type = None;
                 let mut slide_numbers = Vec::new();
+                let mut ruler_seen = false;
+                let mut ruler_tabs = None;
                 // The only source of visible text is this shape's ClientTextbox.
                 let atoms = shape
                     .textbox
@@ -695,6 +697,16 @@ impl Writer<'_, '_> {
                             }
                             slide_numbers.push(text_style::slide_number_position(atom)?);
                         }
+                        4006 => {
+                            // Inline TextOrMaster permits multiple ruler records
+                            // (MS-PPT 2.9.76). Choosing precedence is unsupported
+                            // policy here, not a claim that duplicates are invalid.
+                            if ruler_seen {
+                                return Err(unsupported("duplicate PowerPoint local text ruler"));
+                            }
+                            ruler_seen = true;
+                            ruler_tabs = ruler::read(atom, self.records)?;
+                        }
                         // Do not descend into interactive/action containers.
                         _ => {}
                     }
@@ -768,8 +780,11 @@ impl Writer<'_, '_> {
                     None
                 };
                 slide_numbers.sort_unstable();
+                if ruler_tabs.is_some() && text.len() != 1 {
+                    return Err(unsupported("ambiguous PowerPoint ruled text body"));
+                }
                 let default_style = if style.is_none()
-                    && (levels.is_some() || !slide_numbers.is_empty())
+                    && (levels.is_some() || !slide_numbers.is_empty() || ruler_tabs.is_some())
                     && text.len() == 1
                 {
                     Some(text_style::default_style(&text[0]))
@@ -789,6 +804,7 @@ impl Writer<'_, '_> {
                             levels,
                             slide_numbers: &slide_numbers,
                             slide_number: self.context.map_or(0, |c| c.slide_number),
+                            ruler_tabs,
                         },
                         &mut self.output,
                         self.remaining,
@@ -877,6 +893,44 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    #[test]
+    fn local_ruler_tabs_reach_each_paragraph_without_a_style_atom() {
+        // MS-PPT 2.9.29-30: explicit ruler tabs, signed positions and enum types.
+        let ruler = record(0, 4006, &[
+            4u32.to_le_bytes().as_slice(), &2u16.to_le_bytes(),
+            &576i16.to_le_bytes(), &0u16.to_le_bytes(),
+            &1152i16.to_le_bytes(), &2u16.to_le_bytes(),
+        ].concat());
+        let textbox = record(15, 0xf00d, &[
+            record(0, 3999, &4u32.to_le_bytes()),
+            record(0, 4008, b"A\tB\rC\tD"), ruler,
+        ].concat());
+        let shape = sp(0xa00, vec![
+            record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox,
+        ]);
+        let result = xml(&drawing(vec![shape])).unwrap();
+        assert_eq!(result.matches("<a:tabLst>").count(), 2);
+        assert_eq!(result.matches("<a:tab pos=\"914400\" algn=\"l\"/>").count(), 2);
+        assert_eq!(result.matches("<a:tab pos=\"1828800\" algn=\"r\"/>").count(), 2);
+    }
+
+    #[test]
+    fn rejects_ambiguous_local_ruler_ownership_without_guessing_precedence() {
+        let ruler = record(0, 4006, &[4u32.to_le_bytes().as_slice(), &0u16.to_le_bytes()].concat());
+        for atoms in [
+            vec![record(0, 4008, b"A"), ruler.clone(), ruler.clone()],
+            vec![record(0, 4008, b"A"), record(0, 4008, b"B"), ruler],
+        ] {
+            let textbox = record(15, 0xf00d, &[
+                record(0, 3999, &4u32.to_le_bytes()), atoms.concat(),
+            ].concat());
+            let shape = sp(0xa00, vec![
+                record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox,
+            ]);
+            assert!(xml(&drawing(vec![shape])).is_err());
+        }
     }
 
     #[test]
