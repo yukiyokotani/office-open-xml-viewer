@@ -17,6 +17,7 @@ mod geometry;
 mod print;
 mod rich;
 mod styles;
+mod views;
 
 const BOF: u16 = 0x0809;
 const EOF: u16 = 0x000a;
@@ -89,6 +90,7 @@ struct SheetData {
     cell_styles: BTreeMap<(u16, u16), u16>,
     geometry: geometry::Geometry,
     print: print::PrintSettings,
+    views: views::SheetViews,
     merged: Vec<(u16, u16, u16, u16)>,
     formula_results: bool,
     custom_views_omitted: bool,
@@ -115,6 +117,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
 
     let styles = styles::Styles::parse(&records)?;
     let mut date1904 = false;
+    let mut window_count = 0;
     let mut sheets = Vec::new();
     let mut shared_strings = Vec::new();
     let mut saw_sst = false;
@@ -123,6 +126,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             break;
         }
         match record.kind {
+            views::WINDOW1 => views::read_window(record.data, &mut window_count)?,
             0x0022 => date1904 = u16_at(record.data, 0)? != 0,
             BOUNDSHEET8 => {
                 if sheets.len() >= MAX_SHEETS {
@@ -173,6 +177,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             continue;
         }
         let data = parse_sheet(&records, &sheet, &shared_strings)?;
+        data.views.validate_count(window_count)?;
         for index in data.cell_styles.values() {
             styles.validate_xf(*index)?;
         }
@@ -187,7 +192,13 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
             "BIFF workbook contains no supported worksheets",
         ));
     }
-    let bytes = build_xlsx(&converted, &styles.xml()?, date1904, max_output_bytes)?;
+    let bytes = build_xlsx(
+        &converted,
+        &styles.xml()?,
+        date1904,
+        window_count,
+        max_output_bytes,
+    )?;
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
         "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
@@ -610,6 +621,7 @@ fn parse_sheet(
         }
         output.geometry.read(record)?;
         output.print.read(record)?;
+        output.views.read(record)?;
         if record.kind == 0x0208 {
             output.rows.entry(u16_at(record.data, 0)?).or_default();
         }
@@ -861,6 +873,7 @@ fn build_xlsx(
     sheets: &[(String, SheetData)],
     styles: &str,
     date1904: bool,
+    window_count: usize,
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let mut workbook = String::from(
@@ -868,9 +881,20 @@ fn build_xlsx(
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
     );
     workbook.push_str(&format!(
-        "<workbookPr date1904=\"{}\"/><sheets>",
+        "<workbookPr date1904=\"{}\"/>",
         u8::from(date1904)
     ));
+    // Window1/Window2 associate by ordinal position, not by sheet selection.
+    // Preserve that identity without guessing window geometry or an active tab
+    // after unsupported chart/macro tabs have been omitted.
+    if window_count != 0 {
+        workbook.push_str("<bookViews>");
+        for _ in 0..window_count {
+            workbook.push_str("<workbookView/>");
+        }
+        workbook.push_str("</bookViews>");
+    }
+    workbook.push_str("<sheets>");
     let mut workbook_rels = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
@@ -927,6 +951,7 @@ fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
     );
     xml.push_str(&sheet.print.sheet_properties());
+    xml.push_str(&sheet.views.xml());
     xml.push_str(&sheet.geometry.xml());
     xml.push_str("<sheetData>");
     for (row, cells) in &sheet.rows {
@@ -1062,6 +1087,44 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::{cell_reference, decode_rk, parse_biff_string, parse_sst, records};
+
+    #[test]
+    fn worksheet_window_flags_survive_without_modifying_cells() {
+        use super::*;
+        let bof = [0, 6, 0x10, 0];
+        let mut window = [0u8; 18];
+        window[..2].copy_from_slice(&0x0040u16.to_le_bytes());
+        let records = [
+            Record {
+                kind: BOF,
+                offset: 0,
+                data: &bof,
+            },
+            Record {
+                kind: 0x023e,
+                offset: 8,
+                data: &window,
+            },
+            Record {
+                kind: EOF,
+                offset: 30,
+                data: &[],
+            },
+        ];
+        let bound = BoundSheet {
+            offset: 0,
+            name: "A".into(),
+            sheet_type: 0,
+            visibility: SheetVisibility::Visible,
+        };
+        let sheet = parse_sheet(&records, &bound, &[]).unwrap();
+        let xml = build_sheet_xml(&sheet, 10000).unwrap();
+        assert!(xml.contains("showGridLines=\"0\""));
+        assert!(xml.contains("showZeros=\"0\""));
+        assert!(xml.contains("rightToLeft=\"1\""));
+        assert!(xml.contains("<sheetData></sheetData>"));
+        assert_eq!(build_sheet_xml(&sheet, xml.len() - 1).unwrap_err(), "OUTPUT_TOO_LARGE");
+    }
 
     #[test]
     fn sheet_visibility_uses_only_the_two_defined_bits() {
