@@ -41,7 +41,7 @@ type DocxLayout = ReturnType<DocxRendererModule['layoutDocument']>;
 type RetainedBodyNode = DocxLayout['pages'][number]['layers']['body'][number];
 
 const samplePath = (n: number) =>
-  resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
+  resolve(ROOT, `packages/docx/public/private/docx/sample-${n}.docx`);
 const haveSamples =
   existsSync(samplePath(5)) && existsSync(samplePath(12)) && existsSync(samplePath(13));
 
