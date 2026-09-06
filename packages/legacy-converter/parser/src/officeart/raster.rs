@@ -1,6 +1,7 @@
-//! Passive raster BLIP validation shared by binary Office converters.
+//! Passive image BLIP validation shared by binary Office converters.
 //! MS-ODRAW 2.2.24-32; W3C PNG IHDR; ITU-T T.81 JPEG frame headers.
 use super::Record;
+use std::borrow::Cow;
 
 /// Resolve only in-stream BLIPs. `delayed` is the format-defined binary stream,
 /// never a file path; DOC inline shapes do not supply a delayed store.
@@ -8,9 +9,10 @@ pub(crate) fn read_store_entry<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
     budget: &mut usize,
+    remaining_bytes: usize,
 ) -> Result<Option<Image<'a>>, String> {
     if entry.kind != 0xf007 {
-        return read(entry, budget);
+        return read(entry, budget, remaining_bytes);
     }
     let b = entry.payload;
     if entry.version != 2
@@ -45,28 +47,39 @@ pub(crate) fn read_store_entry<'a>(
     if end != source.len() {
         return Err(unsupported("OfficeArt BLIP record size mismatch"));
     }
-    read(blip, budget)
+    read(blip, budget, remaining_bytes)
 }
 
 const MAX_PIXELS: u64 = 40_000_000;
 
-#[derive(Clone, Copy)]
 pub(crate) struct Image<'a> {
-    pub bytes: &'a [u8],
+    pub bytes: Cow<'a, [u8]>,
     pub extension: &'static str,
 }
 fn unsupported(message: impl Into<String>) -> String {
     format!("UNSUPPORTED:{}", message.into())
 }
 
-pub(crate) fn read<'a>(blip: Record<'a>, budget: &mut usize) -> Result<Option<Image<'a>>, String> {
+pub(crate) fn read<'a>(
+    blip: Record<'a>,
+    budget: &mut usize,
+    remaining_bytes: usize,
+) -> Result<Option<Image<'a>>, String> {
+    if blip.kind == 0xf01a {
+        return Ok(
+            super::metafile::read(blip, budget, remaining_bytes)?.map(|bytes| Image {
+                bytes,
+                extension: "emf",
+            }),
+        );
+    }
     let (extension, prefix) = match (blip.kind, blip.instance) {
         (0xf01e, 0x6e0) => ("png", 17),
         (0xf01e, 0x6e1) => ("png", 33),
         (0xf01d, 0x46a | 0x6e2) => ("jpg", 17),
         (0xf01d, 0x46b | 0x6e3) => ("jpg", 33),
         (0xf01d | 0xf01e, _) => return Err(unsupported("invalid OfficeArt raster BLIP instance")),
-        _ => return Ok(None), // No WMF/EMF/PICT/DIB or active-object decoding here.
+        _ => return Ok(None), // No WMF/PICT/DIB or active-object decoding here.
     };
     if blip.version != 0 {
         return Err(unsupported("invalid OfficeArt raster BLIP version"));
@@ -98,7 +111,13 @@ pub(crate) fn read<'a>(blip: Record<'a>, budget: &mut usize) -> Result<Option<Im
             "OfficeArt image dimensions exceed resource limit",
         ));
     }
-    Ok(Some(Image { bytes, extension }))
+    if bytes.len() > remaining_bytes {
+        return Err(unsupported("OfficeArt retained media budget exceeded"));
+    }
+    Ok(Some(Image {
+        bytes: Cow::Borrowed(bytes),
+        extension,
+    }))
 }
 pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
     if b.len() < 33 || !b.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR") {

@@ -1,4 +1,4 @@
-//! Passive raster BLIPs: MS-PPT 2.1.3/2.4.3; MS-ODRAW 2.2.20-32.
+//! Passive image BLIPs: MS-PPT 2.1.3/2.4.3; MS-ODRAW 2.2.20-32.
 use super::*;
 use crate::officeart::raster::Image;
 #[cfg(test)]
@@ -69,8 +69,13 @@ impl<'a> Store<'a> {
                 .entries
                 .get((index - 1) as usize)
                 .ok_or_else(|| unsupported("PowerPoint picture index out of range"))?;
-            let image = image(entry, self.delayed, budget)?;
-            if let Some(image) = image {
+            let image = crate::officeart::raster::read_store_entry(
+                entry,
+                Some(self.delayed),
+                budget,
+                self.remaining,
+            )?;
+            if let Some(image) = &image {
                 self.remaining = self
                     .remaining
                     .checked_sub(image.bytes.len())
@@ -87,19 +92,21 @@ impl<'a> Store<'a> {
     pub fn relationships(&self) -> String {
         let mut xml = String::new();
         for index in &self.used {
-            let image = self.images[index].expect("only supported referenced images");
+            let image = self.images[index]
+                .as_ref()
+                .expect("only supported referenced images");
             xml.push_str(&format!("<Relationship Id=\"rImg{index}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image{index}.{}\"/>", image.extension));
         }
         xml
     }
-    pub fn parts(&self) -> Vec<(String, &'a [u8])> {
+    pub fn parts(&self) -> Vec<(String, &[u8])> {
         self.images
             .iter()
             .filter_map(|(id, image)| {
-                image.map(|image| {
+                image.as_ref().map(|image| {
                     (
                         format!("ppt/media/image{id}.{}", image.extension),
-                        image.bytes,
+                        image.bytes.as_ref(),
                     )
                 })
             })
@@ -107,12 +114,13 @@ impl<'a> Store<'a> {
     }
 }
 
+#[cfg(test)]
 fn image<'a>(
     entry: Record<'a>,
     delayed: &'a [u8],
     budget: &mut usize,
 ) -> Result<Option<Image<'a>>, String> {
-    crate::officeart::raster::read_store_entry(entry, Some(delayed), budget)
+    crate::officeart::raster::read_store_entry(entry, Some(delayed), budget, MAX_MEDIA_BYTES)
 }
 
 #[cfg(test)]
@@ -213,6 +221,26 @@ mod tests {
     }
 
     #[test]
+    fn compressed_emf_is_retained_once_and_reused_without_inflation() {
+        let (source, blip) = crate::officeart::emf_test_blip();
+        let entries = [parsed(&blip)];
+        let mut store = Store::new(&entries, &[]);
+        store.remaining = source.len();
+        assert!(store.reference(1, &mut 100).unwrap());
+        let pointer = store.parts()[0].1.as_ptr();
+        assert_eq!(store.parts()[0].1, source);
+        assert_eq!(store.remaining, 0);
+        store.begin_slide();
+        assert!(store.reference(1, &mut 0).unwrap());
+        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
+        assert!(store.relationships().contains("image1.emf"));
+        let mut limited = Store::new(&entries, &[]);
+        limited.remaining = source.len() - 1;
+        assert!(limited.reference(1, &mut 100).is_err());
+        assert!(limited.parts().is_empty());
+    }
+
+    #[test]
     fn rejects_invalid_ranges_sizes_names_and_known_raster_headers() {
         let blip = blip(&png(1, 1), false);
         for entry in [
@@ -228,7 +256,7 @@ mod tests {
         entry[8 + 33] = 0;
         entry[8 + 24..8 + 28].fill(0); // Unused slot never dereferences foDelay.
         assert!(image(parsed(&entry), &[], &mut 100).unwrap().is_none());
-        let unsupported = record(0xf01a, 0, &[]);
+        let unsupported = record(0xf01b, 0, &[]); // WMF is still not admitted.
         assert!(image(parsed(&unsupported), &[], &mut 100)
             .unwrap()
             .is_none());

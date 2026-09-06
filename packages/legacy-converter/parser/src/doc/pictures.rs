@@ -29,8 +29,9 @@ impl<'a> Store<'a> {
             if self.cache.len() >= 100_000 {
                 return Err(unsupported("Word picture cache budget exceeded"));
             }
-            let picture = read(self.data, offset, &mut self.budget)?;
-            if let Some(picture) = picture {
+            let picture =
+                read_with_limit(self.data, offset, &mut self.budget, self.remaining_bytes)?;
+            if let Some(picture) = &picture {
                 self.remaining_bytes = self
                     .remaining_bytes
                     .checked_sub(picture.image.bytes.len())
@@ -38,7 +39,7 @@ impl<'a> Store<'a> {
             }
             self.cache.insert(offset, picture);
         }
-        let Some(picture) = self.cache[&offset] else {
+        let Some(picture) = self.cache[&offset].as_ref() else {
             self.omitted = true;
             return Ok(String::new());
         };
@@ -59,19 +60,19 @@ impl<'a> Store<'a> {
         ))
     }
     pub fn relationships(&self) -> String {
-        self.part_offsets.iter().filter_map(|offset| self.cache[offset].map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
+        self.part_offsets.iter().filter_map(|offset| self.cache[offset].as_ref().map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
     }
     pub fn begin_part(&mut self) {
         self.part_offsets.clear();
     }
-    pub fn parts(&self) -> Vec<(String, &'a [u8])> {
+    pub fn parts(&self) -> Vec<(String, &[u8])> {
         self.cache
             .iter()
             .filter_map(|(offset, picture)| {
-                picture.map(|p| {
+                picture.as_ref().map(|p| {
                     (
                         format!("word/media/image{offset}.{}", p.image.extension),
-                        p.image.bytes,
+                        p.image.bytes.as_ref(),
                     )
                 })
             })
@@ -79,7 +80,6 @@ impl<'a> Store<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
 pub(super) struct Picture<'a> {
     pub image: Image<'a>,
     pub extent: [i64; 2],
@@ -102,10 +102,20 @@ impl Picture<'_> {
     }
 }
 
+#[cfg(test)]
 fn read<'a>(
     data: &'a [u8],
     offset: usize,
     budget: &mut usize,
+) -> Result<Option<Picture<'a>>, String> {
+    read_with_limit(data, offset, budget, 128 * 1024 * 1024)
+}
+
+fn read_with_limit<'a>(
+    data: &'a [u8],
+    offset: usize,
+    budget: &mut usize,
+    remaining_bytes: usize,
 ) -> Result<Option<Picture<'a>>, String> {
     let tail = data
         .get(offset..)
@@ -168,7 +178,8 @@ fn read<'a>(
             return Err(unsupported("invalid Word inline BLIP record"));
         }
         if props.pib == Some(index) {
-            selected = crate::officeart::raster::read_store_entry(entry, None, budget)?;
+            selected =
+                crate::officeart::raster::read_store_entry(entry, None, budget, remaining_bytes)?;
         }
     }
     let Some(image) = selected else {
@@ -325,6 +336,20 @@ mod tests {
     }
     fn raster() -> Vec<u8> {
         record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png()].concat())
+    }
+    #[test]
+    fn retains_owned_emf_once_for_repeated_inline_pictures() {
+        let (source, blip) = crate::officeart::emf_test_blip();
+        let data = fixture(&[(0x0104, 1)], &[blip]);
+        let mut store = Store::new(&data);
+        store.remaining_bytes = source.len();
+        assert!(store.drawing(0).unwrap().contains("<wp:inline>"));
+        let pointer = store.parts()[0].1.as_ptr();
+        assert_eq!(store.parts()[0].1, source);
+        store.budget = 0;
+        assert!(!store.drawing(0).unwrap().is_empty());
+        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
+        assert!(store.relationships().contains("image0.emf"));
     }
     #[test]
     fn inline_blips_follow_property_order_not_the_ignored_index_or_flags() {

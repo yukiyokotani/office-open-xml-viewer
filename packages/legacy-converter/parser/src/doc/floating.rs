@@ -190,8 +190,13 @@ impl<'a> Store<'a> {
                 .entries
                 .get(image_index)
                 .ok_or_else(|| unsupported("Word floating image index out of bounds"))?;
-            let image = read_store_entry(entry, Some(self.word), &mut self.budget)?;
-            if let Some(image) = image {
+            let image = read_store_entry(
+                entry,
+                Some(self.word),
+                &mut self.budget,
+                self.remaining_bytes,
+            )?;
+            if let Some(image) = &image {
                 self.remaining_bytes = self
                     .remaining_bytes
                     .checked_sub(image.bytes.len())
@@ -199,7 +204,7 @@ impl<'a> Store<'a> {
             }
             self.images.insert(image_index, image);
         }
-        let Some(image) = self.images[&image_index] else {
+        let Some(image) = self.images[&image_index].as_ref() else {
             self.omitted = true;
             return Ok(String::new());
         };
@@ -237,7 +242,10 @@ impl<'a> Store<'a> {
         }
         self.occurrences += 1;
         let image = Picture {
-            image,
+            image: Image {
+                bytes: std::borrow::Cow::Borrowed(image.bytes.as_ref()),
+                extension: image.extension,
+            },
             extent,
             crop: picture.crop,
             flip: [flags & 0x40 != 0, flags & 0x80 != 0],
@@ -251,13 +259,18 @@ impl<'a> Store<'a> {
         ))
     }
     pub fn relationships(&self) -> String {
-        self.images.iter().filter_map(|(id,image)|image.map(|p|format!(r#"<Relationship Id="rFloatImg{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/float{id}.{}"/>"#,p.extension))).collect()
+        self.images.iter().filter_map(|(id,image)|image.as_ref().map(|p|format!(r#"<Relationship Id="rFloatImg{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/float{id}.{}"/>"#,p.extension))).collect()
     }
-    pub fn parts(&self) -> Vec<(String, &'a [u8])> {
+    pub fn parts(&self) -> Vec<(String, &[u8])> {
         self.images
             .iter()
             .filter_map(|(id, image)| {
-                image.map(|p| (format!("word/media/float{id}.{}", p.extension), p.bytes))
+                image.as_ref().map(|p| {
+                    (
+                        format!("word/media/float{id}.{}", p.extension),
+                        p.bytes.as_ref(),
+                    )
+                })
             })
             .collect()
     }
@@ -469,21 +482,38 @@ mod tests {
         group_flags: u32,
         options: &[(u16, u32)],
     ) -> (Vec<u8>, Vec<u8>) {
-        let (mut word, mut table) = input((1 << 1) | (1 << 3) | (2 << 5));
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
         png.extend(2u32.to_be_bytes());
         png.extend(3u32.to_be_bytes());
         png.extend([8, 2, 0, 0, 0, 0, 0, 0, 0]);
         let blip = record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png].concat());
+        drawing_with_blip(shape_flags, group_flags, options, blip, 6)
+    }
+    fn drawing_with_blip(
+        shape_flags: u32,
+        group_flags: u32,
+        options: &[(u16, u32)],
+        blip: Vec<u8>,
+        kind: u8,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let (mut word, mut table) = input((1 << 1) | (1 << 3) | (2 << 5));
         word.resize(1024, 0);
         word.extend(&blip);
         let mut bse = vec![0; 36];
-        bse[0] = 6;
-        bse[1] = 6;
+        bse[0] = kind;
+        bse[1] = kind;
         bse[24] = 1;
         bse[20..24].copy_from_slice(&(blip.len() as u32).to_le_bytes());
         bse[28..32].copy_from_slice(&1024u32.to_le_bytes());
-        let group = record(0xf000, 15, &record(0xf001, 31, &record(0xf007, 0x62, &bse)));
+        let group = record(
+            0xf000,
+            15,
+            &record(
+                0xf001,
+                31,
+                &record(0xf007, (u16::from(kind) << 4) | 2, &bse),
+            ),
+        );
         let mut props = [
             0x4104u16.to_le_bytes().as_slice(),
             &1u32.to_le_bytes(),
@@ -519,6 +549,21 @@ mod tests {
         word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
         table.extend(art);
         (word, table)
+    }
+    #[test]
+    fn delayed_emf_keeps_owned_bytes_cached_across_floating_occurrences() {
+        let (source, blip) = crate::officeart::emf_test_blip();
+        let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        store.remaining_bytes = source.len();
+        assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
+        let pointer = store.parts()[0].1.as_ptr();
+        assert_eq!(store.parts()[0].1, source);
+        assert_eq!(store.remaining_bytes, 0);
+        // Shape records are still parsed per occurrence; image bytes are not.
+        assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
+        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
+        assert!(store.relationships().contains(".emf"));
     }
     #[test]
     fn delayed_pictures_use_word_stream_and_share_parts_without_sharing_drawing_ids() {

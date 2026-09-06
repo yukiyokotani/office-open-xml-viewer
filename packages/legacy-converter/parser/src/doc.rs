@@ -171,6 +171,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     if !media.is_empty() {
         content_types.push_str(r#"<Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/>"#);
     }
+    if media.iter().any(|(name, _)| name.ends_with(".emf")) {
+        content_types.push_str(r#"<Default Extension="emf" ContentType="image/x-emf"/>"#);
+    }
     content_types.push_str("</Types>");
     let mut parts: Vec<(String, String)> = vec![
         ("[Content_Types].xml".into(), content_types),

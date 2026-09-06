@@ -398,6 +398,9 @@ fn build_pptx(
     if !media.is_empty() {
         content_types.push_str("<Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpg\" ContentType=\"image/jpeg\"/>");
     }
+    if media.iter().any(|(name, _)| name.ends_with(".emf")) {
+        content_types.push_str("<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>");
+    }
     for (index, (slide, image_rels)) in slides.into_iter().enumerate() {
         let id = index + 1;
         content_types.push_str(&format!(
