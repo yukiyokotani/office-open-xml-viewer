@@ -99,7 +99,7 @@ async function paintedParagraphGeometry() {
   paragraph.spaceBefore = 6;
   paragraph.spaceAfter = 4;
   const model = doc([paragraph as unknown as BodyElement], 80);
-  const services = createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) });
+  const services = createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) });
   const layout = layoutDocument(model, services, { currentDateMs: 0 });
   const paintedPages: Array<{ lineCount: number; topYPx: number | null }> = [];
   for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex++) {
@@ -146,7 +146,7 @@ describe('paginate/paint line-count divergence — paint never indexes a phantom
     const pageHeight = 80; // short page → the paragraph spans several pages
     const model = doc(body(), pageHeight);
     const services = createLayoutServices(model, {
-      localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+      localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     });
     const layout = layoutDocument(model, services, { currentDateMs: 0 });
     let totalLines = 0;

@@ -11,7 +11,8 @@ import init, { DocxArchive, reinit } from './wasm/docx_parser.js';
 import {
   decodeDataUrl,
   preloadGoogleFonts,
-  unloadLocalFontMetrics,
+  unloadGoogleFonts,
+  unregisterEmbeddedFonts,
   WasmParserHost,
   dropDecodedBitmapCache,
   dropSvgImageCache,
@@ -37,7 +38,7 @@ import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices } from './layout-runtime.js';
 import { DOCX_GOOGLE_FONTS, docxFontPreloadNames } from './google-fonts';
 import { loadEmbeddedFonts } from './embedded-fonts';
-import { loadDocxLocalFontMetrics } from './local-font-metrics';
+import { docxResolvedFontMetricCandidates } from './document-content.js';
 import type {
   RenderWorkerResponse,
   RenderWorkerWireRequest,
@@ -102,7 +103,8 @@ let layoutAbort: AbortController | null = null;
  *  host can only render one of per frame. */
 const LAYOUT_PROGRESS_POST_INTERVAL_MS = 100;
 let renderers: LoadedWorkerRenderers = {};
-let localMetricFontFaces: FontFace[] = [];
+let googleFontFaces: FontFace[] = [];
+let embeddedFontFaces: FontFace[] = [];
 const rawParts = new BoundedRawPartCache({
   maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
   maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
@@ -173,9 +175,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       fallbackPull = null;
       doc = null;
       reviewIndexInput = null;
-      if (localMetricFontFaces.length > 0) {
-        unloadLocalFontMetrics(localMetricFontFaces);
-        localMetricFontFaces = [];
+      if (googleFontFaces.length > 0) {
+        unloadGoogleFonts(googleFontFaces);
+        googleFontFaces = [];
+      }
+      if (embeddedFontFaces.length > 0) {
+        unregisterEmbeddedFonts(embeddedFontFaces);
+        embeddedFontFaces = [];
       }
       // Cached blobs belong to the previous document; serving them after a
       // re-parse would silently return the wrong file's image.
@@ -253,26 +259,31 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           DOCX_GOOGLE_FONTS,
         );
       }
+      googleFontFaces = googleFaces;
       // ECMA-376 §17.8.1 / §17.8.3 — register embedded fonts into the worker's
       // FontFaceSet (self.fonts) before pagination measures text. Bytes are read
       // straight from the retained archive (extract_image reads any zip entry).
-      let embeddedFaces: FontFace[] = [];
+      let embeddedFonts: Awaited<ReturnType<typeof loadEmbeddedFonts>> = { faces: [], metrics: {} };
       if (model.embeddedFonts?.length) {
-        embeddedFaces = await loadEmbeddedFonts(model, async (p) => {
+        embeddedFonts = await loadEmbeddedFonts(model, async (p) => {
           const loaded = host.archive;
           if (!loaded) throw new Error('No docx loaded');
           return host.run(() => loaded.extract_image(p));
         });
       }
-      const localMetrics = await loadDocxLocalFontMetrics(model);
-      localMetricFontFaces = localMetrics.faces;
+      embeddedFontFaces = embeddedFonts.faces;
       const preparedMath = renderers.math && source.mathOccurrences.length > 0
         ? await prepareMathRuns(model, renderers.math)
         : undefined;
       const layoutServices = createLayoutServices(source, {
-        localMetrics: localMetrics.metrics,
+        fontMetrics: embeddedFonts.metrics,
+        measureResolvedFontMetrics: true,
+        resolvedFontMetricCandidates: docxResolvedFontMetricCandidates(
+          model,
+          source.fontFamilyCharsets,
+        ),
         useGoogleFonts: !!req.useGoogleFonts,
-        embeddedFaces,
+        embeddedFaces: embeddedFonts.faces,
         googleFaces,
         mathResources: preparedMath?.records,
         mathDrawables: preparedMath?.drawables,

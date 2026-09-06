@@ -238,7 +238,7 @@ describe('lineRule=auto — the substituted-font single-line FLOOR is centred; o
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400,
       layoutServices: createLayoutServices(model, {
-        localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]), measureContext: canvas.getContext('2d'),
+        localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]), measureContext: canvas.getContext('2d'),
       }),
     });
     const t = fillTextCalls.find((c) => c.text === 'T');

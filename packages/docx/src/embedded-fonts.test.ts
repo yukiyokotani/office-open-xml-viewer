@@ -22,6 +22,8 @@ afterEach(() => {
 interface FakeFace {
   family: string;
   source: ArrayBuffer;
+  weight: string;
+  style: string;
   descriptors?: { weight?: string; style?: string };
   load: () => Promise<FakeFace>;
 }
@@ -31,6 +33,8 @@ function installFontFaceSet() {
   class FakeFontFace implements FakeFace {
     family: string;
     source: ArrayBuffer;
+    weight: string;
+    style: string;
     constructor(
       family: string,
       source: ArrayBuffer,
@@ -38,6 +42,8 @@ function installFontFaceSet() {
     ) {
       this.family = family;
       this.source = source;
+      this.weight = descriptors?.weight ?? 'normal';
+      this.style = descriptors?.style ?? 'normal';
     }
     load(): Promise<FakeFace> {
       return Promise.resolve(this);
@@ -64,6 +70,42 @@ const validHeader = () =>
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   ]);
 
+function metricSfnt(): Uint8Array {
+  const tableCount = 4;
+  const headOffset = 12 + tableCount * 16;
+  const hheaOffset = headOffset + 54;
+  const os2Offset = hheaOffset + 36;
+  const cmapOffset = os2Offset + 78;
+  const bytes = new Uint8Array(cmapOffset + 40);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 0x00010000);
+  view.setUint16(4, tableCount);
+  const record = (index: number, tag: string, offset: number, length: number) => {
+    const at = 12 + index * 16;
+    for (let i = 0; i < 4; i++) bytes[at + i] = tag.charCodeAt(i);
+    view.setUint32(at + 8, offset);
+    view.setUint32(at + 12, length);
+  };
+  record(0, 'head', headOffset, 54);
+  record(1, 'hhea', hheaOffset, 36);
+  record(2, 'OS/2', os2Offset, 78);
+  record(3, 'cmap', cmapOffset, 40);
+  view.setUint16(headOffset + 18, 2048);
+  view.setInt16(hheaOffset + 4, 1802);
+  view.setInt16(hheaOffset + 6, -455);
+  view.setUint16(cmapOffset + 2, 1);
+  view.setUint16(cmapOffset + 4, 3);
+  view.setUint16(cmapOffset + 6, 10);
+  view.setUint32(cmapOffset + 8, 12);
+  view.setUint16(cmapOffset + 12, 12);
+  view.setUint32(cmapOffset + 16, 28);
+  view.setUint32(cmapOffset + 24, 1);
+  view.setUint32(cmapOffset + 28, 0x56fd);
+  view.setUint32(cmapOffset + 32, 0x56fd);
+  view.setUint32(cmapOffset + 36, 1);
+  return bytes;
+}
+
 const GUID = '{3EEE3167-E5B8-4798-AE48-EA6B71E31D4D}';
 
 function modelWith(embeddedFonts?: EmbeddedFontRef[]): DocxDocumentModel {
@@ -78,6 +120,65 @@ function modelWith(embeddedFonts?: EmbeddedFontRef[]): DocxDocumentModel {
 }
 
 describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
+  it('derives East-Asian line metrics from an arbitrary embedded face, not its name', async () => {
+    installFontFaceSet();
+    const loaded = await loadEmbeddedFonts(modelWith([{
+      fontName: 'Unlisted CJK Face', style: 'regular',
+      partPath: 'word/fonts/font1.ttf', fontKey: '',
+    }]), async () => metricSfnt());
+
+    expect(loaded.metrics['unlisted cjk face']).toMatchObject({
+      family: 'Unlisted CJK Face',
+      requestedFamily: 'Unlisted CJK Face',
+      weight: 400,
+      style: 'normal',
+      eastAsianLineHeightRatio: ((1802 + 455) * 1.3) / 2048,
+    });
+  });
+
+  it('does not assign East-Asian metrics to a face whose cmap lacks East-Asian glyphs', async () => {
+    installFontFaceSet();
+    const latinOnly = metricSfnt();
+    const view = new DataView(latinOnly.buffer);
+    const cmapOffset = 12 + 4 * 16 + 54 + 36 + 78;
+    view.setUint32(cmapOffset + 28, 0x41);
+    view.setUint32(cmapOffset + 32, 0x5a);
+    const loaded = await loadEmbeddedFonts(modelWith([{
+      fontName: 'Latin Embedded Face', style: 'regular',
+      partPath: 'word/fonts/font1.ttf', fontKey: '',
+    }]), async () => latinOnly);
+
+    expect(loaded.faces).toHaveLength(1);
+    expect(loaded.metrics).toEqual({});
+  });
+
+  it('does not mix resources when a malformed document repeats one CSS face tuple', async () => {
+    const added = installFontFaceSet();
+    const latinOnly = metricSfnt();
+    const cmapOffset = 12 + 4 * 16 + 54 + 36 + 78;
+    new DataView(latinOnly.buffer).setUint32(cmapOffset + 28, 0x41);
+    new DataView(latinOnly.buffer).setUint32(cmapOffset + 32, 0x5a);
+    const cjk = metricSfnt();
+    const fetchFontBytes = vi.fn(async (path: string) =>
+      path.endsWith('first.ttf') ? latinOnly : cjk);
+    const loaded = await loadEmbeddedFonts(modelWith([
+      {
+        fontName: 'Duplicate Face', style: 'regular',
+        partPath: 'word/fonts/first.ttf', fontKey: '',
+      },
+      {
+        fontName: 'Duplicate Face', style: 'regular',
+        partPath: 'word/fonts/second.ttf', fontKey: '',
+      },
+    ]), fetchFontBytes);
+
+    expect(fetchFontBytes).toHaveBeenCalledTimes(1);
+    expect(fetchFontBytes).toHaveBeenCalledWith('word/fonts/first.ttf');
+    expect(added).toHaveLength(1);
+    expect(loaded.faces).toHaveLength(1);
+    expect(loaded.metrics).toEqual({});
+  });
+
   it('maps a 4-slot font to 4 faces with the correct weight/style descriptors', async () => {
     const added = installFontFaceSet();
     const refs: EmbeddedFontRef[] = [
@@ -104,13 +205,13 @@ describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
     ]);
   });
 
-  it('sets odttf=true for a .odttf part (bytes de-obfuscated to plaintext sfnt)', async () => {
+  it('de-obfuscates a .odttf part once before registration', async () => {
     const added = installFontFaceSet();
     const refs: EmbeddedFontRef[] = [
       { fontName: 'Ubuntu', style: 'regular', partPath: 'word/fonts/font1.ODTTF', fontKey: GUID },
     ];
-    // Obfuscated on the wire; loadEmbeddedFonts must flag odttf (case-insensitive
-    // on the extension) so registerEmbeddedFonts de-obfuscates before FontFace.
+    // Obfuscated on the wire; the loader recognizes the extension
+    // case-insensitively and hands the same plaintext bytes to metrics + FontFace.
     await loadEmbeddedFonts(modelWith(refs), async () => deobfuscateOdttf(validHeader(), GUID));
     expect(added).toHaveLength(1);
     // The first 4 bytes are the plaintext sfnt tag after de-obfuscation.

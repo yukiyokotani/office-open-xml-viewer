@@ -11,6 +11,15 @@ import type {
   SectionProps,
 } from './types.js';
 
+const RESOLVED_EA_FAMILY = 'Arbitrary Resolved EA';
+const RESOLVED_EA_RATIO = 3269 / 2048;
+const RESOLVED_EA_METRICS = {
+  'arbitrary resolved ea': {
+    family: RESOLVED_EA_FAMILY,
+    eastAsianLineHeightRatio: RESOLVED_EA_RATIO,
+  },
+};
+
 function makeMeasureContext(): CanvasRenderingContext2D {
   let font = '10px serif';
   // The mock glyph box is a flat 1.0×em (ascent 0.8 + descent 0.2 of the
@@ -182,6 +191,7 @@ function retainedAdvance(
     section(docGridType),
     makeMeasureContext(),
     { adjustLineHeightInTable },
+    RESOLVED_EA_METRICS,
   )[0];
   if (advance === undefined) throw new Error('Canonical table omitted the row');
   return advance;
@@ -215,8 +225,8 @@ describe('docGrid line-cell integration through the cell measure path', () => {
   it('retains atLeast-zero empty-mark row and horizontal-border boundaries', () => {
     const para = paragraphWithRuns([]);
     para.defaultFontSize = 10;
-    para.defaultFontFamily = 'Meiryo';
-    para.defaultFontFamilyEastAsia = 'Meiryo';
+    para.defaultFontFamily = RESOLVED_EA_FAMILY;
+    para.defaultFontFamilyEastAsia = RESOLVED_EA_FAMILY;
     para.lineSpacing = { value: 0, rule: 'atLeast', explicit: true };
     const source = table();
     const horizontal = { width: 2, color: '#000000', style: 'single' };
@@ -230,6 +240,7 @@ describe('docGrid line-cell integration through the cell measure path', () => {
       makeMeasureContext(),
       {},
       { adjustLineHeightInTable: true, useFeLayout: true },
+      RESOLVED_EA_METRICS,
     );
     const retained = layout.pages[0]?.layers.body[0];
     if (retained?.kind !== 'table') throw new Error('Canonical layout omitted the table');
@@ -239,7 +250,7 @@ describe('docGrid line-cell integration through the cell measure path', () => {
     const bottom = retained.borders.find((border) => border.edge === 'bottom');
     if (!top || !bottom) throw new Error('Canonical table omitted horizontal borders');
 
-    const designAdvancePt = 10 * 3269 / 2048;
+    const designAdvancePt = 10 * RESOLVED_EA_RATIO;
     expect(retainedRow.contentHeightPt).toBeCloseTo(designAdvancePt, 12);
     expect(retainedRow.advancePt).toBeCloseTo(designAdvancePt + 2, 12);
     expect(retained.advancePt).toBeCloseTo(retainedRow.advancePt, 12);
@@ -255,26 +266,24 @@ describe('docGrid line-cell integration through the cell measure path', () => {
       {
         text: 'あ',
         fontSize: 14,
-        fontFamily: 'Meiryo',
-        fontFamilyEastAsia: 'Meiryo',
+        fontFamily: RESOLVED_EA_FAMILY,
+        fontFamilyEastAsia: RESOLVED_EA_FAMILY,
       },
       { type: 'break', breakType: 'line' },
       {
         text: 'い',
         fontSize: 10,
-        fontFamily: 'Meiryo',
-        fontFamilyEastAsia: 'Meiryo',
+        fontFamily: RESOLVED_EA_FAMILY,
+        fontFamilyEastAsia: RESOLVED_EA_FAMILY,
       },
     ]);
     para.lineSpacing = { value: 0, rule: 'atLeast', explicit: true };
 
     // Observed Windows Word output keeps the first explicit-atLeast line at
-    // Meiryo's raw 14pt design height (3269/2048 em, slightly over the 20pt
-    // pitch), then keeps the ordinary 10pt line at one pitch. This fixture
-    // records Office compatibility; the standards do not define this precise
-    // tall-line exception.
+    // The resolved resource's raw 14pt design height (3269/2048 em, slightly
+    // over the 20pt pitch) is followed by one ordinary 10pt grid line.
     expect(retainedAdvance(rowWith(para), true))
-      .toBeCloseTo(14 * 3269 / 2048 + 20, 12);
+      .toBeCloseTo(14 * RESOLVED_EA_RATIO + 20, 12);
   });
 
   it('a manual line break in a SMALLER run does not shrink the line height (tallest governs)', () => {

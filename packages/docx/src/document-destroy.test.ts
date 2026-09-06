@@ -2,7 +2,6 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import {
   WorkerBridge,
-  loadLocalFontMetrics,
   registerEmbeddedFonts,
   preloadGoogleFonts,
   type WorkerLike,
@@ -107,44 +106,6 @@ function installGoogleFontFaceSet(): { added: FakeFace[] } {
   return { added };
 }
 
-function installLocalMetricFontEnvironment(): { added: FakeFace[] } {
-  const added: FakeFace[] = [];
-  class FakeFontFace {
-    status: FontFaceLoadStatus = 'unloaded';
-    constructor(public family: string, public source: string) {}
-    load(): Promise<this> {
-      this.status = 'loaded';
-      return Promise.resolve(this);
-    }
-  }
-  const set = {
-    add: (face: FakeFace) => { added.push(face); },
-    delete: (face: FakeFace) => {
-      const index = added.indexOf(face);
-      if (index >= 0) added.splice(index, 1);
-      return index >= 0;
-    },
-  };
-  class FakeOffscreenCanvas {
-    getContext() {
-      return {
-        font: '',
-        measureText: () => ({
-          width: 50,
-          actualBoundingBoxAscent: 80,
-          actualBoundingBoxDescent: 20,
-          fontBoundingBoxAscent: 106,
-          fontBoundingBoxDescent: 44,
-        }),
-      };
-    }
-  }
-  G.FontFace = FakeFontFace;
-  G.document = { fonts: set };
-  G.OffscreenCanvas = FakeOffscreenCanvas;
-  delete G.self;
-  return { added };
-}
 const GOOGLE_FONT_MAP: Record<string, FontPreloadEntry> = {
   calibri: { url: 'https://fonts.googleapis.com/css2?family=Carlito', loadFamily: 'Carlito' },
 };
@@ -175,7 +136,6 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 4, maxBytes: 1024 });
     instance._embeddedFontFaces = [];
     instance._googleFontFaces = [];
-    instance._localMetricFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
   }
@@ -325,20 +285,4 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     expect((doc as unknown as { _googleFontFaces: FontFace[] })._googleFontFaces).toHaveLength(0);
   });
 
-  it('destroy() releases exact local metric faces from the FontFaceSet', async () => {
-    const { added } = installLocalMetricFontEnvironment();
-    const held = await loadLocalFontMetrics([{
-      family: 'Metric Face',
-      localNames: ['Metric Face'],
-      lineHeightMultiplier: 1.3,
-    }]);
-    expect(added).toHaveLength(1);
-
-    const { doc } = makeDocument();
-    (doc as unknown as { _localMetricFontFaces: FontFace[] })._localMetricFontFaces = held.faces;
-    doc.destroy();
-
-    expect(added).toHaveLength(0);
-    expect((doc as unknown as { _localMetricFontFaces: FontFace[] })._localMetricFontFaces).toHaveLength(0);
-  });
 });

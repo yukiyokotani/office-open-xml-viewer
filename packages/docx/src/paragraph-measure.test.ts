@@ -49,6 +49,15 @@ const environment = (
   ...overrides,
 });
 
+const RESOLVED_EA_FAMILY = 'Arbitrary Resolved EA';
+const RESOLVED_EA_RATIO = 3269 / 2048;
+const resolvedEaMetrics = (ratio = RESOLVED_EA_RATIO) => ({
+  [RESOLVED_EA_FAMILY.toLowerCase()]: {
+    family: RESOLVED_EA_FAMILY,
+    eastAsianLineHeightRatio: ratio,
+  },
+});
+
 const paragraph = (overrides: Partial<DocParagraph> = {}): DocParagraph => ({
   alignment: 'left',
   indentLeft: 0,
@@ -396,16 +405,16 @@ describe('measureParagraph', () => {
     expect(result.contentEndYPt).toBe(40);
   });
 
-  it('uses face-specific Far East design metrics for useFELayout empty marks', () => {
+  it('uses resolved-resource Far East metrics for useFELayout empty marks', () => {
     const markAdvance = (
       fontSize: number,
       pitchPt: number,
-      family: string,
+      ratio?: number,
     ): number => measureParagraph(
       paragraph({
         defaultFontSize: fontSize,
-        defaultFontFamily: family,
-        defaultFontFamilyEastAsia: family,
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         spaceBefore: 0,
       }),
       layoutContext({
@@ -414,18 +423,20 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      environment({
+        useFeLayout: true,
+        resolvedLocalFonts: ratio === undefined ? {} : resolvedEaMetrics(ratio),
+      }),
     ).contentEndYPt;
 
-    // Word 16.111.1 / macOS 26.5.2 synthetic matrix. Meiryo UI uses
-    // 1.3 * hhea while the other requested faces stay below one grid pitch.
-    expect(markAdvance(10, 18, 'Meiryo UI')).toBe(18);
-    expect(markAdvance(11, 18, 'Meiryo UI')).toBe(36);
-    expect(markAdvance(12, 20, 'Meiryo UI')).toBe(20);
-    expect(markAdvance(13, 20, 'Meiryo UI')).toBe(40);
-    expect(markAdvance(11, 18, 'Times New Roman')).toBe(18);
-    expect(markAdvance(11, 18, 'Yu Gothic')).toBe(18);
-    expect(markAdvance(11, 18, 'ＭＳ 明朝')).toBe(18);
+    // A parsed 1.651025-em resource crosses these grid boundaries; the same
+    // arbitrary family without a resource metric stays on the generic path.
+    const ratio = ((2171 + 430) * 1.3) / 2048;
+    expect(markAdvance(10, 18, ratio)).toBe(18);
+    expect(markAdvance(11, 18, ratio)).toBe(36);
+    expect(markAdvance(12, 20, ratio)).toBe(20);
+    expect(markAdvance(13, 20, ratio)).toBe(40);
+    expect(markAdvance(11, 18)).toBe(18);
   });
 
   it('keeps positive atLeast useFELayout marks on the grid unless exact spacing overrides it', () => {
@@ -434,8 +445,8 @@ describe('measureParagraph', () => {
     const measure = (lineSpacing: typeof atLeast | typeof exact): number => measureParagraph(
       paragraph({
         defaultFontSize: 11,
-        defaultFontFamily: 'Meiryo UI',
-        defaultFontFamilyEastAsia: 'Meiryo UI',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
@@ -446,7 +457,10 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      environment({
+        useFeLayout: true,
+        resolvedLocalFonts: resolvedEaMetrics(((2171 + 430) * 1.3) / 2048),
+      }),
     ).contentEndYPt;
 
     // §17.6.5 names exact spacing (not atLeast) as the grid-line override.
@@ -461,8 +475,8 @@ describe('measureParagraph', () => {
       const result = measureParagraph(
         paragraph({
           defaultFontSize: 10,
-          defaultFontFamily: 'Meiryo',
-          defaultFontFamilyEastAsia: 'Meiryo',
+          defaultFontFamily: RESOLVED_EA_FAMILY,
+          defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
           lineSpacing: atLeastZero,
           spaceBefore: 0,
         }),
@@ -473,13 +487,13 @@ describe('measureParagraph', () => {
         }),
         placement({ startYPt: 0 }),
         measurer,
-        environment({ useFeLayout: true }),
+        environment({ useFeLayout: true, resolvedLocalFonts: resolvedEaMetrics() }),
       );
 
       // Word's atLeast-zero compatibility path keeps a line whose design box
       // exceeds one grid pitch at its raw design advance instead of rounding
       // it to a second grid cell. Empty paragraph marks follow the same rule.
-      expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
+      expect(result.contentEndYPt).toBeCloseTo(10 * RESOLVED_EA_RATIO, 12);
     },
   );
 
@@ -492,8 +506,8 @@ describe('measureParagraph', () => {
     const result = measureParagraph(
       paragraph({
         defaultFontSize: 10,
-        defaultFontFamily: 'Meiryo',
-        defaultFontFamilyEastAsia: 'Meiryo',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
@@ -504,7 +518,7 @@ describe('measureParagraph', () => {
       }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      environment({ useFeLayout: true, resolvedLocalFonts: resolvedEaMetrics() }),
     );
 
     expect(result.contentEndYPt).toBeCloseTo(expected, 12);
@@ -520,18 +534,18 @@ describe('measureParagraph', () => {
     const result = measureParagraph(
       paragraph({
         defaultFontSize: 10,
-        defaultFontFamily: 'Meiryo',
-        defaultFontFamilyEastAsia: 'Meiryo',
+        defaultFontFamily: RESOLVED_EA_FAMILY,
+        defaultFontFamilyEastAsia: RESOLVED_EA_FAMILY,
         lineSpacing,
         spaceBefore: 0,
       }),
       layoutContext({ lineGrid, lineSpacing, spaceBeforePt: 0 }),
       placement({ startYPt: 0 }),
       measurer,
-      environment({ useFeLayout: true }),
+      environment({ useFeLayout: true, resolvedLocalFonts: resolvedEaMetrics() }),
     );
 
-    expect(result.contentEndYPt).toBeCloseTo(10 * 3269 / 2048, 12);
+    expect(result.contentEndYPt).toBeCloseTo(10 * RESOLVED_EA_RATIO, 12);
   });
 
   it('matches observed Word spacing for an explicit atLeast line on a body grid', () => {

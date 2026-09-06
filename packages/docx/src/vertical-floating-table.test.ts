@@ -172,7 +172,7 @@ function layoutPages(
 function documentServices(doc: DocxDocumentModel): ReturnType<typeof createLayoutServices> {
   const measure = recordingCanvas();
   return createLayoutServices(doc, {
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]),
+    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]),
     measureContext: measure.canvas.getContext('2d'),
   });
 }

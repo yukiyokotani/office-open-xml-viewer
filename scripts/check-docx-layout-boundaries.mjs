@@ -2050,7 +2050,7 @@ function assertBodyKernelServiceOwner(root) {
     && parentCall.arguments[1] === call
     && call.arguments.length === 3
     && call.arguments.every((argument, index) => (
-      ts.isIdentifier(argument) && argument.text === ['source', 'context', 'localMetrics'][index]
+      ts.isIdentifier(argument) && argument.text === ['source', 'context', 'fontMetrics'][index]
     ));
   let insideOwner = false;
   for (let node = parentCall; node; node = node.parent) {

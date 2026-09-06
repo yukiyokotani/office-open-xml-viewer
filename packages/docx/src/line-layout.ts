@@ -18,7 +18,7 @@ import type {
   DocParagraph, DocRun, DocxTextRun, FieldRun,
   LineSpacing, TabStop, DocxRunBorder, DocSettings, EmphasisMark,
 } from './types';
-import type { CanvasFontRoute, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { CanvasFontRoute, KinsokuRules, HyperlinkTarget, NumberFormat, Duotone, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
   classifyCjkFont,
   cjkFallbackChain,
@@ -44,10 +44,11 @@ import {
   formatDateTimePicture,
   parseDateTimePictureSwitch,
   fontAdvanceBiasEm,
-  normalizeLocalFontMetricFamily,
+  normalizeFontMetricFamily,
   canvasFontString,
+  intendedSingleLinePx,
+  correctLineMetrics,
 } from '@silurus/ooxml-core';
-import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import { groupFitTextRegions, type FitTextRun } from './fit-text.js';
 import {
   type FloatRect,
@@ -179,6 +180,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
    * is its isolated alias; this measured ratio supplies the design-line floor
    * without a version-specific font constant. */
   resolvedLineHeightRatio?: number;
+  resolvedEastAsianLineHeightRatio?: number;
   vertAlign: 'super' | 'sub' | null;
   measuredWidth: number;  // px (set during layout)
   /** A2 text authority captured during segmentation; production text width and
@@ -247,17 +249,14 @@ export interface LayoutTextSeg extends LayoutSegSource {
    *  in the registered order (ECMA-376 §17.3.2.20 w:lang w:bidi). */
   digitsAsAN?: boolean;
   /** ECMA-376 §17.3.2.26 eastAsia axis (`<w:rFonts w:eastAsia>`) DECLARED on the
-   *  originating run, retained purely for a line-box DESIGN-LINE FLOOR. Word
-   *  reserves the declared eastAsia face's line height even when this particular
-   *  segment renders Latin glyphs (the common Japanese encoding puts a tabled CJK
-   *  face — Meiryo — on eastAsia while ascii stays an untabled Latin default). The
-   *  BODY line breaker ignores this (its floor is `intendedSingleLinePx(fontFamily)`
-   *  per segment, so body behaviour is unchanged); the TEXT-BOX metrics
-   *  (`lineMetricsFor`) floor on it so a text box matches PR #640/#646/#648. */
+   *  originating run, retained for a line-box design floor. The floor is read
+   *  from the resolved font resource; the authored family name itself carries
+   *  no geometry. */
   eaFloorFamily?: string | null;
   /** Exact Canvas route for the explicit East Asian design-line probe. */
   eaFloorRoute?: CanvasFontRoute;
   resolvedEaFloorLineHeightRatio?: number;
+  resolvedEaFloorEastAsianLineHeightRatio?: number;
   /** This segment belongs to a DrawingML/WPS text body whose declared
    * eastAsia face contributes a design-line floor independent of glyph slot. */
   textBoxLineFloor?: boolean;
@@ -559,13 +558,12 @@ export interface LayoutLine {
   visibleAscent?: number;
   visibleDescent?: number;
   visibleIntendedSingle?: number;
-  /** px — intended single-line height (max over segments of the requested
-   *  font's win line-height ratio × em), for fonts whose substituted Canvas
-   *  metrics understate Word's line spacing. 0 when no segment needs it. */
+  /** px — intended single-line height (max over segments of the selected
+   * resource ratio, with the established compatibility registry as fallback). */
   intendedSingle: number;
   /** px — DESIGN grid-count height: the max over segments of each run's
-   *  Word-faithful single-line height (a tabled run's design height, an
-   *  untabled East Asian run's 1.3em Word FE fallback). Feeds docGrid cell
+   *  format-policy single-line height (a resolved resource's design height,
+   *  or the generic East Asian fallback). Feeds docGrid cell
    *  counting without depending on a substituted face's Canvas box
    *  (§17.6.5; sample-9/sample-52). */
   gridCountSingle: number;
@@ -691,7 +689,7 @@ export interface LineLayoutEnvironment {
   readonly useFeLayout?: boolean;
   /** §17.15.3.3 w:balanceSingleByteDoubleByteWidth document compatibility switch. */
   readonly balanceSingleByteDoubleByteWidth?: boolean;
-  readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
@@ -1016,17 +1014,20 @@ export function buildFont(
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
-/** Design single-line floor for a measured segment. An exact local face, when
- * resolved during document loading, supersedes the static family profile; the
- * latter remains the fallback when local() is unavailable or rejected. */
+/** Design single-line floor. Parsed resource geometry takes part through the
+ * generic fields; the compatibility registry remains the fallback for authored
+ * fonts whose bytes are unavailable to the browser. */
 export function segmentIntendedSingleLinePx(
   segment: LayoutTextSeg,
   emPx: number,
   eastAsian = false,
 ): number {
+  const resourceRatio = eastAsian
+    ? segment.resolvedEastAsianLineHeightRatio ?? segment.resolvedLineHeightRatio ?? 0
+    : segment.resolvedLineHeightRatio ?? 0;
   return Math.max(
     intendedSingleLinePx(segment.fontFamily, emPx, eastAsian),
-    (segment.resolvedLineHeightRatio ?? 0) * emPx,
+    resourceRatio * emPx,
   );
 }
 
@@ -1035,9 +1036,14 @@ export function segmentEastAsiaFloorSingleLinePx(
   emPx: number,
   eastAsian = false,
 ): number {
+  const resourceRatio = eastAsian
+    ? segment.resolvedEaFloorEastAsianLineHeightRatio
+      ?? segment.resolvedEaFloorLineHeightRatio
+      ?? 0
+    : segment.resolvedEaFloorLineHeightRatio ?? 0;
   return Math.max(
     intendedSingleLinePx(segment.eaFloorFamily, emPx, eastAsian),
-    (segment.resolvedEaFloorLineHeightRatio ?? 0) * emPx,
+    resourceRatio * emPx,
   );
 }
 
@@ -1054,11 +1060,9 @@ export function getDefaultFontSize(para: ParagraphLayoutSource): number {
   return 10; // pt fallback
 }
 
-/** First text/field run's font family — used to size empty paragraphs whose
- *  intended font (e.g. Meiryo) has a larger win line height than the fallback.
- *  Empty paragraphs (no runs) fall back to the paragraph's style-resolved
- *  default font so e.g. an empty Meiryo cell that forms a résumé "bar" reserves
- *  Meiryo's tall line box rather than the generic fallback's. */
+/** First text/field run's font family. Empty paragraphs fall back to the
+ * paragraph's style-resolved default family. Resource lookup consumes the name
+ * first; the legacy compatibility registry may use it only when unavailable. */
 export function getDefaultFontFamily(
   para: ParagraphLayoutSource,
   eastAsian = false,
@@ -1071,8 +1075,7 @@ export function getDefaultFontFamily(
   return para.defaultFontFamily ?? null;
 }
 
-/** Intended single-line height (px) for an empty paragraph, from its default
- *  font's win line-height ratio. 0 when the font is not in the metrics table. */
+/** Compatibility-registry floor for an empty paragraph. */
 export function emptyIntendedSinglePx(
   para: ParagraphLayoutSource,
   scale: number,
@@ -1080,14 +1083,16 @@ export function emptyIntendedSinglePx(
   return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
 }
 
-/** Intended single-line height (px) for an empty paragraph in the script axis
- *  used to draw its paragraph mark. */
 function emptyIntendedSingleForScriptPx(
   para: ParagraphLayoutSource,
   scale: number,
   eastAsian: boolean,
 ): number {
-  return intendedSingleLinePx(getDefaultFontFamily(para, eastAsian), getDefaultFontSize(para) * scale, eastAsian);
+  return intendedSingleLinePx(
+    getDefaultFontFamily(para, eastAsian),
+    getDefaultFontSize(para) * scale,
+    eastAsian,
+  );
 }
 
 /** Code points whose presence marks a line as East Asian for docGrid line-cell
@@ -1554,8 +1559,9 @@ export function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
 /**
  * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
  * single-spaced East Asian line occupies on a pitch of `pitchPx`, from the
- * line's SINGLE-LINE HEIGHT `naturalPx` (the document font's design line
- * height: max of the corrected glyph box and the intendedSingleLinePx floor).
+ * line's SINGLE-LINE HEIGHT `naturalPx` (the resolved font resource's design
+ * line height, with the established compatibility registry used only when the
+ * selected resource cannot expose metrics).
  * The count is `ceil(naturalPx / pitchPx)` — the smallest number of whole
  * cells that CONTAINS the line.
  *
@@ -1577,20 +1583,19 @@ export function docGridLineCells(naturalPx: number, pitchPx: number): number {
 }
 
 /** Deterministic single-line height used to count docGrid cells for one East
- * Asian text run. Tabled fonts contribute their recorded design height.
+ * Asian text run. Resolved font resources contribute their parsed design height.
  *
  * The `word-east-asian-grid-line-allocation` rule supplies the 1.3 × hhea-box
  * fallback measured for the Far East grid path; §17.6.5 does not define this
  * factor.
  *
- * An untabled font's hhea box is unknown, so the fallback assumes 1.0em.
+ * When the font resource is unavailable, its hhea box is unknown, so the
+ * compatibility fallback assumes 1.0em.
  * Whole-cell allocation bounds the error. This is an explicit fallback, not a
  * normative font-metrics claim.
  *
  * Never use a substituted Canvas box here: its integer-rounded metrics are
- * font- and scale-dependent. Follow-up: replace the 1.0em assumption with
- * fontTools-extracted MS Mincho/MS Gothic hhea metrics in core WIN_METRICS when
- * those font binaries are available. */
+ * font- and scale-dependent. */
 export function eastAsianGridCountSinglePx(intendedSinglePx: number, emPx: number): number {
   return wordFarEastSingleLinePx(intendedSinglePx, emPx);
 }
@@ -1622,20 +1627,21 @@ export function lineBoxHeight(
   intendedSinglePx = 0,
   eastAsian = false,
   // px — the line's DESIGN grid-count height: the max over segments of each
-  // run's Word-faithful single-line height (a tabled run's design height, an
-  // untabled East Asian run's 1.3em Word FE fallback). Used ONLY to count
+  // run's format-policy single-line height (a resolved resource's design
+  // height, or the generic East Asian fallback). Used ONLY to count
   // docGrid cells for East Asian lines, so a substituted face's Canvas box
   // cannot change pagination or paint-scale cell allocation.
   gridCountSinglePx?: number,
-  // px — untabled East Asian run em used only by direct/synthetic callers that
+  // px — unresolved East Asian run em used only by direct/synthetic callers that
   // cannot provide the producer-computed per-line gridCountSinglePx.
   untabledEastAsianEmPx?: number,
 ): number {
   const glyphNatural = ascentPx + descentPx;
   // For `auto`/single spacing the multiplier applies to the intended font's
   // design line height (ECMA-376 §17.3.1.33). When the document's font is
-  // substituted, the Canvas glyph extent (`glyphNatural`) understates that —
-  // see font-metrics.ts. `base` restores the intended single-line height while
+  // substituted, the Canvas glyph extent (`glyphNatural`) can understate that.
+  // A resolved-resource metric or established compatibility profile restores
+  // the intended height while
   // never dropping below the substituted glyph extent, so glyphs are not
   // clipped. Grid-snapped lines are governed
   // by the grid pitch instead, so the metric correction stays out of them.
@@ -1652,7 +1658,7 @@ export function lineBoxHeight(
   // text. The number of cells is derived from the line's DESIGN single-line
   // height (`gridCountSinglePx`), per
   // `word-east-asian-grid-line-allocation`; the substituted Canvas glyph box is
-  // not used because it can overstate a tabled font's design height.
+  // not used because it can overstate the source resource's design height.
   // A Latin-only line is not cell-rounded: it keeps its natural height above a
   // one-cell floor. ECMA-376 Part 1 defines only the natural ≤ pitch case
   // (§17.6.5 / §17.3.1.32), so `word-east-asian-grid-line-allocation` gates
@@ -1665,7 +1671,7 @@ export function lineBoxHeight(
     if (hasRuby) return Math.max(pitchPx, Math.ceil(glyphNatural / pitchPx) * pitchPx);
     // `word-east-asian-grid-line-allocation`: count cells from the source face's
     // design single-line height, not a substituted Canvas glyph box. Prefer the
-    // per-line design-grid height; direct untabled callers may supply the run em.
+    // per-line design-grid height; direct unresolved callers may supply the run em.
     // A legacy caller with neither input gets one pitch.
     const cellCountHeight = gridCountSinglePx
       ?? (intendedSinglePx > 0
@@ -1728,19 +1734,8 @@ export function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: nu
   return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
 }
 
-/** Corrected single-line ascent/descent (px) from an ALREADY-measured
- *  `TextMetrics`: the Canvas `fontBoundingBox` (with the synthetic 0.8/0.2-em
- *  fallback when the engine reports none), rescaled to the document font's design
- *  line box via {@link correctLineMetrics}. The single source of truth for "how
- *  tall is one line of `family`", shared by the text-line path (layoutLines) and
- *  the empty paragraph-mark path (paragraphMarkLineHeight) so the two cannot
- *  drift — that drift (the empty path skipping `correctLineMetrics`) was the
- *  empty-paragraph under-measure bug (§17.3.1.29 / §17.3.1.33). `fallbackEmPx`
- *  sizes the synthetic box (the run's full size); `correctionEmPx` is the design
- *  size handed to `correctLineMetrics` — they differ only for smallCaps/vertAlign
- *  runs (where the text path keeps the full-size fallback) and coincide for a
- *  plain paragraph-mark line. The hhea single-line FLOOR for tabled fonts is
- *  applied separately by lineBoxHeight via {@link intendedSingleLinePx}. */
+/** Single-line ascent/descent from the selected face, with the compatibility
+ * registry correcting known unavailable-font substitutions. */
 export function correctedLineMetrics(
   m: TextMetrics,
   family: string | null | undefined,
@@ -1783,7 +1778,7 @@ export function paragraphMarkLineMetrics(
   ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
@@ -1798,15 +1793,23 @@ export function paragraphMarkLineMetrics(
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
   const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
-  const resolvedLocalFont = authoredFamily
-    ? resolvedLocalFonts[normalizeLocalFontMetricFamily(authoredFamily)]
+  const markWeight = effectiveMarkShapeInput?.weight ?? 400;
+  const markStyle = effectiveMarkShapeInput?.style ?? 'normal';
+  const normalizedFamily = authoredFamily
+    ? normalizeFontMetricFamily(authoredFamily)
+    : null;
+  const resolvedLocalFont = normalizedFamily
+    ? resolvedLocalFonts[`${normalizedFamily}:${markWeight}:${markStyle}`]
+      ?? (markWeight === 400 && markStyle === 'normal'
+        ? resolvedLocalFonts[normalizedFamily]
+        : undefined)
     : undefined;
   const measuredFamily = resolvedLocalFont?.family ?? authoredFamily;
   let asc: number;
   let desc: number;
   if (textLayoutService) {
-    const bold = effectiveMarkShapeInput ? effectiveMarkShapeInput.weight >= 600 : false;
-    const italic = effectiveMarkShapeInput?.style === 'italic';
+    const bold = markWeight >= 600;
+    const italic = markStyle === 'italic';
     const ascii = effectiveMarkShapeInput?.fonts.ascii ?? para.defaultFontFamily ?? authoredFamily;
     const shaped = textLayoutService.shape({
       text: markUsesEastAsianFace ? 'あ' : 'x',
@@ -1856,10 +1859,8 @@ export function paragraphMarkLineMetrics(
     // fontBoundingBox is reported per
     // resolved face (not per glyph), so the probe choice does not change the box
     // for a face that contains it — and the probe is script-matched, so the mark
-    // font does. correctedLineMetrics rescales a substituted font to the document
-    // font's design box, identical to the text path; the hhea single-line floor
-    // (intendedSingleLinePx, via emptyIntendedSinglePx below) then raises tabled
-    // fonts — Latin included — to Word's line height.
+    // font does. A parsed resource metric, when available, is applied below by
+    // the same path used for visible text.
     const prevFont = ctx.font;
     ctx.font = buildFont(false, false, fs * scale, measuredFamily, fontFamilyClasses);
     const m = ctx.measureText(markUsesEastAsianFace ? 'あ' : 'x');
@@ -1871,11 +1872,12 @@ export function paragraphMarkLineMetrics(
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }
-  const measuredIntendedSingle = resolvedLocalFont?.lineHeightRatio != null
-    ? fs * scale * resolvedLocalFont.lineHeightRatio
-    : emptyIntendedSingleForScriptPx(para, scale, markUsesEastAsianFace);
+  const resourceRatio = markUsesEastAsianFace
+    ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
+    : resolvedLocalFont?.lineHeightRatio;
   const intendedSingle = Math.max(
-    measuredIntendedSingle,
+    (resourceRatio ?? 0) * fs * scale,
+    emptyIntendedSingleForScriptPx(para, scale, markUsesEastAsianFace),
     wordMsMinchoEmptyEastAsianMarkSingleLinePx(
       authoredFamily,
       fs * scale,
@@ -1948,7 +1950,7 @@ export function paragraphMarkLineHeight(
   ctx?: MeasurementTextContext,
   fontFamilyClasses: Record<string, string> = {},
   effectiveLineSpacing: LineSpacing | null = para.lineSpacing,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
@@ -1991,7 +1993,7 @@ export function paragraphMarkBelowBaselinePt(
   ctx: MeasurementTextContext | undefined,
   fontFamilyClasses: Record<string, string>,
   effectiveLineSpacing: LineSpacing | null,
-  resolvedLocalFonts: Readonly<Record<string, ResolvedLocalFontMetric>> = {},
+  resolvedLocalFonts: Readonly<Record<string, ResolvedFontMetric>> = {},
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
@@ -2758,9 +2760,9 @@ export function buildSegments(
     family: string | null | undefined,
     weight = 400,
     style: 'normal' | 'italic' = 'normal',
-  ): ResolvedLocalFontMetric | undefined => {
+  ): ResolvedFontMetric | undefined => {
     if (!family) return undefined;
-    const normalized = normalizeLocalFontMetricFamily(family);
+    const normalized = normalizeFontMetricFamily(family);
     const metrics = environment.resolvedLocalFonts;
     if (!metrics) return undefined;
     const tuple = metrics[`${normalized}:${weight}:${style}`];
@@ -2768,7 +2770,7 @@ export function buildSegments(
     const normal = metrics[normalized];
     if (weight === 400 && style === 'normal' && normal) return normal;
     return Object.values(metrics).find((metric) =>
-      normalizeLocalFontMetricFamily(metric.requestedFamily ?? '') === normalized
+      normalizeFontMetricFamily(metric.requestedFamily ?? '') === normalized
       && (metric.weight ?? 400) === weight
       && (metric.style ?? 'normal') === style,
     );
@@ -3138,14 +3140,18 @@ export function buildSegments(
       const resolvedSpan = shaped?.spans[0];
       const serviceMetric = (resolvedFamily: string | undefined, requestedFamily?: string) => {
         if (!resolvedFamily) return undefined;
-        const candidates = Object.values(environment.layoutServices?.text.localMetrics ?? {}).filter((metric) =>
-            normalizeLocalFontMetricFamily(metric.family) === normalizeLocalFontMetricFamily(resolvedFamily)
+        const candidates = Object.values(
+          environment.layoutServices?.text.fontMetrics
+          ?? environment.layoutServices?.text.localMetrics
+          ?? {},
+        ).filter((metric) =>
+            normalizeFontMetricFamily(metric.family) === normalizeFontMetricFamily(resolvedFamily)
             && (metric.weight ?? 400) === weight
             && (metric.style ?? 'normal') === style,
           );
         return candidates.find((metric) => requestedFamily
-          && normalizeLocalFontMetricFamily(metric.requestedFamily ?? '')
-            === normalizeLocalFontMetricFamily(requestedFamily)) ?? candidates[0];
+          && normalizeFontMetricFamily(metric.requestedFamily ?? '')
+            === normalizeFontMetricFamily(requestedFamily)) ?? candidates[0];
       };
       const localFont = resolvedSpan
         ? serviceMetric(resolvedSpan.font.resolvedFamily, resolvedSpan.font.requestedFamily)
@@ -3161,12 +3167,8 @@ export function buildSegments(
       const localEaFloor = eaResolution
         ? serviceMetric(eaResolution.resolvedFamily, eaResolution.requestedFamily)
         : resolvedFont(eaFontFamily, weight, style);
-      const familyLineMetric = localFont ?? (fontFamily
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(fontFamily)]
-        : undefined);
-      const eaLineMetric = localEaFloor ?? (eaFontFamily
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(eaFontFamily)]
-        : undefined);
+      const familyLineMetric = localFont ?? resolvedFont(fontFamily, weight, style);
+      const eaLineMetric = localEaFloor ?? resolvedFont(eaFontFamily, weight, style);
       const resolvedEaFloorFamily = eaResolution?.resolvedFamily
         ?? localEaFloor?.family
         ?? eaFontFamily;
@@ -3206,6 +3208,7 @@ export function buildSegments(
         fontFamily: resolvedSpan?.font.resolvedFamily ?? localFont?.family ?? fontFamily,
         fontRoute: resolvedSpan?.fontRoute,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+        resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
         vertAlign: effectiveVertAlign,
         measuredWidth: 0,
         textLayoutService: environment.layoutServices?.text,
@@ -3246,6 +3249,7 @@ export function buildSegments(
         eaFloorFamily: resolvedEaFloorFamily,
         eaFloorRoute: eaResolution?.route,
         resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
+        resolvedEaFloorEastAsianLineHeightRatio: eaLineMetric?.eastAsianLineHeightRatio,
         textBoxLineFloor: (r as DocxTextRun & { textBoxLineFloor?: boolean }).textBoxLineFloor,
         textBoxVertical: (r as DocxTextRun & { textBoxVertical?: boolean }).textBoxVertical,
         // IX1 — resolved hyperlink target of the originating run, for the
@@ -3598,10 +3602,10 @@ export function buildSegments(
       const localFont = resolvedFont(authoredFamily, weight, style);
       const localEaFloor = resolvedFont(run.fontFamilyEastAsia ?? null, weight, style);
       const familyLineMetric = localFont ?? (authoredFamily
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(authoredFamily)]
+        ? environment.resolvedLocalFonts?.[normalizeFontMetricFamily(authoredFamily)]
         : undefined);
       const eaLineMetric = localEaFloor ?? (run.fontFamilyEastAsia
-        ? environment.resolvedLocalFonts?.[normalizeLocalFontMetricFamily(run.fontFamilyEastAsia)]
+        ? environment.resolvedLocalFonts?.[normalizeFontMetricFamily(run.fontFamilyEastAsia)]
         : undefined);
       segs.push({
         text: '',
@@ -3615,11 +3619,13 @@ export function buildSegments(
         color: null,
         fontFamily: localFont?.family ?? authoredFamily,
         resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+        resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
         eaFloorFamily:
           localEaFloor?.family ?? run.fontFamilyEastAsia ?? null,
         resolvedEaFloorLineHeightRatio: eaLineMetric?.lineHeightRatio,
+        resolvedEaFloorEastAsianLineHeightRatio: eaLineMetric?.eastAsianLineHeightRatio,
         snapToCharacterGrid: false,
       });
     }
@@ -4107,7 +4113,7 @@ export function layoutLines(
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
   let lineIntendedSingle = 0; // px — max intended single-line height on the line
-  let lineGridCountSingle = 0; // px — max over segments of (tabled design height | untabled box)
+  let lineGridCountSingle = 0; // px — max resolved design height or generic fallback
   let lineVisibleAscent = 0;
   let lineVisibleDescent = 0;
   let lineVisibleIntendedSingle = 0;
@@ -4597,8 +4603,9 @@ export function layoutLines(
       if (ts.seaBreaks !== undefined && isDictionarySeaText(ts.text)) lineHasSea = true;
       const metricEastAsian = ts.metricEastAsian === true || EAST_ASIAN_RE.test(ts.text);
       if (!lineEastAsian && metricEastAsian) lineEastAsian = true;
-      // Intended single-line height for fonts whose substituted Canvas metrics
-      // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
+      // Prefer the selected resource's single-line height. The established
+      // family compatibility registry remains a fallback when bytes or native
+      // geometry are unavailable; this path adds no new per-family estimate.
       // Small caps (non-super/sub) keep the FULL run size here so the line box
       // follows the run size, not the 2pt-reduced glyphs (§17.3.2.33).
       const intendedEm = ts.smallCaps && !ts.vertAlign ? ts.fontSize * scale : effectiveFontPx(ts);
@@ -4622,7 +4629,7 @@ export function layoutLines(
         lineVisibleIntendedSingle = intended;
       }
       // Only East Asian text is cell-rounded. Both branches are scale-linear:
-      // tabled fonts use recorded design metrics; untabled fonts use 1.3em.
+      // resolved resources use parsed metrics; unresolved faces use 1.3em.
       if (segScriptHint) segGridCount = eastAsianGridCountSinglePx(intended, intendedEm);
     } else if (!('isTab' in s)) {
       // Image/math object: a tall inline object sizes the line's cells too.

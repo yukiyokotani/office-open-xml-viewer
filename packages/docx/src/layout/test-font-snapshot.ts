@@ -1,4 +1,4 @@
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 
 export interface TestFontFace {
   readonly family: string;
@@ -16,8 +16,8 @@ export interface TestFontFace {
  * faces those contexts model instead of relying on host-local resolution. */
 export function testFontSnapshot(
   faces: readonly TestFontFace[],
-): Record<string, ResolvedLocalFontMetric> {
-  const metrics: Record<string, ResolvedLocalFontMetric> = {};
+): Record<string, ResolvedFontMetric> {
+  const metrics: Record<string, ResolvedFontMetric> = {};
   for (const face of faces) {
     const family = face.family;
     const normalized = family.trim().toLowerCase();

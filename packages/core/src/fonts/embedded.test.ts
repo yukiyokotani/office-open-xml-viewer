@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   deobfuscateOdttf,
+  embeddedFontBytesAreWithinLimit,
   registerEmbeddedFonts,
   unregisterEmbeddedFonts,
   _resetEmbeddedRegistryForTests,
@@ -141,6 +142,12 @@ const validHeader = () =>
   ]);
 
 describe('registerEmbeddedFonts', () => {
+  it('shares the exact admission boundary with pre-registration inspectors', () => {
+    expect(embeddedFontBytesAreWithinLimit(new Uint8Array(10), 10)).toBe(true);
+    expect(embeddedFontBytesAreWithinLimit(new Uint8Array(0), 10)).toBe(false);
+    expect(embeddedFontBytesAreWithinLimit(new Uint8Array(11), 10)).toBe(false);
+  });
+
   it('registers a raw (pptx) face and force-loads it', async () => {
     const { added } = installFontFaceSet();
     const faces: EmbeddedFontFace[] = [

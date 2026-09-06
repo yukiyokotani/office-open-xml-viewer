@@ -1,5 +1,9 @@
-import { canvasFontString } from '@silurus/ooxml-core';
-import type { ResolvedLocalFontMetric } from '@silurus/ooxml-core';
+import {
+  canvasFontString,
+  measureResolvedCanvasFontBoxRatio,
+  normalizeFontMetricFamily,
+} from '@silurus/ooxml-core';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { DOCX_GOOGLE_FONTS } from '../google-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
@@ -22,10 +26,12 @@ import {
 import {
   classifyDocxFontGeneric,
   createTextLayoutService,
-  snapshotLocalMetrics,
+  snapshotFontMetrics,
   type GlyphMeasureRequest,
 } from './text.js';
 import type { LayoutServices } from './types.js';
+import { wordResolvedEastAsianSingleLineRatio } from './line-compatibility.js';
+import type { DocxResolvedFontMetricCandidate } from '../document-content.js';
 
 export interface LoadedFontFaceRecord {
   readonly family: string;
@@ -35,7 +41,8 @@ export interface LoadedFontFaceRecord {
 }
 
 export interface ProductionLayoutServiceOptions {
-  readonly localMetrics?: Readonly<Record<string, ResolvedLocalFontMetric>>;
+  readonly localMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
+  readonly fontMetrics?: Readonly<Record<string, ResolvedFontMetric>>;
   readonly useGoogleFonts?: boolean;
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
@@ -43,13 +50,65 @@ export interface ProductionLayoutServiceOptions {
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
   readonly embeddedFaces?: readonly LoadedFontFaceRecord[];
   readonly googleFaces?: readonly LoadedFontFaceRecord[];
+  /** Derive Word line allocation only from the concrete authored Canvas face
+   * that proves coverage of its fontTable East-Asian charset. */
+  readonly measureResolvedFontMetrics?: boolean;
+  readonly resolvedFontMetricCandidates?: readonly DocxResolvedFontMetricCandidate[];
+}
+
+function canvasResolvedFontMetrics(
+  candidates: readonly DocxResolvedFontMetricCandidate[],
+  context: MeasurementTextContext | null,
+): Readonly<Record<string, ResolvedFontMetric>> {
+  if (!context) return {};
+  const metrics: Record<string, ResolvedFontMetric> = {};
+  for (const candidate of candidates) {
+    const family = candidate.family.trim();
+    if (!family) continue;
+    const key = normalizeFontMetricFamily(family);
+    if (metrics[key]) continue;
+    // The document-content projection proves this family actually wins a
+    // rendered script slot. Equal selected/control glyph ink means Canvas
+    // silently substituted a fallback, so no resource metric is claimed.
+    const fontBoxRatio = measureResolvedCanvasFontBoxRatio(
+      context,
+      family,
+      { text: candidate.probeText, emPx: 100 },
+    );
+    if (!(fontBoxRatio != null && fontBoxRatio > 0)) continue;
+    const eastAsianLineHeightRatio = wordResolvedEastAsianSingleLineRatio(fontBoxRatio);
+    if (!(eastAsianLineHeightRatio > 0)) continue;
+    metrics[key] = Object.freeze({
+      family,
+      requestedFamily: family,
+      weight: 400,
+      style: 'normal',
+      sourceIdentity: `canvas-resolved:${family}`,
+      synthesized: false,
+      fontBoxRatio,
+      ...(candidate.appliesToLatin ? { lineHeightRatio: eastAsianLineHeightRatio } : {}),
+      eastAsianLineHeightRatio,
+    });
+  }
+  return Object.freeze(metrics);
 }
 
 export function createProductionLayoutServices(
   source: LayoutSourceStore,
   options: ProductionLayoutServiceOptions,
 ): LayoutServices {
-  const localMetrics = snapshotLocalMetrics(options.localMetrics);
+  const measuredFontMetrics = options.measureResolvedFontMetrics
+    ? canvasResolvedFontMetrics(
+        options.resolvedFontMetricCandidates ?? [],
+        options.measureContext,
+      )
+    : {};
+  const localMetrics = snapshotFontMetrics(options.localMetrics);
+  const fontMetrics = snapshotFontMetrics({
+    ...measuredFontMetrics,
+    ...localMetrics,
+    ...options.fontMetrics,
+  });
   const fontFamilyCharsets = Object.freeze(Object.fromEntries(
     Object.entries(source.fontFamilyCharsets)
       .map(([family, charset]) => [family.trim().toLowerCase(), charset]),
@@ -150,7 +209,7 @@ export function createProductionLayoutServices(
         ),
       ])),
     }),
-    localMetrics,
+    fontMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,

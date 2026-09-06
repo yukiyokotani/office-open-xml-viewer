@@ -107,7 +107,7 @@ function doc(body: BodyElement[], pageHeight: number): DocxDocumentModel {
 const B = (...ps: DocParagraph[]): BodyElement[] => ps.map((p) => p as unknown as BodyElement);
 const bodyPages = (model: DocxDocumentModel) => layoutDocument(
   model,
-  createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman' }]) }),
+  createLayoutServices(model, { localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 2355 / 2048 }]) }),
   { currentDateMs: 0 },
 ).pages.map((page) => page.layers.body);
 
