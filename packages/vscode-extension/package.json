@@ -2,7 +2,7 @@
   "name": "office-open-xml-viewer",
   "displayName": "Office Viewer — DOCX, XLSX, PPTX",
   "description": "High-fidelity local viewer for Office files (.docx / .xlsx / .pptx), powered by Rust/WASM and Canvas. Optional MCP integration can share requested context with an AI agent.",
-  "version": "0.86.0",
+  "version": "0.86.1",
   "publisher": "silurus",
   "license": "MIT",
   "icon": "icon.png",

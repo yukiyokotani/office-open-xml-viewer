@@ -7,6 +7,34 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.86.1 — 2026-09-06
+
+Compatible patch release improving older PowerPoint compatibility, curved-text
+layout, Word pagination fidelity, and rendering resource bounds.
+
+- **older PowerPoint fidelity:** legacy reflected text, preset shapes, diagram
+  fallbacks, table fills and borders, authored row heights, and inherited text
+  colors now follow the saved presentation more closely.
+- **curved PowerPoint text:** Follow Path WordArt uses concentric per-line paths,
+  keeps authored Latin hyphens as valid wrap points in ordinary text, and avoids
+  overlap or excessive rotation in no-wrap curved text.
+- **resilient presentation loading:** primary slides use a measured complexity
+  allowance for dense but valid content while dependency parts retain their
+  stricter limit, and file opening uses the same modern loading indicator as the
+  rest of the viewer.
+- **resolved Word font metrics:** CJK line allocation is derived from the font
+  resource actually selected by the browser or embedded in the document. This
+  removes the previous Meiryo-only resource override without guessing a
+  substitute when the authored font is unavailable.
+- **Word page fields:** complex fields whose markers share a run preserve their
+  authored order, so page-dependent footer values such as page numbers remain
+  visible after pagination.
+- **bounded rendering work:** crafted EMF path brackets, hyphen-rich curved text,
+  and empty WordArt lines can no longer multiply Canvas work beyond the
+  renderer's established resource envelope.
+- **compatibility:** no existing option or method is removed or renamed, and no
+  application changes are required.
+
 ## 0.86.0 — 2026-09-05
 
 Compatible minor release improving PowerPoint text fidelity, Markdown review
