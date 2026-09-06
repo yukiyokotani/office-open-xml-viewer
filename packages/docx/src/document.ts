@@ -182,10 +182,12 @@ export interface LoadOptions extends CoreLoadOptions {
    */
   progressiveLayout?: boolean;
   /**
-   * Called once the full layout has replaced the provisional one, or with the
-   * failure if background layout threw. Only fires when
-   * {@link progressiveLayout} actually deferred work. Observer failures are
-   * reported and isolated from the layout result.
+   * Called exactly once when a successful {@link progressiveLayout} load has
+   * reached its authoritative full layout, whether that happens before or
+   * after `load()` resolves. A failure after an early publication is delivered
+   * as the argument; a failure before the first publication rejects `load()`
+   * directly and does not call this observer. Observer failures are reported
+   * and isolated from the layout result.
    */
   onLayoutComplete?: (error?: unknown) => void;
   /**
@@ -703,11 +705,12 @@ export class DocxDocument {
               exact: true,
               complete: true,
             });
-            if (publishedLayout !== null) {
-              progressiveDocument._layoutObservers.notify(
-                'onLayoutComplete', opts.onLayoutComplete,
-              );
-            }
+            // The terminal success callback fires exactly once per load,
+            // whether or not any partial was published — consumers must not
+            // have to infer completion from document speed.
+            progressiveDocument._layoutObservers.notify(
+              'onLayoutComplete', opts.onLayoutComplete,
+            );
             // Nothing was published: there was nothing to show early, so
             // load() resolves here, on the layout that would have been built
             // anyway. Resolving an already-resolved deferred is a no-op.
@@ -965,9 +968,10 @@ export class DocxDocument {
     // A load whose worker published nothing resolves here instead — there was
     // never anything to show early, so `load()` waited for the real document.
     progressive.firstPublication.resolve();
-    if (progressive.published) {
-      this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
-    }
+    // The terminal success callback fires exactly once per load, published
+    // partials or not; `settled` above keeps the failure path from ever
+    // adding a second notification.
+    this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
   }
 
   /** Bookmark pages and the review anchor projections are derived from the

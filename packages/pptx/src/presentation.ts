@@ -117,9 +117,11 @@ export type LoadOptions = CoreLoadOptions & {
   onLayoutProgress?: (progress: Readonly<ProgressiveLayoutProgress>) => void;
   /** Called for each additional paintable prefix after `load()` resolves. Observer failures are isolated. */
   onLayoutPartial?: (progress: Readonly<ProgressiveLayoutPartial>) => void;
-  /** Called once background preflight completes, or with its failure. Only
-   * fires when progressive loading actually deferred work after `load()`.
-   * Observer failures are isolated. */
+  /** Called exactly once when a successful {@link progressiveLayout} load has
+   * completed its authoritative preflight, whether that happens before or
+   * after `load()` resolves. A failure after an early publication is delivered
+   * as the argument; a failure before the first publication rejects `load()`
+   * directly and does not call this observer. Observer failures are isolated. */
   onLayoutComplete?: (error?: unknown) => void;
 };
 
@@ -812,9 +814,7 @@ export class PptxPresentation {
       exact: true,
       complete: true,
     });
-    if (progressive.deferred) {
-      this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
-    }
+    this._layoutObservers.notify('onLayoutComplete', progressive.onComplete);
   }
 
   private _failProgressiveLayout(error: unknown, progressive: ProgressiveLoad): void {
@@ -822,7 +822,10 @@ export class PptxPresentation {
     progressive.settled = true;
     this._clearProgressiveWatchdog();
     if (this._destroyed) return;
-    if (!progressive.published) {
+    // `published` also becomes true for a complete one-slide prefix retained
+    // internally until the authoritative response. Only `deferred` means
+    // `load()` was actually released and the error must use the callback path.
+    if (!progressive.deferred) {
       progressive.firstPublication.reject(error);
       return;
     }
