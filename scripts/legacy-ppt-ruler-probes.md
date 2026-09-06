@@ -50,7 +50,9 @@ does not prove that PowerPoint retained distinct per-paragraph binary tab lists.
    shape's text ruler and each paragraph's direct and inherited properties.
    Include default intervals, tab arrays, indent level and coordinate origin.
    Distinguish no tab array from an explicitly empty array. Physical record
-   order alone is not proof that an object is live.
+   order alone is not proof that an object is live. Inspect the shape's tertiary
+   OfficeArt properties and alternative XML as described below; the classic
+   text records are not necessarily the only retained representation.
 5. Determine which source conditions survived as distinct binary conditions.
    If PowerPoint merges two source cases, they cannot establish the behavior
    of the distinction that was lost. Any binary counterfactual must preserve
@@ -103,3 +105,35 @@ conditions with control and treatment in separate text bodies, retaining the
 original same-body experiment and its reference artifacts. Verify which values
 actually survive in the binary. No ruler precedence rule or new production
 converter behavior follows from the first roundtrip alone.
+
+### Alternative shape XML is a separate evidence source
+
+MS-ODRAW 2.3.4.41-42 defines `metroBlob` (property `0x03A9`) as an OPC package
+containing alternative shape XML. `OfficeArtTertiaryFOPT` (2.2.11, `0xF122`)
+can carry this property. The general definition says it SHOULD be ignored,
+but implementation note 32 explicitly states that Office 2007 and Office 2010
+do not ignore it. Do not describe choosing this alternative as mandatory binary
+semantics, or infer its exact precedence in a newer Office version from that
+older implementation note alone.
+
+The converter currently ignores these alternative packages. Its previous
+fallback output must remain a regression baseline while this capability is
+developed. Before implementing a projection:
+
+- Correlate each alternative with its owning live shape, text and paragraph
+  sequence. Distinguish absent metadata, valid alternatives, stale/conflicting
+  alternatives and malformed packages. Do not match only by file or slide name.
+- Read only explicitly supported typed properties and validate namespaces,
+  ranges and ownership. Do not copy arbitrary XML or relationships into output,
+  fetch external targets, execute actions, or unpack embedded objects.
+- Bound archive metadata, compressed and expanded bytes, XML depth/node count
+  and total work across shapes. Do not assume a small compressed blob is cheap.
+- Keep plain binary-only inputs supported and test them independently. A
+  modern-Office-authored PPT corpus can contain alternative OOXML throughout,
+  so it cannot alone prove coverage of older files lacking those packages.
+- Compare the binary fallback, projected OOXML, Office-reconverted OOXML and
+  direct-PPT PDF under the same fonts. Test negative offsets and conflicts as
+  counterexamples; do not tune offsets or weaken visual thresholds to pass.
+
+This finding changes the next investigation target, not the acceptance gate:
+full alternative-content conversion and its safety/fidelity checks are pending.

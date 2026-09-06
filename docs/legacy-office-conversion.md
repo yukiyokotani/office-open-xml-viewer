@@ -98,6 +98,12 @@ Malformed local tab records fail rather than producing a partially decoded list.
 Multiple local ruler records are rejected as unsupported ambiguity; the inline
 record grammar permits them, but precedence is not inferred by this subset.
 This is not a claim of full binary/Office visual equality.
+
+OfficeArt `metroBlob` alternative shape XML is currently ignored. A modern
+Office-saved PPT can retain paragraph properties there rather than in its
+classic text ruler; see the [controlled probe protocol](../scripts/legacy-ppt-ruler-probes.md)
+before attributing those differences to an implicit ruler rule.
+
 Local Office-reference checks confirm that restoring these stops improves
 tab-separated text, but residual RTL anchoring and ruler-indent differences
 remain. Fidelity checks must load the intended fonts: fallback metrics can cause
