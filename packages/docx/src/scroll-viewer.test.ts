@@ -2381,6 +2381,29 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     v.destroy();
   });
 
+  it('rounds a fractional page target forward before an integer-quantizing scrollTo', () => {
+    const { v, scrollHost, container } = setup();
+    container.clientWidth = 199.9;
+    scrollHost.clientWidth = 199.9; // fractional fit scale → fractional page px
+    v.resizeForTest();
+
+    let requestedTop = -1;
+    (scrollHost as FakeEl & {
+      scrollTo: (opts: { top: number }) => void;
+    }).scrollTo = ({ top }) => {
+      requestedTop = top;
+      scrollHost.scrollTop = Math.floor(top);
+    };
+
+    v.scrollToPage(3);
+    const fractionalTarget = 3 * (PAGE_H * 199.9 / 200 + GAP);
+    expect(fractionalTarget % 1).not.toBe(0);
+    expect(requestedTop).toBe(Math.ceil(fractionalTarget));
+    expect(scrollHost.scrollTop).toBe(requestedTop);
+    expect(v.topVisiblePage).toBe(3);
+    v.destroy();
+  });
+
   it('ResizeObserver re-fit preserves the zoom multiplier', () => {
     // zoomMax headroom: base 1.5, 2× zoom → 3.0; after the width doubles the new
     // base is 3.0 so the preserved scale is 6.0. zoomMin/zoomMax are ABSOLUTE

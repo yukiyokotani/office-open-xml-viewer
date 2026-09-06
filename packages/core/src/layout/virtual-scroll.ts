@@ -57,6 +57,20 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/**
+ * Resolve a programmatic item-start scroll target for a scroll surface that may
+ * quantize assigned offsets to whole CSS pixels. Rounding forward guarantees a
+ * fractional item start cannot land just before that item. The result remains
+ * clamped to the real maximum, which may itself be fractional near the end.
+ *
+ * Keep this adjustment on navigation targets rather than visible-range queries:
+ * those queries also serve manual scrolling and arbitrary coordinate lookup,
+ * where an epsilon would move the documented item boundary.
+ */
+export function resolveItemStartScrollTop(target: number, maxTop: number): number {
+  return Math.min(Math.max(0, maxTop), Math.ceil(Math.max(0, target)));
+}
+
 /** Build the variable-height prefix geometry once per layout/scale revision. */
 export function createVirtualScrollGeometry(
   heights: readonly number[],
