@@ -11,7 +11,7 @@ export const WORD_EAST_ASIAN_GRID_LINE_ALLOCATION = defineCompatibilityRule({
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'Across eight East-Asian font resources, six sizes, and no-grid/grid/useFELayout variants, Word allocates East-Asian single lines as 1.3 times the selected face hhea ascent-plus-descent box. The matrix also observed that ratio for Latin text when every rFonts slot named the same East-Asian face, but mixed-slot Office documents provide counterexamples to a family-wide Latin override; this rule therefore remains East-Asian-only. Resource identity and glyph coverage are required; a family name alone carries no metric.',
+  description: 'Across eight East-Asian font resources, six sizes, and no-grid/grid/useFELayout variants, Word allocates single lines as 1.3 times the selected face hhea ascent-plus-descent box. The matrix observed that ratio for East-Asian text and for Latin text when the same East-Asian resource actually won every rFonts slot. Mixed-slot Office documents provide counterexamples to a family-wide Latin override, so Latin receives the ratio only when its own ASCII/high-ANSI slot selects that proven resource. Resource identity and glyph coverage are required; a family name alone carries no metric.',
 });
 
 export const WORD_TABLE_CELL_IGNORES_GRID_RIGHT_INDENT_ADJUSTMENT = defineCompatibilityRule({
