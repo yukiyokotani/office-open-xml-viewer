@@ -13,6 +13,8 @@ use std::rc::Rc;
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+mod drawing_media;
 mod geometry;
 mod print;
 mod rich;
@@ -41,6 +43,15 @@ const WORKSHEET: u16 = 0x0010;
 const MAX_RECORDS: usize = 2_000_000;
 const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+    let workbook = cfb
+        .stream("Workbook")
+        .or_else(|_| cfb.stream("Book"))
+        .map_err(unsupported)?;
+    drawing_media::images(&records(&workbook)?)
+}
 
 pub struct XlsConversion {
     pub bytes: Vec<u8>,

@@ -11,6 +11,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 fuzzing = []
+inspection = []
+
+[[example]]
+name = "inspect_xls_images"
+required-features = ["inspection"]
 
 [dependencies]
 console_error_panic_hook = { workspace = true }

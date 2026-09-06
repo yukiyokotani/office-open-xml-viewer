@@ -16,6 +16,17 @@ mod xls;
 pub const ENGINE_ID: &str = "silurus-legacy-office";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Native development helper, not part of the production WASM contract.
+/// Returns passive catalog images, not necessarily visible sheet objects.
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub fn inspect_xls_images(data: &[u8]) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+    if data.len() > 256 * 1024 * 1024 {
+        return Err("UNSUPPORTED:XLS inspection source byte budget exceeded".into());
+    }
+    let cfb = cfb::CompoundFile::open(data).map_err(|e| format!("UNSUPPORTED:{e}"))?;
+    xls::inspect_images(&cfb)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyFormat {
     Doc,

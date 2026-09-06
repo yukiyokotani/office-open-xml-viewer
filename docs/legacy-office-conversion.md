@@ -580,6 +580,43 @@ DrawingML support, not a binary-specific rendering exception. Font metrics,
 tabs and unsupported geometry can still cause visible differences from Office;
 preserving offsets does not guarantee layout equivalence.
 
+## XLS drawing inspection for development
+
+XLS drawing conversion is not enabled yet. A native-only inspection helper can
+extract the supported passive PNG, JPEG and EMF entries from a BIFF8 global
+image store while sheet ownership and font-dependent placement are developed:
+
+```sh
+cargo run -p legacy-office-converter --features inspection \
+  --example inspect_xls_images -- sample.xls fresh-output-directory
+```
+
+Omit the output directory to print catalog indices, formats and byte counts
+without saving images. The optional directory must not already exist. Extracted
+images can contain private document content and must remain local. A catalog
+entry is not proof that an image is displayed on a worksheet.
+
+The helper follows MS-XLS 2.4.58/171 and the documented first-continuation
+exception in 2.1.7.20.3 implementation note 6. It bounds the stream to workbook
+globals and requires one MS-ODRAW 2.2.12/20/22 drawing-group/image-store owner.
+Shared passive-image validation remains unchanged; malformed supported images
+fail inspection rather than being silently repaired. Unsupported encodings,
+unreferenced slots and unresolved delayed entries are not exposed. No external
+resource, macro, OLE object or drawing action is evaluated.
+
+Inspection caps the source at 256 MiB, assembled drawing data and retained media
+at 128 MiB each, and the drawing/decoding walk at two million records. Shared
+image limits also apply. These are independent resource ceilings, not a combined
+process-memory guarantee: source, workbook, assembled data and extracted images
+can coexist. The helper is excluded from production WASM even when its Cargo
+feature is enabled. It does not change the converter contract or renderer.
+
+Worksheet placement still needs explicit shape-to-sheet/image ownership and
+conversion of MS-XLS 2.5.193 cell-relative offsets to OOXML coordinates. Horizontal
+offsets require the normal font's measured digit width; a fixed assumed width
+would introduce layout errors. Measurement transport, anchor placement, cropping
+and grouping remain integration work. No migration is required.
+
 ## Custom converter contract
 
 ```typescript
