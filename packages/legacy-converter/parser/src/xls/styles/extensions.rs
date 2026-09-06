@@ -24,6 +24,7 @@ impl Extensions {
         {
             return Ok(Self::default());
         }
+        let mut theme = None;
         let mut result = Self::default();
         let mut seen = BTreeSet::new();
         for record in globals().filter(|r| r.kind == 0x087d) {
@@ -35,6 +36,10 @@ impl Extensions {
             if index >= xfs.len() || !seen.insert(index) {
                 return Err(unsupported("invalid or duplicate BIFF XF extension index"));
             }
+            // StyleXF reserves this bit; only CellXF uses fHasXFExt (bit25
+            // of the border/fill word). Unowned extensions cannot trigger theme
+            // inflation, even though their record structure is still validated.
+            let owned = u16_at(xfs[index], 4)? & 4 != 0 || xfs[index][17] & 2 != 0;
             let count = usize::from(u16_at(data, 18)?);
             // Resource policy; includes unknown future properties without retaining them.
             if count > 1024 {
@@ -60,9 +65,16 @@ impl Extensions {
                     if color_type > 4 {
                         return Err(unsupported("invalid BIFF extended color type"));
                     }
-                    // Literal, untinted RGBA is losslessly representable as SML ARGB.
-                    // Theme and tint resolution is separate: never use a guessed
-                    // default theme or treat tint as an RGB-channel scale factor.
+                    // Resolve owned, untinted theme colors to SML ARGB. Leave
+                    // tint normalization separate; never scale RGB channels.
+                    if owned && color_type == 3 && u16_at(value, 2)? == 0 {
+                        if theme.is_none() {
+                            theme = Some(super::super::theme::Colors::parse(records)?);
+                        }
+                        if let Some(color) = theme.as_ref().unwrap().rgb(u32_at(value, 4)?) {
+                            colors.insert(kind, color);
+                        }
+                    }
                     if color_type == 2 && u16_at(value, 2)? == 0 {
                         colors.insert(
                             kind,
@@ -77,9 +89,7 @@ impl Extensions {
             if offset != data.len() {
                 return Err(unsupported("unexpected BIFF XF extension tail"));
             }
-            // StyleXF reserves this bit; only CellXF uses fHasXFExt (bit25
-            // of the border/fill word). It cannot attach an extension when false.
-            if u16_at(xfs[index], 4)? & 4 != 0 || xfs[index][17] & 2 != 0 {
+            if owned {
                 result.0.insert(index, colors);
             }
         }

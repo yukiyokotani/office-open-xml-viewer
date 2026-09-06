@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, it } from 'vitest';
-import { buildCfbWithStreams } from '@silurus/ooxml-core/testing';
+import { buildCfbWithStreams, buildStoredZip } from '@silurus/ooxml-core/testing';
 import initXlsx, { XlsxArchive } from '../../xlsx/src/wasm/xlsx_parser.js';
 import { createLegacyOfficeWasmConverter } from './index.js';
 import { concat, little16, little32 } from './test-fixtures.js';
@@ -38,6 +38,7 @@ interface Options {
   styleXf?: boolean;
   checksumType?: number;
   extensionType?: number;
+  themeRecords?: Uint8Array[];
 }
 
 function fixture(properties: Uint8Array[], options: Options = {}) {
@@ -65,8 +66,9 @@ function fixture(properties: Uint8Array[], options: Options = {}) {
   const number = new Uint8Array(14); number[4] = 1;
   new DataView(number.buffer).setFloat64(6, 42, true);
   const bound = (offset: number) => rec(0x85, concat(little32(offset), new Uint8Array([0, 0, 1, 0, 65])));
-  const size = concat(globals, bound(0), rec(10)).length;
-  const stream = concat(globals, bound(size), rec(10), bof(16), rec(0x203, number), rec(10));
+  const themeRecords = options.themeRecords ?? [];
+  const size = concat(globals, bound(0), ...themeRecords, rec(10)).length;
+  const stream = concat(globals, bound(size), ...themeRecords, rec(10), bof(16), rec(0x203, number), rec(10));
   return new Uint8Array(buildCfbWithStreams([{ name: 'Workbook', data: stream }]));
 }
 
@@ -139,4 +141,93 @@ it.each([
 it('ignores reserved FullColorExt bytes instead of using them as color data', async () => {
   const value = color(); value.fill(0xab, 8);
   expect((await convert(fixture([prop(4, value)]))).xml).toContain('78123456');
+});
+
+const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const R = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const themeNames = ['dk1', 'lt1', 'dk2', 'lt2', 'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6', 'hlink', 'folHlink'];
+const themeColor = (index: number) => [index + 1, index + 17, index + 33];
+const hex = (bytes: number[]) => bytes.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+function themeXml() {
+  return `<a:theme xmlns:a="${A}"><a:themeElements><a:clrScheme name="Test">${themeNames.map((name, i) =>
+    `<a:${name}>${i === 0 ? `<a:sysClr val="windowText" lastClr="${hex(themeColor(i))}"/>` : `<a:srgbClr val="${hex(themeColor(i))}"/>`}</a:${name}>`).join('')}</a:clrScheme></a:themeElements></a:theme>`;
+}
+function themeZip(xml = themeXml(), targetMode = '') {
+  return buildStoredZip({
+    // An unreferenced competing theme must never win by path or enumeration.
+    'theme/theme1.xml': themeXml().replace(hex(themeColor(0)), 'FFFFFF'),
+    '_rels/.rels': `<Relationships xmlns="${R}"><Relationship Id="main" Type="${REL}/officeDocument" Target="settings/manager.xml"/></Relationships>`,
+    'settings/manager.xml': `<a:themeManager xmlns:a="${A}"/>`,
+    'settings/_rels/manager.xml.rels': `<Relationships xmlns="${R}"><Relationship Id="colors" Type="${REL}/theme" Target="../owned/colors.xml" ${targetMode}/></Relationships>`,
+    'owned/colors.xml': xml,
+  });
+}
+const themeRecords = (zip: Uint8Array) => [rec(0x896, concat(frt(0x896), little32(0), zip))];
+
+it.each(themeNames.map((name, index) => [name, index] as const))('resolves owned theme slot %s through WASM and the ordinary XLSX parser', async (_name, index) => {
+  const { xml, model } = await convert(fixture([prop(13, color([index, 0, 0, 0], 3))], { themeRecords: themeRecords(themeZip()) }));
+  expect(xml).toContain(`<color rgb="FF${hex(themeColor(index))}"/>`);
+  expect(model.fonts[model.cellXfs[1].fontId].color).toBe(`#${hex(themeColor(index))}`);
+});
+
+it.each([[4, 'fgColor'], [5, 'bgColor'], [7, 'top'], [8, 'bottom'], [9, 'left'], [10, 'right'], [11, 'diagonal']] as const)
+('resolves theme color for fill or border property %s', async (kind, name) => {
+  const { xml } = await convert(fixture([prop(kind, color([4, 0, 0, 0], 3))], { themeRecords: themeRecords(themeZip()) }));
+  const colorXml = `rgb="FF${hex(themeColor(4))}"`;
+  expect(xml).toContain(kind <= 5 ? `<${name} ${colorXml}/>` : `<${name} style="thin"><color ${colorXml}/></${name}>`);
+});
+
+it.each([{ stale: true }, { missingChecksum: true }, { wrongCount: true }])
+('does not read theme content without a current XF binding: %j', async options => {
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], {
+    ...options, themeRecords: [rec(0x896, new Uint8Array([1]))],
+  }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
+});
+
+it('assembles a large theme across ContinueFrt12 records without exposing package content', async () => {
+  const zip = themeZip(themeXml().replace('</a:theme>', `<!--${'padding'.repeat(2000)}--></a:theme>`));
+  expect(zip.length).toBeGreaterThan(8224);
+  const records = [rec(0x896, concat(frt(0x896), little32(0), zip.subarray(0, 8208)))];
+  for (let i = 8208; i < zip.length; i += 8212) records.push(rec(0x87f, concat(frt(0x87f), zip.subarray(i, i + 8212))));
+  expect((await convert(fixture([prop(4, color([4, 0, 0, 0], 3))], { themeRecords: records }))).xml)
+    .toContain(`<fgColor rgb="FF${hex(themeColor(4))}"/>`);
+});
+
+it('does not inflate or interpret theme data when only literal colors are requested', async () => {
+  expect((await convert(fixture([prop(13, color())], { themeRecords: [rec(0x896, new Uint8Array([1]))] }))).xml)
+    .toContain('78123456');
+});
+
+it('does not read a theme for an unowned CellXF extension', async () => {
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], {
+    cellHasExtension: false, themeRecords: [rec(0x896, new Uint8Array([1]))],
+  }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
+});
+
+it.each([124226, 123820])('retains base palette rather than inventing version-only default theme %s', async version => {
+  const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3))], {
+    themeRecords: [rec(0x896, concat(frt(0x896), little32(version)))],
+  }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
+});
+
+it.each([
+  themeZip(themeXml(), 'TargetMode="External"'),
+  themeZip(`<!DOCTYPE theme [<!ENTITY ex SYSTEM "https://example.invalid/data">]>${themeXml()}`),
+  themeZip(themeXml().replace('name="Test"', 'name="Test" name="Again"')),
+  themeZip(themeXml().replace('lastClr=', 'x:spoof=')),
+])('rejects external or malformed embedded themes without evaluating their content', async zip => {
+  await expect(convert(fixture([prop(13, color([0, 0, 0, 0], 3))], { themeRecords: themeRecords(zip) })))
+    .rejects.toMatchObject({ reason: 'unsupported-input' });
+});
+
+it('does not erase a theme transform or a FullColorExt tint to force a color match', async () => {
+  const transformed = themeXml().replace(`<a:srgbClr val="${hex(themeColor(4))}"/>`, `<a:srgbClr val="${hex(themeColor(4))}"><a:tint val="50000"/></a:srgbClr>`);
+  for (const [zip, tint] of [[themeZip(transformed), 0], [themeZip(), 8191]] as const) {
+    const { xml } = await convert(fixture([prop(13, color([4, 0, 0, 0], 3, tint))], { themeRecords: themeRecords(zip) }));
+    expect(xml.match(/<font>/g)).toHaveLength(1);
+  }
 });

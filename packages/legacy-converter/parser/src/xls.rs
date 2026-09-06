@@ -17,6 +17,7 @@ mod geometry;
 mod print;
 mod rich;
 mod styles;
+mod theme;
 mod views;
 
 const BOF: u16 = 0x0809;
