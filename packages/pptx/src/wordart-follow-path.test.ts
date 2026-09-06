@@ -40,6 +40,7 @@ function apply(m: M, x: number, y: number): { x: number; y: number } {
  *  fillText — i.e. each warped glyph's baseline point after all transforms. */
 function trackingCtx() {
   const glyphs: Array<{ ch: string; x: number; y: number }> = [];
+  const measurements: string[] = [];
   let ctm: M = I;
   const stack: M[] = [];
   let fillStyle = '';
@@ -61,11 +62,14 @@ function trackingCtx() {
     textAlign: 'left' as CanvasTextAlign,
     textBaseline: 'alphabetic' as CanvasTextBaseline,
     // Fixed 10px/char advance and ink metrics → predictable natural width.
-    measureText: (s: string) => ({
-      width: [...s].length * 10,
-      actualBoundingBoxAscent: 7,
-      actualBoundingBoxDescent: 2,
-    }),
+    measureText: (s: string) => {
+      measurements.push(s);
+      return {
+        width: [...s].length * 10,
+        actualBoundingBoxAscent: 7,
+        actualBoundingBoxDescent: 2,
+      };
+    },
     fillText: (t: string, x: number, y: number) => {
       const p = apply(ctm, x, y);
       glyphs.push({ ch: t, x: p.x, y: p.y });
@@ -93,7 +97,7 @@ function trackingCtx() {
     clip: () => {},
     rect: () => {},
   };
-  return { ctx: ctx as unknown as CanvasRenderingContext2D, glyphs };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, glyphs, measurements };
 }
 
 function run(text: string, over: Partial<TextRunData> = {}): TextRunData {
@@ -317,5 +321,15 @@ describe('WordArt Follow Path — single-edge span (issue #846)', () => {
     renderTextBody(ctx, warpBody('textArchUp', long), 0, 0, BOX_W, BOX_H, SCALE);
     const s = span(glyphs);
     expect(s).toBeGreaterThan(BOX_W * 0.5);
+  });
+
+  it('does not create wrap-only fragments for infinite-width WordArt layout', () => {
+    const compound = Array.from({ length: 100 }, () => 'word').join('-');
+    const { ctx, measurements } = trackingCtx();
+    renderTextBody(ctx, warpBody('textArchUp', compound), 0, 0, BOX_W, BOX_H, SCALE);
+
+    // The flat no-wrap pass and warped mapping may measure the full segment a
+    // small fixed number of times. They must not measure every growing prefix.
+    expect(measurements.filter((text) => [...text].length > 1)).toHaveLength(3);
   });
 });
