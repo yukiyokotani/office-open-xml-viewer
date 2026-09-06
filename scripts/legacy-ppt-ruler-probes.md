@@ -84,7 +84,22 @@ as observed Office behavior before using it to justify compatibility code.
 
 ## Verification status
 
-The source-condition generator is tested. The paired source presentation has
-been authored and structurally checked locally, but its controlled local Office
-roundtrip has not completed. No new compatibility precedence rule, production
-converter behavior or visual-fidelity claim follows from this experiment yet.
+The first paired source presentation has completed a local PowerPoint roundtrip:
+save as PPT, close, reopen the saved PPT, export a local print-quality PDF, and
+save a separate OOXML copy. All 29 PDF pages were inspected. This establishes
+the reference route, not converter fidelity.
+
+In the initial same-text-body arrangement, varying the second paragraph's tab
+position, alignment, empty/list state or default interval did not produce a
+distinct PDF placement from the baseline in the tested cases. For selected tab
+cases, the reconverted OOXML retains the baseline stop in the text body's
+`a:lstStyle`, not the direct `a:pPr`. Do not mistake an absent direct tab list
+for an absent effective tab list, or infer that the converter should ignore
+those properties. The observation does not isolate OOXML import from PPT
+serialization as the point where the distinction was lost.
+
+Before inferring the behavior of these lost distinctions, repeat the affected
+conditions with control and treatment in separate text bodies, retaining the
+original same-body experiment and its reference artifacts. Verify which values
+actually survive in the binary. No ruler precedence rule or new production
+converter behavior follows from the first roundtrip alone.
