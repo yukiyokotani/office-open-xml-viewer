@@ -382,6 +382,7 @@ impl Character {
 #[derive(Clone, PartialEq)]
 struct Paragraph {
     level: u16,
+    rtl: Option<bool>,
     align: Option<u16>,
     spacing: [Option<i16>; 3],
     bullet: bullet::Bullet,
@@ -396,6 +397,7 @@ impl Paragraph {
         };
         Self {
             level: self.level,
+            rtl: self.rtl.or(base.rtl),
             align: self.align.or(base.align),
             spacing: std::array::from_fn(|i| self.spacing[i].or(base.spacing[i])),
             bullet: self.bullet.inherit(&base.bullet),
@@ -432,9 +434,17 @@ impl Paragraph {
         }
         r.optional16(mask, 0x10000)?;
         r.optional16(mask, 0xe0000)?;
-        r.optional16(mask, 0x200000)?;
+        // MS-PPT 2.9.20 / 2.13.30 TextDirectionEnum. Absence inherits;
+        // explicit LeftToRight must clear a right-to-left master value.
+        let rtl = match r.optional16(mask, 0x200000)? {
+            None => None,
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            Some(_) => return Err(unsupported("invalid PowerPoint text direction")),
+        };
         Ok(Self {
             level,
+            rtl,
             align,
             spacing,
             bullet,
@@ -445,6 +455,10 @@ impl Paragraph {
     }
     fn xml(&self, context: Context<'_>) -> Result<String, String> {
         let mut xml = format!("<a:pPr lvl=\"{}\"", self.level);
+        if let Some(rtl) = self.rtl {
+            // ECMA-376 21.1.2.2.7: direction is independent of alignment.
+            xml.push_str(&format!(" rtl=\"{}\"", u8::from(rtl)));
+        }
         // MS-PPT 2.9.20 / 2.2.29: signed master units, not points or a
         // percentage. ECMA-376 21.1.2.2.7 defTabSz uses ST_Coordinate32.
         // Preserve explicit zero/negative values; absence alone inherits.
@@ -514,6 +528,7 @@ impl Level {
         Self {
             paragraph: Paragraph {
                 level,
+                rtl: None,
                 align: None,
                 spacing: [None; 3],
                 bullet: bullet::Bullet::default(),
@@ -727,6 +742,39 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_direction_preserves_inheritance_and_explicit_left_to_right() {
+        let read = |value: u16| {
+            let bytes = [u32s(0x200000), u16s(value)].concat();
+            Paragraph::read(
+                &mut Reader {
+                    bytes: &bytes,
+                    pos: 0,
+                    budget: &mut 100,
+                },
+                0,
+            )
+        };
+        let rtl = read(1).unwrap();
+        let ltr = read(0).unwrap();
+        let empty = Level::empty(0).paragraph;
+        assert!(rtl.xml(Context::default()).unwrap().contains(" rtl=\"1\""));
+        assert!(empty
+            .inherit(Some(&rtl))
+            .xml(Context::default())
+            .unwrap()
+            .contains(" rtl=\"1\""));
+        assert!(ltr
+            .inherit(Some(&rtl))
+            .xml(Context::default())
+            .unwrap()
+            .contains(" rtl=\"0\""));
+        assert!(!empty.xml(Context::default()).unwrap().contains(" rtl="));
+        for value in [2, 255, 32767, 65535] {
+            assert!(read(value).is_err());
+        }
+    }
 
     #[test]
     fn preserves_default_tab_size_units_and_explicit_zero_overrides() {

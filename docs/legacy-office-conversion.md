@@ -82,6 +82,15 @@ Master visibility is not inherited. Transitions, sounds, and actions remain
 omitted. No migration or additional opt-in is required for this metadata fix;
 PPT conversion still requires its existing per-format opt-in.
 
+PPT paragraph text direction is retained as DrawingML `a:pPr/@rtl`
+(MS-PPT 2.9.20/21 and 2.13.30; ECMA-376 21.1.2.2.7). Supported master and
+direct formatting paths inherit an absent direction, while explicit left-to-right
+clears an inherited right-to-left value. Alignment remains independent and
+logical Unicode text order is unchanged. Reserved direction values are rejected.
+The ordinary PPTX parser and renderer handle the resulting metadata; no
+renderer changes, migration or additional opt-in are required. This does not
+claim complete Office-equivalent bidirectional shaping or punctuation placement.
+
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with
