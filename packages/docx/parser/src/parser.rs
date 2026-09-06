@@ -5548,6 +5548,129 @@ fn push_comment_mark(
     });
 }
 
+fn field_control_run_fmt(r_node: roxmltree::Node, base_run: &RunFmt) -> RunFmt {
+    let mut fmt = base_run.clone();
+    if let Some(rpr) = child_w(r_node, "rPr") {
+        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+    }
+    fmt
+}
+
+fn begin_complex_field(field: &mut FieldState, r_node: roxmltree::Node, base_run: &RunFmt) {
+    let occurrence_id = field.next_occurrence_id;
+    field.next_occurrence_id = field.next_occurrence_id.saturating_add(1);
+    let legacy_checkbox = r_node
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "checkBox")
+        .map(|check_box| {
+            let on_off = |name: &str| {
+                child_w(check_box, name).map(|value| {
+                    attr_w(value, "val")
+                        .as_deref()
+                        .and_then(parse_on_off)
+                        .unwrap_or(true)
+                })
+            };
+            let checked = on_off("checked")
+                .or_else(|| on_off("default"))
+                .unwrap_or(false);
+            let size_pt = child_w(check_box, "size")
+                .and_then(|size| attr_w(size, "val"))
+                .and_then(|value| half_pt_to_pt(&value));
+            (checked, size_pt)
+        });
+    let legacy_checkbox_checked = legacy_checkbox.map(|(checked, _)| checked);
+    let legacy_checkbox_size_pt = legacy_checkbox.and_then(|(_, size)| size);
+    let legacy_checkbox_nested = legacy_checkbox.is_some() && !field.stack.is_empty();
+    // Legacy form fields keep their visible control formatting on the fldChar
+    // begin run. Other complex fields use the first instruction run.
+    let legacy_checkbox_fmt = legacy_checkbox_checked.map(|_| {
+        let mut fmt = field_control_run_fmt(r_node, base_run);
+        if let Some(size_pt) = legacy_checkbox_size_pt {
+            fmt.font_size = Some(size_pt);
+            fmt.font_size_cs = Some(size_pt);
+            fmt.font_size_set_here = true;
+            fmt.font_size_cs_set_here = true;
+        }
+        fmt
+    });
+    field.stack.push(FieldFrame {
+        occurrence_id,
+        fmt: legacy_checkbox_fmt,
+        legacy_checkbox_checked,
+        legacy_checkbox_nested,
+        ..FieldFrame::default()
+    });
+}
+
+fn separate_complex_field(
+    field: &mut FieldState,
+    runs: &[DocRun],
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
+) {
+    if let Some(frame) = field.top_mut() {
+        frame.past_separate = true;
+        // Only locally-computed fields swallow their stored result. Other
+        // complex fields render their stored result as ordinary run content.
+        frame.substitute = frame.legacy_checkbox_checked.is_some()
+            || classify_field(&frame.instruction) != "other";
+        let semantics = classify_complex_field(&frame.instruction);
+        frame.field_type = semantics.field_type;
+        frame.hyperlink_anchor = semantics.hyperlink_anchor;
+        if !frame.substitute {
+            complex_field_boundaries.push(complex_field_boundary(frame, "start", runs.len()));
+        }
+    }
+}
+
+fn end_complex_field(
+    field: &mut FieldState,
+    base_run: &RunFmt,
+    theme: &ThemeColors,
+    revision: Option<&RunRevision>,
+    runs: &mut Vec<DocRun>,
+    complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
+) {
+    if let Some(mut frame) = field.stack.pop() {
+        // `separate` can be absent when no stored result exists. Locally
+        // computed fields are still complete at `end`.
+        if !frame.past_separate {
+            frame.substitute = frame.legacy_checkbox_checked.is_some()
+                || classify_field(&frame.instruction) != "other";
+        }
+        if frame.substitute && !frame.legacy_checkbox_nested {
+            let fmt = if has_mergeformat_switch(&frame.instruction) {
+                frame
+                    .result_fmt
+                    .clone()
+                    .or_else(|| frame.fmt.clone())
+                    .unwrap_or_else(|| base_run.clone())
+            } else {
+                frame.fmt.clone().unwrap_or_else(|| base_run.clone())
+            };
+            let fallback = frame.legacy_checkbox_checked.map_or_else(
+                || frame.fallback.clone(),
+                |checked| {
+                    if checked {
+                        "☒".to_string()
+                    } else {
+                        "☐".to_string()
+                    }
+                },
+            );
+            runs.push(make_field_run(
+                &frame.instruction,
+                &fmt,
+                &fallback,
+                theme,
+                revision,
+            ));
+        } else if frame.past_separate && !frame.legacy_checkbox_nested {
+            complex_field_boundaries.push(complex_field_boundary(&frame, "end", runs.len()));
+        }
+    }
+}
+
 // Same parse-context threading as parse_para_content, with the additional
 // hyperlink/field state carried per run.
 #[allow(clippy::too_many_arguments)]
@@ -5577,208 +5700,156 @@ fn handle_run_in_para(
     depth: DepthGuard,
     diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) {
-    // Inspect this run for field control characters or instruction text first.
-    let mut fld_char_type: Option<String> = None;
-    let mut instr_text = String::new();
-    for c in r_node.children().filter(|n| n.is_element()) {
-        match c.tag_name().name() {
-            "fldChar" => {
-                if let Some(t) = attr_w(c, "fldCharType") {
-                    fld_char_type = Some(t);
-                }
-            }
-            "instrText" => {
-                if let Some(t) = c.text() {
-                    instr_text.push_str(t);
-                }
-            }
-            _ => {}
-        }
-    }
+    // ECMA-376 §17.3.2.25 allows any combination of run content, while
+    // §17.16.18 gives fldChar its position in that parent run. Word may serialize
+    // the complete begin/instruction/separate/result/end sequence in one CT_R,
+    // so process every child in document order rather than reducing all fldChar
+    // children to one value. Visible non-field children are replayed through the
+    // ordinary run parser in their original position.
+    let has_field_content = r_node
+        .children()
+        .filter(|n| n.is_element())
+        .any(|child| matches!(child.tag_name().name(), "fldChar" | "instrText"));
+    if has_field_content {
+        let mut visible_children = HashSet::new();
+        let mut preserve_segment_boundary = preserve_comment_boundary;
+        let mut collect_run_diagnostics = true;
 
-    if let Some(ct) = fld_char_type {
-        match ct.as_str() {
-            "begin" => {
-                // Push a new (nested) field frame. §17.16.18 — fields nest, so a
-                // TOC field's result region may itself open PAGEREF fields.
-                let occurrence_id = field.next_occurrence_id;
-                field.next_occurrence_id = field.next_occurrence_id.saturating_add(1);
-                let legacy_checkbox = r_node
-                    .descendants()
-                    .find(|node| node.is_element() && node.tag_name().name() == "checkBox")
-                    .map(|check_box| {
-                        let on_off = |name: &str| {
-                            child_w(check_box, name).map(|value| {
-                                attr_w(value, "val")
-                                    .as_deref()
-                                    .and_then(parse_on_off)
-                                    .unwrap_or(true)
-                            })
-                        };
-                        let checked = on_off("checked")
-                            .or_else(|| on_off("default"))
-                            .unwrap_or(false);
-                        let size_pt = child_w(check_box, "size")
-                            .and_then(|size| attr_w(size, "val"))
-                            .and_then(|value| half_pt_to_pt(&value));
-                        (checked, size_pt)
-                    });
-                let legacy_checkbox_checked = legacy_checkbox.map(|(checked, _)| checked);
-                let legacy_checkbox_size_pt = legacy_checkbox.and_then(|(_, size)| size);
-                let legacy_checkbox_nested = legacy_checkbox.is_some() && !field.stack.is_empty();
-                // Legacy form fields keep their visible control formatting on
-                // the fldChar begin run. Other complex fields continue to use
-                // the first instruction run, as required by the existing field
-                // projection (notably PAGE/NUMPAGES in headers and footers).
-                let legacy_checkbox_fmt = legacy_checkbox_checked.map(|_| {
-                    let mut fmt = base_run.clone();
-                    if let Some(rpr) = child_w(r_node, "rPr") {
-                        apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
+        for child in r_node.children().filter(|n| n.is_element()) {
+            let child_name = child.tag_name().name();
+            if child_name == "fldChar" {
+                if !visible_children.is_empty() {
+                    parse_run_inner(
+                        r_node,
+                        base_run,
+                        style_map,
+                        num_map,
+                        media_map,
+                        chart_map,
+                        rel_map,
+                        theme,
+                        runs,
+                        comment_marks,
+                        link_href.clone(),
+                        link_anchor.clone(),
+                        preserve_segment_boundary,
+                        revision,
+                        field.in_toc(),
+                        depth,
+                        diagnostics,
+                        collect_run_diagnostics,
+                        Some(&visible_children),
+                    );
+                    collect_run_diagnostics = false;
+                    visible_children.clear();
+                    preserve_segment_boundary = false;
+                }
+
+                match attr_w(child, "fldCharType").as_deref() {
+                    Some("begin") => begin_complex_field(field, r_node, base_run),
+                    Some("separate") => {
+                        separate_complex_field(field, runs, complex_field_boundaries)
                     }
-                    if let Some(size_pt) = legacy_checkbox_size_pt {
-                        fmt.font_size = Some(size_pt);
-                        fmt.font_size_cs = Some(size_pt);
-                        fmt.font_size_set_here = true;
-                        fmt.font_size_cs_set_here = true;
-                    }
-                    fmt
-                });
-                field.stack.push(FieldFrame {
-                    occurrence_id,
-                    fmt: legacy_checkbox_fmt,
-                    legacy_checkbox_checked,
-                    legacy_checkbox_nested,
-                    ..FieldFrame::default()
-                });
+                    Some("end") => end_complex_field(
+                        field,
+                        base_run,
+                        theme,
+                        revision,
+                        runs,
+                        complex_field_boundaries,
+                    ),
+                    _ => {}
+                }
+                continue;
             }
-            "separate" => {
-                if let Some(frame) = field.top_mut() {
-                    frame.past_separate = true;
-                    // Only PAGE / NUMPAGES are recomputed (their cached result is swallowed).
-                    // Complex fields (TOC, PAGEREF, REF, HYPERLINK, …) render their result
-                    // content as normal runs — so multi-paragraph / nested fields like a TOC
-                    // keep their headings, tabs and page numbers.
-                    frame.substitute = frame.legacy_checkbox_checked.is_some()
-                        || classify_field(&frame.instruction) != "other";
-                    let semantics = classify_complex_field(&frame.instruction);
-                    frame.field_type = semantics.field_type;
-                    frame.hyperlink_anchor = semantics.hyperlink_anchor;
-                    if !frame.substitute {
-                        complex_field_boundaries.push(complex_field_boundary(
-                            frame,
-                            "start",
-                            runs.len(),
-                        ));
+
+            if child_name == "instrText" {
+                if field.top().is_some_and(|frame| !frame.past_separate) {
+                    let needs_fmt = field.top().and_then(|frame| frame.fmt.as_ref()).is_none();
+                    let fmt = needs_fmt.then(|| field_control_run_fmt(r_node, base_run));
+                    if let Some(frame) = field.top_mut() {
+                        frame.instruction.push_str(child.text().unwrap_or(""));
+                        // Classify incrementally so enclosing TOC result runs
+                        // receive their display semantics before `separate`.
+                        if classify_toc(&frame.instruction) {
+                            frame.is_toc = true;
+                        }
+                        if let Some(fmt) = fmt {
+                            frame.fmt = Some(fmt);
+                        }
                     }
                 }
+                continue;
             }
-            "end" => {
-                if let Some(mut frame) = field.stack.pop() {
-                    // §17.16.18: `separate` marks the start of a stored field
-                    // result, but it is absent when no result is stored. Fields
-                    // whose value we compute locally are still complete at
-                    // `end`; retain them instead of treating the missing cached
-                    // result as a missing field.
-                    if !frame.past_separate {
-                        frame.substitute = frame.legacy_checkbox_checked.is_some()
-                            || classify_field(&frame.instruction) != "other";
-                    }
-                    if frame.substitute && !frame.legacy_checkbox_nested {
-                        let fmt = if has_mergeformat_switch(&frame.instruction) {
-                            frame
-                                .result_fmt
-                                .clone()
-                                .or_else(|| frame.fmt.clone())
-                                .unwrap_or_else(|| base_run.clone())
-                        } else {
-                            frame.fmt.clone().unwrap_or_else(|| base_run.clone())
-                        };
-                        let fallback = frame.legacy_checkbox_checked.map_or_else(
-                            || frame.fallback.clone(),
-                            |checked| {
-                                if checked {
-                                    "☒".to_string()
-                                } else {
-                                    "☐".to_string()
-                                }
-                            },
-                        );
-                        runs.push(make_field_run(
-                            &frame.instruction,
-                            &fmt,
-                            &fallback,
-                            theme,
-                            revision,
-                        ));
-                    } else if frame.past_separate && !frame.legacy_checkbox_nested {
-                        complex_field_boundaries.push(complex_field_boundary(
-                            &frame,
-                            "end",
-                            runs.len(),
-                        ));
+
+            if field.top().is_some_and(|frame| !frame.past_separate) {
+                continue;
+            }
+            if field.top().is_some_and(|frame| frame.substitute) {
+                if child_name == "t" {
+                    let text = child.text().unwrap_or("");
+                    if !text.is_empty() {
+                        let cached_result_fmt = field_control_run_fmt(r_node, base_run);
+                        if let Some(frame) = field.top_mut() {
+                            frame.fallback.push_str(text);
+                            if frame.result_fmt.is_none() {
+                                frame.result_fmt = Some(cached_result_fmt);
+                            }
+                        }
                     }
                 }
+                continue;
             }
-            _ => {}
+            if child_name != "rPr" {
+                visible_children.insert(child.id());
+            }
+        }
+
+        if !visible_children.is_empty() {
+            parse_run_inner(
+                r_node,
+                base_run,
+                style_map,
+                num_map,
+                media_map,
+                chart_map,
+                rel_map,
+                theme,
+                runs,
+                comment_marks,
+                link_href,
+                link_anchor,
+                preserve_segment_boundary,
+                revision,
+                field.in_toc(),
+                depth,
+                diagnostics,
+                collect_run_diagnostics,
+                Some(&visible_children),
+            );
         }
         return;
     }
 
-    // A frame that has NOT yet passed `separate` is consuming its instruction.
-    if field.top().is_some_and(|f| !f.past_separate) {
-        // Inside the instruction (before `separate`). Accumulate it and remember the
-        // first instruction run's formatting; the (hidden) instruction never renders.
-        if !instr_text.is_empty() {
-            let fmt_run = if field.top().and_then(|f| f.fmt.as_ref()).is_none() {
-                let mut fmt = base_run.clone();
-                if let Some(rpr) = child_w(r_node, "rPr") {
-                    apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
-                }
-                Some(fmt)
-            } else {
-                None
-            };
-            if let Some(frame) = field.top_mut() {
-                frame.instruction.push_str(&instr_text);
-                // §17.16.5.69 — classify as soon as the leading token is known so
-                // `in_toc()` is true for result runs even before this frame's own
-                // `separate`/`end` (e.g. the TOC entry hyperlink that precedes the
-                // nested PAGEREF still sees the enclosing TOC frame).
-                if classify_toc(&frame.instruction) {
-                    frame.is_toc = true;
-                }
-                if let Some(f) = fmt_run {
-                    frame.fmt = Some(f);
-                }
-            }
-        }
+    // No field markup in this run. Existing open-field state still decides
+    // whether its content is instruction data, a swallowed stored result, or
+    // visible result content.
+    if field.top().is_some_and(|frame| !frame.past_separate) {
         return;
     }
-
-    if field.top().is_some_and(|f| f.substitute) {
-        // Cached result of a recomputed field (PAGE/NUMPAGES) — swallow it.
-        let mut swallowed = String::new();
-        for c in r_node
+    if field.top().is_some_and(|frame| frame.substitute) {
+        let swallowed = r_node
             .children()
-            .filter(|n| n.is_element() && n.tag_name().name() == "t")
-        {
-            if let Some(t) = c.text() {
-                swallowed.push_str(t);
-            }
-        }
-        let cached_result_fmt = if swallowed.is_empty() {
-            None
-        } else {
-            let mut fmt = base_run.clone();
-            if let Some(rpr) = child_w(r_node, "rPr") {
-                apply_direct_run(&mut fmt, &parse_run_fmt(rpr));
-            }
-            Some(fmt)
-        };
-        if let Some(frame) = field.top_mut() {
-            frame.fallback.push_str(&swallowed);
-            if frame.result_fmt.is_none() {
-                frame.result_fmt = cached_result_fmt;
+            .filter(|node| node.is_element() && node.tag_name().name() == "t")
+            .filter_map(|node| node.text())
+            .collect::<String>();
+        if !swallowed.is_empty() {
+            let cached_result_fmt = field_control_run_fmt(r_node, base_run);
+            if let Some(frame) = field.top_mut() {
+                frame.fallback.push_str(&swallowed);
+                if frame.result_fmt.is_none() {
+                    frame.result_fmt = Some(cached_result_fmt);
+                }
             }
         }
         return;
@@ -5817,6 +5888,8 @@ fn handle_run_in_para(
         in_toc,
         depth,
         diagnostics,
+        true,
+        None,
     );
 }
 
@@ -6327,6 +6400,8 @@ fn parse_run_inner(
     in_toc: bool,
     depth: DepthGuard,
     diagnostics: &mut Vec<PendingParseDiagnostic>,
+    collect_run_diagnostics: bool,
+    selected_children: Option<&HashSet<roxmltree::NodeId>>,
 ) {
     // Merge run-level formatting
     let rpr_node = child_w(node, "rPr");
@@ -6350,7 +6425,9 @@ fn parse_run_inner(
     if fmt.vanish.unwrap_or(false) {
         return;
     }
-    collect_text_effect_diagnostic(rpr_node, diagnostics);
+    if collect_run_diagnostics {
+        collect_text_effect_diagnostic(rpr_node, diagnostics);
+    }
 
     // Word renders TOC-field hyperlinks with the surrounding TOC paragraph style,
     // NOT the Hyperlink character style's blue/underline — the entries carry
@@ -6503,6 +6580,9 @@ fn parse_run_inner(
     let mut preserve_next_comment_boundary = preserve_comment_boundary;
 
     for child in node.children().filter(|n| n.is_element()) {
+        if selected_children.is_some_and(|selected| !selected.contains(&child.id())) {
+            continue;
+        }
         let merge_here = merge_into_prev_text;
         merge_into_prev_text = false;
         match child.tag_name().name() {
@@ -6964,6 +7044,8 @@ fn parse_run_inner(
                             in_toc,
                             depth,
                             diagnostics,
+                            true,
+                            None,
                         );
                     }
                     // Attach ruby to the FIRST text run produced from rubyBase
@@ -14553,6 +14635,78 @@ mod tests {
         assert_eq!(field.fallback_text, "2");
         assert_eq!(field.font_size, 6.5);
         assert_eq!(field.font_size_cs, Some(6.5));
+    }
+
+    /// ECMA-376 §17.3.2.25 permits any combination of run content and §17.16.18
+    /// assigns every complex-field character a location in its parent run. CT_R
+    /// can therefore carry the full ordered sequence; the parser must not
+    /// collapse repeated fldChar children to only the final `end` marker.
+    #[test]
+    fn complex_page_field_is_parsed_when_all_parts_share_one_run() {
+        let runs = parse_para(
+            r#"<w:r>
+                 <w:rPr><w:sz w:val="18"/></w:rPr>
+                 <w:fldChar w:fldCharType="begin"/>
+                 <w:instrText xml:space="preserve"> PAGE </w:instrText>
+                 <w:fldChar w:fldCharType="separate"/>
+                 <w:t>7</w:t>
+                 <w:fldChar w:fldCharType="end"/>
+               </w:r>"#,
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let fields = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Field(field) => Some(field.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_type, "page");
+        assert_eq!(fields[0].instruction, "PAGE");
+        assert_eq!(fields[0].fallback_text, "7");
+        assert_eq!(fields[0].font_size, 9.0);
+        assert!(
+            !runs
+                .iter()
+                .any(|run| matches!(run, DocRun::Text(text) if text.text == "7")),
+            "stored PAGE result is fallback data, not a second visible run",
+        );
+    }
+
+    #[test]
+    fn same_run_field_processing_preserves_surrounding_content_order() {
+        let (runs, boundaries) = parse_para_with_boundaries(
+            r#"<w:r>
+                 <w:t>before</w:t>
+                 <w:fldChar w:fldCharType="begin"/>
+                 <w:instrText> REF Target </w:instrText>
+                 <w:fldChar w:fldCharType="separate"/>
+                 <w:t>stored result</w:t>
+                 <w:fldChar w:fldCharType="end"/>
+                 <w:t>after</w:t>
+               </w:r>"#,
+            &RunFmt::default(),
+            &StyleMap::parse(""),
+        );
+        let text = runs
+            .iter()
+            .filter_map(|run| match run {
+                DocRun::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(text, vec!["before", "stored result", "after"]);
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|boundary| (boundary.boundary.as_str(), boundary.run_index))
+                .collect::<Vec<_>>(),
+            vec![("start", 1), ("end", 2)],
+        );
     }
 
     #[test]
