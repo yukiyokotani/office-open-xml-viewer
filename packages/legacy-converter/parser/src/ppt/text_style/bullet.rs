@@ -52,13 +52,13 @@ impl Bullet {
         }
         // One BMP scalar is representable; controls, isolated surrogates and
         // invalid XML characters are unsupported, not replacement bullet glyphs.
-        let Some(character) = self
+        let character = self
             .character
             .and_then(|v| char::from_u32(u32::from(v)))
-            .filter(|c| !c.is_control() && !matches!(*c, '\u{fffe}' | '\u{ffff}'))
-        else {
+            .filter(|c| !c.is_control() && !matches!(*c, '\u{fffe}' | '\u{ffff}'));
+        if character.is_none() && context.auto_number.is_none() {
             return "<a:buNone/>".into();
-        };
+        }
         let mut xml = String::new();
         // DrawingML CT_TextParagraphProperties requires color, size, font,
         // then the bullet choice in this order. False flags override inheritance.
@@ -99,10 +99,17 @@ impl Bullet {
                 ));
             }
         }
-        xml.push_str(&format!(
-            "<a:buChar char=\"{}\"/>",
-            crate::ooxml::xml_attr(&character.to_string())
-        ));
+        if let Some(number) = context.auto_number {
+            xml.push_str(&format!(
+                "<a:buAutoNum type=\"{}\" startAt=\"{}\"/>",
+                number.scheme, number.start
+            ));
+        } else if let Some(character) = character {
+            xml.push_str(&format!(
+                "<a:buChar char=\"{}\"/>",
+                crate::ooxml::xml_attr(&character.to_string())
+            ));
+        }
         xml
     }
 }

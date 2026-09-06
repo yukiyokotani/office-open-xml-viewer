@@ -129,6 +129,7 @@ struct Shape<'a> {
     anchor: Option<Rect>,
     child_space: Option<Rect>,
     textbox: Option<Record<'a>>,
+    style9: Option<&'a [u8]>,
     placeholder: bool,
     props: Properties<'a>,
 }
@@ -144,6 +145,8 @@ impl<'a> Shape<'a> {
         let mut anchor = None;
         let mut child_space = None;
         let mut textbox = None;
+        let mut style9 = None;
+        let mut tags_seen = false;
         let mut placeholder = None;
         let mut props = Properties::default();
         for child in parse_records(record.payload, budget)? {
@@ -179,9 +182,16 @@ impl<'a> Shape<'a> {
                     if child.version != 15 {
                         return Err(unsupported("invalid PowerPoint client data"));
                     }
-                    // Inspect only direct placeholder metadata. Never descend
-                    // into action/link containers or collect their text.
+                    // Inspect direct placeholder metadata and exact passive PP9
+                    // tags only. Never descend into action/link containers.
                     for atom in parse_records(child.payload, budget)? {
+                        if atom.kind == 5000 {
+                            if tags_seen {
+                                return Err(unsupported("duplicate PowerPoint shape tags"));
+                            }
+                            tags_seen = true;
+                            style9 = text_style::auto_number::local_atom(atom, budget)?;
+                        }
                         if atom.kind != 3011 {
                             continue;
                         }
@@ -201,6 +211,7 @@ impl<'a> Shape<'a> {
             anchor,
             child_space,
             textbox,
+            style9,
             placeholder: placeholder.unwrap_or(false),
             props,
         })
@@ -805,6 +816,15 @@ impl Writer<'_, '_> {
                             slide_numbers: &slide_numbers,
                             slide_number: self.context.map_or(0, |c| c.slide_number),
                             ruler_tabs,
+                            // PP9ShapeBinaryTagExtension owns an inline TextHeaderAtom.
+                            // Outline PP9 uses document-level slide/text IDs instead;
+                            // do not attach local metadata to an outline by proximity.
+                            style9: if !outline_body && text_type.is_some() {
+                                shape.style9
+                            } else {
+                                None
+                            },
+                            auto_number: None,
                         },
                         &mut self.output,
                         self.remaining,

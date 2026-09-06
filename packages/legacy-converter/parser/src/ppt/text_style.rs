@@ -1,5 +1,6 @@
 //! Direct PowerPoint text runs: [MS-PPT] 2.9.14/20/41/44–46.
 use super::*;
+pub(super) mod auto_number;
 mod bullet;
 
 #[derive(Default, Clone, Copy)]
@@ -10,6 +11,8 @@ pub(super) struct Context<'a> {
     pub slide_numbers: &'a [u32],
     pub slide_number: u32,
     pub ruler_tabs: Option<ruler::Tabs<'a>>,
+    pub style9: Option<&'a [u8]>,
+    pub auto_number: Option<auto_number::Number>,
 }
 
 /// MS-PPT 2.9.47 / 2.2.30: this is a passive positional substitution, not
@@ -106,6 +109,12 @@ pub(super) fn write(
         paragraphs: pf,
         characters: cf,
     } = read_runs(text, style, work_budget)?;
+    let groups = context
+        .style9
+        .map(|bytes| auto_number::bind(bytes, &cf, work_budget))
+        .transpose()?
+        .unwrap_or_default();
+    let mut number_group = 0;
     let (mut pi, mut ci, mut cp) = (0, 0, 0);
     for paragraph in text.split('\r') {
         while pf[pi].0 <= cp {
@@ -119,7 +128,13 @@ pub(super) fn write(
         let base = context
             .levels
             .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
-        let properties = pf[pi].1.inherit(base.map(|v| &v.paragraph)).xml(context)?;
+        let properties = pf[pi]
+            .1
+            .inherit(base.map(|v| &v.paragraph))
+            .xml(Context {
+                auto_number: auto_number::paragraph(&groups, &mut number_group, cp, para_end),
+                ..context
+            })?;
         if let Some(tabs) = context.ruler_tabs {
             let prefix = properties
                 .strip_suffix("</a:pPr>")
