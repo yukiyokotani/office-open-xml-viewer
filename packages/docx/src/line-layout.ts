@@ -562,7 +562,7 @@ export interface LayoutLine {
    * resource ratio, with the established compatibility registry as fallback). */
   intendedSingle: number;
   /** px — DESIGN grid-count height: the max over segments of each run's
-   *  Word-compatible single-line height (a resolved resource's design height,
+   *  format-policy single-line height (a resolved resource's design height,
    *  or the generic East Asian fallback). Feeds docGrid cell
    *  counting without depending on a substituted face's Canvas box
    *  (§17.6.5; sample-9/sample-52). */
@@ -1627,7 +1627,7 @@ export function lineBoxHeight(
   intendedSinglePx = 0,
   eastAsian = false,
   // px — the line's DESIGN grid-count height: the max over segments of each
-  // run's Word-compatible single-line height (a resolved resource's design
+  // run's format-policy single-line height (a resolved resource's design
   // height, or the generic East Asian fallback). Used ONLY to count
   // docGrid cells for East Asian lines, so a substituted face's Canvas box
   // cannot change pagination or paint-scale cell allocation.
