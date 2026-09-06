@@ -10,6 +10,7 @@ const bof = (kind: number) => biff(0x809, concat(little16(0x600), little16(kind)
 export function buildXlsPicturesFixture(options: {
   hiddenRoot?: boolean; nested?: boolean; malformedImage?: boolean;
   unknownFont?: boolean; behavior?: 0 | 2 | 3; dx?: number;
+  rotation?: number; flipH?: boolean; flipV?: boolean;
   normalFont?: { family: string; sizePoints: number; bold: boolean; italic: boolean };
 } = {}): Uint8Array {
   const font = (name: string, normal = false) => {
@@ -32,8 +33,13 @@ export function buildXlsPicturesFixture(options: {
   const root = art(0xf004, 15, concat(fsp(1, 5), ...(options.hiddenRoot
     ? [art(0xf00b, 0x13, concat(little16(0x3bf), little32(0x20002)))] : [])));
   const corner = [options.behavior ?? 2, 0, options.dx ?? 512, 0, 128, 2, 256, 3, 64];
-  const shape = art(0xf004, 15, concat(fsp(2, 0xa00),
-    art(0xf00b, 0x13, concat(little16(0x4104), little32(1))),
+  const pictureProps = options.rotation == null
+    ? concat(little16(0x4104), little32(1))
+    // Keep this authored fixture in ascending property-ID order.
+    : concat(little16(4), little32(options.rotation >>> 0), little16(0x4104), little32(1));
+  const shapeFlags = 0xa00 | (options.flipH ? 64 : 0) | (options.flipV ? 128 : 0);
+  const shape = art(0xf004, 15, concat(fsp(2, shapeFlags),
+    art(0xf00b, options.rotation == null ? 0x13 : 0x23, pictureProps),
     art(0xf010, 0, concat(...corner.map(little16))), art(0xf011, 0, new Uint8Array()),
   ));
   const shapes = options.nested

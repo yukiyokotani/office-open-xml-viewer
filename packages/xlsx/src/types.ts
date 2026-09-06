@@ -720,6 +720,10 @@ export interface ImageAnchor {
    *  size. Authoritative when `editAs === "oneCell"`. 0 = unavailable. */
   nativeExtCx: number;
   nativeExtCy: number;
+  /** Non-identity `<a:xfrm>` transform. Rotation is clockwise degrees. */
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   /** Zip path of the blip inside the package (e.g. `xl/media/image1.png`). The
    *  blip's own `r:embed` raster fallback when an svgBlip extension is present;
    *  otherwise the only source. Falls back to the SVG part itself when the

@@ -22,6 +22,30 @@ const parts = (bytes: Uint8Array | ArrayBuffer) => {
 };
 
 describe('measured XLS picture conversion', () => {
+  it('round-trips authored XLS rotation and flips through ordinary XLSX parsing', async () => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
+      .convert(request(buildXlsPicturesFixture({
+        rotation: -90 * 65536, flipH: true, flipV: true,
+      })));
+    const xml = strFromU8(parts(result.bytes)['xl/drawings/drawing1.xml']);
+    expect(xml).toContain('rot="-5400000" flipH="1" flipV="1"');
+    const archive = new XlsxArchive(new Uint8Array(result.bytes));
+    try {
+      archive.open_sheet_cursor(0, 'S');
+      let worksheet;
+      for (let pull = 0; pull < 10; pull++) {
+        const value = JSON.parse(strFromU8(archive.pull_sheet_cursor(100)));
+        if (archive.sheet_cursor_pull_finished()) {
+          worksheet = value.worksheet;
+          archive.acknowledge_sheet_cursor_terminal();
+          break;
+        }
+      }
+      expect(worksheet.images[0]).toMatchObject({ rotation: -90, flipH: true, flipV: true });
+      archive.close_sheet_cursor();
+    } finally { archive.free(); }
+  });
+
   it.each([0, 2, 3] as const)('emits validated picture parts with movement flags %i', async (behavior) => {
     const measure = vi.fn(() => 7);
     const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: measure })

@@ -731,6 +731,28 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(cache.size).toBe(0);
   });
 
+  it('fetches a rotated picture whose painted corner reaches the viewport', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
+    const fetchImage = vi.fn(async (path: string, mime: string) =>
+      new Blob([new TextEncoder().encode(path)], { type: mime }));
+    const cache = new Map<string, CanvasImageSource | null>();
+    const ws = worksheetWithImages();
+    ws.shapeGroups = [];
+    const image = ws.images[0];
+    image.toCol = 2;
+    image.toRow = 1;
+    image.rotation = 90;
+
+    // The unrotated 128×20 box ends at row 2. Rotating about its centre makes
+    // its 128px vertical bound reach rows 3–4, so resource culling must retain it.
+    await prefetchImages(ws, cache, fetchImage, {
+      viewport: { row: 3, col: 1, rows: 2, cols: 2 },
+    });
+
+    expect(fetchImage).toHaveBeenCalledOnce();
+    expect(cache.has('xl/media/image1.png')).toBe(true);
+  });
+
   it('falls back to both to-markers when a one-cell native extent is incomplete', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async (blob: Blob) => new FakeBitmap(blob.type)));
     const fetchImage = vi.fn(async (path: string, mime: string) =>

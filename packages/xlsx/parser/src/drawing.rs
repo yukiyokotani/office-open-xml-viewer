@@ -129,6 +129,9 @@ pub(crate) fn parse_drawing_anchors(
         let mut svg_rid: Option<String> = None;
         let mut native_ext_cx: i64 = 0;
         let mut native_ext_cy: i64 = 0;
+        let mut rotation = None;
+        let mut flip_h = None;
+        let mut flip_v = None;
         // ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (None ⇒ uncropped).
         let mut src_rect: Option<SrcRect> = None;
         // ECMA-376 §20.1.8.6 `<a:alphaModFix>` opacity (None ⇒ opaque) and
@@ -217,6 +220,18 @@ pub(crate) fn parse_drawing_anchors(
                         if let Some(xfrm_n) = sp_pr.children().find(|n| {
                             n.tag_name().name() == "xfrm" && is_a_ns(n.tag_name().namespace())
                         }) {
+                            // CT_Transform2D permits xfrm without an ext. The
+                            // anchor still supplies the destination bounds, so
+                            // preserve its independent transform attributes.
+                            rotation = xfrm_n
+                                .attribute("rot")
+                                .and_then(|value| value.parse::<i32>().ok())
+                                .filter(|value| *value != 0)
+                                .map(|value| value as f64 / 60000.0);
+                            flip_h = matches!(xfrm_n.attribute("flipH"), Some("1") | Some("true"))
+                                .then_some(true);
+                            flip_v = matches!(xfrm_n.attribute("flipV"), Some("1") | Some("true"))
+                                .then_some(true);
                             if let Some(xfrm) = parse_xfrm(&xfrm_n) {
                                 native_ext_cx = xfrm.ext_x as i64;
                                 native_ext_cy = xfrm.ext_y as i64;
@@ -276,6 +291,9 @@ pub(crate) fn parse_drawing_anchors(
             edit_as,
             native_ext_cx,
             native_ext_cy,
+            rotation,
+            flip_h,
+            flip_v,
             image_path,
             mime_type,
             svg_image_path,
@@ -2242,6 +2260,9 @@ pub(crate) fn parse_ole_object_anchors(
             edit_as: Some("twoCell".to_string()),
             native_ext_cx: 0,
             native_ext_cy: 0,
+            rotation: None,
+            flip_h: None,
+            flip_v: None,
             image_path,
             mime_type,
             svg_image_path: None,
@@ -3677,6 +3698,52 @@ mod blip_svg_tests {
         assert!(json.contains("\"srcRect\""), "emits srcRect: {json}");
     }
 
+    /// Part 1 §20.1.7.6 (`xfrm`, CT_Transform2D) and §20.1.10.3 ST_Angle: `rot` uses
+    /// signed 60000ths of a degree while flips are independent booleans. The
+    /// transform remains meaningful when optional `ext` is absent because the
+    /// spreadsheet anchor supplies the painted rectangle.
+    #[test]
+    fn picture_xfrm_preserves_rotation_and_flips_without_extent() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#)
+            .replace(
+                "<a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"300000\" cy=\"300000\"/></a:xfrm>",
+                "<a:xfrm rot=\"-5400000\" flipH=\"true\" flipV=\"1\"><a:off x=\"0\" y=\"0\"/></a:xfrm>",
+            );
+        let data = build_media_zip(PNG_1X1, SVG);
+        let mut archive = crate::XlsxZip::new(Cursor::new(data)).unwrap();
+        let anchor = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[])
+            .into_iter().next().unwrap();
+
+        assert_eq!(anchor.native_ext_cx, 0);
+        assert_eq!(anchor.native_ext_cy, 0);
+        assert_eq!(anchor.rotation, Some(-90.0));
+        assert_eq!(anchor.flip_h, Some(true));
+        assert_eq!(anchor.flip_v, Some(true));
+    }
+
+    #[test]
+    fn picture_xfrm_omits_identity_and_rejects_non_integer_rotation() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdPng".to_string(), "../media/image1.png".to_string());
+        for rot in ["0", "NaN", "inf", "5400000.5", "2147483648"] {
+            let xml = drawing_xml(r#"<a:blip r:embed="rIdPng"/>"#)
+                .replace("<a:xfrm>", &format!("<a:xfrm rot=\"{rot}\" flipH=\"false\" flipV=\"0\">"));
+            let data = build_media_zip(PNG_1X1, SVG);
+            let mut archive = crate::XlsxZip::new(Cursor::new(data)).unwrap();
+            let anchor = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[])
+                .into_iter().next().unwrap();
+            assert_eq!(anchor.rotation, None, "rot={rot}");
+            assert_eq!(anchor.flip_h, None);
+            assert_eq!(anchor.flip_v, None);
+            let json = serde_json::to_string(&anchor).unwrap();
+            assert!(!json.contains("rotation"), "rot={rot}: {json}");
+            assert!(!json.contains("flipH"), "rot={rot}: {json}");
+            assert!(!json.contains("flipV"), "rot={rot}: {json}");
+        }
+    }
+
     /// An uncropped `<xdr:pic>` (no `<a:srcRect>`) leaves `src_rect == None`, and
     /// the serialized JSON omits the key entirely (skip_serializing_if), so the
     /// common case stays on the cheap full-blip draw path.
@@ -3769,6 +3836,9 @@ mod blip_svg_tests {
             edit_as: Some("oneCell".to_string()),
             native_ext_cx: 300000,
             native_ext_cy: 200000,
+            rotation: None,
+            flip_h: None,
+            flip_v: None,
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("xl/media/image2.svg".to_string()),

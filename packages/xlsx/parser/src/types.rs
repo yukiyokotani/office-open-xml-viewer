@@ -1203,6 +1203,15 @@ pub struct ImageAnchor {
     /// `editAs == "oneCell"`. 0 = absent / use from/to rect.
     pub native_ext_cx: i64,
     pub native_ext_cy: i64,
+    /// Non-identity `<a:xfrm>` picture transform (ECMA-376 Part 1,
+    /// CT_Transform2D). Rotation is clockwise degrees. Identity values are
+    /// omitted to keep the common wire model unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_h: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_v: Option<bool>,
     /// Zip path of the blip inside the package (e.g. `xl/media/image1.png`).
     /// The blip's own `r:embed` raster fallback when an svgBlip extension is
     /// present; otherwise the only source. Falls back to the SVG part itself
