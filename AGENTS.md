@@ -211,9 +211,9 @@ be committed.
 
 Typical local-only paths:
 
-- `packages/docx/public/private/`
-- `packages/xlsx/public/private/`
-- `packages/pptx/public/private/`
+- `packages/docx/public/private/docx/`
+- `packages/xlsx/public/private/xlsx/`
+- `packages/pptx/public/private/pptx/`
 - `packages/*/src/*privateDemo.stories.ts`
 - `packages/*/src/wasm/`
 

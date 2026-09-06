@@ -16,7 +16,7 @@
  *   node packages/node/src/bench-parse.mjs <file> [iterations]
  *
  * Example:
- *   node packages/node/src/bench-parse.mjs packages/docx/public/private/sample-10.docx
+ *   node packages/node/src/bench-parse.mjs packages/docx/public/private/docx/sample-10.docx
  *
  * Requires the WASM artifacts to be freshly built (`pnpm build:wasm`) so it
  * measures the current parser source, not a stale committed pkg.

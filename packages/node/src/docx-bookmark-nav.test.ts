@@ -38,7 +38,7 @@ const docxMod = skia ? await importForTests(() => import('./docx.ts'), './docx.t
 const rendererMod = skia ? await loadDocxRendererForTests() : null;
 const navMod = skia ? await loadDocxBookmarkNavForTests() : null;
 
-const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/sample-${n}.docx`);
+const samplePath = (n: number) => resolve(ROOT, `packages/docx/public/private/docx/sample-${n}.docx`);
 const haveSample11 = existsSync(samplePath(11));
 
 describe.skipIf(!skia || !docxMod || !rendererMod || !navMod || !haveSample11)(

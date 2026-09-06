@@ -3318,8 +3318,8 @@ mod tests {
 
     // Local-only sample (redistribution-prohibited, gitignored). Tests that
     // depend on it must skip gracefully on a clean checkout / in CI where the
-    // file is absent. See packages/pptx/public/private/.
-    const LOCAL_SAMPLE_2: &str = "../public/private/sample-2.pptx";
+    // file is absent. See packages/pptx/public/private/pptx/.
+    const LOCAL_SAMPLE_2: &str = "../public/private/pptx/sample-2.pptx";
 
     struct SlideJsonLimitOverride(Option<u64>);
 

@@ -19,10 +19,10 @@ const { Canvas } = (skia ?? {}) as Skia;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../../..');
-const SAMPLE_14 = resolve(ROOT, 'packages/pptx/public/private/sample-14.pptx');
-const SAMPLE_30 = resolve(ROOT, 'packages/xlsx/public/private/sample-30.xlsx');
-const SAMPLE_17 = resolve(ROOT, 'packages/pptx/public/private/sample-17.pptx');
-const SAMPLE_18 = resolve(ROOT, 'packages/pptx/public/private/sample-18.pptx');
+const SAMPLE_14 = resolve(ROOT, 'packages/pptx/public/private/pptx/sample-14.pptx');
+const SAMPLE_30 = resolve(ROOT, 'packages/xlsx/public/private/xlsx/sample-30.xlsx');
+const SAMPLE_17 = resolve(ROOT, 'packages/pptx/public/private/pptx/sample-17.pptx');
+const SAMPLE_18 = resolve(ROOT, 'packages/pptx/public/private/pptx/sample-18.pptx');
 
 const varySamples = [SAMPLE_17, SAMPLE_18].filter((p) => existsSync(p));
 const pptxMod = skia && (existsSync(SAMPLE_14) || varySamples.length > 0)
