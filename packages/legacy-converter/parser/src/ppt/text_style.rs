@@ -743,6 +743,39 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 mod tests {
     use super::*;
 
+    fn paragraph_master(properties: &[u8], defaults: &[Level]) -> Master {
+        // MS-PPT 2.9.35-36: one title master level, followed by its empty CF.
+        let payload = [u16s(1), properties.to_vec(), u32s(0)].concat();
+        Master::parse(
+            &[Record {
+                version: 0,
+                instance: 0,
+                kind: 4003,
+                payload: &payload,
+            }],
+            defaults,
+            &mut 100,
+        )
+        .unwrap()
+    }
+
+    fn inherited_paragraph_xml(master: &Master) -> String {
+        let mut output = String::new();
+        write(
+            "X",
+            &default_style("X"),
+            Context {
+                levels: master.levels(0),
+                ..Context::default()
+            },
+            &mut output,
+            &mut 4096,
+            &mut 100,
+        )
+        .unwrap();
+        output
+    }
+
     #[test]
     fn text_direction_preserves_inheritance_and_explicit_left_to_right() {
         let read = |value: u16| {
@@ -778,79 +811,57 @@ mod tests {
 
     #[test]
     fn preserves_default_tab_size_units_and_explicit_zero_overrides() {
+        // These fields belong in TextMasterStyleLevel, not TextPFRun (2.9.45).
         for value in [i16::MIN, -1, 0, 1, 288, 575, 576, i16::MAX] {
             let bytes = [u32s(0x8000), value.to_le_bytes().to_vec()].concat();
-            let mut budget = 100;
-            let mut reader = Reader {
-                bytes: &bytes,
-                pos: 0,
-                budget: &mut budget,
-            };
-            let direct = Paragraph::read(&mut reader, 0).unwrap();
-            assert_eq!(reader.pos, bytes.len());
+            let master = paragraph_master(&bytes, &[]);
             let expected = format!("defTabSz=\"{}\"", master_to_emu(i64::from(value)));
-            assert!(direct.xml(Context::default()).unwrap().contains(&expected));
-            let empty = Level::empty(0).paragraph;
-            assert!(empty
-                .inherit(Some(&direct))
-                .xml(Context::default())
-                .unwrap()
-                .contains(&expected));
+            assert!(inherited_paragraph_xml(&master).contains(&expected));
         }
-        let mut base = Level::empty(0).paragraph;
         let base_bytes = [u32s(0x8000), u16s(288)].concat();
-        base = Paragraph::read(
-            &mut Reader {
-                bytes: &base_bytes,
-                pos: 0,
-                budget: &mut 100,
-            },
-            0,
-        )
-        .unwrap()
-        .inherit(Some(&base));
+        let base = paragraph_master(&base_bytes, &[]);
         let zero_bytes = [u32s(0x8000), u16s(0)].concat();
-        let direct = Paragraph::read(
-            &mut Reader {
-                bytes: &zero_bytes,
-                pos: 0,
-                budget: &mut 100,
-            },
-            0,
-        )
-        .unwrap();
-        assert!(direct
-            .inherit(Some(&base))
-            .xml(Context::default())
-            .unwrap()
-            .contains("defTabSz=\"0\""));
-        assert!(!Level::empty(0)
-            .paragraph
-            .xml(Context::default())
-            .unwrap()
-            .contains("defTabSz"));
+        let zero = paragraph_master(&zero_bytes, base.levels(0).unwrap());
+        let absent = paragraph_master(&u32s(0), base.levels(0).unwrap());
+        assert!(inherited_paragraph_xml(&zero).contains("defTabSz=\"0\""));
+        assert!(inherited_paragraph_xml(&absent).contains("defTabSz=\"457200\""));
+        assert!(!inherited_paragraph_xml(&paragraph_master(&u32s(0), &[])).contains("defTabSz"));
     }
 
     #[test]
     fn preserves_character_bullet_properties_and_hanging_indent() {
-        // MS-PPT TextPFException: explicit bullet flags, glyph, font, point size,
-        // RGB color, text offset and absolute first-line/bullet offset.
+        // MS-PPT 2.9.44-45: direct bullets can inherit offsets from a master,
+        // but the offsets themselves cannot be stored in a TextPFRun.
+        let master = paragraph_master(&[u32s(0x500), u16s(144), u16s(0)].concat(), &[]);
         let data = [
             u32s(2),
             u16s(0),
-            u32s(0x5ff),
+            u32s(0xff),
             u16s(15),
             u16s('&' as u16),
             u16s(0),
             u16s((-12i16) as u16),
             u32s(0xfe332211),
-            u16s(144),
-            u16s(0),
             u32s(2),
             u32s(0),
         ]
         .concat();
-        let output = xml("X", &data, &["Bullet & Font".into()]).unwrap();
+        // MS-PPT 2.9.45 forbids ruler fields inside a TextPFRun.
+        assert_eq!(u32_at(&data, 6).unwrap() & 0x108500, 0);
+        let mut output = String::new();
+        write(
+            "X",
+            &data,
+            Context {
+                fonts: &["Bullet & Font".into()],
+                levels: master.levels(0),
+                ..Context::default()
+            },
+            &mut output,
+            &mut 4096,
+            &mut 100,
+        )
+        .unwrap();
         assert!(output.contains("marL=\"228600\" indent=\"-228600\""));
         assert!(output.contains("<a:buClr><a:srgbClr val=\"112233\"/></a:buClr>"));
         assert!(output.contains("<a:buSzPts val=\"1200\"/>"));

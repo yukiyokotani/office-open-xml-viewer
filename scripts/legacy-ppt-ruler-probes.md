@@ -67,6 +67,21 @@ binary origin depends on whether it belongs to a ruler or a paragraph
 exception. Do not add a margin correction or choose conflicting property
 precedence solely to improve a private sample.
 
+### Container constraints
+
+Read the constraints of the containing record as well as `TextPFException`.
+MS-PPT 2.9.45 requires `leftMargin`, `indent`, `defaultTabSize` and `tabStops`
+to be absent in a `TextPFRun` inside `StyleTextPropAtom`. A synthetic direct
+paragraph run containing these fields is not a conforming serialization oracle,
+even if the converter's shared exception reader accepts it. The master-level
+exception in 2.9.35-36 does not have that restriction; placeholder inheritance
+from the main master is specified in 2.9.44.
+
+Inspect ruler records and master-level exceptions separately. An observation of
+zero direct-run tab arrays is not evidence that the document has no custom tabs.
+If Office produces an exception to a container constraint, record that separately
+as observed Office behavior before using it to justify compatibility code.
+
 ## Verification status
 
 The source-condition generator is tested. The paired source presentation has
