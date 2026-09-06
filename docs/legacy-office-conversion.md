@@ -74,6 +74,14 @@ XLS worksheet visibility is preserved as OOXML metadata. Display follows the
 existing `XlsxViewer` `hiddenSheetMode` option; its default remains `'show'`.
 Hidden sheets and their cell data are retained, not removed.
 
+PPT slide visibility is also preserved as OOXML metadata. The slide's own
+`SlideShowSlideInfoAtom.fHidden` becomes `p:sld/@show="0"`; hidden slides and
+their content remain in the presentation. Display follows the existing
+`PptxViewer` `hiddenSlideMode` option, whose default remains `'show'`.
+Master visibility is not inherited. Transitions, sounds, and actions remain
+omitted. No migration or additional opt-in is required for this metadata fix;
+PPT conversion still requires its existing per-format opt-in.
+
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with

@@ -70,6 +70,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
     let mut fallback = false;
     for (index, (record, outline)) in presentation.slides.iter().enumerate() {
         media.begin_slide();
+        let hidden = slide_is_hidden(record.payload, &mut record_budget)?;
         if contains_record(
             record.payload,
             DOCUMENT_ENCRYPTION_ATOM,
@@ -112,7 +113,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
             .checked_sub(relationships.len())
             .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
         slides.push((
-            slide_xml(&drawing.tree, &background, &mut xml_budget)?,
+            slide_xml(&drawing.tree, &background, hidden, &mut xml_budget)?,
             relationships,
         ));
     }
@@ -460,11 +461,47 @@ fn background_xml(
     Ok(format!("<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>"))
 }
 
-fn slide_xml(tree: &str, background: &str, budget: &mut usize) -> Result<String, String> {
+/// MS-PPT 2.5.1 / 2.6.6: only the live slide's own optional
+/// SlideShowSlideInfoAtom controls visibility. Master and nested records do not.
+fn slide_is_hidden(payload: &[u8], budget: &mut usize) -> Result<bool, String> {
+    let mut hidden = None;
+    for record in parse_records(payload, budget)? {
+        if record.kind != 0x03f9 {
+            continue;
+        }
+        if hidden.is_some()
+            || record.version != 0
+            || record.instance != 0
+            || record.payload.len() != 16
+        {
+            return Err(unsupported(
+                "invalid or duplicate PowerPoint SlideShowSlideInfoAtom",
+            ));
+        }
+        // fHidden is bit 2 of the flags word following the two effect bytes.
+        // Reserved bits are explicitly ignored; transitions/sounds/actions
+        // remain outside this converter subset and are never executed.
+        hidden = Some(u16_at(record.payload, 10)? & 0x0004 != 0);
+    }
+    Ok(hidden.unwrap_or(false))
+}
+
+fn slide_xml(
+    tree: &str,
+    background: &str,
+    hidden: bool,
+    budget: &mut usize,
+) -> Result<String, String> {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld>"#,
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#,
     );
+    // ECMA-376 CT_Slide/@show defaults to true. Retain the slide and its
+    // content; ordinary PPTX viewer visibility policy decides whether to show it.
+    if hidden {
+        xml.push_str(r#" show="0""#);
+    }
+    xml.push_str("><p:cSld>");
     xml.push_str(background);
     xml.push_str(r#"<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#);
     let end = "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>";
@@ -540,6 +577,41 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
+
+    #[test]
+    fn slide_visibility_uses_only_the_hidden_flag_in_all_flag_words() {
+        for flags in 0..=u16::MAX {
+            let mut payload = [0; 16];
+            payload[10..12].copy_from_slice(&flags.to_le_bytes());
+            let record = super::persist::tests::record(0, 0x03f9, &payload);
+            assert_eq!(
+                super::slide_is_hidden(&record, &mut MAX_RECORDS.clone()).unwrap(),
+                flags & 4 != 0,
+                "flags={flags:04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn slide_visibility_scan_respects_record_budget() {
+        let record = super::persist::tests::record(0, 0x03f9, &[0; 16]);
+        assert!(super::slide_is_hidden(&record, &mut 0).is_err());
+        let mut budget = 1;
+        assert!(!super::slide_is_hidden(&record, &mut budget).unwrap());
+        assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn hidden_slide_wrapper_charges_the_attribute_to_the_xml_budget() {
+        let visible = super::slide_xml("", "", false, &mut usize::MAX.clone()).unwrap();
+        let hidden = super::slide_xml("", "", true, &mut usize::MAX.clone()).unwrap();
+        assert_eq!(hidden.replace(" show=\"0\"", ""), visible);
+        assert_eq!(hidden.len() - visible.len(), " show=\"0\"".len());
+        assert!(super::slide_xml("", "", true, &mut (hidden.len() - 1)).is_err());
+        let mut budget = hidden.len();
+        assert_eq!(super::slide_xml("", "", true, &mut budget).unwrap(), hidden);
+        assert_eq!(budget, 0);
+    }
 
     #[test]
     fn text_bytes_are_zero_high_byte_unicode_not_ansi() {
