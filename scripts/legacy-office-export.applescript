@@ -1,5 +1,16 @@
 -- Local verification only. Never used by the shipped converter.
 -- The caller must provide a disposable copy and a fresh output path.
+on sameLocalFile(actualPath, expectedPath)
+    -- Office can return a different symbolic-link spelling of the same path.
+    -- Resolve both existing files outside the application's terminology scope.
+    -- Never accept only a matching basename or silently accept an unreadable path.
+    try
+        return ((POSIX file actualPath) as alias) = ((POSIX file expectedPath) as alias)
+    on error
+        return false
+    end try
+end sameLocalFile
+
 on run arguments
     if (count of arguments) is not 3 then error "expected format, input and output"
     set family to item 1 of arguments
@@ -74,8 +85,11 @@ on run arguments
                     set automation security to msoAutomationSecurityForceDisable
                     if automation security is not msoAutomationSecurityForceDisable then error "PowerPoint did not confirm disabled macros"
                     open POSIX file sourcePath
-                    set presentationRef to active presentation
-                    if full name of presentationRef is not sourcePath then error "PowerPoint did not open the requested disposable copy"
+                    set candidateRef to active presentation
+                    if not my sameLocalFile(full name of candidateRef, sourcePath) then error "PowerPoint did not open the requested disposable copy"
+                    -- Arm cleanup only after ownership is established. A failed
+                    -- open or focus race must never close an unrelated document.
+                    set presentationRef to candidateRef
                     save presentationRef in POSIX file outputPath as save as PDF
                     close presentationRef saving no
                 on error messageText number errorNumber
