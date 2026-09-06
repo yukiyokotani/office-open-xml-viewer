@@ -2545,6 +2545,28 @@ describe('PptxScrollViewer — navigation, resize, empty (T6)', () => {
     v.destroy();
   });
 
+  it('topVisibleSlide survives the browser scrollTop snap below a fractional slide offset', () => {
+    // Slide heights are natural-px × the fit scale; with a fractional scale the
+    // offsets are fractional. A real browser snaps a programmatic scrollTop to
+    // an integer, landing strictly BELOW the target slide's offset — the
+    // top-index boundary must still report the slide the viewport top shows.
+    const { v, scrollHost, container } = setup();
+    container.clientWidth = 199.9;
+    scrollHost.clientWidth = 199.9; // fractional fit scale → fractional slide px
+    v.resizeForTest();
+
+    v.scrollToSlide(3);
+    // Precondition: slide 3's offset IS fractional, and an exact landing reports 3.
+    expect(scrollHost.scrollTop % 1).not.toBe(0);
+    expect(v.topVisibleSlide).toBe(3);
+
+    // Simulate the browser's integer snap and the resulting scroll event.
+    scrollHost.scrollTop = Math.floor(scrollHost.scrollTop);
+    scrollHost.dispatch('scroll');
+    expect(v.topVisibleSlide).toBe(3);
+    v.destroy();
+  });
+
   it('ResizeObserver re-fit preserves the zoom multiplier', () => {
     // zoomMax headroom: base 1.0, 2× zoom → 2.0; after the width doubles the new
     // base is 2.0 so the preserved scale is 4.0. zoomMin/zoomMax are ABSOLUTE

@@ -277,3 +277,43 @@ describe('cached virtual-scroll geometry', () => {
     });
   });
 });
+
+describe('top-index boundary — fractional offsets and browser scrollTop rounding', () => {
+  // Page/slide heights are pt × a fractional fit/zoom scale, so offsets are
+  // almost never integers (e.g. 1193.4). A browser snaps a programmatic
+  // scrollTop to an integer, landing strictly BELOW the target item's offset;
+  // without a rounding tolerance scrollToPage(k) reports topIndex k−1 even
+  // though item k is what the viewport top shows. The boundary therefore
+  // counts a scrollTop within 1 CSS px below an item start as that item —
+  // without moving the pinned convention that the gap otherwise belongs to
+  // the preceding item.
+  //
+  // heights 100.4 × 3, gap 10 → offsets [0, 110.4, 220.8].
+  const heights = [100.4, 100.4, 100.4];
+
+  it('scrollTop = floor(offsets[k]) still attributes the top to item k', () => {
+    // The exact programmatic-navigation case: target 110.4, landed 110.
+    expect(computeVisibleRange(heights, 10, Math.floor(110.4), 50, 0).topIndex).toBe(1);
+    expect(computeVisibleRange(heights, 10, Math.floor(220.8), 50, 0).topIndex).toBe(2);
+  });
+
+  it('scrollTop exactly at offsets[k] attributes the top to item k (unchanged)', () => {
+    expect(computeVisibleRange(heights, 10, 110.4, 50, 0).topIndex).toBe(1);
+  });
+
+  it('a top genuinely inside the gap, beyond rounding distance, stays on the preceding item', () => {
+    // 110.4 − gap/2 − 2 = 103.4: well inside the gap — the 1 px band must not
+    // reach this far (the user is still on the tail of item 0).
+    expect(computeVisibleRange(heights, 10, 103.4, 50, 0).topIndex).toBe(0);
+    // Just outside the band: 110.4 − 1.5.
+    expect(computeVisibleRange(heights, 10, 108.9, 50, 0).topIndex).toBe(0);
+  });
+
+  it('uniform windows share the same boundary (slides)', () => {
+    // stride 110.4 → slide 1 starts at 110.4.
+    expect(computeUniformVisibleWindow(3, 100.4, 10, Math.floor(110.4), 50, 0).topIndex).toBe(1);
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 110.4, 50, 0).topIndex).toBe(1);
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 103.4, 50, 0).topIndex).toBe(0);
+    expect(computeUniformVisibleWindow(3, 100.4, 10, 108.9, 50, 0).topIndex).toBe(0);
+  });
+});

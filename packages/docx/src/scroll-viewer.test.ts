@@ -2381,6 +2381,28 @@ describe('DocxScrollViewer — navigation, resize, empty (T6)', () => {
     v.destroy();
   });
 
+  it('topVisiblePage survives the browser scrollTop snap below a fractional page offset', () => {
+    // Page heights are pt × the fit scale; with a fractional scale the offsets
+    // are fractional. A real browser snaps a programmatic scrollTop to an
+    // integer, landing strictly BELOW the target page's offset — the top-index
+    // boundary must still report the page the viewport top actually shows.
+    const { v, scrollHost, container } = setup();
+    container.clientWidth = 199.9;
+    scrollHost.clientWidth = 199.9; // fractional fit scale → fractional page px
+    v.resizeForTest();
+
+    v.scrollToPage(3);
+    // Precondition: page 3's offset IS fractional, and an exact landing reports 3.
+    expect(scrollHost.scrollTop % 1).not.toBe(0);
+    expect(v.topVisiblePage).toBe(3);
+
+    // Simulate the browser's integer snap and the resulting scroll event.
+    scrollHost.scrollTop = Math.floor(scrollHost.scrollTop);
+    scrollHost.dispatch('scroll');
+    expect(v.topVisiblePage).toBe(3);
+    v.destroy();
+  });
+
   it('ResizeObserver re-fit preserves the zoom multiplier', () => {
     // zoomMax headroom: base 1.5, 2× zoom → 3.0; after the width doubles the new
     // base is 3.0 so the preserved scale is 6.0. zoomMin/zoomMax are ABSOLUTE
