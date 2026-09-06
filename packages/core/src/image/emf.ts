@@ -43,8 +43,11 @@
 // twins), POLYPOLYGON16/POLYPOLYLINE16 (+ 32-bit twins), MOVETOEX, LINETO,
 // RECTANGLE, ELLIPSE, SETPOLYFILLMODE, EXTTEXTOUTW, SETTEXTCOLOR, SETTEXTALIGN,
 // SETBKMODE, BITBLT, STRETCHDIBITS (minimal DIB decoder), EOF.
-// Path clipping IS handled: BEGINPATH/ENDPATH/CLOSEFIGURE build a path and
-// SELECTCLIPPATH applies it as a clip (scoped by SAVEDC/RESTOREDC).
+// BEGINPATH/ENDPATH/CLOSEFIGURE retain line/polygon/cubic/rectangle geometry;
+// FILLPATH/STROKEPATH/STROKEANDFILLPATH paint it, ABORTPATH discards it, and
+// SELECTCLIPPATH applies the existing intersection clip implementation.
+// Glyph/ellipse/arc path construction and flatten/widen remain unsupported;
+// such paths are discarded rather than painting an incomplete outline.
 // Ignored (no-op, skipped by nSize): GDICOMMENT (may hold EMF+, out of scope),
 // SETICMMODE, SETMITERLIMIT, SETROP2, SETSTRETCHBLTMODE, INTERSECTCLIPRECT,
 // and any unrecognized iType.
@@ -56,6 +59,7 @@
 import { decodeDib, blitDibToCtx, type DecodedDib } from './dib.js';
 import { colorRefToCss, isEmf } from './wmf.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
+import { EmfPath, createEmfPathBudget, type EmfPathBudget } from './emf-path.js';
 
 // EMF record type codes ([MS-EMF] 2.1.1 EMR enumeration; the subset we act on,
 // others are skipped by nSize).
@@ -89,14 +93,28 @@ const EMR = {
   CREATEPEN: 38,
   CREATEBRUSHINDIRECT: 39,
   DELETEOBJECT: 40,
+  ANGLEARC: 41,
   ELLIPSE: 42,
   RECTANGLE: 43,
+  ROUNDRECT: 44,
+  ARC: 45,
+  CHORD: 46,
+  PIE: 47,
   LINETO: 54,
+  ARCTO: 55,
+  POLYDRAW: 56,
   BEGINPATH: 59,
   ENDPATH: 60,
   CLOSEFIGURE: 61,
+  FILLPATH: 62,
+  STROKEANDFILLPATH: 63,
+  STROKEPATH: 64,
+  FLATTENPATH: 65,
+  WIDENPATH: 66,
   SELECTCLIPPATH: 67,
+  ABORTPATH: 68,
   EXTCREATEFONTINDIRECTW: 82,
+  EXTTEXTOUTA: 83,
   EXTTEXTOUTW: 84,
   POLYBEZIER16: 85,
   POLYGON16: 86,
@@ -105,9 +123,13 @@ const EMR = {
   POLYLINETO16: 89,
   POLYPOLYLINE16: 90,
   POLYPOLYGON16: 91,
+  POLYDRAW16: 92,
   CREATEMONOBRUSH: 93,
   CREATEDIBPATTERNBRUSHPT: 94,
   EXTCREATEPEN: 95,
+  POLYTEXTOUTA: 96,
+  POLYTEXTOUTW: 97,
+  SMALLTEXTOUT: 108,
   BITBLT: 76,
   STRETCHDIBITS: 81,
 } as const;
@@ -219,22 +241,29 @@ class EmfCursor {
   get remaining(): number {
     return this.end - this.p;
   }
+  private require(size: number): void {
+    if (this.p < 0 || this.remaining < size) throw new RangeError('Truncated EMF record');
+  }
   i16(): number {
+    this.require(2);
     const v = this.dv.getInt16(this.p, true);
     this.p += 2;
     return v;
   }
   i32(): number {
+    this.require(4);
     const v = this.dv.getInt32(this.p, true);
     this.p += 4;
     return v;
   }
   u32(): number {
+    this.require(4);
     const v = this.dv.getUint32(this.p, true);
     this.p += 4;
     return v;
   }
   f32(): number {
+    this.require(4);
     const v = this.dv.getFloat32(this.p, true);
     this.p += 4;
     return v;
@@ -299,10 +328,14 @@ interface PlayState {
   stack: SavedDc[]; // SAVEDC/RESTOREDC graphics-state stack
   drew: boolean;
   inPath: boolean; // between BEGINPATH and ENDPATH — geometry builds a path, no draw
+  path: EmfPath | null;
+  pathBudget: EmfPathBudget;
 }
 
 /** Snapshot of the graphics state pushed by EMR_SAVEDC. */
 interface SavedDc {
+  path: EmfPath | null;
+  inPath: boolean;
   wt: Xform;
   mapMode: number;
   winOrgX: number;
@@ -568,30 +601,39 @@ type PointReader = (c: EmfCursor) => [number, number];
 const readPoint16: PointReader = (c) => [c.i16(), c.i16()];
 const readPoint32: PointReader = (c) => [c.i32(), c.i32()];
 
+function requirePoints(c: EmfCursor, rp: PointReader, count: number): void {
+  if (count > Math.floor(c.remaining / (rp === readPoint16 ? 4 : 8))) {
+    throw new RangeError('Truncated EMF point array');
+  }
+}
+
 // ── poly drawing ────────────────────────────────────────────────────────────
 
 /** EMR_POLYLINE(16): open path stroked with the current pen. */
 function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
   c.skip(16); // RECTL rclBounds — drawing uses world transform, not bounds
   const count = c.u32();
-  if (count < 2 || count > 0x100000) return;
-  if (!s.curPen || s.curPen.stroke == null) {
+  if (count < 2 || count > 0x100000) throw new RangeError('Invalid EMF polyline point count');
+  requirePoints(c, rp, count);
+  if (!s.inPath && (!s.curPen || s.curPen.stroke == null)) {
     // still drop current position to the last point for ...TO continuity callers
     return;
   }
   const { ctx } = s;
-  ctx.beginPath();
+  const path = s.inPath && s.path ? s.path : ctx;
+  if (!s.inPath) ctx.beginPath();
   let lx = 0;
   let ly = 0;
   for (let i = 0; i < count; i++) {
     if (c.remaining < 4) break;
     const [xl, yl] = rp(c);
     const [px, py] = toPx(s, xl, yl);
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
+    if (i === 0) path.moveTo(px, py);
+    else path.lineTo(px, py);
     lx = xl;
     ly = yl;
   }
+  if (s.inPath || !s.curPen || s.curPen.stroke == null) return;
   ctx.strokeStyle = s.curPen.stroke;
   ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
   ctx.stroke();
@@ -605,10 +647,14 @@ function strokePolyline(s: PlayState, c: EmfCursor, rp: PointReader): void {
 function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
   c.skip(16);
   const count = c.u32();
-  if (count < 1 || count > 0x100000) return;
+  if (count < 1 || count > 0x100000) throw new RangeError('Invalid EMF polyline point count');
+  requirePoints(c, rp, count);
   const { ctx } = s;
+  const path = s.inPath && s.path ? s.path : ctx;
   const draw = s.curPen != null && s.curPen.stroke != null;
-  if (draw) {
+  if (s.inPath && s.path) {
+    s.path.continueFrom(...toPx(s, s.curX, s.curY));
+  } else if (draw) {
     ctx.beginPath();
     const [px0, py0] = toPx(s, s.curX, s.curY);
     ctx.moveTo(px0, py0);
@@ -616,14 +662,14 @@ function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
   for (let i = 0; i < count; i++) {
     if (c.remaining < 4) break;
     const [xl, yl] = rp(c);
-    if (draw) {
+    if (draw || s.inPath) {
       const [px, py] = toPx(s, xl, yl);
-      ctx.lineTo(px, py);
+      path.lineTo(px, py);
     }
     s.curX = xl;
     s.curY = yl;
   }
-  if (draw && s.curPen) {
+  if (!s.inPath && draw && s.curPen) {
     ctx.strokeStyle = s.curPen.stroke as string;
     ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
     ctx.stroke();
@@ -635,8 +681,10 @@ function strokePolylineTo(s: PlayState, c: EmfCursor, rp: PointReader): void {
 function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
   c.skip(16);
   const count = c.u32();
-  if (count < 2 || count > 0x100000) return;
+  if (count < 2 || count > 0x100000) throw new RangeError('Invalid EMF polygon point count');
+  requirePoints(c, rp, count);
   const { ctx } = s;
+  const path = s.inPath && s.path ? s.path : ctx;
   if (!s.inPath) ctx.beginPath();
   let started = false;
   for (let i = 0; i < count; i++) {
@@ -644,12 +692,12 @@ function fillStrokePolygon(s: PlayState, c: EmfCursor, rp: PointReader): void {
     const [xl, yl] = rp(c);
     const [px, py] = toPx(s, xl, yl);
     if (!started) {
-      ctx.moveTo(px, py);
+      path.moveTo(px, py);
       started = true;
-    } else ctx.lineTo(px, py);
+    } else path.lineTo(px, py);
   }
   if (!started) return;
-  ctx.closePath();
+  path.closePath();
   if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
@@ -674,7 +722,9 @@ function strokePolyBezier(
 ): void {
   c.skip(16);
   const count = c.u32();
-  if (count < 1 || count > 0x100000) return;
+  if (count < (isTo ? 3 : 4) || count > 0x100000) throw new RangeError('Invalid EMF Bezier point count');
+  requirePoints(c, rp, count);
+  if ((count - (isTo ? 0 : 1)) % 3 !== 0) throw new RangeError('Invalid EMF Bezier point count');
   const pts: Array<[number, number]> = [];
   for (let i = 0; i < count; i++) {
     if (c.remaining < 4) break;
@@ -689,10 +739,12 @@ function strokePolyBezier(
   }
   const draw = s.curPen != null && s.curPen.stroke != null;
   const { ctx } = s;
-  if (draw) {
-    ctx.beginPath();
+  const path = s.inPath && s.path ? s.path : ctx;
+  if (draw || s.inPath) {
+    if (!s.inPath) ctx.beginPath();
     const start = isTo ? toPx(s, s.curX, s.curY) : toPx(s, pts[0][0], pts[0][1]);
-    ctx.moveTo(start[0], start[1]);
+    if (s.inPath && s.path && isTo) s.path.continueFrom(...start);
+    else path.moveTo(start[0], start[1]);
   }
   let i = isTo ? 0 : 1;
   for (; i + 2 < pts.length + (isTo ? 1 : 0); i += 3) {
@@ -700,16 +752,18 @@ function strokePolyBezier(
     const c2 = pts[i + 1];
     const end = pts[i + 2];
     if (!c1 || !c2 || !end) break;
-    if (draw) {
+    if (draw || s.inPath) {
       const p1 = toPx(s, c1[0], c1[1]);
       const p2 = toPx(s, c2[0], c2[1]);
       const pe = toPx(s, end[0], end[1]);
-      ctx.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
+      path.bezierCurveTo(p1[0], p1[1], p2[0], p2[1], pe[0], pe[1]);
     }
-    s.curX = end[0];
-    s.curY = end[1];
+    if (isTo || !s.inPath) {
+      s.curX = end[0];
+      s.curY = end[1];
+    }
   }
-  if (draw && s.curPen) {
+  if (!s.inPath && draw && s.curPen) {
     ctx.strokeStyle = s.curPen.stroke as string;
     ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
     ctx.stroke();
@@ -729,14 +783,16 @@ function fillStrokePolyPoly(
   c.skip(16); // RECTL rclBounds
   const numPolys = c.u32();
   const totalPoints = c.u32();
-  if (numPolys <= 0 || numPolys > 0x10000) return;
-  if (totalPoints <= 0 || totalPoints > 0x200000) return;
+  if (numPolys <= 0 || numPolys > 0x10000) throw new RangeError('Invalid EMF polygon count');
+  if (totalPoints <= 0 || totalPoints > 0x200000) throw new RangeError('Invalid EMF polygon point count');
   const counts: number[] = [];
   for (let i = 0; i < numPolys; i++) {
-    if (c.remaining < 4) return;
     counts.push(c.u32());
   }
+  if (counts.reduce((sum, n) => sum + n, 0) !== totalPoints) throw new RangeError('Invalid EMF polygon counts');
+  requirePoints(c, rp, totalPoints);
   const { ctx } = s;
+  const path = s.inPath && s.path ? s.path : ctx;
   if (!s.inPath) ctx.beginPath(); // in a path bracket: accumulate, don't reset
   let any = false;
   for (const cnt of counts) {
@@ -748,10 +804,10 @@ function fillStrokePolyPoly(
       if (c.remaining < 4) break;
       const [xl, yl] = rp(c);
       const [px, py] = toPx(s, xl, yl);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
+      if (i === 0) path.moveTo(px, py);
+      else path.lineTo(px, py);
     }
-    if (isPolygon) ctx.closePath();
+    if (isPolygon) path.closePath();
     any = true;
   }
   if (!any || s.inPath) return; // path bracket: geometry added, defer fill/stroke
@@ -771,16 +827,17 @@ function fillStrokePolyPoly(
 /** Fill+stroke an axis-aligned rectangle (EMR_RECTANGLE) given logical corners. */
 function fillStrokeRect(s: PlayState, l: number, t: number, r: number, b: number): void {
   const { ctx } = s;
+  const path = s.inPath && s.path ? s.path : ctx;
   const c0 = toPx(s, l, t);
   const c1 = toPx(s, r, t);
   const c2 = toPx(s, r, b);
   const c3 = toPx(s, l, b);
   if (!s.inPath) ctx.beginPath();
-  ctx.moveTo(c0[0], c0[1]);
-  ctx.lineTo(c1[0], c1[1]);
-  ctx.lineTo(c2[0], c2[1]);
-  ctx.lineTo(c3[0], c3[1]);
-  ctx.closePath();
+  path.moveTo(c0[0], c0[1]);
+  path.lineTo(c1[0], c1[1]);
+  path.lineTo(c2[0], c2[1]);
+  path.lineTo(c3[0], c3[1]);
+  path.closePath();
   if (s.inPath) return; // path bracket: defer fill/stroke
   if (s.curBrush && s.curBrush.fill != null) {
     ctx.fillStyle = s.curBrush.fill;
@@ -1085,6 +1142,8 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
     stack: [],
     drew: false,
     inPath: false,
+    path: null,
+    pathBudget: createEmfPathBudget(),
   };
 
   let pos = 0;
@@ -1227,6 +1286,8 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           // SELECTCLIPPATH (below) is scoped to the matching RESTOREDC.
           s.ctx.save();
           s.stack.push({
+            path: s.path?.snapshot() ?? null,
+            inPath: s.inPath,
             wt: { ...s.wt },
             mapMode: s.mapMode,
             winOrgX: s.winOrgX,
@@ -1260,6 +1321,8 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
             s.ctx.restore(); // unwind the matching canvas save (clip/state)
           }
           if (saved) {
+            s.path = saved.path;
+            s.inPath = saved.inPath;
             s.wt = saved.wt;
             s.mapMode = saved.mapMode;
             s.winOrgX = saved.winOrgX;
@@ -1285,19 +1348,53 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
         case EMR.BEGINPATH: {
           // Start a path bracket ([MS-EMF] 2.3.10): subsequent geometry records
           // build the path instead of drawing it, until ENDPATH.
-          s.ctx.beginPath();
+          s.path = new EmfPath(s.pathBudget);
           s.inPath = true;
           break;
         }
         case EMR.CLOSEFIGURE: {
-          if (s.inPath) s.ctx.closePath();
+          if (s.inPath) s.path?.closePath();
           break;
         }
         case EMR.ENDPATH: {
           s.inPath = false;
           break;
         }
+        case EMR.ABORTPATH:
+          s.path = null;
+          s.inPath = false;
+          break;
+        case EMR.FLATTENPATH:
+        case EMR.WIDENPATH:
+          // Unsupported path transformations: do not paint the untransformed path.
+          s.path?.invalidate();
+          break;
+        case EMR.FILLPATH:
+        case EMR.STROKEPATH:
+        case EMR.STROKEANDFILLPATH: {
+          // [MS-EMF] 2.3.5.9, 2.3.5.38–39: paint-time objects and fill mode.
+          if (s.inPath || c.remaining < 16) break;
+          const path = s.path;
+          s.path = null; // GDI consumes a painted path, including a null-brush path.
+          if (!path?.replay(ctx, iType === EMR.STROKEANDFILLPATH)) break;
+          if (iType !== EMR.STROKEPATH && s.curBrush?.fill != null) {
+            ctx.fillStyle = s.curBrush.fill;
+            ctx.fill(s.fillRule);
+            s.drew = true;
+          }
+          if (iType !== EMR.FILLPATH && s.curPen?.stroke != null) {
+            ctx.strokeStyle = s.curPen.stroke;
+            ctx.lineWidth = deviceLineWidth(s, s.curPen.width);
+            ctx.stroke();
+            s.drew = true;
+          }
+          break;
+        }
         case EMR.SELECTCLIPPATH: {
+          if (s.inPath) break;
+          const path = s.path;
+          s.path = null;
+          if (!path?.replay(ctx)) break;
           // Use the path just defined as the clip region (intersecting the
           // current clip — the common RGN_AND case, and what a following blit
           // relies on, e.g. sample-13 Fig.3 clips a bar-chart DIB to the bar
@@ -1402,14 +1499,20 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           fillStrokePolyPoly(s, c, readPoint32, false);
           break;
         case EMR.MOVETOEX: {
+          if (c.remaining < 8) throw new RangeError('Truncated EMF point');
           s.curX = c.i32();
           s.curY = c.i32();
+          if (s.inPath) s.path?.moveTo(...toPx(s, s.curX, s.curY));
           break;
         }
         case EMR.LINETO: {
+          if (c.remaining < 8) throw new RangeError('Truncated EMF point');
           const xl = c.i32();
           const yl = c.i32();
-          if (s.curPen && s.curPen.stroke != null) {
+          if (s.inPath && s.path) {
+            s.path.continueFrom(...toPx(s, s.curX, s.curY));
+            s.path.lineTo(...toPx(s, xl, yl));
+          } else if (s.curPen && s.curPen.stroke != null) {
             const [px0, py0] = toPx(s, s.curX, s.curY);
             const [px1, py1] = toPx(s, xl, yl);
             ctx.beginPath();
@@ -1433,6 +1536,11 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           break;
         }
         case EMR.ELLIPSE: {
+          if (s.inPath) {
+            // Affine ellipse-to-path construction is not implemented yet.
+            s.path?.invalidate();
+            break;
+          }
           const left = c.i32();
           const top = c.i32();
           const right = c.i32();
@@ -1476,13 +1584,31 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
           break;
         }
         case EMR.EXTTEXTOUTW:
-          drawText(s, c, dv, pos);
+          // Canvas text cannot supply GDI glyph outlines to a retained path.
+          if (s.inPath) s.path?.invalidate();
+          else drawText(s, c, dv, pos);
           break;
         case EMR.BITBLT:
           doBitBlt(s, c, dv, pos);
           break;
         case EMR.STRETCHDIBITS:
           doStretchDibits(s, c, dv, pos);
+          break;
+        case EMR.ANGLEARC:
+        case EMR.ROUNDRECT:
+        case EMR.ARC:
+        case EMR.CHORD:
+        case EMR.PIE:
+        case EMR.ARCTO:
+        case EMR.POLYDRAW:
+        case EMR.POLYDRAW16:
+        case EMR.EXTTEXTOUTA:
+        case EMR.POLYTEXTOUTA:
+        case EMR.POLYTEXTOUTW:
+        case EMR.SMALLTEXTOUT:
+          // Unsupported path-producing records: never silently fill only the
+          // supported fragments. [MS-EMF] 2.3.5 drawing record enumeration.
+          if (s.inPath) s.path?.invalidate();
           break;
         default:
           // GDICOMMENT (may hold EMF+, out of scope), SETICMMODE,
@@ -1493,6 +1619,7 @@ export function playEmf(bytes: Uint8Array, ctx: AnyCtx, W: number, H: number): b
       }
     } catch {
       // A malformed record must never abort the whole render — just advance.
+      if (s.inPath) s.path?.invalidate();
     }
 
     pos = recEnd;

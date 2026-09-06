@@ -105,8 +105,22 @@ commands by the converter. Existing OOXML image handling renders the supported
 EMF drawing subset; this is not full EMF/EMF+ or Office visual parity. WMF, PICT
 and unsupported binary drawing containers remain omitted. XLS drawing records
 are not yet reconstructed, so this change does not add XLS image support.
-In particular, unsupported metafile path-paint commands can still leave a
-retained EMF blank in the viewer; preserving bytes is not proof of visible output.
+The shared OOXML image renderer supports retained line, polygon, rectangle and
+cubic-Bezier paths, including fill, stroke, stroke-and-fill, abort and saved-DC
+path state (MS-EMF 2.3.10, 2.3.5.9, 2.3.5.38-39 and 3.1.1.2.4). This can restore
+outline-based content in retained EMFs without a binary-format renderer.
+Glyph-to-path, ellipse/arc path construction, flattening and widening remain
+unsupported; affected paths are omitted rather than painted as fragments.
+Path clipping retains intersection-only support. Other clip combination modes
+and full GDI pen/brush semantics are not implemented. Preserving EMF bytes is
+still not proof of complete visible output or original-binary layout fidelity.
+
+As renderer resource policy (not format limits), one path retains at most
+65,536 commands; one EMF playback allocates at most 262,144 path commands and
+replays at most 1,048,576 stored commands. Saved DCs share immutable geometry
+and these budgets. Malformed or over-budget path geometry is discarded; a
+replay-budget rejection issues no partial path drawing. The existing image
+failure/omission behavior and cache ownership remain unchanged.
 
 EMF extraction checks the declared compressed/expanded lengths, stream end,
 header and record envelope. As resource policy, each EMF is limited to 32 MiB
@@ -115,8 +129,8 @@ checked before decompression. DOC inline and floating stores have separate
 caps. Repeated image references share one retained buffer; cache lifetime ends
 with conversion. Existing work and generated-package limits still apply.
 Malformed records or over-budget expansion reject the input through the existing
-error contract. No renderer, per-format opt-in or application migration change
-is required.
+error contract. No public API, per-format opt-in or application migration change
+is required. DOC, XLS and PPT conversion remain independently opt-in.
 
 PPT master object inheritance follows `SlideFlags.fMasterObjects` independently
 of color-scheme and background inheritance (MS-PPT 2.5.10-11). Live main/title

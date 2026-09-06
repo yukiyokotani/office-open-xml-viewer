@@ -271,6 +271,136 @@ function makeRecordingCtx(): MockCtx {
 
 // ── isEmf detection ─────────────────────────────────────────────────────────
 
+describe('playEmf — retained path painting', () => {
+  const empty = (type: number) => record(type, () => {});
+  const point = (type: number, x: number, y: number) => record(type, w => w.i32(x).i32(y));
+  const paint = (type: number) => record(type, w => w.i32(0).i32(0).i32(100).i32(100));
+  const stock = (id: number) => record(37, w => w.u32(0x80000000 + id));
+  const poly = (type: number, points: number[][]) => record(type, w => {
+    w.i32(0).i32(0).i32(100).i32(100).u32(points.length);
+    for (const [x, y] of points) w.i16(x).i16(y);
+  });
+  const triangle = [point(27, 10, 10), point(54, 40, 10), point(54, 10, 40)];
+  function run(...records: Uint8Array[]) {
+    const m = makeRecordingCtx();
+    playEmf(concat(emfHeader(), ...records), m.ctx, 100, 100);
+    return m;
+  }
+
+  it('defers lines and cubic outlines even with a null pen, then fills using the paint-time brush', () => {
+    const m = run(stock(8), empty(59), point(27, 10, 10),
+      poly(89, [[40, 10]]), poly(88, [[40, 30], [20, 40], [10, 40]]),
+      empty(60), stock(4), paint(62));
+    expect(m.styles.fill).toEqual(['#000000']);
+    expect(m.styles.stroke).toEqual([]);
+    expect(m.calls.filter(c => c.op === 'moveTo')).toHaveLength(1);
+    expect(m.calls.filter(c => c.op === 'bezierCurveTo')).toHaveLength(1);
+  });
+
+  it('does not paint an unfinished bracket', () => {
+    const m = run(stock(4), stock(7), empty(59), ...triangle, paint(62));
+    expect(m.styles.fill).toEqual([]);
+    expect(m.styles.stroke).toEqual([]);
+  });
+
+  it('stroke leaves figures open, while stroke-and-fill closes every figure', () => {
+    for (const type of [63, 64]) {
+      const m = run(stock(4), stock(7), empty(59), ...triangle,
+        point(27, 60, 60), point(54, 80, 80), empty(60), paint(type));
+      expect(m.styles.stroke).toHaveLength(1);
+      expect(m.styles.fill).toHaveLength(type === 63 ? 1 : 0);
+      expect(m.calls.filter(c => c.op === 'closePath')).toHaveLength(type === 63 ? 2 : 0);
+    }
+  });
+
+  it('consumes painted paths and discards aborted or replaced paths', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(60), paint(62), paint(62),
+      empty(59), ...triangle, empty(68), paint(62),
+      empty(59), ...triangle, empty(60), empty(59), empty(60), paint(62));
+    expect(m.styles.fill).toHaveLength(1);
+  });
+
+  it('retains selected geometry across unrelated drawing and mapping changes', () => {
+    const m = run(stock(4), stock(7), empty(59), ...triangle, empty(60),
+      point(12, 50, 50), point(27, 0, 0), point(54, 5, 5), paint(62));
+    expect(m.calls.filter(c => c.op === 'moveTo').map(c => c.args)).toEqual([[50, 50], [10, 10]]);
+  });
+
+  it('uses the polygon filling mode selected after construction', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(60),
+      record(19, w => w.u32(1)), paint(62));
+    expect(m.styles.fillRules).toEqual(['evenodd']);
+  });
+
+  it('a truncated 32-bit point record cannot borrow bytes from the next record or paint a partial path', () => {
+    const m = run(stock(4), empty(59), ...triangle,
+      record(6, w => w.i32(0).i32(0).i32(100).i32(100).u32(2).i32(12)),
+      empty(60), paint(62));
+    expect(m.styles.fill).toEqual([]);
+  });
+
+  it.each([2, 3, 4, 5, 6, 85, 86, 87, 88, 89])('retains geometry for 16/32-bit poly record %i', type => {
+    const bezier = [2, 5, 85, 88].includes(type);
+    const to = [5, 6, 88, 89].includes(type);
+    const points = bezier
+      ? (to ? [[20, 10], [30, 20], [10, 30]] : [[10, 10], [20, 10], [30, 20], [10, 30]])
+      : [[20, 10], [10, 30]];
+    const data = record(type, w => {
+      w.i32(0).i32(0).i32(100).i32(100).u32(points.length);
+      for (const [x, y] of points) {
+        if (type >= 85) w.i16(x).i16(y);
+        else w.i32(x).i32(y);
+      }
+    });
+    const m = run(stock(4), stock(8), empty(59), point(27, 10, 10), data, empty(60), paint(62));
+    expect(m.styles.fill).toHaveLength(1);
+    expect(m.styles.stroke).toHaveLength(0);
+    expect(m.calls.filter(c => c.op === (bezier ? 'bezierCurveTo' : 'lineTo')).length).toBeGreaterThan(0);
+  });
+
+  it('consumes a clip path, so a subsequent paint cannot reuse it', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(60), record(67, w => w.u32(1)), paint(62));
+    expect(m.calls.filter(c => c.op === 'clip')).toHaveLength(1);
+    expect(m.styles.fill).toEqual([]);
+  });
+
+  it.each([7, 8, 90, 91])('rejects a truncated sub-polygon count array in record %i', type => {
+    const malformed = record(type, w => w.i32(0).i32(0).i32(100).i32(100)
+      .u32(2).u32(4).u32(2));
+    const m = run(stock(4), empty(59), ...triangle, malformed, empty(60), paint(62));
+    expect(m.styles.fill).toEqual([]);
+  });
+
+  it.each([2, 3, 4, 5, 6, 85, 86, 87, 88, 89])('invalidates rather than skips over-budget geometry in record %i', type => {
+    const malformed = record(type, w => w.i32(0).i32(0).i32(100).i32(100).u32(0x100001));
+    const m = run(stock(4), empty(59), ...triangle, malformed, empty(60), paint(62));
+    expect(m.styles.fill).toEqual([]);
+  });
+
+  it('SaveDC restores a selected path after the temporary path is painted', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(60), empty(33),
+      empty(59), point(27, 60, 60), point(54, 80, 60), point(54, 60, 80), empty(60), paint(62),
+      record(34, w => w.i32(-1)), paint(62));
+    expect(m.styles.fill).toHaveLength(2);
+    expect(m.calls.filter(c => c.op === 'moveTo').map(c => c.args)).toEqual([[60, 60], [10, 10]]);
+  });
+
+  it('SaveDC restores an open bracket without retaining geometry appended after saving', () => {
+    const m = run(stock(4), empty(59), ...triangle, empty(33),
+      point(54, 90, 90), empty(60), paint(62), record(34, w => w.i32(-1)),
+      point(54, 15, 15), empty(60), paint(62));
+    expect(m.styles.fill).toHaveLength(2);
+    expect(m.calls.filter(c => c.op === 'lineTo').map(c => c.args)).toEqual([
+      [40, 10], [10, 40], [90, 90], [40, 10], [10, 40], [15, 15],
+    ]);
+  });
+
+  it.each([42, 65, 66, 84, 108])('does not paint fragments of unsupported path operation %i', type => {
+    const m = run(stock(4), empty(59), ...triangle, empty(type), empty(60), paint(62));
+    expect(m.styles.fill).toEqual([]);
+  });
+});
+
 describe('isEmf detection (shared with the WMF sniffer)', () => {
   it('detects a synthetic EMF header (EMR_HEADER + " EMF" signature@40)', () => {
     expect(isEmf(emfHeader())).toBe(true);
