@@ -1,9 +1,12 @@
 //! Binary table properties, [MS-DOC] 2.4.3, 2.6.3, TDefTableOperand/TC80.
 //! A row's definition belongs to its TTP mark, not its first text paragraph.
 use super::{border::Border, u16_at, u32_at, unsupported};
+mod shading;
+use shading::Shading;
 
 #[derive(Clone, Default)]
 pub struct Cell {
+    pub shading: Option<Shading>,
     pub width: i32,
     pub flags: u16,
     pub preferred: u16,
@@ -23,6 +26,7 @@ pub struct Properties {
 
 #[derive(Clone)]
 pub struct Row {
+    pub shading: Option<Shading>,
     pub identity: std::collections::BTreeMap<u16, Vec<u8>>,
     pub cells: Vec<Cell>,
     pub left: i32,
@@ -41,6 +45,7 @@ pub struct Row {
 impl Default for Row {
     fn default() -> Self {
         Self {
+            shading: None,
             identity: Default::default(),
             cells: vec![],
             left: 0,
@@ -147,6 +152,73 @@ impl Row {
             self.identity.insert(code, b.to_vec());
         }
         match code {
+            // MS-DOC 2.6.3: use the compatibility shading arrays while table
+            // style interpretation is unsupported. Do not apply ShdRaw as a
+            // second layer: its ShdNil requires the unresolved table style.
+            0xd609 | 0xd612 | 0xd616 | 0xd60c => {
+                let old = code == 0xd609;
+                let size = if old { 2 } else { 10 };
+                let start = match code {
+                    0xd616 => 22,
+                    0xd60c => 44,
+                    _ => 0,
+                };
+                let max = match code {
+                    0xd609 => 63,
+                    0xd60c => 19,
+                    _ => 22,
+                };
+                let cb = usize::from(
+                    *b.first()
+                        .ok_or_else(|| unsupported("short Word shading array"))?,
+                );
+                if b.len() != cb + 1
+                    || cb % size != 0
+                    || cb / size > max
+                    || (cb > 0 && start + cb / size > self.cells.len())
+                {
+                    return Err(unsupported("invalid Word cell shading array"));
+                }
+                // MS-DOC 2.9.53: omitted trailing entries are non-shaded, not
+                // a sparse update retaining colors from an earlier array.
+                if !old {
+                    let end = (start + max).min(self.cells.len());
+                    for cell in &mut self.cells[start.min(end)..end] {
+                        cell.shading = None;
+                    }
+                }
+                if cb == 0 {
+                    return Ok(true);
+                }
+                let mut supported = true;
+                for (cell, bytes) in self.cells[start..start + cb / size]
+                    .iter_mut()
+                    .zip(b[1..].chunks_exact(size))
+                {
+                    cell.shading = Shading::read(bytes, old)?;
+                    supported &= cell.shading.is_some();
+                }
+                return Ok(supported);
+            }
+            0xd62d | 0xd62e => {
+                if b.len() != 13 || b[0] != 12 {
+                    return Err(unsupported("invalid Word cell shading range length"));
+                }
+                let cells = range(&b[1..], self.cells.len())?;
+                let value = Shading::read(&b[3..], false)?;
+                let supported = value.is_some();
+                for index in cells.step_by(if code == 0xd62e { 2 } else { 1 }) {
+                    self.cells[index].shading = value.clone();
+                }
+                return Ok(supported);
+            }
+            0xd660 => {
+                if b.len() != 11 || b[0] != 10 {
+                    return Err(unsupported("invalid Word table shading length"));
+                }
+                self.shading = Shading::read(&b[1..], false)?;
+                return Ok(self.shading.is_some());
+            }
             0xd608 => {
                 let n = *b
                     .get(2)
@@ -338,6 +410,92 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn shade(pattern: u16) -> Vec<u8> {
+        let mut b = vec![10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0];
+        b.extend(pattern.to_le_bytes());
+        b
+    }
+    #[test]
+    fn shading_arrays_cover_three_segments_and_clear_omitted_segment_tails() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 63, 1, 0]).unwrap();
+        for (code, index) in [(0xd612, 0), (0xd616, 22), (0xd60c, 44)] {
+            assert!(row.apply(code, &shade(0)).unwrap());
+            assert!(row.cells[index]
+                .shading
+                .as_ref()
+                .unwrap()
+                .xml()
+                .contains("123456"));
+            assert!(row.cells[index + 1].shading.is_none());
+        }
+        assert!(row.apply(0xd609, &[2, 0xe0, 0]).unwrap()); // Ico yellow background.
+        assert!(row.cells[0]
+            .shading
+            .as_ref()
+            .unwrap()
+            .xml()
+            .contains("FFFF00"));
+        assert!(row.cells[22].shading.is_some());
+        assert!(row.cells[44].shading.is_some());
+        assert!(row.apply(0xd612, &[0]).unwrap());
+        assert!(row.cells[0].shading.is_none());
+        assert!(row.cells[22].shading.is_some());
+        assert!(row.cells[44].shading.is_some());
+        let mut longer = vec![20];
+        longer.extend(&shade(0)[1..]);
+        longer.extend(&shade(0)[1..]);
+        assert!(row.apply(0xd612, &longer).unwrap());
+        assert!(row.cells[1].shading.is_some());
+        assert!(row.apply(0xd612, &shade(0)).unwrap());
+        assert!(row.cells[0].shading.is_some());
+        assert!(row.cells[1].shading.is_none());
+        let mut empty = Row::default();
+        assert!(empty.apply(0xd616, &[0]).unwrap());
+        assert!(empty.apply(0xd60c, &[0]).unwrap());
+    }
+    #[test]
+    fn shading_ranges_start_alternation_at_the_first_selected_cell() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 6, 1, 0]).unwrap();
+        let mut b = vec![12, 1, 6];
+        b.extend(&shade(0)[1..]);
+        assert!(row.apply(0xd62e, &b).unwrap());
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|c| c.shading.is_some())
+                .collect::<Vec<_>>(),
+            [false, true, false, true, false, true]
+        );
+        b[1] = 0;
+        b[2] = 6;
+        assert!(row.apply(0xd62d, &b).unwrap());
+        assert!(row.cells.iter().all(|c| c.shading.is_some()));
+        // Defined but unmappable patterns clear the stale value and warn.
+        b[11] = 0x23;
+        assert!(!row.apply(0xd62d, &b).unwrap());
+        assert!(row.cells.iter().all(|c| c.shading.is_none()));
+    }
+    #[test]
+    fn shading_bad_lengths_and_out_of_range_cells_reject() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 63, 1, 0]).unwrap();
+        for code in [0xd609, 0xd612, 0xd616, 0xd60c, 0xd660, 0xd62d, 0xd62e] {
+            assert!(row.apply(code, &[]).is_err());
+            assert!(row.apply(code, &[1, 0]).is_err());
+        }
+        let mut b = vec![200];
+        b.resize(201, 0);
+        assert!(row.apply(0xd60c, &b).is_err());
+        let mut few = Row::default();
+        few.apply(0x7621, &[0, 1, 1, 0]).unwrap();
+        assert!(few.apply(0xd616, &shade(0)).is_err());
+        let mut b = vec![12, 1, 2];
+        b.extend(&shade(0)[1..]);
+        assert!(few.apply(0xd62d, &b).is_err());
+        assert!(!few.apply(0xd670, &shade(0)).unwrap()); // No guessed raw/style cascade.
+    }
     #[test]
     fn definition_edges_do_not_subtract_the_origin_gap_twice() {
         let mut row = Row::default();

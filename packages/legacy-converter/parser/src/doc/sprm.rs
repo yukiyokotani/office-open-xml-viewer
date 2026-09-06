@@ -114,10 +114,25 @@ impl<'a> Sprms<'a> {
         let operand = bytes
             .get(..size)
             .ok_or_else(|| unsupported("truncated Word formatting operand"))?;
-        if matches!(code, 0xc60d | 0xc615) {
+        if matches!(
+            code,
+            0xc60d | 0xc615 | 0xd609 | 0xd612 | 0xd616 | 0xd60c | 0xd62d | 0xd62e | 0xd660
+        ) {
             // Charge variable tab edits, not just their enclosing SPRM. Range
             // deletion is logarithmic plus removed entries, not a full-set scan.
+            // Table shading arrays/ranges also perform per-cell work (at most
+            // 63 cells for a range); account for it below before expansion.
             budget.take_many(operand.len())?;
+            // DefTableShd replaces its segment, including omitted non-shaded
+            // trailing cells, so even an empty array has bounded reset work.
+            budget.take_many(match code {
+                0xd612 | 0xd616 => 22,
+                0xd60c => 19,
+                _ => 0,
+            })?;
+            if matches!(code, 0xd62d | 0xd62e) && operand.len() >= 3 {
+                budget.take_many(usize::from(operand[2].saturating_sub(operand[1])))?;
+            }
         }
         self.bytes = &bytes[size..];
         Ok(Some((code, operand)))
@@ -127,6 +142,19 @@ impl<'a> Sprms<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shading_work_is_charged_before_cell_expansion() {
+        let mut budget = Budget(76); // 1 SPRM + 13 operand bytes + 63 selected cells = 77.
+        let mut bytes = vec![0x2d, 0xd6, 12, 0, 63];
+        bytes.extend([0u8; 10]);
+        assert!(Sprms::new(&bytes)
+            .next(&mut budget)
+            .unwrap_err()
+            .contains("budget"));
+        let mut budget = Budget(77);
+        assert!(Sprms::new(&bytes).next(&mut budget).unwrap().is_some());
+        assert_eq!(budget.0, 0);
+    }
     #[test]
     fn extended_tabs_are_framed_without_consuming_the_following_sprm() {
         let mut b = vec![0x15, 0xc6, 255, 64];

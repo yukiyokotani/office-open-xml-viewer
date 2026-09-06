@@ -210,6 +210,27 @@ ceilings. Paragraph text and pending tables remain bounded by the XML budget.
 Floating frames and numbering are still absent; line wrapping and pagination
 can differ significantly. No existing renderer changes are required.
 
+DOC tables retain the compatibility cell-shading arrays (`Shd80` and `Shd`),
+explicit cell ranges (including alternating cells), and table-wide shading
+(MS-DOC 2.6.3, 2.9.52-53, 2.9.247-249, 2.9.308). Foreground and background
+colors, automatic colors, no-shading sentinels and the 38 documented OOXML
+pattern mappings become ordinary `w:shd` properties (ECMA-376 17.3.5,
+17.4.30-32, 17.18.78). Row-level exceptions preserve a shared table grid;
+omitted trailing entries in modern shading arrays clear stale segment values.
+Unmappable binary patterns remain warned and omitted,
+not approximated by a percentage tint. Array/range work consumes the formatting
+budget, and output consumes the existing XML budget.
+
+This converter does not interpret conditional table styles, so it uses the
+legacy compatibility shading specified for readers without table-style support.
+The separate `ShdRaw` style-inheritance arrays remain unsupported; in particular,
+their `ShdNil` is not treated as an explicit clear override of the compatibility
+array. These limitations remain visible in conversion warnings. The existing
+DOCX viewer currently renders background fills but does not reproduce every
+shading pattern or automatic-color/inheritance case. Preserving that metadata
+does not claim pattern-level visual parity. No renderer change, migration, or
+additional opt-in is required.
+
 DOC header/footer stories follow MS-DOC 2.3.3 and 2.8.22: the six separator
 stories are not page headers, and each section has even/default/first header
 and footer slots. Zero-length ranges inherit the previous section's matching

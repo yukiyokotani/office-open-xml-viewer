@@ -1,6 +1,12 @@
 //! [MS-DOC] Brc/Brc80/BrcType/Ico to ECMA-376 ST_Border, no pixel fitting.
 use super::{u32_at, unsupported};
 
+// MS-DOC 2.9.119 Ico: the fixed palette is shared by Brc80 and Shd80.
+pub(super) const ICO_COLORS: [&str; 17] = [
+    "auto", "000000", "0000FF", "00FFFF", "00FF00", "FF00FF", "FF0000", "FFFF00", "FFFFFF",
+    "000080", "008080", "008000", "800080", "800080", "808000", "808080", "C0C0C0",
+];
+
 #[derive(Clone, Default)]
 pub struct Border {
     attributes: String,
@@ -52,15 +58,10 @@ impl Border {
         }
         let (width, kind, color, flags) = if old {
             // Ico is a fixed binary-format palette, not a document theme.
-            let colors = [
-                "auto", "000000", "0000FF", "00FFFF", "00FF00", "FF00FF", "FF0000", "FFFF00",
-                "FFFFFF", "000080", "008080", "008000", "800080", "800080", "808000", "808080",
-                "C0C0C0",
-            ];
             (
                 b[0],
                 b[1],
-                colors
+                ICO_COLORS
                     .get(b[2] as usize)
                     .ok_or_else(|| unsupported("invalid Word border palette index"))?
                     .to_string(),

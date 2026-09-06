@@ -175,7 +175,14 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
     let total = grid[grid.len() - 1] - origin;
     let (jc, physical) = first.alignment;
     let jc = if physical && first.bidi { 2 - jc } else { jc };
-    xml.push_str(&format!("<w:tbl><w:tblPr><w:bidiVisual w:val=\"{}\"/><w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/><w:tblLayout w:type=\"{}\"/><w:tblCellMar>",u8::from(first.bidi),["left","center","right"][jc as usize], if first.autofit {"autofit"} else {"fixed"}));
+    xml.push_str(&format!("<w:tbl><w:tblPr><w:bidiVisual w:val=\"{}\"/><w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/>",u8::from(first.bidi),["left","center","right"][jc as usize]));
+    if let Some(shading) = &first.shading {
+        xml.push_str(&shading.xml());
+    }
+    xml.push_str(&format!(
+        "<w:tblLayout w:type=\"{}\"/><w:tblCellMar>",
+        if first.autofit { "autofit" } else { "fixed" }
+    ));
     margins(xml, first.margins);
     xml.push_str("</w:tblCellMar></w:tblPr><w:tblGrid>");
     for edges in grid.windows(2) {
@@ -184,7 +191,19 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
     xml.push_str("</w:tblGrid>");
     let mut header_prefix = true;
     for (row_index, (row, content)) in rows.iter().enumerate() {
-        xml.push_str("<w:tr><w:trPr>");
+        xml.push_str("<w:tr>");
+        if row.shading != first.shading {
+            // ECMA-376 17.4.30: table-level exceptions belong to the row;
+            // changing shading must not split the table's shared grid.
+            xml.push_str("<w:tblPrEx>");
+            if let Some(shading) = &row.shading {
+                xml.push_str(&shading.xml());
+            } else {
+                xml.push_str("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
+            }
+            xml.push_str("</w:tblPrEx>");
+        }
+        xml.push_str("<w:trPr>");
         let edge = row.origin();
         let before = grid.partition_point(|e| *e < edge);
         let mut cell_grid = vec![before];
@@ -271,6 +290,9 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
                 }
             }
             xml.push_str("</w:tcBorders>");
+            if let Some(shading) = &c.shading {
+                xml.push_str(&shading.xml());
+            }
             xml.push_str("<w:tcMar>");
             margins(
                 xml,
@@ -312,6 +334,61 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cell_shading_is_retained_between_borders_and_margins() {
+        let mut r = row(1, &[1000]);
+        assert!(r
+            .row
+            .apply(0xd612, &[10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0, 0, 0])
+            .unwrap());
+        let mut w = Writer::new(100000);
+        w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
+        w.push(r, '\u{7}', String::new()).unwrap();
+        let xml = w.finish().unwrap();
+        assert!(xml.contains(
+            "</w:tcBorders><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"123456\"/><w:tcMar>"
+        ));
+    }
+
+    #[test]
+    fn table_shading_does_not_become_cell_override() {
+        let mut r = row(1, &[1000]);
+        assert!(r
+            .row
+            .apply(0xd660, &[10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0, 0, 0])
+            .unwrap());
+        let mut w = Writer::new(100000);
+        w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
+        w.push(r, '\u{7}', String::new()).unwrap();
+        let xml = w.finish().unwrap();
+        let shade = xml.find("<w:shd ").unwrap();
+        assert!(shade < xml.find("<w:tblLayout ").unwrap());
+        assert_eq!(xml.matches("<w:shd ").count(), 1);
+    }
+
+    #[test]
+    fn varying_table_shading_uses_row_exceptions_without_splitting_the_grid() {
+        for first_shaded in [false, true] {
+            let mut w = Writer::new(100000);
+            for shaded in [first_shaded, !first_shaded, first_shaded] {
+                let mut r = row(1, &[1000]);
+                if shaded {
+                    r.row
+                        .apply(0xd660, &[10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0, 0, 0])
+                        .unwrap();
+                }
+                w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
+                w.push(r, '\u{7}', String::new()).unwrap();
+            }
+            let xml = w.finish().unwrap();
+            assert_eq!(xml.matches("<w:tbl>").count(), 1);
+            assert_eq!(xml.matches("<w:tr>").count(), 3);
+            assert_eq!(xml.matches("<w:tblPrEx>").count(), 1);
+            let fill = if first_shaded { "auto" } else { "123456" };
+            assert!(xml.contains(&format!("<w:tr><w:tblPrEx><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{fill}\"/></w:tblPrEx><w:trPr>")));
+        }
+    }
+
     fn cell(depth: u32, end: bool) -> Properties {
         let mut p = Properties::default();
         p.apply(0x6649, &depth.to_le_bytes()).unwrap();
