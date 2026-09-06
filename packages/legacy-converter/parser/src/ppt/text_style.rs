@@ -320,7 +320,17 @@ impl Character {
         } else {
             None
         };
-        let _position = r.optional16(mask, 0x80000)?;
+        // MS-PPT 2.9.14: signed percentage of line height, in [-100, 100].
+        // Validate even though projection remains unsupported: DrawingML
+        // CT_TextCharacterProperties/@baseline is relative to font size, so
+        // multiplying by 1000 alone is not a justified conversion rule.
+        if r.optional16(mask, 0x80000)?
+            .is_some_and(|value| !(-100..=100).contains(&(value as i16)))
+        {
+            return Err(unsupported(
+                "invalid PowerPoint character baseline position",
+            ));
+        }
         Ok(Self {
             mask,
             style,
@@ -1216,6 +1226,50 @@ mod tests {
         assert!(out.contains("sz=\"2000\"/><a:t>x</a:t>"));
         assert!(out.contains("<a:endParaRPr sz=\"2000\"/>"));
     }
+    #[test]
+    fn character_position_accepts_only_the_signed_percentage_domain() {
+        // MS-PPT 2.9.14: position is signed and MUST be within [-100, 100].
+        // Its line-height reference does not establish an OOXML font-size
+        // percentage mapping. This test validates input, not superscript paint.
+        for position in i16::MIN..=i16::MAX {
+            let data = style(2, [u32s(0x80000), u16s(position as u16)].concat());
+            let result = xml("x", &data, &[]);
+            assert_eq!(
+                result.is_ok(),
+                (-100..=100).contains(&position),
+                "{position}"
+            );
+            if let Ok(output) = result {
+                assert!(!output.contains("baseline="));
+            }
+        }
+        assert!(xml("x", &style(2, u32s(0x80000)), &[]).is_err());
+        assert!(xml("x", &style(2, [u32s(0x80000), vec![0]].concat()), &[]).is_err());
+    }
+
+    #[test]
+    fn master_character_position_uses_the_same_validation_as_direct_runs() {
+        for position in [-101i16, -100, 0, 100, 101] {
+            // TextMasterStyleAtom: one level, empty PF, CF with position only.
+            let data = [u16s(1), u32s(0), u32s(0x80000), u16s(position as u16)].concat();
+            let result = Master::parse(
+                &[Record {
+                    version: 0,
+                    instance: 0,
+                    kind: 4003,
+                    payload: &data,
+                }],
+                &[],
+                &mut 100,
+            );
+            assert_eq!(
+                result.is_ok(),
+                (-100..=100).contains(&position),
+                "{position}"
+            );
+        }
+    }
+
     #[test]
     fn paragraph_alignment_and_signed_spacing_use_their_own_units() {
         let data = [
