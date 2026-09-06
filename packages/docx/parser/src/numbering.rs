@@ -13,6 +13,10 @@ mod restart_tests;
 #[path = "numbering/legal_tests.rs"]
 mod legal_tests;
 
+#[cfg(test)]
+#[path = "numbering/counter_instance_tests.rs"]
+mod counter_instance_tests;
+
 /// Parse a single VML CSS length (e.g. `width:9pt`) from a `style` attribute
 /// into pt. Supports the units Word emits for picture-bullet shapes: `pt`
 /// (1pt), `in` (72pt), `pc`/`pi` (12pt), `cm` (28.3465pt), `mm` (2.83465pt). A
@@ -165,20 +169,22 @@ pub struct NumberingMap {
     /// before the abstract's levels in `get_level`,
     /// so lvlText/numFmt/indents/rPr/pStyle all substitute per-numId.
     num_level_overrides: HashMap<u32, HashMap<u32, LevelDef>>,
-    /// per-**abstractNumId** per-level counter. ECMA-376 §17.9: the running
-    /// count belongs to the abstract numbering definition, so every `<w:num>`
-    /// (numId) that references the same `<w:abstractNum>` shares one counter —
-    /// that is how Word's "continue previous list" works and how a restart on
-    /// one numId carries into the next (sample-13's masthead: numId=30 with a
-    /// `<w:startOverride>` restarts abstractNumId 20 to 1, then the body's
-    /// numId=6 — same abstract — continues 2, 3, 4 rather than resuming its own
-    /// page-1 tail at 5, 6, 7). Keyed by `CounterKey` so an unresolved numId
-    /// gets a disjoint counter instead of colliding with an abstractNumId.
+    /// Per-**abstractNumId** per-level counter. ECMA-376 §17.9.1 and §17.9.15
+    /// define abstract numbering definitions and concrete numbering instances;
+    /// they do not by themselves establish this runtime counter-store policy.
+    /// The §17.9.26 `startOverride` example establishes shared restart behavior:
+    /// numIds 5, 5, 6, 5 on one abstractNum produce 1, 2, 1, 2. The wider alias
+    /// and full-level-replacement policy is bounded native-Word compatibility
+    /// evidence (see `counter_instance_tests`). Keyed by `CounterKey` so an
+    /// unresolved numId gets a disjoint counter instead of colliding with an
+    /// abstractNumId.
     counters: HashMap<CounterKey, HashMap<u32, u32>>,
     /// (numId, level) pairs already advanced at least once. A numId carrying a
     /// `<w:lvlOverride><w:startOverride>` restarts the shared abstract counter
-    /// only on its FIRST appearance at that level (§17.9.6 / §17.9.7); afterward
-    /// it increments the shared counter like any other num on the abstract.
+    /// only on its FIRST appearance at that level. ECMA-376 §17.9.26 defines
+    /// `startOverride` and demonstrates its reset propagating across numIds on
+    /// one abstractNum; applying it only once per numId follows measured
+    /// native-Word compatibility behavior.
     started: HashSet<(u32, u32)>,
 }
 
@@ -452,8 +458,9 @@ impl NumberingMap {
     /// Advance the counter for (numId, level), resetting deeper levels.
     ///
     /// The counter is keyed by the numId's **abstractNumId**, so all numIds that
-    /// share an abstract definition advance one running count (§17.9 — see the
-    /// `counters` field doc). Each level stores its CURRENT displayed value (not
+    /// share an abstract definition advance one running count. This storage
+    /// policy follows measured native-Word behavior; see the `counters` field
+    /// doc and `counter_instance_tests`. Each level stores its CURRENT value (not
     /// the next): a level's first appearance shows its `start`, each later
     /// advance adds one. Advancing a level resets descendants whose effective
     /// `lvlRestart` includes that ancestor (17.9.10); by default this means all
@@ -463,8 +470,10 @@ impl NumberingMap {
     ///
     /// A numId whose `<w:lvlOverride>` carries a `<w:startOverride>` for this
     /// level RESTARTS the shared abstract counter to the override value on its
-    /// first appearance at that level (§17.9.6 / §17.9.7), then increments
-    /// normally. Returns the value to display.
+    /// first appearance at that level, then increments normally. ECMA-376
+    /// §17.9.26 defines `startOverride` and demonstrates the shared reset with
+    /// numIds 5, 5, 6, 5 producing 1, 2, 1, 2. The once-per-numId application is
+    /// measured native-Word compatibility behavior. Returns the value to display.
     pub fn advance(&mut self, num_id: u32, level: u32) -> u32 {
         // Pre-compute start values to avoid borrow conflicts. `get_start`
         // already folds in any per-numId `<w:startOverride>` for the level.
@@ -1276,12 +1285,9 @@ mod tests {
         assert_eq!(m.resolve_text(2, 1, c), "A.1");
     }
 
-    /// §17.9 — two numIds that reference the SAME abstractNum share one running
-    /// counter. sample-13's masthead: the article body numbers headings with
-    /// numId=6 (1..4), then a section restarts via numId=30 (same abstract 20,
-    /// a `<w:startOverride w:val="1"/>`) and the body resumes with numId=6. Word
-    /// shows 1, 2, 3, 4 across the restart — NOT 5, 6, 7 — because the count is
-    /// owned by abstract 20, not by each numId.
+    /// ECMA-376 §17.9.26 demonstrates that two numIds referencing one abstractNum
+    /// share a restart: the sequence 5, 5, 6, 5 produces 1, 2, 1, 2 when numId 6
+    /// has startOverride=1. This test exercises the same specified transition.
     #[test]
     fn shared_abstract_counter_restarts_on_start_override() {
         let mut m = map(r#"<w:abstractNum w:abstractNumId="20">

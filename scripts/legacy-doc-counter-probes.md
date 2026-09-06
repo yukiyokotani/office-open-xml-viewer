@@ -1,10 +1,13 @@
 # Legacy DOC counter instance probes
 
-This generator creates nine passive DOCX controls for one unresolved question:
+This generator creates nine passive DOCX controls for the following question:
 when two `w:num` instances reference the same `w:abstractNum`, does native Word
 advance one counter or a counter per instance? ECMA-376 defines the inheritance
-of numbering properties but does not explicitly assign mutable counter identity.
-The generator therefore records every outcome as `UNOBSERVED`.
+of numbering properties; its section 17.9.26 `startOverride` example also shows
+a restart affecting a later paragraph using the previous instance. The wider
+alias and full-level-replacement combinations still require controlled checks.
+The generator therefore records every new artifact's outcome as `UNOBSERVED`;
+the bounded native observation below must not be confused with a new run.
 
 ## Generate the source controls
 
@@ -59,6 +62,29 @@ save-dependent drift.
 
 This protocol requires native Word. LibreOffice is not a substitute for the
 Office observation and is not part of this probe.
+
+## Observed single-level behavior
+
+Native Word for Mac 16.112.3 produced these marker sequences in both the source
+DOCX PDF and the PDF exported after saving, closing, and reopening the DOC:
+
+| Cases | Four displayed numbers |
+| --- | --- |
+| C01-C05, C07, C09 | 1, 2, 3, 4 |
+| C06 | 1, 7, 8, 9 |
+| C08 | 1, 1, 2, 2 |
+
+All nine pages were visually inspected. C05 applies bold only to the second
+instance's markers without separating its counter. These observations support
+sharing counters between aliases in the tested single-level configurations and
+distinguishing `startOverride` from a replacement level's `start`. They are
+Office compatibility evidence, not an additional normative ECMA-376 rule or
+proof for arbitrary multilevel lists, story boundaries, or other overrides.
+The restart observation is also consistent with the section 17.9.26 example.
+
+The ordinary DOCX parser already produces these sequences; focused tests in
+`packages/docx/parser/src/numbering/counter_instance_tests.rs` preserve that
+behavior. The native files and detailed provenance remain local-only.
 
 ## Tests
 
