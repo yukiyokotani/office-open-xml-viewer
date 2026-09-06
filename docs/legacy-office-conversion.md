@@ -114,6 +114,10 @@ unsupported; affected paths are omitted rather than painted as fragments.
 Path clipping retains intersection-only support. Other clip combination modes
 and full GDI pen/brush semantics are not implemented. Preserving EMF bytes is
 still not proof of complete visible output or original-binary layout fidelity.
+Restored outlines also do not establish color or opacity fidelity. Visual
+evaluation must compare every changed page with the previous renderer and an
+Office reference, and record remaining differences separately from restored
+content. A reference exported from OOXML does not certify binary-input layout.
 
 As renderer resource policy (not format limits), one path retains at most
 65,536 commands; one EMF playback allocates at most 262,144 path commands and
