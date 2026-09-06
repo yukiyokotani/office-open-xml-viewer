@@ -39,6 +39,8 @@ interface Options {
   checksumType?: number;
   extensionType?: number;
   themeRecords?: Uint8Array[];
+  baseIndent?: number;
+  readingOrder?: number;
 }
 
 function fixture(properties: Uint8Array[], options: Options = {}) {
@@ -50,9 +52,16 @@ function fixture(properties: Uint8Array[], options: Options = {}) {
   // Solid fill and all five thin borders; both diagonal direction flags.
   xf.set(little32(0xc0001111), 10);
   xf.set(little32((1 << 26) | (1 << 25) | (1 << 21)), 14);
+  xf[8] = (options.baseIndent ?? 0) | ((options.readingOrder ?? 0) << 6);
   if (options.cellHasExtension === false) xf[17] &= ~2;
-  if (options.styleXf) { xf[4] = 4; xf[17] &= ~2; }
-  const xfs = Array.from({ length: 16 }, () => xf);
+  const xfs = Array.from({ length: 16 }, () => xf.slice());
+  // A BIFF8 workbook begins with StyleXFs. Keep index zero as the Normal style
+  // while the default extension target remains CellXF index one.
+  xfs[0][4] = 4; xfs[0][17] &= ~2;
+  if (options.styleXf) {
+    const index = options.index ?? 1;
+    xfs[index][4] = 4; xfs[index][17] &= ~2;
+  }
   const check = rec(0x87c, concat(frt(options.checksumType ?? 0x87c), little16(0),
     little16(options.wrongCount ? 15 : xfs.length), little32(checksum(concat(...xfs)) ^ Number(Boolean(options.stale)))));
   const ext = rec(0x87d, concat(frt(options.extensionType ?? 0x87d), little16(0),
@@ -115,6 +124,37 @@ it.each([{ stale: true }, { missingChecksum: true }, { wrongCount: true }, { cel
 
 it('does not interpret the reserved StyleXF bit as CellXF.fHasXFExt', async () => {
   expect((await convert(fixture([prop(13, color())], { styleXf: true }))).xml).toContain('78123456');
+});
+
+const indentation = (value: number) => prop(0x000f, little16(value));
+
+it.each([0, 15, 16, 250])
+('preserves extended indentation %s through the ordinary XLSX parser', async value => {
+  const { xml, model } = await convert(fixture([indentation(value)], {
+    baseIndent: 7, readingOrder: 2,
+  }));
+  expect(xml).toContain(`indent="${value}"`);
+  expect(model.cellXfs[1].indent).toBe(value === 0 ? undefined : value);
+  expect(model.cellXfs[1].readingOrder).toBe(2);
+  expect(model.cellXfs[2].indent).toBe(7);
+  expect(model.cellXfs[2].readingOrder).toBe(2);
+});
+
+it('applies extended indentation to its owning StyleXF without changing CellXFs', async () => {
+  const { model } = await convert(fixture([indentation(250)], {
+    index: 0, baseIndent: 7, readingOrder: 2,
+  }));
+  expect(model.cellXfs[0]).toMatchObject({ indent: 250, readingOrder: 2 });
+  expect(model.cellXfs[1]).toMatchObject({ indent: 7, readingOrder: 2 });
+});
+
+it.each([{ stale: true }, { cellHasExtension: false }])
+('retains base indentation when the extended CellXF binding is ineligible: %j', async options => {
+  const { model } = await convert(fixture([indentation(250)], {
+    ...options, baseIndent: 7, readingOrder: 1,
+  }));
+  expect(model.cellXfs[1]).toMatchObject({ indent: 7, readingOrder: 1 });
+  expect(model.cellXfs[2]).toMatchObject({ indent: 7, readingOrder: 1 });
 });
 
 it.each([color([4, 0, 0, 0], 3), color([1, 2, 3, 255], 2, 8191), color([0, 0, 0, 0], 0)])

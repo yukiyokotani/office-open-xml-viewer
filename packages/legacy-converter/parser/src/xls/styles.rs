@@ -344,12 +344,14 @@ impl<'a> Styles<'a> {
             let vertical = ["top", "center", "bottom", "justify", "distributed"]
                 .get(usize::from((data[6] >> 4) & 7))
                 .ok_or_else(|| unsupported("invalid BIFF vertical alignment"))?;
-            if (181..255).contains(&data[7]) || (flags & 4 == 0 && data[8] >> 6 > 2) {
+            if (181..255).contains(&data[7]) || data[8] >> 6 > 2 {
                 return Err(unsupported("invalid BIFF text alignment"));
             }
-            // StyleXF reserves cIndent/iReadOrder. Ignore those bits for styles.
-            let indent = if flags & 4 == 0 { data[8] & 15 } else { 0 };
-            let reading = if flags & 4 == 0 { data[8] >> 6 } else { 0 };
+            let indent = self
+                .extensions
+                .indent(index)
+                .unwrap_or(u16::from(data[8] & 15));
+            let reading = data[8] >> 6;
             xfs.push(format!("<xf numFmtId=\"{}\" fontId=\"{font}\" fillId=\"{fill_id}\" borderId=\"{border_id}\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\" applyProtection=\"1\" quotePrefix=\"{}\"><alignment horizontal=\"{horizontal}\" vertical=\"{vertical}\" wrapText=\"{}\" textRotation=\"{}\" indent=\"{indent}\" shrinkToFit=\"{}\" readingOrder=\"{reading}\" justifyLastLine=\"{}\"/><protection locked=\"{}\" hidden=\"{}\"/></xf>", u16_at(data, 2)?, (flags >> 3) & 1, (data[6] >> 3) & 1, data[7], (data[8] >> 4) & 1, data[6] >> 7, flags & 1, (flags >> 1) & 1));
         }
         if xfs.is_empty() {
@@ -385,6 +387,30 @@ fn intern(value: String, values: &mut Vec<String>, ids: &mut BTreeMap<String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn crc(bytes: impl Iterator<Item = u8>) -> u32 {
+        let mut value = 0u32;
+        for byte in bytes {
+            value ^= u32::from(byte) << 24;
+            for _ in 0..8 {
+                value = (value << 1) ^ if value & 0x8000_0000 != 0 { 0xaf } else { 0 };
+            }
+        }
+        value
+    }
+    fn extended_indent<'a>(xfs: &'a [[u8; 20]], index: u16, value: u16) -> ([u8; 20], Vec<u8>) {
+        let mut check = [0; 20];
+        check[..2].copy_from_slice(&0x087cu16.to_le_bytes());
+        check[14..16].copy_from_slice(&(xfs.len() as u16).to_le_bytes());
+        check[16..].copy_from_slice(&crc(xfs.iter().flatten().copied()).to_le_bytes());
+        let mut ext = vec![0; 20];
+        ext[..2].copy_from_slice(&0x087du16.to_le_bytes());
+        ext[14..16].copy_from_slice(&index.to_le_bytes());
+        ext[18..20].copy_from_slice(&1u16.to_le_bytes());
+        ext.extend_from_slice(&0x000fu16.to_le_bytes());
+        ext.extend_from_slice(&6u16.to_le_bytes());
+        ext.extend_from_slice(&value.to_le_bytes());
+        (check, ext)
+    }
     fn font() -> Vec<u8> {
         let mut data = vec![0; 16];
         data[..2].copy_from_slice(&200u16.to_le_bytes());
@@ -520,6 +546,140 @@ mod tests {
         assert!(xml.contains("<color rgb=\"FF123456\"/>"));
         assert!(xml.contains("<fonts count=\"2\">"));
         assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
+    }
+    #[test]
+    fn checksum_bound_extended_indent_overrides_only_the_owned_cell_xf() {
+        for value in [0u16, 15, 16, 250] {
+            let font = font();
+            let mut owned = [0u8; 20];
+            owned[6] = 1; // left alignment
+            owned[8] = 7; // distinguish the four-bit base cIndent
+            owned[17] = 2; // CellXF.fHasXFExt
+            let mut xfs = [owned; 16];
+            xfs[0][4] = 4; // Normal StyleXF; its XFExt ownership is fStyle.
+            xfs[0][17] = 0;
+            let (check, ext) = extended_indent(&xfs, 1, value);
+            let mut records = vec![Record {
+                kind: 0x31,
+                offset: 0,
+                data: &font,
+            }];
+            records.extend(xfs.iter().map(|xf| Record {
+                kind: 0xe0,
+                offset: 0,
+                data: xf,
+            }));
+            records.push(Record {
+                kind: 0x087c,
+                offset: 0,
+                data: &check,
+            });
+            records.push(Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &ext,
+            });
+            let xml = Styles::parse(&records).unwrap().xml().unwrap();
+            assert_eq!(xml.matches("indent=\"7\"").count(), 16); // style XF plus 15 unextended cell XFs
+            assert_eq!(
+                xml.matches(&format!("indent=\"{value}\"")).count(),
+                usize::from(value != 7)
+            );
+        }
+    }
+    #[test]
+    fn extended_indent_requires_current_ownership_and_isolates_style_and_cell_xfs() {
+        let font = font();
+        for case in ["unowned", "stale", "cell", "style"] {
+            let mut xf = [0u8; 20];
+            xf[6] = 1;
+            xf[8] = 7;
+            let mut xfs = [xf; 16];
+            xfs[0][4] = 4;
+            xfs[0][8] = 0x87; // StyleXF cIndent=7, iReadOrder=2.
+            if matches!(case, "stale" | "cell") {
+                xfs[1][17] = 2;
+            }
+            let target = if case == "style" { 0 } else { 1 };
+            let (mut check, ext) = extended_indent(&xfs, target, 250);
+            if case == "stale" {
+                check[16] ^= 1;
+            }
+            let mut records = vec![Record {
+                kind: 0x31,
+                offset: 0,
+                data: &font,
+            }];
+            records.extend(xfs.iter().map(|xf| Record {
+                kind: 0xe0,
+                offset: 0,
+                data: xf,
+            }));
+            records.push(Record {
+                kind: 0x087c,
+                offset: 0,
+                data: &check,
+            });
+            records.push(Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &ext,
+            });
+            let xml = Styles::parse(&records).unwrap().xml().unwrap();
+            let expected = match case {
+                "cell" => 1,
+                "style" => 2,
+                _ => 0,
+            };
+            assert_eq!(xml.matches("indent=\"250\"").count(), expected, "{case}");
+            assert_eq!(xml.matches("readingOrder=\"2\"").count(), 2, "{case}");
+        }
+    }
+    #[test]
+    fn rejects_malformed_extended_indent() {
+        let font = font();
+        let mut xf = [0u8; 20];
+        xf[17] = 2;
+        let xfs = [xf; 16];
+        for case in ["short", "long", "range", "duplicate"] {
+            let (check, mut ext) = extended_indent(&xfs, 1, if case == "range" { 251 } else { 16 });
+            match case {
+                "short" => {
+                    ext[22..24].copy_from_slice(&5u16.to_le_bytes());
+                    ext.pop();
+                }
+                "long" => {
+                    ext[22..24].copy_from_slice(&7u16.to_le_bytes());
+                    ext.push(0);
+                }
+                "duplicate" => {
+                    ext[18..20].copy_from_slice(&2u16.to_le_bytes());
+                    ext.extend_from_slice(&ext[20..26].to_vec());
+                }
+                _ => {}
+            }
+            let mut records = vec![Record {
+                kind: 0x31,
+                offset: 0,
+                data: &font,
+            }];
+            records.extend(xfs.iter().map(|xf| Record {
+                kind: 0xe0,
+                offset: 0,
+                data: xf,
+            }));
+            records.push(Record {
+                kind: 0x087c,
+                offset: 0,
+                data: &check,
+            });
+            records.push(Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &ext,
+            });
+            assert!(Styles::parse(&records).is_err(), "{case}");
+        }
     }
     #[test]
     fn remaps_font_gap_and_deduplicates_repeated_fills() {

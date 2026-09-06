@@ -4,7 +4,10 @@ use super::super::{u16_at, u32_at, unsupported, Record};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
-pub(super) struct Extensions(BTreeMap<usize, BTreeMap<u16, String>>);
+pub(super) struct Extensions {
+    colors: BTreeMap<usize, BTreeMap<u16, String>>,
+    indents: BTreeMap<usize, u16>,
+}
 
 impl Extensions {
     pub(super) fn parse(records: &[Record<'_>], xfs: &[&[u8]]) -> Result<Self, String> {
@@ -47,6 +50,7 @@ impl Extensions {
             }
             let mut offset = 20usize;
             let mut colors = BTreeMap::new();
+            let mut indent = None;
             let mut properties = BTreeSet::new();
             for _ in 0..count {
                 let kind = u16_at(data, offset)?;
@@ -93,20 +97,38 @@ impl Extensions {
                             ),
                         );
                     }
+                } else if kind == 0x000f {
+                    if value.len() != 2 {
+                        return Err(unsupported("invalid BIFF extended indentation size"));
+                    }
+                    let value = u16_at(value, 0)?;
+                    if value > 250 {
+                        return Err(unsupported("invalid BIFF extended indentation"));
+                    }
+                    indent = Some(value);
                 }
             }
             if offset != data.len() {
                 return Err(unsupported("unexpected BIFF XF extension tail"));
             }
             if owned {
-                result.0.insert(index, colors);
+                result.colors.insert(index, colors);
+                // MS-XLS 2.2.6.1.2.1 permits an XFExt for StyleXF as well as
+                // CellXF. ExtProp 0x000F extends either owning XF's cIndent.
+                if let Some(indent) = indent {
+                    result.indents.insert(index, indent);
+                }
             }
         }
         Ok(result)
     }
 
     pub(super) fn color(&self, index: usize, property: u16) -> Option<&str> {
-        self.0.get(&index)?.get(&property).map(String::as_str)
+        self.colors.get(&index)?.get(&property).map(String::as_str)
+    }
+
+    pub(super) fn indent(&self, index: usize) -> Option<u16> {
+        self.indents.get(&index).copied()
     }
 }
 
