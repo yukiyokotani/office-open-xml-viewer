@@ -231,6 +231,17 @@ shading pattern or automatic-color/inheritance case. Preserving that metadata
 does not claim pattern-level visual parity. No renderer change, migration, or
 additional opt-in is required.
 
+DOC table-level floating positions now become ordinary `w:tblpPr` and
+`w:tblOverlap` properties (MS-DOC 2.4.3, 2.6.3, 2.7.13, 2.9.208/351/357;
+ECMA-376 17.4.57). The converter preserves page/margin/column/text anchors,
+symbolic alignment, signed coordinates, physical text clearances and explicit
+overlap prevention. Encoded absolute distances are decremented by one as
+specified; reserved alignment values are mapped separately. Non-positioned
+anchor codes remain inline. No renderer-specific offset or wrapping correction
+is applied. Paragraph-frame-derived table positioning remains unsupported, and
+the existing DOCX renderer's floating-table layout limitations still apply.
+No migration or per-format opt-in change is required.
+
 DOC header/footer stories follow MS-DOC 2.3.3 and 2.8.22: the six separator
 stories are not page headers, and each section has even/default/first header
 and footer slots. Zero-length ranges inherit the previous section's matching

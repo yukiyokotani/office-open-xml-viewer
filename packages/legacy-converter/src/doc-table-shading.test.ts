@@ -86,3 +86,32 @@ it('warns rather than inventing an OOXML pattern for unmappable binary coverage'
   try { expect(new TextDecoder().decode(archive.extract_image('word/document.xml'))).not.toContain('<w:shd '); }
   finally { archive.free(); }
 });
+
+it('retains table position through WASM and the ordinary DOCX parser', async () => {
+  const result = await convert(tableFixture(0x360d, concat(new Uint8Array([0x20]),
+    little16(0x940e), little16(721), little16(0x940f), little16(1),
+    little16(0x941e), little16(187), little16(0x3465), new Uint8Array([1]))));
+  const archive = new DocxArchive(new Uint8Array(result.bytes));
+  try {
+    const xml = new TextDecoder().decode(archive.extract_image('word/document.xml'));
+    expect(xml).toContain('w:horzAnchor="text" w:vertAnchor="text" w:tblpX="720" w:tblpY="0"');
+    expect(xml).toContain('<w:tblOverlap w:val="never"/>');
+    const model = JSON.parse(new TextDecoder().decode(archive.parse())) as {
+      body: { type: string; tblpPr?: unknown }[];
+    };
+    expect(model.body.find(block => block.type === 'table')?.tblpPr).toMatchObject({
+      horzAnchor: 'text', vertAnchor: 'text', tblpX: 36, tblpY: 0, rightFromText: 9.35,
+    });
+  } finally { archive.free(); }
+});
+
+it.each([0x30, 0xc0, 0xf0])('keeps explicitly non-positioned anchor code %i inline', async pc => {
+  const result = await convert(tableFixture(0x360d, new Uint8Array([pc])));
+  const archive = new DocxArchive(new Uint8Array(result.bytes));
+  try { expect(new TextDecoder().decode(archive.extract_image('word/document.xml'))).not.toContain('<w:tblpPr '); }
+  finally { archive.free(); }
+});
+
+it.each([0x940e, 0x940f, 0x9410, 0x9411, 0x941e, 0x941f])('rejects out-of-range table position %i', async code => {
+  await expect(convert(tableFixture(code, little16(32767)))).rejects.toMatchObject({ reason: 'unsupported-input' });
+});

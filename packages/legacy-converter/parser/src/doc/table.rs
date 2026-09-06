@@ -3,6 +3,8 @@
 use super::{border::Border, u16_at, u32_at, unsupported};
 mod shading;
 use shading::Shading;
+mod position;
+use position::Position;
 
 #[derive(Clone, Default)]
 pub struct Cell {
@@ -26,6 +28,7 @@ pub struct Properties {
 
 #[derive(Clone)]
 pub struct Row {
+    pub position: Position,
     pub shading: Option<Shading>,
     pub identity: std::collections::BTreeMap<u16, Vec<u8>>,
     pub cells: Vec<Cell>,
@@ -45,6 +48,7 @@ pub struct Row {
 impl Default for Row {
     fn default() -> Self {
         Self {
+            position: Position::default(),
             shading: None,
             identity: Default::default(),
             cells: vec![],
@@ -149,9 +153,19 @@ impl Row {
             code,
             0x7469 | 0x563a | 0x360d | 0x3465 | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f
         ) {
-            self.identity.insert(code, b.to_vec());
+            self.identity.insert(
+                code,
+                if code == 0x360d {
+                    vec![b[0] & 0xf0]
+                } else {
+                    b.to_vec()
+                },
+            );
         }
         match code {
+            0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f | 0x3465 => {
+                return self.position.apply(code, b);
+            }
             // MS-DOC 2.6.3: use the compatibility shading arrays while table
             // style interpretation is unsupported. Do not apply ShdRaw as a
             // second layer: its ShdNil requires the unresolved table style.
@@ -410,6 +424,17 @@ impl Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn table_identity_ignores_position_padding_but_retains_anchor_changes() {
+        let mut a = Row::default();
+        let mut b = Row::default();
+        a.apply(0x360d, &[0x20]).unwrap();
+        b.apply(0x360d, &[0x2f]).unwrap();
+        assert_eq!(a.identity, b.identity);
+        assert_eq!(a.position.xml(), b.position.xml());
+        b.apply(0x360d, &[0x60]).unwrap();
+        assert_ne!(a.identity, b.identity);
+    }
     fn shade(pattern: u16) -> Vec<u8> {
         let mut b = vec![10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0];
         b.extend(pattern.to_le_bytes());

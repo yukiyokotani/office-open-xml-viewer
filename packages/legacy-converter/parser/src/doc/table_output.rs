@@ -175,7 +175,9 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
     let total = grid[grid.len() - 1] - origin;
     let (jc, physical) = first.alignment;
     let jc = if physical && first.bidi { 2 - jc } else { jc };
-    xml.push_str(&format!("<w:tbl><w:tblPr><w:bidiVisual w:val=\"{}\"/><w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/>",u8::from(first.bidi),["left","center","right"][jc as usize]));
+    xml.push_str("<w:tbl><w:tblPr>");
+    xml.push_str(&first.position.xml());
+    xml.push_str(&format!("<w:bidiVisual w:val=\"{}\"/><w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/>",u8::from(first.bidi),["left","center","right"][jc as usize]));
     if let Some(shading) = &first.shading {
         xml.push_str(&shading.xml());
     }
@@ -334,6 +336,26 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn floating_table_position_precedes_direction_without_rewriting_the_grid() {
+        let mut r = row(1, &[1000]);
+        r.row.apply(0x360d, &[0x20]).unwrap(); // Column/text anchors.
+        r.row.apply(0x940e, &721i16.to_le_bytes()).unwrap();
+        r.row.apply(0x940f, &1i16.to_le_bytes()).unwrap();
+        r.row.apply(0x941e, &187u16.to_le_bytes()).unwrap();
+        r.row.apply(0x3465, &[1]).unwrap();
+        let mut w = Writer::new(100000);
+        w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
+        w.push(r, '\u{7}', String::new()).unwrap();
+        let xml = w.finish().unwrap();
+        assert!(xml.contains("<w:tblPr><w:tblpPr "));
+        assert!(xml.contains("w:horzAnchor=\"text\" w:vertAnchor=\"text\""));
+        assert!(xml.contains("w:tblpX=\"720\" w:tblpY=\"0\""));
+        assert!(xml.contains("w:rightFromText=\"187\""));
+        assert!(xml.contains("<w:tblOverlap w:val=\"never\"/><w:bidiVisual"));
+        assert!(xml.contains("<w:gridCol w:w=\"1000\"/>"));
+    }
+
     #[test]
     fn cell_shading_is_retained_between_borders_and_margins() {
         let mut r = row(1, &[1000]);
