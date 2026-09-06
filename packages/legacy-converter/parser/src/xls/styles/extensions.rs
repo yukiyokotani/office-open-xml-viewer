@@ -67,7 +67,16 @@ impl Extensions {
                     }
                     // Resolve owned, untinted theme colors to SML ARGB. Leave
                     // tint normalization separate; never scale RGB channels.
-                    if owned && color_type == 3 && u16_at(value, 2)? == 0 {
+                    // Interop limitation: the light/dark order in MS-XLS
+                    // 2.5.49 conflicts with Office-produced XFExt/palette/PDF
+                    // evidence. Keep those four colors' original BIFF fallback
+                    // until varied Office probes establish an approved mapping.
+                    // Do not guess a swap or let unresolved indices inflate ZIPs.
+                    if owned
+                        && color_type == 3
+                        && u16_at(value, 2)? == 0
+                        && (4..=11).contains(&u32_at(value, 4)?)
+                    {
                         if theme.is_none() {
                             theme = Some(super::super::theme::Colors::parse(records)?);
                         }

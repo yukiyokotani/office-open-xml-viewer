@@ -165,10 +165,25 @@ function themeZip(xml = themeXml(), targetMode = '') {
 }
 const themeRecords = (zip: Uint8Array) => [rec(0x896, concat(frt(0x896), little32(0), zip))];
 
-it.each(themeNames.map((name, index) => [name, index] as const))('resolves owned theme slot %s through WASM and the ordinary XLSX parser', async (_name, index) => {
+it.each(themeNames.map((name, index) => [name, index] as const).slice(4))('resolves owned theme slot %s through WASM and the ordinary XLSX parser', async (_name, index) => {
   const { xml, model } = await convert(fixture([prop(13, color([index, 0, 0, 0], 3))], { themeRecords: themeRecords(themeZip()) }));
   expect(xml).toContain(`<color rgb="FF${hex(themeColor(index))}"/>`);
   expect(model.fonts[model.cellXfs[1].fontId].color).toBe(`#${hex(themeColor(index))}`);
+});
+
+it.each([0, 1, 2, 3])('retains the BIFF palette for ambiguous light/dark theme index %s', async index => {
+  const { xml, model } = await convert(fixture([4, 5, 7, 8, 9, 10, 11, 13].map(kind => prop(kind, color([index, 0, 0, 0], 3))), { themeRecords: themeRecords(themeZip()) }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
+  expect(xml).toContain('<color auto="1"/>');
+  expect(model.cellXfs[1].fontId).toBe(model.cellXfs[0].fontId);
+  expect(xml).toBe((await convert(fixture([]))).xml);
+});
+
+it('does not inflate an unresolved light/dark theme just to retain the palette', async () => {
+  const { xml } = await convert(fixture([prop(13, color([1, 0, 0, 0], 3))], {
+    themeRecords: [rec(0x896, new Uint8Array([1]))],
+  }));
+  expect(xml.match(/<font>/g)).toHaveLength(1);
 });
 
 it.each([[4, 'fgColor'], [5, 'bgColor'], [7, 'top'], [8, 'bottom'], [9, 'left'], [10, 'right'], [11, 'diagonal']] as const)
@@ -220,7 +235,7 @@ it.each([
   themeZip(themeXml().replace('name="Test"', 'name="Test" name="Again"')),
   themeZip(themeXml().replace('lastClr=', 'x:spoof=')),
 ])('rejects external or malformed embedded themes without evaluating their content', async zip => {
-  await expect(convert(fixture([prop(13, color([0, 0, 0, 0], 3))], { themeRecords: themeRecords(zip) })))
+  await expect(convert(fixture([prop(13, color([4, 0, 0, 0], 3))], { themeRecords: themeRecords(zip) })))
     .rejects.toMatchObject({ reason: 'unsupported-input' });
 });
 

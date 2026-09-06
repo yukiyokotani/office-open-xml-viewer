@@ -73,12 +73,14 @@ legacy document in Microsoft Office.
 XLS literal, untinted RGBA colors in checksum-matched XF extensions are preserved
 for text, pattern fills, and all five border edges. Cell-specific font colors do
 not change other cells sharing the original font. Missing or stale XF checksums
-retain the base palette formatting. Untinted theme colors are resolved through
-the embedded theme package's internal relationships and named color slots,
+retain the base palette formatting. Untinted accent and hyperlink theme colors
+are resolved through the embedded theme package's internal relationships and named color slots,
 including saved system-color `lastClr` values. The theme is read only when an
 owned extension needs it; no theme package, links, or active content are copied
-to the output. Version-only default themes, unsupported theme color forms or
-transforms, tinted extension colors, gradient fills, and font-scheme extensions
+to the output. The first four light/dark theme indices retain their BIFF palette
+fallback: the documented index ordering conflicts with observed Office output,
+and no compatibility remapping is inferred. Version-only default themes,
+unsupported theme color forms or transforms, tinted extension colors, gradient fills, and font-scheme extensions
 still use the base-format fallback; extended-style warnings remain. No migration
 is required.
 
