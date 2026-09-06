@@ -818,6 +818,12 @@ pub(crate) enum Fill {
         image_path: String,
         /// MIME type of the blip at `image_path` (e.g. `image/png`).
         mime_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        svg_image_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rot_with_shape: Option<bool>,
         /// `<a:srcRect>` (§20.1.8.55) source-image crop. Unlike `fill_rect`,
         /// this applies before either stretch or tile placement.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -828,6 +834,8 @@ pub(crate) enum Fill {
         /// the fill-mode is `tile`.
         #[serde(skip_serializing_if = "Option::is_none")]
         fill_rect: Option<FillRect>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        stretch: bool,
         /// `<a:tile>` (§20.1.8.58). `Some` only when the blipFill is tiled;
         /// mutually exclusive with `fill_rect`.
         #[serde(skip_serializing_if = "Option::is_none")]

@@ -278,7 +278,15 @@ export function renderPresetShape(
   baseFill: string | CanvasGradient | CanvasPattern | null,
   applyAndStroke: (() => void) | null,
   clearShadow: () => void,
-  opts?: { skipTrailingStroke?: boolean },
+  opts?: {
+    skipTrailingStroke?: boolean;
+    /**
+     * Paint the already-traced fill-bearing path. The painter may clip and draw,
+     * but must leave the current path intact for tint overlays and stroking.
+     * Returns true only when it painted the path.
+     */
+    paintFill?: (ctx: CanvasRenderingContext2D) => boolean;
+  },
 ): boolean {
   const key = geom.toLowerCase();
   const selected = effectivePreset(key, w, h, adj);
@@ -299,7 +307,28 @@ export function renderPresetShape(
     const fillMode = path.fill;
     const wantFill = fillMode !== 'none' && baseFill != null;
 
-    if (wantFill) {
+    if (fillMode !== 'none' && opts?.paintFill) {
+      let painted = false;
+      ctx.save();
+      try {
+        painted = opts.paintFill(ctx);
+      } finally {
+        ctx.restore();
+      }
+      if (painted) {
+        const overlay = tintOverlay(fillMode);
+        if (overlay) {
+          ctx.save();
+          ctx.fillStyle = overlay;
+          ctx.fill();
+          ctx.restore();
+        }
+        if (!shadowCleared) {
+          clearShadow();
+          shadowCleared = true;
+        }
+      }
+    } else if (wantFill) {
       ctx.save();
       ctx.fillStyle = baseFill!;
       ctx.fill();

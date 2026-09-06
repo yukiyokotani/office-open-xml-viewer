@@ -19,6 +19,7 @@ import type {
   RenderOptions,
   DimOptions,
   BlipBullet,
+  ImageFill,
 } from './types';
 import { asBullet } from './types';
 import {
@@ -63,6 +64,8 @@ import {
   isHTMLCanvas,
   defaultDpr,
   clampCanvasSize,
+  MAX_CANVAS_DIMENSION,
+  MAX_CANVAS_AREA,
   classifyCjkFont,
   classifyFontGeneric,
   cjkFallbackChain,
@@ -185,6 +188,8 @@ export interface RenderContext {
    * SVG bullets remain count-bounded HTMLImageElements in the SVG cache.
    */
   pictureBulletImages?: ReadonlyMap<string, SvgImageSource | null>;
+  /** Shape blip-fill sources settled before synchronous shape/text painting. */
+  shapeFillImages?: ReadonlyMap<string, PreparedShapeFill | null>;
 }
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
@@ -461,7 +466,23 @@ async function planSlideImages(
           );
         }
       }
-    } else if (element.type === 'shape' && element.textBody) {
+    } else if (element.type === 'shape') {
+      const fill = element.fill?.fillType === 'image' ? element.fill : null;
+      if (fill && !fill.tile && !fill.duotone) {
+        const fr = fill.fillRect ?? {};
+        const width = emuToPx(element.width, scale) * (1 - (fr.l ?? 0) - (fr.r ?? 0));
+        const height = emuToPx(element.height, scale) * (1 - (fr.t ?? 0) - (fr.b ?? 0));
+        const vector = fill.mimeType === 'image/svg+xml' || preferVectorBlip(fill);
+        if (!vector) push(
+          imagePlanKey(fill.imagePath, fill.duotone),
+          rasterTargetOptions(width, height, dpr, fill.srcRect),
+          fill.imagePath,
+          fill.mimeType,
+          fetchImage,
+          1,
+        );
+      }
+      if (!element.textBody) continue;
       for (const paragraph of element.textBody.paragraphs) {
         const bullet = asBullet(paragraph.bullet);
         if (bullet.type !== 'blip') continue;
@@ -497,8 +518,9 @@ function slideMayDecodeImages(slide: Slide): boolean {
     if (element.type === 'picture') return true;
     if (element.type === 'media') return !!element.posterPath;
     if (element.type === 'chart') return collectChartImageFillUsages(element.chart).length > 0;
-    return element.type === 'shape' && !!element.textBody?.paragraphs.some(
-      paragraph => asBullet(paragraph.bullet).type === 'blip',
+    return element.type === 'shape' && (
+      element.fill?.fillType === 'image'
+      || !!element.textBody?.paragraphs.some(paragraph => asBullet(paragraph.bullet).type === 'blip')
     );
   });
 }
@@ -2062,8 +2084,8 @@ async function renderBackground(
 }
 
 /**
- * EMU per pixel at 96 DPI. A blip's intrinsic pixel size is interpreted at
- * 96 DPI to get its native EMU size, matching how PowerPoint sizes a tile.
+ * EMU per pixel at 96 DPI. A blip without an authored DPI uses this established
+ * compatibility basis to get its native EMU size.
  * 914400 EMU / inch ÷ 96 px / inch = 9525 EMU / px.
  */
 const EMU_PER_PX_96 = 9525;
@@ -2125,25 +2147,27 @@ export function tileSourceExtent(
 /**
  * Paint a tiled blip background (ECMA-376 §20.1.8.58 CT_TileInfoProperties).
  *
- * The blip repeats at its native pixel size (interpreted at 96 DPI → EMU)
+ * The blip repeats at its native pixel size (interpreted at its authored DPI)
  * scaled by sx/sy and the slide `scale`. `flip` mirrors alternate tiles, which
  * we pre-compose into a 2×2 "super-tile" so a plain `repeat` pattern reproduces
  * the mirror cadence. `algn` registers the grid against a box corner/edge and
  * tx/ty add a further EMU offset. The whole pattern is phase-shifted via a
  * `DOMMatrix` translate on the pattern transform.
  *
- * The caller has already clipped to the slide box and set globalAlpha.
+ * The caller has already clipped to the fill box and set globalAlpha. Background
+ * callers omit `dpi` and preserve their prior 96-DPI behavior.
  */
 function paintTiledBackground(
   ctx: CanvasRenderingContext2D,
-  bitmap: ImageBitmap,
+  bitmap: SvgImageSource,
   tile: TileInfo,
   canvasW: number,
   canvasH: number,
   scale: number,
   srcRect?: PictureElement['srcRect'],
   intrinsicSize?: Readonly<{ width: number; height: number }>,
-): void {
+  dpi = 96,
+): boolean {
   // Native tile size in slide px: image px → EMU @96dpi → × sx/sy → × scale.
   // §20.1.8.55 applies before the fill mode: for tile mode the cropped source
   // rectangle is the content duplicated (Annex L.4.8.4.3), so its logical
@@ -2156,9 +2180,10 @@ function paintTiledBackground(
     intrinsicSize?.height ?? bitmap.height,
     srcRect,
   );
-  const tileW = source.width * EMU_PER_PX_96 * (tile.sx ?? 1) * scale;
-  const tileH = source.height * EMU_PER_PX_96 * (tile.sy ?? 1) * scale;
-  if (!(tileW > 0) || !(tileH > 0)) return;
+  const pixelToEmu = EMU_PER_PX_96 * 96 / dpi;
+  const tileW = source.width * pixelToEmu * (tile.sx ?? 1) * scale;
+  const tileH = source.height * pixelToEmu * (tile.sy ?? 1) * scale;
+  if (!(tileW > 0) || !(tileH > 0)) return false;
 
   const flipX = tile.flip === 'x' || tile.flip === 'xy';
   const flipY = tile.flip === 'y' || tile.flip === 'xy';
@@ -2168,10 +2193,18 @@ function paintTiledBackground(
   // mirror line (PowerPoint's tile-flip behaviour).
   const cellW = tileW * (flipX ? 2 : 1);
   const cellH = tileH * (flipY ? 2 : 1);
+  // createAuxCanvas rounds each requested axis up. Charge the actual allocation,
+  // not the fractional geometry, so two individually-safe fractions cannot
+  // cross the retained scratch-area limit after independent ceil operations.
+  const scratchW = Math.max(1, Math.ceil(cellW));
+  const scratchH = Math.max(1, Math.ceil(cellH));
+  if (!Number.isFinite(scratchW) || !Number.isFinite(scratchH)
+    || scratchW > MAX_CANVAS_DIMENSION || scratchH > MAX_CANVAS_DIMENSION
+    || scratchW > Math.floor(MAX_CANVAS_AREA / scratchH)) return false;
   const aux = createAuxCanvas(cellW, cellH);
-  if (!aux) return;
+  if (!aux) return false;
   const actx = aux.getContext('2d') as CanvasRenderingContext2D | null;
-  if (!actx) return;
+  if (!actx) return false;
 
   const drawCell = (cx: number, cy: number, mx: boolean, my: boolean) => {
     actx.save();
@@ -2187,7 +2220,7 @@ function paintTiledBackground(
   if (flipX && flipY) drawCell(tileW, tileH, true, true);
 
   const pattern = ctx.createPattern(aux as unknown as CanvasImageSource, 'repeat');
-  if (!pattern) return;
+  if (!pattern) return false;
 
   // Phase: register the grid against the alignment anchor, then add tx/ty.
   // PowerPoint registers an omitted algn at the top-left. CT_TileInfoProperties
@@ -2208,6 +2241,57 @@ function paintTiledBackground(
     ctx.translate(px, py);
     ctx.fillStyle = pattern;
     ctx.fillRect(-px, -py, canvasW, canvasH);
+    ctx.restore();
+  }
+  return true;
+}
+
+interface PreparedShapeFill {
+  image: SvgImageSource;
+  intrinsicSize?: Readonly<{ width: number; height: number }>;
+}
+
+function shapeFillKey(fill: ImageFill): string {
+  return chartImageFillKey(fill);
+}
+
+/** Paint a predecoded shape blip into the current geometry path. */
+export function paintPreparedShapeImageFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ImageFill,
+  prepared: PreparedShapeFill | null | undefined,
+  bounds: Readonly<{ x: number; y: number; w: number; h: number }>,
+  scale: number,
+  evenOdd = false,
+): boolean {
+  if (!prepared || !(bounds.w > 0) || !(bounds.h > 0)) return false;
+  // PPTX shapes historically treat an omitted fill-mode choice as full-box
+  // stretch; retain that compatibility while rejecting a conflicting pair.
+  if (fill.tile && fill.stretch === true) return false;
+  const { x, y, w, h } = bounds;
+  ctx.save();
+  try {
+    ctx.clip(evenOdd ? 'evenodd' : 'nonzero');
+    if (fill.alpha != null) ctx.globalAlpha *= Math.max(0, Math.min(1, fill.alpha));
+    // rotWithShape=false needs the image frame counter-transform here. Its
+    // rotated/flipped placement is intentionally not guessed without Office
+    // evidence; absence and true retain the ordinary shape-local frame.
+    if (fill.tile) {
+      ctx.translate(x, y);
+      return paintTiledBackground(
+        ctx, prepared.image, fill.tile, w, h, scale, fill.srcRect, prepared.intrinsicSize,
+        fill.dpi && fill.dpi > 0 ? fill.dpi : 96,
+      );
+    }
+    const rect = fill.fillRect ?? {};
+    const dx = x + (rect.l ?? 0) * w;
+    const dy = y + (rect.t ?? 0) * h;
+    const dw = (1 - (rect.l ?? 0) - (rect.r ?? 0)) * w;
+    const dh = (1 - (rect.t ?? 0) - (rect.b ?? 0)) * h;
+    if (!(dw > 0) || !(dh > 0)) return false;
+    drawImageCropped(ctx, prepared.image, fill.srcRect, dx, dy, dw, dh);
+    return true;
+  } finally {
     ctx.restore();
   }
 }
@@ -3434,6 +3518,15 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
 
   const geom = el.geometry.toLowerCase();
   const fillStyle = resolveShapeFill(el.fill, ctx, x, y, w, h, el.rotation);
+  const imageFill = el.fill?.fillType === 'image' ? el.fill : null;
+  const preparedImageFill = imageFill
+    ? rc.shapeFillImages?.get(shapeFillKey(imageFill))
+    : undefined;
+  const hasPreparedImageFill = Boolean(
+    imageFill
+    && preparedImageFill
+    && !(imageFill.tile && imageFill.stretch === true),
+  );
 
   // The Canvas API exposes a single shadow slot, so when both an outer shadow
   // and a glow are configured we let the outer shadow win (visually dominant)
@@ -3510,8 +3603,20 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           }
         : null;
     const tClearShadow = () => clearShadow(target);
+    const evenOddFill = geom === 'donut' || geom === 'smileyface' || geom === 'frame';
+    const paintImageFill = imageFill && !silhouette
+      ? (paintCtx: CanvasRenderingContext2D) => paintPreparedShapeImageFill(
+          paintCtx,
+          imageFill,
+          preparedImageFill,
+          { x: bx, y: by, w: bw, h: bh },
+          scale,
+          evenOddFill,
+        )
+      : undefined;
 
     if (usePresetEngine && !silhouette) {
+      const skipTrailingStroke = isRetractableLeader(geom);
       renderPresetShape(
         target, geom, bx, by, bw, bh,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
@@ -3520,7 +3625,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         // re-stroked retracted from its decorated ends in the line-end block
         // below, so suppress the preset engine's full-length leader stroke to
         // avoid a double line / a cap poking through the arrow tip.
-        isRetractableLeader(geom) ? { skipTrailingStroke: true } : undefined,
+        skipTrailingStroke || paintImageFill
+          ? { ...(skipTrailingStroke ? { skipTrailingStroke: true } : {}), paintFill: paintImageFill }
+          : undefined,
       );
       return;
     }
@@ -3541,9 +3648,11 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     // buildShapePath, which draws the OPEN arc — filling that auto-closes into
     // a chord, not the pie wedge. So skip the fill for arc here (the engine,
     // not this branch, owns arc's pie-wedge fill).
-    if (tFill && geom !== 'arc') {
+    if (paintImageFill && geom !== 'arc') {
+      if (paintImageFill(target)) tClearShadow();
+    } else if (tFill && geom !== 'arc') {
       target.fillStyle = tFill;
-      if (geom === 'donut' || geom === 'smileyface' || geom === 'frame') {
+      if (evenOddFill) {
         target.fill('evenodd');
       } else {
         target.fill();
@@ -3776,7 +3885,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
     scale,
     effScale,
     liveTransform,
-    Boolean(fillStyle),
+    Boolean(fillStyle) || hasPreparedImageFill,
     (target) => paintShapeBody(target, '#000'),
   );
 
@@ -7012,6 +7121,7 @@ async function renderSlideLeased(
     : '#000000';
 
   const pictureBulletImages = new Map<string, SvgImageSource | null>();
+  const shapeFillImages = new Map<string, PreparedShapeFill | null>();
   const rc: RenderContext = {
     themeMajorFont: opts.majorFont ?? null,
     themeMinorFont: opts.minorFont ?? null,
@@ -7025,6 +7135,7 @@ async function renderSlideLeased(
     // null-colour runs, derived once per slide from the background luminance.
     smartArtFallbackTextColor: smartArtFallbackTextColor(slide.background, themeDefaultColor),
     pictureBulletImages,
+    shapeFillImages,
   };
 
   await renderBackground(
@@ -7147,6 +7258,49 @@ async function renderSlideLeased(
   // Missing/failed decodes resolve to null and the marker is simply skipped.
   if (opts.fetchImage) {
     const fetchImage = opts.fetchImage;
+    const shapeFills = new Map<string, {
+      fill: ImageFill;
+      widthPt: number;
+      heightPt: number;
+      targetWidthPx?: number;
+      targetHeightPx?: number;
+      preserveNaturalSize: boolean;
+      hasSourceCrop: boolean;
+    }>();
+    for (const element of slide.elements) {
+      const fill = element.type === 'shape' && element.fill?.fillType === 'image'
+        ? element.fill
+        : null;
+      if (!fill || !(element.width > 0) || !(element.height > 0)) continue;
+      const key = shapeFillKey(fill);
+      const prior = shapeFills.get(key);
+      const widthPt = element.width / PT_TO_EMU;
+      const heightPt = element.height / PT_TO_EMU;
+      const fr = fill.fillRect ?? {};
+      const target = rasterTargetOptions(
+        emuToPx(element.width, scale) * (1 - (fr.l ?? 0) - (fr.r ?? 0)),
+        emuToPx(element.height, scale) * (1 - (fr.t ?? 0) - (fr.b ?? 0)),
+        effectiveDpr,
+        fill.srcRect,
+      );
+      shapeFills.set(key, prior
+        ? {
+            fill: prior.fill,
+            widthPt: Math.max(prior.widthPt, widthPt),
+            heightPt: Math.max(prior.heightPt, heightPt),
+            targetWidthPx: Math.max(prior.targetWidthPx ?? 0, target?.targetWidthPx ?? 0) || undefined,
+            targetHeightPx: Math.max(prior.targetHeightPx ?? 0, target?.targetHeightPx ?? 0) || undefined,
+            preserveNaturalSize: prior.preserveNaturalSize || fill.tile != null,
+            hasSourceCrop: prior.hasSourceCrop || fill.srcRect != null,
+          }
+        : {
+            fill, widthPt, heightPt,
+            targetWidthPx: target?.targetWidthPx,
+            targetHeightPx: target?.targetHeightPx,
+            preserveNaturalSize: fill.tile != null,
+            hasSourceCrop: fill.srcRect != null,
+          });
+    }
     const bulletPaths = new Map<string, { mimeType: string; targetHeightPx?: number }>();
     // A chart whose frame or derived decode size is non-positive or non-finite
     // cannot paint an image safely. Exclude it before aggregate source gating
@@ -7279,7 +7433,7 @@ async function renderSlideLeased(
         }
       }
     }
-    if (bulletPaths.size > 0 || chartFillMap.size > 0) {
+    if (bulletPaths.size > 0 || chartFillMap.size > 0 || shapeFills.size > 0) {
       const bulletPromises: Promise<void>[] = [...bulletPaths].map(async (
         [path, { mimeType, targetHeightPx }],
       ) => {
@@ -7363,7 +7517,72 @@ async function renderSlideLeased(
           chartMarkerImages.set(key, null);
         }
       });
-      await Promise.all([...bulletPromises, ...chartPromises]);
+      const shapePromises: Promise<void>[] = [...shapeFills].map(async (
+        [key, {
+          fill, widthPt, heightPt, targetWidthPx, targetHeightPx,
+          preserveNaturalSize, hasSourceCrop,
+        }],
+      ) => {
+        const vector = !fill.duotone
+          && (fill.mimeType === 'image/svg+xml' || preferVectorBlip({
+            svgImagePath: fill.svgImagePath,
+            srcRect: hasSourceCrop ? true : null,
+          }));
+        const planned = !preserveNaturalSize && !fill.duotone
+          ? plannedRasterOptions(imagePlan, imagePlanKey(fill.imagePath, fill.duotone))
+          : undefined;
+        const rawTarget = !preserveNaturalSize && targetWidthPx && targetHeightPx
+          ? { targetWidthPx, targetHeightPx }
+          : undefined;
+        const target = vector ? rawTarget : planned;
+        try {
+          const intrinsicSize = preserveNaturalSize
+            ? (await inspectCachedRasterSource(fill.imagePath, fill.mimeType, fetchImage))
+                .dimensions ?? undefined
+            : undefined;
+          const fallback = () => fill.mimeType === 'image/svg+xml'
+            ? fill.duotone
+              ? Promise.resolve(null)
+              : getCachedSvgImageByPath(fill.imagePath, fetchImage, {
+                  ...(target ?? {}), workerDecoder: opts.svgDecoder,
+                })
+            : getCachedDuotoneBitmapByPath(
+                fill.imagePath, fill.mimeType, fill.duotone, fetchImage,
+                {
+                  widthPt,
+                  heightPt,
+                  ...(target ?? {}),
+                  failClosedOnDuotoneFailure: true,
+                  tiff: opts.tiff,
+                  svgDecoder: opts.svgDecoder,
+                },
+              );
+          let image: SvgImageSource | null;
+          if (!fill.duotone && preferVectorBlip({
+            svgImagePath: fill.svgImagePath,
+            srcRect: hasSourceCrop ? true : null,
+          })) {
+            try {
+              image = await getCachedSvgImageByPath(fill.svgImagePath as string, fetchImage, {
+                ...(target ?? {}), workerDecoder: opts.svgDecoder,
+              });
+            } catch {
+              image = await fallback();
+            }
+          } else {
+            image = await fallback();
+          }
+          shapeFillImages.set(key, image ? { image, intrinsicSize } : null);
+        } catch (error) {
+          if (isOptionalImageCodecUnavailableError(error, 'tiff')) {
+            shapeFillImages.set(key, null);
+            return;
+          }
+          if (isOoxmlDecodedImageLimitError(error) || isTiffDecodeError(error)) throw error;
+          shapeFillImages.set(key, null);
+        }
+      });
+      await Promise.all([...bulletPromises, ...chartPromises, ...shapePromises]);
       if (superseded()) return canvas;
     }
   }

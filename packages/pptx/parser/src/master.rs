@@ -6,7 +6,7 @@
 //! `MasterBundle` → `ParsedMaster` type rename (fields unchanged).
 
 use crate::fill::{
-    parse_background, parse_blip_alpha, parse_color_node, parse_cust_geom, parse_fill,
+    parse_background, parse_blip_fill, parse_color_node, parse_cust_geom, parse_fill,
     parse_reflection, parse_xfrm,
 };
 use crate::shape::{
@@ -20,7 +20,7 @@ use crate::text::{
     LevelFontSizes, LevelIndents,
 };
 use crate::theme::{
-    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxSchemeResolver, PptxTheme,
+    bake_clr_map, parse_theme_part, resolve_theme_typeface, PptxTheme,
     PptxThemeSource,
 };
 use crate::types::*;
@@ -29,7 +29,7 @@ use crate::{
     note_layout_master_parse, parse_preflighted_pptx_xml, parse_rels, read_zip_str, resolve_path,
     PptxZip,
 };
-use ooxml_common::blip::{mime_from_ext, parse_blip_duotone, parse_src_rect, Duotone, SrcRect};
+use ooxml_common::blip::{mime_from_ext, Duotone, SrcRect};
 use ooxml_common::rels::relationship_part_path;
 use std::collections::HashMap;
 
@@ -242,7 +242,13 @@ pub(crate) struct InheritedBlipFill {
     pub(crate) image_path: String,
     /// MIME of the blip at `image_path`.
     pub(crate) mime_type: String,
+    pub(crate) svg_image_path: Option<String>,
+    pub(crate) dpi: Option<u32>,
+    pub(crate) rot_with_shape: Option<bool>,
     pub(crate) src_rect: Option<SrcRect>,
+    pub(crate) fill_rect: Option<FillRect>,
+    pub(crate) tile: Option<TileInfo>,
+    pub(crate) stretch: bool,
     pub(crate) alpha: Option<f64>,
     /// ECMA-376 §20.1.8.23 `<a:duotone>` recolour on the layout placeholder's
     /// blipFill, resolved through the theme. Inherited onto the slide picture
@@ -1622,19 +1628,20 @@ pub(crate) fn parse_layout_placeholders(
             // `read_zip_bytes` which decompressed the entry just to discard it.
             zip.index_for_name(&image_path)?;
             let mime_type = mime_from_ext(&image_path).to_owned();
-            Some(InheritedBlipFill {
-                image_path,
-                mime_type,
-                src_rect: parse_src_rect(bf),
-                alpha: parse_blip_alpha(bf),
-                // §20.1.8.23 duotone on the layout placeholder blipFill, resolved
-                // through the theme; inherited onto the slide picture placeholder.
-                duotone: parse_blip_duotone(
-                    bf,
-                    &PptxSchemeResolver { theme },
-                    ooxml_common::color::TintMode::PowerPointLinear,
-                ),
-            })
+            let mut resolve = |relationship_id: &str| {
+                let target = layout_rels.get(relationship_id)?;
+                let path = resolve_path(layout_dir, target);
+                zip.index_for_name(&path)?;
+                Some(path)
+            };
+            let Fill::Image {
+                svg_image_path, dpi, rot_with_shape, src_rect, fill_rect,
+                stretch, tile, alpha, duotone, ..
+            } = parse_blip_fill(bf, theme, &mut resolve)? else {
+                return None;
+            };
+            Some(InheritedBlipFill { image_path, mime_type, svg_image_path, dpi,
+                rot_with_shape, src_rect, fill_rect, tile, stretch, alpha, duotone })
         });
 
         if let Some(ph) = ph_node {

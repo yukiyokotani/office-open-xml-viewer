@@ -148,6 +148,7 @@ impl<'a> Shape<'a> {
         let mut style9 = None;
         let mut tags_seen = false;
         let mut placeholder = None;
+        let mut tertiary_seen = false;
         let mut props = Properties::default();
         for child in parse_records(record.payload, budget)? {
             match child.kind {
@@ -178,6 +179,13 @@ impl<'a> Shape<'a> {
                     textbox = Some(child);
                 }
                 0xf00b => props.read(child, budget)?,
+                0xf122 => {
+                    if tertiary_seen {
+                        return Err(unsupported("duplicate PowerPoint tertiary properties"));
+                    }
+                    tertiary_seen = true;
+                    props.read_tertiary(child, budget)?;
+                }
                 0xf011 => {
                     if child.version != 15 {
                         return Err(unsupported("invalid PowerPoint client data"));
@@ -268,6 +276,18 @@ impl Default for Properties<'_> {
     }
 }
 impl<'a> Properties<'a> {
+    fn read_tertiary(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
+        crate::officeart::properties::visit_tertiary(record, budget, |property| {
+            // Only supported fill Boolean fields are interpreted here; other
+            // tertiary properties need their own typed mappings and must not be
+            // routed through the broader primary-property parser.
+            if property.opid == 0x01bf && property.complex.is_none() {
+                self.paint.tertiary_fill_boolean_property(property.value)?;
+            }
+            Ok(())
+        })
+    }
+
     fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
         crate::officeart::properties::visit(record, budget, |property| {
             let opid = property.opid;
@@ -723,6 +743,38 @@ impl Writer<'_, '_> {
                 if text.is_empty() && preset.is_none() && custom.is_none() {
                     return Ok(());
                 }
+                let allow_fill = custom
+                    .as_ref()
+                    .and_then(|geometry| geometry.uniform_paint())
+                    .map_or(
+                        preset.is_some() && !matches!(shape.kind, 20 | 32),
+                        |(fill, _)| fill,
+                    );
+                let image_fill = if allow_fill {
+                    paint
+                        .foreground_image()
+                        .map(|(index, opacity, rotate)| {
+                            let referenced = self
+                                .media
+                                .as_deref_mut()
+                                .map(|media| media.reference(index, self.records))
+                                .transpose()?
+                                .unwrap_or(false);
+                            Ok::<_, String>(referenced.then(|| {
+                                let alpha = (opacity != 65536).then(|| {
+                                    format!(
+                                        "<a:alphaModFix amt=\"{}\"/>",
+                                        (u64::from(opacity) * 100000 + 32768) / 65536
+                                    )
+                                }).unwrap_or_default();
+                                format!("<a:blipFill rotWithShape=\"{}\"><a:blip r:embed=\"rImg{index}\">{alpha}</a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>", u8::from(rotate))
+                            }))
+                        })
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
                 let anchor = shape
                     .anchor
                     .ok_or_else(|| unsupported("missing PowerPoint shape anchor"))?;
@@ -738,12 +790,26 @@ impl Writer<'_, '_> {
                         .uniform_paint()
                         .expect("uniform paths filtered above");
                     custom.write_xml(&mut self.output, self.remaining)?;
-                    self.push(&paint.xml_with_custom_geometry(scheme, fill, stroke))?;
+                    self.push(&paint.xml_with_custom_geometry_and_fill(
+                        scheme,
+                        fill,
+                        stroke,
+                        image_fill.as_deref(),
+                    ))?;
                 } else {
-                    self.push(&format!(
-                        "<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{}",
-                        preset.unwrap_or("rect"),
+                    let paint_xml = if image_fill.is_some() {
+                        paint.xml_with_custom_geometry_and_fill(
+                            scheme,
+                            !matches!(shape.kind, 20 | 32),
+                            true,
+                            image_fill.as_deref(),
+                        )
+                    } else {
                         paint.xml_with_scheme(shape.kind, scheme)
+                    };
+                    self.push(&format!(
+                        "<a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom>{paint_xml}",
+                        preset.unwrap_or("rect"),
                     ))?;
                 }
                 self.push("</p:spPr>")?;
@@ -852,11 +918,14 @@ mod tests {
         values.iter().flat_map(|n| n.to_le_bytes()).collect()
     }
     fn sp(flags: i32, children: Vec<Vec<u8>>) -> Vec<u8> {
+        sp_kind(202, flags, children)
+    }
+    fn sp_kind(kind: u16, flags: i32, children: Vec<Vec<u8>>) -> Vec<u8> {
         record(
             15,
             0xf004,
             &[
-                vec![record((202 << 4) | 2, 0xf00a, &ints(&[42, flags]))],
+                vec![record((kind << 4) | 2, 0xf00a, &ints(&[42, flags]))],
                 children,
             ]
             .concat()
@@ -890,6 +959,321 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    fn tertiary_properties(values: &[(u16, u32)]) -> Vec<u8> {
+        let payload: Vec<u8> = values
+            .iter()
+            .flat_map(|(id, value)| {
+                [id.to_le_bytes().to_vec(), value.to_le_bytes().to_vec()].concat()
+            })
+            .collect();
+        record(((values.len() as u16) << 4) | 3, 0xf122, &payload)
+    }
+
+    fn authored_png() -> Vec<u8> {
+        // Complete authored asymmetric 2x1 RGBA PNG, including valid zlib data and CRCs.
+        vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2,
+            0, 0, 0, 1, 8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65,
+            84, 120, 156, 99, 248, 207, 192, 0, 66, 13, 0, 15, 122, 3, 126, 119, 233,
+            127, 151, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ]
+    }
+    fn png_blip() -> Vec<u8> {
+        record(0x6e00, 0xf01e, &[vec![0; 17], authored_png()].concat())
+    }
+
+    #[test]
+    fn authored_shape_fill_png_has_valid_chunks_and_decodes_asymmetric_pixels() {
+        use std::io::Read;
+        let png = authored_png();
+        let crc = |bytes: &[u8]| {
+            !bytes.iter().fold(u32::MAX, |mut crc, byte| {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0xedb88320 & 0u32.wrapping_sub(crc & 1));
+                }
+                crc
+            })
+        };
+        assert_eq!(crc(&png[12..29]), u32::from_be_bytes(png[29..33].try_into().unwrap()));
+        assert_eq!(crc(&png[37..55]), u32::from_be_bytes(png[55..59].try_into().unwrap()));
+        let mut pixels = Vec::new();
+        flate2::read::ZlibDecoder::new(&png[41..55])
+            .read_to_end(&mut pixels)
+            .unwrap();
+        assert_eq!(pixels, [0, 255, 0, 0, 255, 0, 0, 255, 128]);
+    }
+
+    #[test]
+    fn stretched_shape_picture_fill_uses_media_relationship_and_keeps_line() {
+        let image = png_blip();
+        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
+        let entries = [entry];
+        let mut media = media::Store::new(&entries, &[]);
+        let shape = sp(
+            0x200,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                properties(&[
+                    (0x180, 3),
+                    (0x182, 32768),
+                    (0x4186, 1),
+                    (0x1bf, 0x00200020),
+                    (0x1c0, 0xff),
+                ]),
+            ],
+        );
+        let xml = render(
+            &drawing(vec![shape]),
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+            None,
+            Some(&mut media),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(xml.contains("<a:prstGeom prst=\"rect\""));
+        assert!(xml.contains("<a:blipFill rotWithShape=\"1\"><a:blip r:embed=\"rImg1\"><a:alphaModFix amt=\"50000\"/></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill>"));
+        assert!(xml.contains("<a:ln"));
+        assert!(media.relationships().contains("Id=\"rImg1\""));
+        assert_eq!(media.parts().len(), 1);
+    }
+
+    #[test]
+    fn tertiary_fill_rotation_is_scoped_and_supports_explicit_true_and_false() {
+        let image = png_blip();
+        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
+        let entries = [entry];
+        for (tertiary, expected) in [
+            (0x00600060, "rotWithShape=\"1\""),
+            (0x00600040, "rotWithShape=\"0\""),
+        ] {
+            let mut media = media::Store::new(&entries, &[]);
+            let shape = sp(
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                    properties(&[(0x180, 3), (0x4186, 1), (0x1bf, 0x00100010)]),
+                    tertiary_properties(&[(0x1bf, tertiary), (0x180, 99)]),
+                ],
+            );
+            let output = render(
+                &drawing(vec![shape]),
+                &[],
+                &mut MAX_RECORDS.clone(),
+                &mut MAX_TEXT_BYTES.clone(),
+                &mut (256 * 1024 * 1024),
+                None,
+                Some(&mut media),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(output.contains(expected));
+        }
+    }
+
+    #[test]
+    fn tertiary_fill_properties_reject_duplicate_tables_and_boolean_conflicts() {
+        let base = vec![
+            record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+            properties(&[(0x1bf, 0x00200020)]),
+        ];
+        let mut conflicting = base.clone();
+        conflicting.push(tertiary_properties(&[(0x1bf, 0x00200000)]));
+        assert!(xml(&drawing(vec![sp(0x200, conflicting)])).is_err());
+
+        let mut duplicate = base;
+        duplicate.push(tertiary_properties(&[(0x1bf, 0x00200020)]));
+        duplicate.push(tertiary_properties(&[(0x1bf, 0x00200020)]));
+        assert!(xml(&drawing(vec![sp(0x200, duplicate)])).is_err());
+    }
+
+    #[test]
+    fn shape_picture_fill_does_not_reference_ineligible_or_unknown_geometry() {
+        let image = png_blip();
+        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
+        let entries = [entry];
+        for (kind, boolean, adjusted) in [
+            (202, 0x00100000, false),
+            (202, 0x00020002, false),
+            (0, 0, false),
+            (202, 0, true),
+        ] {
+            let mut media = media::Store::new(&entries, &[]);
+            let mut values = vec![(0x180, 3), (0x4186, 1), (0x1bf, boolean)];
+            if adjusted {
+                values.push((0x147, 100));
+            }
+            let shape = sp_kind(
+                kind,
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                    properties(&values),
+                    text("kept"),
+                ],
+            );
+            let output = render(
+                &drawing(vec![shape]),
+                &[],
+                &mut MAX_RECORDS.clone(),
+                &mut MAX_TEXT_BYTES.clone(),
+                &mut (256 * 1024 * 1024),
+                None,
+                Some(&mut media),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(!output.contains("a:blipFill"));
+            assert!(media.relationships().is_empty());
+            assert!(media.parts().is_empty());
+        }
+
+        let array = |size: u16, data: Vec<u8>| {
+            let count = u16::try_from(data.len() / usize::from(size)).unwrap();
+            [
+                count.to_le_bytes().as_slice(),
+                count.to_le_bytes().as_slice(),
+                size.to_le_bytes().as_slice(),
+                data.as_slice(),
+            ]
+            .concat()
+        };
+        let vertices = array(
+            8,
+            [[0i32, 0], [10, 0], [0, 0], [0, 10]]
+                .iter()
+                .flatten()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        );
+        let segments = array(
+            2,
+            [0x4000u16, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        );
+        let complex = record(
+            (4 << 4) | 3,
+            0xf00b,
+            &[
+                0x8145u16.to_le_bytes().as_slice(),
+                (vertices.len() as u32).to_le_bytes().as_slice(),
+                0x8146u16.to_le_bytes().as_slice(),
+                (segments.len() as u32).to_le_bytes().as_slice(),
+                0x180u16.to_le_bytes().as_slice(),
+                3u32.to_le_bytes().as_slice(),
+                0x4186u16.to_le_bytes().as_slice(),
+                1u32.to_le_bytes().as_slice(),
+                vertices.as_slice(),
+                segments.as_slice(),
+            ]
+            .concat(),
+        );
+        let mut media = media::Store::new(&entries, &[]);
+        let shape = sp(
+            0x200,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                complex,
+                text("mixed paint kept"),
+            ],
+        );
+        let output = render(
+            &drawing(vec![shape]),
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+            None,
+            Some(&mut media),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(output.contains("mixed paint kept"));
+        assert!(!output.contains("a:blipFill"));
+        assert!(media.relationships().is_empty());
+        assert!(media.parts().is_empty());
+
+        // Eligibility is decided before Store parsing: an adjusted text shape
+        // must not dereference even a malformed BLIP that would fail if used.
+        let malformed = record(0x6e00, 0xf01e, &[vec![0; 17], vec![1, 2, 3]].concat());
+        let entry = parse_record_at(&malformed, 0, &mut 100).unwrap();
+        let entries = [entry];
+        let mut media = media::Store::new(&entries, &[]);
+        let shape = sp(
+            0x200,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                properties(&[(0x147, 100), (0x180, 3), (0x4186, 1)]),
+                text("malformed media untouched"),
+            ],
+        );
+        let output = render(
+            &drawing(vec![shape]),
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+            None,
+            Some(&mut media),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(output.contains("malformed media untouched"));
+        assert!(media.parts().is_empty());
+    }
+
+    #[test]
+    fn eligible_shape_picture_fill_validates_index_and_supported_media() {
+        let shape = |index| {
+            drawing(vec![sp(
+                0x200,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 288])),
+                    properties(&[(0x180, 3), (0x4186, index)]),
+                ],
+            )])
+        };
+        let image = png_blip();
+        let entry = parse_record_at(&image, 0, &mut 100).unwrap();
+        let entries = [entry];
+        let mut media = media::Store::new(&entries, &[]);
+        assert!(render(
+            &shape(2),
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+            None,
+            Some(&mut media),
+        )
+        .unwrap_err()
+        .contains("index out of range"));
+
+        let unsupported = record(0, 0xf01b, &[]); // WMF remains outside Store's allowlist.
+        let entry = parse_record_at(&unsupported, 0, &mut 100).unwrap();
+        let entries = [entry];
+        let mut media = media::Store::new(&entries, &[]);
+        let output = render(
+            &shape(1),
+            &[],
+            &mut MAX_RECORDS.clone(),
+            &mut MAX_TEXT_BYTES.clone(),
+            &mut (256 * 1024 * 1024),
+            None,
+            Some(&mut media),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!output.contains("a:blipFill"));
+        assert!(media.relationships().is_empty());
+        assert!(media.parts().is_empty());
     }
 
     #[test]

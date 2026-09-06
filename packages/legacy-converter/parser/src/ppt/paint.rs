@@ -8,10 +8,14 @@ pub(super) struct Paint {
     fill_ok: Option<bool>,
     line_ok: Option<bool>,
     fill_rect: Option<bool>,
+    fill_shape: Option<bool>,
+    rotate_fill_with_shape: Option<bool>,
     fill_type: Option<u32>,
     fill: Option<u32>,
     fill_blip: Option<u32>,
     fill_alpha: Option<u32>,
+    fill_dztype: Option<u32>,
+    fill_origins: [Option<u32>; 4],
     filled: Option<bool>,
     line_type: Option<u32>,
     line: Option<u32>,
@@ -21,6 +25,77 @@ pub(super) struct Paint {
     dash: Option<u32>,
 }
 impl Paint {
+    fn merge_boolean(
+        target: &mut Option<bool>,
+        value: bool,
+        name: &'static str,
+    ) -> Result<(), String> {
+        if target.is_some_and(|current| current != value) {
+            return Err(unsupported(name));
+        }
+        *target = Some(value);
+        Ok(())
+    }
+
+    fn fill_boolean_property(&mut self, value: u32, reject_conflicts: bool) -> Result<(), String> {
+        // MS-ODRAW 2.3.7.43: each low-word value is active only when its
+        // corresponding high-word use bit is set. Primary and tertiary FOPT
+        // tables have no documented precedence for contradictory active bits.
+        if value & 0x00100000 != 0 {
+            let value = value & 0x10 != 0;
+            if reject_conflicts {
+                Self::merge_boolean(
+                    &mut self.filled,
+                    value,
+                    "ambiguous PowerPoint filled property",
+                )?;
+            } else {
+                self.filled = Some(value);
+            }
+        }
+        if value & 0x00020000 != 0 {
+            let value = value & 2 != 0;
+            if reject_conflicts {
+                Self::merge_boolean(
+                    &mut self.fill_rect,
+                    value,
+                    "ambiguous PowerPoint fill rectangle property",
+                )?;
+            } else {
+                self.fill_rect = Some(value);
+            }
+        }
+        if value & 0x00040000 != 0 {
+            let value = value & 4 != 0;
+            if reject_conflicts {
+                Self::merge_boolean(
+                    &mut self.fill_shape,
+                    value,
+                    "ambiguous PowerPoint fill shape property",
+                )?;
+            } else {
+                self.fill_shape = Some(value);
+            }
+        }
+        if value & 0x00200000 != 0 {
+            let value = value & 0x20 != 0;
+            if reject_conflicts {
+                Self::merge_boolean(
+                    &mut self.rotate_fill_with_shape,
+                    value,
+                    "ambiguous PowerPoint fill rotation property",
+                )?;
+            } else {
+                self.rotate_fill_with_shape = Some(value);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn tertiary_fill_boolean_property(&mut self, value: u32) -> Result<(), String> {
+        self.fill_boolean_property(value, true)
+    }
+
     /// Explicit hspMaster supplies defaults (MS-ODRAW 1.1, 2.2.40, 2.3.2.1).
     /// Preserve absence until the full chain is resolved, especially Boolean
     /// use bits: explicit false must win over inherited true. Colors stay in
@@ -34,10 +109,16 @@ impl Paint {
             fill_ok: self.fill_ok.or(parent.fill_ok),
             line_ok: self.line_ok.or(parent.line_ok),
             fill_rect: self.fill_rect.or(parent.fill_rect),
+            fill_shape: self.fill_shape.or(parent.fill_shape),
+            rotate_fill_with_shape: self
+                .rotate_fill_with_shape
+                .or(parent.rotate_fill_with_shape),
             fill_type: self.fill_type.or(parent.fill_type),
             fill: self.fill.or(parent.fill),
             fill_blip: self.fill_blip.or(parent.fill_blip),
             fill_alpha: self.fill_alpha.or(parent.fill_alpha),
+            fill_dztype: self.fill_dztype.or(parent.fill_dztype),
+            fill_origins: std::array::from_fn(|i| self.fill_origins[i].or(parent.fill_origins[i])),
             filled: self.filled.or(parent.filled),
             line_type: self.line_type.or(parent.line_type),
             line: self.line.or(parent.line),
@@ -76,16 +157,11 @@ impl Paint {
                     self.line_alpha = Some(value);
                 }
             }
+            0x195 => self.fill_dztype = Some(value),
+            0x198..=0x19b => self.fill_origins[usize::from(id - 0x198)] = Some(value),
             // Boolean property's high word contains use bits, low word values.
             // MS-ODRAW 2.3.7.43 and 2.3.8.38: unused values cannot override paint.
-            0x1bf => {
-                if value & 0x00100000 != 0 {
-                    self.filled = Some(value & 0x10 != 0);
-                }
-                if value & 0x00020000 != 0 {
-                    self.fill_rect = Some(value & 2 != 0);
-                }
-            }
+            0x1bf => self.fill_boolean_property(value, false)?,
             0x1ff if value & 0x00080000 != 0 => self.lined = Some(value & 8 != 0),
             0x1c0 => self.line = Some(value),
             0x1c4 => self.line_type = Some(value),
@@ -150,6 +226,25 @@ impl Paint {
             self.fill_alpha.unwrap_or(65536),
         ))
     }
+    /// Plain foreground `msofillPicture` only. MS-ODRAW 2.3.7.43 defaults
+    /// fillShape to 1, fillUseRect to 0, and fUseShapeAnchor to 0. A distinct
+    /// fill rectangle or view-relative fill cannot be represented by this
+    /// shape-local DrawingML stretch without inventing placement semantics.
+    pub fn foreground_image(&self) -> Option<(u32, u32, bool)> {
+        (self.fill_type == Some(3)
+            && self.fill_blip.unwrap_or(0) != 0
+            && !self.fill_rect.unwrap_or(false)
+            && self.fill_shape.unwrap_or(true)
+            && self.fill_dztype.unwrap_or(0) == 0
+            && self.fill_origins.iter().all(|value| value.unwrap_or(0) == 0)
+            && self.filled.unwrap_or(true)
+            && self.fill_ok.unwrap_or(true))
+        .then_some((
+            self.fill_blip.unwrap_or(0),
+            self.fill_alpha.unwrap_or(65536),
+            self.rotate_fill_with_shape.unwrap_or(false),
+        ))
+    }
     #[cfg(test)]
     fn xml(&self, kind: u16) -> String {
         self.xml_with_scheme(kind, None)
@@ -168,6 +263,16 @@ impl Paint {
         scheme: Option<&scheme::Scheme>,
         allow_fill: bool,
         allow_line: bool,
+    ) -> String {
+        self.xml_with_custom_geometry_and_fill(scheme, allow_fill, allow_line, None)
+    }
+
+    pub fn xml_with_custom_geometry_and_fill(
+        &self,
+        scheme: Option<&scheme::Scheme>,
+        allow_fill: bool,
+        allow_line: bool,
+        image_fill: Option<&str>,
     ) -> String {
         // Direct and explicitly linked master paint are reconstructed. Drawing
         // defaults and unlinked masters remain absent, with a conversion warning.
@@ -212,7 +317,12 @@ impl Paint {
         } else {
             None
         };
-        let mut xml = fill.unwrap_or_else(|| "<a:noFill/>".into());
+        let mut xml = if allow_fill {
+            image_fill.map(str::to_owned).or(fill)
+        } else {
+            fill
+        }
+        .unwrap_or_else(|| "<a:noFill/>".into());
         if let Some(line) = line {
             let dash = self
                 .dash
@@ -450,6 +560,114 @@ mod tests {
         p.property(0x1bf, 0x00100000).unwrap();
         assert!(p.background_image().is_none());
         assert_eq!(p.background_fill(None).unwrap(), "<a:noFill/>");
+    }
+    #[test]
+    fn foreground_picture_fill_preserves_use_bits_opacity_and_master_values() {
+        let mut master = Paint::default();
+        master.property(0x180, 3).unwrap();
+        master.property(0x4186, 9).unwrap();
+        master.property(0x182, 32768).unwrap();
+        assert_eq!(
+            Paint::default().inherit(&master).foreground_image(),
+            Some((9, 32768, false))
+        );
+
+        let mut local = Paint::default();
+        local.property(0x1bf, 0x00200020).unwrap();
+        assert_eq!(
+            local.inherit(&master).foreground_image(),
+            Some((9, 32768, true))
+        );
+        local.property(0x1bf, 0x00100000).unwrap();
+        assert!(local.inherit(&master).foreground_image().is_none());
+        local.property(0x1bf, 0x00100010).unwrap();
+        local.property(0x17f, 0x00010000).unwrap();
+        assert!(local.inherit(&master).foreground_image().is_none());
+    }
+
+    #[test]
+    fn tertiary_fill_booleans_merge_disjoint_uses_and_reject_conflicts() {
+        let mut paint = Paint::default();
+        paint.property(0x1bf, 0x00100010).unwrap();
+        paint.tertiary_fill_boolean_property(0x00200020).unwrap();
+        assert_eq!(paint.foreground_image(), None);
+        paint.property(0x180, 3).unwrap();
+        paint.property(0x4186, 1).unwrap();
+        assert_eq!(paint.foreground_image(), Some((1, 65536, true)));
+
+        let mut conflict = paint;
+        assert!(conflict.tertiary_fill_boolean_property(0x00200000).is_err());
+    }
+
+    #[test]
+    fn inactive_tertiary_bits_do_not_override_inherited_fill_rotation() {
+        let mut master = Paint::default();
+        master.property(0x180, 3).unwrap();
+        master.property(0x4186, 2).unwrap();
+        master.tertiary_fill_boolean_property(0x00200020).unwrap();
+        let mut local = Paint::default();
+        local.tertiary_fill_boolean_property(0x20).unwrap();
+        assert_eq!(
+            local.inherit(&master).foreground_image(),
+            Some((2, 65536, true))
+        );
+    }
+
+    #[test]
+    fn foreground_picture_fill_rejects_only_unsupported_picture_placement() {
+        let mut p = Paint::default();
+        p.property(0x180, 3).unwrap();
+        p.property(0x4186, 4).unwrap();
+        assert_eq!(p.foreground_image(), Some((4, 65536, false)));
+
+        // MS-ODRAW 2.3.7.12-13: authored fill dimensions are inert when
+        // fillDztype is the default, but a nondefault sizing mode needs a
+        // placement mapping beyond this plain stretch subset.
+        p.property(0x189, 123).unwrap();
+        p.property(0x18a, 456).unwrap();
+        p.property(0x195, 0).unwrap();
+        for id in 0x198..=0x19b {
+            p.property(id, 0).unwrap();
+        }
+        assert_eq!(p.foreground_image(), Some((4, 65536, false)));
+        p.property(0x19a, 1).unwrap();
+        assert!(p.foreground_image().is_none());
+        p.property(0x19a, 0).unwrap();
+        p.property(0x195, 1).unwrap();
+        assert!(p.foreground_image().is_none());
+        p.property(0x195, 0).unwrap();
+
+        // Unused Boolean values do not override their documented defaults.
+        p.property(0x1bf, 0x26).unwrap();
+        assert_eq!(p.foreground_image(), Some((4, 65536, false)));
+        p.property(0x1bf, 0x00020002).unwrap();
+        assert!(p.foreground_image().is_none());
+        p.property(0x1bf, 0x00020000).unwrap();
+        p.property(0x1bf, 0x00040000).unwrap();
+        assert!(p.foreground_image().is_none());
+
+        // Pattern, texture, and gradient values are distinct MSOFILLTYPEs.
+        for fill_type in [1, 2, 4] {
+            p.property(0x180, fill_type).unwrap();
+            assert!(p.foreground_image().is_none());
+        }
+        p.property(0x180, 3).unwrap();
+        p.property(0x4186, 0).unwrap();
+        assert!(p.foreground_image().is_none());
+
+        for id in 0x198..=0x19b {
+            let mut parent = Paint::default();
+            parent.property(0x180, 3).unwrap();
+            parent.property(0x4186, 4).unwrap();
+            parent.property(id, 1).unwrap();
+            assert!(Paint::default().inherit(&parent).foreground_image().is_none());
+            let mut child = Paint::default();
+            child.property(id, 0).unwrap();
+            assert_eq!(
+                child.inherit(&parent).foreground_image(),
+                Some((4, 65536, false))
+            );
+        }
     }
     #[test]
     fn maps_only_supported_unmodified_presets() {

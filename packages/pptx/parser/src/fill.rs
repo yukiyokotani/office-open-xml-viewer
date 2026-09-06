@@ -259,6 +259,16 @@ fn parse_blip_fill_with_color_resolver<
     let r_id = child(blip_fill, "blip").and_then(|b| attr_r(&b, "embed"))?;
     let image_path = resolve_blip(&r_id)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
+    let svg_image_path = child(blip_fill, "blip")
+        .and_then(|blip| {
+            blip.descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "svgBlip")
+        })
+        .and_then(|node| attr_r(&node, "embed"))
+        .and_then(|rid| resolve_blip(&rid));
+    let dpi = attr(&blip_fill, "dpi").and_then(|value| value.parse().ok());
+    let rot_with_shape = attr(&blip_fill, "rotWithShape")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let alpha = parse_blip_alpha(blip_fill);
     // §20.1.8.23 duotone recolour, resolved through the theme with PowerPoint's
     // linear tint (same call the `<p:pic>` paths use). `None` ⇒ no effect.
@@ -273,19 +283,28 @@ fn parse_blip_fill_with_color_resolver<
         return Some(Fill::Image {
             image_path,
             mime_type,
+            svg_image_path,
+            dpi,
+            rot_with_shape,
             src_rect: parse_src_rect(blip_fill),
             fill_rect: None,
+            stretch: false,
             tile: Some(parse_tile(tile_node)),
             alpha,
             duotone,
         });
     }
     let fill_rect = child(blip_fill, "stretch").and_then(parse_fill_rect);
+    let stretch = child(blip_fill, "stretch").is_some();
     Some(Fill::Image {
         image_path,
         mime_type,
+        svg_image_path,
+        dpi,
+        rot_with_shape,
         src_rect: parse_src_rect(blip_fill),
         fill_rect,
+        stretch,
         tile: None,
         alpha,
         duotone,

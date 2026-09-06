@@ -3903,8 +3903,12 @@ mod tests {
         let fill = Fill::Image {
             image_path: "ppt/media/image2.jpeg".to_owned(),
             mime_type: "image/jpeg".to_owned(),
+            svg_image_path: None,
+            dpi: None,
+            rot_with_shape: None,
             src_rect: None,
             fill_rect: None,
+            stretch: true,
             tile: None,
             alpha: None,
             duotone: None,
@@ -4863,6 +4867,7 @@ mod tests {
                 tile,
                 alpha,
                 duotone: _,
+                ..
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");
                 assert_eq!(mime_type, "image/jpeg");

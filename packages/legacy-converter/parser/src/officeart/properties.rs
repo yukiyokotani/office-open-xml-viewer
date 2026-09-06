@@ -15,9 +15,29 @@ pub(crate) struct Property<'a> {
 pub(crate) fn visit<'a>(
     record: Record<'a>,
     budget: &mut usize,
+    visitor: impl FnMut(Property<'a>) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_kind(record, 0xf00b, budget, visitor)
+}
+
+/// Walk a shape-owned OfficeArtTertiaryFOPT table (MS-ODRAW 2.2.11).
+/// Interpretation remains host-scoped; callers must explicitly select the
+/// small property subset they support from tertiary options.
+pub(crate) fn visit_tertiary<'a>(
+    record: Record<'a>,
+    budget: &mut usize,
+    visitor: impl FnMut(Property<'a>) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_kind(record, 0xf122, budget, visitor)
+}
+
+fn visit_kind<'a>(
+    record: Record<'a>,
+    expected_kind: u16,
+    budget: &mut usize,
     mut visitor: impl FnMut(Property<'a>) -> Result<(), String>,
 ) -> Result<(), String> {
-    if record.kind != 0xf00b || record.version != 3 {
+    if record.kind != expected_kind || record.version != 3 {
         return Err(unsupported("invalid OfficeArt property table"));
     }
     let count = usize::from(record.instance);
@@ -114,5 +134,31 @@ mod tests {
         bad.kind = 0xf00b;
         bad.version = 15;
         assert!(visit(bad, &mut 10, |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn tertiary_reuses_bounded_fopte_framing_without_weakening_primary_visit() {
+        let payload = entry(0x01bf, 0x00600060);
+        let tertiary = Record {
+            kind: 0xf122,
+            version: 3,
+            instance: 1,
+            payload: &payload,
+        };
+        let mut values = Vec::new();
+        visit_tertiary(tertiary, &mut 1, |property| {
+            values.push((property.opid, property.value));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(values, [(0x01bf, 0x00600060)]);
+        assert!(visit(tertiary, &mut 1, |_| Ok(())).is_err());
+        assert!(visit_tertiary(tertiary, &mut 0, |_| Ok(())).is_err());
+
+        let truncated = Record {
+            payload: &payload[..5],
+            ..tertiary
+        };
+        assert!(visit_tertiary(truncated, &mut 1, |_| Ok(())).is_err());
     }
 }
