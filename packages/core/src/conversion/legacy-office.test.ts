@@ -130,12 +130,25 @@ describe('normalizeOfficeInput', () => {
     expect(onResult).toHaveBeenCalledWith(result.conversion);
   });
 
-  it('does not enable an omitted legacy family when another family is configured', async () => {
-    const converter = converterReturning('docx');
+  it.each([
+    ['doc', 'xls', 'Workbook', 'xlsx'],
+    ['doc', 'ppt', 'PowerPoint Document', 'pptx'],
+    ['xls', 'doc', 'WordDocument', 'docx'],
+    ['xls', 'ppt', 'PowerPoint Document', 'pptx'],
+    ['ppt', 'doc', 'WordDocument', 'docx'],
+    ['ppt', 'xls', 'Workbook', 'xlsx'],
+  ] as const)('configuring %s does not enable omitted %s input', async (
+    configured,
+    _inputFormat,
+    stream,
+    target,
+  ) => {
+    const configuredTarget = ({ doc: 'docx', xls: 'xlsx', ppt: 'pptx' } as const)[configured];
+    const converter = converterReturning(configuredTarget);
     await expect(normalizeOfficeInput(
-      buildCfbFixture(['Root Entry', 'Workbook']),
-      'xlsx',
-      conversionFor('doc', { converter }),
+      buildCfbFixture(['Root Entry', stream]),
+      target,
+      conversionFor(configured, { converter }),
     )).rejects.toMatchObject({ code: 'legacy-binary-format' });
     expect(converter.convert).not.toHaveBeenCalled();
   });
@@ -326,11 +339,22 @@ describe('validateConvertedOoxml', () => {
     await expect(validateConvertedOoxml(compressed, 'docx')).resolves.toBeUndefined();
   });
 
-  it('rejects a valid package for the wrong OOXML family', async () => {
-    await expect(validateConvertedOoxml(packageFor('xlsx'), 'docx')).rejects.toMatchObject({
+  it.each([
+    ['docx', 'xlsx'],
+    ['docx', 'pptx'],
+    ['xlsx', 'docx'],
+    ['xlsx', 'pptx'],
+    ['pptx', 'docx'],
+    ['pptx', 'xlsx'],
+  ] as const)('rejects valid macro-free %s converter output requested as %s', async (
+    output,
+    requested,
+  ) => {
+    const source = { docx: 'doc', xlsx: 'xls', pptx: 'ppt' }[requested];
+    await expect(validateConvertedOoxml(packageFor(output), requested)).rejects.toMatchObject({
       reason: 'invalid-output',
-      from: 'doc',
-      to: 'docx',
+      from: source,
+      to: requested,
     });
   });
 
