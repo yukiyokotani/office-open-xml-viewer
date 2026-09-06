@@ -137,3 +137,32 @@ developed. Before implementing a projection:
 
 This finding changes the next investigation target, not the acceptance gate:
 full alternative-content conversion and its safety/fidelity checks are pending.
+
+### Typed reader development
+
+The native-only inspection example reads an already-extracted alternative shape
+XML file. It does not unpack PPT/ZIP inputs or apply properties to binary text:
+
+```sh
+cargo test -p legacy-office-converter --test metro_text
+cargo run -p legacy-office-converter --example inspect_metro_text -- shape.xml
+```
+
+It retains direct paragraph margins, signed indentation, default tab interval,
+level and literal XML text as separate typed evidence. It does not normalize
+text placeholders, infer correspondence from equal character counts or copy
+XML markup into output. The parser is currently compiled only by the example
+and integration tests; neither the converter WASM nor its dependencies change.
+ZIP admission and binary-text correspondence remain prerequisites for runtime
+wiring. This reader is a typed inspection subset, not a complete schema validator.
+
+The 1 MiB part limit, depth/attribute ceilings and caller-retained byte/event/
+paragraph counters are resource policy, not Office format restrictions. DTDs,
+processing instructions, undefined entities, invalid numeric ranges and
+unsupported text structures are rejected or have no projection. XML archive
+metadata and expansion must be bounded independently before calling it.
+
+An empty `textCheckSum` is not an identity check. The
+[DrawingML persistence specification](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/28f2957d-a978-40c8-bc85-5a32ed0ae8e1)
+states that Office writes an empty value and ignores that attribute. This is
+not a specification of binary-PPT text-slot correspondence.

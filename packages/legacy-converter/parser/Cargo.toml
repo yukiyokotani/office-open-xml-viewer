@@ -18,6 +18,9 @@ flate2 = { workspace = true }
 wasm-bindgen = { workspace = true }
 zip = { workspace = true }
 
+[dev-dependencies]
+quick-xml = { workspace = true }
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
 
