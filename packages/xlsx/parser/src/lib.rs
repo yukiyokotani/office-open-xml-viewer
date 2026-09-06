@@ -1091,7 +1091,7 @@ pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Op
     )
 }
 
-/// Resolve a DrawingML/SpreadsheetML color from its raw attribute values
+/// Resolve a SpreadsheetML color from its raw attribute values
 /// (`rgb` / `theme` + `tint` / `indexed`). Split out from [`parse_color`] so
 /// callers that scan attributes without a roxmltree node (e.g. the bounded
 /// tab-color head probe) share the exact same resolution rules.
@@ -1102,12 +1102,25 @@ pub(crate) fn resolve_color_attrs(
     indexed: Option<&str>,
     theme_colors: &[String],
 ) -> Option<String> {
+    // ECMA-376 18.8.3/18.8.19 (CT_Color): tint applies to the resolved
+    // RGB value, regardless of whether it came from rgb, theme or indexed.
+    // Invalid tint metadata is ignored, not clamped to a different color.
+    let tint = tint
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| (-1.0..=1.0).contains(v))
+        .unwrap_or(0.0);
+    let finish = |base: std::borrow::Cow<'_, str>| {
+        let hex = base.strip_prefix('#').unwrap_or(&base);
+        if tint != 0.0 && hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            apply_tint(&base, tint)
+        } else {
+            base.into_owned()
+        }
+    };
     // rgb attribute (ARGB: 8 chars, drop alpha; or 6-char RGB)
     if let Some(rgb) = rgb {
-        if rgb.len() == 8 {
-            return Some(format!("#{}", rgb[2..].to_uppercase()));
-        }
-        return Some(format!("#{}", rgb.to_uppercase()));
+        let rgb = if rgb.len() == 8 { rgb.get(2..)? } else { rgb };
+        return Some(finish(format!("#{}", rgb.to_uppercase()).into()));
     }
 
     // theme attribute → resolve from theme color array + optional tint
@@ -1132,11 +1145,7 @@ pub(crate) fn resolve_color_attrs(
                 n => n,
             };
             if let Some(base) = theme_colors.get(mapped) {
-                let tint = tint.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                if tint == 0.0 {
-                    return Some(base.clone());
-                }
-                return Some(apply_tint(base, tint));
+                return Some(finish(base.as_str().into()));
             }
         }
     }
@@ -1150,7 +1159,7 @@ pub(crate) fn resolve_color_attrs(
                 65 => "#FFFFFF",
                 _ => INDEXED_COLORS.get(idx).copied().unwrap_or("#000000"),
             };
-            return Some(color.to_string());
+            return Some(finish(color.into()));
         }
     }
 
@@ -4260,6 +4269,116 @@ mod tab_color_tests {
         let head =
             r#"<worksheet><sheetPr/><sheetData><c><is><t>tabColor rgb="00FF00"</t></is></c>"#;
         assert_eq!(extract_tab_color_from_head(head, &theme()), None);
+    }
+}
+
+#[cfg(test)]
+mod color_tint_tests {
+    use super::resolve_color_attrs;
+
+    #[test]
+    fn explicit_rgb_uses_the_same_sml_luminance_tint_as_theme_colors() {
+        for (tint, expected) in [
+            ("-1", "#000000"),
+            ("-0.5", "#404040"),
+            ("0", "#808080"),
+            ("0.5", "#C0C0C0"),
+            ("1", "#FFFFFF"),
+        ] {
+            for rgb in ["FF808080", "808080"] {
+                assert_eq!(
+                    resolve_color_attrs(Some(rgb), None, Some(tint), None, &[]).as_deref(),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_colors_also_receive_tint_after_resolving_the_palette() {
+        assert_eq!(
+            resolve_color_attrs(None, None, Some("1"), Some("0"), &[]).as_deref(),
+            Some("#FFFFFF")
+        );
+        assert_eq!(
+            resolve_color_attrs(None, None, Some("-1"), Some("1"), &[]).as_deref(),
+            Some("#000000")
+        );
+    }
+
+    #[test]
+    fn rgb_tint_reaches_fonts_pattern_fills_borders_and_differential_styles() {
+        let source = r##"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+            <fonts><font><color rgb="FF808080" tint="-0.5"/></font></fonts>
+            <fills><fill><patternFill patternType="solid"><fgColor rgb="FF808080" tint="0.5"/><bgColor indexed="0" tint="1"/></patternFill></fill></fills>
+            <borders><border><bottom style="thin"><color rgb="FF808080" tint="-0.5"/></bottom></border></borders>
+            <dxfs><dxf><font><color rgb="FF808080" tint="0.5"/></font><fill><patternFill patternType="solid"><fgColor rgb="FF808080" tint="-0.5"/></patternFill></fill><border><bottom style="thin"><color rgb="FF808080" tint="0.5"/></bottom></border></dxf></dxfs>
+        </styleSheet>"##;
+        let doc = roxmltree::Document::parse(source).unwrap();
+        assert_eq!(
+            super::styles::parse_fonts(&doc, &[])[0].color.as_deref(),
+            Some("#404040")
+        );
+        let fills = super::styles::parse_fills(&doc, &[]);
+        assert_eq!(fills[0].fg_color.as_deref(), Some("#C0C0C0"));
+        assert_eq!(fills[0].bg_color.as_deref(), Some("#FFFFFF"));
+        assert_eq!(
+            super::styles::parse_borders(&doc, &[])[0]
+                .bottom
+                .as_ref()
+                .unwrap()
+                .color
+                .as_deref(),
+            Some("#404040")
+        );
+        let dxf = super::styles::parse_dxfs(&doc, &[]).remove(0);
+        assert_eq!(dxf.font.unwrap().color.as_deref(), Some("#C0C0C0"));
+        assert_eq!(dxf.fill.unwrap().fg_color.as_deref(), Some("#404040"));
+        assert_eq!(
+            dxf.border.unwrap().bottom.unwrap().color.as_deref(),
+            Some("#C0C0C0")
+        );
+        assert_eq!(
+            super::extract_tab_color_from_head(
+                r#"<worksheet><sheetPr><tabColor rgb="FF808080" tint="0.5"/></sheetPr><sheetData>"#,
+                &[]
+            )
+            .as_deref(),
+            Some("#C0C0C0")
+        );
+    }
+
+    #[test]
+    fn source_kind_does_not_change_hue_preserving_tint_and_invalid_metadata_is_not_clamped() {
+        let theme = vec!["#4472C4".to_owned(); 12];
+        for tint in [
+            "-1", "-0.75", "-0.5", "-0.25", "-0.00001", "0", "0.00001", "0.25", "0.5", "0.75", "1",
+        ] {
+            assert_eq!(
+                resolve_color_attrs(Some("FF4472C4"), None, Some(tint), None, &[]),
+                resolve_color_attrs(None, Some("4"), Some(tint), None, &theme)
+            );
+        }
+        for tint in ["NaN", "inf", "-inf", "1.01", "-1.01", "invalid"] {
+            assert_eq!(
+                resolve_color_attrs(Some("FF4472C4"), None, Some(tint), None, &[]).as_deref(),
+                Some("#4472C4")
+            );
+            assert_eq!(
+                resolve_color_attrs(None, Some("4"), Some(tint), None, &theme).as_deref(),
+                Some("#4472C4")
+            );
+        }
+        assert_eq!(
+            resolve_color_attrs(Some("FF808080"), None, Some(" 0.5 "), None, &[]).as_deref(),
+            Some("#C0C0C0")
+        );
+        // Malformed non-ASCII RGB must not reach byte-indexed HLS conversion.
+        assert!(resolve_color_attrs(Some("あ12345"), None, Some("0.5"), None, &[]).is_none());
+        assert_eq!(
+            resolve_color_attrs(Some("あ123"), None, Some("0.5"), None, &[]).as_deref(),
+            Some("#あ123")
+        );
     }
 }
 
