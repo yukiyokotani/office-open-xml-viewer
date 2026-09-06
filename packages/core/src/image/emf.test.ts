@@ -83,6 +83,7 @@ const EMR = {
   CREATEBRUSHINDIRECT: 39,
   DELETEOBJECT: 40,
   MOVETOEX: 27,
+  LINETO: 54,
   BEGINPATH: 59,
   ENDPATH: 60,
   CLOSEFIGURE: 61,
@@ -93,6 +94,7 @@ const EMR = {
   POLYGON16: 86,
   POLYLINE16: 87,
   POLYBEZIERTO16: 88,
+  POLYPOLYGON16: 91,
   CREATEDIBPATTERNBRUSHPT: 94,
 } as const;
 
@@ -987,8 +989,12 @@ describe('playEmf — picture frame mapping + path clip', () => {
       record(EMR.SELECTOBJECT, (w) => w.u32(1)),
       record(EMR.BEGINPATH, () => {}),
       record(EMR.POLYLINE16, (w) =>
-        w.i32(10).i32(10).i32(90).i32(90).u32(3)
-          .i16(10).i16(10).i16(90).i16(10).i16(90).i16(90),
+        w.i32(10).i32(10).i32(90).i32(10).u32(2)
+          .i16(10).i16(10).i16(90).i16(10),
+      ),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(90).i32(10).i32(90).i32(90).u32(2)
+          .i16(90).i16(10).i16(90).i16(90),
       ),
       record(EMR.ENDPATH, () => {}),
       record(EMR.FILLPATH, (w) => w.i32(10).i32(10).i32(90).i32(90)),
@@ -1000,6 +1006,61 @@ describe('playEmf — picture frame mapping + path clip', () => {
     expect(m.calls.filter((call) => call.op === 'lineTo')).toHaveLength(2);
     expect(m.calls.filter((call) => call.op === 'stroke')).toHaveLength(0);
     expect(m.calls.filter((call) => call.op === 'fill')).toHaveLength(1);
+  });
+
+  it('discards a path bracket that exceeds the cumulative geometry budget', () => {
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x0000ff00).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.BEGINPATH, () => {}),
+      record(EMR.MOVETOEX, (w) => w.i32(0).i32(0)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(30).i32(30).u32(3)
+          .i16(0).i16(0).i16(20).i16(20).i16(30).i16(30),
+      ),
+      record(EMR.LINETO, (w) => w.i32(40).i32(40)),
+      record(EMR.ENDPATH, () => {}),
+      record(EMR.FILLPATH, (w) => w.i32(0).i32(0).i32(40).i32(40)),
+      // Rendering must recover after the rejected bracket.
+      record(EMR.CREATEPEN, (w) => w.u32(2).u32(0).i32(1).i32(0).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(2)),
+      record(EMR.POLYLINE16, (w) =>
+        w.i32(0).i32(0).i32(10).i32(10).u32(2).i16(0).i16(0).i16(10).i16(10),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+
+    const playWithLimits = playEmf as unknown as (
+      bytes: Uint8Array,
+      ctx: CanvasRenderingContext2D,
+      width: number,
+      height: number,
+      limits: { maxPathCommands: number },
+    ) => boolean;
+    expect(playWithLimits(file, m.ctx, 100, 100, { maxPathCommands: 4 })).toBe(true);
+    expect(m.calls.filter((call) => call.op === 'fill')).toHaveLength(0);
+    expect(m.calls.filter((call) => call.op === 'stroke')).toHaveLength(1);
+  });
+
+  it('rejects a poly-polygon whose per-polygon counts exceed its declared total', () => {
+    const file = concat(
+      emfHeader(0, 0, 100, 100),
+      record(EMR.CREATEBRUSHINDIRECT, (w) => w.u32(1).u32(0).u32(0x0000ff00).u32(0)),
+      record(EMR.SELECTOBJECT, (w) => w.u32(1)),
+      record(EMR.POLYPOLYGON16, (w) =>
+        w.i32(0).i32(0).i32(50).i32(50)
+          .u32(1).u32(1) // one polygon, falsely declares one total point
+          .u32(3)
+          .i16(0).i16(0).i16(50).i16(0).i16(50).i16(50),
+      ),
+      record(EMR.EOF, () => {}),
+    );
+    const m = makeRecordingCtx();
+
+    playEmf(file, m.ctx, 100, 100);
+    expect(m.calls.filter((call) => call.op === 'fill')).toHaveLength(0);
   });
 
   it('decodes a 4bpp DIB pattern brush (MATLAB bar-chart fill colour)', () => {

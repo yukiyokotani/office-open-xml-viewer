@@ -1693,7 +1693,13 @@ export function layoutParagraph(
     const tokens = runText.split(/(\s+)/).flatMap((token) => {
       if (!token) return [];
       if (/^\s+$/u.test(token)) return [{ text: token, breakBefore: false }];
-      return splitLatinCompoundToken(token);
+      // Authored hyphens are soft-wrap seams only. WordArt deliberately lays
+      // text out at infinite width before mapping it to a curve, so fragmenting
+      // a compound there adds repeated prefix measurement without changing a
+      // possible line break.
+      return Number.isFinite(maxWidthPx)
+        ? splitLatinCompoundToken(token)
+        : [{ text: token, breakBefore: false }];
     });
 
     for (const tokenPart of tokens) {
@@ -2898,12 +2904,6 @@ function renderWarpedText(
   const anchoredBaseline = lines[clockwise ? lineCount - 1 : 0]!.baseline;
   for (let li = 0; li < lineCount; li++) {
     const { line, alignment } = lines[li];
-    const outset = env.singleEdge
-      ? Math.max(0, clockwise ? anchoredBaseline - lines[li]!.baseline : lines[li]!.baseline - anchoredBaseline)
-      : 0;
-    const lineEnv = outset > 0
-      ? buildWarpEnvelope(preset, adj, boxW + 2 * outset, boxH + 2 * outset) ?? env
-      : env;
     // Per-line vertical band [v0, v1] of the envelope's height. One line fills
     // the whole band; multiple lines split it evenly top→bottom.
     const v0 = li / lineCount;
@@ -2933,6 +2933,14 @@ function renderWarpedText(
       if (m.actualBoundingBoxDescent > 0) maxD = Math.max(maxD, m.actualBoundingBoxDescent);
     }
     if (totalW <= 0) continue;
+    // Empty manual lines affect authored baseline spacing, but have no glyphs
+    // to map. Avoid rebuilding a sampled curve for them.
+    const outset = env.singleEdge
+      ? Math.max(0, clockwise ? anchoredBaseline - lines[li]!.baseline : lines[li]!.baseline - anchoredBaseline)
+      : 0;
+    const lineEnv = outset > 0
+      ? buildWarpEnvelope(preset, adj, boxW + 2 * outset, boxH + 2 * outset) ?? env
+      : env;
 
     // PowerPoint's WordArt semantics for the envelope (paired-edge) presets:
     // the FLAT text's INK RECTANGLE (totalW × ink height) is first STRETCHED to
