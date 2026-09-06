@@ -148,6 +148,39 @@ The ordinary PPTX parser and renderer handle the resulting metadata; no
 renderer changes, migration or additional opt-in are required. This does not
 claim complete Office-equivalent bidirectional shaping or punctuation placement.
 
+PPT text-body direction preserves an owned primary `txflTextFlow=1` as
+DrawingML `bodyPr/@vert="eaVert"` when `cdirFont` is absent or zero. This is a
+PowerPoint compatibility mapping, not a literal interpretation of the generic
+MS-ODRAW enumeration. Controlled local Office down-save/reopen/PDF/roundtrip
+tests found that both OOXML `vert` and `eaVert` become the same binary value,
+and that Office reopens that value with East Asian vertical behavior. The
+converter targets the binary presentation, not recovery of a source OOXML
+distinction lost by Office during down-save.
+
+The controls used Latin, CJK, mixed text and punctuation with two font families;
+additional controls varied unrotated frames, positive/negative 45- and 90-degree
+rotation, 180-degree rotation, and horizontal/vertical/both flips. The mapping
+does not branch on characters, fonts, sample names, or rotation angles. A group
+control lost its geometry during Office down-save and is not evidence of group
+visual fidelity. Combined transforms, other producers and arbitrary grouped
+layouts are not certified by these controls. Other text-flow values, nonzero
+font direction, tertiary direction properties and inherited direction remain
+unsupported; the existing advanced-text warning still applies. Invalid primary
+direction enums, scalar flags and duplicate direction properties are rejected.
+Geometry and the ordinary OOXML renderer are unchanged. Restoring body direction
+does not implement Office's automatic upright digit grouping or resolve existing
+font and geometry differences. No migration is required.
+
+XLS extended indentation (`XFExt` property `0x000F`, MS-XLS 2.5.108) is preserved
+as ordinary SpreadsheetML `alignment/@indent`, including values above the base
+four-bit limit through 250. Extensions require the existing matching XF checksum
+and owning-XF checks. Cell and style XFs retain their own indentation and reading
+order; style XF fields are not treated as reserved (MS-XLS 2.5.249). Invalid
+extension sizes/ranges and duplicate properties fail through the existing error
+contract. This is a direct specification mapping, not an Office-layout heuristic;
+the existing XLSX parser and renderer consume it without a binary-specific path.
+No migration or opt-in change is required.
+
 Version-3 and version-4 CFB containers are admitted. Password-protected legacy
 binaries and pre-CFB Office formats are rejected. These limits are structural,
 not filename-based. Unsupported binary structures fail with

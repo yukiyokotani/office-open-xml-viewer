@@ -256,6 +256,8 @@ struct Properties<'a> {
     wrap: &'static str,
     anchor: &'static str,
     center: bool,
+    text_flow: Option<u32>,
+    font_direction: Option<u32>,
 }
 impl Default for Properties<'_> {
     fn default() -> Self {
@@ -272,6 +274,8 @@ impl Default for Properties<'_> {
             wrap: "square",
             anchor: "t",
             center: false,
+            text_flow: None,
+            font_direction: None,
         }
     }
 }
@@ -292,6 +296,26 @@ impl<'a> Properties<'a> {
         crate::officeart::properties::visit(record, budget, |property| {
             let opid = property.opid;
             let value = property.value;
+            if matches!(opid & 0x3fff, 0x88 | 0x89) {
+                if opid & 0xc000 != 0 || property.complex.is_some() {
+                    return Err(unsupported("invalid PowerPoint text direction property"));
+                }
+                let target = if opid == 0x88 {
+                    if value > 5 {
+                        return Err(unsupported("invalid PowerPoint text flow"));
+                    }
+                    &mut self.text_flow
+                } else {
+                    if value > 3 {
+                        return Err(unsupported("invalid PowerPoint font direction"));
+                    }
+                    &mut self.font_direction
+                };
+                if target.replace(value).is_some() {
+                    return Err(unsupported("duplicate PowerPoint text direction property"));
+                }
+                return Ok(());
+            }
             if let Some(complex) = property.complex {
                 if matches!(opid & 0x3fff, 0x145..=0x150) {
                     self.paint.custom_geometry = true;
@@ -819,7 +843,20 @@ impl Writer<'_, '_> {
                 }
                 self.push("<p:txBody>")?;
                 let p = &shape.props;
-                self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
+                // PowerPoint's owned scalar txflTextFlow=1 down-saves both its
+                // `vert` and `eaVert` inputs as the same OfficeArt value and
+                // round-trips that value as DrawingML eaVert. This compatibility
+                // mapping is deliberately independent of text, fonts and outer
+                // transforms (MS-ODRAW 2.4.5 uses text-container coordinates).
+                // Other flows and nonzero cdirFont were not established by
+                // these controls and remain omitted. See the controlled-test
+                // scope in docs/legacy-office-conversion.md.
+                let vert = if p.text_flow == Some(1) && p.font_direction.unwrap_or(0) == 0 {
+                    " vert=\"eaVert\""
+                } else {
+                    ""
+                };
+                self.push(&format!("<a:bodyPr wrap=\"{}\" anchor=\"{}\" anchorCtr=\"{}\" lIns=\"{}\" tIns=\"{}\" rIns=\"{}\" bIns=\"{}\"{vert}/><a:lstStyle/>", p.wrap, p.anchor, u8::from(p.center), p.margins[0], p.margins[1], p.margins[2], p.margins[3]))?;
                 let linked = match (shape.master(), self.context.and_then(|c| c.shapes)) {
                     (Some(id), Some(shapes)) => Some(shapes.levels(id)?),
                     _ => None,
@@ -1619,6 +1656,91 @@ mod tests {
         let out = xml(&bytes).unwrap();
         assert!(out.contains("rot=\"-2700000\" flipH=\"1\" flipV=\"1\""));
         assert!(out.contains("wrap=\"none\" anchor=\"ctr\" anchorCtr=\"1\" lIns=\"12700\" tIns=\"25400\" rIns=\"38100\" bIns=\"50800\""));
+    }
+
+    #[test]
+    fn maps_only_owned_text_flow_one_with_default_font_direction_to_ea_vert() {
+        let shape = |values: &[(u16, u32)]| {
+            sp(
+                0xa00,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                    text("Same text 日本語 123"),
+                    properties(values),
+                ],
+            )
+        };
+        for values in [
+            &[][..],
+            &[(0x88, 0)],
+            &[(0x88, 2)],
+            &[(0x88, 3)],
+            &[(0x88, 4)],
+            &[(0x88, 5)],
+        ] {
+            assert!(!xml(&drawing(vec![shape(values)]))
+                .unwrap()
+                .contains(" vert="));
+        }
+        for flags in [0xa00, 0xa40, 0xa80, 0xac0] {
+            let out = xml(&drawing(vec![sp(
+                flags,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                    text("Same text 日本語 123"),
+                    properties(&[(4, (-45i32 * 65536) as u32), (0x88, 1)]),
+                ],
+            )]))
+            .unwrap();
+            assert!(out.contains("<a:bodyPr") && out.contains(" vert=\"eaVert\""));
+        }
+        assert!(xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
+            .unwrap()
+            .contains(" vert=\"eaVert\""));
+        for direction in 1..=3 {
+            assert!(!xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
+                .unwrap()
+                .contains(" vert="));
+        }
+    }
+
+    #[test]
+    fn validates_text_direction_scalars_without_guessing_other_values() {
+        let shape = |options: Vec<u8>| {
+            drawing(vec![sp(
+                0xa00,
+                vec![
+                    record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                    text("Direction"),
+                    options,
+                ],
+            )])
+        };
+        for values in [
+            vec![(0x88, 1), (0x88, 1)],
+            vec![(0x89, 0), (0x89, 0)],
+            vec![(0x88, 6)],
+            vec![(0x89, 4)],
+        ] {
+            assert!(xml(&shape(properties(&values))).is_err());
+        }
+        let complex = record((1 << 4) | 3, 0xf00b, &[0x88, 0x80, 0, 0, 0, 0]);
+        let blip = properties(&[(0x4088, 1)]);
+        assert!(xml(&shape(complex)).is_err());
+        assert!(xml(&shape(blip)).is_err());
+
+        // Direction fields in a tertiary table are outside this measured,
+        // primary-owned mapping and remain omitted rather than reinterpreted.
+        let out = xml(&drawing(vec![sp(
+            0xa00,
+            vec![
+                record(0, 0xf010, &ints(&[0, 0, 576, 576])),
+                text("Direction"),
+                tertiary_properties(&[(0x88, 1)]),
+            ],
+        )]))
+        .unwrap();
+        assert!(!out.contains(" vert="));
     }
 
     #[test]
