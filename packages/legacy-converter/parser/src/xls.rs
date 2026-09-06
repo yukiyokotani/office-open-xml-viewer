@@ -14,6 +14,8 @@ use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
 #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+pub(crate) mod drawing_anchors;
+#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
 mod drawing_media;
 mod geometry;
 mod print;
@@ -51,6 +53,17 @@ pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<(u32, &'stati
         .or_else(|_| cfb.stream("Book"))
         .map_err(unsupported)?;
     drawing_media::images(&records(&workbook)?)
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub(crate) fn inspect_anchors(
+    cfb: &CompoundFile<'_>,
+) -> Result<Vec<drawing_anchors::DrawingAnchor>, String> {
+    let workbook = cfb
+        .stream("Workbook")
+        .or_else(|_| cfb.stream("Book"))
+        .map_err(unsupported)?;
+    drawing_anchors::workbook(&records(&workbook)?)
 }
 
 pub struct XlsConversion {

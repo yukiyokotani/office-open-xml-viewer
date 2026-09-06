@@ -611,8 +611,36 @@ process-memory guarantee: source, workbook, assembled data and extracted images
 can coexist. The helper is excluded from production WASM even when its Cargo
 feature is enabled. It does not change the converter contract or renderer.
 
-Worksheet placement still needs explicit shape-to-sheet/image ownership and
-conversion of MS-XLS 2.5.193 cell-relative offsets to OOXML coordinates. Horizontal
+The companion `inspect_xls_anchors` native example prints raw worksheet anchor
+metadata without extracting images:
+
+```sh
+cargo run -p legacy-office-converter --features inspection \
+  --example inspect_xls_anchors -- sample.xls
+```
+
+It uses BoundSheet tab order and disjoint worksheet substreams, excludes nested
+chart streams, and joins only owned drawing fragments. MS-XLS 2.5.194/195 client
+markers must end at the exact fragment boundary immediately preceding the
+matching Obj/TxO record. The inspector retains the shape identity, FtCmo object
+identity/type/flags, enclosing group depth and signed MS-XLS 2.5.193 endpoint
+fractions. It does not flatten groups or interpret client formulas and actions.
+The fractions are not pixels or EMUs; negative and beyond-cell fractions remain
+unchanged. Reserved anchor bits are ignored as specified. Invalid movement flags,
+duplicate identities, ambiguous clients and truncated streams fail inspection.
+The current subset does not reclassify Continue records following Obj/TxO as
+drawing data; producer output requiring that interleaving remains unsupported.
+
+Anchor inspection limits cumulative drawing bytes to 128 MiB, record work to
+two million, substream/group nesting to 32, retained anchors to 65,536, and
+per-sheet shape/client identities to 65,536. The disjoint ranges prevent repeated
+scanning through overlapping worksheet references. Native metadata does not prove
+visibility, image eligibility or complete object validity: non-picture objects,
+deleted shapes and OLE-marked shapes can have anchors too. No production WASM,
+worker, public conversion option or OOXML rendering behavior is changed.
+
+Worksheet placement still needs image-store binding, complete shape eligibility
+and conversion of cell-relative offsets to OOXML coordinates. Horizontal
 offsets require the normal font's measured digit width; a fixed assumed width
 would introduce layout errors. Measurement transport, anchor placement, cropping
 and grouping remain integration work. No migration is required.

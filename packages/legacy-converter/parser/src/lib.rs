@@ -20,11 +20,24 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Returns passive catalog images, not necessarily visible sheet objects.
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
 pub fn inspect_xls_images(data: &[u8]) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+    xls::inspect_images(&inspection_source(data)?)
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub use xls::drawing_anchors::{CellCorner, DrawingAnchor};
+
+/// Native-only raw sheet anchor evidence. Not a visibility or image-admission API.
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub fn inspect_xls_anchors(data: &[u8]) -> Result<Vec<DrawingAnchor>, String> {
+    xls::inspect_anchors(&inspection_source(data)?)
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+fn inspection_source(data: &[u8]) -> Result<cfb::CompoundFile<'_>, String> {
     if data.len() > 256 * 1024 * 1024 {
         return Err("UNSUPPORTED:XLS inspection source byte budget exceeded".into());
     }
-    let cfb = cfb::CompoundFile::open(data).map_err(|e| format!("UNSUPPORTED:{e}"))?;
-    xls::inspect_images(&cfb)
+    cfb::CompoundFile::open(data).map_err(|e| format!("UNSUPPORTED:{e}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
