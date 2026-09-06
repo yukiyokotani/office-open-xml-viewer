@@ -106,6 +106,45 @@ original same-body experiment and its reference artifacts. Verify which values
 actually survive in the binary. No ruler precedence rule or new production
 converter behavior follows from the first roundtrip alone.
 
+### Separate-body and text-slot source conditions
+
+```sh
+node --test scripts/legacy-ppt-text-probes.test.mjs
+node scripts/legacy-ppt-text-probes.mjs
+```
+
+The second manifest preserves all 29 ruler conditions as `S001` through `S029`,
+with `sourceCondition` linking each to its unchanged original `T` condition.
+Put control and treatment in separate text bodies with identical widths and
+insets. Each ruler body has one paragraph. Keep their positions fixed across
+conditions, and materialize all paragraph properties explicitly. This isolates
+the text-body ownership variable that the first experiment did not separate.
+
+The additional 16 `M` conditions keep paragraph properties fixed and vary text
+structure: equal UTF-16 length with different content, spaces, underscores,
+tabs, combining sequences, supplementary characters, CJK, empty paragraphs,
+unequal/reversed paragraph lengths, styled runs, explicit line breaks and empty
+runs. Keep these as native runs/paragraphs, not pictures or normalized strings.
+The unchanged repeat is a control for repeatability, not an expected result.
+Both generators produce source descriptions only; neither launches Office nor
+asserts binary-text correspondence.
+
+A local 45-slide authored source has been checked against transitional PML and
+the exact manifest text/properties, including empty runs and paragraphs. Its
+Office roundtrip is still pending. Non-Office previews are not an oracle:
+some tab conditions can fail to display even when the source XML retains every
+authored character. Do not remove those conditions or tune the source to make
+an unrelated renderer pass.
+
+After saving and reopening the binary, record the owning live shape, each
+binary text block, paragraph boundaries and each alternative XML run. Compare
+the authored source, Office-reconverted XML and direct-binary PDF independently.
+Report which distinctions survived serialization. Equal code-unit counts, a
+matching shape name or a blank persistence checksum alone do not prove a valid
+slot correspondence. Empty paragraphs, explicit breaks and surrogate pairs are
+required counterexamples before adopting any substitution algorithm. No runtime
+compatibility rule is established by preparing these source experiments.
+
 ### Alternative shape XML is a separate evidence source
 
 MS-ODRAW 2.3.4.41-42 defines `metroBlob` (property `0x03A9`) as an OPC package
