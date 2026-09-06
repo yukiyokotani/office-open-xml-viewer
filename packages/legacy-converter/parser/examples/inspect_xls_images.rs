@@ -3,9 +3,15 @@ use std::io::{Read, Write};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let source = args
+    let first = args
         .next()
         .ok_or("expected XLS input and optional fresh output directory")?;
+    let used_only = first == "--used";
+    let source = if used_only {
+        args.next().ok_or("expected XLS input after --used")?
+    } else {
+        first
+    };
     let directory = args.next();
     if args.next().is_some() {
         return Err("too many arguments".into());
@@ -14,7 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::File::open(source)?
         .take(256 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
-    let images = legacy_office_converter::inspect_xls_images(&bytes)?;
+    let images = if used_only {
+        let result = legacy_office_converter::inspect_xls_pictures(&bytes)?;
+        eprintln!("passive-picture-anchors:{}", result.anchors.len());
+        result.images
+    } else {
+        legacy_office_converter::inspect_xls_images(&bytes)?
+    };
     // Never overwrite an existing folder or source/sample artifact. Passing no
     // directory prints metadata only; catalog membership is not visibility.
     if let Some(directory) = &directory {

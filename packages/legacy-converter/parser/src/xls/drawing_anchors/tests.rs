@@ -89,6 +89,7 @@ fn preserves_signed_fractional_endpoints_and_exact_object_ownership() {
             object_flags: 0x11,
             group_depth: 0,
             behavior: 3,
+            picture: None,
             from: CellCorner {
                 column: 2,
                 row: 3,
@@ -303,4 +304,44 @@ fn enforces_shape_identity_and_global_retained_anchor_limits() {
         .unwrap_err()
         .contains("retained anchor budget"));
     assert_eq!(retained.len(), MAX_OBJECTS);
+}
+
+#[test]
+fn binds_only_the_owning_shapes_picture_property_and_plain_native_object() {
+    let prop = art(
+        0xf00b,
+        0x13,
+        &[
+            0x4104u16.to_le_bytes().to_vec(),
+            7u32.to_le_bytes().to_vec(),
+        ]
+        .concat(),
+    );
+    let mut source = fixture();
+    source[2]
+        .1
+        .extend_from_slice(&[7, 0, 2, 0, 255, 255, 8, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    let mut outer = source.clone();
+    let root_size = u32::from_le_bytes(outer[1].1[4..8].try_into().unwrap()) + prop.len() as u32;
+    outer[1].1[4..8].copy_from_slice(&root_size.to_le_bytes());
+    outer[1].1.splice(8..8, prop.clone());
+    assert!(run(&outer).unwrap()[0].picture.is_none());
+
+    for at in [4, 12] {
+        let n = u32::from_le_bytes(source[1].1[at..at + 4].try_into().unwrap()) + prop.len() as u32;
+        source[1].1[at..at + 4].copy_from_slice(&n.to_le_bytes());
+    }
+    source[1].1.splice(32..32, prop);
+    assert_eq!(
+        run(&source).unwrap()[0].picture,
+        Some(PictureReference {
+            store_index: 7,
+            crop: [0; 4],
+            rotation: 0,
+            clipboard_format: 0xffff,
+            auto_picture: false,
+        })
+    );
+    source[2].1[32] = 16; // ActiveX cannot become a passive catalog reference.
+    assert!(run(&source).unwrap()[0].picture.is_none());
 }

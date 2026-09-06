@@ -12,9 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take(256 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
     let anchors = legacy_office_converter::inspect_xls_anchors(&bytes)?;
-    println!("sheet,shape,shapeFlags,object,objectType,objectFlags,groupDepth,behavior,colL,rowT,dxL,dyT,colR,rowB,dxR,dyB");
+    println!("sheet,shape,shapeFlags,object,objectType,objectFlags,groupDepth,behavior,colL,rowT,dxL,dyT,colR,rowB,dxR,dyB,pictureIndex,cropTop,cropBottom,cropLeft,cropRight,rotation,clipboardFormat,autoPicture");
     for a in anchors {
-        println!(
+        print!(
             "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             a.sheet,
             a.shape_id,
@@ -32,6 +32,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             a.to.row,
             a.to.dx,
             a.to.dy
+        );
+        let p = a
+            .picture
+            .unwrap_or(legacy_office_converter::PictureReference {
+                store_index: 0,
+                crop: [0; 4],
+                rotation: 0,
+                clipboard_format: 0,
+                auto_picture: false,
+            });
+        println!(
+            ",{},{},{},{},{},{},{},{}",
+            p.store_index,
+            p.crop[0],
+            p.crop[1],
+            p.crop[2],
+            p.crop[3],
+            p.rotation,
+            p.clipboard_format,
+            u8::from(p.auto_picture)
         );
     }
     Ok(())

@@ -24,12 +24,25 @@ pub fn inspect_xls_images(data: &[u8]) -> Result<Vec<(u32, &'static str, Vec<u8>
 }
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
-pub use xls::drawing_anchors::{CellCorner, DrawingAnchor};
+pub use xls::drawing_anchors::{CellCorner, DrawingAnchor, PictureReference};
 
 /// Native-only raw sheet anchor evidence. Not a visibility or image-admission API.
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
 pub fn inspect_xls_anchors(data: &[u8]) -> Result<Vec<DrawingAnchor>, String> {
     xls::inspect_anchors(&inspection_source(data)?)
+}
+
+/// Native development bindings. Each retained anchor references one supported
+/// image here; groups, inherited visibility and layout remain uninterpreted.
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub struct XlsPictureInspection {
+    pub anchors: Vec<DrawingAnchor>,
+    pub images: Vec<(u32, &'static str, Vec<u8>)>,
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub fn inspect_xls_pictures(data: &[u8]) -> Result<XlsPictureInspection, String> {
+    xls::inspect_pictures(&inspection_source(data)?)
 }
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]

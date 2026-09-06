@@ -11,6 +11,9 @@ const MAX_BYTES: usize = 128 * 1024 * 1024;
 const MAX_OBJECTS: usize = 65_536;
 const MAX_DEPTH: usize = 32;
 
+mod picture;
+pub use picture::PictureReference;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellCorner {
     pub column: u16,
@@ -36,6 +39,7 @@ pub struct DrawingAnchor {
     pub behavior: u16,
     pub from: CellCorner,
     pub to: CellCorner,
+    pub picture: Option<PictureReference>,
 }
 
 pub(super) fn workbook(records: &[Record<'_>]) -> Result<Vec<DrawingAnchor>, String> {
@@ -229,10 +233,13 @@ fn walk(
             if record.kind == 0xf004 {
                 let (mut position, mut shape, mut anchor, mut object, mut textbox) =
                     (at + 8, None, None, None, false);
+                let mut object_data = None;
+                let mut picture = picture::Properties::default();
                 while position < next {
                     let (child, child_end) =
                         record_with_end(&drawing.bytes[..next], position, work, "XLS shape")?;
                     match child.kind {
+                        0xf00b => picture.read(child, work)?,
                         0xf00a => {
                             if shape.is_some() || child.version != 2 || child.payload.len() != 8 {
                                 return Err(unsupported("invalid BIFF shape identity"));
@@ -289,6 +296,7 @@ fn walk(
                                     return Err(unsupported("duplicate BIFF drawing object id"));
                                 }
                                 object = Some((id, kind, u16_at(client.data, 8)?));
+                                object_data = Some(client.data);
                             } else {
                                 if textbox || client.kind != 0x01b6 {
                                     return Err(unsupported("invalid BIFF drawing textbox owner"));
@@ -319,6 +327,7 @@ fn walk(
                         behavior,
                         from,
                         to,
+                        picture: picture.reference(shape_flags, object_data)?,
                     });
                 }
             }

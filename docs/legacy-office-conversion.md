@@ -631,6 +631,27 @@ duplicate identities, ambiguous clients and truncated streams fail inspection.
 The current subset does not reclassify Continue records following Obj/TxO as
 drawing data; producer output requiring that interleaving remains unsupported.
 
+For explicitly owned plain picture objects, anchor metadata also retains a
+one-based BStore reference, raw signed crop/rotation values, clipboard format and
+the aspect-preservation flag. The reference must be a scalar `pib` with `fBid`
+set in the shape's own FOPT; complex BLIPs and drawing-wide properties are not
+substituted. FtCf and FtPioGrbit must occupy their specified Obj fields. DDE,
+ActiveX, camera, icon, dynamic/default-sized, controls-stream and auto-load forms,
+additional client fields, linked BLIPs, explicit hidden/script anchors and
+deleted/OLE/group/background shape flags do not produce passive references.
+Unknown property content is never decoded as a script, URL or nested object.
+
+Use `inspect_xls_images --used sample.xls fresh-output-directory` with the same
+Cargo invocation to extract only supported images referenced by those objects.
+The native `inspect_xls_pictures` helper parses the workbook stream once, binds
+anchors to the global catalog by index, and decodes each requested image at most
+once. It returns only anchors with a corresponding supported image. Unused
+catalog entries are not inflated; an invalid referenced image or out-of-range
+index still fails inspection. There is no fallback to another image, file or URL.
+The anchor and media stages each retain their separate two-million-work budget.
+This is preparation for OOXML emission, not worksheet image display support or
+an assertion of complete inherited visibility/geometry.
+
 Anchor inspection limits cumulative drawing bytes to 128 MiB, record work to
 two million, substream/group nesting to 32, retained anchors to 65,536, and
 per-sheet shape/client identities to 65,536. The disjoint ranges prevent repeated

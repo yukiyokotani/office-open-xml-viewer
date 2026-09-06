@@ -66,6 +66,24 @@ pub(crate) fn inspect_anchors(
     drawing_anchors::workbook(&records(&workbook)?)
 }
 
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub(crate) fn inspect_pictures(cfb: &CompoundFile<'_>) -> Result<crate::XlsPictureInspection, String> {
+    let workbook = cfb
+        .stream("Workbook")
+        .or_else(|_| cfb.stream("Book"))
+        .map_err(unsupported)?;
+    let records = records(&workbook)?;
+    let mut anchors = drawing_anchors::workbook(&records)?;
+    let indices = anchors
+        .iter()
+        .filter_map(|a| a.picture.map(|p| p.store_index))
+        .collect();
+    let images = drawing_media::selected(&records, &indices)?;
+    let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
+    anchors.retain(|a| a.picture.is_some_and(|p| supported.contains(&p.store_index)));
+    Ok(crate::XlsPictureInspection { anchors, images })
+}
+
 pub struct XlsConversion {
     pub bytes: Vec<u8>,
     pub warnings: Vec<String>,

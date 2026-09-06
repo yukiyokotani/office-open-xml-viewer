@@ -7,6 +7,36 @@ use crate::officeart::{raster, record_with_end};
 const MAX_DRAWING_BYTES: usize = 128 * 1024 * 1024;
 const MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
 
+/// Resolve only admitted, owned references. Unused catalog images are neither
+/// inflated nor validated; malformed *referenced* images still fail closed.
+pub(super) fn selected(
+    records: &[Record<'_>],
+    indices: &std::collections::BTreeSet<u32>,
+) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut work = 2_000_000;
+    let bytes = assemble(records, MAX_DRAWING_BYTES, &mut work)?
+        .ok_or_else(|| unsupported("missing referenced BIFF image store"))?;
+    let entries = catalog(&bytes, &mut work)?;
+    let mut remaining = MAX_MEDIA_BYTES;
+    let mut output = Vec::new();
+    for &index in indices {
+        let entry = index
+            .checked_sub(1)
+            .and_then(|i| entries.get(i as usize))
+            .ok_or_else(|| unsupported("BIFF picture index out of range"))?;
+        if let Some(image) = raster::read_store_entry(*entry, None, &mut work, remaining)? {
+            remaining = remaining
+                .checked_sub(image.bytes.len())
+                .ok_or_else(|| unsupported("BIFF retained image budget exceeded"))?;
+            output.push((index, image.extension, image.bytes.into_owned()));
+        }
+    }
+    Ok(output)
+}
+
 /// Inspect the global image store only. Do not call it from shipped conversion
 /// until image ownership and font-dependent sheet coordinates are integrated.
 pub(super) fn images(records: &[Record<'_>]) -> Result<Vec<(u32, &'static str, Vec<u8>)>, String> {
@@ -138,6 +168,35 @@ fn catalog<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_references_are_deduplicated_and_unused_invalid_blips_are_not_decoded() {
+        let good = art(0xf01e, 0x6e00, &[vec![0; 17], png()].concat());
+        let invalid = art(0xf01a, 0x3d40, &[]);
+        let bytes = art(0xf000, 15, &art(0xf001, 0x2f, &[good, invalid].concat()));
+        let records = [
+            record(BOF, &[0, 6, 5, 0]),
+            record(0xeb, &bytes),
+            record(EOF, &[]),
+        ];
+        let selected_once = std::collections::BTreeSet::from([1, 1]);
+        assert_eq!(
+            selected(&records, &selected_once).unwrap(),
+            vec![(1, "png", png())]
+        );
+        assert!(selected(&records, &std::collections::BTreeSet::from([2])).is_err());
+        for index in [0, 3, u32::MAX] {
+            assert!(selected(&records, &std::collections::BTreeSet::from([index])).is_err());
+        }
+        assert!(selected(&records, &std::collections::BTreeSet::new())
+            .unwrap()
+            .is_empty());
+        assert!(selected(
+            &[record(BOF, &[0, 6, 5, 0]), record(EOF, &[])],
+            &selected_once
+        )
+        .is_err());
+    }
     fn record(kind: u16, data: &[u8]) -> Record<'_> {
         Record {
             kind,

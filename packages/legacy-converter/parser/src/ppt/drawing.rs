@@ -269,35 +269,15 @@ impl Default for Properties<'_> {
 }
 impl<'a> Properties<'a> {
     fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
-        // [MS-ODRAW] 2.2.7–9: six-byte property entries precede complex data.
-        // Even ignored complex properties must fit; never use their payload as XML.
-        if record.version != 3 {
-            return Err(unsupported("invalid PowerPoint shape property table"));
-        }
-        *budget = budget
-            .checked_sub(usize::from(record.instance))
-            .ok_or_else(|| unsupported("PowerPoint shape property work budget exceeded"))?;
-        let len = usize::from(record.instance) * 6;
-        let entries = record
-            .payload
-            .get(..len)
-            .ok_or_else(|| unsupported("truncated PowerPoint shape properties"))?;
-        let mut end = len;
-        for entry in entries.chunks_exact(6) {
-            let opid = u16_at(entry, 0)?;
-            let value = u32_at(entry, 2)?;
-            if opid & 0x8000 != 0 {
+        crate::officeart::properties::visit(record, budget, |property| {
+            let opid = property.opid;
+            let value = property.value;
+            if let Some(complex) = property.complex {
                 if matches!(opid & 0x3fff, 0x145..=0x150) {
                     self.paint.custom_geometry = true;
                 }
-                let start = end;
-                end = end
-                    .checked_add(value as usize)
-                    .filter(|n| *n <= record.payload.len())
-                    .ok_or_else(|| unsupported("truncated PowerPoint complex shape property"))?;
-                self.geometry
-                    .complex(opid & 0x3fff, &record.payload[start..end]);
-                continue;
+                self.geometry.complex(opid & 0x3fff, complex);
+                return Ok(());
             }
             if matches!(opid & 0x3fff, 0x145 | 0x146) {
                 self.geometry.scalar(opid & 0x3fff, value)?;
@@ -308,7 +288,7 @@ impl<'a> Properties<'a> {
                 } else if opid == 0x4186 {
                     self.paint.property(opid, value)?;
                 }
-                continue;
+                return Ok(());
             }
             match opid {
                 // MS-ODRAW 2.3.4.44. Hidden shapes and active script anchors
@@ -350,11 +330,8 @@ impl<'a> Properties<'a> {
                     self.paint.property(opid, value)?;
                 }
             }
-        }
-        if end != record.payload.len() {
-            return Err(unsupported("unexpected PowerPoint property data"));
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 

@@ -1,6 +1,7 @@
 //! Bounded OfficeArt / PowerPoint record headers (MS-ODRAW 2.2.1).
 pub(crate) mod geometry;
 mod metafile;
+pub(crate) mod properties;
 #[cfg(test)]
 pub(crate) use metafile::tests::emf_test_blip;
 pub(crate) mod raster;
