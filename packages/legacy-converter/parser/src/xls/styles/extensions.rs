@@ -1,0 +1,106 @@
+//! MS-XLS 2.4.354/355: bind XFExt to the exact XF sequence before using it.
+//! ExtProp 2.5.108, FullColorExt 2.5.155, LongRGBA 2.5.178.
+use super::super::{u16_at, u32_at, unsupported, Record};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Default)]
+pub(super) struct Extensions(BTreeMap<usize, BTreeMap<u16, String>>);
+
+impl Extensions {
+    pub(super) fn parse(records: &[Record<'_>], xfs: &[&[u8]]) -> Result<Self, String> {
+        let globals = || records.iter().take_while(|r| r.kind != super::super::EOF);
+        let mut checks = globals().filter(|r| r.kind == 0x087c);
+        let Some(check) = checks.next() else {
+            return Ok(Self::default());
+        };
+        if checks.next().is_some() || check.data.len() != 20 || u16_at(check.data, 0)? != 0x087c {
+            return Err(unsupported("invalid BIFF XF checksum record"));
+        }
+        // A stale extension must not replace newer palette-based formatting.
+        // No extension is admitted without both count and checksum agreement.
+        if !(16..=4050).contains(&xfs.len())
+            || usize::from(u16_at(check.data, 14)?) != xfs.len()
+            || u32_at(check.data, 16)? != checksum(xfs.iter().flat_map(|v| v.iter().copied()))
+        {
+            return Ok(Self::default());
+        }
+        let mut result = Self::default();
+        let mut seen = BTreeSet::new();
+        for record in globals().filter(|r| r.kind == 0x087d) {
+            let data = record.data;
+            if data.len() < 20 || u16_at(data, 0)? != 0x087d {
+                return Err(unsupported("invalid BIFF XF extension header"));
+            }
+            let index = usize::from(u16_at(data, 14)?);
+            if index >= xfs.len() || !seen.insert(index) {
+                return Err(unsupported("invalid or duplicate BIFF XF extension index"));
+            }
+            let count = usize::from(u16_at(data, 18)?);
+            // Resource policy; includes unknown future properties without retaining them.
+            if count > 1024 {
+                return Err(unsupported("too many BIFF XF extension properties"));
+            }
+            let mut offset = 20usize;
+            let mut colors = BTreeMap::new();
+            let mut properties = BTreeSet::new();
+            for _ in 0..count {
+                let kind = u16_at(data, offset)?;
+                let size = usize::from(u16_at(data, offset + 2)?);
+                if size < 4 || size > data.len().saturating_sub(offset) || !properties.insert(kind)
+                {
+                    return Err(unsupported("invalid BIFF XF extension property"));
+                }
+                let value = &data[offset + 4..offset + size];
+                offset += size;
+                if matches!(kind, 4 | 5 | 7..=11 | 13) {
+                    if value.len() != 16 {
+                        return Err(unsupported("invalid BIFF extended color size"));
+                    }
+                    let color_type = u16_at(value, 0)?;
+                    if color_type > 4 {
+                        return Err(unsupported("invalid BIFF extended color type"));
+                    }
+                    // Literal, untinted RGBA is losslessly representable as SML ARGB.
+                    // Theme and tint resolution is separate: never use a guessed
+                    // default theme or treat tint as an RGB-channel scale factor.
+                    if color_type == 2 && u16_at(value, 2)? == 0 {
+                        colors.insert(
+                            kind,
+                            format!(
+                                "rgb=\"{:02X}{:02X}{:02X}{:02X}\"",
+                                value[7], value[4], value[5], value[6]
+                            ),
+                        );
+                    }
+                }
+            }
+            if offset != data.len() {
+                return Err(unsupported("unexpected BIFF XF extension tail"));
+            }
+            // StyleXF reserves this bit; only CellXF uses fHasXFExt (bit25
+            // of the border/fill word). It cannot attach an extension when false.
+            if u16_at(xfs[index], 4)? & 4 != 0 || xfs[index][17] & 2 != 0 {
+                result.0.insert(index, colors);
+            }
+        }
+        Ok(result)
+    }
+
+    pub(super) fn color(&self, index: usize, property: u16) -> Option<&str> {
+        self.0.get(&index)?.get(&property).map(String::as_str)
+    }
+}
+
+// MS-OSHARED 2.4.3 MsoCrc32Compute: non-reflected MSB-first polynomial
+// x^32+x^7+x^5+x^3+x^2+x+1, zero initial remainder, no final complement.
+// Streaming avoids allocating a concatenated copy of the XF table.
+fn checksum(bytes: impl Iterator<Item = u8>) -> u32 {
+    let mut crc = 0u32;
+    for byte in bytes {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = (crc << 1) ^ if crc & 0x8000_0000 != 0 { 0xaf } else { 0 };
+        }
+    }
+    crc
+}

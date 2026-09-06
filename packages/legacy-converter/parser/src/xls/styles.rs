@@ -8,6 +8,7 @@ use super::{
 };
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
+mod extensions;
 
 const PATTERNS: [&str; 19] = [
     "none",
@@ -52,6 +53,7 @@ pub(super) struct Styles<'a> {
     xfs: Vec<&'a [u8]>,
     formats: BTreeMap<u16, String>,
     palette: Option<&'a [u8]>,
+    extensions: extensions::Extensions,
     pub extensions_omitted: bool,
 }
 
@@ -62,6 +64,7 @@ impl<'a> Styles<'a> {
             xfs: vec![],
             formats: BTreeMap::new(),
             palette: None,
+            extensions: extensions::Extensions::default(),
             extensions_omitted: false,
         };
         for record in records.iter().take_while(|r| r.kind != super::EOF) {
@@ -96,6 +99,7 @@ impl<'a> Styles<'a> {
                 _ => {}
             }
         }
+        styles.extensions = extensions::Extensions::parse(records, &styles.xfs)?;
         Ok(styles)
     }
 
@@ -126,7 +130,7 @@ impl<'a> Styles<'a> {
     }
 
     fn font(&self, data: &[u8]) -> Result<String, String> {
-        self.font_xml(data, false)
+        self.font_xml(data, false, None)
     }
 
     pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
@@ -137,10 +141,10 @@ impl<'a> Styles<'a> {
             .get(offset)
             .filter(|_| index != 4)
             .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))?;
-        self.font_xml(data, true)
+        self.font_xml(data, true, None)
     }
 
-    fn font_xml(&self, data: &[u8], run: bool) -> Result<String, String> {
+    fn font_xml(&self, data: &[u8], run: bool, color: Option<&str>) -> Result<String, String> {
         if data.len() < 16 {
             return Err(unsupported("truncated BIFF font"));
         }
@@ -150,7 +154,8 @@ impl<'a> Styles<'a> {
         } else {
             ("font", "name")
         };
-        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&name), f64::from(u16_at(data, 0)?) / 20.0, self.color(u16_at(data, 4)?), data[11], data[12]);
+        let base_color = self.color(u16_at(data, 4)?);
+        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&name), f64::from(u16_at(data, 0)?) / 20.0, color.unwrap_or(&base_color), data[11], data[12]);
         // OOXML exposes only bold/normal, not arbitrary LOGFONT weight.
         if u16_at(data, 6)? == 700 {
             xml.push_str("<b/>");
@@ -206,12 +211,18 @@ impl<'a> Styles<'a> {
         if self.xfs.is_empty() && self.fonts.is_empty() {
             return Ok(minimal_styles());
         }
-        let mut fonts = String::new();
+        let mut fonts = Vec::new();
         for font in &self.fonts {
-            fonts.push_str(&self.font(font)?);
+            fonts.push(self.font(font)?);
         }
         if fonts.is_empty() {
             return Err(unsupported("BIFF styles reference missing fonts"));
+        }
+        // Keep original font indices stable for shared-string rich runs. XF-local
+        // color overrides append an interned variant, never mutate a shared font.
+        let mut font_ids = BTreeMap::new();
+        for (id, xml) in fonts.iter().enumerate() {
+            font_ids.entry(xml.clone()).or_insert(id);
         }
         let mut fills = vec![
             "<fill><patternFill patternType=\"none\"/></fill>".to_string(),
@@ -222,12 +233,25 @@ impl<'a> Styles<'a> {
         let mut fill_ids = BTreeMap::from([(fills[0].clone(), 0usize), (fills[1].clone(), 1)]);
         let mut border_ids = BTreeMap::from([(borders[0].clone(), 0usize)]);
         let mut xfs = Vec::new();
-        for data in &self.xfs {
+        for (index, data) in self.xfs.iter().enumerate() {
             let ifnt = u16_at(data, 0)?;
-            let font = usize::from(ifnt - u16::from(ifnt > 4));
+            let mut font = usize::from(ifnt - u16::from(ifnt > 4));
             if ifnt == 4 || font >= self.fonts.len() {
                 return Err(unsupported("BIFF XF font index out of range"));
             }
+            if let Some(color) = self.extensions.color(index, 13) {
+                font = intern(
+                    self.font_xml(self.fonts[font], false, Some(color))?,
+                    &mut fonts,
+                    &mut font_ids,
+                );
+            }
+            let color = |property, fallback| {
+                self.extensions
+                    .color(index, property)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.color(fallback))
+            };
             let flags = u16_at(data, 4)?;
             let b1 = u32_at(data, 10)?;
             let b2 = u32_at(data, 14)?;
@@ -238,7 +262,7 @@ impl<'a> Styles<'a> {
             let fill = if *pattern == "none" {
                 fills[0].clone()
             } else {
-                format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", self.color(colors & 127), self.color((colors >> 7) & 127))
+                format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", color(4, colors & 127), color(5, (colors >> 7) & 127))
             };
             let fill_id = intern(fill, &mut fills, &mut fill_ids);
             let mut border = format!(
@@ -246,12 +270,12 @@ impl<'a> Styles<'a> {
                 (b1 >> 30) & 1,
                 (b1 >> 31) & 1
             );
-            for (tag, style, color) in [
-                ("left", b1 & 15, (b1 >> 16) & 127),
-                ("right", (b1 >> 4) & 15, (b1 >> 23) & 127),
-                ("top", (b1 >> 8) & 15, b2 & 127),
-                ("bottom", (b1 >> 12) & 15, (b2 >> 7) & 127),
-                ("diagonal", (b2 >> 21) & 15, (b2 >> 14) & 127),
+            for (tag, style, palette_color, property) in [
+                ("left", b1 & 15, (b1 >> 16) & 127, 9),
+                ("right", (b1 >> 4) & 15, (b1 >> 23) & 127, 10),
+                ("top", (b1 >> 8) & 15, b2 & 127, 7),
+                ("bottom", (b1 >> 12) & 15, (b2 >> 7) & 127, 8),
+                ("diagonal", (b2 >> 21) & 15, (b2 >> 14) & 127, 11),
             ] {
                 let style = BORDERS
                     .get(style as usize)
@@ -261,7 +285,7 @@ impl<'a> Styles<'a> {
                 } else {
                     border.push_str(&format!(
                         "<{tag} style=\"{style}\"><color {}/></{tag}>",
-                        self.color(color as u16)
+                        color(property, palette_color as u16)
                     ));
                 }
             }
@@ -304,7 +328,7 @@ impl<'a> Styles<'a> {
                 )
             })
             .collect();
-        Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"{}\">{formats}</numFmts><fonts count=\"{}\">{fonts}</fonts><fills count=\"{}\">{}</fills><borders count=\"{}\">{}</borders><cellStyleXfs count=\"1\">{normal}</cellStyleXfs><cellXfs count=\"{}\">{}</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>", self.formats.len(), self.fonts.len(), fills.len(), fills.join(""), borders.len(), borders.join(""), xfs.len(), xfs.join("")))
+        Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"{}\">{formats}</numFmts><fonts count=\"{}\">{}</fonts><fills count=\"{}\">{}</fills><borders count=\"{}\">{}</borders><cellStyleXfs count=\"1\">{normal}</cellStyleXfs><cellXfs count=\"{}\">{}</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>", self.formats.len(), fonts.len(), fonts.join(""), fills.len(), fills.join(""), borders.len(), borders.join(""), xfs.len(), xfs.join("")))
     }
 }
 
@@ -330,6 +354,51 @@ mod tests {
         data
     }
     #[test]
+    fn checksum_bound_extended_rgb_colors_override_only_the_owned_xf() {
+        let font = font();
+        let mut xf = [0; 20];
+        xf[17] = 6; // Solid fill and CellXF.fHasXFExt.
+        let mut crc = [0; 20];
+        crc[..2].copy_from_slice(&0x087cu16.to_le_bytes());
+        crc[14..16].copy_from_slice(&16u16.to_le_bytes());
+        crc[16..].copy_from_slice(&0x344d21a3u32.to_le_bytes());
+        let mut ext = vec![0; 20];
+        ext[..2].copy_from_slice(&0x087du16.to_le_bytes());
+        ext[14] = 1;
+        ext[18] = 2;
+        for kind in [4u16, 13] {
+            ext.extend_from_slice(&kind.to_le_bytes());
+            ext.extend_from_slice(&20u16.to_le_bytes());
+            ext.extend_from_slice(&[2, 0, 0, 0, 0x12, 0x34, 0x56, 0xff]);
+            ext.extend_from_slice(&[0; 8]);
+        }
+        let mut records = vec![Record {
+            kind: 0x31,
+            offset: 0,
+            data: &font,
+        }];
+        records.extend((0..16).map(|_| Record {
+            kind: 0xe0,
+            offset: 0,
+            data: &xf,
+        }));
+        records.push(Record {
+            kind: 0x87c,
+            offset: 0,
+            data: &crc,
+        });
+        records.push(Record {
+            kind: 0x87d,
+            offset: 0,
+            data: &ext,
+        });
+        let xml = Styles::parse(&records).unwrap().xml().unwrap();
+        assert!(xml.contains("<fgColor rgb=\"FF123456\"/>"));
+        assert!(xml.contains("<color rgb=\"FF123456\"/>"));
+        assert!(xml.contains("<fonts count=\"2\">"));
+        assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
+    }
+    #[test]
     fn remaps_font_gap_and_deduplicates_repeated_fills() {
         let font = font();
         let mut xf = [0u8; 20];
@@ -340,6 +409,7 @@ mod tests {
             formats: BTreeMap::new(),
             palette: None,
             extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
         };
         let xml = s.xml().unwrap();
         assert!(xml.contains("fontId=\"4\""));
@@ -356,6 +426,7 @@ mod tests {
             formats: BTreeMap::new(),
             palette: Some(&palette),
             extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
         };
         assert_eq!(s.color(10), "rgb=\"FF123456\"");
         assert_eq!(s.color(0x7fff), "auto=\"1\"");
@@ -373,6 +444,7 @@ mod tests {
                 formats: BTreeMap::new(),
                 palette: None,
                 extensions_omitted: false,
+                extensions: extensions::Extensions::default(),
             };
             assert!(s.xml().is_err());
         }
@@ -395,6 +467,7 @@ mod tests {
             formats: BTreeMap::from([(164, "[Red][<0]0.0\"&\"".into())]),
             palette: None,
             extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
         };
         assert!(s
             .xml()
