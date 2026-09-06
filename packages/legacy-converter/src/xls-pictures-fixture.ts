@@ -10,11 +10,19 @@ const bof = (kind: number) => biff(0x809, concat(little16(0x600), little16(kind)
 export function buildXlsPicturesFixture(options: {
   hiddenRoot?: boolean; nested?: boolean; malformedImage?: boolean;
   unknownFont?: boolean; behavior?: 0 | 2 | 3; dx?: number;
+  normalFont?: { family: string; sizePoints: number; bold: boolean; italic: boolean };
 } = {}): Uint8Array {
-  const font = (name: string) => {
+  const font = (name: string, normal = false) => {
+    const format = normal ? options.normalFont : undefined;
     const data = new Uint8Array(16);
-    data.set(little16(220)); data.set(little16(400), 6); data[14] = name.length;
-    return biff(0x31, concat(data, new TextEncoder().encode(name)));
+    data.set(little16((format?.sizePoints ?? 11) * 20));
+    data.set(little16(format?.italic ? 2 : 0), 2);
+    data.set(little16(format?.bold ? 700 : 400), 6); data[14] = name.length;
+    // MS-XLS 2.4.122 requires fontName.fHighByte=1 even for ASCII names.
+    // ShortXLUnicodeString counts UTF-16 units, not UTF-8 bytes.
+    data[15] = 1;
+    const chars = Array.from({ length: name.length }, (_, i) => name.charCodeAt(i));
+    return biff(0x31, concat(data, concat(...chars.map(little16))));
   };
   const xf = new Uint8Array(20); xf[0] = 1; xf[4] = 4;
   if (options.unknownFont) xf[4] = 0;
@@ -35,7 +43,7 @@ export function buildXlsPicturesFixture(options: {
   obj.set(concat(little16(0x15), little16(18), little16(8), little16(7), little16(0x11)));
   obj.set(concat(little16(7), little16(2), little16(9), little16(8), little16(2), little16(1)), 22);
   const bound = concat(little32(0), new Uint8Array([0, 0, 1, 0, 83]));
-  const globals = () => concat(bof(5), biff(0x85, bound), font('Unused'), font('Arial'), biff(0xe0, xf), store, biff(10));
+  const globals = () => concat(bof(5), biff(0x85, bound), font('Unused'), font(options.normalFont?.family ?? 'Arial', true), biff(0xe0, xf), store, biff(10));
   bound.set(little32(globals().length));
   const number = new Uint8Array(14); new DataView(number.buffer).setFloat64(6, 42.5, true);
   const workbook = concat(globals(), bof(16), biff(0x225, new Uint8Array([0, 0, 44, 1])),

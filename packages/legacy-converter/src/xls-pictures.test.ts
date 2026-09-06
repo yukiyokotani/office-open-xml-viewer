@@ -57,6 +57,42 @@ describe('measured XLS picture conversion', () => {
     expect(Object.keys(parts(result.bytes)).some((p) => p.includes('/drawings/'))).toBe(false);
   });
 
+  it('measures each workbook independently, preserving Unicode family and face metadata', async () => {
+    const fonts = [
+      { family: 'Example Sans', sizePoints: 11, bold: false, italic: false },
+      { family: '検証書体', sizePoints: 12, bold: false, italic: false },
+      { family: 'Example Sans', sizePoints: 11, bold: true, italic: true },
+      { family: 'Example Sans', sizePoints: 11, bold: false, italic: false },
+    ];
+    const widths = [7, 9, 8, 7];
+    const measure = vi.fn(async () => widths[measure.mock.calls.length - 1]);
+    const converter = createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: measure });
+    for (const [index, font] of fonts.entries()) {
+      const result = await converter.convert(request(buildXlsPicturesFixture({ normalFont: font })));
+      expect(measure).toHaveBeenNthCalledWith(index + 1, font, expect.any(AbortSignal));
+      const zip = parts(result.bytes);
+      const drawing = strFromU8(zip['xl/drawings/drawing1.xml']);
+      // Ten measured digits per column; MS-XLS cell fractions 512/1024
+      // and 256/1024. Two columns minus the two corner offsets spans
+      // 17.5 digits. Only the columns depend on the measured Normal font;
+      // row dimensions remain the explicit BIFF twips (635 EMU/twip).
+      expect(drawing).toContain(`<xdr:colOff>${5 * widths[index] * 9525}</xdr:colOff>`);
+      expect(drawing).toContain(`<a:ext cx="${Math.round(17.5 * widths[index] * 9525)}" cy="523875"/>`);
+      expect(drawing).toContain('<xdr:rowOff>95250</xdr:rowOff>');
+      expect(zip['xl/media/image1.png']).toEqual(picturePng);
+      expect(strFromU8(zip['xl/worksheets/sheet1.xml'])).toContain('<v>42.5</v>');
+    }
+    expect(measure).toHaveBeenCalledTimes(fonts.length);
+  });
+
+  it.each([1, 4096])('accepts metric contract boundary %i without changing row geometry', async (width) => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => width }).convert(request());
+    const drawing = strFromU8(parts(result.bytes)['xl/drawings/drawing1.xml']);
+    expect(drawing).toContain(`<xdr:colOff>${5 * width * 9525}</xdr:colOff>`);
+    expect(drawing).toContain(`<a:ext cx="${Math.round(17.5 * width * 9525)}" cy="523875"/>`);
+    await validateConvertedOoxml(new Uint8Array(result.bytes), 'xlsx');
+  });
+
   it.each([{ hiddenRoot: true }, { nested: true }, { malformedImage: true }, { unknownFont: true }])('omits unsupported pictures without invoking fonts: %j', async (options) => {
     const measure = vi.fn(() => 7);
     const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: measure }).convert(request(buildXlsPicturesFixture(options)));
