@@ -108,9 +108,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
             Some(&mut media),
         )?;
         fallback |= drawing.fallback;
-        let background = match presentation.backgrounds[index] {
-            Some(paint) => background_xml(
-                &paint,
+        let background = match &presentation.backgrounds[index] {
+            Some(background) => background_xml(
+                &background.paint,
                 presentation.schemes[index].as_ref(),
                 &mut media,
                 &mut record_budget,

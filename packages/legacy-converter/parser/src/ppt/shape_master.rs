@@ -12,6 +12,7 @@ pub(super) struct Node {
     pub base: Option<Rc<text_style::Master>>,
     pub paint: paint::Paint,
     pub geometry: crate::officeart::geometry::SpannedGeometry,
+    pub gradient: crate::officeart::gradient::Spanned,
 }
 #[derive(Default)]
 pub(super) struct Resolver {
@@ -23,6 +24,7 @@ struct Resolved {
     text_base: Option<TextBase>,
     paint: paint::Paint,
     geometry: crate::officeart::geometry::SpannedGeometry,
+    gradient: crate::officeart::gradient::Spanned,
     depth: usize,
 }
 #[derive(Clone)]
@@ -88,6 +90,15 @@ impl Resolver {
             .map(|v| &v.geometry)
             .ok_or_else(|| unsupported("unresolved PowerPoint master geometry"))
     }
+    pub fn gradient(
+        &self,
+        id: u32,
+    ) -> Result<&crate::officeart::gradient::Spanned, String> {
+        self.resolved
+            .get(&id)
+            .map(|value| &value.gradient)
+            .ok_or_else(|| unsupported("unresolved PowerPoint master gradient"))
+    }
     fn resolve(
         &mut self,
         id: u32,
@@ -139,6 +150,10 @@ impl Resolver {
             Some(parent) => node.geometry.inherit(&self.resolved[&parent].geometry),
             None => node.geometry.clone(),
         };
+        let gradient = match parent {
+            Some(parent) => node.gradient.inherit(&self.resolved[&parent].gradient),
+            None => node.gradient.clone(),
+        };
         let base = inherited.as_ref().map(|v| v.as_slice()).or_else(|| {
             node.base
                 .as_ref()
@@ -164,6 +179,7 @@ impl Resolver {
                 text_base,
                 paint,
                 geometry,
+                gradient,
                 depth,
             },
         );
@@ -183,6 +199,7 @@ mod tests {
             base: None,
             paint: paint::Paint::default(),
             geometry: crate::officeart::geometry::SpannedGeometry::default(),
+            gradient: crate::officeart::gradient::Spanned::default(),
         }
     }
     fn master_size(size: u16) -> Rc<text_style::Master> {
@@ -346,5 +363,45 @@ mod tests {
         assert!(resolver.geometry(1).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_some());
         assert!(resolver.geometry(2).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_none());
         assert!(resolver.geometry(1).unwrap().view(&moved[..moved.len() - 1]).is_err());
+    }
+    #[test]
+    fn resolved_master_gradient_inherits_and_explicit_reset_vetoes_parent() {
+        let backing = vec![1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
+        let span = crate::officeart::ByteSpan::new(
+            0..backing.len(),
+            backing.len(),
+            "gradient",
+        )
+        .unwrap();
+        let mut root = node(1, None);
+        root.gradient.set(span);
+        let inherited = node(2, Some(1));
+        let mut reset = node(3, Some(2));
+        reset.gradient.scalar(0);
+        let mut resolver = Resolver::default();
+        resolver.insert(root).unwrap();
+        resolver.insert(inherited).unwrap();
+        resolver.insert(reset).unwrap();
+        resolver.finish(&mut 20).unwrap();
+        assert_eq!(
+            resolver
+                .gradient(2)
+                .unwrap()
+                .view(&backing)
+                .unwrap()
+                .decode(&mut 1, &mut 8)
+                .unwrap()
+                .unwrap()[0]
+                .color,
+            7
+        );
+        assert!(resolver
+            .gradient(3)
+            .unwrap()
+            .view(&backing)
+            .unwrap()
+            .decode(&mut 1, &mut 8)
+            .unwrap()
+            .is_none());
     }
 }

@@ -76,15 +76,16 @@ impl Context<'_> {
         }
         self.drawing(local, false)?;
         let scheme = self.presentation.schemes[self.index].as_ref();
-        let background = match self.presentation.backgrounds[self.index] {
-            Some(paint) => {
+        let background = match &self.presentation.backgrounds[self.index] {
+            Some(background) => {
                 self.charge_shape_strings()?;
-                let image = paint
+                let image = background
+                    .paint
                     .background_image()
                     .map(|(id, alpha)| self.image_fill(id, alpha, false))
                     .transpose()?
                     .flatten();
-                paint.background_model(scheme, image)
+                background.paint.background_model(scheme, image)
             }
             None => None,
         };
@@ -206,6 +207,14 @@ impl Context<'_> {
             .map(|id| self.presentation.shape_masters.paint(id))
             .transpose()?;
         let paint = master.map_or(shape.props.paint, |base| shape.props.paint.inherit(base));
+        let _gradient = match shape.master() {
+            Some(id) => shape
+                .props
+                .gradient
+                .inherit(self.presentation.shape_masters.gradient(id)?),
+            None => shape.props.gradient.clone(),
+        }
+        .view(self.backing)?;
         let local_geometry = shape.props.geometry.view(self.backing)?;
         let geometry = match shape.master() {
             Some(id) => local_geometry.inherit(
@@ -978,7 +987,10 @@ mod tests {
         let mut background = paint::Paint::default();
         background.property(0x180, 3).unwrap();
         background.property(0x4186, 1).unwrap();
-        p.backgrounds[0] = Some(background);
+        p.backgrounds[0] = Some(drawing::SpannedBackground {
+            paint: background,
+            gradient: crate::officeart::gradient::Spanned::default(),
+        });
         let mut media = media::SpanStore::new(p.image_entries.clone());
         let model = slide(
             0,

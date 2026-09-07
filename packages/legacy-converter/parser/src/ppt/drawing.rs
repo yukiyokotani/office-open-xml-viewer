@@ -477,6 +477,7 @@ impl<R, C, S> ShapeStorage<R, C, S> {
 
 struct PropertiesStorage<T> {
     geometry: geometry::GeometryStorage<T>,
+    gradient: crate::officeart::gradient::Storage<T>,
     hidden: bool,
     script: bool,
     master: Option<u32>,
@@ -498,6 +499,7 @@ impl<T> Default for PropertiesStorage<T> {
     fn default() -> Self {
         Self {
             geometry: geometry::GeometryStorage::default(),
+            gradient: crate::officeart::gradient::Storage::default(),
             hidden: false,
             script: false,
             master: None,
@@ -544,6 +546,10 @@ impl<T: Default + Clone> PropertiesStorage<T> {
             return Ok(());
         }
         if let Some(complex) = complex {
+            if opid & 0x3fff == 0x197 {
+                self.gradient.set(complex);
+                return Ok(());
+            }
             if matches!(opid & 0x3fff, 0x145..=0x150) {
                 self.paint.custom_geometry = true;
             }
@@ -552,6 +558,10 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         }
         if matches!(opid & 0x3fff, 0x145 | 0x146) {
             self.geometry.scalar(opid & 0x3fff, value)?;
+        }
+        if opid & 0x3fff == 0x197 {
+            self.gradient.scalar(value);
+            return Ok(());
         }
         if opid & 0x4000 != 0 {
             if opid == 0x4104 {
@@ -648,42 +658,107 @@ impl SpannedProperties {
 
 /// A slide background is the ungrouped OfficeArt background shape, not an
 /// arbitrary full-slide rectangle. Never inspect nested client/action data.
-pub(super) fn background(slide: &[u8], budget: &mut usize) -> Result<Option<paint::Paint>, String> {
-    let children = parse_records(slide, budget)?;
-    let mut drawings = children.iter().filter(|r| r.kind == 1036);
+#[derive(Clone)]
+pub(super) struct BackgroundStorage<T> {
+    pub paint: paint::Paint,
+    pub gradient: crate::officeart::gradient::Storage<T>,
+}
+pub(super) type Background<'a> = BackgroundStorage<&'a [u8]>;
+pub(super) type SpannedBackground = BackgroundStorage<ByteSpan>;
+
+impl SpannedBackground {
+    pub fn view<'a>(&self, backing: &'a [u8]) -> Result<Background<'a>, String> {
+        Ok(BackgroundStorage {
+            paint: self.paint,
+            gradient: self.gradient.view(backing)?,
+        })
+    }
+}
+
+pub(super) fn background<'a>(
+    slide: &'a [u8],
+    budget: &mut usize,
+) -> Result<Option<Background<'a>>, String> {
+    background_from(
+        &BorrowedSource(std::marker::PhantomData),
+        &Record {
+            version: 0,
+            instance: 0,
+            kind: 0,
+            payload: slide,
+        },
+        budget,
+    )
+}
+
+pub(super) fn spanned_background(
+    backing: &[u8],
+    slide: &RecordSpan,
+    budget: &mut usize,
+) -> Result<Option<SpannedBackground>, String> {
+    background_from(&SpannedSlideSource { backing }, slide, budget)
+}
+
+fn background_from<S: ShapeSource>(
+    source: &S,
+    slide: &S::Record,
+    budget: &mut usize,
+) -> Result<Option<BackgroundStorage<S::Complex>>, String> {
+    let mut drawings = Vec::new();
+    for record in source.children(slide, budget)? {
+        if source.with_record(&record, |view| Ok(view.kind == 1036))? {
+            drawings.push(record);
+        }
+    }
+    let mut drawings = drawings.into_iter();
     let Some(drawing) = drawings.next() else {
         return Ok(None);
     };
-    if drawings.next().is_some() || drawing.version != 15 {
+    if drawings.next().is_some()
+        || source.with_record(&drawing, |view| Ok(view.version != 15))?
+    {
         return Err(unsupported("invalid PowerPoint background drawing"));
     }
-    let groups = parse_records(drawing.payload, budget)?;
-    if groups.len() != 1 || groups[0].kind != 0xf002 || groups[0].version != 15 {
-        return Err(unsupported(
-            "invalid PowerPoint background OfficeArt drawing",
-        ));
+    let groups = source.children(&drawing, budget)?;
+    if groups.len() != 1 {
+        return Err(unsupported("invalid PowerPoint background OfficeArt drawing"));
+    }
+    if source.with_record(&groups[0], |view| {
+        Ok(view.kind != 0xf002 || view.version != 15)
+    })? {
+        return Err(unsupported("invalid PowerPoint background OfficeArt drawing"));
     }
     let mut result = None;
-    for record in parse_records(groups[0].payload, budget)? {
-        if record.kind != 0xf004 {
+    for record in source.children(&groups[0], budget)? {
+        if source.with_record(&record, |view| Ok(view.kind != 0xf004))? {
             continue;
         }
-        // Only the flag record is needed to decide whether this is a background.
-        let flags: Vec<_> = parse_records(record.payload, budget)?
-            .into_iter()
-            .filter(|r| r.kind == 0xf00a)
-            .collect();
-        if flags.len() != 1 || flags[0].version != 2 || flags[0].payload.len() != 8 {
+        let mut flags = Vec::new();
+        for child in source.children(&record, budget)? {
+            if source.with_record(&child, |view| Ok(view.kind == 0xf00a))? {
+                flags.push(child);
+            }
+        }
+        if flags.len() != 1 {
             return Err(unsupported("invalid PowerPoint background shape flags"));
         }
-        let value = u32_at(flags[0].payload, 4)?;
+        let value = source.with_record(&flags[0], |flag| {
+            if flag.version != 2 || flag.payload.len() != 8 {
+                return Err(unsupported("invalid PowerPoint background shape flags"));
+            }
+            u32_at(flag.payload, 4)
+        })?;
         if value & 1024 == 0 || value & (8 | 16) != 0 {
             continue;
         }
         if result.is_some() {
             return Err(unsupported("duplicate PowerPoint background shapes"));
         }
-        result = Some(Shape::read(record, false, budget)?.props.paint);
+        let props = ShapeStorage::read_from(source, record, false, budget)?.props;
+        result = Some(BackgroundStorage {
+            paint: props.paint,
+            gradient: props.gradient,
+        });
     }
     Ok(result)
 }
@@ -806,6 +881,7 @@ pub(super) fn master_shapes(
                 base: base.clone(),
                 paint: shape.props.paint,
                 geometry: shape.props.geometry,
+                gradient: shape.props.gradient,
             })?;
         }
         Ok(())
@@ -925,6 +1001,16 @@ impl Writer<'_, '_> {
                 let paint = match (shape.master(), self.context.and_then(|c| c.shapes)) {
                     (Some(id), Some(shapes)) => shape.props.paint.inherit(shapes.paint(id)?),
                     _ => shape.props.paint,
+                };
+                // Resolve retained shade-array ownership at the visible shape
+                // boundary. Semantic decoding waits for supported projection.
+                let _gradient = match (shape.master(), self.context.and_then(|c| c.shapes)) {
+                    (Some(id), Some(shapes)) => shape.props.gradient.inherit(
+                        &shapes
+                            .gradient(id)?
+                            .view(self.context.expect("context").backing)?,
+                    ),
+                    _ => shape.props.gradient.clone(),
                 };
                 if shape.kind == 75 && shape.props.picture != 0 {
                     let index = shape.props.picture;
@@ -1977,6 +2063,7 @@ mod tests {
             background(&input, &mut 100)
             .unwrap()
             .unwrap()
+            .paint
             .background_fill(None)
             .unwrap()
                 .contains("563412")
@@ -2001,6 +2088,84 @@ mod tests {
                 .contains("duplicate")
         );
         assert!(background(&input, &mut 1).is_err());
+    }
+
+    #[test]
+    fn background_gradient_is_retained_as_a_span_without_eager_decode() {
+        let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
+        let fopt = record(
+            (1 << 4) | 3,
+            0xf00b,
+            &[
+                0x8197u16.to_le_bytes().as_slice(),
+                (shade.len() as u32).to_le_bytes().as_slice(),
+                shade.as_slice(),
+            ]
+            .concat(),
+        );
+        let slide = record(15, 1006, &drawing(vec![sp(0xc00, vec![fopt])]));
+        let span = record_span_with_end(&slide, 0, &mut 100, "test").unwrap().0;
+        let retained = spanned_background(&slide, &span, &mut 100)
+            .unwrap()
+            .unwrap();
+        let moved = slide;
+        assert_eq!(
+            retained
+                .view(&moved)
+                .unwrap()
+                .gradient
+                .decode(&mut 1, &mut 8)
+                .unwrap()
+                .unwrap()[0]
+                .color,
+            7
+        );
+        assert!(retained.view(&moved[..moved.len() - 1]).is_err());
+    }
+
+    #[test]
+    // MS-ODRAW 2.3.7.26 leaves fBid undefined for fillShadeColors: ignore
+    // that flag, retain scalar zero as reset, and defer invalid values.
+    fn scalar_shade_reset_ignores_fbid_and_defers_invalid_value_rejection() {
+        let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
+        for opid in [0x197, 0x4197] {
+            let mut props = Properties::default();
+            props.apply_primary(0x8197, shade.len() as u32, Some(&shade))
+                .unwrap();
+            props.apply_primary(opid, 0, None).unwrap();
+            assert!(props
+                .gradient
+                .decode(&mut 1, &mut 8)
+                .unwrap()
+                .is_none());
+        }
+        let mut invalid = Properties::default();
+        invalid.apply_primary(0x197, 1, None).unwrap();
+        assert!(invalid.gradient.decode(&mut 1, &mut 8).is_err());
+    }
+
+    #[test]
+    fn retained_gradient_does_not_change_xml_before_projection_is_supported() {
+        let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
+        let gradient = record(
+            (2 << 4) | 3,
+            0xf00b,
+            &[
+                0x180u16.to_le_bytes().as_slice(),
+                4u32.to_le_bytes().as_slice(),
+                0x8197u16.to_le_bytes().as_slice(),
+                (shade.len() as u32).to_le_bytes().as_slice(),
+                shade.as_slice(),
+            ]
+            .concat(),
+        );
+        let shape = |extra| {
+            drawing(vec![sp(
+                0x200,
+                vec![record(0, 0xf010, &ints(&[0, 0, 576, 288])), extra, text("x")],
+            )])
+        };
+        assert_eq!(xml(&shape(properties(&[(0x180, 4)]))).unwrap(), xml(&shape(gradient)).unwrap());
     }
 
     #[test]

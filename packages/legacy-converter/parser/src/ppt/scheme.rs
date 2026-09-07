@@ -72,8 +72,8 @@ pub(super) struct Resolver {
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
-    backgrounds: BTreeMap<u32, Option<paint::Paint>>,
-    background_cache: BTreeMap<u32, Option<paint::Paint>>,
+    backgrounds: BTreeMap<u32, Option<drawing::SpannedBackground>>,
+    background_cache: BTreeMap<u32, Option<drawing::SpannedBackground>>,
     records: BTreeMap<u32, RecordSpan>,
     object_cache: BTreeMap<u32, std::rc::Rc<[RecordSpan]>>,
 }
@@ -122,8 +122,11 @@ impl Resolver {
                     return Err(unsupported("invalid PowerPoint master persist object"));
                 }
                 masters.insert(id, entry(record, budget)?);
+                backgrounds.insert(
+                    id,
+                    drawing::spanned_background(document, &record_span, budget)?,
+                );
                 master_records.push((id, record_span));
-                backgrounds.insert(id, drawing::background(record.payload, budget)?);
                 if record.kind == 1016 {
                     let records = parse_records(record.payload, budget)?;
                     text_styles.insert(
@@ -216,12 +219,13 @@ impl Resolver {
     }
     pub fn background(
         &mut self,
-        slide: Record<'_>,
+        document: &[u8],
+        slide: &RecordSpan,
         budget: &mut usize,
-    ) -> Result<Option<paint::Paint>, String> {
-        match entry(slide, budget)?.background_parent {
+    ) -> Result<Option<drawing::SpannedBackground>, String> {
+        match entry(slide.view(document)?, budget)?.background_parent {
             Some(id) => self.master_background(id, &mut Vec::new(), budget),
-            None => drawing::background(slide.payload, budget),
+            None => drawing::spanned_background(document, slide, budget),
         }
     }
     fn master_background(
@@ -229,12 +233,12 @@ impl Resolver {
         id: u32,
         path: &mut Vec<u32>,
         budget: &mut usize,
-    ) -> Result<Option<paint::Paint>, String> {
+    ) -> Result<Option<drawing::SpannedBackground>, String> {
         *budget = budget
             .checked_sub(1)
             .ok_or_else(|| unsupported("PowerPoint background work budget exceeded"))?;
         if let Some(value) = self.background_cache.get(&id) {
-            return Ok(*value);
+            return Ok(value.clone());
         }
         if path.len() >= MAX_DEPTH || path.contains(&id) {
             return Err(unsupported(
@@ -248,10 +252,10 @@ impl Resolver {
         path.push(id);
         let result = match e.background_parent {
             Some(parent) => self.master_background(parent, path, budget)?,
-            None => self.backgrounds.get(&id).copied().flatten(),
+            None => self.backgrounds.get(&id).cloned().flatten(),
         };
         path.pop();
-        self.background_cache.insert(id, result);
+        self.background_cache.insert(id, result.clone());
         Ok(result)
     }
     pub fn text_master(
@@ -504,12 +508,15 @@ mod tests {
         // Background bit alone inherits through title to main. Scheme index is
         // retained until paint, using the destination slide's current scheme.
         let input = background_slide(1006, 200, 4, 0x123456);
-        let paint = r.background(parsed(&input), &mut 100).unwrap().unwrap();
+        let input_span = record_span_with_end(&input, 0, &mut 100, "test").unwrap().0;
+        let paint = r.background(&input, &input_span, &mut 100).unwrap().unwrap();
         assert!(paint
+            .paint
             .background_fill(Some(&[0xabcdef; 8]))
             .unwrap()
             .contains("EFCDAB"));
         assert!(paint
+            .paint
             .background_fill(Some(&[0x123456; 8]))
             .unwrap()
             .contains("563412"));
@@ -517,10 +524,12 @@ mod tests {
         assert!(r.master_background(200, &mut Vec::new(), &mut 0).is_err());
         // Scheme/objects bits do not inherit the background.
         let local = background_slide(1006, 200, 3, 0x123456);
+        let local_span = record_span_with_end(&local, 0, &mut 100, "test").unwrap().0;
         assert!(r
-            .background(parsed(&local), &mut 100)
+            .background(&local, &local_span, &mut 100)
             .unwrap()
             .unwrap()
+            .paint
             .background_fill(None)
             .unwrap()
             .contains("563412"));

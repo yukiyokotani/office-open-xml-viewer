@@ -2,6 +2,7 @@
 use std::ops::Range;
 
 pub(crate) mod geometry;
+pub(crate) mod gradient;
 mod metafile;
 pub(crate) mod properties;
 #[cfg(test)]

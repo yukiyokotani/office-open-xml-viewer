@@ -15,6 +15,11 @@ pub(super) struct Paint {
     fill: Option<u32>,
     fill_blip: Option<u32>,
     fill_alpha: Option<u32>,
+    fill_back: Option<u32>,
+    fill_back_alpha: Option<u32>,
+    fill_angle: Option<u32>,
+    fill_focus: Option<u32>,
+    fill_shade_type: Option<u32>,
     fill_dztype: Option<u32>,
     fill_origins: [Option<u32>; 4],
     filled: Option<bool>,
@@ -118,6 +123,11 @@ impl Paint {
             fill: self.fill.or(parent.fill),
             fill_blip: self.fill_blip.or(parent.fill_blip),
             fill_alpha: self.fill_alpha.or(parent.fill_alpha),
+            fill_back: self.fill_back.or(parent.fill_back),
+            fill_back_alpha: self.fill_back_alpha.or(parent.fill_back_alpha),
+            fill_angle: self.fill_angle.or(parent.fill_angle),
+            fill_focus: self.fill_focus.or(parent.fill_focus),
+            fill_shade_type: self.fill_shade_type.or(parent.fill_shade_type),
             fill_dztype: self.fill_dztype.or(parent.fill_dztype),
             fill_origins: std::array::from_fn(|i| self.fill_origins[i].or(parent.fill_origins[i])),
             filled: self.filled.or(parent.filled),
@@ -146,6 +156,11 @@ impl Paint {
             }
             0x180 => self.fill_type = Some(value),
             0x181 => self.fill = Some(value),
+            0x183 => self.fill_back = Some(value),
+            0x184 => self.fill_back_alpha = Some(value),
+            0x18b => self.fill_angle = Some(value),
+            0x18c => self.fill_focus = Some(value),
+            0x19c => self.fill_shade_type = Some(value),
             // Caller validates fBid on this one-based BStore reference.
             0x4186 => self.fill_blip = Some(value),
             0x182 | 0x1c1 => {
@@ -740,6 +755,38 @@ mod tests {
         assert!(local.inherit(&master).xml(1).contains("00FF00"));
         master.custom_geometry = true;
         assert!(local.inherit(&master).geometry(1).is_none());
+    }
+
+    #[test]
+    fn gradient_scalars_retain_raw_values_inherit_and_preserve_explicit_zero() {
+        let fields = [
+            (0x183, 0x0800_0003),
+            (0x184, 32768),
+            (0x18b, (-90i32 << 16) as u32),
+            (0x18c, (-25i32) as u32),
+            (0x19c, 0x4000_0003),
+        ];
+        let mut parent = Paint::default();
+        for (id, value) in fields {
+            parent.property(id, value).unwrap();
+        }
+        let inherited = Paint::default().inherit(&parent);
+        assert_eq!(inherited.fill_back, Some(0x0800_0003));
+        assert_eq!(inherited.fill_back_alpha, Some(32768));
+        assert_eq!(inherited.fill_angle, Some((-90i32 << 16) as u32));
+        assert_eq!(inherited.fill_focus, Some((-25i32) as u32));
+        assert_eq!(inherited.fill_shade_type, Some(0x4000_0003));
+
+        let mut child = Paint::default();
+        for (id, _) in fields {
+            child.property(id, 0).unwrap();
+        }
+        let explicit = child.inherit(&parent);
+        assert_eq!(explicit.fill_back, Some(0));
+        assert_eq!(explicit.fill_back_alpha, Some(0));
+        assert_eq!(explicit.fill_angle, Some(0));
+        assert_eq!(explicit.fill_focus, Some(0));
+        assert_eq!(explicit.fill_shade_type, Some(0));
     }
 
     #[test]

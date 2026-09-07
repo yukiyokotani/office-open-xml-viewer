@@ -3,7 +3,7 @@
 use super::*;
 use std::collections::{BTreeMap, HashSet};
 
-pub(super) struct PresentationStorage<R, S> {
+pub(super) struct PresentationStorage<R, S, B> {
     pub shape_masters: shape_master::Resolver,
     pub slides: Vec<(R, Vec<String>)>,
     pub outline_styles: Vec<Vec<Option<S>>>,
@@ -15,13 +15,15 @@ pub(super) struct PresentationStorage<R, S> {
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<R>,
-    pub backgrounds: Vec<Option<paint::Paint>>,
+    pub backgrounds: Vec<Option<B>>,
     pub object_masters: Vec<std::rc::Rc<[RecordSpan]>>,
     pub size: (u32, u32),
 }
 
-pub(super) type Presentation<'a> = PresentationStorage<Record<'a>, &'a [u8]>;
-pub(super) type OwnedPresentation = PresentationStorage<RecordSpan, ByteSpan>;
+pub(super) type Presentation<'a> =
+    PresentationStorage<Record<'a>, &'a [u8], drawing::Background<'a>>;
+pub(super) type OwnedPresentation =
+    PresentationStorage<RecordSpan, ByteSpan, drawing::SpannedBackground>;
 
 impl OwnedPresentation {
     fn into_borrowed(self, document: &[u8]) -> Result<Presentation<'_>, String> {
@@ -44,7 +46,11 @@ impl OwnedPresentation {
             document_text_axes: self.document_text_axes,
             fonts: self.fonts,
             schemes: self.schemes,
-            backgrounds: self.backgrounds,
+            backgrounds: self
+                .backgrounds
+                .into_iter()
+                .map(|background| background.map(|value| value.view(document)).transpose())
+                .collect::<Result<_, _>>()?,
             object_masters: self.object_masters,
             size: self.size,
         })
@@ -313,7 +319,7 @@ pub(super) fn resolve_owned(
             .collect::<Result<_, _>>()?,
         backgrounds: slides
             .iter()
-            .map(|(slide, _)| schemes.background(slide.view(document)?, budget))
+            .map(|(slide, _)| schemes.background(document, slide, budget))
             .collect::<Result<_, _>>()?,
         image_entries: media::catalog_spans(document, &child_spans, budget)?,
         text_masters: slides
