@@ -1,0 +1,11 @@
+[package]
+name = "xlsx-model"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+ooxml-common = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

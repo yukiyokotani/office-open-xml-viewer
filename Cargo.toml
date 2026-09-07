@@ -4,6 +4,7 @@ members = [
   "packages/ooxml-common",
   "packages/legacy-converter/parser",
   "packages/pptx/model",
+  "packages/xlsx/model",
   "packages/pptx/parser",
   "packages/docx/parser",
   "packages/xlsx/parser",
@@ -23,6 +24,7 @@ base64 = "0.22"
 console_error_panic_hook = "0.1"
 ooxml-common = { path = "packages/ooxml-common" }
 pptx-model = { path = "packages/pptx/model" }
+xlsx-model = { path = "packages/xlsx/model" }
 
 [profile.release]
 opt-level = "s"

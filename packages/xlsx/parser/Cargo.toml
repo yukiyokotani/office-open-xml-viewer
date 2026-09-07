@@ -15,6 +15,7 @@ roxmltree = { workspace = true }
 quick-xml = { workspace = true }
 console_error_panic_hook = { workspace = true }
 ooxml-common = { workspace = true }
+xlsx-model = { workspace = true }
 
 # `-Oz` optimizes the wasm binary for size (over the default `-O`), shrinking
 # the artifact browsers download. wasm-pack runs this pass after wasm-bindgen.
