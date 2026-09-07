@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 fuzzing = []
 direct-ppt = ["dep:js-sys", "dep:serde_json"]
+direct-xls = ["dep:js-sys", "dep:serde", "dep:serde_json"]
 inspection = ["direct-ppt"]
 
 [[example]]
@@ -33,12 +34,14 @@ js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+serde = { workspace = true, optional = true }
 pptx-model = { workspace = true }
 ooxml-common = { workspace = true }
 xlsx-model = { workspace = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 xlsx-parser = { path = "../../xlsx/parser" }
 

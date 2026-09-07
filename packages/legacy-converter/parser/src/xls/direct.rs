@@ -313,6 +313,10 @@ impl DirectSession {
             .ok_or_else(|| unsupported("unadmitted XLS direct image key"))
     }
 
+    pub(crate) fn assert_healthy(&self) -> Result<(), String> {
+        self.healthy()
+    }
+
     fn healthy(&self) -> Result<(), String> {
         if self.poisoned {
             Err(unsupported("XLS direct session is poisoned"))

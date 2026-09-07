@@ -13,13 +13,15 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
-mod direct;
+pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_corpus_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_strings_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_styles_tests;
+#[cfg(any(test, feature = "direct-xls"))]
+pub(crate) mod direct_wire;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
 mod geometry;

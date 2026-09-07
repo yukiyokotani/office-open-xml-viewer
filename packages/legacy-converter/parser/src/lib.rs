@@ -16,6 +16,8 @@ mod ppt;
 #[cfg(feature = "direct-ppt")]
 mod ppt_wasm;
 mod xls;
+#[cfg(feature = "direct-xls")]
+mod xls_wasm;
 
 pub const ENGINE_ID: &str = "silurus-legacy-office";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

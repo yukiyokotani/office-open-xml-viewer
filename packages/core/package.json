@@ -34,6 +34,7 @@
     "./internal/dom-geometry": "./src/internal/dom-geometry.ts",
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
     "./internal/legacy-ppt-source": "./src/conversion/legacy-ppt-source.ts",
+    "./internal/legacy-xls-source": "./src/conversion/legacy-xls-source.ts",
     "./internal/legacy-office-conversion": "./src/internal/legacy-office-conversion.ts",
     "./internal/owned-session": "./src/internal/owned-session.ts",
     "./internal/progressive-layout-lifecycle": "./src/internal/progressive-layout-lifecycle.ts",

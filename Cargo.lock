@@ -417,6 +417,7 @@ dependencies = [
  "ooxml-common",
  "pptx-model",
  "quick-xml",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "xlsx-model",

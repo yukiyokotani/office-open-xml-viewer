@@ -110,6 +110,7 @@
     "build-storybook": "storybook build",
     "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-legacy-converter wasm && pnpm build:wasm:legacy-ppt",
     "build:wasm:legacy-ppt": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-ppt",
+    "build:wasm:legacy-xls": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-xls",
     "vrt": "pnpm -r --workspace-concurrency=1 vrt",
     "vrt:snapshot": "pnpm -r --workspace-concurrency=1 vrt:snapshot",
     "vrt:private": "pnpm -r --workspace-concurrency=1 --if-present vrt:private",
