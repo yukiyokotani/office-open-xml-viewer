@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 fuzzing = []
-inspection = []
+inspection = ["dep:serde_json"]
 
 [[example]]
 name = "inspect_xls_images"
@@ -19,6 +19,10 @@ required-features = ["inspection"]
 
 [[example]]
 name = "inspect_xls_anchors"
+required-features = ["inspection"]
+
+[[example]]
+name = "inspect_ppt_direct"
 required-features = ["inspection"]
 
 [dependencies]
@@ -29,6 +33,7 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 pptx-model = { workspace = true }
 ooxml-common = { workspace = true }
+serde_json = { workspace = true, optional = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]

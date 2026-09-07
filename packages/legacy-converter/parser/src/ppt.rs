@@ -9,7 +9,7 @@
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_PPTX};
 
-mod direct_session;
+pub(crate) mod direct_session;
 mod drawing;
 mod media;
 mod paint;

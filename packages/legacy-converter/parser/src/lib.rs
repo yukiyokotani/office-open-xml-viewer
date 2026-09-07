@@ -45,6 +45,44 @@ pub fn inspect_xls_pictures(data: &[u8]) -> Result<XlsPictureInspection, String>
     xls::inspect_pictures(&inspection_source(data)?)
 }
 
+/// Native-only direct PPT renderer-model inspection session. This is not part
+/// of the WASM conversion contract and never constructs an OOXML package.
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub struct PptDirectInspection {
+    inner: ppt::direct_session::DirectSession,
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+impl PptDirectInspection {
+    pub fn slide_count(&self) -> usize {
+        self.inner.slide_count()
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.inner.size()
+    }
+
+    pub fn slide(&mut self, index: usize) -> Result<pptx_model::Slide, String> {
+        self.inner.slide(index)
+    }
+
+    pub fn resource(&self, key: &str) -> Result<(&'static str, &[u8]), String> {
+        let resource = self.inner.resource(key)?;
+        Ok((resource.extension, resource.bytes))
+    }
+}
+
+#[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
+pub fn inspect_ppt_direct(data: &[u8]) -> Result<PptDirectInspection, String> {
+    if data.len() > 256 * 1024 * 1024 {
+        return Err("UNSUPPORTED:PPT inspection source byte budget exceeded".into());
+    }
+    let cfb = cfb::CompoundFile::open(data).map_err(|e| format!("UNSUPPORTED:{e}"))?;
+    Ok(PptDirectInspection {
+        inner: ppt::direct_session::DirectSession::new(&cfb)?,
+    })
+}
+
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
 fn inspection_source(data: &[u8]) -> Result<cfb::CompoundFile<'_>, String> {
     if data.len() > 256 * 1024 * 1024 {

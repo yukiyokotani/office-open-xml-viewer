@@ -5,7 +5,7 @@ use super::*;
 
 const MAX_MODEL_BYTES: usize = 256 * 1024 * 1024;
 
-pub(super) struct DirectSession {
+pub(crate) struct DirectSession {
     document: Vec<u8>,
     pictures: Option<Vec<u8>>,
     presentation: persist::OwnedPresentation,
@@ -16,7 +16,7 @@ pub(super) struct DirectSession {
     poisoned: bool,
 }
 
-pub(super) struct Resource<'a> {
+pub(crate) struct Resource<'a> {
     pub extension: &'static str,
     pub bytes: &'a [u8],
 }
@@ -119,6 +119,14 @@ impl DirectSession {
             self.poisoned = true;
         }
         result
+    }
+
+    pub fn slide_count(&self) -> usize {
+        self.presentation.slides.len()
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.presentation.size
     }
 
     pub fn resource(&self, key: &str) -> Result<Resource<'_>, String> {
