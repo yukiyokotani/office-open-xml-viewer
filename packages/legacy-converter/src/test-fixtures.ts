@@ -1,6 +1,6 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
 export interface BinaryNoteFixture { cp: number; text: string; automatic?: boolean }
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: readonly BinaryNoteFixture[]; endnotes?: readonly BinaryNoteFixture[]; comments?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; formattingRuns?: readonly { end: number; properties: Uint8Array }[]; numbering?: { definitions: Uint8Array; definitionHeaderBytes: number; overrides: Uint8Array }; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: readonly BinaryNoteFixture[]; endnotes?: readonly BinaryNoteFixture[]; comments?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const sectionEnds = options.sectionEnds ?? [text.length];
   if (options.headers && options.headers.length !== sectionEnds.length * 6) throw new Error('Expected six header/footer variants per section');
@@ -25,7 +25,7 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   view.setUint32(0x1a2, 0, true);
   units.forEach((unit, index) => view.setUint16(textOffset + index * 2, unit, true));
   const pieceProperties = concat(options.paragraphProperties ?? new Uint8Array(), options.characterProperties ?? new Uint8Array());
-  const table = concat(
+  let table = concat(
     ...(pieceProperties.length ? [new Uint8Array([1]), little16(pieceProperties.length), pieceProperties] : []),
     new Uint8Array([0x02]),
     little32(16),
@@ -35,6 +35,17 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     little32(textOffset),
     little16(pieceProperties.length ? 1 : 0),
   );
+  if (options.formattingRuns) {
+    const runs = options.formattingRuns;
+    const starts = [0, ...runs.slice(0, -1).map(r => r.end)];
+    if (!runs.length || runs.at(-1)?.end !== units.length || runs.some((r, i) => r.end <= starts[i])) throw new Error('Invalid synthetic formatting piece boundaries');
+    table = concat(
+      ...runs.map(r => { const properties = concat(pieceProperties, r.properties); return concat(new Uint8Array([1]), little16(properties.length), properties); }),
+      new Uint8Array([2]), little32(4 + runs.length * 12),
+      little32(0), ...runs.map(r => little32(r.end)),
+      ...runs.map((_, i) => concat(little16(0), little32(textOffset + starts[i] * 2), little16(i * 2 + 1))),
+    );
+  }
   view.setUint32(0x1a6, table.length, true);
   const dop = options.defaultTabTwips === undefined ? new Uint8Array() : new Uint8Array(500);
   if (dop.length) {
@@ -110,9 +121,18 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     noteOffset += ranges.length;
     noteTables.push(references, ranges);
   }
+  const numbering: Uint8Array[] = [];
+  if (options.numbering) {
+    const { definitions, definitionHeaderBytes, overrides } = options.numbering;
+    view.setUint32(0x2e2, noteOffset, true);
+    view.setUint32(0x2e6, definitionHeaderBytes, true); // Appended LVLs are not included.
+    view.setUint32(0x2ea, noteOffset + definitions.length, true);
+    view.setUint32(0x2ee, overrides.length, true);
+    numbering.push(definitions, overrides);
+  }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable, ...noteTables)],
+    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable, ...noteTables, ...numbering)],
     ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }

@@ -52,6 +52,28 @@ impl Default for Properties {
 }
 
 impl Properties {
+    /// A resolved style patch, without injecting the document's default size.
+    /// Used when list-linked styles are layered onto a paragraph mark.
+    pub fn sparse() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            fonts: [None; 4],
+            picture: Picture::default(),
+        }
+    }
+
+    pub fn overlay_visible(&mut self, patch: &Self) {
+        self.values
+            .extend(patch.values.iter().map(|(k, v)| (*k, v.clone())));
+        for (current, added) in self.fonts.iter_mut().zip(patch.fonts) {
+            if added.is_some() {
+                *current = added;
+            }
+        }
+        // Object/special flags are not visual run formatting and must not
+        // turn numbering text into a picture or an executable object.
+    }
+
     pub fn reset_to(&mut self, paragraph: &Self, preserve_object: bool) {
         // Of the reset exceptions in sprmCPlain/CIstd, these are the supported
         // properties. Revision metadata remains omitted. CIstd preserves

@@ -66,7 +66,7 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, list/style-remapping and conditional table styles, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, lists, advanced floating drawings, non-raster images other than EMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, ordinary single-level and multilevel list definitions, list starts/restarts and marker formatting, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, unsupported paragraph/list-style interactions and conditional table styles, legacy automatic-numbering fields, high-nibble or symbol-font list bullets, and unrepresentable list templates, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, advanced floating drawings, non-raster images other than EMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors and supported checksum-bound extension colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands, manual page breaks, and measured passive embedded PNG/JPEG/EMF picture frames with supported cell anchors, cropping, rotation and flips | formula programs, phonetic string data, unsupported extended styles/theme colors/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, non-picture drawings, grouped or active/linked picture objects, picture effects, external links, pre-BIFF8 sheets |
 | PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG and EMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, WMF/PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
 
@@ -362,8 +362,47 @@ floating/frame placement and protection-bookmark table separation are incomplete
 Unknown optional border-side flags are omitted with a warning, not reinterpreted.
 Nesting (32), rows per section (100,000) and grid boundaries (65,536) have resource
 ceilings. Paragraph text and pending tables remain bounded by the XML budget.
-Floating frames and numbering are still absent; line wrapping and pagination
-can differ significantly. No existing renderer changes are required.
+Floating-frame support remains partial; line wrapping and pagination can differ
+significantly. No existing renderer changes are required.
+
+DOC list tables and list-format overrides are emitted as ordinary
+WordprocessingML numbering. Supported output includes single-level and
+multilevel lists, supported literal bullets and level templates, number formats,
+suffixes and justification, starts and restart boundaries, and marker-only
+character formatting. Lists with the same binary LSID share a counter even when
+paragraphs use different LFOs; a start override applies once for its original
+LFO and level. The main story, each header/footer story and each note use
+independent numbering scopes. Legal-number formatting is retained without
+collapsing a zero-padded decimal format to ordinary decimal.
+
+List paragraph and marker properties are resolved without replaying document
+defaults as direct formatting. Marker CHPX can vary without creating a new
+counter sequence. Explicit direct paragraph bidi, common alignment values and
+absolute twip indentation (including zero) are retained after list formatting;
+style-only, default and relative-indent values are not promoted by this
+compatibility rule. This precedence is based on bounded Word-produced controls,
+not the literal list-last ordering described by MS-DOC. The controls covered
+ordinary common alignments and both paragraph directions, but did not establish
+universal behavior for piece-level direct formatting or exotic alignment enum
+values.
+
+The list decoding and counter mapping follow MS-DOC 2.4.6.3-4 and 2.9.150,
+and ECMA-376 17.9.10 and 17.9.26. The direct-format precedence exception above
+is an observed Office behavior, not an amendment to those specifications.
+
+Local checkpoints exercised 36 numbered paragraphs across nine list cases, 352
+paragraphs for indentation and bidi compatibility, and 18 common-alignment
+cases. These measurements bound the compatibility claim; they are not a general
+Office conformance certificate.
+
+The converter emits OOXML consumed by the existing DOCX parser and renderer; no
+legacy-specific renderer path was added. This support does not guarantee exact
+Office display, pagination, marker placement or bidirectional word order.
+High-nibble binary bullets require a marker-font mapping that has not yet been
+verified. They are omitted, rather than treating their raw or masked character
+codes as Unicode. These bullets, unsupported automatic-number fields and list
+templates that cannot be expressed safely report
+`legacy-doc:unsupported-numbering-text-or-autonum-omitted`.
 
 DOC tables retain the compatibility cell-shading arrays (`Shd80` and `Shd`),
 explicit cell ranges (including alternating cells), and table-wide shading
@@ -486,8 +525,8 @@ custom paragraph stops over automatic stops. Missing document properties use
 the OOXML default with a warning as an explicit recovery policy; a present but
 truncated DOP or zero interval is rejected, not silently assigned new spacing.
 Only the shared DOP prefix is interpreted; this does not claim preservation of
-other document settings or version-specific compatibility flags. List generation
-remains unsupported. Preserving tabs does not imply Word pagination equivalence.
+other document settings or version-specific compatibility flags. Preserving tabs
+or list metadata does not imply Word pagination equivalence.
 
 Section text flow preserves the basic top-to-bottom, right-to-left-column mode
 (`sprmSTextFlow` / `msotxflTtoBA`, MS-DOC 2.6.4 and MS-ODRAW 2.4.5) as ordinary
@@ -497,8 +536,8 @@ does not retain a previous vertical direction. Existing DOCX layout and Canvas
 painting handle the orientation, with no binary-only renderer path. Other
 rotation variants and version-dependent column-direction modes remain omitted
 under the advanced-section-property warning; unknown enumeration values reject.
-This does not yet preserve frame/cell text directions, drawings, list markers,
-all East Asian character formatting, or exact Word line wrapping.
+This does not yet preserve frame/cell text directions, all drawings, every list
+marker form, all East Asian character formatting, or exact Word line wrapping.
 
 DOC inline pictures follow `sprmCFSpec` and `sprmCPicLocation` through the same
 style/CHPX/CLX cascade as other character properties. Only passive picture-frame

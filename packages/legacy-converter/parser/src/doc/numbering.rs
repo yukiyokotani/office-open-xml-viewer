@@ -5,6 +5,8 @@
 use super::{fkp, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;
 
+pub(super) mod output;
+
 const FC_PLF_LST: usize = 0x2e2;
 const FC_PLF_LFO: usize = 0x2ea;
 // Resource policies, not MS-DOC limits. Payloads are borrowed, not copied per
@@ -44,7 +46,7 @@ impl Reference {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Level<'a> {
     pub start: Option<u16>,
     pub format: u8,
@@ -85,6 +87,9 @@ pub struct LevelOverride<'a> {
 #[derive(Debug)]
 pub struct Override<'a> {
     pub list_index: usize,
+    // Diagnostics only; story/paragraph order, not this cached hint, drives
+    // conversion. In particular, it must not reorder header/note numbering.
+    #[allow(dead_code)]
     pub first_cp: Option<u32>,
     pub auto_number_field: Option<u8>,
     // Most LFOs have no overrides. Do not allocate nine potentially large LVL

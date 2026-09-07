@@ -433,75 +433,7 @@ impl Properties {
 // MS-DOC 2.6.4 SNfcPgn and documented for Word in its implementation note.
 // Preserve `none`, whose specified meaning is to suppress the number.
 fn page_number_format(value: u8) -> Result<&'static str, String> {
-    const FORMATS: [&str; 60] = [
-        "decimal",
-        "upperRoman",
-        "lowerRoman",
-        "upperLetter",
-        "lowerLetter",
-        "ordinal",
-        "cardinalText",
-        "ordinalText",
-        "hex",
-        "chicago",
-        "ideographDigital",
-        "japaneseCounting",
-        "aiueo",
-        "iroha",
-        "decimalFullWidth",
-        "decimalHalfWidth",
-        "japaneseLegal",
-        "japaneseDigitalTenThousand",
-        "decimalEnclosedCircle",
-        "decimalFullWidth2",
-        "aiueoFullWidth",
-        "irohaFullWidth",
-        "decimalZero",
-        "decimal",
-        "ganada",
-        "chosung",
-        "decimalEnclosedFullstop",
-        "decimalEnclosedParen",
-        "decimalEnclosedCircleChinese",
-        "ideographEnclosedCircle",
-        "ideographTraditional",
-        "ideographZodiac",
-        "ideographZodiacTraditional",
-        "taiwaneseCounting",
-        "ideographLegalTraditional",
-        "taiwaneseCountingThousand",
-        "taiwaneseDigital",
-        "chineseCounting",
-        "chineseLegalSimplified",
-        "chineseCountingThousand",
-        "decimal",
-        "koreanDigital",
-        "koreanCounting",
-        "koreanLegal",
-        "koreanDigital2",
-        "hebrew1",
-        "arabicAlpha",
-        "hebrew2",
-        "arabicAbjad",
-        "hindiVowels",
-        "hindiConsonants",
-        "hindiNumbers",
-        "hindiCounting",
-        "thaiLetters",
-        "thaiNumbers",
-        "thaiCounting",
-        "vietnameseCounting",
-        "numberInDash",
-        "russianLower",
-        "russianUpper",
-    ];
-    if value == 0xff {
-        return Ok("none");
-    }
-    FORMATS
-        .get(usize::from(value))
-        .copied()
-        .ok_or_else(|| unsupported("invalid Word page-number format"))
+    super::number_format::name(if value == 0x17 { 0 } else { value })
 }
 
 #[cfg(test)]

@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 
 #[derive(Clone)]
 pub struct Properties {
+    pub ilfo: i16,
+    pub ilvl: u8,
+    pub numbering: Option<(usize, u8)>,
+    protected_list_indent: Option<(i32, i32)>,
     tabs: super::tabs::Stops,
     flags: BTreeMap<&'static str, bool>,
     line: (u16, &'static str),
@@ -28,6 +32,10 @@ pub struct Properties {
 impl Default for Properties {
     fn default() -> Self {
         Self {
+            ilfo: 0,
+            ilvl: 0,
+            numbering: None,
+            protected_list_indent: None,
             tabs: super::tabs::Stops::default(),
             flags: BTreeMap::from([
                 ("widowControl", true),
@@ -67,6 +75,10 @@ fn signed(bytes: &[u8]) -> Result<i32, String> {
 }
 
 impl Properties {
+    pub fn set_bidi(&mut self, value: bool) {
+        self.flags.insert("bidi", value);
+    }
+
     pub fn apply(&mut self, code: u16, operand: &[u8]) -> Result<bool, String> {
         let flag = match code {
             0x2405 => Some("keepLines"),
@@ -91,6 +103,8 @@ impl Properties {
             return Ok(true);
         }
         match code {
+            0x260a => self.ilvl = operand[0],
+            0x460b => self.ilfo = u16_at(operand, 0)? as i16,
             0x6424..=0x6428 => {
                 let side = usize::from(code - 0x6424);
                 self.borders[side] = Some(Border::paragraph(operand, true, side)?);
@@ -207,6 +221,13 @@ impl Properties {
             "adjustRightInd",
             "snapToGrid",
         ] {
+            if key == "suppressLineNumbers" {
+                if let Some((id, level)) = self.numbering {
+                    xml.push_str(&format!(
+                        "<w:numPr><w:ilvl w:val=\"{level}\"/><w:numId w:val=\"{id}\"/></w:numPr>"
+                    ));
+                }
+            }
             if key == "suppressAutoHyphens" {
                 // MS-DOC 2.6.2 PBrcLeft/Right are logical. ECMA-376
                 // 17.3.1.17/28 left/right are physical, so resolve after bidi.
@@ -247,35 +268,14 @@ impl Properties {
         }
         xml.push_str("/>");
         let bidi = self.flags.get("bidi") == Some(&true);
-        // Resolve physical/logical coordinates after bidi is known. Keep the
-        // last assignment to either logical side, including mixed old/new SPRMs.
-        let mut indents = [0, 0];
-        let mut writes: Vec<_> = self
-            .indents
-            .iter()
-            .enumerate()
-            .filter_map(|(i, value)| value.map(|(v, order)| (order, i, v)))
-            .collect();
-        writes.sort_unstable_by_key(|(order, _, _)| *order);
-        for (_, i, value) in writes {
-            indents[(i % 2) ^ usize::from(i < 2 && bidi)] = value;
-        }
-        let [mut left, mut right] = indents;
-        if let Some((value, physical)) = self.nest {
-            if physical && bidi {
-                right += value;
-            } else {
-                left += value;
-            }
-        }
+        let [left, right] = self.logical_indents();
+        let first = self
+            .protected_list_indent
+            .map_or(self.first, |(_, first)| first);
         xml.push_str(&format!(
             "<w:ind w:left=\"{left}\" w:right=\"{right}\" w:{}=\"{}\"",
-            if self.first < 0 {
-                "hanging"
-            } else {
-                "firstLine"
-            },
-            self.first.abs()
+            if first < 0 { "hanging" } else { "firstLine" },
+            first.abs()
         ));
         for (name, value) in [("leftChars", self.chars[0]), ("rightChars", self.chars[1])] {
             if let Some(value) = value {
@@ -326,6 +326,35 @@ impl Properties {
         }
         xml
     }
+
+    /// MS-DOC sprmPIlfo: negative references retain the paragraph's logical
+    /// left and first-line indent despite subsequent list/style formatting.
+    pub fn preserve_list_indent(&mut self, source: &Self) {
+        self.protected_list_indent = Some((source.logical_indents()[0], source.first));
+    }
+
+    fn logical_indents(&self) -> [i32; 2] {
+        let bidi = self.flags.get("bidi") == Some(&true);
+        // Resolve physical/logical coordinates only after bidi is known.
+        let mut indents = [0, 0];
+        let mut writes: Vec<_> = self
+            .indents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, value)| value.map(|(v, order)| (order, i, v)))
+            .collect();
+        writes.sort_unstable_by_key(|(order, _, _)| *order);
+        for (_, i, value) in writes {
+            indents[(i % 2) ^ usize::from(i < 2 && bidi)] = value;
+        }
+        if let Some((value, physical)) = self.nest {
+            indents[usize::from(physical && bidi)] += value;
+        }
+        if let Some((left, _)) = self.protected_list_indent {
+            indents[0] = left;
+        }
+        indents
+    }
 }
 
 fn bool8(value: u8) -> Result<bool, String> {
@@ -342,6 +371,7 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
         0x07 => 0x2405,
         0x08 => 0x2406,
         0x09 => 0x2407,
+        0x0c => 0x260a,
         0x0e => 0x240c,
         0x2c => 0x242a,
         0x33 => 0x2431,
@@ -360,6 +390,25 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn negative_list_reference_protects_logical_indents_in_rtl_without_freezing_the_other_side() {
+        let mut original = Properties::default();
+        original.apply(0x2441, &[1]).unwrap();
+        original.apply(0x840e, &1000_i16.to_le_bytes()).unwrap(); // physical right = logical left
+        original.apply(0x8460, &(-200_i16).to_le_bytes()).unwrap();
+        let mut list = original.clone();
+        list.apply(0x845e, &720_i16.to_le_bytes()).unwrap();
+        list.apply(0x845d, &600_i16.to_le_bytes()).unwrap();
+        list.apply(0x8460, &(-360_i16).to_le_bytes()).unwrap();
+        list.preserve_list_indent(&original);
+        assert!(list
+            .xml()
+            .contains("<w:ind w:left=\"1000\" w:right=\"600\" w:hanging=\"200\"/>"));
+        assert!(original
+            .xml()
+            .contains("<w:ind w:left=\"1000\" w:right=\"0\" w:hanging=\"200\"/>"));
+    }
     #[test]
     fn paragraph_borders_preserve_each_side_and_schema_order() {
         let mut p = Properties::default();

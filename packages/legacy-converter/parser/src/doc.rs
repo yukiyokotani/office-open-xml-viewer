@@ -20,9 +20,7 @@ mod formatting;
 mod header_fields;
 mod headers;
 mod notes;
-// Keep the list decoder out of production until its OOXML serialization and
-// counter-continuation integration are verified together.
-#[cfg(test)]
+mod number_format;
 mod numbering;
 mod paragraph;
 mod pictures;
@@ -159,6 +157,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         note_parts.relationships.push_str(&output.relationships);
         note_parts.omitted_floating |= output.omitted_floating;
     }
+    let numbering_xml = formatting.numbering_output.xml(remaining)?;
     let mut content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#.to_string();
     if document_settings.is_some() {
@@ -166,6 +165,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     }
     content_types.push_str(&header_parts.content_types);
     content_types.push_str(&note_parts.content_types);
+    if numbering_xml.is_some() {
+        content_types.push_str(r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#);
+    }
     let mut media = pictures.parts();
     media.extend(floating.parts());
     if !media.is_empty() {
@@ -181,6 +183,10 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
         ("word/document.xml".into(), document_xml),
     ];
     let mut relationships = String::new();
+    if let Some(xml) = numbering_xml {
+        parts.push(("word/numbering.xml".into(), xml));
+        relationships.push_str(r#"<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#);
+    }
     if let Some(properties) = &document_settings {
         parts.push(("word/settings.xml".into(), properties.xml()));
         relationships.push_str(r#"<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>"#);
@@ -234,6 +240,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     }
     if formatting.unsupported_character_properties {
         warnings.push("legacy-doc:unsupported-character-properties-omitted".into());
+    }
+    if formatting.numbering_output.omitted {
+        warnings.push("legacy-doc:unsupported-numbering-text-or-autonum-omitted".into());
     }
     if formatting.unsupported_paragraph_properties {
         warnings.push("legacy-doc:unsupported-paragraph-properties-omitted".into());
@@ -618,6 +627,9 @@ fn build_formatted_story(
     mut floating: Option<&mut floating::Store<'_>>,
     max_bytes: usize,
 ) -> Result<String, String> {
+    if let Some(formatting) = formatting.as_deref_mut() {
+        formatting.numbering_output.begin_story();
+    }
     let (text, sections, story_cp) = match content {
         Content::Document(sections, _) => (story.text.as_str(), sections, 0),
         Content::HeaderFooter { text, cp, .. } => (text, &[][..], cp),

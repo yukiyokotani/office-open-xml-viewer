@@ -48,7 +48,7 @@ fn tables(
     (word, table)
 }
 
-fn one() -> (Vec<u8>, Vec<u8>) {
+pub(super) fn one() -> (Vec<u8>, Vec<u8>) {
     tables(
         &[list(42, true)],
         &[level(0)],
