@@ -19,6 +19,7 @@ import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 import {
   acquirePptxNodeSession,
+  acquirePptxSessionFromArchive,
   PptxSlidePullClient,
   readPptxSlideCursorUsage,
   SlidePullWorker,
@@ -29,7 +30,10 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
-import { normalizeNodeOfficeInput } from './normalize-input.ts';
+import {
+  bindLegacyOfficeConversionSignal,
+  resolvePptPresentationInput,
+} from '@silurus/ooxml-core/internal/legacy-office-conversion';
 
 const getPptxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -86,15 +90,35 @@ async function openPptxPresentationImpl(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenPptxPresentationOptions = {},
 ): Promise<PptxPresentationSessionImpl> {
-  const bytes = await normalizeNodeOfficeInput(buffer, 'pptx', options);
-  const acquired = await acquirePptxNodeSession(bytes, getPptxWasmModule(), options);
-  return new PptxPresentationSessionImpl(
-    acquired.closeArchive,
-    acquired.archive,
-    acquired.bootstrap,
-    acquired.metrics,
-    options.signal,
-  );
+  const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, 'pptx', options.signal);
+  try {
+    const resolved = await resolvePptPresentationInput(buffer, bound.options, options.password);
+    if (resolved.kind === 'ooxml') {
+      const acquired = await acquirePptxNodeSession(resolved.bytes, getPptxWasmModule(), options);
+      bound.cleanup();
+      return new PptxPresentationSessionImpl(
+        acquired.closeArchive, acquired.archive, acquired.bootstrap, acquired.metrics, options.signal,
+      );
+    }
+    const { openLegacyPptSource } = await import('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine');
+    const owned = await openLegacyPptSource(resolved.bytes, resolved.source, resolved.signal);
+    const acquired = acquirePptxSessionFromArchive(owned, {
+      ...options,
+      signal: resolved.signal,
+    });
+    return new PptxPresentationSessionImpl(
+      () => {
+        try { acquired.closeArchive(); } finally { bound.cleanup(); }
+      },
+      acquired.archive,
+      acquired.bootstrap,
+      acquired.metrics,
+      resolved.signal,
+    );
+  } catch (error) {
+    bound.cleanup();
+    throw error;
+  }
 }
 
 class PptxPresentationSessionImpl implements PptxPresentationSession {
@@ -311,6 +335,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   private assertOpen(): void {
     if (this.closed) throw new Error('PPTX presentation session is closed');
     if (this.resourceFailure) throw this.resourceFailure;
+    throwIfAborted(this.signal);
   }
 
   private failOperation(error: unknown): never {

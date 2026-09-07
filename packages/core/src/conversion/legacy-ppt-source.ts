@@ -5,6 +5,8 @@ export interface LegacyPptDirectSourceDescriptor {
   readonly wasmUrl: string;
 }
 
+export const MAX_LEGACY_PPT_SOURCE_BYTES = 256 * 1024 * 1024;
+
 const SUPPORTED_WASM_PROTOCOLS = new Set(['http:', 'https:', 'file:', 'blob:', 'data:']);
 const FIELDS = ['protocol', 'builtin', 'wasmUrl'] as const;
 

@@ -161,6 +161,9 @@ importers:
 
   packages/node:
     dependencies:
+      '@silurus/ooxml-legacy-converter':
+        specifier: workspace:*
+        version: link:../legacy-converter
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
@@ -192,6 +195,9 @@ importers:
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
+      '@silurus/ooxml-legacy-converter':
+        specifier: workspace:*
+        version: link:../legacy-converter
     devDependencies:
       '@playwright/test':
         specifier: ^1.59.1

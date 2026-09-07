@@ -141,8 +141,10 @@ export {
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
   type LegacyOfficeFormatConversionOptions,
+  type LegacyPptDirectConversionOptions,
   type NormalizedOfficeInput,
 } from './conversion/legacy-office';
+export type { LegacyPptDirectSourceDescriptor } from './conversion/legacy-ppt-source';
 export {
   LegacyOfficeConversionError,
   type LegacyOfficeConversionFailureReason,

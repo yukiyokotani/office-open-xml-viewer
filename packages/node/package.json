@@ -33,7 +33,8 @@
     "@silurus/ooxml-core": "workspace:*",
     "@silurus/ooxml-pptx": "workspace:*",
     "@silurus/ooxml-docx": "workspace:*",
-    "@silurus/ooxml-xlsx": "workspace:*"
+    "@silurus/ooxml-xlsx": "workspace:*",
+    "@silurus/ooxml-legacy-converter": "workspace:*"
   },
   "peerDependencies": {
     "skia-canvas": "^2.0.0"

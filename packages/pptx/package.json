@@ -62,6 +62,7 @@
   },
   "dependencies": {
     "@fontsource/nunito-sans": "^5.2.7",
-    "@silurus/ooxml-core": "workspace:*"
+    "@silurus/ooxml-core": "workspace:*",
+    "@silurus/ooxml-legacy-converter": "workspace:*"
   }
 }

@@ -1,4 +1,10 @@
 import type { LegacyOfficeConversionOptions } from '../conversion/legacy-office.js';
+import { LegacyOfficeConversionError } from '../conversion/legacy-office-error.js';
+import {
+  MAX_LEGACY_PPT_SOURCE_BYTES,
+  validateLegacyPptSourceDescriptor,
+} from '../conversion/legacy-ppt-source.js';
+import { sniffCfb, sniffLegacyOfficeFormat } from '../errors/cfb-sniff.js';
 import { resolveOoxmlContainer } from '../errors/cfb-guard.js';
 import type { OoxmlFormat } from '../errors/ooxml-error.js';
 
@@ -18,6 +24,58 @@ export function resolveOfficeInputWithOptionalConversion(
   return import('../conversion/legacy-office.js')
     .then(({ normalizeOfficeInput }) => normalizeOfficeInput(bytes, target, options, password))
     .then((result) => result.bytes);
+}
+
+export type ResolvedPptPresentationInput =
+  | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>
+  | Readonly<{
+    kind: 'legacy-ppt';
+    bytes: Uint8Array;
+    source: import('../conversion/legacy-ppt-source.js').LegacyPptDirectSourceDescriptor;
+    signal?: AbortSignal;
+  }>;
+
+export async function resolvePptPresentationInput(
+  bytes: Uint8Array | ArrayBuffer,
+  options?: LegacyOfficeConversionOptions,
+  password?: string,
+): Promise<ResolvedPptPresentationInput> {
+  const inspected = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const selected = options?.ppt;
+  if (sniffCfb(inspected) !== 'legacy-binary-format') {
+    return { kind: 'ooxml', bytes: await resolveOoxmlContainer(inspected, password) };
+  }
+  if (!selected || !('source' in selected)) {
+    return {
+      kind: 'ooxml',
+      bytes: await resolveOfficeInputWithOptionalConversion(inspected, 'pptx', options, password),
+    };
+  }
+  if ('converter' in selected) {
+    throw new TypeError('legacyConversion.ppt source and converter are mutually exclusive');
+  }
+  const source = validateLegacyPptSourceDescriptor(selected.source);
+  const limit = selected.maxInputBytes ?? MAX_LEGACY_PPT_SOURCE_BYTES;
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_LEGACY_PPT_SOURCE_BYTES) {
+    throw new RangeError('legacyConversion.ppt.maxInputBytes is invalid');
+  }
+  if (sniffLegacyOfficeFormat(inspected) !== 'ppt') {
+    throw new LegacyOfficeConversionError('unsupported-input', 'ppt', 'pptx');
+  }
+  if (inspected.byteLength > limit) {
+    throw new LegacyOfficeConversionError('source-too-large', 'ppt', 'pptx');
+  }
+  if (selected.signal?.aborted) {
+    throw new LegacyOfficeConversionError('aborted', 'ppt', 'pptx');
+  }
+  return {
+    kind: 'legacy-ppt',
+    bytes: inspected.byteOffset === 0 && inspected.byteLength === inspected.buffer.byteLength
+      ? inspected
+      : inspected.slice(),
+    source,
+    ...(selected.signal ? { signal: selected.signal } : {}),
+  };
 }
 
 /** Bind one owner/session cancellation signal to an optional converter request. */

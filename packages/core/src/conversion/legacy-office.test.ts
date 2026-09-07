@@ -56,6 +56,18 @@ function conversionFor(
 }
 
 describe('normalizeOfficeInput', () => {
+  it('rejects a direct PPT source at the byte-only OOXML normalization boundary', async () => {
+    await expect(normalizeOfficeInput(
+      buildCfbFixture(['Root Entry', 'PowerPoint Document']),
+      'pptx',
+      { ppt: { source: {
+        protocol: 'ooxml-legacy-ppt-source/v1',
+        builtin: 'ppt',
+        wasmUrl: 'https://example.test/ppt.wasm',
+      } } },
+    )).rejects.toThrow(/presentation session API/);
+  });
+
   it('leaves the existing OOXML/decryption path untouched when input is not legacy CFB', async () => {
     const bytes = packageFor('docx');
     const converter = converterReturning('docx');

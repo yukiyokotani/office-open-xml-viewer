@@ -5,6 +5,7 @@ import {
   LegacyOfficeConversionError,
   type LegacyOfficeFormat,
 } from './legacy-office-error.js';
+import type { LegacyPptDirectSourceDescriptor } from './legacy-ppt-source.js';
 
 export {
   LegacyOfficeConversionError,
@@ -81,6 +82,14 @@ export interface LegacyOfficeFormatConversionOptions {
   readonly maxOutputBytes?: number;
   /** Receives one content-free record after output validation succeeds. */
   readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+  readonly source?: never;
+}
+
+export interface LegacyPptDirectConversionOptions {
+  readonly source: LegacyPptDirectSourceDescriptor;
+  readonly converter?: never;
+  readonly maxInputBytes?: number;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -90,7 +99,7 @@ export interface LegacyOfficeFormatConversionOptions {
 export interface LegacyOfficeConversionOptions {
   readonly doc?: LegacyOfficeFormatConversionOptions;
   readonly xls?: LegacyOfficeFormatConversionOptions;
-  readonly ppt?: LegacyOfficeFormatConversionOptions;
+  readonly ppt?: LegacyOfficeFormatConversionOptions | LegacyPptDirectConversionOptions;
 }
 
 export interface NormalizedOfficeInput {
@@ -152,6 +161,12 @@ export async function normalizeOfficeInput(
   const selected = conversion?.[from];
   if (sniffCfb(inspected) !== 'legacy-binary-format' || selected === undefined) {
     return { bytes: await resolveOoxmlContainer(inspected, password) };
+  }
+  if ('source' in selected && 'converter' in selected) {
+    throw new TypeError('legacyConversion.ppt source and converter are mutually exclusive');
+  }
+  if ('source' in selected) {
+    throw new TypeError('direct legacy PPT sources require the presentation session API');
   }
 
   const inputByteLength = inspected.byteLength;

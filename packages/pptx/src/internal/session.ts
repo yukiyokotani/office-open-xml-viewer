@@ -10,6 +10,7 @@ export type { PresentationBootstrap } from '../worker-protocol.js';
 export { renderSlide } from '../renderer.js';
 export {
   acquirePptxNodeSession,
+  acquirePptxSessionFromArchive,
   type PptxNodeAcquisition,
   type PptxNodeAcquisitionOptions,
   type PptxNodeArchive,

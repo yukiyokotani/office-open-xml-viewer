@@ -8,8 +8,10 @@
     "paths": {
       "@silurus/ooxml-core": ["../core/src/index.ts"],
       "@silurus/ooxml-core/worker": ["../core/src/worker/index.ts"],
+      "@silurus/ooxml-core/internal/legacy-ppt-source": ["../core/src/conversion/legacy-ppt-source.ts"],
       "@silurus/ooxml-pptx": ["../pptx/src/types.ts"],
       "@silurus/ooxml-pptx/internal/session": ["../pptx/src/internal/session.ts"],
+      "@silurus/ooxml-legacy-converter/internal/direct-ppt-engine": ["./typecheck/legacy-direct-ppt-engine.ts"],
       "@silurus/ooxml-docx": ["./typecheck/docx-public-types.ts"],
       "@silurus/ooxml-docx/internal/session": ["../docx/src/internal/session.ts"],
       "@silurus/ooxml-xlsx": ["../xlsx/src/types.ts"],

@@ -18,7 +18,12 @@ import {
 // @ts-ignore wasm-pack generated module has no declaration entry
 import * as pptxWasm from '../wasm/pptx_parser.js';
 
-export type { PptxNodeAcquisition, PptxNodeAcquisitionOptions, PptxNodeArchive } from './node-session-acquisition.js';
+export {
+  acquirePptxSessionFromArchive,
+  type PptxNodeAcquisition,
+  type PptxNodeAcquisitionOptions,
+  type PptxNodeArchive,
+} from './node-session-acquisition.js';
 
 interface PptxArchiveConstructor {
   new (
