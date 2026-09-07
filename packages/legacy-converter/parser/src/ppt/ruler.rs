@@ -7,20 +7,46 @@ pub(super) struct Tabs<'a> {
     entries: &'a [u8],
 }
 
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Retained fields are consumed by the next inheritance-wiring unit.
+pub(super) struct Ruler<'a> {
+    pub c_levels: Option<i16>,
+    pub default_tab_size: Option<i16>,
+    pub tabs: Option<Tabs<'a>>,
+    pub margins: [Option<i16>; 5],
+    pub indents: [Option<i16>; 5],
+}
+
 pub(super) fn read<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Option<Tabs<'a>>, String> {
+    Ok(read_full(atom, budget)?.tabs)
+}
+
+pub(super) fn read_full<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Ruler<'a>, String> {
     if atom.kind != 4006 || atom.version != 0 || atom.instance != 0 {
         return Err(unsupported("invalid PowerPoint text ruler header"));
     }
-    let data = atom.payload;
+    decode(atom.payload, budget).map(|(_, ruler)| ruler)
+}
+
+/// Decode the mandatory complete ruler stored by DocumentTextInfoContainer.
+#[allow(dead_code)] // The document-default retention call site follows separately.
+pub(super) fn read_default<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Ruler<'a>, String> {
+    if atom.kind != 4011 || atom.version != 0 || atom.instance != 0 {
+        return Err(unsupported("invalid PowerPoint default ruler header"));
+    }
+    let (flags, ruler) = decode(atom.payload, budget)?;
+    if flags & 0x1fff != 0x1fff {
+        return Err(unsupported("incomplete PowerPoint default ruler"));
+    }
+    Ok(ruler)
+}
+
+fn decode<'a>(data: &'a [u8], budget: &mut usize) -> Result<(u32, Ruler<'a>), String> {
     let flags = u32_at(data, 0)?;
     // Presence bits differ from serialization order. Reserved bits are ignored.
     let mut pos = 4;
-    for bit in [2, 1] {
-        if flags & bit != 0 {
-            u16_at(data, pos)?;
-            pos += 2;
-        }
-    }
+    let c_levels = read_optional_i16(data, &mut pos, flags, 2)?;
+    let default_tab_size = read_optional_i16(data, &mut pos, flags, 1)?;
     let tabs = if flags & 4 != 0 {
         let count = usize::from(u16_at(data, pos)?);
         pos += 2;
@@ -41,21 +67,44 @@ pub(super) fn read<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Option<Ta
     } else {
         None
     };
-    // Consume all five interleaved margin/indent pairs even though this path
-    // emits only explicit local custom tabs. Other ruler properties and linked
-    // master/default-ruler inheritance are separate, still-unsupported work.
+    let mut margins = [None; 5];
+    let mut indents = [None; 5];
     for level in 0..5 {
-        for bit in [8 << level, 256 << level] {
-            if flags & bit != 0 {
-                u16_at(data, pos)?;
-                pos += 2;
-            }
-        }
+        margins[level] = read_optional_i16(data, &mut pos, flags, 8 << level)?;
+        indents[level] = read_optional_i16(data, &mut pos, flags, 256 << level)?;
     }
     if pos != data.len() {
         return Err(unsupported("unexpected PowerPoint text ruler tail"));
     }
-    Ok(tabs)
+    Ok((
+        flags,
+        Ruler {
+            c_levels,
+            default_tab_size,
+            tabs,
+            margins,
+            indents,
+        },
+    ))
+}
+
+fn read_optional_i16(
+    data: &[u8],
+    pos: &mut usize,
+    flags: u32,
+    bit: u32,
+) -> Result<Option<i16>, String> {
+    if flags & bit == 0 {
+        return Ok(None);
+    }
+    let value = i16::from_le_bytes(
+        data.get(*pos..*pos + 2)
+            .ok_or_else(|| unsupported("truncated PowerPoint text ruler"))?
+            .try_into()
+            .expect("two-byte ruler field"),
+    );
+    *pos += 2;
+    Ok(Some(value))
 }
 
 impl<'a> Tabs<'a> {
@@ -122,6 +171,14 @@ mod tests {
             payload,
         }
     }
+    fn default_atom(payload: &[u8]) -> Record<'_> {
+        Record {
+            kind: 4011,
+            version: 0,
+            instance: 0,
+            payload,
+        }
+    }
     #[test]
     fn absent_empty_signed_and_all_alignment_values_are_distinct() {
         assert!(read(atom(&0u32.to_le_bytes()), &mut 100).unwrap().is_none());
@@ -152,16 +209,99 @@ mod tests {
                     data.extend(0u16.to_le_bytes());
                 }
             }
-            assert_eq!(
-                read(atom(&data), &mut 100).unwrap().is_some(),
-                flags & 4 != 0
-            );
+            let ruler = read_full(atom(&data), &mut 100).unwrap();
+            assert_eq!(ruler.c_levels, (flags & 2 != 0).then_some(0));
+            assert_eq!(ruler.default_tab_size, (flags & 1 != 0).then_some(0));
+            assert_eq!(ruler.tabs.is_some(), flags & 4 != 0);
+            for level in 0..5 {
+                assert_eq!(
+                    ruler.margins[level],
+                    (flags & (8 << level) != 0).then_some(0)
+                );
+                assert_eq!(
+                    ruler.indents[level],
+                    (flags & (256 << level) != 0).then_some(0)
+                );
+            }
             for end in 0..data.len() {
                 assert!(read(atom(&data[..end]), &mut 100).is_err());
             }
             data.push(0);
             assert!(read(atom(&data), &mut 100).is_err());
         }
+    }
+    #[test]
+    fn full_ruler_retains_signed_fields_and_distinguishes_absence_from_zero() {
+        let flags: u32 = 2 | 1 | 8 | 256 | 16 | 512 | 32 | 1024 | 64 | 2048 | 128 | 4096;
+        let mut data = flags.to_le_bytes().to_vec();
+        data.extend(i16::MIN.to_le_bytes());
+        data.extend(i16::MAX.to_le_bytes());
+        for (margin, indent) in [
+            (i16::MIN, i16::MAX),
+            (-1, 1),
+            (0, 0),
+            (1234, -1234),
+            (i16::MAX, i16::MIN),
+        ] {
+            data.extend(margin.to_le_bytes());
+            data.extend(indent.to_le_bytes());
+        }
+        let ruler = read_full(atom(&data), &mut 0).unwrap();
+        assert_eq!(ruler.c_levels, Some(i16::MIN));
+        assert_eq!(ruler.default_tab_size, Some(i16::MAX));
+        assert!(ruler.tabs.is_none());
+        assert_eq!(
+            ruler.margins,
+            [
+                Some(i16::MIN),
+                Some(-1),
+                Some(0),
+                Some(1234),
+                Some(i16::MAX)
+            ]
+        );
+        assert_eq!(
+            ruler.indents,
+            [
+                Some(i16::MAX),
+                Some(1),
+                Some(0),
+                Some(-1234),
+                Some(i16::MIN)
+            ]
+        );
+        let absent_data = 0u32.to_le_bytes();
+        let absent = read_full(atom(&absent_data), &mut 0).unwrap();
+        assert_eq!(absent.c_levels, None);
+        assert_eq!(absent.default_tab_size, None);
+        assert_eq!(absent.margins, [None; 5]);
+        assert_eq!(absent.indents, [None; 5]);
+    }
+
+    #[test]
+    fn default_ruler_requires_its_thirteen_presence_bits() {
+        let mut complete = 0x1fffu32.to_le_bytes().to_vec();
+        // cLevels, defaultTabSize, empty TabStops, then five margin/indent pairs.
+        complete.extend([0u8; 26]);
+        let ruler = read_default(default_atom(&complete), &mut 0).unwrap();
+        assert_eq!(ruler.c_levels, Some(0));
+        assert_eq!(ruler.default_tab_size, Some(0));
+        assert!(ruler.tabs.is_some_and(|tabs| tabs.positions().len() == 0));
+        assert_eq!(ruler.margins, [Some(0); 5]);
+        assert_eq!(ruler.indents, [Some(0); 5]);
+
+        for missing in 0..13 {
+            let flags = 0x1fffu32 & !(1 << missing);
+            let mut data = flags.to_le_bytes().to_vec();
+            for bit in [2, 1, 4, 8, 256, 16, 512, 32, 1024, 64, 2048, 128, 4096] {
+                if flags & bit != 0 {
+                    data.extend(0u16.to_le_bytes());
+                }
+            }
+            assert!(read_default(default_atom(&data), &mut 0).is_err());
+        }
+        assert!(read_default(atom(&complete), &mut 0).is_err());
+        assert!(read_full(default_atom(&complete), &mut 0).is_err());
     }
     #[test]
     fn maximum_count_and_repeated_emission_are_budgeted() {
