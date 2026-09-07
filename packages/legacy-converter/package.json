@@ -17,7 +17,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./direct-ppt": "./src/direct-ppt.ts",
+    "./direct-xls": "./src/direct-xls.ts",
     "./internal/direct-ppt-engine": "./src/direct-ppt-engine.ts",
+    "./internal/direct-xls-engine": "./src/direct-xls-engine.ts",
     "./wasm": "./src/wasm/legacy_office_converter.js",
     "./wasm-binary": "./src/wasm/legacy_office_converter_bg.wasm",
     "./wasm-direct-ppt": "./src/wasm-direct-ppt/legacy_office_converter.js",
