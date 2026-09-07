@@ -177,19 +177,19 @@ fn native_session_matches_immutable_archive_models() {
             .as_array()
             .expect("native workbook sheets")
             .len();
-        for sheet_index in 0..sheet_count {
+        // Reverse order exercises indexed slots instead of an accidental
+        // dependency on consuming sheets in workbook order.
+        for sheet_index in (0..sheet_count).rev() {
             let sheet_name = actual_bootstrap["workbook"]["sheets"][sheet_index]["name"]
                 .as_str()
                 .expect("native sheet name");
-            let mut actual = serde_json::to_value(
-                direct
-                    .next_sheet()
-                    .unwrap_or_else(|error| {
-                        panic!("corpus index {document} sheet {sheet_index} error: {error}")
-                    })
-                    .expect("native sheet count matches bootstrap"),
-            )
-            .unwrap();
+            let projected = direct.projected_sheet(sheet_index, sheet_name)
+                .unwrap_or_else(|error| {
+                    panic!("corpus index {document} sheet {sheet_index} error: {error}")
+                });
+            assert!(projected.worksheet.rows.is_empty());
+            let mut actual = serde_json::to_value(projected.worksheet).unwrap();
+            actual["rows"] = serde_json::to_value(projected.rows).unwrap();
             resolve_shared_cells(&mut actual, shared_strings);
             // The XLSX parser oracle crosses its JSON byte boundary, while
             // `to_value` retains the model's original f64 bits. Cross the same
@@ -211,6 +211,10 @@ fn native_session_matches_immutable_archive_models() {
                 ));
             }
             compared_sheets += 1;
+        }
+        // The transitional ownership API can still consume projected slots.
+        for _ in 0..sheet_count {
+            assert!(direct.next_sheet().unwrap().is_some());
         }
         assert!(direct.next_sheet().unwrap().is_none());
     }

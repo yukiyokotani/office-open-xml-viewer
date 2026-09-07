@@ -1,14 +1,14 @@
-//! Owned BIFF workbook-to-renderer-model boundary. Models are projected once,
-//! in workbook order, without creating SpreadsheetML or ZIP parts.
+//! Owned BIFF workbook-to-renderer-model boundary. Indexed models are projected
+//! once on demand, without creating SpreadsheetML or ZIP parts.
 
 use super::*;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 const MAX_MODEL_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct DirectSession {
     pending_sheets: Option<Vec<(String, SheetData)>>,
-    sheets: VecDeque<(String, SheetData)>,
+    sheets: Vec<SheetSlot>,
     sheet_meta: Vec<(String, SheetVisibility)>,
     styles: Option<styles::ResolvedStyleSheet>,
     shared_strings: Vec<rich::Text>,
@@ -23,6 +23,22 @@ pub(crate) struct DirectSession {
     model_budget: usize,
     bootstrapped: bool,
     poisoned: bool,
+}
+
+enum SheetSlot {
+    Neutral { name: String, sheet: SheetData },
+    Projected(ProjectedSheet),
+    Consumed,
+}
+
+struct ProjectedSheet {
+    worksheet: xlsx_model::Worksheet,
+    rows: Vec<xlsx_model::Row>,
+}
+
+pub(crate) struct ProjectedSheetRef<'a> {
+    pub(crate) worksheet: &'a xlsx_model::Worksheet,
+    pub(crate) rows: &'a [xlsx_model::Row],
 }
 
 impl DirectSession {
@@ -62,9 +78,9 @@ impl DirectSession {
             .styles
             .default_font()
             .map(|(name, size)| (name.to_owned(), size));
-        Ok(Self {
+        let mut session = Self {
             pending_sheets: Some(std::mem::take(&mut prepared.sheets)),
-            sheets: VecDeque::new(),
+            sheets: Vec::new(),
             sheet_meta,
             styles: Some(prepared.styles),
             shared_strings: prepared.shared_strings,
@@ -82,17 +98,11 @@ impl DirectSession {
             mdw: None,
             bootstrapped: false,
             poisoned: false,
-        })
-        .map(|mut session| {
-            if session.pictures.is_empty() {
-                session.sheets = session
-                    .pending_sheets
-                    .take()
-                    .expect("pending sheets")
-                    .into();
-            }
-            session
-        })
+        };
+        if session.pictures.is_empty() {
+            session.initialize_sheet_slots()?;
+        }
+        Ok(session)
     }
 
     pub(crate) fn measurement_font(&self) -> Option<&styles::NormalFont> {
@@ -125,12 +135,7 @@ impl DirectSession {
             self.pictures = pictures::Pictures::default();
         }
         self.mdw = mdw;
-        self.sheets = self
-            .pending_sheets
-            .take()
-            .expect("checked pending sheets")
-            .into();
-        Ok(())
+        self.initialize_sheet_slots()
     }
 
     pub(crate) fn bootstrap(&mut self) -> Result<xlsx_model::ParsedWorkbook, String> {
@@ -204,32 +209,85 @@ impl DirectSession {
         if self.pending_sheets.is_some() {
             return self.fail("XLS direct pictures require an explicit font measurement decision");
         }
-        let Some((name, sheet)) = self.sheets.pop_front() else {
+        if self.sheet_index >= self.sheets.len() {
             return Ok(None);
-        };
-        let index = self.sheet_index;
-        self.sheet_index += 1;
-        match project_sheet(
-            name,
-            sheet,
-            self.date1904,
-            self.mdw,
-            self.default_font.as_ref(),
-            &mut self.model_budget,
-        ) {
-            Ok(mut sheet) => {
-                sheet.images = self
-                    .native_pictures
-                    .sheets
-                    .remove(&index)
-                    .unwrap_or_default();
-                Ok(Some(sheet))
-            }
-            Err(error) => {
-                self.poisoned = true;
-                Err(error)
-            }
         }
+        let index = self.sheet_index;
+        let name = self.sheet_meta[index].0.clone();
+        self.projected_sheet(index, &name)?;
+        self.sheet_index += 1;
+        let SheetSlot::Projected(projected) =
+            std::mem::replace(&mut self.sheets[index], SheetSlot::Consumed)
+        else {
+            return self.fail("XLS direct sheet was already consumed");
+        };
+        let mut worksheet = projected.worksheet;
+        worksheet.rows = projected.rows;
+        Ok(Some(worksheet))
+    }
+
+    /// Lazily project one worksheet into an indexed, reusable model slot.
+    /// The row-free shell and row sidecar are borrowed by the cursor wire layer;
+    /// projection is charged once and never repeated after cancellation.
+    pub(crate) fn projected_sheet(
+        &mut self,
+        index: usize,
+        name: &str,
+    ) -> Result<ProjectedSheetRef<'_>, String> {
+        self.healthy()?;
+        if !self.bootstrapped {
+            return self.fail("XLS direct bootstrap must be consumed before worksheets");
+        }
+        if self.pending_sheets.is_some() {
+            return self.fail("XLS direct pictures require an explicit font measurement decision");
+        }
+        let Some((expected, _)) = self.sheet_meta.get(index) else {
+            return Err(unsupported("XLS direct sheet index is out of range"));
+        };
+        if expected != name {
+            return Err(unsupported(
+                "XLS direct sheet name does not match its index",
+            ));
+        }
+        if matches!(self.sheets.get(index), Some(SheetSlot::Consumed)) {
+            return Err(unsupported("XLS direct sheet was already consumed"));
+        }
+        if matches!(self.sheets.get(index), Some(SheetSlot::Neutral { .. })) {
+            let SheetSlot::Neutral { name, sheet } =
+                std::mem::replace(&mut self.sheets[index], SheetSlot::Consumed)
+            else {
+                unreachable!("neutral slot checked above")
+            };
+            let projected = project_sheet(
+                name,
+                sheet,
+                self.date1904,
+                self.mdw,
+                self.default_font.as_ref(),
+                &mut self.model_budget,
+            );
+            let mut worksheet = match projected {
+                Ok(worksheet) => worksheet,
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            };
+            worksheet.images = self
+                .native_pictures
+                .sheets
+                .remove(&index)
+                .unwrap_or_default();
+            let rows = std::mem::take(&mut worksheet.rows);
+            self.sheets[index] = SheetSlot::Projected(ProjectedSheet { worksheet, rows });
+        }
+        let SheetSlot::Projected(projected) = &self.sheets[index] else {
+            unreachable!("consumed slot rejected above")
+        };
+        Ok(ProjectedSheetRef {
+            worksheet: &projected.worksheet,
+            rows: &projected.rows,
+        })
     }
 
     pub(crate) fn warnings(&self) -> &[String] {
@@ -266,6 +324,25 @@ impl DirectSession {
     fn fail<T>(&mut self, message: &str) -> Result<T, String> {
         self.poisoned = true;
         Err(unsupported(message))
+    }
+
+    fn initialize_sheet_slots(&mut self) -> Result<(), String> {
+        let pending = self
+            .pending_sheets
+            .take()
+            .expect("sheet slots initialized once");
+        let mut sheets = Vec::new();
+        if let Err(error) = reserve_model(&mut sheets, pending.len(), &mut self.model_budget) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        sheets.extend(
+            pending
+                .into_iter()
+                .map(|(name, sheet)| SheetSlot::Neutral { name, sheet }),
+        );
+        self.sheets = sheets;
+        Ok(())
     }
 }
 
@@ -435,7 +512,7 @@ fn model_error() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::cfb::test_support::build_cfb;
 
@@ -492,6 +569,27 @@ mod tests {
         )
     }
 
+    pub(crate) fn wire_fixture() -> DirectSession {
+        let bytes = workbook();
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        DirectSession::new(&cfb).unwrap()
+    }
+
+    pub(crate) fn wire_picture_fixture() -> DirectSession {
+        picture_session().0
+    }
+
+    fn indexed_session() -> DirectSession {
+        let bytes = workbook();
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut prepared = prepare(&cfb, false).unwrap();
+        prepared.sheets = ["First", "Second", "Third"]
+            .into_iter()
+            .map(|name| (name.into(), SheetData::default()))
+            .collect();
+        DirectSession::from_prepared(prepared).unwrap()
+    }
+
     #[test]
     fn owns_bootstrap_and_moves_each_sheet_once_without_xml() {
         let bytes = workbook();
@@ -522,6 +620,44 @@ mod tests {
             (1, 3)
         );
         assert!(session.next_sheet().unwrap().is_none());
+    }
+
+    #[test]
+    fn indexed_projection_is_random_access_reusable_and_charged_once() {
+        let mut session = indexed_session();
+        session.bootstrap().unwrap();
+
+        let before = session.model_budget;
+        let third = session.projected_sheet(2, "Third").unwrap();
+        assert_eq!(third.worksheet.name, "Third");
+        assert!(third.worksheet.rows.is_empty());
+        assert!(third.rows.is_empty());
+        let after_first_projection = session.model_budget;
+        assert!(after_first_projection < before);
+
+        let third_again = session.projected_sheet(2, "Third").unwrap();
+        assert_eq!(third_again.worksheet.name, "Third");
+        assert_eq!(session.model_budget, after_first_projection);
+        assert_eq!(
+            session.projected_sheet(0, "First").unwrap().worksheet.name,
+            "First"
+        );
+        assert!(session.projected_sheet(3, "missing").is_err());
+        assert!(session.projected_sheet(1, "wrong-name").is_err());
+        assert_eq!(
+            session.projected_sheet(1, "Second").unwrap().worksheet.name,
+            "Second"
+        );
+    }
+
+    #[test]
+    fn sequential_compatibility_consumes_the_indexed_slot_without_cloning() {
+        let mut session = indexed_session();
+        session.bootstrap().unwrap();
+        session.projected_sheet(0, "First").unwrap();
+        assert_eq!(session.next_sheet().unwrap().unwrap().name, "First");
+        assert!(session.projected_sheet(0, "First").is_err());
+        assert_eq!(session.next_sheet().unwrap().unwrap().name, "Second");
     }
 
     #[test]
