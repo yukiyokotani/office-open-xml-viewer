@@ -278,18 +278,13 @@ fn template(
     level: &Level<'_>,
     formats: impl Fn(u8) -> Option<u8>,
 ) -> Result<Option<String>, String> {
-    if level.format == 0x17
-        && level
-            .text
-            .chunks_exact(2)
-            .next()
-            .is_some_and(|pair| u16::from_le_bytes([pair[0], pair[1]]) & 0xf000 != 0)
-    {
-        // MS-DOC 2.4.6.3 masks high-nibble binary bullet characters before
-        // applying their marker font. Until that font-aware mapping is
-        // represented in OOXML, neither the raw nor masked code point is safe.
-        return Ok(None);
-    }
+    // MS-DOC 2.4.6.3 describes masking a high-nibble bullet before applying
+    // its font. Measured Office-produced pairs retain the UTF-16 glyph reference
+    // with its resolved font, and direct-DOC PDFs confirm representative glyphs.
+    // One pair was DOC→DOCX; the others were original OOXML saved as DOC.
+    // Preserve that pair literally in lvlText/rFonts. This is observed
+    // compatibility behavior, not an application of the unrelated w:sym rule
+    // or a font-to-Unicode mapping.
     let mut units = Vec::with_capacity(level.text.len() / 2 + 9);
     let mut previous_literal_percent = false;
     for (index, pair) in level.text.chunks_exact(2).enumerate() {
@@ -520,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn emits_low_nibble_bullets_and_caches_high_nibble_bullet_omission() {
+    fn preserves_bullet_glyph_references_without_font_mapping() {
         let (word, table) = super::super::tests::one();
         let mut tables = Tables::read(&word, &table).unwrap();
         let reference = Reference::new(1, 0).unwrap().unwrap();
@@ -532,25 +527,29 @@ mod tests {
         level.text = &[0xb7, 0x00];
         assert_eq!(template(level, |_| Some(0x17)).unwrap(), Some("·".into()));
 
-        for text in [&[0x22, 0x20][..], &[0xb7, 0xf0][..]] {
+        for (text, expected) in [(&[0x22, 0x20][..], "•"), (&[0xb7, 0xf0][..], "\u{f0b7}")] {
             tables.lists[0].levels[0].text = text;
             let mut store = Store::default();
+            assert_eq!(
+                template(&tables.lists[0].levels[0], |_| Some(0x17)).unwrap(),
+                Some(expected.into())
+            );
             assert_eq!(
                 store
                     .activate(&tables, reference, String::new(), String::new(), 10_000)
                     .unwrap(),
-                None
+                Some(1)
             );
             let bytes = store.bytes;
             assert_eq!(
                 store
                     .activate(&tables, reference, String::new(), String::new(), 10_000)
                     .unwrap(),
-                None
+                Some(1)
             );
-            assert!(store.omitted);
-            assert_eq!(store.unrepresentable.len(), 1);
-            assert_eq!(store.instances.len(), 0);
+            assert!(!store.omitted);
+            assert_eq!(store.unrepresentable.len(), 0);
+            assert_eq!(store.instances.len(), 1);
             assert_eq!(store.bytes, bytes);
         }
     }

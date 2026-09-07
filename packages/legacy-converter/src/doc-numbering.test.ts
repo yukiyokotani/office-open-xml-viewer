@@ -199,19 +199,55 @@ it('preserves authored bullet text and applies marker-only CHPX', async () => {
   expect(output.model.body[0].numbering.text).toBe('·');
 });
 
-it.each(['•', '\uf0b7'])('omits high-nibble bullet %s without dropping body text', async bullet => {
-  const output = await convertWithOptionalNumbering(buildDocFixture({
+it.each([
+  { bullet: '\uf0b7', font: 'Symbol', charset: 2 },
+  { bullet: '\uf0fc', font: 'Wingdings', charset: 0 },
+  { bullet: '\uf06c', font: 'Wingdings', charset: 0 },
+  { bullet: '•', font: 'Arial', charset: 238 },
+  { bullet: '•', font: 'Symbol', charset: 2 },
+  { bullet: '・', font: 'ＭＳ 明朝', charset: 128 },
+])('preserves $bullet with resolved $font references without mapping it', async ({ bullet, font, charset }) => {
+  const output = await convert(buildDocFixture({
     text: 'Body\r',
-    numbering: listData({ bullet }),
+    fonts: [{ name: font, charset }],
+    numbering: listData({ bullet, chpx: concat(distance(0x4a4f, 0), distance(0x4a51, 0)) }),
     paragraphProperties: reference(1),
   }));
+  expect(output.result.warnings).not.toContain('legacy-doc:unsupported-numbering-text-or-autonum-omitted');
+  expect(output.numbering).toContain(`w:lvlText w:val="${bullet}"`);
+  expect(output.numbering).toContain(`w:ascii="${font}"`);
+  expect(output.numbering).toContain(`w:hAnsi="${font}"`);
+  expect(output.model.body[0].numbering.text).toBe(bullet);
+});
+
+it('omits an XML-control bullet with a warning while preserving body text', async () => {
+  const output = await convertWithOptionalNumbering(buildDocFixture({ text: 'Body\r',
+    numbering: listData({ bullet: '\u0001' }), paragraphProperties: reference(1) }));
   expect(output.result.warnings).toContain('legacy-doc:unsupported-numbering-text-or-autonum-omitted');
   expect(output.numbering).toBeUndefined();
   expect(output.relationships ?? '').not.toContain('relationships/numbering');
   expect(output.types).not.toContain('wordprocessingml.numbering+xml');
   expect(output.document).toContain('>Body</w:t>');
-  expect(output.model.body).toHaveLength(1);
   expect(output.model.body[0].numbering).toBeNull();
+});
+
+it('encodes astral and XML-sensitive synthetic FFN names as complete UTF-16 metadata', async () => {
+  const font = 'A😀&"';
+  const output = await convert(buildDocFixture({ text: 'Body\r', fonts: [{ name: font, charset: 2 }],
+    numbering: listData({ bullet: '\uf0b7', chpx: concat(distance(0x4a4f, 0), distance(0x4a51, 0)) }), paragraphProperties: reference(1) }));
+  expect(output.numbering).toContain('w:ascii="A😀&amp;&quot;"');
+  expect(output.numbering).toContain('w:hAnsi="A😀&amp;&quot;"');
+});
+
+it.each([
+  { name: '', charset: 0 },
+  { name: 'bad\u0000name', charset: 0 },
+  { name: 'Font', charset: -1 },
+  { name: 'Font', charset: 256 },
+  { name: 'Font', charset: 1.5 },
+  { name: 'x'.repeat(108), charset: 0 },
+])('rejects invalid synthetic FFN metadata: %#', font => {
+  expect(() => buildDocFixture({ fonts: [font] })).toThrow(/synthetic font/i);
 });
 
 it('retains ancestor number formats and normal multilevel restarts', async () => {

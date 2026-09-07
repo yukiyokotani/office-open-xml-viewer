@@ -1,6 +1,6 @@
 // Synthetic, redistributable Office binary fixtures for converter integration tests.
 export interface BinaryNoteFixture { cp: number; text: string; automatic?: boolean }
-export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; formattingRuns?: readonly { end: number; properties: Uint8Array }[]; numbering?: { definitions: Uint8Array; definitionHeaderBytes: number; overrides: Uint8Array }; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: readonly BinaryNoteFixture[]; endnotes?: readonly BinaryNoteFixture[]; comments?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
+export function buildDocFixture(options: { text?: string; paragraphProperties?: Uint8Array; characterProperties?: Uint8Array; formattingRuns?: readonly { end: number; properties: Uint8Array }[]; numbering?: { definitions: Uint8Array; definitionHeaderBytes: number; overrides: Uint8Array }; fonts?: readonly { name: string; charset: number }[]; data?: Uint8Array; defaultTabTwips?: number; sectionProperties?: Uint8Array | readonly Uint8Array[]; sectionEnds?: readonly number[]; floatingAnchors?: Uint8Array; drawingGroupData?: Uint8Array; headers?: readonly string[]; footnotes?: readonly BinaryNoteFixture[]; endnotes?: readonly BinaryNoteFixture[]; comments?: string; facingPages?: boolean; lockedHeaderFields?: boolean } = {}): Uint8Array {
   const text = options.text ?? 'Hello 日本語\rSecond paragraph';
   const sectionEnds = options.sectionEnds ?? [text.length];
   if (options.headers && options.headers.length !== sectionEnds.length * 6) throw new Error('Expected six header/footer variants per section');
@@ -121,6 +121,22 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
     noteOffset += ranges.length;
     noteTables.push(references, ranges);
   }
+  if ((options.fonts?.length ?? 0) > 0x7ff0) throw new Error('Too many synthetic fonts');
+  const fontTable = options.fonts?.length ? concat(little16(options.fonts.length), little16(0), ...options.fonts.map(font => {
+    if (!font.name || font.name.includes('\u0000')) throw new Error('Invalid synthetic font name');
+    if (!Number.isInteger(font.charset) || font.charset < 0 || font.charset > 255) throw new Error('Invalid synthetic font charset');
+    if (39 + (font.name.length + 1) * 2 > 255) throw new Error('Synthetic font name is too long');
+    const name = concat(...Array.from({ length: font.name.length }, (_, index) => little16(font.name.charCodeAt(index))), little16(0));
+    const record = new Uint8Array(39 + name.length);
+    record[3] = font.charset;
+    record.set(name, 39);
+    return concat(new Uint8Array([record.length]), record);
+  })) : new Uint8Array();
+  if (fontTable.length) {
+    view.setUint32(0x112, noteOffset, true);
+    view.setUint32(0x116, fontTable.length, true);
+    noteOffset += fontTable.length;
+  }
   const numbering: Uint8Array[] = [];
   if (options.numbering) {
     const { definitions, definitionHeaderBytes, overrides } = options.numbering;
@@ -132,7 +148,7 @@ export function buildDocFixture(options: { text?: string; paragraphProperties?: 
   }
   return buildCfb([
     ['WordDocument', word],
-    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable, ...noteTables, ...numbering)],
+    ['0Table', concat(table, dop, sectionTable, floating, drawing, headerTable, fieldTable, ...noteTables, fontTable, ...numbering)],
     ...(options.data ? [['Data', options.data] as const] : []),
   ]);
 }
