@@ -3,7 +3,7 @@ pub(crate) mod geometry;
 mod metafile;
 pub(crate) mod properties;
 #[cfg(test)]
-pub(crate) use metafile::tests::emf_test_blip;
+pub(crate) use metafile::tests::{emf_test_blip, wmf_test_blip};
 pub(crate) mod raster;
 pub(crate) mod stroke;
 

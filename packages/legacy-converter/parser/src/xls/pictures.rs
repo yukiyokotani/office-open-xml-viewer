@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Pictures {
     anchors: BTreeMap<usize, Vec<DrawingAnchor>>,
     images: Vec<(u32, &'static str, Vec<u8>)>,
+    unsupported_images: bool,
 }
 
 pub(super) struct Parts {
@@ -42,11 +43,16 @@ impl Pictures {
         Ok(Self {
             anchors: by_sheet,
             images,
+            unsupported_images: supported.len() != indices.len(),
         })
     }
 
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty()
+    }
+
+    pub fn has_unsupported_images(&self) -> bool {
+        self.unsupported_images
     }
 
     pub fn emit(
@@ -189,6 +195,7 @@ impl Pictures {
                 "png" => "image/png",
                 "jpg" | "jpeg" => "image/jpeg",
                 "emf" => "image/x-emf",
+                "wmf" => "image/wmf",
                 _ => continue,
             };
             let name = format!("xl/media/image{id}.{ext}");
@@ -273,6 +280,7 @@ mod tests {
         Pictures {
             anchors: BTreeMap::from([(0, anchors)]),
             images: vec![(1, "png", vec![1, 2, 3])],
+            unsupported_images: false,
         }
     }
 
@@ -299,6 +307,23 @@ mod tests {
                 .matches("Target=\"../media/image1.png\"")
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn mixed_supported_and_unsupported_catalog_entries_keep_supported_output() {
+        let pictures = Pictures {
+            anchors: BTreeMap::from([(0, vec![anchor()])]),
+            images: vec![(1, "png", vec![1, 2, 3])],
+            unsupported_images: true,
+        };
+        assert!(pictures.has_unsupported_images());
+        let mut warnings = vec!["legacy-xls:invalid-or-unsupported-pictures-omitted".into()];
+        let parts = pictures.emit(&[("S".into(), sheet())], 7.0, &mut warnings);
+        assert_eq!(parts.media, [("xl/media/image1.png".into(), vec![1, 2, 3])]);
+        assert_eq!(
+            warnings,
+            ["legacy-xls:invalid-or-unsupported-pictures-omitted"]
         );
     }
 
@@ -330,6 +355,7 @@ mod tests {
         let pictures = Pictures {
             anchors: (0..32).map(|i| (i, vec![picture])).collect(),
             images: vec![(1, "png", vec![1])],
+            unsupported_images: false,
         };
         let mut warnings = vec![];
         let parts = pictures.emit(&sheets, 7.0, &mut warnings);

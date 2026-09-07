@@ -9,8 +9,13 @@ export const shapeFillPng = Uint8Array.from(Buffer.from(
 const record = (kind: number, bytes: Uint8Array, options = 0) =>
   concat(little16(options), little16(kind), little32(bytes.length), bytes);
 
-export function buildPptShapeImageFillFixture(): Uint8Array {
-  const blip = record(0xf01e, concat(new Uint8Array(17), shapeFillPng), 0x6e00);
+export function buildPptShapeImageFillFixture(wmf?: Uint8Array): Uint8Array {
+  const blip = wmf ? (() => {
+    const header = new Uint8Array(34); const view = new DataView(header.buffer);
+    view.setUint32(0, wmf.length, true); view.setUint32(28, wmf.length, true);
+    header[32] = header[33] = 0xfe;
+    return record(0xf01b, concat(new Uint8Array(16), header, wmf), 0x2160);
+  })() : record(0xf01e, concat(new Uint8Array(17), shapeFillPng), 0x6e00);
   // Keep the authored OfficeArtFOPT property array in ascending property-ID order.
   const properties = record(0xf00b, concat(
     little16(0x180), little32(3),

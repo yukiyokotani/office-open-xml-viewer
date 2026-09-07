@@ -66,9 +66,9 @@ legacy document in Microsoft Office.
 
 | Input | Accepted subset | Preserved | Deliberately omitted / rejected |
 |---|---|---|---|
-| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, ordinary single-level and multilevel list definitions, list starts/restarts and marker formatting, literal list-bullet glyph references with resolved marker fonts, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, unsupported paragraph/list-style interactions and conditional table styles, legacy automatic-numbering fields and unrepresentable list templates, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, advanced floating drawings, non-raster images other than EMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
-| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors and supported checksum-bound extension colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands, manual page breaks, and measured passive embedded PNG/JPEG/EMF picture frames with supported cell anchors, cropping, rotation and flips | formula programs, phonetic string data, unsupported extended styles/theme colors/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, non-picture drawings, grouped or active/linked picture objects, picture effects, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG and EMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, WMF/PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
+| DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, ordinary single-level and multilevel list definitions, list starts/restarts and marker formatting, literal list-bullet glyph references with resolved marker fonts, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF/WMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF/WMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, unsupported paragraph/list-style interactions and conditional table styles, legacy automatic-numbering fields and unrepresentable list templates, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, advanced floating drawings, non-raster images other than EMF/WMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
+| XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors and supported checksum-bound extension colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands, manual page breaks, and measured passive embedded PNG/JPEG/EMF/WMF picture frames with supported cell anchors, cropping, rotation and flips | formula programs, phonetic string data, unsupported extended styles/theme colors/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, non-picture drawings, grouped or active/linked picture objects, picture effects, external links, pre-BIFF8 sheets |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG, EMF and WMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
 
 XLS literal, untinted RGBA colors in checksum-matched XF extensions are preserved
 for text, pattern fills, and all five border edges. Cell-specific font colors do
@@ -189,11 +189,11 @@ listed above: their warning identifiers are not a fidelity certificate.
 
 DOC inline/floating images, measured XLS picture frames, and PPT
 picture/background images can retain passive
-EMF BLIPs (MS-ODRAW 2.2.24/31). Both UID layouts and uncompressed or RFC 1950
-zlib-compressed data are supported. Validated EMF bytes become ordinary image
+EMF and WMF BLIPs (MS-ODRAW 2.2.24-25/31). Both UID layouts and uncompressed or RFC 1950
+zlib-compressed data are supported. Validated metafile bytes become ordinary image
 parts without rasterization, geometry rewriting or execution of metafile
 commands by the converter. Existing OOXML image handling renders the supported
-EMF drawing subset; this is not full EMF/EMF+ or Office visual parity. WMF, PICT
+EMF/WMF drawing subset; this is not full metafile or Office visual parity. PICT
 and unsupported binary drawing containers remain omitted. XLS support is limited
 to the eligible passive picture subset described below; it does not reconstruct
 charts, arbitrary drawing shapes, grouped pictures or active/linked objects.
@@ -218,14 +218,28 @@ and these budgets. Malformed or over-budget path geometry is discarded; a
 replay-budget rejection issues no partial path drawing. The existing image
 failure/omission behavior and cache ownership remain unchanged.
 
-EMF extraction checks the declared compressed/expanded lengths, stream end,
-header and record envelope. As resource policy, each EMF is limited to 32 MiB
+Metafile extraction checks the declared compressed/expanded lengths, stream end,
+header and record envelope. As resource policy, each metafile is limited to 32 MiB
 stored and expanded, with the existing 128 MiB per-media-store retention cap
 checked before decompression. DOC inline and floating stores have separate
 caps. Repeated image references share one retained buffer; cache lifetime ends
 with conversion. Existing work and generated-package limits still apply.
-Malformed records or over-budget expansion reject the input through the existing
-error contract. No public API, per-format opt-in or application migration change
+
+WMF admission accepts standard and placeable headers and validates the bounded
+record envelope through its terminal record (MS-WMF 2.3 and 2.3.2.1-3). It
+preserves the original drawing bytes, including unknown drawing operations;
+it does not evaluate them. This is structural validation, not a claim that all
+WMF operations are supported by the existing Canvas image player. Text-heavy
+metafiles can retain their image dimensions while their text remains unpainted
+by that player; preserving the image is not evidence of equation-text fidelity.
+When a size-declared WMF contains data after a valid terminal record, the entire
+image remains unsupported and is omitted through the existing media-omission
+path. The converter neither removes nor forwards those trailing bytes. This is
+an admission policy, not a rule that Office padding is valid or safely ignorable.
+Malformed records or over-budget expansion fail the existing media validation.
+DOC and PPT propagate those errors as unsupported input; XLS retains its
+existing picture-set omission and warning behavior. No public API, per-format
+opt-in or application migration change
 is required. DOC, XLS and PPT conversion remain independently opt-in.
 
 PPT master object inheritance follows `SlideFlags.fMasterObjects` independently
@@ -713,7 +727,7 @@ measurement without retaining the parser's source slices. DOC and PPT never
 invoke this XLS hook, and omitting the hook preserves the previous output path.
 
 The current subset emits owned, explicitly sized, embedded PNG/JPEG/validated
-EMF picture frames outside nested groups. It preserves cell-relative anchor
+EMF/WMF picture frames outside nested groups. It preserves cell-relative anchor
 offsets, movement/resize behavior, crop and local flip/rotation attributes in
 ordinary SpreadsheetDrawing XML. Coordinate conversion uses MS-XLS 2.5.193 and
 ECMA-376 18.3.1.13/81, not a fixed assumed digit width. Normal font selection
@@ -735,7 +749,7 @@ those properties in OOXML does not establish their full display fidelity yet.
 ## XLS drawing inspection for development
 
 Separately, a native-only inspection helper can
-extract the supported passive PNG, JPEG and EMF entries from a BIFF8 global
+extract the supported passive PNG, JPEG, EMF and WMF entries from a BIFF8 global
 image store without requiring font metrics or generating an OOXML package:
 
 ```sh

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import initXlsx, { XlsxArchive } from '../../xlsx/src/wasm/xlsx_parser.js';
 import { validateConvertedOoxml } from '@silurus/ooxml-core';
 import { createLegacyOfficeWasmConverter } from './index.js';
-import { buildXlsPicturesFixture, picturePng } from './xls-pictures-fixture.js';
+import { buildXlsPicturesFixture, picturePng, pictureWmf } from './xls-pictures-fixture.js';
 import { buildDocFixture } from './test-fixtures.js';
 
 const wasm = await readFile(new URL('./wasm/legacy_office_converter_bg.wasm', import.meta.url));
@@ -14,7 +14,7 @@ const parts = (bytes: Uint8Array | ArrayBuffer) => {
   const archive = new XlsxArchive(new Uint8Array(bytes));
   const result: Record<string, Uint8Array> = {};
   try {
-    for (const path of ['xl/media/image1.png', 'xl/drawings/drawing1.xml', 'xl/worksheets/sheet1.xml']) {
+    for (const path of ['[Content_Types].xml', 'xl/media/image1.png', 'xl/media/image1.wmf', 'xl/drawings/drawing1.xml', 'xl/drawings/_rels/drawing1.xml.rels', 'xl/worksheets/sheet1.xml']) {
       try { result[path] = archive.extract_image(path); } catch { /* absent part */ }
     }
     return result;
@@ -22,6 +22,41 @@ const parts = (bytes: Uint8Array | ArrayBuffer) => {
 };
 
 describe('measured XLS picture conversion', () => {
+  it('preserves WMF media, package type, relationship, and parsed image model', async () => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
+      .convert(request(buildXlsPicturesFixture({ imageFormat: 'wmf' })));
+    const zip = parts(result.bytes);
+    expect(zip['xl/media/image1.wmf']).toEqual(pictureWmf);
+    expect(strFromU8(zip['[Content_Types].xml'])).toContain('ContentType="image/wmf"');
+    expect(strFromU8(zip['xl/drawings/drawing1.xml'])).toContain('r:embed="rId1"');
+    expect(strFromU8(zip['xl/drawings/_rels/drawing1.xml.rels'])).toContain('Target="../media/image1.wmf"');
+    const archive = new XlsxArchive(new Uint8Array(result.bytes));
+    try {
+      archive.open_sheet_cursor(0, 'S');
+      let worksheet;
+      for (let pull = 0; pull < 10; pull++) {
+        const value = JSON.parse(strFromU8(archive.pull_sheet_cursor(100)));
+        if (archive.sheet_cursor_pull_finished()) { worksheet = value.worksheet; archive.acknowledge_sheet_cursor_terminal(); break; }
+      }
+      expect(worksheet.images[0]).toMatchObject({ imagePath: 'xl/media/image1.wmf', mimeType: 'image/wmf' });
+      archive.close_sheet_cursor();
+    } finally { archive.free(); }
+    await validateConvertedOoxml(new Uint8Array(result.bytes), 'xlsx');
+  });
+  it.each([new Uint8Array(2), new Uint8Array(8), new Uint8Array([0xa5, 0xa5]), new Uint8Array(8).fill(0xa5)])('omits a referenced WMF with a declared post-EOF trailer and leaves no dangling drawing parts', async (trailer) => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
+      .convert(request(buildXlsPicturesFixture({ imageFormat: 'wmf', wmfTrailer: trailer })));
+    const zip = parts(result.bytes);
+    expect(result.warnings).toContain('legacy-xls:invalid-or-unsupported-pictures-omitted');
+    expect(Object.keys(zip).some(path => path.includes('/media/') || path.includes('/drawings/'))).toBe(false);
+    expect(strFromU8(zip['xl/worksheets/sheet1.xml'])).not.toContain('legacyDrawing');
+  });
+  it('keeps the XLS optional-picture contract for malformed WMF data before EOF', async () => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
+      .convert(request(buildXlsPicturesFixture({ imageFormat: 'wmf', wmfMalformedBeforeEof: true })));
+    expect(result.warnings).toContain('legacy-xls:invalid-or-unsupported-pictures-omitted');
+    expect(Object.keys(parts(result.bytes)).some(path => path.includes('/media/') || path.includes('/drawings/'))).toBe(false);
+  });
   it('round-trips authored XLS rotation and flips through ordinary XLSX parsing', async () => {
     const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
       .convert(request(buildXlsPicturesFixture({
@@ -124,6 +159,12 @@ describe('measured XLS picture conversion', () => {
     expect(Object.keys(parts(result.bytes)).some((p) => p.includes('/media/'))).toBe(false);
     expect(strFromU8(parts(result.bytes)['xl/worksheets/sheet1.xml'])).toContain('<v>42.5</v>');
     expect(result.warnings?.length).toBeGreaterThan(0);
+  });
+
+  it('reports a referenced unsupported image instead of silently dropping its anchor', async () => {
+    const result = await createLegacyOfficeWasmConverter({ wasm, measureXlsNormalFont: () => 7 })
+      .convert(request(buildXlsPicturesFixture({ malformedImage: true })));
+    expect(result.warnings).toContain('legacy-xls:invalid-or-unsupported-pictures-omitted');
   });
 
   it('omits unmeasurable fonts with an explicit warning', async () => {

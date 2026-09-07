@@ -246,9 +246,9 @@ mod tests {
     fn embedded_store_entries_preserve_indices_without_resolving_delayed_or_unused_slots() {
         let blip = art(0xf01e, 0x6e00, &[vec![0; 17], png()].concat());
         let entries = [
-            bse(&blip, false, 1),     // No delayed stream exists in this path.
-            bse(&blip, true, 0),      // Unreferenced slot remains unexposed.
-            art(0xf01b, 0x2160, &[]), // Unsupported WMF is not relabeled.
+            bse(&blip, false, 1), // No delayed stream exists in this path.
+            bse(&blip, true, 0),  // Unreferenced slot remains unexposed.
+            art(0xf01c, 0, &[]),  // Unsupported PICT is not relabeled.
             bse(&blip, true, 1),
         ]
         .concat();
@@ -267,20 +267,33 @@ mod tests {
         .is_err());
     }
     #[test]
-    fn compressed_emf_uses_the_shared_passive_validator_and_total_retention_budget() {
-        let (source, blip) = crate::officeart::emf_test_blip();
-        let bytes = art(
-            0xf000,
-            15,
-            &art(0xf001, 0x2f, &[blip.clone(), blip].concat()),
-        );
-        assert_eq!(
-            extract(&bytes, &mut 100, 2 * source.len()).unwrap(),
-            vec![(1, "emf", source.clone()), (2, "emf", source.clone())]
-        );
-        assert!(extract(&bytes, &mut 100, 2 * source.len() - 1).is_err());
-        assert!(extract(&bytes, &mut 100, 0).is_err());
-        assert!(extract(&bytes, &mut 5, 2 * source.len()).is_err());
+    fn compressed_metafiles_use_the_shared_passive_validator_and_total_retention_budget() {
+        for (source, blip, extension) in [
+            {
+                let (s, b) = crate::officeart::emf_test_blip();
+                (s, b, "emf")
+            },
+            {
+                let (s, b) = crate::officeart::wmf_test_blip();
+                (s, b, "wmf")
+            },
+        ] {
+            let bytes = art(
+                0xf000,
+                15,
+                &art(0xf001, 0x2f, &[blip.clone(), blip].concat()),
+            );
+            assert_eq!(
+                extract(&bytes, &mut 100, 2 * source.len()).unwrap(),
+                vec![
+                    (1, extension, source.clone()),
+                    (2, extension, source.clone())
+                ]
+            );
+            assert!(extract(&bytes, &mut 100, 2 * source.len() - 1).is_err());
+            assert!(extract(&bytes, &mut 100, 0).is_err());
+            assert!(extract(&bytes, &mut 5, 2 * source.len()).is_err());
+        }
     }
     #[test]
     fn extracts_identical_passive_bytes_across_every_split_and_documented_first_continuation() {

@@ -551,19 +551,49 @@ mod tests {
         (word, table)
     }
     #[test]
-    fn delayed_emf_keeps_owned_bytes_cached_across_floating_occurrences() {
-        let (source, blip) = crate::officeart::emf_test_blip();
+    fn delayed_metafiles_keep_owned_bytes_cached_across_floating_occurrences() {
+        for (source, blip, extension) in [
+            {
+                let (s, b) = crate::officeart::emf_test_blip();
+                (s, b, ".emf")
+            },
+            {
+                let (s, b) = crate::officeart::wmf_test_blip();
+                (s, b, ".wmf")
+            },
+        ] {
+            let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            store.remaining_bytes = source.len();
+            assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
+            let pointer = store.parts()[0].1.as_ptr();
+            assert_eq!(store.parts()[0].1, source);
+            assert_eq!(store.remaining_bytes, 0);
+            // Shape records are still parsed per occurrence; image bytes are not.
+            assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
+            assert_eq!(store.parts()[0].1.as_ptr(), pointer);
+            assert!(store.relationships().contains(extension));
+        }
+    }
+    #[test]
+    fn post_eof_wmf_omits_floating_xml_relationship_and_media() {
+        let (mut source, _) = crate::officeart::wmf_test_blip();
+        source.extend_from_slice(&[0, 0]);
+        let words = (source.len() / 2) as u32;
+        source[6..10].copy_from_slice(&words.to_le_bytes());
+        let mut payload = vec![0; 50];
+        payload[16..20].copy_from_slice(&(source.len() as u32).to_le_bytes());
+        payload[44..48].copy_from_slice(&(source.len() as u32).to_le_bytes());
+        payload[48] = 0xfe;
+        payload[49] = 0xfe;
+        payload.extend_from_slice(&source);
+        let blip = record(0xf01b, 0x2160, &payload);
         let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
         let mut store = Store::read(&word, &table, 20).unwrap();
-        store.remaining_bytes = source.len();
-        assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
-        let pointer = store.parts()[0].1.as_ptr();
-        assert_eq!(store.parts()[0].1, source);
-        assert_eq!(store.remaining_bytes, 0);
-        // Shape records are still parsed per occurrence; image bytes are not.
-        assert!(store.drawing(12).unwrap().contains("<wp:anchor"));
-        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
-        assert!(store.relationships().contains(".emf"));
+        assert!(store.drawing(12).unwrap().is_empty());
+        assert!(store.omitted);
+        assert!(store.relationships().is_empty());
+        assert!(store.parts().is_empty());
     }
     #[test]
     fn delayed_pictures_use_word_stream_and_share_parts_without_sharing_drawing_ids() {

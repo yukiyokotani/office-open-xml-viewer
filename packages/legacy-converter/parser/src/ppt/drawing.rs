@@ -1293,7 +1293,7 @@ mod tests {
         .unwrap_err()
         .contains("index out of range"));
 
-        let unsupported = record(0, 0xf01b, &[]); // WMF remains outside Store's allowlist.
+        let unsupported = record(0, 0xf01c, &[]); // PICT remains outside Store's allowlist.
         let entry = parse_record_at(&unsupported, 0, &mut 100).unwrap();
         let entries = [entry];
         let mut media = media::Store::new(&entries, &[]);

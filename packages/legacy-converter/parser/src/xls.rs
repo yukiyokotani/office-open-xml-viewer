@@ -318,7 +318,12 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
     }
     let pictures = if with_pictures {
         match pictures::Pictures::prepare(&records, &tabs) {
-            Ok(value) => value,
+            Ok(value) => {
+                if value.has_unsupported_images() {
+                    warnings.push("legacy-xls:invalid-or-unsupported-pictures-omitted".into());
+                }
+                value
+            }
             Err(_) => {
                 // Optional passive content fails closed without discarding
                 // otherwise valid cells. Never copy the rejected image bytes.

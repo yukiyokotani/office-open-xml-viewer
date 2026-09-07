@@ -65,13 +65,10 @@ pub(crate) fn read<'a>(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<Image<'a>>, String> {
-    if blip.kind == 0xf01a {
-        return Ok(
-            super::metafile::read(blip, budget, remaining_bytes)?.map(|bytes| Image {
-                bytes,
-                extension: "emf",
-            }),
-        );
+    if matches!(blip.kind, 0xf01a | 0xf01b) {
+        let extension = if blip.kind == 0xf01a { "emf" } else { "wmf" };
+        return Ok(super::metafile::read(blip, budget, remaining_bytes)?
+            .map(|bytes| Image { bytes, extension }));
     }
     let (extension, prefix) = match (blip.kind, blip.instance) {
         (0xf01e, 0x6e0) => ("png", 17),
@@ -79,7 +76,7 @@ pub(crate) fn read<'a>(
         (0xf01d, 0x46a | 0x6e2) => ("jpg", 17),
         (0xf01d, 0x46b | 0x6e3) => ("jpg", 33),
         (0xf01d | 0xf01e, _) => return Err(unsupported("invalid OfficeArt raster BLIP instance")),
-        _ => return Ok(None), // No WMF/PICT/DIB or active-object decoding here.
+        _ => return Ok(None), // No PICT/DIB or active-object decoding here.
     };
     if blip.version != 0 {
         return Err(unsupported("invalid OfficeArt raster BLIP version"));

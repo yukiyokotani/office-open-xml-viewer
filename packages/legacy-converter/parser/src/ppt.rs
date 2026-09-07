@@ -402,6 +402,9 @@ fn build_pptx(
     if media.iter().any(|(name, _)| name.ends_with(".emf")) {
         content_types.push_str("<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>");
     }
+    if media.iter().any(|(name, _)| name.ends_with(".wmf")) {
+        content_types.push_str("<Default Extension=\"wmf\" ContentType=\"image/wmf\"/>");
+    }
     for (index, (slide, image_rels)) in slides.into_iter().enumerate() {
         let id = index + 1;
         content_types.push_str(&format!(

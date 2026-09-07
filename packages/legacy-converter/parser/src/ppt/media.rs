@@ -221,23 +221,33 @@ mod tests {
     }
 
     #[test]
-    fn compressed_emf_is_retained_once_and_reused_without_inflation() {
-        let (source, blip) = crate::officeart::emf_test_blip();
-        let entries = [parsed(&blip)];
-        let mut store = Store::new(&entries, &[]);
-        store.remaining = source.len();
-        assert!(store.reference(1, &mut 100).unwrap());
-        let pointer = store.parts()[0].1.as_ptr();
-        assert_eq!(store.parts()[0].1, source);
-        assert_eq!(store.remaining, 0);
-        store.begin_slide();
-        assert!(store.reference(1, &mut 0).unwrap());
-        assert_eq!(store.parts()[0].1.as_ptr(), pointer);
-        assert!(store.relationships().contains("image1.emf"));
-        let mut limited = Store::new(&entries, &[]);
-        limited.remaining = source.len() - 1;
-        assert!(limited.reference(1, &mut 100).is_err());
-        assert!(limited.parts().is_empty());
+    fn compressed_metafiles_are_retained_once_and_reused_without_inflation() {
+        for (source, blip, extension) in [
+            {
+                let (s, b) = crate::officeart::emf_test_blip();
+                (s, b, "image1.emf")
+            },
+            {
+                let (s, b) = crate::officeart::wmf_test_blip();
+                (s, b, "image1.wmf")
+            },
+        ] {
+            let entries = [parsed(&blip)];
+            let mut store = Store::new(&entries, &[]);
+            store.remaining = source.len();
+            assert!(store.reference(1, &mut 100).unwrap());
+            let pointer = store.parts()[0].1.as_ptr();
+            assert_eq!(store.parts()[0].1, source);
+            assert_eq!(store.remaining, 0);
+            store.begin_slide();
+            assert!(store.reference(1, &mut 0).unwrap());
+            assert_eq!(store.parts()[0].1.as_ptr(), pointer);
+            assert!(store.relationships().contains(extension));
+            let mut limited = Store::new(&entries, &[]);
+            limited.remaining = source.len() - 1;
+            assert!(limited.reference(1, &mut 100).is_err());
+            assert!(limited.parts().is_empty());
+        }
     }
 
     #[test]
@@ -256,7 +266,7 @@ mod tests {
         entry[8 + 33] = 0;
         entry[8 + 24..8 + 28].fill(0); // Unused slot never dereferences foDelay.
         assert!(image(parsed(&entry), &[], &mut 100).unwrap().is_none());
-        let unsupported = record(0xf01b, 0, &[]); // WMF is still not admitted.
+        let unsupported = record(0xf01c, 0, &[]); // PICT is still not admitted.
         assert!(image(parsed(&unsupported), &[], &mut 100)
             .unwrap()
             .is_none());

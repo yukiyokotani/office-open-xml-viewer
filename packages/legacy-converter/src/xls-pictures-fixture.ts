@@ -3,6 +3,9 @@ import { concat, little16, little32 } from './test-fixtures.js';
 import { buildCfbWithStreams } from '@silurus/ooxml-core/testing';
 
 export const picturePng = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64'));
+const wmfRecord = (fn: number, words: number[] = []) => concat(little32(3 + words.length), little16(fn), ...words.map(little16));
+const wmfBody = concat(wmfRecord(0x020c, [100, 100]), wmfRecord(0x0325, [2, 10, 10, 90, 90]), wmfRecord(0));
+export const pictureWmf = concat(little16(1), little16(9), little16(0x100), little32((18 + wmfBody.length) / 2), little16(0), little32(8), little16(7), wmfBody);
 const biff = (kind: number, data: Uint8Array = new Uint8Array()) => concat(little16(kind), little16(data.length), data);
 const art = (kind: number, options: number, data: Uint8Array) => concat(little16(options), little16(kind), little32(data.length), data);
 const bof = (kind: number) => biff(0x809, concat(little16(0x600), little16(kind)));
@@ -12,6 +15,8 @@ export function buildXlsPicturesFixture(options: {
   unknownFont?: boolean; behavior?: 0 | 2 | 3; dx?: number;
   rotation?: number; flipH?: boolean; flipV?: boolean;
   normalFont?: { family: string; sizePoints: number; bold: boolean; italic: boolean };
+  imageFormat?: 'png' | 'wmf';
+  wmfTrailer?: Uint8Array; wmfMalformedBeforeEof?: boolean;
 } = {}): Uint8Array {
   const font = (name: string, normal = false) => {
     const format = normal ? options.normalFont : undefined;
@@ -27,7 +32,9 @@ export function buildXlsPicturesFixture(options: {
   };
   const xf = new Uint8Array(20); xf[0] = 1; xf[4] = 4;
   if (options.unknownFont) xf[4] = 0;
-  const blip = art(0xf01e, 0x6e00, concat(new Uint8Array(17), options.malformedImage ? new Uint8Array([1]) : picturePng));
+  const blip = options.imageFormat === 'wmf'
+    ? art(0xf01b, 0x2160, concat(new Uint8Array(16), (() => { let image: Uint8Array<ArrayBufferLike> = options.malformedImage ? new Uint8Array([1]) : new Uint8Array(pictureWmf); if (options.wmfMalformedBeforeEof) { image = new Uint8Array(image); image[image.length - 2] = 1; } if (options.wmfTrailer) { image = concat(image, options.wmfTrailer); new DataView(image.buffer, image.byteOffset).setUint32(6, image.length / 2, true); } const h = new Uint8Array(34); const v = new DataView(h.buffer); v.setUint32(0, image.length, true); v.setUint32(28, image.length, true); h[32] = h[33] = 0xfe; return concat(h, image); })()))
+    : art(0xf01e, 0x6e00, concat(new Uint8Array(17), options.malformedImage ? new Uint8Array([1]) : picturePng));
   const store = biff(0xeb, art(0xf000, 15, art(0xf001, 31, blip)));
   const fsp = (id: number, flags: number) => art(0xf00a, 2, concat(little32(id), little32(flags)));
   const root = art(0xf004, 15, concat(fsp(1, 5), ...(options.hiddenRoot
