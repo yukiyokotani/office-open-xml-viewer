@@ -14,6 +14,91 @@ W = "{" + NS["w"] + "}"
 
 
 class ProbeTests(unittest.TestCase):
+    def test_alignment_precedence_matrix_is_bounded_and_one_dimensional(self):
+        cases = probes.matrix("alignment-precedence")
+        self.assertEqual(len(cases), 18)
+        by_id = {case["id"]: case for case in cases}
+        self.assertEqual(len(by_id), 18)
+        self.assertEqual(set(by_id), {f"T{i:03}" for i in range(1, 19)})
+        for case in cases:
+            if case["parent"]:
+                parent = by_id[case["parent"]]["parameters"]
+                actual = [key for key, value in case["parameters"].items() if parent[key] != value]
+                self.assertEqual(actual, case["changed"])
+                self.assertLessEqual(len(actual), 1)
+        for rtl in [False, True]:
+            subset = [case for case in cases if case["parameters"]["rtl"] == rtl]
+            self.assertEqual(len(subset), 9)
+            self.assertEqual(
+                {case["parameters"]["direct_alignment"] for case in subset},
+                {None, "left", "right", "center", "both", "distribute"},
+            )
+            self.assertEqual(sum(case["parameters"]["direct_alignment"] is not None for case in subset), 5)
+            self.assertEqual(sum(case["parameters"]["direct_alignment"] is None for case in subset), 4)
+            self.assertEqual(sum(case["parent"] is not None and not case["changed"] for case in subset), 2)
+            baseline = next(case for case in subset if case["parent"] is None)
+            list_aligned = next(case for case in subset if case["changed"] == ["list_alignment"])
+            self.assertIsNone(baseline["parameters"]["list_alignment"])
+            self.assertEqual(list_aligned["parameters"]["list_alignment"], "left" if rtl else "right")
+
+    def test_alignment_precedence_xml_owns_exact_jc_and_schema_order(self):
+        cases = probes.matrix("alignment-precedence")
+        payload = probes.build(cases)
+        self.assertEqual(payload, probes.build(cases))
+        with ZipFile(BytesIO(payload)) as z:
+            document = E.fromstring(z.read("word/document.xml"))
+            numbering = E.fromstring(z.read("word/numbering.xml"))
+            styles = E.fromstring(z.read("word/styles.xml"))
+        paragraphs = document.findall("w:body/w:p", NS)
+        self.assertEqual(len(paragraphs), 72)
+        levels = numbering.findall("w:abstractNum/w:lvl", NS)
+        self.assertEqual(len(levels), 18)
+        self.assertEqual(len(numbering.findall("w:num", NS)), 18)
+        self.assertEqual(
+            [E.QName(child).localname for child in numbering],
+            ["abstractNum"] * 18 + ["num"] * 18,
+        )
+
+        order = {name: index for index, name in enumerate(["tabs", "bidi", "ind", "jc"])}
+        for index, case in enumerate(cases):
+            params = case["parameters"]
+            level_ppr = levels[index].find("w:pPr", NS)
+            level_names = [E.QName(child).localname for child in level_ppr]
+            selected = [order[name] for name in level_names if name in order]
+            self.assertEqual(selected, sorted(selected), (case["id"], level_names))
+            level_jc = level_ppr.find("w:jc", NS)
+            if params["list_alignment"] is None:
+                self.assertIsNone(level_jc)
+            else:
+                self.assertEqual(level_jc.get(W + "val"), params["list_alignment"])
+            self.assertEqual(level_ppr.find("w:bidi", NS).get(W + "val"), str(int(not params["rtl"])))
+
+            for paragraph in paragraphs[index * 4 + 2:index * 4 + 4]:
+                ppr = paragraph.find("w:pPr", NS)
+                names = [E.QName(child).localname for child in ppr]
+                selected = [order[name] for name in names if name in order]
+                self.assertEqual(selected, sorted(selected), (case["id"], names))
+                direct_jc = ppr.find("w:jc", NS)
+                if params["direct_alignment"] is None:
+                    self.assertIsNone(direct_jc)
+                else:
+                    self.assertEqual(direct_jc.get(W + "val"), params["direct_alignment"])
+                self.assertEqual(ppr.find("w:bidi", NS).get(W + "val"), str(int(params["rtl"])))
+
+                style_id = ppr.find("w:pStyle", NS).get(W + "val")
+                visited = set()
+                while style_id:
+                    self.assertNotIn(style_id, visited)
+                    visited.add(style_id)
+                    style = styles.xpath("w:style[@w:styleId=$id]", namespaces=NS, id=style_id)[0]
+                    style_ppr = style.find("w:pPr", NS)
+                    if style_ppr is not None:
+                        self.assertIsNone(style_ppr.find("w:bidi", NS))
+                        self.assertIsNone(style_ppr.find("w:jc", NS))
+                    based_on = style.find("w:basedOn", NS)
+                    style_id = based_on.get(W + "val") if based_on is not None else None
+                self.assertIn("Normal", visited)
+
     def test_bidi_boundaries_change_one_parameter_with_plain_and_repeat_controls(self):
         cases = probes.matrix("bidi-boundaries")
         self.assertEqual(len(cases), 32)
@@ -105,7 +190,7 @@ class ProbeTests(unittest.TestCase):
                                      E.tostring(definitions[1].find("w:pPr", NS)))
 
     def test_all_phases_remain_deterministic_and_passive(self):
-        for phase in ["baseline", "interactions", "style-association", "bidi-boundaries"]:
+        for phase in ["baseline", "interactions", "style-association", "bidi-boundaries", "alignment-precedence"]:
             with self.subTest(phase=phase):
                 cases = probes.matrix(phase)
                 payload = probes.build(cases)

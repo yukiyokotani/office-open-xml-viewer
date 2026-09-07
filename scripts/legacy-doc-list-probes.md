@@ -90,6 +90,27 @@ should move. Keep Unicode UAX #9 character-level ordering, renderer segment
 ordering, and observed Word punctuation placement separate. Passing a
 word-order test is not approval of an indentation rule or whole-page fidelity.
 
+The fifth phase authors a small paragraph-alignment precedence matrix:
+
+```sh
+python scripts/legacy-doc-list-probes.py /tmp/doc-list-probes-alignment --phase alignment-precedence
+```
+
+It creates 18 `T` cases: nine per paragraph direction. Each direction includes
+a list-alignment-absent baseline, one explicit list alignment, five explicit
+direct paragraph alignments (`left`, `right`, `center`, `both`, and
+`distribute`), and two unchanged repeats. Parent links change at most one
+parameter. Every case has its own numbering definition and two body paragraphs;
+paragraph styles deliberately contribute neither bidi nor alignment so the
+authored ownership of each control remains explicit.
+
+These are source-authoring controls, not Office evidence. XML presence,
+absence, ordering, and deterministic generation establish only what was placed
+in the input. Before drawing a compatibility conclusion, inspect the saved DOC
+properties and native output, confirm that Office preserved the intended
+contrast, and test counterexamples. A generated alignment pair does not by
+itself establish precedence between direct paragraph and list-level formatting.
+
 ## Required local Office sequence
 
 1. Record Word version/build, platform, installed/substituted fonts and relevant

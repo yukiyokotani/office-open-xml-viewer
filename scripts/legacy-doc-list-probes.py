@@ -15,6 +15,7 @@ from io import BytesIO
 import json
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 from docx import Document
@@ -31,6 +32,8 @@ def matrix(phase="baseline"):
         return style_association_matrix()
     if phase == "bidi-boundaries":
         return bidi_boundary_matrix()
+    if phase == "alignment-precedence":
+        return alignment_precedence_matrix()
     if phase != "baseline":
         raise ValueError("unknown experiment phase")
     cases = []
@@ -193,6 +196,33 @@ def bidi_boundary_matrix():
     return cases
 
 
+def alignment_precedence_matrix():
+    """Bound direct paragraph alignment conflicts against list formatting."""
+    cases = []
+
+    def add(parent, **changes):
+        case = {"id": f"T{len(cases) + 1:03}", "parent": parent["id"],
+                "changed": list(changes),
+                "parameters": {**parent["parameters"], **changes}}
+        cases.append(case)
+        return case
+
+    for original in (case for case in matrix() if case["parent"] is None):
+        rtl = original["parameters"]["rtl"]
+        baseline = {"id": f"T{len(cases) + 1:03}", "parent": None, "changed": [],
+                    "parameters": {**original["parameters"],
+                        "list_left": 720, "list_right": 720,
+                        "list_bidi": not rtl, "list_alignment": None,
+                        "direct_alignment": None}}
+        cases.append(baseline)
+        aligned = add(baseline, list_alignment="left" if rtl else "right")
+        for value in ["left", "right", "center", "both", "distribute"]:
+            add(aligned, direct_alignment=value)
+        add(baseline)
+        add(aligned)
+    return cases
+
+
 def add_bidi_probe_text(paragraph, label, params):
     terminal = params["terminal_punctuation"]
     mode = params["text_runs"]
@@ -232,6 +262,43 @@ def add_reference(parent, identity):
     parent.append(ref)
 
 
+def validate_alignment_precedence(payload, cases):
+    """Assert the new phase's schema order and direct/style ownership."""
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with ZipFile(BytesIO(payload)) as archive:
+        document = ElementTree.fromstring(archive.read("word/document.xml"))
+        numbering = ElementTree.fromstring(archive.read("word/numbering.xml"))
+        styles = ElementTree.fromstring(archive.read("word/styles.xml"))
+    paragraphs = []
+    for paragraph in document.findall(".//w:body/w:p", namespace):
+        text = "".join(paragraph.itertext())
+        if text.startswith(("First marker", "Second marker")):
+            paragraphs.append(paragraph)
+    assert len(paragraphs) == len(cases) * 2
+    for index, paragraph in enumerate(paragraphs):
+        case = cases[index // 2]
+        ppr = paragraph.find("w:pPr", namespace)
+        names = [child.tag.rsplit("}", 1)[-1] for child in ppr]
+        selected = [names.index(name) for name in ["bidi", "ind", "jc"] if name in names]
+        assert selected == sorted(selected), (case["id"], names)
+        has_jc = "jc" in names
+        assert has_jc == (case["parameters"]["direct_alignment"] is not None)
+    levels = numbering.findall("w:abstractNum/w:lvl", namespace)
+    assert len(levels) == len(cases)
+    for case, level in zip(cases, levels):
+        ppr = level.find("w:pPr", namespace)
+        names = [child.tag.rsplit("}", 1)[-1] for child in ppr]
+        selected = [names.index(name) for name in ["tabs", "bidi", "ind", "jc"] if name in names]
+        assert selected == sorted(selected), (case["id"], names)
+        has_jc = "jc" in names
+        assert has_jc == (case["parameters"]["list_alignment"] is not None)
+    for style in styles.findall("w:style", namespace):
+        ppr = style.find("w:pPr", namespace)
+        if ppr is not None:
+            assert ppr.find("w:bidi", namespace) is None
+            assert ppr.find("w:jc", namespace) is None
+
+
 def build(cases):
     doc = Document()
     section = doc.sections[0]
@@ -247,7 +314,8 @@ def build(cases):
     title.font.name, title.font.size = "Arial", Pt(18)
     title.font.color.rgb = normal.font.color.rgb = RGBColor(0, 0, 0)
     boundary_experiment = any("terminal_punctuation" in case["parameters"] for case in cases)
-    if boundary_experiment:
+    alignment_experiment = any("direct_alignment" in case["parameters"] for case in cases)
+    if boundary_experiment or alignment_experiment:
         # Keep P/Q/R bytes unchanged; the new probe title has no decorative rule.
         for border in title.element.xpath("./w:pPr/w:pBdr"):
             border.getparent().remove(border)
@@ -293,16 +361,25 @@ def build(cases):
         if p["list_bidi"] is not None:
             level_ppr.append(element("bidi", val=int(p["list_bidi"])))
         add_indent(level_ppr, p["list_left"], p["list_right"], p["list_first"])
+        if p.get("list_alignment") is not None:
+            level_ppr.append(element("jc", val=p["list_alignment"]))
         level.append(level_ppr)
         abstract.append(level)
         definitions.append(abstract)
         instance = element("num", numId=identity)
         instance.append(element("abstractNumId", val=identity))
         instances.append(instance)
-        heading = doc.add_paragraph(("Bidirectional text probe " if boundary_experiment else "List indentation probe ") + case["id"], "Title")
+        prefix = ("Bidirectional text probe " if boundary_experiment else
+                  "Paragraph alignment precedence probe " if alignment_experiment else
+                  "List indentation probe ")
+        heading = doc.add_paragraph(prefix + case["id"], "Title")
         heading.paragraph_format.page_break_before = index > 0
-        doc.add_paragraph("Compare word order and punctuation before and after saving as DOC."
-                          if boundary_experiment else "Compare the marker, first line, continuation line and wrapped text.")
+        instruction = ("Compare word order and punctuation before and after saving as DOC."
+                       if boundary_experiment else
+                       "Compare paragraph alignment before and after saving as DOC."
+                       if alignment_experiment else
+                       "Compare the marker, first line, continuation line and wrapped text.")
+        doc.add_paragraph(instruction)
         for label in ["First", "Second"]:
             paragraph_style = style
             if label == "Second" and style_mode == "mixed-normal":
@@ -316,6 +393,8 @@ def build(cases):
             add_tabs(props, p["direct_tab"])
             props.append(element("bidi", val=int(p["rtl"])))
             add_indent(props, p["direct_left"], p["direct_right"], p["direct_first"], p["empty_direct_ind"])
+            if p.get("direct_alignment") is not None:
+                props.append(element("jc", val=p["direct_alignment"]))
             if "terminal_punctuation" in p:
                 add_bidi_probe_text(paragraph, label, p)
             else:
@@ -341,10 +420,12 @@ def build(cases):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new directory; existing paths are rejected")
-    parser.add_argument("--phase", choices=["baseline", "interactions", "style-association", "bidi-boundaries"], default="baseline")
+    parser.add_argument("--phase", choices=["baseline", "interactions", "style-association", "bidi-boundaries", "alignment-precedence"], default="baseline")
     args = parser.parse_args()
     cases = matrix(args.phase)
     payload = build(cases)
+    if args.phase == "alignment-precedence":
+        validate_alignment_precedence(payload, cases)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "list-indent-probes.docx").write_bytes(payload)
     manifest = {"phase": "authored-not-office-verified", "experiment": args.phase,
