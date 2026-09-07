@@ -8,38 +8,82 @@ pub(in crate::ppt) fn local_atom<'a>(
     tags: Record<'a>,
     budget: &mut usize,
 ) -> Result<Option<&'a [u8]>, String> {
-    if tags.version != 15 {
+    Ok(local_atom_record(&tags, &[], budget)?.map(|atom| atom.payload))
+}
+
+pub(in crate::ppt) fn local_atom_span(
+    tags: &RecordSpan,
+    backing: &[u8],
+    budget: &mut usize,
+) -> Result<Option<ByteSpan>, String> {
+    Ok(local_atom_record(tags, backing, budget)?.map(|atom| atom.payload_span().clone()))
+}
+
+trait TagRecord<'a>: Clone {
+    fn view(&self, backing: &'a [u8]) -> Result<Record<'a>, String>;
+    fn children(&self, backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String>;
+}
+
+impl<'a> TagRecord<'a> for Record<'a> {
+    fn view(&self, _: &'a [u8]) -> Result<Record<'a>, String> {
+        Ok(*self)
+    }
+    fn children(&self, _: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String> {
+        parse_records(self.payload, budget)
+    }
+}
+
+impl<'a> TagRecord<'a> for RecordSpan {
+    fn view(&self, backing: &'a [u8]) -> Result<Record<'a>, String> {
+        RecordSpan::view(self, backing)
+    }
+    fn children(&self, backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String> {
+        parse_record_spans(backing, self.payload_span(), budget)
+    }
+}
+
+// One ownership/validation walk for borrowed and session-retained PP9 styles.
+fn local_atom_record<'a, T: TagRecord<'a>>(
+    tags: &T,
+    backing: &'a [u8],
+    budget: &mut usize,
+) -> Result<Option<T>, String> {
+    if tags.view(backing)?.version != 15 {
         return Err(unsupported("invalid PowerPoint shape tags"));
     }
     let mut found = None;
-    for tag in parse_records(tags.payload, budget)? {
-        if tag.kind != 5002 {
+    for tag in tags.children(backing, budget)? {
+        let tag_view = tag.view(backing)?;
+        if tag_view.kind != 5002 {
             continue;
         }
-        if tag.version != 15 || tag.instance != 0 {
+        if tag_view.version != 15 || tag_view.instance != 0 {
             return Err(unsupported("invalid PowerPoint binary tag container"));
         }
-        let pair = parse_records(tag.payload, budget)?;
+        let pair = tag.children(backing, budget)?;
         let Some(name) = pair.first() else { continue };
-        if name.kind != 4026 || name.payload != b"_\0_\0_\0P\0P\0T\09\0" {
+        let name_view = name.view(backing)?;
+        if name_view.kind != 4026 || name_view.payload != b"_\0_\0_\0P\0P\0T\09\0" {
             continue;
         }
-        if name.version != 0 || name.instance != 0 || pair.len() != 2 || found.is_some() {
+        if name_view.version != 0 || name_view.instance != 0 || pair.len() != 2 || found.is_some() {
             return Err(unsupported("ambiguous PowerPoint PP9 shape tag"));
         }
-        let blob = pair[1];
-        if blob.kind != 5003 || blob.version != 0 || blob.instance != 0 {
+        let blob = &pair[1];
+        let blob_view = blob.view(backing)?;
+        if blob_view.kind != 5003 || blob_view.version != 0 || blob_view.instance != 0 {
             return Err(unsupported("invalid PowerPoint PP9 shape blob"));
         }
-        let atoms = parse_records(blob.payload, budget)?;
-        if atoms.len() != 1
-            || atoms[0].kind != 4012
-            || atoms[0].version != 0
-            || atoms[0].instance != 0
-        {
+        let atoms = blob.children(backing, budget)?;
+        if atoms.len() != 1 {
             return Err(unsupported("invalid PowerPoint local PP9 text style"));
         }
-        found = Some(atoms[0].payload);
+        let atom = &atoms[0];
+        let view = atom.view(backing)?;
+        if view.kind != 4012 || view.version != 0 || view.instance != 0 {
+            return Err(unsupported("invalid PowerPoint local PP9 text style"));
+        }
+        found = Some(atom.clone());
     }
     Ok(found)
 }
@@ -251,7 +295,8 @@ mod tests {
         let data = record(5003, 0, &record(4012, 0, &entry(3, 1)));
         let tag = record(5002, 15, &[name.clone(), data.clone()].concat());
         let parse = |bytes: &[u8], budget: &mut usize| {
-            local_atom(
+            let mut span_budget = *budget;
+            let borrowed = local_atom(
                 Record {
                     kind: 5000,
                     version: 15,
@@ -260,7 +305,19 @@ mod tests {
                 },
                 budget,
             )
-            .map(|v| v.map(<[u8]>::to_vec))
+            .map(|v| v.map(<[u8]>::to_vec));
+            let mut backing = vec![0xaa; 3];
+            backing.extend(record(5000, 15, bytes));
+            let (tags, _) = record_span_with_end(&backing, 3, &mut 1, "PP9").unwrap();
+            let retained = local_atom_span(&tags, &backing, &mut span_budget);
+            let moved = backing;
+            let spanned = retained.and_then(|span| {
+                span.map(|span| span.view(&moved).map(<[u8]>::to_vec))
+                    .transpose()
+            });
+            assert_eq!(borrowed, spanned);
+            assert_eq!(*budget, span_budget);
+            borrowed
         };
         assert_eq!(parse(&tag, &mut 100).unwrap(), Some(entry(3, 1)));
         assert!(parse(&tag, &mut 1).is_err());

@@ -1,5 +1,6 @@
 //! OfficeArt preset geometry and solid paint, without renderer extensions.
 use super::{scheme, unsupported};
+use pptx_model::{ArrowEnd, Fill, Stroke};
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Paint {
@@ -245,6 +246,131 @@ impl Paint {
             self.rotate_fill_with_shape.unwrap_or(false),
         ))
     }
+    pub(super) fn model(
+        &self,
+        kind: u16,
+        scheme: Option<&scheme::Scheme>,
+        image_fill: Option<Fill>,
+    ) -> (Option<Fill>, Option<Stroke>) {
+        if self.geometry(kind).is_none() {
+            return (Some(Fill::None), None);
+        }
+        self.model_with_custom_geometry(scheme, !matches!(kind, 20 | 32), true, image_fill)
+    }
+
+    pub(super) fn model_with_custom_geometry(
+        &self,
+        scheme: Option<&scheme::Scheme>,
+        allow_fill: bool,
+        allow_line: bool,
+        image_fill: Option<Fill>,
+    ) -> (Option<Fill>, Option<Stroke>) {
+        let image_fill = image_fill.filter(|_| self.foreground_image().is_some());
+        let fill = if allow_fill {
+            image_fill.or_else(|| {
+                self.solid_fill_values(allow_fill)
+                    .and_then(|(color, alpha)| model_solid(color, alpha, scheme))
+            })
+        } else {
+            None
+        };
+        let stroke = self
+            .solid_line_values(allow_line)
+            .and_then(|_| self.model_stroke(scheme));
+        (Some(fill.unwrap_or(Fill::None)), stroke)
+    }
+
+    // Both output adapters consume these semantic eligibility/default rules.
+    // Keep unsupported fill kinds and explicit paint vetoes out of either path.
+    fn solid_fill_values(&self, allow_fill: bool) -> Option<(u32, u32)> {
+        let fill_set = self.fill.is_some()
+            || self.filled.is_some()
+            || self.fill_type.is_some()
+            || self.fill_alpha.is_some();
+        (allow_fill
+            && fill_set
+            && self.filled.unwrap_or(true)
+            && self.fill_ok.unwrap_or(true)
+            && !self.fill_rect.unwrap_or(false)
+            && self.fill_type.unwrap_or(0) == 0)
+            .then_some((
+                self.fill.unwrap_or(0xffffff),
+                self.fill_alpha.unwrap_or(65536),
+            ))
+    }
+
+    fn solid_line_values(&self, allow_line: bool) -> Option<(u32, u32)> {
+        let line_set = self.line.is_some()
+            || self.lined.is_some()
+            || self.line_type.is_some()
+            || self.line_alpha.is_some()
+            || self.width.is_some()
+            || self.dash.is_some()
+            || self.details.specified();
+        (allow_line
+            && line_set
+            && self.lined.unwrap_or(true)
+            && self.line_ok.unwrap_or(true)
+            && self.line_type.unwrap_or(0) == 0)
+            .then_some((self.line.unwrap_or(0), self.line_alpha.unwrap_or(65536)))
+    }
+
+    pub(super) fn background_model(
+        &self,
+        scheme: Option<&scheme::Scheme>,
+        image_fill: Option<Fill>,
+    ) -> Option<Fill> {
+        if !self.filled.unwrap_or(true) || !self.fill_ok.unwrap_or(true) {
+            return Some(Fill::None);
+        }
+        if self.fill_rect.unwrap_or(false) {
+            return None;
+        }
+        if self.fill_type.unwrap_or(0) == 3 {
+            return image_fill.filter(|_| self.background_image().is_some());
+        }
+        (self.fill_type.unwrap_or(0) == 0)
+            .then(|| {
+                model_solid(
+                    self.fill.unwrap_or(0xffffff),
+                    self.fill_alpha.unwrap_or(65536),
+                    scheme,
+                )
+            })
+            .flatten()
+    }
+
+    fn model_stroke(&self, scheme: Option<&scheme::Scheme>) -> Option<Stroke> {
+        let color = model_color(
+            self.line.unwrap_or(0),
+            self.line_alpha.unwrap_or(65536),
+            scheme,
+        )?;
+        let (line_join, miter_limit) = self.details.join();
+        let arrow = |end: crate::officeart::stroke::LineEnd<'_>| ArrowEnd {
+            kind: end.kind.to_owned(),
+            w: end.width.to_owned(),
+            len: end.length.to_owned(),
+        };
+        Some(Stroke {
+            color,
+            width: i64::from(self.width.unwrap_or(9525)),
+            fill: None,
+            dash_style: self
+                .dash
+                .and_then(crate::officeart::stroke::preset_dash)
+                .filter(|value| *value != "solid")
+                .map(str::to_owned),
+            custom_dash: Vec::new(),
+            line_cap: Some(self.details.canvas_cap().to_owned()),
+            line_join: Some(line_join.to_owned()),
+            miter_limit,
+            alignment: None,
+            head_end: self.details.line_end(0).map(arrow),
+            tail_end: self.details.line_end(1).map(arrow),
+            cmpd: None,
+        })
+    }
     #[cfg(test)]
     fn xml(&self, kind: u16) -> String {
         self.xml_with_scheme(kind, None)
@@ -277,46 +403,12 @@ impl Paint {
         // Direct and explicitly linked master paint are reconstructed. Drawing
         // defaults and unlinked masters remain absent, with a conversion warning.
         // Within an explicit layer, use the normative MS-ODRAW property defaults.
-        let fill_set = self.fill.is_some()
-            || self.filled.is_some()
-            || self.fill_type.is_some()
-            || self.fill_alpha.is_some();
-        let line_set = self.line.is_some()
-            || self.lined.is_some()
-            || self.line_type.is_some()
-            || self.line_alpha.is_some()
-            || self.width.is_some()
-            || self.dash.is_some()
-            || self.details.specified();
-        let fill = if allow_fill
-            && fill_set
-            && self.filled.unwrap_or(true)
-            && self.fill_ok.unwrap_or(true)
-            && !self.fill_rect.unwrap_or(false)
-            && self.fill_type.unwrap_or(0) == 0
-        {
-            solid(
-                self.fill.unwrap_or(0xffffff),
-                self.fill_alpha.unwrap_or(65536),
-                scheme,
-            )
-        } else {
-            None
-        };
-        let line = if allow_line
-            && line_set
-            && self.lined.unwrap_or(true)
-            && self.line_ok.unwrap_or(true)
-            && self.line_type.unwrap_or(0) == 0
-        {
-            solid(
-                self.line.unwrap_or(0),
-                self.line_alpha.unwrap_or(65536),
-                scheme,
-            )
-        } else {
-            None
-        };
+        let fill = self
+            .solid_fill_values(allow_fill)
+            .and_then(|(color, alpha)| solid(color, alpha, scheme));
+        let line = self
+            .solid_line_values(allow_line)
+            .and_then(|(color, alpha)| solid(color, alpha, scheme));
         let mut xml = if allow_fill {
             image_fill.map(str::to_owned).or(fill)
         } else {
@@ -360,9 +452,132 @@ fn solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<St
     Some(xml)
 }
 
+fn model_solid(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<Fill> {
+    model_color(color, opacity, scheme).map(|color| Fill::Solid { color })
+}
+
+fn model_color(color: u32, opacity: u32, scheme: Option<&scheme::Scheme>) -> Option<String> {
+    let color = scheme::drawing(color, scheme)?;
+    let mut result = format!(
+        "{:02X}{:02X}{:02X}",
+        color & 255,
+        (color >> 8) & 255,
+        (color >> 16) & 255
+    );
+    if opacity != 65536 {
+        let alpha = (u64::from(opacity) * 255 + 32768) / 65536;
+        result.push_str(&format!("{alpha:02X}"));
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_and_xml_outputs_share_explicit_paint_vetoes() {
+        for allow in [false, true] {
+            for enabled in [None, Some(false), Some(true)] {
+                for ok in [None, Some(false), Some(true)] {
+                    for kind in [None, Some(0), Some(3), Some(7)] {
+                        let mut p = Paint::default();
+                        p.fill = Some(0x332211);
+                        p.line = Some(0x665544);
+                        p.filled = enabled;
+                        p.lined = enabled;
+                        p.fill_ok = ok;
+                        p.line_ok = ok;
+                        p.fill_type = kind;
+                        p.line_type = kind;
+                        let (fill, line) = p.model_with_custom_geometry(None, allow, allow, None);
+                        let xml = p.xml_with_custom_geometry(None, allow, allow);
+                        assert_eq!(
+                            matches!(fill, Some(Fill::Solid { .. })),
+                            xml.contains("112233")
+                        );
+                        assert_eq!(line.is_some(), xml.contains("445566"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_model_preserves_solid_opacity_and_stroke_semantics() {
+        let mut p = Paint::default();
+        for (id, value) in [
+            (0x181, 0x332211),
+            (0x182, 32768),
+            (0x1c0, 0x665544),
+            (0x1c1, 16384),
+            (0x1cb, 25400),
+            (0x1ce, 8),
+            (0x1d0, 1),
+            (0x1d1, 5),
+            (0x1d6, 1),
+            (0x1cc, 0x18000),
+            (0x1d7, 1),
+        ] {
+            p.property(id, value).unwrap();
+        }
+        let (fill, stroke) = p.model(1, None, None);
+        assert!(matches!(fill, Some(Fill::Solid { ref color }) if color == "11223380"));
+        let stroke = stroke.unwrap();
+        assert_eq!(stroke.color, "44556640");
+        assert_eq!(stroke.width, 25400);
+        assert_eq!(stroke.dash_style.as_deref(), Some("dashDot"));
+        assert_eq!(stroke.line_cap.as_deref(), Some("square"));
+        assert_eq!(stroke.line_join.as_deref(), Some("miter"));
+        assert_eq!(stroke.miter_limit, Some(1.5));
+        assert_eq!(stroke.head_end.unwrap().kind, "triangle");
+        assert_eq!(stroke.tail_end.unwrap().kind, "arrow");
+    }
+
+    #[test]
+    fn direct_model_keeps_no_fill_and_unsupported_paint_absent() {
+        let mut p = Paint::default();
+        p.property(0x181, 0x332211).unwrap();
+        p.property(0x1c0, 0x665544).unwrap();
+        p.property(0x1bf, 0x00100000).unwrap();
+        p.property(0x1c4, 1).unwrap();
+        let (fill, stroke) = p.model(1, None, None);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert!(stroke.is_none());
+
+        let mut unresolved = Paint::default();
+        unresolved.property(0x181, 0x08000001).unwrap();
+        let (fill, _) = unresolved.model(1, None, None);
+        assert!(matches!(fill, Some(Fill::None)));
+        assert!(unresolved.background_model(None, None).is_none());
+    }
+
+    #[test]
+    fn direct_background_and_passive_image_use_only_provided_model_fill() {
+        let mut p = Paint::default();
+        p.property(0x180, 3).unwrap();
+        p.property(0x4186, 9).unwrap();
+        assert!(p.background_model(None, None).is_none());
+        assert!(matches!(
+            p.background_model(None, Some(Fill::None)),
+            Some(Fill::None)
+        ));
+        let (fill, _) = p.model_with_custom_geometry(None, true, false, Some(Fill::None));
+        assert!(matches!(fill, Some(Fill::None)));
+
+        p.property(0x1bf, 0x00100000).unwrap();
+        assert!(p
+            .background_model(None, Some(Fill::None))
+            .is_some_and(|fill| matches!(fill, Fill::None)));
+        let (fill, _) = p.model_with_custom_geometry(
+            None,
+            true,
+            false,
+            Some(Fill::Solid {
+                color: "BADBAD".into(),
+            }),
+        );
+        assert!(matches!(fill, Some(Fill::None)));
+    }
     #[test]
     fn all_dash_presets_retain_the_line_and_inherit_explicit_solid() {
         for (value, name) in [

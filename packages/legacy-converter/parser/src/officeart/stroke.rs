@@ -30,6 +30,14 @@ pub(crate) struct Details {
     values: [Option<u8>; 8],
     miter: Option<u32>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LineEnd<'a> {
+    pub kind: &'a str,
+    pub width: &'a str,
+    pub length: &'a str,
+}
+
 impl Details {
     pub fn property(&mut self, id: u16, value: u32) -> Result<(), String> {
         match id {
@@ -70,6 +78,38 @@ impl Details {
     pub fn cap(&self) -> &'static str {
         // MS-ODRAW defaults: flat cap and round join.
         ["rnd", "sq", "flat"][usize::from(self.values[7].unwrap_or(2))]
+    }
+    pub fn canvas_cap(&self) -> &'static str {
+        match self.cap() {
+            "rnd" => "round",
+            "sq" => "square",
+            _ => "butt",
+        }
+    }
+    pub fn join(&self) -> (&'static str, Option<f64>) {
+        match self.values[6].unwrap_or(2) {
+            0 => ("bevel", None),
+            1 => (
+                "miter",
+                Some(f64::from(self.miter.unwrap_or(0x80000)) / 65536.0),
+            ),
+            _ => ("round", None),
+        }
+    }
+    pub fn line_end(&self, index: usize) -> Option<LineEnd<'static>> {
+        if index > 1 {
+            return None;
+        }
+        let kind = ["none", "triangle", "stealth", "diamond", "oval", "arrow"]
+            [usize::from(self.values[index].unwrap_or(0))];
+        (kind != "none").then(|| {
+            let sizes = ["sm", "med", "lg"];
+            LineEnd {
+                kind,
+                width: sizes[usize::from(self.values[2 + index * 2].unwrap_or(1))],
+                length: sizes[usize::from(self.values[3 + index * 2].unwrap_or(1))],
+            }
+        })
     }
     pub fn children_xml(&self) -> String {
         let mut xml = match self.values[6].unwrap_or(2) {

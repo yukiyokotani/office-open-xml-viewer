@@ -132,8 +132,9 @@ impl Rect {
     }
 }
 
-mod direct_transform;
 mod direct_geometry;
+pub(super) mod direct_model;
+mod direct_transform;
 
 trait ShapeSource {
     type Record: Clone;
@@ -212,16 +213,16 @@ impl<'a> ShapeSource for BorrowedSource<'a> {
     }
 }
 
-struct SpannedSource<'a> {
+struct SpannedSlideSource<'a> {
     backing: &'a [u8],
 }
 // Master-metadata adapter only: the previous master path validated PP9 tags
 // without consuming their local styles. A direct slide producer must retain
 // those styles rather than reuse this adapter's unit-valued Style.
-impl ShapeSource for SpannedSource<'_> {
+impl ShapeSource for SpannedSlideSource<'_> {
     type Record = RecordSpan;
     type Complex = ByteSpan;
-    type Style = ();
+    type Style = ByteSpan;
     fn with_record<T>(
         &self,
         record: &Self::Record,
@@ -257,9 +258,7 @@ impl ShapeSource for SpannedSource<'_> {
         record: &Self::Record,
         budget: &mut usize,
     ) -> Result<Option<Self::Style>, String> {
-        self.with_record(record, |view| {
-            text_style::auto_number::local_atom(view, budget).map(|v| v.map(|_| ()))
-        })
+        text_style::auto_number::local_atom_span(record, self.backing, budget)
     }
 }
 
@@ -275,7 +274,7 @@ struct ShapeStorage<R, C, S> {
     props: PropertiesStorage<C>,
 }
 type Shape<'a> = ShapeStorage<Record<'a>, &'a [u8], &'a [u8]>;
-type SpannedShape = ShapeStorage<RecordSpan, ByteSpan, ()>;
+type SpannedShape = ShapeStorage<RecordSpan, ByteSpan, ByteSpan>;
 
 impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
     fn read_from(
@@ -472,90 +471,90 @@ impl<T: Default + Clone> PropertiesStorage<T> {
     fn apply_tertiary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
         if opid == 0x01bf && complex.is_none() {
             self.paint.tertiary_fill_boolean_property(value)?;
-            }
-            Ok(())
+        }
+        Ok(())
     }
 
     fn apply_primary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
-            if matches!(opid & 0x3fff, 0x88 | 0x89) {
+        if matches!(opid & 0x3fff, 0x88 | 0x89) {
             if opid & 0xc000 != 0 || complex.is_some() {
-                    return Err(unsupported("invalid PowerPoint text direction property"));
-                }
-                let target = if opid == 0x88 {
-                    if value > 5 {
-                        return Err(unsupported("invalid PowerPoint text flow"));
-                    }
-                    &mut self.text_flow
-                } else {
-                    if value > 3 {
-                        return Err(unsupported("invalid PowerPoint font direction"));
-                    }
-                    &mut self.font_direction
-                };
-                if target.replace(value).is_some() {
-                    return Err(unsupported("duplicate PowerPoint text direction property"));
-                }
-                return Ok(());
+                return Err(unsupported("invalid PowerPoint text direction property"));
             }
+            let target = if opid == 0x88 {
+                if value > 5 {
+                    return Err(unsupported("invalid PowerPoint text flow"));
+                }
+                &mut self.text_flow
+            } else {
+                if value > 3 {
+                    return Err(unsupported("invalid PowerPoint font direction"));
+                }
+                &mut self.font_direction
+            };
+            if target.replace(value).is_some() {
+                return Err(unsupported("duplicate PowerPoint text direction property"));
+            }
+            return Ok(());
+        }
         if let Some(complex) = complex {
-                if matches!(opid & 0x3fff, 0x145..=0x150) {
-                    self.paint.custom_geometry = true;
-                }
-                self.geometry.complex(opid & 0x3fff, complex);
-                return Ok(());
+            if matches!(opid & 0x3fff, 0x145..=0x150) {
+                self.paint.custom_geometry = true;
             }
-            if matches!(opid & 0x3fff, 0x145 | 0x146) {
-                self.geometry.scalar(opid & 0x3fff, value)?;
+            self.geometry.complex(opid & 0x3fff, complex);
+            return Ok(());
+        }
+        if matches!(opid & 0x3fff, 0x145 | 0x146) {
+            self.geometry.scalar(opid & 0x3fff, value)?;
+        }
+        if opid & 0x4000 != 0 {
+            if opid == 0x4104 {
+                self.picture = value;
+            } else if opid == 0x4186 {
+                self.paint.property(opid, value)?;
             }
-            if opid & 0x4000 != 0 {
-                if opid == 0x4104 {
-                    self.picture = value;
-                } else if opid == 0x4186 {
-                    self.paint.property(opid, value)?;
-                }
-                return Ok(());
-            }
-            match opid {
-                // MS-ODRAW 2.3.4.44. Hidden shapes and active script anchors
-                // are omitted before any text/image references are followed.
-                0x3bf => {
-                    for (bit, target) in [(1, &mut self.hidden), (7, &mut self.script)] {
-                        if value & (1 << (bit + 16)) != 0 {
-                            *target = value & (1 << bit) != 0;
-                        }
+            return Ok(());
+        }
+        match opid {
+            // MS-ODRAW 2.3.4.44. Hidden shapes and active script anchors
+            // are omitted before any text/image references are followed.
+            0x3bf => {
+                for (bit, target) in [(1, &mut self.hidden), (7, &mut self.script)] {
+                    if value & (1 << (bit + 16)) != 0 {
+                        *target = value & (1 << bit) != 0;
                     }
                 }
-                // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
-                0x301 => self.master = Some(value),
-                // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
-                // fractions become DrawingML 1/1000 percentages without clamping.
-                0x100..=0x103 => {
-                    let value = i64::from(value as i32) * 100000;
-                    let value = (value + value.signum() * 32768) / 65536;
-                    i32::try_from(value).map_err(|_| {
-                        unsupported("PowerPoint crop exceeds DrawingML percentage range")
-                    })?;
-                    self.crop[usize::from(opid - 0x100)] = value;
-                }
-                // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> 1/60000 degree.
-                4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
-                0x81..=0x84 => {
-                    if value > 0x132f540 {
-                        return Err(unsupported("invalid PowerPoint text margin"));
-                    }
-                    self.margins[usize::from(opid - 0x81)] = value;
-                }
-                0x85 => self.wrap = if value == 2 { "none" } else { "square" },
-                0x87 if value <= 5 => {
-                    self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
-                    self.center = value >= 3;
-                }
-                _ => {
-                    self.geometry.scalar(opid, value)?;
-                    self.paint.property(opid, value)?;
-                }
             }
-            Ok(())
+            // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
+            0x301 => self.master = Some(value),
+            // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
+            // fractions become DrawingML 1/1000 percentages without clamping.
+            0x100..=0x103 => {
+                let value = i64::from(value as i32) * 100000;
+                let value = (value + value.signum() * 32768) / 65536;
+                i32::try_from(value).map_err(|_| {
+                    unsupported("PowerPoint crop exceeds DrawingML percentage range")
+                })?;
+                self.crop[usize::from(opid - 0x100)] = value;
+            }
+            // [MS-ODRAW] 2.3.18.5: signed 16.16 degrees -> 1/60000 degree.
+            4 => self.rotation = i64::from(value as i32) * 60000 / 65536,
+            0x81..=0x84 => {
+                if value > 0x132f540 {
+                    return Err(unsupported("invalid PowerPoint text margin"));
+                }
+                self.margins[usize::from(opid - 0x81)] = value;
+            }
+            0x85 => self.wrap = if value == 2 { "none" } else { "square" },
+            0x87 if value <= 5 => {
+                self.anchor = ["t", "ctr", "b"][(value % 3) as usize];
+                self.center = value >= 3;
+            }
+            _ => {
+                self.geometry.scalar(opid, value)?;
+                self.paint.property(opid, value)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -672,8 +671,12 @@ pub(super) fn master_shapes(
             let first = children
                 .first()
                 .ok_or_else(|| unsupported("empty PowerPoint master group"))?;
-            let group =
-                SpannedShape::read_from(&SpannedSource { backing }, first.clone(), nested, budget)?;
+            let group = SpannedShape::read_from(
+                &SpannedSlideSource { backing },
+                first.clone(),
+                nested,
+                budget,
+            )?;
             if group.flags & 1 == 0 || (nested && group.flags & 4 != 0) {
                 return Err(unsupported("invalid PowerPoint master group flags"));
             }
@@ -705,7 +708,7 @@ pub(super) fn master_shapes(
             }
         } else if viewed.kind == 0xf004 {
             let shape = SpannedShape::read_from(
-                &SpannedSource { backing },
+                &SpannedSlideSource { backing },
                 record.clone(),
                 nested,
                 budget,
@@ -1262,23 +1265,37 @@ mod tests {
         let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).unwrap();
         let mut spanned_work = 20;
         let spanned = SpannedShape::read_from(
-            &SpannedSource { backing: &bytes },
+            &SpannedSlideSource { backing: &bytes },
             span,
             false,
             &mut spanned_work,
         )
         .unwrap();
         assert_eq!(borrowed_work, spanned_work);
-        assert_eq!((borrowed.id, borrowed.flags, borrowed.anchor), (spanned.id, spanned.flags, spanned.anchor));
+        assert_eq!(
+            (borrowed.id, borrowed.flags, borrowed.anchor),
+            (spanned.id, spanned.flags, spanned.anchor)
+        );
         assert_eq!(borrowed.master(), spanned.master());
         assert!(borrowed.props.geometry.decode(&mut 10).unwrap().is_none());
         let moved = bytes.clone();
-        assert!(spanned.props.geometry.view(&moved).unwrap().decode(&mut 10).unwrap().is_none());
+        assert!(spanned
+            .props
+            .geometry
+            .view(&moved)
+            .unwrap()
+            .decode(&mut 10)
+            .unwrap()
+            .is_none());
         for length in 0..bytes.len() {
             assert!(span_for_shape_prefix(&bytes[..length]).is_err());
         }
         let duplicate_flags = sp(0, vec![record(2, 0xf00a, &[0; 8])]);
-        let malformed_child = record(15, 0xf004, &[record(2, 0xf00a, &[0; 8]), vec![1, 2, 3]].concat());
+        let malformed_child = record(
+            15,
+            0xf004,
+            &[record(2, 0xf00a, &[0; 8]), vec![1, 2, 3]].concat(),
+        );
         for (invalid, work) in [(&duplicate_flags, 20), (&malformed_child, 20), (&bytes, 0)] {
             let (borrowed, borrowed_left, spanned, spanned_left) = parse_shape_both(invalid, work);
             assert_eq!(borrowed, spanned);
@@ -1287,14 +1304,17 @@ mod tests {
         }
     }
 
-    fn parse_shape_both(bytes: &[u8], work: usize) -> (Result<(), String>, usize, Result<(), String>, usize) {
+    fn parse_shape_both(
+        bytes: &[u8],
+        work: usize,
+    ) -> (Result<(), String>, usize, Result<(), String>, usize) {
         let borrowed_record = parse_record_at(bytes, 0, &mut 1).unwrap();
         let (span, _) = record_span_with_end(bytes, 0, &mut 1, "shape").unwrap();
         let mut borrowed_work = work;
         let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).map(|_| ());
         let mut spanned_work = work;
         let spanned = SpannedShape::read_from(
-            &SpannedSource { backing: bytes },
+            &SpannedSlideSource { backing: bytes },
             span,
             false,
             &mut spanned_work,
@@ -1305,8 +1325,13 @@ mod tests {
 
     fn span_for_shape_prefix(bytes: &[u8]) -> Result<(), String> {
         let (span, _) = record_span_with_end(bytes, 0, &mut 100, "shape")?;
-        SpannedShape::read_from(&SpannedSource { backing: bytes }, span, false, &mut 100)
-            .map(|_| ())
+        SpannedShape::read_from(
+            &SpannedSlideSource { backing: bytes },
+            span,
+            false,
+            &mut 100,
+        )
+        .map(|_| ())
     }
 
     fn tertiary_properties(values: &[(u16, u32)]) -> Vec<u8> {

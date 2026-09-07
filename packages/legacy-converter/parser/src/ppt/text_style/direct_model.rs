@@ -19,7 +19,7 @@ use pptx_model::{
 /// decoded TextBytesAtom), StyleTextPropAtom and its resolved master context.
 /// `model_budget` bounds requested output backing storage and owned string bytes;
 /// allocator bookkeeping, input bytes and decoder temporaries are not included.
-pub(super) fn paragraphs(
+pub(in crate::ppt) fn paragraphs(
     text: &str,
     style: &[u8],
     context: Context<'_>,
