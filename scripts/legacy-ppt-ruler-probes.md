@@ -276,3 +276,15 @@ all glyphs at the text inset in the tested negative-indent case, while the
 direct model preserves the signed origin and the renderer paints farther left.
 No clamp or sample-specific correction is added. These observations do not
 establish exact Office display parity or a general negative-indent layout rule.
+
+The direct model also retains an explicit local ruler default tab interval
+(MS-PPT 2.2.29 and 2.9.30), overriding an inherited paragraph interval without
+changing custom stops or inventing a document default. Absence, explicit zero,
+and signed master-unit values remain distinct. The binary Office probes include
+zero and intervals of 288, 574, 577 and 1152 master units. The two-inch interval
+now advances past the last custom stop at the Office-observed position.
+
+Zero-interval display is still a limitation: the shared renderer degrades an
+unreachable tab to a space, whereas the tested Office binary output has no gap.
+The local-ruler projection does not change that renderer policy. Signed-range
+unit tests prove lossless model retention, not Office fidelity for every value.

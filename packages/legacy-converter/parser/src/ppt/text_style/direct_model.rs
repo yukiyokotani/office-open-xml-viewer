@@ -106,6 +106,9 @@ pub(in crate::ppt) fn paragraphs_with_axes(
             if let Some(indent) = ruler.indents[level] {
                 properties.indent = Some(indent);
             }
+            // MS-PPT 2.9.30: the text body's local ruler supplies its explicit
+            // default tab size independently of the per-level origin arrays.
+            properties.default_tab = ruler.default_tab_size.or(properties.default_tab);
         }
         if properties.level == 0 {
             if let Some(document) = axes.document {
@@ -939,6 +942,79 @@ mod tests {
                 [TabStop { pos: 1_828_800, algn }] if algn == "l"
             ));
         }
+    }
+
+    #[test]
+    fn local_ruler_default_tab_overrides_inherited_paragraph_default_exactly() {
+        let mut base = explicit_origin();
+        base.paragraph.default_tab = Some(576);
+        let project = |local_default_tab| {
+            let ruler = ruler::Ruler {
+                c_levels: None,
+                default_tab_size: local_default_tab,
+                tabs: None,
+                margins: [None; 5],
+                indents: [None; 5],
+            };
+            paragraphs_with_axes(
+                "X",
+                &plain_style(0),
+                Context {
+                    levels: Some(std::slice::from_ref(&base)),
+                    ..Context::default()
+                },
+                DirectAxes {
+                    ruler: Some(ruler),
+                    document: None,
+                },
+                &mut 100,
+                &mut 100_000,
+            )
+            .unwrap()[0]
+                .def_tab_sz
+        };
+
+        assert_eq!(project(None), Some(master_to_emu(576)));
+        for value in [i16::MIN, -1, 0, 1, 288, 574, 577, 1152, i16::MAX] {
+            assert_eq!(project(Some(value)), Some(master_to_emu(i64::from(value))));
+        }
+    }
+
+    #[test]
+    fn local_ruler_default_tab_applies_across_cr_paragraphs_and_vt_lines() {
+        let mut base = explicit_origin();
+        base.paragraph.default_tab = Some(576);
+        let ruler = ruler::Ruler {
+            c_levels: None,
+            default_tab_size: Some(1152),
+            tabs: None,
+            margins: [None; 5],
+            indents: [None; 5],
+        };
+        let model = paragraphs_with_axes(
+            "A\u{b}B\rC",
+            &topology_style(6, &[6]),
+            Context {
+                levels: Some(std::slice::from_ref(&base)),
+                ..Context::default()
+            },
+            DirectAxes {
+                ruler: Some(ruler),
+                document: None,
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+
+        assert_eq!(model.len(), 2);
+        assert!(model
+            .iter()
+            .all(|paragraph| paragraph.def_tab_sz == Some(master_to_emu(1152))));
+        assert!(matches!(
+            model[0].runs.as_slice(),
+            [TextRun::Text(_), TextRun::Break, TextRun::Text(_)]
+        ));
     }
 
     #[test]
