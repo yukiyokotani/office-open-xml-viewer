@@ -166,7 +166,11 @@ impl<'a> Store<'a> {
         }
         let flags = flags.unwrap_or(0);
         if kind != Some(75)
-            || flags & 0x11f != 0
+            // MS-ODRAW 2.2.40 identifies fOleShape (0x10) as shape
+            // metadata, not permission to execute or inspect an OLE payload.
+            // Its indexed passive BLIP still passes the ordinary validation
+            // and resource budgets below. Retain every other structural gate.
+            || flags & 0x10f != 0
             || placement.hidden
             || placement.script
             || picture.rotation != 0
@@ -588,12 +592,29 @@ mod tests {
         payload[49] = 0xfe;
         payload.extend_from_slice(&source);
         let blip = record(0xf01b, 0x2160, &payload);
-        let (word, table) = drawing_with_blip(0xa00, 0, &[], blip, 2);
+        for flags in [0xa00, 0xa10] {
+            let (word, table) = drawing_with_blip(flags, 0, &[], blip.clone(), 2);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            assert!(store.drawing(12).unwrap().is_empty());
+            assert!(store.omitted);
+            assert!(store.relationships().is_empty());
+            assert!(store.parts().is_empty());
+        }
+    }
+    #[test]
+    fn ole_shape_without_pib_is_omitted_without_package_residue() {
+        let (word, mut table) = drawing_input(0xa10, 0);
+        let key = 0x4104u16.to_le_bytes();
+        let offset = table
+            .windows(key.len())
+            .position(|bytes| bytes == key)
+            .expect("fixture contains pib property");
+        table[offset..offset + 2].copy_from_slice(&0x4105u16.to_le_bytes());
         let mut store = Store::read(&word, &table, 20).unwrap();
         assert!(store.drawing(12).unwrap().is_empty());
-        assert!(store.omitted);
         assert!(store.relationships().is_empty());
         assert!(store.parts().is_empty());
+        assert!(store.omitted);
     }
     #[test]
     fn delayed_pictures_use_word_stream_and_share_parts_without_sharing_drawing_ids() {
@@ -613,9 +634,44 @@ mod tests {
         assert!(truncated.drawing(12).is_err());
     }
     #[test]
-    fn hidden_ole_and_script_shapes_are_not_dereferenced() {
-        for (shape, group) in [(0xa10, 0), (0xa00, 0x00020002), (0xa00, 0x00800080)] {
-            let (word, table) = drawing_input(shape, group);
+    fn ole_shapes_admit_only_their_validated_passive_blip() {
+        let (png_word, png_table) = drawing_input(0xa10, 0);
+        let (wmf_source, wmf_blip) = crate::officeart::wmf_test_blip();
+        let (wmf_word, wmf_table) = drawing_with_blip(0xa10, 0, &[], wmf_blip, 2);
+        for (word, table, expected) in [
+            (png_word, png_table, None),
+            (wmf_word, wmf_table, Some(wmf_source)),
+        ] {
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let xml = store.drawing(12).unwrap();
+            assert!(xml.contains("<wp:anchor"));
+            assert!(xml.contains("<wp:positionH relativeFrom=\"page\">"));
+            assert!(xml.contains("<wp:positionV relativeFrom=\"page\">"));
+            assert!(xml.contains("cx=\"254000\" cy=\"190500\""));
+            assert!(xml.contains("<wp:wrapSquare wrapText=\"bothSides\"/>"));
+            assert_eq!(store.parts().len(), 1);
+            if let Some(expected) = expected {
+                assert_eq!(store.parts()[0].1, expected);
+            } else {
+                assert!(store.parts()[0].1.starts_with(b"\x89PNG"));
+            }
+            assert_eq!(store.relationships().matches("<Relationship ").count(), 1);
+            assert!(!store.omitted);
+        }
+    }
+    #[test]
+    fn structural_hidden_and_script_flags_still_prevent_blip_access() {
+        for flag in [0x01, 0x02, 0x04, 0x08, 0x100] {
+            for ole in [0, 0x10] {
+                let (word, table) = drawing_input(0xa00 | flag | ole, 0);
+                let mut store = Store::read(&word[..1024], &table, 20).unwrap();
+                assert!(store.drawing(12).unwrap().is_empty());
+                assert!(store.parts().is_empty());
+                assert!(store.omitted);
+            }
+        }
+        for group in [0x00020002, 0x00800080] {
+            let (word, table) = drawing_input(0xa10, group);
             let mut store = Store::read(&word[..1024], &table, 20).unwrap();
             assert!(store.drawing(12).unwrap().is_empty());
             assert!(store.parts().is_empty());
