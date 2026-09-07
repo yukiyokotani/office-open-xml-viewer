@@ -3,6 +3,52 @@
 use super::{styles::Styles, u16_at, u32_at, unsupported, Record};
 use std::collections::BTreeMap;
 
+struct RowFacts {
+    height: f64,
+    hidden: bool,
+    custom: bool,
+    outline: u8,
+    collapsed: bool,
+    thick_top: bool,
+    thick_bottom: bool,
+    style: Option<u16>,
+}
+
+struct ColumnFacts {
+    width: f64,
+    style: u16,
+    hidden: bool,
+    custom: bool,
+    best_fit: bool,
+    outline: u8,
+    collapsed: bool,
+}
+
+fn row_facts(height: u16, flags: u32) -> RowFacts {
+    RowFacts {
+        height: f64::from(height) / 20.0,
+        hidden: flags & (1 << 5) != 0,
+        custom: flags & (1 << 6) != 0,
+        outline: (flags & 7) as u8,
+        collapsed: flags & (1 << 4) != 0,
+        thick_top: flags & (1 << 28) != 0,
+        thick_bottom: flags & (1 << 29) != 0,
+        style: (flags & 0x80 != 0).then_some(((flags >> 16) & 0xfff) as u16),
+    }
+}
+
+fn column_facts(width: u16, style: u16, flags: u16) -> ColumnFacts {
+    ColumnFacts {
+        width: f64::from(width) / 256.0,
+        style,
+        hidden: flags & 1 != 0,
+        custom: flags & 2 != 0,
+        best_fit: flags & 4 != 0,
+        outline: ((flags >> 8) & 7) as u8,
+        collapsed: flags & (1 << 12) != 0,
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Geometry {
     rows: BTreeMap<u16, (u16, u32)>,
@@ -15,6 +61,153 @@ pub(super) struct Geometry {
 }
 
 impl Geometry {
+    /// Apply already-validated BIFF geometry to the renderer worksheet model.
+    /// The 8.43/15.0 values are the existing XLSX parser's model defaults when
+    /// SpreadsheetML omits sheetFormatPr; they are not additional BIFF facts.
+    pub(super) fn project(
+        &self,
+        worksheet: &mut xlsx_model::Worksheet,
+        mdw: Option<f64>,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        let width_ranges = self
+            .columns
+            .values()
+            .filter(|(_, _, flags)| flags & 3 == 0)
+            .count();
+        let width_points = self.columns.len() - width_ranges;
+        let outlines = self
+            .columns
+            .values()
+            .filter(|(_, _, flags)| flags & 0x700 != 0)
+            .count();
+        let collapsed = self
+            .columns
+            .values()
+            .filter(|(_, _, flags)| flags & 0x1000 != 0)
+            .count();
+        let hidden = self
+            .columns
+            .values()
+            .filter(|(_, _, flags)| flags & 1 != 0)
+            .count();
+        let row_heights = worksheet
+            .rows
+            .iter()
+            .filter(|row| {
+                row.index
+                    .checked_sub(1)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .is_some_and(|index| self.rows.contains_key(&index))
+                    || (self.default_row.is_some_and(|(_, flags)| flags & 2 != 0)
+                        && !row.hidden
+                        && row.height.is_none())
+            })
+            .count();
+        // Allocator node overhead is implementation-private. Charge logical
+        // key/value payload; BIFF bounds column maps to 256 entries and the
+        // already-admitted worksheet bounds row heights.
+        let payload = checked_product(
+            self.columns.len(),
+            std::mem::size_of::<xlsx_model::ColumnStyleRange>(),
+        )?
+        .checked_add(checked_product(
+            width_ranges,
+            std::mem::size_of::<xlsx_model::ColumnWidthRange>(),
+        )?)
+        .and_then(|n| n.checked_add(width_points * std::mem::size_of::<(u32, f64)>()))
+        .and_then(|n| n.checked_add(outlines * std::mem::size_of::<(u32, u8)>()))
+        .and_then(|n| n.checked_add((collapsed + hidden) * std::mem::size_of::<(u32, bool)>()))
+        .and_then(|n| n.checked_add(row_heights * std::mem::size_of::<(u32, f64)>()))
+        .ok_or_else(model_budget_error)?;
+        *budget = budget.checked_sub(payload).ok_or_else(model_budget_error)?;
+        worksheet
+            .col_style_ranges
+            .try_reserve_exact(self.columns.len())
+            .map_err(|_| model_budget_error())?;
+        worksheet
+            .col_width_ranges
+            .try_reserve_exact(width_ranges)
+            .map_err(|_| model_budget_error())?;
+        worksheet.default_col_width = 8.43;
+        worksheet.default_row_height = 15.0;
+        worksheet.default_row_height_custom = false;
+
+        if let Some((height, flags)) = self.default_row {
+            let authored_height = f64::from(height) / 20.0;
+            worksheet.default_row_height = if flags & 2 != 0 { 0.0 } else { authored_height };
+            worksheet.default_row_height_custom = flags & 1 != 0;
+            if flags & 2 != 0 {
+                for row in &mut worksheet.rows {
+                    if !row.hidden && row.height.is_none() {
+                        row.height = Some(authored_height);
+                        worksheet.row_heights.insert(row.index, authored_height);
+                    }
+                }
+            }
+            if let Some(width) = mdw
+                .and_then(|value| self.default_width(value))
+                .or_else(|| self.default_column.map(|column| f64::from(column.0)))
+            {
+                worksheet.default_col_width = width / 256.0;
+            }
+        }
+
+        for (&column, &(width, style, flags)) in &self.columns {
+            let column = u32::from(column) + 1;
+            let facts = column_facts(width, style, flags);
+            let width = if facts.hidden { 0.0 } else { facts.width };
+            worksheet
+                .col_style_ranges
+                .push(xlsx_model::ColumnStyleRange {
+                    min: column,
+                    max: column,
+                    style_index: u32::from(facts.style),
+                });
+            if facts.custom || facts.hidden {
+                worksheet.col_widths.insert(column, width);
+            } else {
+                worksheet
+                    .col_width_ranges
+                    .push(xlsx_model::ColumnWidthRange {
+                        min: column,
+                        max: column,
+                        width,
+                    });
+            }
+            if facts.outline != 0 {
+                worksheet.col_outline_levels.insert(column, facts.outline);
+            }
+            if facts.collapsed {
+                worksheet.col_collapsed.insert(column, true);
+            }
+            if facts.hidden {
+                worksheet.col_hidden.insert(column, true);
+            }
+        }
+
+        for row in &mut worksheet.rows {
+            let Some(index) = row
+                .index
+                .checked_sub(1)
+                .and_then(|value| u16::try_from(value).ok())
+            else {
+                continue;
+            };
+            let Some(&(height, flags)) = self.rows.get(&index) else {
+                continue;
+            };
+            let facts = row_facts(height, flags);
+            row.hidden = facts.hidden;
+            row.height = Some(if row.hidden { 0.0 } else { facts.height });
+            row.custom_height = facts.custom;
+            row.outline_level = facts.outline;
+            row.collapsed = facts.collapsed;
+            worksheet.row_heights.insert(row.index, row.height.unwrap());
+        }
+        Ok(())
+    }
+
     pub fn read(&mut self, record: &Record<'_>) -> Result<(), String> {
         let data = record.data;
         match record.kind {
@@ -88,12 +281,10 @@ impl Geometry {
         let Some((height, flags)) = self.rows.get(&row) else {
             return String::new();
         };
-        let mut xml = format!(" ht=\"{}\" hidden=\"{}\" customHeight=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\" thickTop=\"{}\" thickBot=\"{}\"", f64::from(*height) / 20.0, (flags >> 5) & 1, (flags >> 6) & 1, flags & 7, (flags >> 4) & 1, (flags >> 28) & 1, (flags >> 29) & 1);
-        if flags & 0x80 != 0 {
-            xml.push_str(&format!(
-                " s=\"{}\" customFormat=\"1\"",
-                (flags >> 16) & 0xfff
-            ));
+        let facts = row_facts(*height, *flags);
+        let mut xml = format!(" ht=\"{}\" hidden=\"{}\" customHeight=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\" thickTop=\"{}\" thickBot=\"{}\"", facts.height, u8::from(facts.hidden), u8::from(facts.custom), facts.outline, u8::from(facts.collapsed), u8::from(facts.thick_top), u8::from(facts.thick_bottom));
+        if let Some(style) = facts.style {
+            xml.push_str(&format!(" s=\"{style}\" customFormat=\"1\""));
         }
         xml
     }
@@ -124,7 +315,8 @@ impl Geometry {
             xml.push_str("<cols>");
             for (column, (width, style, flags)) in &self.columns {
                 let column = u32::from(*column) + 1;
-                xml.push_str(&format!("<col min=\"{column}\" max=\"{column}\" width=\"{}\" style=\"{style}\" hidden=\"{}\" customWidth=\"{}\" bestFit=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\"/>", f64::from(*width) / 256.0, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1, (flags >> 8) & 7, (flags >> 12) & 1));
+                let facts = column_facts(*width, *style, *flags);
+                xml.push_str(&format!("<col min=\"{column}\" max=\"{column}\" width=\"{}\" style=\"{}\" hidden=\"{}\" customWidth=\"{}\" bestFit=\"{}\" outlineLevel=\"{}\" collapsed=\"{}\"/>", facts.width, facts.style, u8::from(facts.hidden), u8::from(facts.custom), u8::from(facts.best_fit), facts.outline, u8::from(facts.collapsed)));
             }
             xml.push_str("</cols>");
         }
@@ -181,9 +373,33 @@ impl Geometry {
     }
 }
 
+fn checked_product(count: usize, size: usize) -> Result<usize, String> {
+    count.checked_mul(size).ok_or_else(model_budget_error)
+}
+
+fn model_budget_error() -> String {
+    unsupported("XLS direct geometry model byte budget exceeded")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn worksheet() -> xlsx_model::Worksheet {
+        xlsx_model::Worksheet::placeholder("S", "test".into())
+    }
+
+    fn row(index: u32) -> xlsx_model::Row {
+        xlsx_model::Row {
+            index,
+            height: None,
+            custom_height: false,
+            cells: Vec::new(),
+            outline_level: 0,
+            collapsed: false,
+            hidden: false,
+        }
+    }
     #[test]
     fn measured_width_uses_normative_padding_and_explicit_digit_width_precedence() {
         let mut geometry = Geometry::default();
@@ -274,5 +490,159 @@ mod tests {
                 data: &[0; 16]
             })
             .is_err());
+    }
+
+    #[test]
+    fn model_projection_preserves_defaults_rows_columns_and_flags() {
+        let mut geometry = Geometry::default();
+        geometry
+            .read(&Record {
+                kind: 0x0225,
+                offset: 0,
+                data: &[3, 0, 44, 1], // custom default, unspecified rows hidden
+            })
+            .unwrap();
+        geometry
+            .read(&Record {
+                kind: 0x007d,
+                offset: 0,
+                // column A, width 12, style 2, hidden+custom+outline3+collapsed
+                data: &[0, 0, 0, 0, 0, 12, 2, 0, 3, 0x13],
+            })
+            .unwrap();
+        let row_flags = (2_u32) | (1 << 4) | (1 << 6);
+        let mut row_record = [0_u8; 16];
+        row_record[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        row_record[2..4].copy_from_slice(&0_u16.to_le_bytes());
+        row_record[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        row_record[6..8].copy_from_slice(&400_u16.to_le_bytes());
+        row_record[12..16].copy_from_slice(&row_flags.to_le_bytes());
+        geometry
+            .read(&Record {
+                kind: 0x0208,
+                offset: 0,
+                data: &row_record,
+            })
+            .unwrap();
+
+        let mut rejected = worksheet();
+        rejected.rows = vec![row(1), row(2)];
+        assert!(geometry.project(&mut rejected, None, &mut 0).is_err());
+        assert!(rejected.col_style_ranges.is_empty());
+        assert!(rejected.row_heights.is_empty());
+
+        let mut model = worksheet();
+        model.rows = vec![row(1), row(2)];
+        let mut budget = usize::MAX;
+        geometry.project(&mut model, None, &mut budget).unwrap();
+        assert_eq!(model.default_col_width, 8.43);
+        assert_eq!(model.default_row_height, 0.0);
+        assert!(model.default_row_height_custom);
+        assert_eq!(model.col_widths.get(&1), Some(&0.0));
+        assert_eq!(model.col_style_ranges[0].style_index, 2);
+        assert_eq!(model.col_outline_levels.get(&1), Some(&3));
+        assert_eq!(model.col_collapsed.get(&1), Some(&true));
+        assert_eq!(model.col_hidden.get(&1), Some(&true));
+        assert_eq!(
+            (model.rows[0].height, model.rows[0].outline_level),
+            (Some(15.0), 0)
+        );
+        assert_eq!(
+            (model.rows[1].height, model.rows[1].outline_level),
+            (Some(20.0), 2)
+        );
+        assert!(model.rows[1].custom_height && model.rows[1].collapsed);
+        assert_eq!(model.row_heights.get(&1), Some(&15.0));
+        assert_eq!(model.row_heights.get(&2), Some(&20.0));
+    }
+
+    #[test]
+    fn native_geometry_matches_parser_across_flag_combinations() {
+        use super::super::{build_xlsx_with_drawings, styles, CellValue, SheetData};
+        for default_flags in 0..4 {
+            for flags in 0..128_u32 {
+                let mut source = SheetData::default();
+                source.geometry.default_row = Some((420, default_flags));
+                source.geometry.default_column = Some((2560, 0, 0));
+                source.geometry.rows.insert(1, (360, flags));
+                let col_flags = (flags as u16 & 7)
+                    | (((flags as u16 >> 3) & 7) << 8)
+                    | (((flags as u16 >> 6) & 1) << 12);
+                source.geometry.columns.insert(0, (3072, 0, col_flags));
+                source
+                    .rows
+                    .insert(0, BTreeMap::from([(0, CellValue::Number(1.0))]));
+                source
+                    .rows
+                    .insert(1, BTreeMap::from([(0, CellValue::Number(2.0))]));
+                let mut actual = worksheet();
+                actual.rows = vec![row(1), row(2)];
+                let mut budget = usize::MAX;
+                source
+                    .geometry
+                    .project(&mut actual, None, &mut budget)
+                    .unwrap();
+                let bytes = build_xlsx_with_drawings(
+                    &[("S".into(), source)],
+                    &styles::minimal_resolved(),
+                    Vec::new(),
+                    false,
+                    1,
+                    1024 * 1024,
+                    None,
+                    None,
+                )
+                .unwrap();
+                let expected: serde_json::Value =
+                    serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap())
+                        .unwrap();
+                let actual = serde_json::to_value(actual).unwrap();
+                for field in [
+                    "defaultColWidth",
+                    "defaultRowHeight",
+                    "defaultRowHeightCustom",
+                    "colWidths",
+                    "colWidthRanges",
+                    "colStyleRanges",
+                    "colOutlineLevels",
+                    "colCollapsed",
+                    "colHidden",
+                    "rowHeights",
+                ] {
+                    assert_eq!(
+                        actual[field], expected[field],
+                        "{field}: default={default_flags}, flags={flags}"
+                    );
+                }
+                for i in 0..2 {
+                    for field in [
+                        "height",
+                        "customHeight",
+                        "outlineLevel",
+                        "collapsed",
+                        "hidden",
+                    ] {
+                        assert_eq!(
+                            actual["rows"][i][field], expected["rows"][i][field],
+                            "row {i} {field}: default={default_flags}, flags={flags}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_sheet_format_uses_existing_parser_model_defaults() {
+        let mut model = worksheet();
+        let mut budget = usize::MAX;
+        Geometry::default()
+            .project(&mut model, Some(7.0), &mut budget)
+            .unwrap();
+        assert_eq!(
+            (model.default_col_width, model.default_row_height),
+            (8.43, 15.0)
+        );
+        assert!(!model.default_row_height_custom);
     }
 }

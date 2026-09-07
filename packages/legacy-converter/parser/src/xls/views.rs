@@ -10,6 +10,15 @@ const WINDOW2: u16 = 0x023e;
 // Resource policy, not a BIFF format limit. Bound retained views and XML fanout.
 const MAX_WINDOWS: usize = 1024;
 
+fn display_flags(flags: u16) -> (bool, bool, bool, bool) {
+    (
+        flags & 0x02 != 0,
+        flags & 0x04 != 0,
+        flags & 0x10 != 0,
+        flags & 0x40 != 0,
+    )
+}
+
 pub(super) fn read_window(data: &[u8], count: &mut usize) -> Result<(), String> {
     if data.len() != 18 || *count >= MAX_WINDOWS {
         return Err(unsupported("invalid or excessive BIFF workbook windows"));
@@ -22,6 +31,20 @@ pub(super) fn read_window(data: &[u8], count: &mut usize) -> Result<(), String> 
 pub(super) struct SheetViews(Vec<u16>);
 
 impl SheetViews {
+    /// Apply the display flags selected by the existing XLSX parser contract.
+    /// The byte adapter emits every Window2 in workbook-view order and that
+    /// parser retains the last sheetView. This is compatibility behavior, not
+    /// a claim that the last BIFF window is normatively the active window.
+    pub(super) fn project(&self, worksheet: &mut xlsx_model::Worksheet) {
+        let Some(&flags) = self.0.last() else {
+            return;
+        };
+        let (gridlines, _, zeros, right_to_left) = display_flags(flags);
+        worksheet.show_gridlines = gridlines;
+        worksheet.show_zeros = zeros;
+        worksheet.right_to_left = right_to_left;
+    }
+
     pub(super) fn displays_formulas(&self) -> bool {
         self.0.iter().any(|flags| flags & 1 != 0)
     }
@@ -53,12 +76,13 @@ impl SheetViews {
         }
         let mut xml = String::from("<sheetViews>");
         for (id, flags) in self.0.iter().enumerate() {
+            let (gridlines, headers, zeros, right_to_left) = display_flags(*flags);
             // Explicit zeros matter: OOXML defaults grid/headers/zeros to true.
             // Reserved bits are ignored, as required by Window2.
             xml.push_str(&format!(
                 "<sheetView workbookViewId=\"{id}\" showGridLines=\"{}\" showRowColHeaders=\"{}\" showZeros=\"{}\" rightToLeft=\"{}\"/>",
-                u8::from(flags & 0x02 != 0), u8::from(flags & 0x04 != 0),
-                u8::from(flags & 0x10 != 0), u8::from(flags & 0x40 != 0),
+                u8::from(gridlines), u8::from(headers),
+                u8::from(zeros), u8::from(right_to_left),
             ));
         }
         xml.push_str("</sheetViews>");
@@ -69,6 +93,24 @@ impl SheetViews {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_view(flags: Vec<u16>) -> serde_json::Value {
+        let count = flags.len();
+        let mut sheet = super::super::SheetData::default();
+        sheet.views = SheetViews(flags);
+        let bytes = super::super::build_xlsx_with_drawings(
+            &[("S".into(), sheet)],
+            &super::super::styles::minimal_resolved(),
+            Vec::new(),
+            false,
+            count,
+            1_000_000,
+            None,
+            None,
+        )
+        .unwrap();
+        serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap()).unwrap()
+    }
 
     #[test]
     fn all_flag_combinations_project_only_the_four_display_bits() {
@@ -124,5 +166,39 @@ mod tests {
         views.validate_count(MAX_WINDOWS).unwrap();
         assert!(views.validate_count(MAX_WINDOWS - 1).is_err());
         assert!(views.xml().contains("workbookViewId=\"1023\""));
+    }
+
+    #[test]
+    fn model_projection_uses_the_same_last_view_as_the_xml_parser() {
+        let views = SheetViews(vec![0x52, 0x04]);
+        let mut model = xlsx_model::Worksheet::placeholder("S", "test".into());
+        views.project(&mut model);
+        let parsed = parsed_view(vec![0x52, 0x04]);
+        assert_eq!(
+            model.show_gridlines,
+            parsed["showGridlines"].as_bool().unwrap()
+        );
+        assert_eq!(model.show_zeros, parsed["showZeros"].as_bool().unwrap());
+        assert_eq!(
+            model.right_to_left,
+            parsed["rightToLeft"].as_bool().unwrap()
+        );
+
+        let absent = SheetViews::default();
+        let mut absent_model = xlsx_model::Worksheet::placeholder("S", "test".into());
+        absent.project(&mut absent_model);
+        let parsed = parsed_view(Vec::new());
+        assert_eq!(
+            absent_model.show_gridlines,
+            parsed["showGridlines"].as_bool().unwrap()
+        );
+        assert_eq!(
+            absent_model.show_zeros,
+            parsed["showZeros"].as_bool().unwrap()
+        );
+        assert_eq!(
+            absent_model.right_to_left,
+            parsed["rightToLeft"].as_bool().unwrap()
+        );
     }
 }
