@@ -3,14 +3,28 @@
 //! 20.1.9.6-8/13-16 custom geometry, with no binary-aware renderer commands.
 use super::unsupported;
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Geometry<'a> {
+#[derive(Clone, Copy)]
+pub(crate) struct GeometryStorage<T> {
     bounds: [Option<i32>; 4],
     path: Option<u32>,
-    vertices: Option<&'a [u8]>,
-    segments: Option<&'a [u8]>,
+    vertices: Option<T>,
+    segments: Option<T>,
 }
-impl<'a> Geometry<'a> {
+pub(crate) type Geometry<'a> = GeometryStorage<&'a [u8]>;
+pub(crate) type SpannedGeometry = GeometryStorage<super::ByteSpan>;
+
+impl<T> Default for GeometryStorage<T> {
+    fn default() -> Self {
+        Self {
+            bounds: [None; 4],
+            path: None,
+            vertices: None,
+            segments: None,
+        }
+    }
+}
+
+impl<T: Default + Clone> GeometryStorage<T> {
     pub fn scalar(&mut self, id: u16, value: u32) -> Result<(), String> {
         match id {
             0x140..=0x143 => self.bounds[usize::from(id - 0x140)] = Some(value as i32),
@@ -20,16 +34,16 @@ impl<'a> Geometry<'a> {
                     return Err(unsupported("nonzero scalar OfficeArt geometry array"));
                 }
                 if id == 0x145 {
-                    self.vertices = Some(&[]);
+                    self.vertices = Some(T::default());
                 } else {
-                    self.segments = Some(&[]);
+                    self.segments = Some(T::default());
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    pub fn complex(&mut self, id: u16, data: &'a [u8]) {
+    pub fn complex(&mut self, id: u16, data: T) {
         match id {
             0x145 => self.vertices = Some(data),
             0x146 => self.segments = Some(data),
@@ -42,10 +56,35 @@ impl<'a> Geometry<'a> {
         Self {
             bounds: std::array::from_fn(|i| self.bounds[i].or(parent.bounds[i])),
             path: self.path.or(parent.path),
-            vertices: self.vertices.or(parent.vertices),
-            segments: self.segments.or(parent.segments),
+            vertices: self.vertices.as_ref().or(parent.vertices.as_ref()).cloned(),
+            segments: self.segments.as_ref().or(parent.segments.as_ref()).cloned(),
         }
     }
+}
+
+impl SpannedGeometry {
+    /// Materialize only borrowed views over the owning session's immutable
+    /// backing. Bounds/inheritance/path decoding are shared with borrowed users;
+    /// retaining or inheriting this metadata never copies or expands arrays.
+    pub fn view<'a>(&self, backing: &'a [u8]) -> Result<Geometry<'a>, String> {
+        Ok(Geometry {
+            bounds: self.bounds,
+            path: self.path,
+            vertices: self
+                .vertices
+                .as_ref()
+                .map(|span| span.view(backing))
+                .transpose()?,
+            segments: self
+                .segments
+                .as_ref()
+                .map(|span| span.view(backing))
+                .transpose()?,
+        })
+    }
+}
+
+impl Geometry<'_> {
     /// Borrow source arrays until a visible shape needs them. Expanded point and
     /// segment work is charged per occurrence, including repeated master layers.
     pub fn decode(&self, budget: &mut usize) -> Result<Option<Decoded>, String> {
@@ -325,6 +364,37 @@ impl Decoded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spanned_geometry_reuses_decode_after_move_and_preserves_empty_reset() {
+        let bytes = vertices(&[[10, 20], [30, 40]]);
+        let mut parent = SpannedGeometry::default();
+        parent.complex(
+            0x145,
+            super::super::ByteSpan::new(0..bytes.len(), bytes.len(), "geometry").unwrap(),
+        );
+        let moved = bytes;
+        let mut inherited = SpannedGeometry::default().inherit(&parent);
+        let mut work = 100;
+        let decoded = inherited
+            .view(&moved)
+            .unwrap()
+            .decode(&mut work)
+            .unwrap()
+            .unwrap();
+        assert_eq!(work, 98);
+        // The original decoder remains the sole geometry interpretation.
+        let expected = geometry(&moved, None).decode(&mut 100).unwrap().unwrap();
+        assert_eq!(xml(&decoded), xml(&expected));
+        inherited.scalar(0x145, 0).unwrap();
+        assert!(inherited
+            .inherit(&parent)
+            .view(&moved)
+            .unwrap()
+            .decode(&mut 0)
+            .unwrap()
+            .is_none());
+        assert!(parent.view(&moved[..moved.len() - 1]).is_err());
+    }
     fn array_bytes(size: u16, bytes: Vec<u8>) -> Vec<u8> {
         let n = (bytes.len() / usize::from(size)) as u16;
         [

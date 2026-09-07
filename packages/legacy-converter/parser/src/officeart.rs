@@ -24,7 +24,7 @@ pub(crate) struct Record<'a> {
 /// An owned byte range into a parser-selected backing buffer. Range checks do
 /// not establish source identity: callers must view it against the same owned
 /// backing from which it was parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ByteSpan {
     range: Range<usize>,
 }
@@ -49,6 +49,30 @@ impl ByteSpan {
         backing
             .get(self.range.clone())
             .ok_or_else(|| unsupported("byte span is outside backing"))
+    }
+
+    /// Return a span addressed relative to this span, without permitting the
+    /// requested range to escape its parent.
+    pub(crate) fn checked_subrange(
+        &self,
+        relative: Range<usize>,
+        context: &str,
+    ) -> Result<Self, String> {
+        if relative.start > relative.end {
+            return Err(unsupported(format!("invalid {context} byte span")));
+        }
+        let start = self
+            .range
+            .start
+            .checked_add(relative.start)
+            .ok_or_else(|| unsupported(format!("invalid {context} byte span")))?;
+        let end = self
+            .range
+            .start
+            .checked_add(relative.end)
+            .filter(|end| *end <= self.range.end)
+            .ok_or_else(|| unsupported(format!("invalid {context} byte span")))?;
+        Ok(Self { range: start..end })
     }
 }
 
@@ -186,6 +210,14 @@ mod span_tests {
             .unwrap_err()
             .contains("outside backing"));
         assert!(ByteSpan::new(5..2, 5, "test").is_err());
+
+        let parent = ByteSpan::new(2..5, 5, "test").unwrap();
+        assert_eq!(
+            parent.checked_subrange(1..3, "child").unwrap().range(),
+            3..5
+        );
+        assert!(parent.checked_subrange(0..4, "child").is_err());
+        assert!(parent.checked_subrange(2..1, "child").is_err());
     }
 
     #[test]
