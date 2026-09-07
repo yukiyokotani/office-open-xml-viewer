@@ -262,6 +262,42 @@ impl ShapeSource for SpannedSlideSource<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceholderSize {
+    Full,
+    Half,
+    Quarter,
+    /// Retained without interpretation as a defined value. MS-PPT 2.13.22 defines
+    /// only values 0..=2, but the pre-existing reader accepted every byte.
+    Unknown(u8),
+}
+
+impl From<u8> for PlaceholderSize {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Full,
+            1 => Self::Half,
+            2 => Self::Quarter,
+            value => Self::Unknown(value),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlaceholderMetadata {
+    position: i32,
+    placement_id: u8,
+    preferred_size: PlaceholderSize,
+}
+
+impl PlaceholderMetadata {
+    fn is_placeholder(self) -> bool {
+        // MS-PPT 2.7.8: -1 marks a present PlaceholderAtom whose shape is not
+        // a placeholder. Atom presence and placeholder status are distinct.
+        self.position != -1
+    }
+}
+
 struct ShapeStorage<R, C, S> {
     id: u32,
     kind: u16,
@@ -270,13 +306,18 @@ struct ShapeStorage<R, C, S> {
     child_space: Option<Rect>,
     textbox: Option<R>,
     style9: Option<S>,
-    placeholder: bool,
+    placeholder: Option<PlaceholderMetadata>,
     props: PropertiesStorage<C>,
 }
 type Shape<'a> = ShapeStorage<Record<'a>, &'a [u8], &'a [u8]>;
 type SpannedShape = ShapeStorage<RecordSpan, ByteSpan, ByteSpan>;
 
 impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
+    fn is_placeholder(&self) -> bool {
+        self.placeholder
+            .is_some_and(PlaceholderMetadata::is_placeholder)
+    }
+
     fn read_from(
         source: &impl ShapeSource<Record = R, Complex = C, Style = S>,
         record: R,
@@ -366,9 +407,15 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
                         if placeholder.is_some() || atom_version != 0 || atom_len != 8 {
                             return Err(unsupported("invalid PowerPoint placeholder metadata"));
                         }
-                        placeholder = Some(
-                            source.with_record(&atom, |view| u32_at(view.payload, 0))? != u32::MAX,
-                        );
+                        placeholder = Some(source.with_record(&atom, |view| {
+                            Ok(PlaceholderMetadata {
+                                position: u32_at(view.payload, 0)? as i32,
+                                placement_id: view.payload[4],
+                                preferred_size: view.payload[5].into(),
+                                // MS-PPT 2.7.8: payload bytes 6..8 are undefined
+                                // and MUST be ignored.
+                            })
+                        })?);
                     }
                 }
                 _ => {}
@@ -382,7 +429,7 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
             child_space,
             textbox,
             style9,
-            placeholder: placeholder.unwrap_or(false),
+            placeholder,
             props,
         })
     }
@@ -836,7 +883,10 @@ impl Writer<'_, '_> {
                     .first()
                     .ok_or_else(|| unsupported("empty PowerPoint group"))?;
                 let group = Shape::read(*first, nested, self.records)?;
-                if group.omitted() || group.props.hidden || (self.inherited && group.placeholder) {
+                if group.omitted()
+                    || group.props.hidden
+                    || (self.inherited && group.is_placeholder())
+                {
                     return Ok(());
                 }
                 if group.flags & 1 == 0 {
@@ -866,7 +916,10 @@ impl Writer<'_, '_> {
             }
             0xf004 => {
                 let shape = Shape::read(record, nested, self.records)?;
-                if shape.omitted() || shape.props.hidden || (self.inherited && shape.placeholder) {
+                if shape.omitted()
+                    || shape.props.hidden
+                    || (self.inherited && shape.is_placeholder())
+                {
                     return Ok(());
                 }
                 let paint = match (shape.master(), self.context.and_then(|c| c.shapes)) {
@@ -1114,7 +1167,7 @@ impl Writer<'_, '_> {
                 };
                 let levels = if linked.is_some() {
                     linked
-                } else if shape.placeholder {
+                } else if shape.is_placeholder() {
                     self.context
                         .and_then(|c| c.master)
                         .and_then(|m| text_type.and_then(|t| m.levels(t)))
@@ -1247,6 +1300,113 @@ mod tests {
             })
             .collect();
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
+    }
+
+    fn shape_with_placeholder(
+        position: i32,
+        placement_id: u8,
+        preferred_size: u8,
+        unused: [u8; 2],
+    ) -> Vec<u8> {
+        sp(
+            0,
+            vec![record(
+                15,
+                0xf011,
+                &record(
+                    0,
+                    3011,
+                    &[
+                        position.to_le_bytes().as_slice(),
+                        &[placement_id, preferred_size],
+                        &unused,
+                    ]
+                    .concat(),
+                ),
+            )],
+        )
+    }
+
+    #[test]
+    fn retains_placeholder_presence_identity_position_and_preferred_size() {
+        let absent = sp(0, vec![]);
+        let absent =
+            Shape::read(parse_record_at(&absent, 0, &mut 1).unwrap(), false, &mut 10).unwrap();
+        assert_eq!(absent.placeholder, None);
+        assert!(!absent.is_placeholder());
+
+        for (raw, expected) in [
+            (0, PlaceholderSize::Full),
+            (1, PlaceholderSize::Half),
+            (2, PlaceholderSize::Quarter),
+            (3, PlaceholderSize::Unknown(3)),
+            (u8::MAX, PlaceholderSize::Unknown(u8::MAX)),
+        ] {
+            let bytes = shape_with_placeholder(-17, 0x1a, raw, [0x55, 0xaa]);
+            let shape =
+                Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20).unwrap();
+            assert_eq!(
+                shape.placeholder,
+                Some(PlaceholderMetadata {
+                    position: -17,
+                    placement_id: 0x1a,
+                    preferred_size: expected,
+                })
+            );
+            assert!(shape.is_placeholder());
+            assert!(shape.textbox.is_none());
+        }
+
+        let bytes = shape_with_placeholder(-1, 7, 0, [1, 2]);
+        let shape =
+            Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20).unwrap();
+        assert!(shape.placeholder.is_some());
+        assert!(!shape.is_placeholder());
+    }
+
+    #[test]
+    fn borrowed_and_spanned_placeholder_metadata_match_without_backing_borrows() {
+        for position in [i32::MIN, -1, 0, i32::MAX] {
+            let bytes = shape_with_placeholder(position, u8::MAX, 2, [0xde, 0xad]);
+            let borrowed_record = parse_record_at(&bytes, 0, &mut 1).unwrap();
+            let (span, end) = record_span_with_end(&bytes, 0, &mut 1, "shape").unwrap();
+            assert_eq!(end, bytes.len());
+            let mut borrowed_work = 20;
+            let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).unwrap();
+            let mut spanned_work = 20;
+            let spanned = SpannedShape::read_from(
+                &SpannedSlideSource { backing: &bytes },
+                span,
+                false,
+                &mut spanned_work,
+            )
+            .unwrap();
+            assert_eq!(borrowed_work, spanned_work);
+            assert_eq!(borrowed.placeholder, spanned.placeholder);
+            let moved = bytes;
+            assert_eq!(
+                spanned.placeholder.unwrap().position,
+                position,
+                "metadata must not borrow the source bytes"
+            );
+            assert!(!moved.is_empty());
+        }
+    }
+
+    #[test]
+    fn placeholder_metadata_keeps_existing_duplicate_version_and_length_rejections() {
+        let payload = [0u8; 8];
+        let client = |atoms: Vec<Vec<u8>>| sp(0, vec![record(15, 0xf011, &atoms.concat())]);
+        for bytes in [
+            client(vec![record(1, 3011, &payload)]),
+            client(vec![record(0, 3011, &[0; 7])]),
+            client(vec![record(0, 3011, &payload), record(0, 3011, &payload)]),
+        ] {
+            let error = Shape::read(parse_record_at(&bytes, 0, &mut 1).unwrap(), false, &mut 20)
+                .err()
+                .expect("invalid placeholder metadata must fail");
+            assert!(error.contains("invalid PowerPoint placeholder metadata"));
+        }
     }
 
     #[test]

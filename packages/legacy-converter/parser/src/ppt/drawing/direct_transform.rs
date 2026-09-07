@@ -94,7 +94,7 @@ mod tests {
             }),
             textbox: None,
             style9: None,
-            placeholder: false,
+            placeholder: None,
             props: Properties::default(),
         }
     }

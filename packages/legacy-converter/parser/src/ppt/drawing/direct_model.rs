@@ -162,7 +162,7 @@ impl Context<'_> {
                 nested,
                 self.work_budget,
             )?;
-            if group.omitted() || group.props.hidden || (inherited && group.placeholder) {
+            if group.omitted() || group.props.hidden || (inherited && group.is_placeholder()) {
                 return Ok(());
             }
             let transform = direct_transform::group(&group, nested)?;
@@ -183,7 +183,7 @@ impl Context<'_> {
                 nested,
                 self.work_budget,
             )?;
-            if shape.omitted() || shape.props.hidden || (inherited && shape.placeholder) {
+            if shape.omitted() || shape.props.hidden || (inherited && shape.is_placeholder()) {
                 return Ok(());
             }
             self.shape(shape, inherited, ancestors)?;
@@ -472,7 +472,7 @@ impl Context<'_> {
             .transpose()?;
         let levels = linked.or_else(|| {
             shape
-                .placeholder
+                .is_placeholder()
                 .then(|| {
                     self.presentation.text_masters[self.index]
                         .as_deref()
@@ -515,7 +515,7 @@ impl Context<'_> {
                 ruler: local_ruler,
                 document: document_text_axes(
                     text_type,
-                    shape.placeholder,
+                    shape.is_placeholder(),
                     master_link.is_some(),
                     outline_body,
                     self.presentation.document_text_axes,
