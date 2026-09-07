@@ -461,6 +461,26 @@ mod tests {
             .unwrap();
         sheet
     }
+    fn base_width_sheet() -> SheetData {
+        let mut sheet = SheetData::default();
+        sheet
+            .geometry
+            .read(&Record {
+                kind: 0x225,
+                offset: 0,
+                data: &[0, 0, 44, 1],
+            })
+            .unwrap();
+        sheet
+            .geometry
+            .read(&Record {
+                kind: 0x55,
+                offset: 0,
+                data: &[8, 0],
+            })
+            .unwrap();
+        sheet
+    }
     fn anchor() -> DrawingAnchor {
         DrawingAnchor {
             sheet: 0,
@@ -652,11 +672,48 @@ mod tests {
     }
 
     #[test]
-    fn measured_defaults_only_change_sheets_that_receive_drawings() {
+    fn stored_default_width_is_preserved_with_and_without_drawings() {
         use super::super::{styles, styles::NormalFont, PreparedXls};
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
             sheets: vec![("Picture".into(), sheet()), ("Cells".into(), sheet())],
+            styles: styles::minimal_resolved(),
+            shared_strings: vec![],
+            date1904: false,
+            window_count: 0,
+            warnings: vec![
+                "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
+            ],
+            font: Some(NormalFont {
+                name: "F".into(),
+                size_points: 11.0,
+                bold: false,
+                italic: false,
+            }),
+            pictures: pictures(vec![anchor()]),
+        };
+        let result = prepared.finish(10000, Some(7.0)).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(result.bytes)).unwrap();
+        for (id, drawing) in [(1, true), (2, false)] {
+            let mut xml = String::new();
+            zip.by_name(&format!("xl/worksheets/sheet{id}.xml"))
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            assert!(xml.contains("defaultColWidth=\"10\""));
+            assert_eq!(xml.contains("r:id=\"legacyDrawing\""), drawing);
+        }
+    }
+
+    #[test]
+    fn font_dependent_base_width_only_changes_sheets_that_receive_drawings() {
+        use super::super::{styles, styles::NormalFont, PreparedXls};
+        use std::io::{Cursor, Read};
+        let prepared = PreparedXls {
+            sheets: vec![
+                ("Picture".into(), base_width_sheet()),
+                ("Cells".into(), base_width_sheet()),
+            ],
             styles: styles::minimal_resolved(),
             shared_strings: vec![],
             date1904: false,
@@ -680,7 +737,7 @@ mod tests {
                 .unwrap()
                 .read_to_string(&mut xml)
                 .unwrap();
-            assert_eq!(xml.contains("defaultColWidth=\"10\""), measured);
+            assert_eq!(xml.contains("defaultColWidth=\"8.7109375\""), measured);
             assert_eq!(xml.contains("r:id=\"legacyDrawing\""), measured);
         }
     }

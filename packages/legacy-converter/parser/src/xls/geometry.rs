@@ -145,10 +145,7 @@ impl Geometry {
                     }
                 }
             }
-            if let Some(width) = mdw
-                .and_then(|value| self.default_width(value))
-                .or_else(|| self.default_column.map(|column| f64::from(column.0)))
-            {
+            if let Some(width) = self.sheet_default_width(mdw) {
                 worksheet.default_col_width = width / 256.0;
             }
         }
@@ -303,10 +300,7 @@ impl Geometry {
             if let Some(width) = self.base_width {
                 xml.push_str(&format!(" baseColWidth=\"{width}\""));
             }
-            if let Some(width) = mdw
-                .and_then(|m| self.default_width(m))
-                .or_else(|| self.default_column.map(|c| f64::from(c.0)))
-            {
+            if let Some(width) = self.sheet_default_width(mdw) {
                 xml.push_str(&format!(" defaultColWidth=\"{}\"", width / 256.0));
             }
             xml.push_str("/>");
@@ -336,6 +330,22 @@ impl Geometry {
                 self.base_width
                     .map(|w| ((f64::from(w) + 5.0 / mdw) * 256.0).trunc())
             })
+    }
+
+    /// Width stored by DxGCol and ColInfo is already in 1/256 Normal digit
+    /// units. Only DefColWidth's character count needs a measured digit width.
+    /// A non-two-byte DxGCol keeps the existing conservative unknown-layout
+    /// policy: ignore both its value and the font-dependent base-width route,
+    /// while retaining an independently authored default ColInfo sentinel.
+    fn sheet_default_width(&self, mdw: Option<f64>) -> Option<f64> {
+        if !self.unknown_digit_width {
+            if let Some(width) = self.digit_width {
+                return Some(f64::from(width));
+            }
+        }
+        self.default_column
+            .map(|column| f64::from(column.0))
+            .or_else(|| mdw.and_then(|value| self.default_width(value)))
     }
 
     pub(super) fn column_emu(&self, col: u16, mdw: f64) -> Option<f64> {
@@ -400,6 +410,101 @@ mod tests {
             hidden: false,
         }
     }
+    #[test]
+    fn stored_digit_width_does_not_require_host_font_measurement() {
+        // [MS-XLS] 2.4.98: DxGCol already stores width in 1/256 Normal
+        // digit units. Only conversion to pixels needs a measured digit width.
+        for width in [0_u16, 1, 2560, 65535] {
+            let mut geometry = Geometry::default();
+            geometry.default_row = Some((300, 0));
+            geometry.default_column = Some((3072, 0, 0));
+            geometry
+                .read(&Record {
+                    kind: 0x0099,
+                    offset: 0,
+                    data: &width.to_le_bytes(),
+                })
+                .unwrap();
+            for mdw in [None, Some(7.0), Some(9.0)] {
+                let mut model = worksheet();
+                let mut budget = usize::MAX;
+                geometry.project(&mut model, mdw, &mut budget).unwrap();
+                assert_eq!(model.default_col_width, f64::from(width) / 256.0);
+                assert!(geometry
+                    .xml_with_metrics(mdw)
+                    .contains(&format!("defaultColWidth=\"{}\"", f64::from(width) / 256.0)));
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_digit_width_keeps_default_column_and_explicit_column_policy() {
+        let mut geometry = Geometry::default();
+        geometry.default_row = Some((300, 0));
+        geometry.default_column = Some((3072, 0, 0));
+        geometry.base_width = Some(8);
+        geometry.digit_width = Some(2560);
+        // A non-two-byte DxGCol selects the existing unknown-layout policy. It
+        // invalidates the stored digit width and font-dependent base route,
+        // but not the independent default ColInfo record.
+        geometry
+            .read(&Record {
+                kind: 0x0099,
+                offset: 0,
+                data: &[0, 10, 0, 0],
+            })
+            .unwrap();
+        geometry.columns.insert(0, (4096, 0, 2));
+
+        for mdw in [None, Some(7.0), Some(9.0)] {
+            let mut model = worksheet();
+            let mut budget = usize::MAX;
+            geometry.project(&mut model, mdw, &mut budget).unwrap();
+            assert_eq!(model.default_col_width, 12.0);
+            assert_eq!(model.col_widths.get(&1), Some(&16.0));
+            assert!(geometry
+                .xml_with_metrics(mdw)
+                .contains("defaultColWidth=\"12\""));
+        }
+    }
+
+    #[test]
+    fn stored_digit_width_without_default_column_and_explicit_override_are_distinct() {
+        let mut geometry = Geometry::default();
+        geometry.default_row = Some((300, 0));
+        geometry.digit_width = Some(2560);
+        geometry.columns.insert(0, (4096, 0, 2));
+        let mut model = worksheet();
+        let mut budget = usize::MAX;
+        geometry.project(&mut model, None, &mut budget).unwrap();
+        assert_eq!(model.default_col_width, 10.0);
+        assert_eq!(model.col_widths.get(&1), Some(&16.0));
+        assert!(geometry.xml().contains("defaultColWidth=\"10\""));
+    }
+
+    #[test]
+    fn unknown_digit_width_without_default_column_omits_width_even_when_measured() {
+        let mut geometry = Geometry::default();
+        geometry.default_row = Some((300, 0));
+        geometry.base_width = Some(8);
+        geometry
+            .read(&Record {
+                kind: 0x0099,
+                offset: 0,
+                data: &[0, 10, 0, 0],
+            })
+            .unwrap();
+        let mut model = worksheet();
+        let mut budget = usize::MAX;
+        geometry
+            .project(&mut model, Some(7.0), &mut budget)
+            .unwrap();
+        assert_eq!(model.default_col_width, 8.43);
+        assert!(!geometry
+            .xml_with_metrics(Some(7.0))
+            .contains("defaultColWidth"));
+    }
+
     #[test]
     fn measured_width_uses_normative_padding_and_explicit_digit_width_precedence() {
         let mut geometry = Geometry::default();
