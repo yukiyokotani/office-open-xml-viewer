@@ -616,6 +616,25 @@ export class PptxPresentation {
     });
   }
 
+  /** @internal Transfer viewer-composed signal wiring to this owned session. */
+  _retainLegacyPptSignalCleanup(cleanup: () => void): void {
+    if (this._destroyed) {
+      cleanup();
+      return;
+    }
+    const releaseNativeListener = this._legacyPptSignalCleanup;
+    let active = true;
+    this._legacyPptSignalCleanup = () => {
+      if (!active) return;
+      active = false;
+      try {
+        releaseNativeListener();
+      } finally {
+        cleanup();
+      }
+    };
+  }
+
   private async _parseMainProgressively(
     buffer: ArrayBuffer,
     source: LegacyPptDirectSourceDescriptor | undefined,

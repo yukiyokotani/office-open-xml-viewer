@@ -129,6 +129,52 @@ describe('PptxViewer.load() — concurrent-load latch', () => {
     v.destroy();
   });
 
+  it('keeps both direct-source signals connected after a successful load', async () => {
+    const { canvas } = mount();
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const user = new AbortController();
+    const removeUserListener = vi.spyOn(user.signal, 'removeEventListener');
+    let combined: AbortSignal | undefined;
+    vi.spyOn(PptxPresentation, 'load').mockImplementation(async (_source, options) => {
+      const presentation = engine.asPres();
+      combined = options?.legacyConversion?.ppt?.signal;
+      expect(combined).not.toBe(user.signal);
+      combined?.addEventListener('abort', () => presentation.destroy(), { once: true });
+      let retainedCleanup: () => void = () => undefined;
+      (presentation as unknown as { _retainLegacyPptSignalCleanup(cleanup: () => void): void })
+        ._retainLegacyPptSignalCleanup = (cleanup) => { retainedCleanup = cleanup; };
+      const destroy = presentation.destroy.bind(presentation);
+      presentation.destroy = () => {
+        try { destroy(); } finally {
+          const cleanup = retainedCleanup;
+          retainedCleanup = () => undefined;
+          cleanup();
+        }
+      };
+      return presentation;
+    });
+    const v = new PptxViewer(canvas as unknown as HTMLCanvasElement, {
+      legacyConversion: {
+        ppt: {
+          source: {
+            protocol: 'ooxml-legacy-ppt-source/v1',
+            builtin: 'ppt',
+            wasmUrl: 'https://example.test/direct-ppt.wasm',
+          },
+          signal: user.signal,
+        },
+      },
+    });
+
+    await v.load('deck.ppt');
+    expect(combined?.aborted).toBe(false);
+    user.abort();
+    expect(combined?.aborted).toBe(true);
+    expect(engine.destroyed).toBe(true);
+    expect(removeUserListener).toHaveBeenCalledOnce();
+    v.destroy();
+  });
+
   it('does not report a pending old-presentation render rejected by a successful reload', async () => {
     const { canvas } = mount();
     const onError = vi.fn();

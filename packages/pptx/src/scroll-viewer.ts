@@ -12,6 +12,7 @@ import {
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { settleLegacyPptLoad } from './legacy-ppt-load.js';
 import { eventTargetsDataAttributeWithin } from '@silurus/ooxml-core/internal/dom-interaction-boundary';
 import type { ReadOnlyCommentMarginGeometry } from '@silurus/ooxml-core/internal/read-only-comment-decoration';
 import { PptxPresentation, type LoadOptions, type RenderSlideOptions } from './presentation';
@@ -621,9 +622,7 @@ export class PptxScrollViewer implements ZoomableViewer {
           onLayoutPartial: this._opts.onLayoutPartial,
           onLayoutComplete: this._opts.onLayoutComplete,
         });
-        return conversion.options === undefined
-          ? pending
-          : pending.finally(conversion.cleanup);
+        return settleLegacyPptLoad(pending, conversion);
       }, (ownedPresentation) => {
         // Invalidate before TerminalResourceOwner installs the candidate and
         // destroys the prior worker, whose pending hit requests reject on close.

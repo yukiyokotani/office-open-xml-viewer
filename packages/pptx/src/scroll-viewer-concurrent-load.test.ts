@@ -93,6 +93,55 @@ describe('PptxScrollViewer.load() — concurrent-load latch', () => {
     expect(b.destroyed).toBe(true);
   });
 
+  it('keeps both direct-source signals connected after a successful load', async () => {
+    const { v } = build();
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    const user = new AbortController();
+    const removeUserListener = vi.spyOn(user.signal, 'removeEventListener');
+    let combined: AbortSignal | undefined;
+    vi.spyOn(PptxPresentation, 'load').mockImplementation(async (_source, options) => {
+      const presentation = engine.asPres();
+      combined = options?.legacyConversion?.ppt?.signal;
+      expect(combined).not.toBe(user.signal);
+      combined?.addEventListener('abort', () => presentation.destroy(), { once: true });
+      let retainedCleanup: () => void = () => undefined;
+      (presentation as unknown as { _retainLegacyPptSignalCleanup(cleanup: () => void): void })
+        ._retainLegacyPptSignalCleanup = (cleanup) => { retainedCleanup = cleanup; };
+      const destroy = presentation.destroy.bind(presentation);
+      presentation.destroy = () => {
+        try { destroy(); } finally {
+          const cleanup = retainedCleanup;
+          retainedCleanup = () => undefined;
+          cleanup();
+        }
+      };
+      return presentation;
+    });
+    const viewer = new PptxScrollViewer(
+      makeContainer(200, 400) as unknown as HTMLElement,
+      {
+        legacyConversion: {
+          ppt: {
+            source: {
+              protocol: 'ooxml-legacy-ppt-source/v1',
+              builtin: 'ppt',
+              wasmUrl: 'https://example.test/direct-ppt.wasm',
+            },
+            signal: user.signal,
+          },
+        },
+      },
+    );
+
+    await viewer.load('deck.ppt');
+    expect(combined?.aborted).toBe(false);
+    user.abort();
+    expect(combined?.aborted).toBe(true);
+    expect(engine.destroyed).toBe(true);
+    expect(removeUserListener).toHaveBeenCalledOnce();
+    viewer.destroy();
+  });
+
   it('does not report an old slot render rejected while a successful reload recycles it', async () => {
     const onError = vi.fn();
     const { v } = build(onError);

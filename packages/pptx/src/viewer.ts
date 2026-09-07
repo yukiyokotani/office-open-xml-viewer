@@ -35,6 +35,7 @@ import {
   TerminalResourceOwner,
 } from '@silurus/ooxml-core/internal/canvas-viewer-mechanics';
 import { bindLegacyOfficeConversionSignal } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { settleLegacyPptLoad } from './legacy-ppt-load.js';
 import {
   readPptxTextSelectionContext,
 } from './selection-context';
@@ -365,9 +366,7 @@ export class PptxViewer implements ZoomableViewer {
           onLayoutPartial: this.opts.onLayoutPartial,
           onLayoutComplete: this.opts.onLayoutComplete,
         });
-        return conversion.options === undefined
-          ? pending
-          : pending.finally(conversion.cleanup);
+        return settleLegacyPptLoad(pending, conversion);
       }, () => {
         // Retire old-engine hit promises before install() destroys that engine:
         // a worker bridge may reject them synchronously during destroy, and its

@@ -9,6 +9,7 @@ import {
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progressive-layout-lifecycle';
 import { PptxPresentation } from './presentation';
+import { settleLegacyPptLoad } from './legacy-ppt-load.js';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type { PptxEmbeddedFontRef } from './worker-protocol';
 import { buildCfbFixture } from '@silurus/ooxml-core/testing';
@@ -103,8 +104,42 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     instance._layoutWaiters = new Set();
     instance._layoutLifecycle = new ProgressiveLayoutLifecycle();
     instance._fetchImage = () => Promise.resolve(new Blob());
-    return { pres: instance as unknown as DestroyProbe, bridge, worker };
+    return { pres: instance as unknown as PptxPresentation & DestroyProbe, bridge, worker };
   }
+
+  it('releases native and viewer-composed signal wiring exactly once on destroy', async () => {
+    const { pres } = makePresentation();
+    const nativeCleanup = vi.fn();
+    const composedCleanup = vi.fn();
+    (pres as unknown as Record<string, unknown>)._legacyPptSignalCleanup = nativeCleanup;
+    await settleLegacyPptLoad(Promise.resolve(pres), {
+      options: { ppt: { source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      } } },
+      cleanup: composedCleanup,
+    });
+
+    pres.destroy();
+    pres.destroy();
+    expect(nativeCleanup).toHaveBeenCalledOnce();
+    expect(composedCleanup).toHaveBeenCalledOnce();
+  });
+
+  it('immediately releases composed wiring when retention races with destruction', async () => {
+    const { pres } = makePresentation();
+    const composedCleanup = vi.fn();
+    pres.destroy();
+
+    await settleLegacyPptLoad(Promise.resolve(pres), {
+      options: { ppt: { source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      } } },
+      cleanup: composedCleanup,
+    });
+    expect(composedCleanup).toHaveBeenCalledOnce();
+  });
 
   it('rejects a pending request when destroy() terminates the worker', async () => {
     const { pres, bridge, worker } = makePresentation();
