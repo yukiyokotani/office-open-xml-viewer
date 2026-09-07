@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
 import { buildXlsFixture } from '../../legacy-converter/src/test-fixtures.ts';
 import { openXlsxWorkbook, type XlsxWorkbookSession } from './xlsx.ts';
@@ -36,6 +38,33 @@ async function rows(workbook: XlsxWorkbookSession) {
 }
 
 describe('Node direct XLS native session', () => {
+  it.skipIf(!process.env.LEGACY_XLS_SESSION_CORPUS)('streams every local corpus workbook without OOXML acquisition', async () => {
+    const directory = process.env.LEGACY_XLS_SESSION_CORPUS as string;
+    const files = (await readdir(directory)).filter(name => name.toLowerCase().endsWith('.xls')).sort();
+    expect(files.length).toBeGreaterThan(0);
+    let sheetCount = 0;
+    let rowCount = 0;
+    for (const file of files) {
+      const workbook = await openXlsxWorkbook(await readFile(join(directory, file)), {
+        legacyConversion: { xls: { source } },
+      });
+      try {
+        for (let index = workbook.sheetCount - 1; index >= 0; index--) {
+          let finished = false;
+          for await (const chunk of workbook.worksheetRows(index)) {
+            if (chunk.kind === 'rows') rowCount += chunk.rows.length;
+            else finished = true;
+          }
+          expect(finished).toBe(true);
+          sheetCount++;
+        }
+      } finally { await workbook.close(); }
+    }
+    expect(loadOoxml).not.toHaveBeenCalled();
+    // Aggregate counts only: never publish local corpus filenames or contents.
+    console.info({ workbooks: files.length, sheets: sheetCount, rows: rowCount });
+  }, 120_000);
+
   it('streams real BIFF through the XLSX row contract without loading OOXML WASM', async () => {
     const workbook = await openXlsxWorkbook(fixture(), { legacyConversion: { xls: { source } } });
     try {
