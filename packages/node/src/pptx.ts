@@ -298,6 +298,7 @@ class PptxPresentationSessionImpl implements PptxPresentationSession {
   }
 
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
+    if (!this.archive.resource_usage) return this.usage;
     try {
       this.usage = decodeOoxmlResourceUsage(this.archive.resource_usage());
       this.metrics.observeUsage(this.usage);

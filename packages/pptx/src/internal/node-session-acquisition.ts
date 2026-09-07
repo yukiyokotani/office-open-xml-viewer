@@ -19,7 +19,8 @@ export interface PptxNodeArchive extends PptxSlideCursorArchive {
   free(): void;
   assert_healthy(): void;
   presentation_bootstrap(): Uint8Array;
-  resource_usage(): Uint8Array;
+  /** ZIP accounting is absent for native sources; absence is not zero usage. */
+  resource_usage?(): Uint8Array;
   extract_image(path: string): Uint8Array;
   extract_media(path: string): Uint8Array;
 }

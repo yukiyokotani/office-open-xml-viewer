@@ -40,6 +40,20 @@ describe('PPTX owned archive admission', () => {
     expect(closeArchive).toHaveBeenCalledTimes(1);
   });
 
+  it('admits and cleans up a native owned source without fabricated ZIP metrics', () => {
+    const closeArchive = vi.fn();
+    const archive = archiveWith(() => encoded(validBootstrap));
+    expect(archive.resource_usage).toBeUndefined();
+    const acquired = acquirePptxSessionFromArchive({
+      archive,
+      sourceByteLength: 456,
+      closeArchive,
+    });
+    expect(acquired.bootstrap).toEqual(validBootstrap);
+    acquired.closeArchive();
+    expect(closeArchive).toHaveBeenCalledOnce();
+  });
+
   it('preserves a provider error when cleanup also throws', () => {
     const original = new SyntaxError('bad bootstrap');
     const closeArchive = vi.fn(() => { throw new Error('cleanup failed'); });
