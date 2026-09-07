@@ -434,47 +434,6 @@ fn observe_shared_cache_candidate<T: serde::Serialize>(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PresentationBootstrap {
-    slide_count: usize,
-    slide_width: i64,
-    slide_height: i64,
-    default_text_color: Option<String>,
-    major_font: Option<String>,
-    minor_font: Option<String>,
-    hlink_color: Option<String>,
-    fol_hlink_color: Option<String>,
-    embedded_fonts: Vec<PptxEmbeddedFontRef>,
-    slides: Vec<BootstrapSlide>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PptxEmbeddedFontRef {
-    font_name: String,
-    style: EmbeddedFontStyle,
-    part_path: String,
-    content_type: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-enum EmbeddedFontStyle {
-    Regular,
-    Bold,
-    Italic,
-    BoldItalic,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BootstrapSlide {
-    index: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    part_name: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 struct PresentationBootstrapProjection<'a> {
     slide_count: usize,
     slide_width: i64,
@@ -4866,7 +4825,6 @@ mod tests {
                 fill_rect,
                 tile,
                 alpha,
-                duotone: _,
                 ..
             } => {
                 assert_eq!(image_path, "ppt/media/image1.jpeg");

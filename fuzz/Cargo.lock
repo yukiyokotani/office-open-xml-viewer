@@ -173,6 +173,8 @@ name = "legacy-office-converter"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "flate2",
+ "quick-xml",
  "wasm-bindgen",
  "zip",
 ]
@@ -247,11 +249,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pptx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+]
+
+[[package]]
 name = "pptx-parser"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "ooxml-common",
+ "pptx-model",
  "roxmltree",
  "serde",
  "serde_json",
