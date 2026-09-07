@@ -204,14 +204,15 @@ impl Geometry<'_> {
 }
 
 type Point = [i64; 2];
-enum Command {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodedCommand {
     Move(Point),
     Line(Point),
     Cubic([Point; 3]),
     Close,
 }
 struct Path {
-    commands: Vec<Command>,
+    commands: Vec<DecodedCommand>,
     fill: bool,
     stroke: bool,
     has_open_subpath: bool,
@@ -230,6 +231,38 @@ pub(crate) struct Decoded {
     width: i64,
     height: i64,
     paths: Vec<Path>,
+}
+
+pub(crate) struct DecodedPath<'a> {
+    path: &'a Path,
+}
+
+impl Decoded {
+    pub(crate) fn width(&self) -> i64 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> i64 {
+        self.height
+    }
+
+    pub(crate) fn paths(&self) -> impl ExactSizeIterator<Item = DecodedPath<'_>> {
+        self.paths.iter().map(|path| DecodedPath { path })
+    }
+}
+
+impl DecodedPath<'_> {
+    pub(crate) fn fill(&self) -> bool {
+        self.path.fill
+    }
+
+    pub(crate) fn stroke(&self) -> bool {
+        self.path.stroke
+    }
+
+    pub(crate) fn commands(&self) -> impl ExactSizeIterator<Item = DecodedCommand> + '_ {
+        self.path.commands.iter().copied()
+    }
 }
 struct PathReader<'a, 'b> {
     points: &'a [Point],
@@ -250,7 +283,7 @@ impl PathReader<'_, '_> {
     fn move_to(&mut self) -> Result<(), String> {
         self.current.has_open_subpath |= self.open;
         let point = self.point()?;
-        self.current.commands.push(Command::Move(point));
+        self.current.commands.push(DecodedCommand::Move(point));
         self.open = true;
         Ok(())
     }
@@ -260,7 +293,7 @@ impl PathReader<'_, '_> {
         }
         for _ in 0..count {
             let point = self.point()?;
-            self.current.commands.push(Command::Line(point));
+            self.current.commands.push(DecodedCommand::Line(point));
         }
         Ok(())
     }
@@ -270,7 +303,7 @@ impl PathReader<'_, '_> {
         }
         for _ in 0..count {
             let points = [self.point()?, self.point()?, self.point()?];
-            self.current.commands.push(Command::Cubic(points));
+            self.current.commands.push(DecodedCommand::Cubic(points));
         }
         Ok(())
     }
@@ -278,7 +311,7 @@ impl PathReader<'_, '_> {
         if !self.open {
             return Err(unsupported("OfficeArt close without current subpath"));
         }
-        self.current.commands.push(Command::Close);
+        self.current.commands.push(DecodedCommand::Close);
         self.open = false;
         Ok(())
     }
@@ -341,10 +374,10 @@ impl Decoded {
             )?;
             for command in &path.commands {
                 let (tag, points): (&str, &[Point]) = match command {
-                    Command::Move(p) => ("moveTo", std::slice::from_ref(p)),
-                    Command::Line(p) => ("lnTo", std::slice::from_ref(p)),
-                    Command::Cubic(p) => ("cubicBezTo", p),
-                    Command::Close => {
+                    DecodedCommand::Move(p) => ("moveTo", std::slice::from_ref(p)),
+                    DecodedCommand::Line(p) => ("lnTo", std::slice::from_ref(p)),
+                    DecodedCommand::Cubic(p) => ("cubicBezTo", p),
+                    DecodedCommand::Close => {
                         push(output, budget, "<a:close/>")?;
                         continue;
                     }

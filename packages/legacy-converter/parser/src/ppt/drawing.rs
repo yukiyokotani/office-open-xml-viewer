@@ -132,6 +132,9 @@ impl Rect {
     }
 }
 
+mod direct_transform;
+mod direct_geometry;
+
 trait ShapeSource {
     type Record: Clone;
     type Complex: Default + Clone;
