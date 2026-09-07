@@ -58,7 +58,17 @@ pub(super) fn read<'a>(atom: Record<'a>, budget: &mut usize) -> Result<Option<Ta
     Ok(tabs)
 }
 
-impl Tabs<'_> {
+impl<'a> Tabs<'a> {
+    /// Semantic tab positions shared by direct-model and XML output. The
+    /// validated record owns order, duplicates and the signed ruler origin.
+    pub(super) fn positions(self) -> impl ExactSizeIterator<Item = (i64, &'static str)> + 'a {
+        self.entries.chunks_exact(4).map(|entry| {
+            let position = master_to_emu(i64::from(i16::from_le_bytes([entry[0], entry[1]])));
+            let alignment = ["l", "ctr", "r", "dec"][usize::from(entry[2])];
+            (position, alignment)
+        })
+    }
+
     pub(super) fn write(
         self,
         output: &mut String,
@@ -69,9 +79,7 @@ impl Tabs<'_> {
             .checked_sub(self.entries.len() / 4)
             .ok_or_else(|| unsupported("PowerPoint ruler tab work budget exceeded"))?;
         drawing::append(output, xml, "<a:tabLst>")?;
-        for entry in self.entries.chunks_exact(4) {
-            let pos = master_to_emu(i64::from(i16::from_le_bytes([entry[0], entry[1]])));
-            let alignment = ["l", "ctr", "r", "dec"][usize::from(entry[2])];
+        for (pos, alignment) in self.positions() {
             // ECMA-376 21.1.2.2.13-14. Office roundtrip of the controlled
             // baseline maps a local ruler's 1152 units to pos=1828800, and
             // keeps that stop fixed when paragraph marL changes. No offset
@@ -89,6 +97,23 @@ impl Tabs<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn positions_expose_binary_tabs_without_xml_or_reordering() {
+        let mut data = [4u32.to_le_bytes().as_slice(), &4u16.to_le_bytes()].concat();
+        for (position, alignment) in [(1152i16, 3u16), (-576, 0), (0, 1), (0, 2)] {
+            data.extend(position.to_le_bytes());
+            data.extend(alignment.to_le_bytes());
+        }
+        let tabs = read(atom(&data), &mut 100).unwrap().unwrap();
+        assert_eq!(tabs.positions().len(), 4);
+        assert_eq!(
+            tabs.positions().collect::<Vec<_>>(),
+            vec![(1828800, "dec"), (-914400, "l"), (0, "ctr"), (0, "r"),]
+        );
+        let empty = read(atom(&[4, 0, 0, 0, 0, 0]), &mut 100).unwrap().unwrap();
+        assert_eq!(empty.positions().len(), 0);
+    }
+
     fn atom(payload: &[u8]) -> Record<'_> {
         Record {
             kind: 4006,
