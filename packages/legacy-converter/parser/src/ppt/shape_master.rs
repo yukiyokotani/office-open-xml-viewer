@@ -20,9 +20,15 @@ pub(super) struct Resolver {
 }
 struct Resolved {
     levels: Rc<Vec<text_style::Level>>,
+    text_base: Option<TextBase>,
     paint: paint::Paint,
     geometry: crate::officeart::geometry::SpannedGeometry,
     depth: usize,
+}
+#[derive(Clone)]
+struct TextBase {
+    authored_font_sizes: Rc<text_style::AuthoredFontSizeTable>,
+    text_type: u16,
 }
 impl Resolver {
     pub fn insert(&mut self, node: Node) -> Result<(), String> {
@@ -49,6 +55,23 @@ impl Resolver {
             .get(&id)
             .map(|v| v.levels.as_slice())
             .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
+    }
+    pub fn authored_base_font_sizes(
+        &self,
+        id: u32,
+        authored_type: u16,
+    ) -> Result<Option<(u16, text_style::AuthoredFontSizes)>, String> {
+        let resolved = self
+            .resolved
+            .get(&id)
+            .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))?;
+        Ok(resolved.text_base.as_ref().and_then(|base| {
+            base.authored_font_sizes
+                .get(usize::from(authored_type))
+                .copied()
+                .flatten()
+                .map(|sizes| (base.text_type, sizes))
+        }))
     }
     pub fn paint(&self, id: u32) -> Result<&paint::Paint, String> {
         self.resolved
@@ -97,6 +120,17 @@ impl Resolver {
             .transpose()?;
         let depth = parent.map_or(1, |parent| self.resolved[&parent].depth + 1);
         let node = &self.nodes[&id];
+        let text_base = match parent {
+            Some(parent) => self.resolved[&parent].text_base.clone(),
+            None => node
+                .base
+                .as_ref()
+                .zip(node.text_type)
+                .map(|(master, text_type)| TextBase {
+                    authored_font_sizes: master.authored_font_size_table(),
+                    text_type,
+                }),
+        };
         let paint = match parent {
             Some(parent) => node.paint.inherit(&self.resolved[&parent].paint),
             None => node.paint,
@@ -127,6 +161,7 @@ impl Resolver {
             id,
             Resolved {
                 levels: levels.clone(),
+                text_base,
                 paint,
                 geometry,
                 depth,
@@ -149,6 +184,29 @@ mod tests {
             paint: paint::Paint::default(),
             geometry: crate::officeart::geometry::SpannedGeometry::default(),
         }
+    }
+    fn master_size(size: u16) -> Rc<text_style::Master> {
+        let bytes = [
+            1u16.to_le_bytes().to_vec(),
+            0u16.to_le_bytes().to_vec(),
+            0u32.to_le_bytes().to_vec(),
+            0x20000u32.to_le_bytes().to_vec(),
+            size.to_le_bytes().to_vec(),
+        ]
+        .concat();
+        Rc::new(
+            text_style::Master::parse(
+                &[Record {
+                    version: 0,
+                    instance: 8,
+                    kind: 4003,
+                    payload: &bytes,
+                }],
+                &[],
+                &mut 100,
+            )
+            .unwrap(),
+        )
     }
     #[test]
     fn paint_resolves_through_cached_chains_without_losing_explicit_false() {
@@ -186,6 +244,47 @@ mod tests {
         assert!(Rc::ptr_eq(&a, &b));
         assert!(r.resolve(2, &mut Vec::new(), &mut 0).is_err());
         assert!(r.insert(node(2, None)).is_err());
+    }
+    #[test]
+    fn resolved_parent_chain_retains_authored_master_base_provenance_after_finish() {
+        let master = master_size(20);
+        let weak = Rc::downgrade(&master);
+        let mut root = node(1, None);
+        root.text_type = Some(1);
+        root.base = Some(master.clone());
+        let mut r = Resolver::default();
+        r.insert(root).unwrap();
+        r.insert(node(2, Some(1))).unwrap();
+        drop(master);
+        r.finish(&mut 100).unwrap();
+        assert!(r.nodes.is_empty());
+        assert!(weak.upgrade().is_none());
+        let (base_type, authored) = r.authored_base_font_sizes(2, 8).unwrap().unwrap();
+        assert_eq!(base_type, 1);
+        assert_eq!(authored.level_count(), 1);
+        assert_eq!(authored.get(0), Some(20));
+        assert!(r.authored_base_font_sizes(2, 7).unwrap().is_none());
+        assert!(r.authored_base_font_sizes(3, 8).is_err());
+    }
+    #[test]
+    fn parent_text_base_provenance_wins_over_an_ignored_child_base() {
+        let mut root = node(1, None);
+        root.text_type = Some(1);
+        root.base = Some(master_size(20));
+        let mut child = node(2, Some(1));
+        child.text_type = Some(2);
+        child.base = Some(master_size(44));
+        let mut absent = node(3, None);
+        absent.text_type = Some(1);
+        let mut r = Resolver::default();
+        r.insert(root).unwrap();
+        r.insert(child).unwrap();
+        r.insert(absent).unwrap();
+        r.finish(&mut 100).unwrap();
+        let (base_type, authored) = r.authored_base_font_sizes(2, 8).unwrap().unwrap();
+        assert_eq!(base_type, 1);
+        assert_eq!(authored.get(0), Some(20));
+        assert!(r.authored_base_font_sizes(3, 8).unwrap().is_none());
     }
     #[test]
     fn rejects_cycles_missing_parents_and_excessive_depth() {

@@ -641,8 +641,26 @@ pub(super) fn shape_levels(
     }
     Ok(levels)
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AuthoredFontSizes {
+    level_count: u8,
+    values: [Option<u16>; 5],
+}
+impl AuthoredFontSizes {
+    pub fn level_count(self) -> usize {
+        usize::from(self.level_count)
+    }
+    pub fn get(self, level: usize) -> Option<u16> {
+        (level < self.level_count()).then(|| self.values[level]).flatten()
+    }
+}
+pub(super) type AuthoredFontSizeTable = [Option<AuthoredFontSizes>; 9];
 pub(super) struct Master {
+    // One fixed nine-slot table per Master covers the eight admitted
+    // TextTypeEnum values and five levels, with no second Level vector or
+    // per-paragraph metadata allocation.
     types: std::collections::BTreeMap<u16, Vec<Level>>,
+    authored_font_sizes: std::rc::Rc<AuthoredFontSizeTable>,
     defaults: Vec<Level>,
 }
 impl Master {
@@ -652,11 +670,21 @@ impl Master {
         budget: &mut usize,
     ) -> Result<Self, String> {
         let mut types = std::collections::BTreeMap::new();
+        let mut authored_types: AuthoredFontSizeTable = [None; 9];
         for atom in records.iter().filter(|r| r.kind == 4003) {
             if types.contains_key(&atom.instance) {
                 return Err(unsupported("duplicate PowerPoint master text type"));
             }
             let mut levels = read_levels(*atom, budget)?;
+            let authored_font_sizes = AuthoredFontSizes {
+                level_count: levels.len() as u8,
+                values: std::array::from_fn(|index| {
+                    levels.get(index).and_then(|level| {
+                        (level.character.mask & 0x20000 != 0).then_some(level.character.size)
+                    })
+                }),
+            };
+            authored_types[usize::from(atom.instance)] = Some(authored_font_sizes);
             for (i, level) in levels.iter_mut().enumerate() {
                 level.paragraph = level
                     .paragraph
@@ -670,6 +698,7 @@ impl Master {
         }
         Ok(Self {
             types,
+            authored_font_sizes: std::rc::Rc::new(authored_types),
             defaults: defaults.to_vec(),
         })
     }
@@ -678,6 +707,15 @@ impl Master {
             .get(&kind)
             .map(Vec::as_slice)
             .or_else(|| (!self.defaults.is_empty()).then_some(self.defaults.as_slice()))
+    }
+    pub fn authored_font_sizes(&self, kind: u16) -> Option<AuthoredFontSizes> {
+        self.authored_font_sizes
+            .get(usize::from(kind))
+            .copied()
+            .flatten()
+    }
+    pub fn authored_font_size_table(&self) -> std::rc::Rc<AuthoredFontSizeTable> {
+        self.authored_font_sizes.clone()
     }
 }
 fn read_levels(atom: Record<'_>, budget: &mut usize) -> Result<Vec<Level>, String> {
@@ -1135,6 +1173,36 @@ mod tests {
         assert_eq!(base.character.size, 32);
         assert_eq!(base.character.style & 1, 1);
         assert_eq!(base.paragraph.align, Some(1));
+    }
+
+    #[test]
+    fn master_retains_authored_type_level_count_and_explicit_sizes_before_defaults_merge() {
+        let default_bytes = [
+            u16s(2), u32s(0), u32s(0x20000), u16s(18),
+            u32s(0), u32s(0x20000), u16s(16),
+        ].concat();
+        let defaults = read_levels(
+            Record { version: 0, instance: 4, kind: 4003, payload: &default_bytes },
+            &mut 100,
+        ).unwrap();
+        let authored_bytes = [
+            u16s(2), u16s(0), u32s(0), u32s(0x20000), u16s(20),
+            u16s(1), u32s(0), u32s(0),
+        ].concat();
+        let master = Master::parse(
+            &[Record { version: 0, instance: 8, kind: 4003, payload: &authored_bytes }],
+            &defaults,
+            &mut 100,
+        ).unwrap();
+        let authored = master.authored_font_sizes(8).unwrap();
+        assert_eq!(authored.level_count(), 2);
+        assert_eq!(authored.get(0), Some(20));
+        assert_eq!(authored.get(1), None);
+        assert_eq!(authored.get(2), None);
+        assert_eq!(authored.get(usize::MAX), None);
+        assert!(master.authored_font_sizes(7).is_none());
+        assert_eq!(master.levels(8).unwrap()[1].character.size, 16);
+        assert_eq!(master.levels(7).unwrap()[0].character.size, 18);
     }
 
     #[test]
