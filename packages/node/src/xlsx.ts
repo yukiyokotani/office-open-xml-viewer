@@ -11,6 +11,7 @@ import {
 // internal entry point rather than reconstructing XLSX orchestration here.
 import {
   acquireXlsxNodeSession,
+  acquireXlsxSessionFromArchive,
   addWorksheetCacheUsage,
   addWorksheetUsage,
   assertWorksheetCacheUsage,
@@ -28,7 +29,10 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
-import { normalizeNodeOfficeInput } from './normalize-input.ts';
+import {
+  bindLegacyOfficeConversionSignal,
+  resolveXlsWorkbookInput,
+} from '@silurus/ooxml-core/internal/legacy-office-conversion';
 
 const getXlsxWasmModule = createLazyWasmModule(() => resolveWasm(
     import.meta.url,
@@ -94,16 +98,39 @@ export async function openXlsxWorkbook(
   buffer: ArrayBuffer | Uint8Array,
   options: OpenXlsxWorkbookOptions = {},
 ): Promise<XlsxWorkbookSession> {
-  const bytes = await normalizeNodeOfficeInput(buffer, 'xlsx', options);
-  const acquired = await acquireXlsxNodeSession(bytes, getXlsxWasmModule(), options);
-  return new XlsxWorkbookSessionImpl(
-    acquired.closeArchive,
-    acquired.archive,
-    acquired.workbookIndex,
-    acquired.metrics,
-    acquired.usage,
-    options.signal,
-  );
+  const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, 'xlsx', options.signal);
+  let acquired: ReturnType<typeof acquireXlsxSessionFromArchive> | undefined;
+  try {
+    const resolved = await resolveXlsWorkbookInput(buffer, bound.options, options.password);
+    let signal = options.signal;
+    if (resolved.kind === 'ooxml') {
+      acquired = await acquireXlsxNodeSession(resolved.bytes, getXlsxWasmModule(), options);
+      bound.cleanup();
+    } else {
+      const { openLegacyXlsSource } = await import('@silurus/ooxml-legacy-converter/internal/direct-xls-engine');
+      const owned = await openLegacyXlsSource(resolved.bytes, resolved.source, resolved.signal);
+      try {
+        const request = JSON.parse(new TextDecoder().decode(owned.archive.measurement_request())) as { required: boolean };
+        // Node has no admitted font measurement provider here. Explicitly
+        // omit metric-dependent pictures instead of guessing a digit width.
+        if (request.required) owned.archive.configure_mdw(undefined);
+      } catch (error) {
+        try { owned.closeArchive(); } catch {}
+        throw error;
+      }
+      signal = resolved.signal;
+      acquired = acquireXlsxSessionFromArchive(owned, { ...options, signal });
+    }
+    const owned = acquired;
+    return new XlsxWorkbookSessionImpl(
+      () => { try { owned.closeArchive(); } finally { bound.cleanup(); } },
+      owned.archive, owned.workbookIndex, owned.metrics, owned.usage, signal,
+    );
+  } catch (error) {
+    try { acquired?.closeArchive(); } catch {}
+    bound.cleanup();
+    throw error;
+  }
 }
 
 type ActiveWorksheetOperation = {

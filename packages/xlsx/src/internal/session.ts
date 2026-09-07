@@ -24,6 +24,7 @@ export {
 } from '../worksheet-resource-limits.js';
 export {
   acquireXlsxNodeSession,
+  acquireXlsxSessionFromArchive,
   type XlsxNodeAcquisition,
   type XlsxNodeAcquisitionOptions,
   type XlsxNodeArchive,

@@ -69,6 +69,40 @@ export interface XlsxNodeAcquisition {
   closeArchive(): void;
 }
 
+/** Adopt a format-compatible native source without initializing OOXML WASM. */
+export function acquireXlsxSessionFromArchive(
+  owned: Readonly<{
+    archive: XlsxNodeArchive;
+    sourceByteLength: number;
+    closeArchive(): void;
+  }>,
+  options: XlsxNodeAcquisitionOptions = {},
+): XlsxNodeAcquisition {
+  let metrics: OoxmlResourceMetricsSession | undefined;
+  try {
+    const resourceOptions = normalizeLoadResourceOptions(options);
+    metrics = new OoxmlResourceMetricsSession({
+      enabled: resourceOptions.debug || resourceOptions.onResourceMetrics !== undefined,
+      format: 'xlsx', mode: 'node', scope: 'session', policy: resourceOptions.policy,
+      onMetrics: resourceOptions.onResourceMetrics, emitToConsole: resourceOptions.debug,
+    });
+    metrics.setSourceBytes(owned.sourceByteLength);
+    throwIfAborted(options.signal);
+    const { workbook: workbookIndex, usage } = readXlsxArchiveBootstrap(
+      () => JSON.parse(new TextDecoder().decode(owned.archive.parse())) as ParsedWorkbook,
+      () => owned.archive.resource_usage(),
+    );
+    metrics.observeUsage(usage);
+    metrics.checkpoint('workbook index ready');
+    return { archive: owned.archive, workbookIndex, usage, metrics, closeArchive: () => owned.closeArchive() };
+  } catch (error) {
+    try { owned.closeArchive(); } catch {}
+    const normalized = parseResourceLimitError(error) ?? error;
+    metrics?.fail(normalized);
+    throw normalized;
+  }
+}
+
 /** Format-owned archive acquisition and workbook-index projection for Node. */
 export async function acquireXlsxNodeSession(
   bytes: Uint8Array,
