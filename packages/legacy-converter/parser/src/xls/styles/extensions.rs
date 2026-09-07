@@ -1,11 +1,12 @@
 //! MS-XLS 2.4.354/355: bind XFExt to the exact XF sequence before using it.
 //! ExtProp 2.5.108, FullColorExt 2.5.155, LongRGBA 2.5.178.
 use super::super::{u16_at, u32_at, unsupported, Record};
+use super::color::ColorIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
 pub(super) struct Extensions {
-    colors: BTreeMap<usize, BTreeMap<u16, String>>,
+    colors: BTreeMap<usize, BTreeMap<u16, ColorIdentity>>,
     indents: BTreeMap<usize, u16>,
 }
 
@@ -84,17 +85,14 @@ impl Extensions {
                         if theme.is_none() {
                             theme = Some(super::super::theme::Colors::parse(records)?);
                         }
-                        if let Some(color) = theme.as_ref().unwrap().rgb(u32_at(value, 4)?) {
-                            colors.insert(kind, color);
+                        if let Some(argb) = theme.as_ref().unwrap().argb(u32_at(value, 4)?) {
+                            colors.insert(kind, ColorIdentity::Argb(argb));
                         }
                     }
                     if color_type == 2 && u16_at(value, 2)? == 0 {
                         colors.insert(
                             kind,
-                            format!(
-                                "rgb=\"{:02X}{:02X}{:02X}{:02X}\"",
-                                value[7], value[4], value[5], value[6]
-                            ),
+                            ColorIdentity::Argb([value[7], value[4], value[5], value[6]]),
                         );
                     }
                 } else if kind == 0x000f {
@@ -123,8 +121,8 @@ impl Extensions {
         Ok(result)
     }
 
-    pub(super) fn color(&self, index: usize, property: u16) -> Option<&str> {
-        self.colors.get(&index)?.get(&property).map(String::as_str)
+    pub(super) fn color(&self, index: usize, property: u16) -> Option<ColorIdentity> {
+        self.colors.get(&index)?.get(&property).copied()
     }
 
     pub(super) fn indent(&self, index: usize) -> Option<u16> {

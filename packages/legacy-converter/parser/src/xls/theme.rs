@@ -63,9 +63,15 @@ impl Colors {
         Self::package(&bytes)
     }
 
+    #[cfg(test)]
     pub(super) fn rgb(&self, index: u32) -> Option<String> {
+        let [a, r, g, b] = self.argb(index)?;
+        Some(format!("rgb=\"{a:02X}{r:02X}{g:02X}{b:02X}\""))
+    }
+
+    pub(super) fn argb(&self, index: u32) -> Option<[u8; 4]> {
         let [r, g, b] = self.0.get(index as usize).copied().flatten()?;
-        Some(format!("rgb=\"FF{r:02X}{g:02X}{b:02X}\""))
+        Some([0xff, r, g, b])
     }
 
     fn package(bytes: &[u8]) -> Result<Self, String> {

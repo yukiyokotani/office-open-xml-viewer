@@ -8,7 +8,12 @@ use super::{
 };
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
+mod color;
 mod extensions;
+mod font;
+
+use color::ColorIdentity;
+use font::{ResolvedFont, Script, Underline};
 
 const PATTERNS: [&str; 19] = [
     "none",
@@ -150,27 +155,27 @@ impl<'a> Styles<'a> {
         Ok(())
     }
 
-    fn color(&self, index: u16) -> String {
+    fn color(&self, index: u16) -> ColorIdentity {
         if let Some(palette) = self.palette {
             if (8..64).contains(&index) {
                 let offset = usize::from(index - 8) * 4;
-                return format!(
-                    "rgb=\"FF{:02X}{:02X}{:02X}\"",
+                return ColorIdentity::Argb([
+                    0xff,
                     palette[offset],
                     palette[offset + 1],
-                    palette[offset + 2]
-                );
+                    palette[offset + 2],
+                ]);
             }
         }
         if index == 0x7fff {
-            "auto=\"1\"".into()
+            ColorIdentity::Auto
         } else {
-            format!("indexed=\"{index}\"")
+            ColorIdentity::Indexed(index)
         }
     }
 
     fn font(&self, data: &[u8]) -> Result<String, String> {
-        self.font_xml(data, false, None)
+        self.font_xml(&ResolvedFont::decode(data)?, false, None)
     }
 
     pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
@@ -181,67 +186,47 @@ impl<'a> Styles<'a> {
             .get(offset)
             .filter(|_| index != 4)
             .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))?;
-        self.font_xml(data, true, None)
+        self.font_xml(&ResolvedFont::decode(data)?, true, None)
     }
 
-    fn font_xml(&self, data: &[u8], run: bool, color: Option<&str>) -> Result<String, String> {
-        if data.len() < 16 {
-            return Err(unsupported("truncated BIFF font"));
-        }
-        let (name, _) = decode_biff_chars(data, 16, usize::from(data[14]), data[15] & 1 != 0)?;
+    fn font_xml(
+        &self,
+        font: &ResolvedFont,
+        run: bool,
+        color: Option<&str>,
+    ) -> Result<String, String> {
         let (tag, name_tag) = if run {
             ("rPr", "rFont")
         } else {
             ("font", "name")
         };
-        let base_color = self.color(u16_at(data, 4)?);
-        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&name), f64::from(u16_at(data, 0)?) / 20.0, color.unwrap_or(&base_color), data[11], data[12]);
+        let base_color = self.color(font.color_index).xml();
+        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&font.name), f64::from(font.size_twips) / 20.0, color.unwrap_or(&base_color), font.family, font.charset);
         // OOXML exposes only bold/normal, not arbitrary LOGFONT weight.
-        if u16_at(data, 6)? == 700 {
+        if font.weight == 700 {
             xml.push_str("<b/>");
         } else if run {
             xml.push_str("<b val=\"0\"/>");
         }
-        for (mask, tag) in [
-            (2, "i"),
-            (8, "strike"),
-            (16, "outline"),
-            (32, "shadow"),
-            (64, "condense"),
-            (128, "extend"),
+        for (enabled, tag) in [
+            (font.italic, "i"),
+            (font.strike, "strike"),
+            (font.outline, "outline"),
+            (font.shadow, "shadow"),
+            (font.condense, "condense"),
+            (font.extend, "extend"),
         ] {
-            if data[2] & mask != 0 {
+            if enabled {
                 xml.push_str(&format!("<{tag}/>"));
             } else if run {
                 xml.push_str(&format!("<{tag} val=\"0\"/>"));
             }
         }
-        let underline = match data[10] {
-            0 => {
-                if run {
-                    Some("none")
-                } else {
-                    None
-                }
-            }
-            1 => Some("single"),
-            2 => Some("double"),
-            0x21 => Some("singleAccounting"),
-            0x22 => Some("doubleAccounting"),
-            _ => return Err(unsupported("invalid BIFF underline")),
-        };
-        if let Some(value) = underline {
-            xml.push_str(&format!("<u val=\"{value}\"/>"));
+        if font.underline != Underline::None || run {
+            xml.push_str(&format!("<u val=\"{}\"/>", font.underline.xml_value()));
         }
-        match u16_at(data, 8)? {
-            0 => {
-                if run {
-                    xml.push_str("<vertAlign val=\"baseline\"/>");
-                }
-            }
-            1 => xml.push_str("<vertAlign val=\"superscript\"/>"),
-            2 => xml.push_str("<vertAlign val=\"subscript\"/>"),
-            _ => return Err(unsupported("invalid BIFF font script")),
+        if font.script != Script::Baseline || run {
+            xml.push_str(&format!("<vertAlign val=\"{}\"/>", font.script.xml_value()));
         }
         xml.push_str(&format!("</{tag}>"));
         Ok(xml)
@@ -280,8 +265,13 @@ impl<'a> Styles<'a> {
                 return Err(unsupported("BIFF XF font index out of range"));
             }
             if let Some(color) = self.extensions.color(index, 13) {
+                let color = color.xml();
                 font = intern(
-                    self.font_xml(self.fonts[font], false, Some(color))?,
+                    self.font_xml(
+                        &ResolvedFont::decode(self.fonts[font])?,
+                        false,
+                        Some(&color),
+                    )?,
                     &mut fonts,
                     &mut font_ids,
                 );
@@ -289,8 +279,8 @@ impl<'a> Styles<'a> {
             let color = |property, fallback| {
                 self.extensions
                     .color(index, property)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| self.color(fallback))
+                    .map(ColorIdentity::xml)
+                    .unwrap_or_else(|| self.color(fallback).xml())
             };
             let flags = u16_at(data, 4)?;
             let b1 = u32_at(data, 10)?;
@@ -409,6 +399,26 @@ mod tests {
         ext.extend_from_slice(&0x000fu16.to_le_bytes());
         ext.extend_from_slice(&6u16.to_le_bytes());
         ext.extend_from_slice(&value.to_le_bytes());
+        (check, ext)
+    }
+    fn extended_color(
+        xfs: &[[u8; 20]],
+        index: u16,
+        kind: u16,
+        argb: [u8; 4],
+    ) -> ([u8; 20], Vec<u8>) {
+        let mut check = [0; 20];
+        check[..2].copy_from_slice(&0x087cu16.to_le_bytes());
+        check[14..16].copy_from_slice(&(xfs.len() as u16).to_le_bytes());
+        check[16..].copy_from_slice(&crc(xfs.iter().flatten().copied()).to_le_bytes());
+        let mut ext = vec![0; 20];
+        ext[..2].copy_from_slice(&0x087du16.to_le_bytes());
+        ext[14..16].copy_from_slice(&index.to_le_bytes());
+        ext[18..20].copy_from_slice(&1u16.to_le_bytes());
+        ext.extend_from_slice(&kind.to_le_bytes());
+        ext.extend_from_slice(&20u16.to_le_bytes());
+        ext.extend_from_slice(&[2, 0, 0, 0, argb[1], argb[2], argb[3], argb[0]]);
+        ext.extend_from_slice(&[0; 8]);
         (check, ext)
     }
     fn font() -> Vec<u8> {
@@ -700,6 +710,46 @@ mod tests {
         assert!(xml.contains("<cellXfs count=\"100\">"));
     }
     #[test]
+    fn typed_font_keeps_legacy_cell_and_run_xml_byte_exact() {
+        let mut font = vec![0; 16];
+        font[..2].copy_from_slice(&240u16.to_le_bytes());
+        font[2] = 2 | 8 | 16 | 32 | 64 | 128;
+        font[4..6].copy_from_slice(&10u16.to_le_bytes());
+        font[6..8].copy_from_slice(&700u16.to_le_bytes());
+        font[8..10].copy_from_slice(&1u16.to_le_bytes());
+        font[10] = 0x21;
+        font[11] = 3;
+        font[12] = 0x80;
+        font[14] = 3;
+        font.extend_from_slice(b"A&B");
+        let s = Styles {
+            fonts: vec![&font],
+            xfs: vec![],
+            formats: BTreeMap::new(),
+            palette: None,
+            extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
+        };
+        assert_eq!(s.font(&font).unwrap(), "<font><name val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></font>");
+        assert_eq!(s.run_font(0).unwrap(), "<rPr><rFont val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></rPr>");
+        assert!(s.run_font(4).is_err());
+
+        let mut plain = font.clone();
+        plain[2] = 0;
+        plain[6..8].copy_from_slice(&650u16.to_le_bytes());
+        plain[8..10].copy_from_slice(&0u16.to_le_bytes());
+        plain[10] = 0;
+        let plain_styles = Styles {
+            fonts: vec![&plain],
+            xfs: vec![],
+            formats: BTreeMap::new(),
+            palette: None,
+            extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
+        };
+        assert_eq!(plain_styles.run_font(0).unwrap(), "<rPr><rFont val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b val=\"0\"/><i val=\"0\"/><strike val=\"0\"/><outline val=\"0\"/><shadow val=\"0\"/><condense val=\"0\"/><extend val=\"0\"/><u val=\"none\"/><vertAlign val=\"baseline\"/></rPr>");
+    }
+    #[test]
     fn resolves_custom_palette_and_preserves_automatic_font_color() {
         let mut palette = vec![0; 224];
         palette[8..12].copy_from_slice(&[0x12, 0x34, 0x56, 0]);
@@ -711,9 +761,97 @@ mod tests {
             extensions_omitted: false,
             extensions: extensions::Extensions::default(),
         };
-        assert_eq!(s.color(10), "rgb=\"FF123456\"");
-        assert_eq!(s.color(0x7fff), "auto=\"1\"");
-        assert_eq!(s.color(65), "indexed=\"65\"");
+        assert_eq!(s.color(10).xml(), "rgb=\"FF123456\"");
+        assert_eq!(s.color(0x7fff).xml(), "auto=\"1\"");
+        assert_eq!(s.color(65).xml(), "indexed=\"65\"");
+    }
+    #[test]
+    fn palette_and_parsed_extended_argb_share_typed_identity() {
+        let mut font = font();
+        font[4..6].copy_from_slice(&10u16.to_le_bytes());
+        let mut owned = [0u8; 20];
+        owned[17] = 2;
+        let xfs = [owned; 16];
+        let (check, ext) = extended_color(&xfs, 1, 13, [0xff, 0x12, 0x34, 0x56]);
+        let mut palette = vec![0; 226];
+        palette[..2].copy_from_slice(&56u16.to_le_bytes());
+        palette[10..14].copy_from_slice(&[0x12, 0x34, 0x56, 0]);
+        let mut records = vec![Record {
+            kind: 0x31,
+            offset: 0,
+            data: &font,
+        }];
+        records.extend(xfs.iter().map(|xf| Record {
+            kind: 0xe0,
+            offset: 0,
+            data: xf,
+        }));
+        records.extend([
+            Record {
+                kind: 0x0092,
+                offset: 0,
+                data: &palette,
+            },
+            Record {
+                kind: 0x087c,
+                offset: 0,
+                data: &check,
+            },
+            Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &ext,
+            },
+        ]);
+        let styles = Styles::parse(&records).unwrap();
+        assert_eq!(styles.color(10), styles.extensions.color(1, 13).unwrap());
+        let xml = styles.xml().unwrap();
+        // The extension resolves to the same typed ARGB identity as the
+        // palette-backed base font, so exact XML interning keeps one font.
+        assert!(xml.contains("<fonts count=\"1\">"));
+        assert_eq!(xml.matches("rgb=\"FF123456\"").count(), 1);
+    }
+    #[test]
+    fn extended_argb_alpha_remains_distinct_for_font_interning() {
+        let font = font();
+        let mut owned = [0u8; 20];
+        owned[17] = 2;
+        let xfs = [owned; 16];
+        let (check, first) = extended_color(&xfs, 1, 13, [0x80, 0x12, 0x34, 0x56]);
+        let (_, second) = extended_color(&xfs, 2, 13, [0xff, 0x12, 0x34, 0x56]);
+        let mut records = vec![Record {
+            kind: 0x31,
+            offset: 0,
+            data: &font,
+        }];
+        records.extend(xfs.iter().map(|xf| Record {
+            kind: 0xe0,
+            offset: 0,
+            data: xf,
+        }));
+        records.extend([
+            Record {
+                kind: 0x087c,
+                offset: 0,
+                data: &check,
+            },
+            Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &first,
+            },
+            Record {
+                kind: 0x087d,
+                offset: 0,
+                data: &second,
+            },
+        ]);
+        let xml = Styles::parse(&records).unwrap().xml().unwrap();
+        assert!(xml.contains("<fonts count=\"3\">"));
+        assert!(xml.contains("<color rgb=\"80123456\"/>"));
+        assert!(xml.contains("<color rgb=\"FF123456\"/>"));
+        assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
+        assert_eq!(xml.matches("fontId=\"2\"").count(), 1);
     }
     #[test]
     fn rejects_invalid_font_references_and_truncated_records() {
