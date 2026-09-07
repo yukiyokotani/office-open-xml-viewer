@@ -72,6 +72,9 @@ pub(crate) struct NormalFont {
 
 pub(super) struct ResolvedStyleSheet {
     minimal: bool,
+    // Rich-text FontIndex addresses only authored FONT records; XF-local
+    // variants appended during resolution are not valid rich-run fonts.
+    original_font_count: usize,
     fonts: Vec<ResolvedStyleFont>,
     fills: Vec<ResolvedFill>,
     borders: Vec<ResolvedBorder>,
@@ -217,6 +220,66 @@ impl ResolvedStyleSheet {
             dxfs: Vec::new(),
         }
     }
+
+    fn run_font(&self, index: u16) -> Result<&ResolvedStyleFont, String> {
+        let offset = usize::from(index - u16::from(index > 4));
+        self.fonts
+            .get(offset)
+            .filter(|_| index != 4 && offset < self.original_font_count)
+            .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))
+    }
+
+    pub(super) fn validate_run_font(&self, index: u16) -> Result<(), String> {
+        self.run_font(index).map(|_| ())
+    }
+
+    pub(super) fn run_font_xml(&self, index: u16) -> Result<String, String> {
+        let value = self.run_font(index)?;
+        Ok(font_xml_value(&value.font, true, value.color))
+    }
+
+    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
+    pub(super) fn run_font_model(
+        &self,
+        index: u16,
+        budget: &mut usize,
+    ) -> Result<xlsx_model::RunFont, String> {
+        let value = self.run_font(index)?;
+        let underline_style = match value.font.underline {
+            Underline::None | Underline::Single => None,
+            underline => Some(underline.xml_value()),
+        };
+        let vert_align = match value.font.script {
+            Script::Baseline => None,
+            script => Some(script.xml_value()),
+        };
+        // The owning Run Vec slot already includes its inline RunFont. Charge
+        // only allocations owned behind that value, before materializing them.
+        let color_bytes = usize::from(!matches!(value.color, ColorIdentity::Auto)) * 7;
+        let owned_bytes = value
+            .font
+            .name
+            .len()
+            .checked_add(color_bytes)
+            .and_then(|n| n.checked_add(underline_style.map_or(0, str::len)))
+            .and_then(|n| n.checked_add(vert_align.map_or(0, str::len)))
+            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+        *budget = budget
+            .checked_sub(owned_bytes)
+            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+        let color = value.color.model();
+        Ok(xlsx_model::RunFont {
+            bold: value.font.weight == 700,
+            italic: value.font.italic,
+            underline: value.font.underline != Underline::None,
+            strike: value.font.strike,
+            size: Some(f64::from(value.font.size_twips) / 20.0),
+            color,
+            name: Some(value.font.name.clone()),
+            underline_style: underline_style.map(str::to_owned),
+            vert_align: vert_align.map(str::to_owned),
+        })
+    }
 }
 
 impl<'a> Styles<'a> {
@@ -329,6 +392,7 @@ impl<'a> Styles<'a> {
         Ok(font_xml_value(&font, false, self.color(font.color_index)))
     }
 
+    #[cfg(test)]
     pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
         // MS-XLS 2.5.129: FontIndex 4 is reserved, indices above it are one-based.
         let offset = usize::from(index - u16::from(index > 4));
@@ -357,6 +421,7 @@ impl<'a> Styles<'a> {
         if fonts.is_empty() {
             return Err(unsupported("BIFF styles reference missing fonts"));
         }
+        let original_font_count = fonts.len();
         let mut font_ids = BTreeMap::new();
         for (id, font) in fonts.iter().enumerate() {
             font_ids.entry(font.key()).or_insert(id);
@@ -486,6 +551,7 @@ impl<'a> Styles<'a> {
         }
         Ok(ResolvedStyleSheet {
             minimal: false,
+            original_font_count,
             fonts,
             fills,
             borders,
@@ -494,6 +560,7 @@ impl<'a> Styles<'a> {
         })
     }
 
+    #[cfg(test)]
     pub fn xml(&self) -> Result<String, String> {
         Ok(self.resolve()?.xml())
     }
@@ -541,10 +608,11 @@ impl ResolvedXf {
     }
 }
 
-fn minimal_resolved() -> ResolvedStyleSheet {
+pub(super) fn minimal_resolved() -> ResolvedStyleSheet {
     let font = ResolvedFont::minimal_calibri();
     ResolvedStyleSheet {
         minimal: true,
+        original_font_count: 0,
         fonts: vec![ResolvedStyleFont {
             font,
             color: ColorIdentity::Auto,
@@ -1324,6 +1392,25 @@ mod tests {
             }])
             .is_err());
         }
+    }
+
+    #[test]
+    fn rich_font_index_cannot_address_an_appended_xf_variant() {
+        let font = font();
+        let xf = [0u8; 20];
+        let mut resolved = Styles {
+            fonts: vec![&font],
+            xfs: vec![&xf],
+            formats: BTreeMap::new(),
+            palette: None,
+            extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
+        }
+        .resolve()
+        .unwrap();
+        resolved.fonts.push(resolved.fonts[0].clone());
+        assert!(resolved.validate_run_font(0).is_ok());
+        assert!(resolved.validate_run_font(1).is_err());
     }
     #[test]
     fn escapes_custom_formats_without_evaluating_them() {

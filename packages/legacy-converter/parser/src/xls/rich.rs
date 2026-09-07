@@ -1,8 +1,10 @@
 //! BIFF8 rich shared strings (MS-XLS 2.5.132 and 2.5.293).
 
-use super::{styles::Styles, unsupported};
+use super::{styles::ResolvedStyleSheet, unsupported};
 use crate::ooxml::xml_text;
-use std::{collections::BTreeMap, rc::Rc};
+use std::collections::BTreeMap;
+
+pub(super) const MAX_MODEL_BYTES: usize = 256 * 1024 * 1024;
 
 pub(super) struct Text {
     pub text: String,
@@ -46,56 +48,168 @@ impl Text {
         }
         Ok(Self { text, runs: result })
     }
+
+    /// Bytes retained by this neutral SST entry, excluding the owning Vec's
+    /// `Text` slot. The parser charges this immediately after decoding each
+    /// individually bounded BIFF string and before admitting the next entry.
+    pub(super) fn retained_bytes(&self) -> Result<usize, String> {
+        self.text
+            .capacity()
+            .checked_add(
+                self.runs
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<(usize, u16)>())
+                    .ok_or_else(retained_budget_error)?,
+            )
+            .ok_or_else(retained_budget_error)
+    }
+
+    pub(super) fn validate_fonts(&self, styles: &ResolvedStyleSheet) -> Result<(), String> {
+        for &(_, index) in &self.runs {
+            styles.validate_run_font(index)?;
+        }
+        Ok(())
+    }
+
+    /// Materialize one SpreadsheetML string item for the byte-conversion route.
+    /// The caller owns the route-wide output budget so repeated cell expansion
+    /// remains bounded without retaining generated XML in the neutral SST.
+    #[cfg(test)]
+    pub(super) fn xml(
+        &self,
+        styles: &ResolvedStyleSheet,
+        budget: &mut usize,
+    ) -> Result<String, String> {
+        XmlEncoder::new(styles, budget).encode(self)
+    }
+
+    /// Project one neutral BIFF SST entry directly to the renderer model.
+    /// Every owned allocation is charged before reservation or cloning.
+    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
+    pub(super) fn model(
+        &self,
+        styles: &ResolvedStyleSheet,
+        budget: &mut usize,
+    ) -> Result<xlsx_model::SharedString, String> {
+        charge_model(budget, std::mem::size_of::<xlsx_model::SharedString>())?;
+        let text = clone_bounded(&self.text, budget)?;
+        let runs = if self.runs.is_empty() {
+            None
+        } else {
+            let count = self.runs.len() + usize::from(self.runs[0].0 != 0);
+            charge_model(
+                budget,
+                count
+                    .checked_mul(std::mem::size_of::<xlsx_model::Run>())
+                    .ok_or_else(model_budget_error)?,
+            )?;
+            let mut output = Vec::new();
+            output
+                .try_reserve_exact(count)
+                .map_err(|_| model_budget_error())?;
+            let first = self.runs[0].0;
+            if first != 0 {
+                output.push(xlsx_model::Run {
+                    text: clone_bounded(&self.text[..first], budget)?,
+                    font: None,
+                });
+            }
+            for (index, &(start, font)) in self.runs.iter().enumerate() {
+                let end = self
+                    .runs
+                    .get(index + 1)
+                    .map_or(self.text.len(), |run| run.0);
+                output.push(xlsx_model::Run {
+                    text: clone_bounded(&self.text[start..end], budget)?,
+                    font: Some(styles.run_font_model(font, budget)?),
+                });
+            }
+            Some(output)
+        };
+        Ok(xlsx_model::SharedString {
+            text,
+            runs,
+            phonetic_runs: Vec::new(),
+            phonetic_pr: None,
+        })
+    }
 }
 
-/// Encode each SST entry once and share immutable fragments across cells.
-/// The caller owns both this table and its FontIndex cache for one conversion.
-pub(super) struct Encoder<'a, 'b> {
-    styles: &'a Styles<'b>,
+/// Byte-route-only adapter. Its font cache exists only while `finish` creates
+/// the unique SST XML fragments; neutral preparation and direct projection do
+/// not retain OOXML strings.
+pub(super) struct XmlEncoder<'a, 'b> {
+    styles: &'a ResolvedStyleSheet,
     fonts: BTreeMap<u16, String>,
-    budget: usize,
+    budget: &'b mut usize,
 }
 
-impl<'a, 'b> Encoder<'a, 'b> {
-    pub fn new(styles: &'a Styles<'b>) -> Self {
+impl<'a, 'b> XmlEncoder<'a, 'b> {
+    pub(super) fn new(styles: &'a ResolvedStyleSheet, budget: &'b mut usize) -> Self {
         Self {
             styles,
             fonts: BTreeMap::new(),
-            budget: 256 * 1024 * 1024,
+            budget,
         }
     }
 
-    pub fn encode(&mut self, string: Text) -> Result<Rc<str>, String> {
+    pub(super) fn encode(&mut self, value: &Text) -> Result<String, String> {
         let mut xml = String::new();
-        if string.runs.is_empty() {
+        if value.runs.is_empty() {
             append(
                 &mut xml,
-                &format!("<t xml:space=\"preserve\">{}</t>", xml_text(&string.text)),
-                &mut self.budget,
+                &format!("<t xml:space=\"preserve\">{}</t>", xml_text(&value.text)),
+                self.budget,
             )?;
         } else {
-            let first = string.runs[0].0;
+            let first = value.runs[0].0;
             if first != 0 {
-                append_run(&mut xml, "", &string.text[..first], &mut self.budget)?;
+                append_run(&mut xml, "", &value.text[..first], self.budget)?;
             }
-            for (index, &(start, font)) in string.runs.iter().enumerate() {
-                if let std::collections::btree_map::Entry::Vacant(entry) = self.fonts.entry(font) {
-                    entry.insert(self.styles.run_font(font)?);
+            for (index, &(start, font)) in value.runs.iter().enumerate() {
+                if !self.fonts.contains_key(&font) {
+                    self.fonts.insert(font, self.styles.run_font_xml(font)?);
                 }
-                let end = string
+                let end = value
                     .runs
                     .get(index + 1)
-                    .map_or(string.text.len(), |r| r.0);
+                    .map_or(value.text.len(), |run| run.0);
                 append_run(
                     &mut xml,
                     &self.fonts[&font],
-                    &string.text[start..end],
-                    &mut self.budget,
+                    &value.text[start..end],
+                    self.budget,
                 )?;
             }
         }
-        Ok(Rc::from(xml))
+        Ok(xml)
     }
+}
+
+fn retained_budget_error() -> String {
+    unsupported("BIFF retained shared string byte budget exceeded")
+}
+
+#[allow(dead_code)] // Used by the direct-model adapter above.
+fn model_budget_error() -> String {
+    unsupported("BIFF shared string model byte budget exceeded")
+}
+
+#[allow(dead_code)] // Used by the direct-model adapter above.
+fn charge_model(budget: &mut usize, bytes: usize) -> Result<(), String> {
+    *budget = budget.checked_sub(bytes).ok_or_else(model_budget_error)?;
+    Ok(())
+}
+
+#[allow(dead_code)] // Used by the direct-model adapter above.
+fn clone_bounded(value: &str, budget: &mut usize) -> Result<String, String> {
+    charge_model(budget, value.len())?;
+    let mut output = String::new();
+    output
+        .try_reserve_exact(value.len())
+        .map_err(|_| model_budget_error())?;
+    output.push_str(value);
+    Ok(output)
 }
 
 fn append_run(
@@ -123,7 +237,10 @@ fn append(xml: &mut String, part: &str, budget: &mut usize) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use crate::{cfb::test_support::build_cfb, convert_native, LegacyFormat};
+    use crate::{
+        cfb::{test_support::build_cfb, CompoundFile},
+        convert_native, LegacyFormat,
+    };
     use std::io::{Cursor, Read};
 
     fn record(kind: u16, data: &[u8]) -> Vec<u8> {
@@ -191,6 +308,107 @@ mod tests {
     }
 
     #[test]
+    fn direct_model_matches_the_parser_visible_rich_run_semantics() {
+        let input = workbook("base RED normal", &[(5, 5), (9, 0), (15, u16::MAX)]);
+        let cfb = CompoundFile::open(&input).unwrap();
+        let prepared = super::super::prepare(&cfb, false).unwrap();
+        let mut budget = super::MAX_MODEL_BYTES;
+        let value = prepared.shared_strings[0]
+            .model(&prepared.styles, &mut budget)
+            .unwrap();
+        let required = super::MAX_MODEL_BYTES - budget;
+        assert_eq!(
+            required,
+            std::mem::size_of::<xlsx_model::SharedString>()
+                + 3 * std::mem::size_of::<xlsx_model::Run>()
+                + 2 * "base RED normal".len()
+                + 2 * "Arial".len()
+                + "#FF0000".len()
+        );
+        assert_eq!(value.text, "base RED normal");
+        let runs = value.runs.unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "base ");
+        assert!(runs[0].font.is_none());
+        let red = runs[1].font.as_ref().unwrap();
+        assert_eq!(runs[1].text, "RED ");
+        assert_eq!(
+            (red.bold, red.italic, red.underline, red.strike),
+            (false, false, false, false)
+        );
+        assert_eq!((red.size, red.name.as_deref()), (Some(24.0), Some("Arial")));
+        assert_eq!(red.color.as_deref(), Some("#FF0000"));
+        assert_eq!(
+            (red.underline_style.as_deref(), red.vert_align.as_deref()),
+            (None, None)
+        );
+        let normal = runs[2].font.as_ref().unwrap();
+        assert_eq!(runs[2].text, "normal");
+        assert_eq!(
+            (normal.bold, normal.italic, normal.underline, normal.strike),
+            (false, false, false, false)
+        );
+        assert_eq!(normal.vert_align, None);
+        let mut exact = required;
+        prepared.shared_strings[0]
+            .model(&prepared.styles, &mut exact)
+            .unwrap();
+        assert_eq!(exact, 0);
+        assert!(prepared.shared_strings[0]
+            .model(&prepared.styles, &mut (required - 1))
+            .is_err());
+
+        let converted = convert_native(&input, LegacyFormat::Xls, 1_000_000).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(
+            &xlsx_parser::parse_sheet_native(&converted.bytes, 0, "S").unwrap(),
+        )
+        .unwrap();
+        let mut parsed_value = parsed["rows"][0]["cells"][0]["value"].clone();
+        assert_eq!(
+            parsed_value
+                .as_object_mut()
+                .unwrap()
+                .remove("type")
+                .unwrap(),
+            "text"
+        );
+        let mut comparison_budget = super::MAX_MODEL_BYTES;
+        assert_eq!(
+            serde_json::to_value(
+                &prepared.shared_strings[0]
+                    .model(&prepared.styles, &mut comparison_budget)
+                    .unwrap()
+            )
+            .unwrap(),
+            parsed_value
+        );
+    }
+
+    #[test]
+    fn native_model_preserves_biff_controls_and_line_endings_without_xml_normalization() {
+        let source = "a\rb\r\nc\u{1}d";
+        let text = super::Text::new(&source.encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
+        let styles = super::super::styles::minimal_resolved();
+        let mut budget = super::MAX_MODEL_BYTES;
+        assert_eq!(text.model(&styles, &mut budget).unwrap().text, source);
+
+        let mut xml_budget = usize::MAX;
+        let xml = text.xml(&styles, &mut xml_budget).unwrap();
+        assert!(xml.contains("a\rb\r\nc�d"));
+    }
+
+    #[test]
+    fn plain_model_charges_before_allocating_at_the_exact_boundary() {
+        let text = super::Text::new(&"abc".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
+        let styles = super::super::styles::minimal_resolved();
+        let required = std::mem::size_of::<xlsx_model::SharedString>() + 3;
+        let mut exact = required;
+        assert_eq!(text.model(&styles, &mut exact).unwrap().text, "abc");
+        assert_eq!(exact, 0);
+        assert!(text.model(&styles, &mut (required - 1)).is_err());
+    }
+
+    #[test]
     fn rejects_live_invalid_fonts_unsorted_runs_and_surrogate_splits() {
         for runs in [&[(0, 4)][..], &[(0, 1023)], &[(2, 0), (1, 0)], &[(4, 0)]] {
             assert!(convert_native(&workbook("abc", runs), LegacyFormat::Xls, 1_000_000).is_err());
@@ -198,6 +416,14 @@ mod tests {
         assert!(
             convert_native(&workbook("A😀B", &[(2, 0)]), LegacyFormat::Xls, 1_000_000).is_err()
         );
+    }
+
+    #[test]
+    fn synthetic_minimal_style_font_is_not_a_live_biff_run_font() {
+        let text = super::Text::new(&['x' as u16], &[(0, 0)]).unwrap();
+        assert!(text
+            .validate_fonts(&super::super::styles::minimal_resolved())
+            .is_err());
     }
 
     #[test]
@@ -229,21 +455,26 @@ mod tests {
         assert!(super::append_run(&mut xml, "", "<&", &mut 10).is_err());
         assert!(xml.is_empty());
         let mut sheet = super::super::SheetData::default();
-        let value: std::rc::Rc<str> = std::rc::Rc::from("<t>shared</t>");
+        let value = super::Text::new(&"shared".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
         for row in 0..100 {
             sheet
                 .rows
                 .entry(row)
                 .or_default()
-                .insert(0, super::super::CellValue::SharedString(value.clone()));
+                .insert(0, super::super::CellValue::SharedString(0));
         }
-        assert_eq!(std::rc::Rc::strong_count(&value), 101);
+        let styles = super::super::styles::minimal_resolved();
+        let mut budget = 256 * 1024 * 1024;
+        let strings = [value.xml(&styles, &mut budget).unwrap()];
         assert_eq!(
-            super::super::build_sheet_xml(&sheet, 512).unwrap_err(),
+            super::super::build_sheet_xml_with_drawings(&sheet, &strings, 512, None, false)
+                .unwrap_err(),
             "OUTPUT_TOO_LARGE"
         );
-        assert!(super::super::build_sheet_xml(&sheet, 20_000)
-            .unwrap()
-            .contains("<t>shared</t>"));
+        assert!(
+            super::super::build_sheet_xml_with_drawings(&sheet, &strings, 20_000, None, false)
+                .unwrap()
+                .contains("<t xml:space=\"preserve\">shared</t>")
+        );
     }
 }

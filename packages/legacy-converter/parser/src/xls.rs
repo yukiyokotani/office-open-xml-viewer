@@ -9,11 +9,14 @@
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
 use std::collections::{BTreeMap, HashSet};
-use std::rc::Rc;
 
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod direct_strings_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod direct_styles_tests;
 pub(crate) mod drawing_anchors;
 mod drawing_media;
 mod geometry;
@@ -23,8 +26,6 @@ mod rich;
 mod styles;
 mod theme;
 mod views;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod direct_styles_tests;
 
 const BOF: u16 = 0x0809;
 const EOF: u16 = 0x000a;
@@ -130,7 +131,7 @@ enum CellValue {
     Blank,
     Number(f64),
     Text(String),
-    SharedString(Rc<str>),
+    SharedString(usize),
     Bool(bool),
     Error(String),
 }
@@ -156,7 +157,8 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<XlsCon
 /// permits host font measurement without retaining or parsing the source again.
 pub(crate) struct PreparedXls {
     sheets: Vec<(String, SheetData)>,
-    styles: String,
+    styles: styles::ResolvedStyleSheet,
+    shared_strings: Vec<rich::Text>,
     date1904: bool,
     window_count: usize,
     warnings: Vec<String>,
@@ -187,6 +189,7 @@ impl PreparedXls {
         let bytes = build_xlsx_with_drawings(
             &self.sheets,
             &self.styles,
+            self.shared_strings,
             self.date1904,
             self.window_count,
             max_output_bytes,
@@ -251,8 +254,7 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
                     fragments.push(next.data);
                     continued += 1;
                 }
-                let mut encoder = rich::Encoder::new(&styles);
-                shared_strings = parse_sst_with(&fragments, |text| encoder.encode(text))?;
+                shared_strings = parse_sst_elements(&fragments)?;
                 saw_sst = true;
             }
             _ => {}
@@ -268,6 +270,14 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
         .any(|sheet| !sheet_offsets.insert(sheet.offset))
     {
         return Err(unsupported("duplicate BIFF worksheet offsets"));
+    }
+
+    // Validate global rich-text references before allocating worksheet cells.
+    // This replaces the old SST encoder's eager FontIndex validation without
+    // making XML generation part of source admission.
+    let resolved_styles = styles.resolve()?;
+    for text in &shared_strings {
+        text.validate_fonts(&resolved_styles)?;
     }
 
     let mut converted = Vec::new();
@@ -298,7 +308,6 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
             "BIFF workbook contains no supported worksheets",
         ));
     }
-    let styles_xml = styles.xml()?;
     let mut warnings = vec![
         "legacy-xls:drawings-conditional-formatting-and-external-links-omitted".into(),
         "legacy-xls:phonetic-data-print-areas-titles-and-extended-headers-omitted".into(),
@@ -343,7 +352,8 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
     };
     Ok(PreparedXls {
         sheets: converted,
-        styles: styles_xml,
+        styles: resolved_styles,
+        shared_strings,
         date1904,
         window_count,
         warnings,
@@ -430,15 +440,7 @@ fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
         .collect())
 }
 
-#[cfg(test)]
 fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
-    parse_sst_with(fragments, Ok)
-}
-
-fn parse_sst_with<T>(
-    fragments: &[&[u8]],
-    mut retain: impl FnMut(rich::Text) -> Result<T, String>,
-) -> Result<Vec<T>, String> {
     let total_bytes = fragments.iter().try_fold(0usize, |total, fragment| {
         total
             .checked_add(fragment.len())
@@ -448,13 +450,31 @@ fn parse_sst_with<T>(
     let counts = cursor.read_fixed(8, "truncated SST record")?;
     let unique = usize::try_from(u32_at(counts, 4)?)
         .map_err(|_| unsupported("BIFF shared string count is too large"))?;
-    // Resource policy, separate from BIFF's cell/record limits. Encode each
-    // entry immediately instead of retaining all decoded strings and runs
-    // alongside their expanded XML representations.
+    // Resource policy, separate from BIFF's cell/record limits. Retain only the
+    // neutral text/run table here; XML or model expansion is route-local later.
     if unique > 1_000_000 || unique > total_bytes.saturating_sub(8) / 3 {
         return Err(unsupported("too many BIFF shared strings"));
     }
-    let mut strings = Vec::with_capacity(unique);
+    let mut retention_budget = rich::MAX_MODEL_BYTES;
+    retention_budget = retention_budget
+        .checked_sub(
+            unique
+                .checked_mul(std::mem::size_of::<rich::Text>())
+                .ok_or_else(|| unsupported("BIFF shared string retention size overflow"))?,
+        )
+        .ok_or_else(|| unsupported("BIFF shared string retention budget exceeded"))?;
+    let mut strings = Vec::new();
+    strings
+        .try_reserve_exact(unique)
+        .map_err(|_| unsupported("BIFF shared string retention allocation failed"))?;
+    let extra_slots = strings.capacity().saturating_sub(unique);
+    retention_budget = retention_budget
+        .checked_sub(
+            extra_slots
+                .checked_mul(std::mem::size_of::<rich::Text>())
+                .ok_or_else(|| unsupported("BIFF shared string retention size overflow"))?,
+        )
+        .ok_or_else(|| unsupported("BIFF shared string retention budget exceeded"))?;
     let mut run_budget = 1_000_000usize;
     for _ in 0..unique {
         let header = cursor.read_fixed(3, "split or truncated BIFF string header")?;
@@ -491,7 +511,11 @@ fn parse_sst_with<T>(
             runs.push((u16_at(&bytes, 0)?, u16_at(&bytes, 2)?));
         }
         cursor.skip_variable(ext_size)?;
-        strings.push(retain(rich::Text::new(&units, &runs)?)?);
+        let value = rich::Text::new(&units, &runs)?;
+        retention_budget = retention_budget
+            .checked_sub(value.retained_bytes()?)
+            .ok_or_else(|| unsupported("BIFF shared string retention budget exceeded"))?;
+        strings.push(value);
     }
     Ok(strings)
 }
@@ -681,7 +705,7 @@ fn decode_biff_chars(
 fn parse_sheet(
     all_records: &[Record<'_>],
     sheet: &BoundSheet,
-    shared_strings: &[Rc<str>],
+    shared_strings: &[rich::Text],
 ) -> Result<SheetData, String> {
     let start_index = all_records
         .binary_search_by_key(&sheet.offset, |record| record.offset)
@@ -787,15 +811,14 @@ fn parse_sheet(
                 let (row, column) = cell_position(record.data)?;
                 let index = usize::try_from(u32_at(record.data, 6)?)
                     .map_err(|_| unsupported("BIFF shared string index is too large"))?;
-                let value = shared_strings
+                shared_strings
                     .get(index)
-                    .ok_or_else(|| unsupported("BIFF shared string index is out of range"))?
-                    .clone();
+                    .ok_or_else(|| unsupported("BIFF shared string index is out of range"))?;
                 insert_cell(
                     &mut output,
                     row,
                     column,
-                    CellValue::SharedString(value),
+                    CellValue::SharedString(index),
                     &mut cell_count,
                 )?;
             }
@@ -1002,13 +1025,25 @@ fn decode_rk(raw: u32) -> f64 {
 
 fn build_xlsx_with_drawings(
     sheets: &[(String, SheetData)],
-    styles: &str,
+    styles: &styles::ResolvedStyleSheet,
+    shared_strings: Vec<rich::Text>,
     date1904: bool,
     window_count: usize,
     max_output_bytes: usize,
     mdw: Option<f64>,
     drawings: Option<&pictures::Parts>,
 ) -> Result<Vec<u8>, String> {
+    let mut shared_xml_budget = 256 * 1024 * 1024usize;
+    let mut shared_xml = Vec::new();
+    shared_xml
+        .try_reserve_exact(shared_strings.len())
+        .map_err(|_| unsupported("BIFF shared string XML cache allocation failed"))?;
+    let mut shared_encoder = rich::XmlEncoder::new(styles, &mut shared_xml_budget);
+    for value in shared_strings {
+        // Drop each neutral entry after encoding it so the byte route does not
+        // retain both complete text tables until package serialization ends.
+        shared_xml.push(shared_encoder.encode(&value)?);
+    }
     let mut workbook = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
@@ -1038,7 +1073,7 @@ fn build_xlsx_with_drawings(
     );
     let mut parts = vec![
         ("_rels/.rels".into(), ROOT_RELS_XLSX.to_string()),
-        ("xl/styles.xml".into(), styles.into()),
+        ("xl/styles.xml".into(), styles.xml()),
     ];
     // Resource policy: rich run markup must not multiply without a bound when
     // the same SST entry is referenced by many cells or sheets.
@@ -1063,6 +1098,7 @@ fn build_xlsx_with_drawings(
         let has_drawing = drawings.is_some_and(|d| d.sheets.contains(&index));
         let sheet_xml = build_sheet_xml_with_drawings(
             sheet,
+            &shared_xml,
             remaining_sheet_xml,
             if has_drawing { mdw } else { None },
             has_drawing,
@@ -1105,11 +1141,12 @@ fn build_xlsx_with_drawings(
 
 #[cfg(test)]
 fn build_sheet_xml(sheet: &SheetData, max_bytes: usize) -> Result<String, String> {
-    build_sheet_xml_with_drawings(sheet, max_bytes, None, false)
+    build_sheet_xml_with_drawings(sheet, &[], max_bytes, None, false)
 }
 
 fn build_sheet_xml_with_drawings(
     sheet: &SheetData,
+    shared_strings: &[String],
     max_bytes: usize,
     mdw: Option<f64>,
     drawing: bool,
@@ -1150,7 +1187,10 @@ fn build_sheet_xml_with_drawings(
                         xml_text(value)
                     ));
                 }
-                CellValue::SharedString(value) => {
+                CellValue::SharedString(index) => {
+                    let value = shared_strings
+                        .get(*index)
+                        .ok_or_else(|| unsupported("BIFF shared string index is out of range"))?;
                     if value.len() > max_bytes.saturating_sub(xml.len()) {
                         return Err("OUTPUT_TOO_LARGE".into());
                     }

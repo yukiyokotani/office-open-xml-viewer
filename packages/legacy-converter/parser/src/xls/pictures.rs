@@ -366,11 +366,12 @@ mod tests {
 
     #[test]
     fn measured_defaults_only_change_sheets_that_receive_drawings() {
-        use super::super::{minimal_styles, styles::NormalFont, PreparedXls};
+        use super::super::{styles, styles::NormalFont, PreparedXls};
         use std::io::{Cursor, Read};
         let prepared = PreparedXls {
             sheets: vec![("Picture".into(), sheet()), ("Cells".into(), sheet())],
-            styles: minimal_styles(),
+            styles: styles::minimal_resolved(),
+            shared_strings: vec![],
             date1904: false,
             window_count: 0,
             warnings: vec![
