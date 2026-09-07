@@ -615,6 +615,143 @@ mod tests {
         value.to_le_bytes().to_vec()
     }
 
+    fn explicit_origin() -> Level {
+        let mut level = Level::empty(0);
+        level.paragraph.margin = Some(0);
+        level.paragraph.indent = Some(0);
+        level
+    }
+
+    fn topology_style(total: u32, character_counts: &[u32]) -> Vec<u8> {
+        let mut style = [u32s(total), u16s(0), u32s(0)].concat();
+        for &count in character_counts {
+            style.extend(u32s(count));
+            style.extend(u32s(0));
+        }
+        style
+    }
+
+    #[test]
+    fn preserves_empty_leading_and_trailing_classic_paragraphs() {
+        // MS-PPT 2.9.41 adds one implicit terminal CR outside TextBytesAtom.
+        // A controlled Office roundtrip retained CR + "AB" + CR as three
+        // paragraphs while one PF run covered all five UTF-16 positions and
+        // the CF runs covered 1/2/2 positions.
+        let base = explicit_origin();
+        let style = topology_style(5, &[1, 2, 2]);
+        let model = paragraphs(
+            "\rAB\r",
+            &style,
+            Context {
+                levels: Some(std::slice::from_ref(&base)),
+                ..Context::default()
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model.len(), 3);
+        assert!(model[0].runs.is_empty());
+        assert!(model[2].runs.is_empty());
+        assert!(matches!(
+            model[1].runs.as_slice(),
+            [TextRun::Text(run)] if run.text == "AB"
+        ));
+    }
+
+    #[test]
+    fn preserves_classic_vertical_tab_as_an_explicit_line_break() {
+        // The controlled Office protocol retained U+000B inside one classic
+        // paragraph and roundtripped it as DrawingML a:br.
+        let base = explicit_origin();
+        let model = paragraphs(
+            "AB\u{b}CD",
+            &topology_style(6, &[6]),
+            Context {
+                levels: Some(std::slice::from_ref(&base)),
+                ..Context::default()
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model.len(), 1);
+        assert!(matches!(
+            model[0].runs.as_slice(),
+            [TextRun::Text(first), TextRun::Break, TextRun::Text(last)]
+                if first.text == "AB" && last.text == "CD"
+        ));
+    }
+
+    #[test]
+    fn accepts_a_valid_character_run_spanning_a_supplementary_scalar() {
+        // Style run counts use UTF-16 positions. The scalar occupies two units;
+        // the controlled classic file retained one run across all four text
+        // units without splitting its surrogate pair.
+        let base = explicit_origin();
+        let model = paragraphs(
+            "A😀B",
+            &topology_style(5, &[5]),
+            Context {
+                levels: Some(std::slice::from_ref(&base)),
+                ..Context::default()
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model.len(), 1);
+        assert!(matches!(
+            model[0].runs.as_slice(),
+            [TextRun::Text(run)] if run.text == "A😀B"
+        ));
+    }
+
+    #[test]
+    fn applies_one_body_ruler_tab_to_each_classic_paragraph() {
+        // The controlled Office protocol retained one TextRulerAtom for a text
+        // body containing multiple CR-delimited paragraphs, not paragraph-local
+        // ruler arrays.
+        let ruler_data = [
+            4u32.to_le_bytes().as_slice(),
+            &1u16.to_le_bytes(),
+            &1152i16.to_le_bytes(),
+            &0u16.to_le_bytes(),
+        ]
+        .concat();
+        let tabs = ruler::read(
+            Record {
+                kind: 4006,
+                version: 0,
+                instance: 0,
+                payload: &ruler_data,
+            },
+            &mut 100,
+        )
+        .unwrap()
+        .unwrap();
+        let base = explicit_origin();
+        let model = paragraphs(
+            "A\rB",
+            &topology_style(4, &[4]),
+            Context {
+                levels: Some(std::slice::from_ref(&base)),
+                ruler_tabs: Some(tabs),
+                ..Context::default()
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model.len(), 2);
+        for paragraph in model {
+            assert!(matches!(
+                paragraph.tab_stops.as_slice(),
+                [TabStop { pos: 1_828_800, algn }] if algn == "l"
+            ));
+        }
+    }
+
     #[test]
     fn projects_inherited_binary_styles_breaks_and_signed_geometry() {
         let base = Level {

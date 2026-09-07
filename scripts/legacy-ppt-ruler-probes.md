@@ -154,8 +154,22 @@ positions remain fixed in the direct-binary PDF.
 These are observations from the specified source conditions and Office version,
 not a general rounding algorithm or a conflicting-source precedence rule. The
 experiment does not contain conflicting master values or competing treatment
-alternatives. The additional `M` text-slot conditions still require a separate
-correspondence audit before any text substitution behavior can be inferred.
+alternatives.
+
+The `M` text-slot audit now compares live classic text with the exact authored
+manifest and Office-reconverted paragraph/run structure. Counts use UTF-16 code
+units plus the implicit final paragraph mark specified by MS-PPT 2.9.41.
+Leading and trailing CR delimiters preserve empty paragraphs even when one
+paragraph-format run covers the entire body. U+000B survives as an explicit
+line break within a paragraph, and supplementary characters retain valid
+two-unit spans. A single body ruler remains shared across CR-delimited
+paragraphs. These facts have focused direct-model regression tests with
+explicitly supplied paragraph origins; they do not admit unresolved origins.
+
+An authored empty run loses its separate identity in classic storage, and the
+Office OOXML copy can add run boundaries without a corresponding classic style
+change. Consequently, exact run counts are not a text-equivalence oracle. This
+audit establishes neither alternative-text substitution nor master precedence.
 
 Non-Office previews are not an oracle:
 some tab conditions can fail to display even when the source XML retains every
