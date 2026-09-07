@@ -56,7 +56,9 @@ export function wasmAssetUrl(): Plugin {
       const source = await readFile(filePath);
       const emittedName = /[\\/]wasm-direct-ppt[\\/]/.test(filePath)
         ? 'legacy_ppt_direct_bg.wasm'
-        : basename(filePath);
+        : /[\\/]wasm-direct-xls[\\/]/.test(filePath)
+          ? 'legacy_xls_direct_bg.wasm'
+          : basename(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
         name: emittedName,
@@ -130,6 +132,9 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in descriptor for the native legacy PPT reader. Importing this
         // entry emits its dedicated WASM asset URL but does not initialize it.
         'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),
+        // Opt-in descriptor for the native legacy XLS reader. Its dedicated
+        // WASM URL is emitted without initializing either legacy engine.
+        'legacy-xls': resolve(__dirname, 'src/legacy-xls.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),

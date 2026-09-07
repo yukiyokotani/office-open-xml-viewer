@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion', 'legacy-ppt']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion', 'legacy-ppt', 'legacy-xls']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -138,6 +138,17 @@ assert.deepEqual(
     'createLegacyPptSource',
   ].sort(),
   'The ./legacy-ppt declaration entry must expose only the direct PPT descriptor factory and types.',
+);
+
+const legacyXlsExports = moduleExports(path.join(typesDir, 'legacy-xls.d.ts'));
+assert.deepEqual(
+  [...legacyXlsExports.keys()].sort(),
+  [
+    'LegacyXlsDirectSourceDescriptor',
+    'LegacyXlsSourceOptions',
+    'createLegacyXlsSource',
+  ].sort(),
+  'The ./legacy-xls declaration entry must expose only the direct XLS descriptor factory and types.',
 );
 
 process.stdout.write(

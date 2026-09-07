@@ -20,6 +20,7 @@
     "./direct-xls": "./src/direct-xls.ts",
     "./internal/direct-ppt-engine": "./src/direct-ppt-engine.ts",
     "./internal/direct-xls-engine": "./src/direct-xls-engine.ts",
+    "./internal/xls-font-worker": "./src/xls-font-worker.ts",
     "./wasm": "./src/wasm/legacy_office_converter.js",
     "./wasm-binary": "./src/wasm/legacy_office_converter_bg.wasm",
     "./wasm-direct-ppt": "./src/wasm-direct-ppt/legacy_office_converter.js",
