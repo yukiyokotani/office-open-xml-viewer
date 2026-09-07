@@ -34,7 +34,8 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
-import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { resolvePptPresentationInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import type { LegacyPptDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-ppt-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -264,6 +265,7 @@ export class PptxPresentation {
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
   private _destroyed = false;
+  private _legacyPptSignalCleanup: () => void = () => undefined;
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
    *  images for a shared zip path like ppt/media/image1.png). Reusing the same
@@ -356,12 +358,14 @@ export class PptxPresentation {
     // when `opts.password` is supplied ([MS-OFFCRYPTO]); a password-protected
     // file without a password, or a legacy-binary / unknown CFB, becomes a typed
     // OoxmlError (whose `instanceof` would not survive the worker boundary).
-    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+    const resolvedInput = await resolvePptPresentationInput(
       buffer,
-      'pptx',
       opts.legacyConversion,
       opts.password,
-    ));
+    );
+    buffer = toArrayBuffer(resolvedInput.bytes);
+    const nativeSource = resolvedInput.kind === 'legacy-ppt' ? resolvedInput.source : undefined;
+    const nativeSignal = resolvedInput.kind === 'legacy-ppt' ? resolvedInput.signal : undefined;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
@@ -416,7 +420,7 @@ export class PptxPresentation {
             settled: false,
           } satisfies ProgressiveLoad
         : undefined;
-      await pres._parse(
+      const parse = pres._parse(
         buffer,
         resourceOptions.policy,
         !!opts.useGoogleFonts,
@@ -424,6 +428,11 @@ export class PptxPresentation {
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
         progressive,
+        nativeSource,
+      );
+      await pres._bindLegacyPptSignal(
+        parse,
+        nativeSignal,
       );
       metrics.checkpoint('presentation preflight ready');
       if (mode === 'main' && opts.useGoogleFonts && pres._preflight && !progressive) {
@@ -435,6 +444,7 @@ export class PptxPresentation {
           PPTX_GOOGLE_FONTS,
         );
       }
+      if (nativeSignal?.aborted) throw legacyPptAbortError();
       metrics.succeed({ slides: pres.slideCount });
       return pres;
     } catch (error) {
@@ -456,16 +466,17 @@ export class PptxPresentation {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: ProgressiveLoad,
+    source?: LegacyPptDirectSourceDescriptor,
   ): Promise<void> {
     if (progressive) {
       this._progressive = progressive;
       if (this._mode === 'worker') {
         await this._parseWorkerProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, renderers, progressive,
+          buffer, source, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, renderers, progressive,
         );
       } else {
         await this._parseMainProgressively(
-          buffer, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, progressive,
+          buffer, source, resourcePolicy, useGoogleFonts, timeoutMs, onUsage, progressive,
         );
       }
       return;
@@ -473,8 +484,14 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies PptxWorkerRequest),
+          ? ({
+              kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers,
+              ...(source ? { source } : {}),
+            } satisfies RenderWorkerRequest)
+          : ({
+              kind: 'parse', id, buffer, resourcePolicy,
+              ...(source ? { source } : {}),
+            } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
     );
@@ -559,8 +576,49 @@ export class PptxPresentation {
     });
   }
 
+  private _bindLegacyPptSignal<T>(pending: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return pending;
+    this._legacyPptSignalCleanup?.();
+    return new Promise<T>((resolve, reject) => {
+      let pendingSettled = false;
+      const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+      const onAbort = (): void => {
+        // Keep the listener through successful opening: the direct native
+        // source signal owns progressive background work and the live session.
+        this._legacyPptSignalCleanup();
+        try {
+          this.destroy();
+        } catch {
+          // Destroy normally terminates the bridge. Preserve cancellation and
+          // converge at the worker ownership boundary if another disposer fails.
+          try { this._worker.terminate(); } catch {}
+        } finally {
+          if (!pendingSettled) reject(legacyPptAbortError());
+        }
+      };
+      this._legacyPptSignalCleanup = () => {
+        cleanup();
+        this._legacyPptSignalCleanup = () => undefined;
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      pending.then(
+        (value) => {
+          pendingSettled = true;
+          resolve(value);
+        },
+        (error: unknown) => {
+          pendingSettled = true;
+          this._legacyPptSignalCleanup();
+          reject(error);
+        },
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
+
   private async _parseMainProgressively(
     buffer: ArrayBuffer,
+    source: LegacyPptDirectSourceDescriptor | undefined,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
     timeoutMs: number | undefined,
@@ -570,6 +628,7 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) => ({
         kind: 'parse', id, buffer, resourcePolicy, progressiveLayout: true,
+        ...(source ? { source } : {}),
       }) satisfies PptxWorkerRequest,
       [buffer],
       { timeoutMs },
@@ -639,6 +698,7 @@ export class PptxPresentation {
 
   private async _parseWorkerProgressively(
     buffer: ArrayBuffer,
+    source: LegacyPptDirectSourceDescriptor | undefined,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
     useGoogleFonts: boolean,
     timeoutMs: number | undefined,
@@ -652,6 +712,7 @@ export class PptxPresentation {
         this._parseRequestId = id;
         return {
           kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers,
+          ...(source ? { source } : {}),
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },
@@ -1411,6 +1472,7 @@ export class PptxPresentation {
   /** Terminate the worker and release all resources. */
   destroy(): void {
     this._destroyed = true;
+    this._legacyPptSignalCleanup?.();
     this._clearProgressiveWatchdog();
     this._slidePullClient?.cancelAll();
     this._bridge.terminate();
@@ -1448,4 +1510,10 @@ export class PptxPresentation {
     dropImageBitmapCache(this._fetchImage);
     dropSvgImageCache(this._fetchImage);
   }
+}
+
+function legacyPptAbortError(): Error {
+  const error = new Error('legacy PPT direct source load was aborted');
+  error.name = 'AbortError';
+  return error;
 }

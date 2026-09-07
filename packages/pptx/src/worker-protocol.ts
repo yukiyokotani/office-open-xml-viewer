@@ -50,6 +50,7 @@ export type PptxWorkerRequest =
       kind: 'parse';
       id: number;
       buffer: ArrayBuffer;
+      source?: import('@silurus/ooxml-core/internal/legacy-ppt-source').LegacyPptDirectSourceDescriptor;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       progressiveLayout?: boolean;
     }
@@ -86,6 +87,7 @@ export type RenderWorkerRequest =
       kind: 'parse';
       id: number;
       buffer: ArrayBuffer;
+      source?: import('@silurus/ooxml-core/internal/legacy-ppt-source').LegacyPptDirectSourceDescriptor;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
       renderers?: WorkerRendererDescriptors;

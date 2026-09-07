@@ -11,6 +11,7 @@ import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progres
 import { PptxPresentation } from './presentation';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type { PptxEmbeddedFontRef } from './worker-protocol';
+import { buildCfbFixture } from '@silurus/ooxml-core/testing';
 
 /**
  * `PptxPresentation.destroy()` tears the parser worker down via
@@ -138,6 +139,127 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     await expect(PptxPresentation.load(new ArrayBuffer(0))).rejects.toBe(failure);
     expect(SilentWorker.instances).toHaveLength(1);
     expect(SilentWorker.instances[0].terminated).toBe(true);
+  });
+
+  it('binds a direct PPT source signal to the pending worker load', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    let rejectParse!: (error: Error) => void;
+    const parserPending = new Promise<void>((_resolve, reject) => { rejectParse = reject; });
+    const parse = vi.spyOn(
+      PptxPresentation.prototype as unknown as { _parse(...args: unknown[]): Promise<void> },
+      '_parse',
+    ).mockReturnValueOnce(parserPending);
+    const controller = new AbortController();
+    const source = {
+      protocol: 'ooxml-legacy-ppt-source/v1' as const,
+      builtin: 'ppt' as const,
+      wasmUrl: 'https://example.test/direct.wasm',
+    };
+    const loading = PptxPresentation.load(
+      buildCfbFixture(['Root Entry', 'PowerPoint Document']),
+      { legacyConversion: { ppt: { source, signal: controller.signal } } },
+    );
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
+    expect(parse.mock.calls[0]?.[7]).toEqual(source);
+    controller.abort();
+    await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
+    rejectParse(new Error('late parser rejection'));
+    await Promise.resolve();
+    expect(SilentWorker.instances).toHaveLength(1);
+    expect(SilentWorker.instances[0]!.terminated).toBe(true);
+  });
+
+  it('keeps a direct PPT source signal bound for the live session', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    vi.spyOn(
+      PptxPresentation.prototype as unknown as { _parse(...args: unknown[]): Promise<void> },
+      '_parse',
+    ).mockImplementationOnce(async function (this: PptxPresentation) {
+      (this as unknown as { _preflight: object })._preflight = {
+        slideCount: 0,
+        slideWidth: 914400,
+        slideHeight: 914400,
+        defaultTextColor: null,
+        majorFont: null,
+        minorFont: null,
+        hlinkColor: null,
+        folHlinkColor: null,
+        embeddedFonts: [],
+        slides: [],
+        fontPreloadNames: [],
+      };
+    });
+    const controller = new AbortController();
+    const presentation = await PptxPresentation.load(
+      buildCfbFixture(['Root Entry', 'PowerPoint Document']),
+      { legacyConversion: { ppt: { source: {
+        protocol: 'ooxml-legacy-ppt-source/v1',
+        builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      }, signal: controller.signal } } },
+    );
+    expect(SilentWorker.instances[0]!.terminated).toBe(false);
+    controller.abort();
+    expect(SilentWorker.instances[0]!.terminated).toBe(true);
+    // Destruction removes the lifetime listener and remains idempotent.
+    expect(() => presentation.destroy()).not.toThrow();
+  });
+
+  it('rejects and terminates when destroy throws during pending source abort', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    vi.spyOn(
+      PptxPresentation.prototype as unknown as { _parse(...args: unknown[]): Promise<void> },
+      '_parse',
+    ).mockReturnValueOnce(new Promise<void>(() => undefined));
+    vi.spyOn(PptxPresentation.prototype, 'destroy').mockImplementation(() => {
+      throw new Error('destroy failed');
+    });
+    const controller = new AbortController();
+    const loading = PptxPresentation.load(
+      buildCfbFixture(['Root Entry', 'PowerPoint Document']),
+      { legacyConversion: { ppt: { source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      }, signal: controller.signal } } },
+    );
+    await vi.waitFor(() => expect(SilentWorker.instances).toHaveLength(1));
+    controller.abort();
+    await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(SilentWorker.instances[0]!.terminated).toBe(true);
+  });
+
+  it('does not return a presentation aborted during post-parse font work', async () => {
+    G.Worker = SilentWorker;
+    G.location = { href: 'http://localhost/' };
+    const controller = new AbortController();
+    vi.spyOn(
+      PptxPresentation.prototype as unknown as { _parse(...args: unknown[]): Promise<void> },
+      '_parse',
+    ).mockImplementationOnce(async function (this: PptxPresentation) {
+      (this as unknown as { _preflight: object })._preflight = {
+        slideCount: 0, slideWidth: 914400, slideHeight: 914400,
+        defaultTextColor: null, majorFont: null, minorFont: null,
+        hlinkColor: null, folHlinkColor: null, embeddedFonts: [], slides: [],
+        get fontPreloadNames() {
+          controller.abort();
+          return [];
+        },
+      };
+    });
+    await expect(PptxPresentation.load(
+      buildCfbFixture(['Root Entry', 'PowerPoint Document']),
+      {
+        useGoogleFonts: true,
+        legacyConversion: { ppt: { source: {
+          protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+          wasmUrl: 'https://example.test/direct.wasm',
+        }, signal: controller.signal } },
+      },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(SilentWorker.instances[0]!.terminated).toBe(true);
   });
 
   it('preserves the load error and terminates directly when destroy throws', async () => {

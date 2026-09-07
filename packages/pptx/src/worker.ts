@@ -14,11 +14,14 @@ import type {
   PptxWorkerResponse,
 } from './worker-protocol.js';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
+import { WorkerPresentationSourceOwner } from './internal/worker-presentation-source.js';
 
 const host = new WasmParserHost<PptxArchive>(init, {
   freeArchive: (archive) => archive.free(),
   reinit,
 });
+const source = new WorkerPresentationSourceOwner(host);
+let ooxmlWasmInput: Parameters<typeof host.setWasmInput>[0] | undefined;
 
 let preflightBuilder: PresentationPreflightBuilder | null = null;
 type PresentationLifecycleState = 'empty' | 'opening' | 'ready' | 'failed';
@@ -34,7 +37,7 @@ function reservePresentationParse(): void {
 }
 
 const slidePull = new SlidePullWorker(
-  () => host.archive,
+  () => source.cursor(),
   (slideIndex, slide, usage) => {
     if (!preflightBuilder) return;
     if (slideIndex !== preflightBuilder.acceptedSlideCount) {
@@ -45,9 +48,7 @@ const slidePull = new SlidePullWorker(
     return preflightBuilder.prepareSlide(slide, usage);
   },
   (operation) => {
-    const archive = host.archive;
-    if (!archive) throw new Error('Presentation not loaded');
-    return host.run(() => operation(archive));
+    return source.execute(operation);
   },
 );
 
@@ -67,7 +68,7 @@ self.onmessage = async (
   }
 
   if (request.kind === 'init') {
-    host.setWasmInput(decodeDataUrl(request.wasmUrl) ?? request.wasmUrl);
+    ooxmlWasmInput = decodeDataUrl(request.wasmUrl) ?? request.wasmUrl;
     return;
   }
 
@@ -83,7 +84,6 @@ self.onmessage = async (
       ownsParseReservation = true;
     }
     if (request.kind === 'openSlideSession') {
-      await host.ensureReady();
       await slidePull.open(request.slideIndex, request);
       await slidePull.postOpenedSafely(
         request,
@@ -101,27 +101,31 @@ self.onmessage = async (
 
     if (request.kind === 'parse') await slidePull.reset();
     await slidePull.run(async () => {
-      await host.ensureReady();
-      if (request.kind !== 'parse' && host.archive) {
-        const retained = host.archive;
-        host.run(() => retained.assert_healthy());
+      if (request.kind !== 'parse' && source.cursor()) {
+        source.execute((archive) => archive.assert_healthy());
       }
 
       if (request.kind === 'parse') {
         preflightBuilder = null;
-        const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
-        const bootstrap = host.run(() => {
-          const archive = new PptxArchive(
-            new Uint8Array(request.buffer),
-            maxEntry,
-            maxTotal,
-            maxEntries,
-          );
-          host.setArchive(archive);
-          return JSON.parse(
-            new TextDecoder().decode(archive.presentation_bootstrap()),
-          ) as PresentationBootstrap;
-        });
+        let archive: PptxArchive | import('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine').LegacyPptNativeArchive;
+        if (request.source) {
+          archive = await source.openLegacy(new Uint8Array(request.buffer), request.source);
+        } else {
+          if (ooxmlWasmInput === undefined) throw new Error('PPTX WASM input was not configured');
+          host.setWasmInput(ooxmlWasmInput);
+          await host.ensureReady();
+          const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
+          archive = host.run(() => {
+            const opened = new PptxArchive(
+              new Uint8Array(request.buffer), maxEntry, maxTotal, maxEntries,
+            );
+            host.setArchive(opened);
+            return opened;
+          });
+        }
+        const bootstrap = JSON.parse(new TextDecoder().decode(
+          source.execute((current) => current.presentation_bootstrap()),
+        )) as PresentationBootstrap;
         // Ordinary loads retain compact facts in the worker and return them at
         // the end. Progressive main-mode loads decode each sequential slide in
         // Window so the presentation can publish the opening prefix itself;
@@ -134,7 +138,7 @@ self.onmessage = async (
         return;
       }
 
-      const archive = host.archive;
+      const archive = source.cursor();
       if (!archive) throw new Error('No pptx loaded');
 
       if (request.kind === 'finishPresentationPreflight') {
@@ -146,35 +150,44 @@ self.onmessage = async (
       }
 
       if (request.kind === 'extractMedia') {
-        const bytes = host.run(() => archive.extract_media(request.path).buffer as ArrayBuffer);
+        const ooxml = source.ooxml('media extraction');
+        const bytes = host.run(() => ooxml.extract_media(request.path).buffer as ArrayBuffer);
         post({ kind: 'mediaExtracted', id, bytes }, [bytes]);
         return;
       }
 
       if (request.kind === 'extractImage') {
-        const bytes = host.run(() => archive.extract_image(request.path).buffer as ArrayBuffer);
+        const bytes = source.execute(
+          (current) => current.extract_image(request.path).buffer as ArrayBuffer,
+        );
         post({ kind: 'imageExtracted', id, bytes }, [bytes]);
         return;
       }
 
       if (request.kind === 'extractFont') {
-        const bytes = host.run(() => archive.extract_font(request.path).buffer as ArrayBuffer);
+        const ooxml = source.ooxml('font extraction');
+        const bytes = host.run(() => ooxml.extract_font(request.path).buffer as ArrayBuffer);
         post({ kind: 'fontExtracted', id, bytes }, [bytes]);
         return;
       }
 
       if (request.kind === 'resourceUsage') {
-        const usage = decodeOoxmlResourceUsage(host.run(() => archive.resource_usage()));
+        const ooxml = source.ooxml('resource usage');
+        const usage = decodeOoxmlResourceUsage(host.run(() => ooxml.resource_usage()));
         post({ kind: 'resourceUsage', id, usage });
         return;
       }
 
       if (request.kind === 'toMarkdown') {
-        post({ kind: 'markdownRendered', id, markdown: host.run(() => archive.to_markdown()) });
+        const ooxml = source.ooxml('markdown conversion');
+        post({ kind: 'markdownRendered', id, markdown: host.run(() => ooxml.to_markdown()) });
       }
     });
   } catch (error) {
-    if (ownsParseReservation) presentationState = 'failed';
+    if (ownsParseReservation) {
+      presentationState = 'failed';
+      try { source.closeLegacy(); } catch {}
+    }
     if (request.kind === 'openSlideSession') slidePull.abandonOpen(request.sessionId);
     try {
       post({ kind: 'error', id, ...serializeWorkerError(error) });

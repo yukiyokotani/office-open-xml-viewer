@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+const openLegacyMock = vi.fn();
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
@@ -62,6 +63,9 @@ vi.mock('./wasm/pptx_parser.js', () => ({
   reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
+vi.mock('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine', () => ({
+  openLegacyPptSource: (...args: unknown[]) => openLegacyMock(...args),
+}));
 
 interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
@@ -93,6 +97,7 @@ async function loadWorker(): Promise<FakeSelf> {
 
 beforeEach(() => {
   initMock.mockReset();
+  openLegacyMock.mockReset();
 });
 
 afterEach(() => {
@@ -101,6 +106,63 @@ afterEach(() => {
 });
 
 describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
+  it('opens a direct PPT cursor without initializing OOXML WASM', async () => {
+    const archive = new FakePptxArchive(new Uint8Array());
+    const closeArchive = vi.fn();
+    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+    const fake = await loadWorker();
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({ data: {
+      kind: 'parse', id: 30, buffer: new ArrayBuffer(4), resourcePolicy,
+      source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      },
+    } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'presentationOpened', id: 30,
+    })));
+    expect(initMock).not.toHaveBeenCalled();
+    expect(openLegacyMock).toHaveBeenCalledTimes(1);
+
+    fake.onmessage?.({ data: { kind: 'resourceUsage', id: 31 } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 31, message: expect.stringContaining('unsupported'),
+    })));
+    expect(closeArchive).not.toHaveBeenCalled();
+
+    vi.spyOn(archive, 'extract_image').mockImplementation(() => {
+      throw new WebAssembly.RuntimeError('native trap');
+    });
+    fake.onmessage?.({ data: { kind: 'extractImage', id: 32, path: 'legacy-ppt/image/1' } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 32, message: expect.stringContaining('native trap'),
+    })));
+    expect(closeArchive).toHaveBeenCalledTimes(1);
+  });
+
+  it('terminally closes a direct source on bootstrap trap without losing the trap', async () => {
+    const archive = new FakePptxArchive(new Uint8Array());
+    vi.spyOn(archive, 'presentation_bootstrap').mockImplementation(() => {
+      throw new WebAssembly.RuntimeError('bootstrap trap');
+    });
+    const closeArchive = vi.fn(() => { throw new Error('cleanup failed'); });
+    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+    const fake = await loadWorker();
+    fake.onmessage?.({ data: {
+      kind: 'parse', id: 33, buffer: new ArrayBuffer(4), resourcePolicy,
+      source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      },
+    } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 33, message: expect.stringContaining('bootstrap trap'),
+    })));
+    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(initMock).not.toHaveBeenCalled();
+  });
+
   it('a parse after a REJECTED init responds with an error (not a hang)', async () => {
     initMock.mockRejectedValue(new Error('wasm boom'));
     const fake = await loadWorker();
@@ -141,6 +203,7 @@ describe('pptx worker.ts — init failure never hangs a request (AR4)', () => {
       id: number;
     };
     expect(parsed.id).toBe(3);
+    expect(initMock).toHaveBeenCalledTimes(1);
     // No `ready` handshake is emitted anymore (initPromise pattern replaces it).
     expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
 

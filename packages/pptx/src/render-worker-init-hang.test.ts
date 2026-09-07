@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  */
 
 const initMock = vi.fn();
+const openLegacyMock = vi.fn();
 let bootstrapEmbeddedFonts: unknown[] = [];
 let extractedFontCount = 0;
 function deferred<T>() {
@@ -79,6 +80,9 @@ vi.mock('./wasm/pptx_parser.js', () => ({
   reinit: (arg: unknown) => initMock(arg),
   PptxArchive: FakePptxArchive,
 }));
+vi.mock('@silurus/ooxml-legacy-converter/internal/direct-ppt-engine', () => ({
+  openLegacyPptSource: (...args: unknown[]) => openLegacyMock(...args),
+}));
 
 interface FakeSelf {
   onmessage: ((e: MessageEvent) => void) | null;
@@ -109,6 +113,7 @@ async function loadRenderWorker(): Promise<FakeSelf> {
 
 beforeEach(() => {
   initMock.mockReset();
+  openLegacyMock.mockReset();
   bootstrapEmbeddedFonts = [];
   extractedFontCount = 0;
 });
@@ -119,6 +124,52 @@ afterEach(() => {
 });
 
 describe('pptx render-worker.ts — init failure never hangs a request (AR4)', () => {
+  it('preflights a direct PPT cursor without initializing OOXML WASM', async () => {
+    const archive = new FakePptxArchive(new Uint8Array());
+    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive: vi.fn() });
+    const fake = await loadRenderWorker();
+    fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    fake.onmessage?.({ data: {
+      kind: 'parse', id: 40, buffer: new ArrayBuffer(4), resourcePolicy,
+      source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      },
+    } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'presentationReady', id: 40,
+    })));
+    expect(initMock).not.toHaveBeenCalled();
+    expect(openLegacyMock).toHaveBeenCalledTimes(1);
+
+    fake.onmessage?.({ data: { kind: 'toMarkdown', id: 41 } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 41, message: expect.stringContaining('unsupported'),
+    })));
+  });
+
+  it('closes a direct render source when bootstrap traps', async () => {
+    const archive = new FakePptxArchive(new Uint8Array());
+    vi.spyOn(archive, 'presentation_bootstrap').mockImplementation(() => {
+      throw new WebAssembly.RuntimeError('render bootstrap trap');
+    });
+    const closeArchive = vi.fn();
+    openLegacyMock.mockResolvedValue({ archive, sourceByteLength: 4, closeArchive });
+    const fake = await loadRenderWorker();
+    fake.onmessage?.({ data: {
+      kind: 'parse', id: 42, buffer: new ArrayBuffer(4), resourcePolicy,
+      source: {
+        protocol: 'ooxml-legacy-ppt-source/v1', builtin: 'ppt',
+        wasmUrl: 'https://example.test/direct.wasm',
+      },
+    } } as MessageEvent);
+    await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+      kind: 'error', id: 42, message: expect.stringContaining('render bootstrap trap'),
+    })));
+    expect(closeArchive).toHaveBeenCalledTimes(1);
+    expect(initMock).not.toHaveBeenCalled();
+  });
+
   it('a parse after a REJECTED init responds with an error (not a hang)', async () => {
     initMock.mockRejectedValue(new Error('render wasm boom'));
     const fake = await loadRenderWorker();
@@ -157,6 +208,7 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', (
     expect(ready.preflight.slides).toEqual([
       expect.objectContaining({ notes: 'worker note', hidden: true }),
     ]);
+    expect(initMock).toHaveBeenCalledTimes(1);
 
     expect(fake.posted.some((m) => (m as { kind?: string }).kind === 'ready')).toBe(false);
   });
