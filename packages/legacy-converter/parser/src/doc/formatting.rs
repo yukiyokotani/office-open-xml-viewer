@@ -884,6 +884,79 @@ mod tests {
     }
 
     #[test]
+    fn font_hint_resolves_style_direct_no_guidance_and_reset_semantics() {
+        let mut f = empty();
+        f.styles = vec![
+            Some(Style {
+                kind: 1,
+                base: 0xfff,
+                chpx: &[0x6f, 0x28, 1], // eastAsia
+                papx: &[],
+            }),
+            Some(Style {
+                kind: 1,
+                base: 0,
+                chpx: &[0x6f, 0x28, 0], // inherited eastAsia -> default
+                papx: &[],
+            }),
+            Some(Style {
+                kind: 2,
+                base: 0xfff,
+                chpx: &[0x6f, 0x28, 0], // must not replace a pre-CIstd hint
+                papx: &[],
+            }),
+        ];
+
+        assert!(f
+            .run_xml(0, 0, 0, &[])
+            .unwrap()
+            .contains("<w:rFonts w:hint=\"eastAsia\"/>"));
+        assert!(f
+            .run_xml(1, 0, 0, &[])
+            .unwrap()
+            .contains("<w:rFonts w:hint=\"default\"/>"));
+
+        // PCD/direct formatting is later than paragraph-style inheritance.
+        let cs = f.run_xml(1, 0, 1, &[&[0x6f, 0x28, 2]]).unwrap();
+        assert!(cs.contains("<w:rFonts w:hint=\"cs\"/>"), "{cs}");
+
+        // Both CIstd and CPlain preserve the previous sprmCIdctHint operand.
+        let reset = f
+            .run_xml(
+                0,
+                0,
+                1,
+                &[&[
+                    0x6f, 0x28, 2, // cs
+                    0x30, 0x4a, 2, 0, // CIstd 2
+                    0x33, 0x2a, 0, // CPlain
+                ]],
+            )
+            .unwrap();
+        assert!(reset.contains("<w:rFonts w:hint=\"cs\"/>"), "{reset}");
+
+        // 0xFF is a valid explicit cancellation with no ST_Hint equivalent.
+        let cancelled = f
+            .run_xml(0, 0, 1, &[&[0x6f, 0x28, 0xff, 0x33, 0x2a, 0]])
+            .unwrap();
+        assert!(!cancelled.contains("w:hint="), "{cancelled}");
+    }
+
+    #[test]
+    fn font_hint_rejects_invalid_values_and_truncated_operands() {
+        let mut f = empty();
+        assert!(f
+            .run_xml(0, 0, 1, &[&[0x6f, 0x28, 3]])
+            .unwrap_err()
+            .contains("invalid Word character font hint"));
+        assert!(f
+            .run_xml(0, 0, 1, &[&[0x6f, 0x28]])
+            .unwrap_err()
+            .contains("truncated Word formatting operand"));
+        assert!(!f.run_xml(0, 0, 0, &[]).unwrap().contains("w:hint="));
+    }
+
+    #[test]
     fn list_marker_style_patches_do_not_toggle_twice_or_inject_default_sizes() {
         for (chpx, bold) in [(&[][..], "1"), (&[0x35, 0x08, 0x81][..], "0")] {
             let mut f = empty();
@@ -945,6 +1018,75 @@ mod tests {
                 .unwrap()
                 .contains("<w:b w:val=\"1\"/>"));
         }
+    }
+
+    #[test]
+    fn list_marker_hint_patch_can_cancel_and_level_chpx_can_override_it() {
+        let build = |level_chpx: &'static [u8]| {
+            let mut f = empty();
+            f.styles = vec![
+                Some(Style {
+                    kind: 1,
+                    base: 0xfff,
+                    chpx: &[0x6f, 0x28, 1], // paragraph inherits eastAsia
+                    papx: &[],
+                }),
+                Some(Style {
+                    kind: 1,
+                    base: 0,
+                    chpx: &[0x6f, 0x28, 0xff], // linked marker style: no guidance
+                    papx: &[],
+                }),
+            ];
+            f.numbering = numbering::Tables {
+                lists: vec![numbering::List {
+                    id: 42,
+                    styles: [1; 9],
+                    simple: true,
+                    hybrid: false,
+                    auto_number: false,
+                    levels: vec![numbering::Level {
+                        start: Some(1),
+                        format: 0,
+                        justification: 0,
+                        legal: false,
+                        restart: Some(0),
+                        follow: 0,
+                        tentative: false,
+                        papx: &[],
+                        chpx: level_chpx,
+                        text: &[0, 0, b'.', 0],
+                        placeholders: [
+                            Some((1, 0)),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                    }],
+                }],
+                overrides: vec![numbering::Override {
+                    list_index: 0,
+                    first_cp: None,
+                    auto_number_field: None,
+                    levels: vec![],
+                }],
+            };
+            f.paragraph_xml(0, 0, 1, &[&[0x0b, 0x46, 1, 0]]).unwrap();
+            f.numbering_output.xml(10000).unwrap().unwrap()
+        };
+
+        let cancelled = build(&[]);
+        assert!(!cancelled.contains("w:hint="), "{cancelled}");
+        let overridden = build(&[0x6f, 0x28, 2]);
+        assert!(
+            overridden.contains("<w:rFonts w:hint=\"cs\"/>"),
+            "{overridden}"
+        );
     }
 
     #[test]

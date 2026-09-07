@@ -10,7 +10,28 @@ use std::collections::BTreeMap;
 pub struct Properties {
     values: BTreeMap<&'static str, String>,
     pub fonts: [Option<usize>; 4],
+    font_hint: Option<FontHint>,
+    // Sparse style patches must distinguish an absent hint from 0xFF, which
+    // explicitly removes inherited guidance but has no ST_Hint equivalent.
+    font_hint_present: bool,
     pub picture: Picture,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FontHint {
+    Default,
+    EastAsia,
+    ComplexScript,
+}
+
+impl FontHint {
+    fn xml_value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::EastAsia => "eastAsia",
+            Self::ComplexScript => "cs",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +67,8 @@ impl Default for Properties {
         Self {
             values: BTreeMap::from([("sz", "20".into())]),
             fonts: [None; 4],
+            font_hint: None,
+            font_hint_present: false,
             picture: Picture::default(),
         }
     }
@@ -58,6 +81,8 @@ impl Properties {
         Self {
             values: BTreeMap::new(),
             fonts: [None; 4],
+            font_hint: None,
+            font_hint_present: false,
             picture: Picture::default(),
         }
     }
@@ -70,6 +95,10 @@ impl Properties {
                 *current = added;
             }
         }
+        if patch.font_hint_present {
+            self.font_hint = patch.font_hint;
+            self.font_hint_present = true;
+        }
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
     }
@@ -79,6 +108,8 @@ impl Properties {
         // properties. Revision metadata remains omitted. CIstd preserves
         // CFObj; CPlain does not include it in its exception list.
         let mut picture = self.picture;
+        let font_hint = self.font_hint;
+        let font_hint_present = self.font_hint_present;
         if !preserve_object {
             picture.object = paragraph.picture.object;
         }
@@ -88,6 +119,10 @@ impl Properties {
             .collect();
         *self = paragraph.clone();
         self.picture = picture;
+        // MS-DOC 2.6.1: sprmCPlain and sprmCIstd both leave any previous
+        // sprmCIdctHint operand unaffected, including 0xFF (no guidance).
+        self.font_hint = font_hint;
+        self.font_hint_present = font_hint_present;
         for (key, value) in preserved {
             if let Some(value) = value {
                 self.values.insert(key, value);
@@ -157,6 +192,19 @@ impl Properties {
             return Ok(true);
         }
         let (key, value) = match code {
+            0x286f => {
+                // MS-DOC 2.6.1 sprmCIdctHint. 0xFF is an explicit absence of
+                // guidance and therefore cancels an inherited ST_Hint value.
+                self.font_hint = match operand[0] {
+                    0 => Some(FontHint::Default),
+                    1 => Some(FontHint::EastAsia),
+                    2 => Some(FontHint::ComplexScript),
+                    0xff => None,
+                    _ => return Err(unsupported("invalid Word character font hint")),
+                };
+                self.font_hint_present = true;
+                return Ok(true);
+            }
             0x4a4f | 0x4a50 | 0x4a51 | 0x4a5e => {
                 let slot = match code {
                     0x4a4f => 0,
@@ -251,14 +299,20 @@ impl Properties {
 
     pub fn xml(&self, fonts: &[String]) -> Result<String, String> {
         let mut xml = String::from("<w:rPr>");
-        if self.fonts.iter().any(Option::is_some) && !fonts.is_empty() {
+        let has_font_index = self.fonts.iter().any(Option::is_some);
+        if self.font_hint.is_some() || (has_font_index && !fonts.is_empty()) {
             xml.push_str("<w:rFonts");
-            for (key, index) in ["ascii", "eastAsia", "hAnsi", "cs"].iter().zip(self.fonts) {
-                if let Some(index) = index {
-                    let name = fonts
-                        .get(index)
-                        .ok_or_else(|| unsupported("Word font index outside font table"))?;
-                    xml.push_str(&format!(" w:{key}=\"{}\"", xml_attr(name)));
+            if let Some(hint) = self.font_hint {
+                xml.push_str(&format!(" w:hint=\"{}\"", hint.xml_value()));
+            }
+            if !fonts.is_empty() {
+                for (key, index) in ["ascii", "eastAsia", "hAnsi", "cs"].iter().zip(self.fonts) {
+                    if let Some(index) = index {
+                        let name = fonts
+                            .get(index)
+                            .ok_or_else(|| unsupported("Word font index outside font table"))?;
+                        xml.push_str(&format!(" w:{key}=\"{}\"", xml_attr(name)));
+                    }
                 }
             }
             xml.push_str("/>");
@@ -356,6 +410,47 @@ mod tests {
         assert!(xml.contains("w:ascii=\"A &amp; &quot;B&quot;\" w:eastAsia=\"CJK\""));
         assert!(xml.contains("w:sz w:val=\"24\""));
         assert!(p.xml(&[]).is_err());
+    }
+
+    #[test]
+    fn preserves_all_documented_font_hints_without_changing_font_slots() {
+        let mut p = Properties::default();
+        let base = p.clone();
+        for (code, bytes) in [
+            (0x4a4f, [0, 0]),
+            (0x4a50, [1, 0]),
+            (0x4a51, [2, 0]),
+            (0x4a5e, [3, 0]),
+        ] {
+            assert!(p.apply(code, &bytes, &base).unwrap());
+        }
+        let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);
+        for (value, expected) in [(0, "default"), (1, "eastAsia"), (2, "cs")] {
+            assert!(p.apply(0x286f, &[value], &base).unwrap());
+            let xml = p.xml(&fonts).unwrap();
+            assert!(xml.contains(&format!("w:hint=\"{expected}\"")), "{xml}");
+            for (slot, name) in [
+                ("ascii", "ASCII"),
+                ("eastAsia", "East Asia"),
+                ("hAnsi", "High ANSI"),
+                ("cs", "Complex Script"),
+            ] {
+                assert!(xml.contains(&format!("w:{slot}=\"{name}\"")), "{xml}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_guidance_cancels_inherited_hint_and_absence_emits_no_font_element() {
+        let base = Properties::default();
+        assert!(!base.xml(&[]).unwrap().contains("<w:rFonts"));
+
+        let mut inherited = base.clone();
+        inherited.apply(0x286f, &[1], &base).unwrap();
+        assert!(inherited.xml(&[]).unwrap().contains("w:hint=\"eastAsia\""));
+        inherited.apply(0x286f, &[0xff], &base).unwrap();
+        assert!(!inherited.xml(&[]).unwrap().contains("<w:rFonts"));
+        assert!(inherited.apply(0x286f, &[3], &base).is_err());
     }
 
     #[test]
