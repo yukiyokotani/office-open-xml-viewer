@@ -19,6 +19,17 @@ pub(super) struct Context<'a> {
     pub auto_number: Option<auto_number::Number>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct ParagraphAxes {
+    pub margin: Option<i16>,
+    pub indent: Option<i16>,
+}
+
+pub(super) struct DocumentDefaults {
+    pub levels: Vec<Level>,
+    pub type4_level0_axes: Option<ParagraphAxes>,
+}
+
 /// MS-PPT 2.9.47 / 2.2.30: this is a passive positional substitution, not
 /// evaluation of arbitrary fields or replacement of literal asterisks.
 pub(super) fn slide_number_position(atom: Record<'_>) -> Result<u32, String> {
@@ -713,8 +724,9 @@ fn read_levels(atom: Record<'_>, budget: &mut usize) -> Result<Vec<Level>, Strin
 pub(super) fn document_defaults(
     children: &[Record<'_>],
     budget: &mut usize,
-) -> Result<Vec<Level>, String> {
+) -> Result<DocumentDefaults, String> {
     let mut defaults = None;
+    let mut type4_level0_axes = None;
     for env in children
         .iter()
         .filter(|r| r.kind == 1010 && r.version == 15)
@@ -726,10 +738,20 @@ pub(super) fn document_defaults(
             if defaults.is_some() {
                 return Err(unsupported("duplicate PowerPoint document text defaults"));
             }
-            defaults = Some(read_levels(*atom, budget)?);
+            let levels = read_levels(*atom, budget)?;
+            if atom.instance == 4 {
+                type4_level0_axes = levels.first().map(|level| ParagraphAxes {
+                    margin: level.paragraph.margin,
+                    indent: level.paragraph.indent,
+                });
+            }
+            defaults = Some(levels);
         }
     }
-    Ok(defaults.unwrap_or_default())
+    Ok(DocumentDefaults {
+        levels: defaults.unwrap_or_default(),
+        type4_level0_axes,
+    })
 }
 
 pub(super) fn default_style(text: &str) -> Vec<u8> {
@@ -778,6 +800,70 @@ pub(super) fn fonts(children: &[Record<'_>], budget: &mut usize) -> Result<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record_bytes(version: u16, instance: u16, kind: u16, payload: &[u8]) -> Vec<u8> {
+        let options = (instance << 4) | version;
+        [
+            options.to_le_bytes().as_slice(),
+            &kind.to_le_bytes(),
+            &(payload.len() as u32).to_le_bytes(),
+            payload,
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn document_defaults_retain_only_type4_level0_paragraph_axes() {
+        let absent = document_defaults(&[], &mut 100).unwrap();
+        assert!(absent.levels.is_empty());
+        assert_eq!(absent.type4_level0_axes, None);
+
+        let level = [u16s(1), u32s(0x500), u16s(180), u16s(90), u32s(0)].concat();
+        let master = record_bytes(0, 4, 4003, &level);
+        let environment = Record {
+            version: 15,
+            instance: 0,
+            kind: 1010,
+            payload: &master,
+        };
+        let defaults = document_defaults(&[environment], &mut 100).unwrap();
+        assert_eq!(defaults.levels.len(), 1);
+        assert_eq!(
+            defaults.type4_level0_axes,
+            Some(ParagraphAxes {
+                margin: Some(180),
+                indent: Some(90),
+            })
+        );
+
+        let title = record_bytes(0, 0, 4003, &level);
+        let environment = Record {
+            payload: &title,
+            ..environment
+        };
+        assert_eq!(
+            document_defaults(&[environment], &mut 100)
+                .unwrap()
+                .type4_level0_axes,
+            None
+        );
+
+        let zero_level = [u16s(1), u32s(0x500), u16s(0), u16s(0), u32s(0)].concat();
+        let zero_master = record_bytes(0, 4, 4003, &zero_level);
+        let zero_environment = Record {
+            payload: &zero_master,
+            ..environment
+        };
+        assert_eq!(
+            document_defaults(&[zero_environment], &mut 100)
+                .unwrap()
+                .type4_level0_axes,
+            Some(ParagraphAxes {
+                margin: Some(0),
+                indent: Some(0),
+            })
+        );
+    }
 
     fn paragraph_master(properties: &[u8], defaults: &[Level]) -> Master {
         // MS-PPT 2.9.35-36: one title master level, followed by its empty CF.

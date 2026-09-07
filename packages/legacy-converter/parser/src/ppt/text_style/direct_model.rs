@@ -26,6 +26,30 @@ pub(in crate::ppt) fn paragraphs(
     work_budget: &mut usize,
     model_budget: &mut usize,
 ) -> Result<Vec<ModelParagraph>, String> {
+    paragraphs_with_axes(
+        text,
+        style,
+        context,
+        DirectAxes::default(),
+        work_budget,
+        model_budget,
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub(in crate::ppt) struct DirectAxes<'a> {
+    pub ruler: Option<ruler::Ruler<'a>>,
+    pub document: Option<ParagraphAxes>,
+}
+
+pub(in crate::ppt) fn paragraphs_with_axes(
+    text: &str,
+    style: &[u8],
+    context: Context<'_>,
+    axes: DirectAxes<'_>,
+    work_budget: &mut usize,
+    model_budget: &mut usize,
+) -> Result<Vec<ModelParagraph>, String> {
     charge_units(
         work_budget,
         text.len(),
@@ -68,7 +92,27 @@ pub(in crate::ppt) fn paragraphs(
         let base = context
             .levels
             .and_then(|levels| levels.get(usize::from(pf[pi].1.level)));
-        let properties = pf[pi].1.inherit(base.map(|v| &v.paragraph));
+        let mut properties = pf[pi].1.inherit(base.map(|v| &v.paragraph));
+        // MS-PPT 2.9.30 supplies independent local ruler origins for the
+        // paragraph's active level. Office-rendered binary counterfactuals
+        // establish the document type-4 origin for ordinary level-0 freeform
+        // text, including independent fallback beneath partial local axes.
+        // Callers gate that narrower fallback context.
+        if let Some(ruler) = axes.ruler {
+            let level = usize::from(properties.level);
+            if let Some(margin) = ruler.margins[level] {
+                properties.margin = Some(margin);
+            }
+            if let Some(indent) = ruler.indents[level] {
+                properties.indent = Some(indent);
+            }
+        }
+        if properties.level == 0 {
+            if let Some(document) = axes.document {
+                properties.margin = properties.margin.or(document.margin);
+                properties.indent = properties.indent.or(document.indent);
+            }
+        }
         let number = auto_number::paragraph(&groups, &mut number_group, cp, para_end);
         let mut runs = Vec::new();
         let mut start = 0;
@@ -484,6 +528,151 @@ fn model_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_style(level: u16) -> Vec<u8> {
+        [u32s(2), u16s(level), u32s(0), u32s(2), u32s(0)].concat()
+    }
+
+    fn ruler_with_axes(
+        margins: [Option<i16>; 5],
+        indents: [Option<i16>; 5],
+    ) -> ruler::Ruler<'static> {
+        ruler::Ruler {
+            c_levels: None,
+            default_tab_size: None,
+            tabs: None,
+            margins,
+            indents,
+        }
+    }
+
+    #[test]
+    fn direct_origins_resolve_local_level_then_document_type4_level0_by_field() {
+        let document = ParagraphAxes {
+            margin: Some(180),
+            indent: Some(90),
+        };
+        let project = |level, ruler, levels: Option<&[Level]>| {
+            paragraphs_with_axes(
+                "X",
+                &plain_style(level),
+                Context {
+                    levels,
+                    ..Context::default()
+                },
+                DirectAxes {
+                    ruler,
+                    document: Some(document),
+                },
+                &mut 100,
+                &mut 100_000,
+            )
+        };
+
+        let model = project(0, None, None).unwrap();
+        assert_eq!(model[0].mar_l, master_to_emu(180));
+        assert_eq!(model[0].indent, master_to_emu(-90));
+
+        let ruler = ruler_with_axes(
+            [Some(144), None, None, None, None],
+            [Some(144), None, None, None, None],
+        );
+        let model = project(0, Some(ruler), None).unwrap();
+        assert_eq!(model[0].mar_l, master_to_emu(144));
+        assert_eq!(model[0].indent, 0);
+
+        let ruler = ruler_with_axes([Some(288), None, None, None, None], [None; 5]);
+        let model = project(0, Some(ruler), None).unwrap();
+        assert_eq!(model[0].mar_l, master_to_emu(288));
+        assert_eq!(model[0].indent, master_to_emu(90 - 288));
+
+        for local_indent in [-144, 144] {
+            let ruler = ruler_with_axes([None; 5], [Some(local_indent), None, None, None, None]);
+            let model = project(0, Some(ruler), None).unwrap();
+            assert_eq!(model[0].mar_l, master_to_emu(180));
+            assert_eq!(
+                model[0].indent,
+                master_to_emu(i64::from(local_indent) - 180)
+            );
+        }
+
+        let mut inherited = Level::empty(0);
+        inherited.paragraph.margin = Some(500);
+        inherited.paragraph.indent = Some(400);
+        let ruler = ruler_with_axes(
+            [Some(0), None, None, None, None],
+            [Some(0), None, None, None, None],
+        );
+        let model = project(0, Some(ruler), Some(std::slice::from_ref(&inherited))).unwrap();
+        assert_eq!(model[0].mar_l, 0);
+        assert_eq!(model[0].indent, 0);
+
+        let vt_style = [u32s(4), u16s(0), u32s(0), u32s(4), u32s(0)].concat();
+        let model = paragraphs_with_axes(
+            "A\u{b}B",
+            &vt_style,
+            Context::default(),
+            DirectAxes {
+                ruler: None,
+                document: Some(document),
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].mar_l, master_to_emu(180));
+        assert_eq!(model[0].indent, master_to_emu(-90));
+    }
+
+    #[test]
+    fn document_origin_does_not_fill_higher_levels_but_local_ruler_does() {
+        let axes = DirectAxes {
+            ruler: None,
+            document: Some(ParagraphAxes {
+                margin: Some(180),
+                indent: Some(90),
+            }),
+        };
+        let error = paragraphs_with_axes(
+            "X",
+            &plain_style(1),
+            Context::default(),
+            axes,
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("margin requires model admission context"));
+
+        let ruler = ruler_with_axes(
+            [None, Some(0), None, None, None],
+            [None, Some(0), None, None, None],
+        );
+        let model = paragraphs_with_axes(
+            "X",
+            &plain_style(1),
+            Context::default(),
+            DirectAxes {
+                ruler: Some(ruler),
+                document: axes.document,
+            },
+            &mut 100,
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!((model[0].mar_l, model[0].indent), (0, 0));
+
+        assert!(paragraphs(
+            "X",
+            &plain_style(0),
+            Context::default(),
+            &mut 100,
+            &mut 100_000
+        )
+        .unwrap_err()
+        .contains("margin requires model admission context"));
+    }
 
     #[test]
     fn missing_font_size_stays_absent_instead_of_using_decoder_storage_default() {

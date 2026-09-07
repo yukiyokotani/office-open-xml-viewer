@@ -68,6 +68,7 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 #[derive(Default)]
 pub(super) struct Resolver {
     pub shape_masters: shape_master::Resolver,
+    pub document_text_axes: Option<text_style::ParagraphAxes>,
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
@@ -127,13 +128,18 @@ impl Resolver {
                     let records = parse_records(record.payload, budget)?;
                     text_styles.insert(
                         id,
-                        std::rc::Rc::new(text_style::Master::parse(&records, &defaults, budget)?),
+                        std::rc::Rc::new(text_style::Master::parse(
+                            &records,
+                            &defaults.levels,
+                            budget,
+                        )?),
                     );
                 }
             }
         }
         let mut result = Self {
             shape_masters: shape_master::Resolver::default(),
+            document_text_axes: defaults.type4_level0_axes,
             masters,
             cache: BTreeMap::new(),
             text_styles,

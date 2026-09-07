@@ -12,6 +12,18 @@ const MAX_MODEL_SHAPES: usize = 100_000;
 // strings. Text and custom-path backing are charged by their own projectors.
 const MODEL_SHAPE_STRINGS_BYTES: usize = 384;
 
+fn document_text_axes(
+    text_type: Option<u16>,
+    placeholder: bool,
+    master_linked: bool,
+    outline: bool,
+    axes: Option<text_style::ParagraphAxes>,
+) -> Option<text_style::ParagraphAxes> {
+    (text_type == Some(4) && !placeholder && !master_linked && !outline)
+        .then_some(axes)
+        .flatten()
+}
+
 pub(in crate::ppt) fn slide(
     index: usize,
     presentation: &persist::OwnedPresentation,
@@ -386,7 +398,7 @@ impl Context<'_> {
         let mut text_type = None;
         let mut slide_numbers = Vec::new();
         let mut outline_body = false;
-        let mut ruler_tabs = None;
+        let mut local_ruler = None;
         let mut ruler_seen = false;
         for atom in parse_record_spans(self.backing, textbox.payload_span(), self.work_budget)? {
             let view = atom.view(self.backing)?;
@@ -443,7 +455,7 @@ impl Context<'_> {
                         return Err(unsupported("duplicate PowerPoint local text ruler"));
                     }
                     ruler_seen = true;
-                    ruler_tabs = ruler::read(view, self.work_budget)?;
+                    local_ruler = Some(ruler::read_full(view, self.work_budget)?);
                 }
                 _ => {}
             }
@@ -454,8 +466,8 @@ impl Context<'_> {
         if blocks.len() != 1 {
             return Err(unsupported("ambiguous PowerPoint styled text body"));
         }
-        let linked = shape
-            .master()
+        let master_link = shape.master();
+        let linked = master_link
             .map(|id| self.presentation.shape_masters.levels(id))
             .transpose()?;
         let levels = linked.or_else(|| {
@@ -478,7 +490,7 @@ impl Context<'_> {
                 .as_deref()
                 .expect("constructed for absent style"),
         };
-        let paragraphs = text_style::direct_model::paragraphs(
+        let paragraphs = text_style::direct_model::paragraphs_with_axes(
             &blocks[0],
             style_bytes,
             text_style::Context {
@@ -487,7 +499,7 @@ impl Context<'_> {
                 levels,
                 slide_numbers: &slide_numbers,
                 slide_number: u32::from(self.presentation.first_slide_number) + self.index as u32,
-                ruler_tabs,
+                ruler_tabs: local_ruler.and_then(|ruler| ruler.tabs),
                 style9: if !outline_body && text_type.is_some() {
                     shape
                         .style9
@@ -498,6 +510,16 @@ impl Context<'_> {
                     None
                 },
                 auto_number: None,
+            },
+            text_style::direct_model::DirectAxes {
+                ruler: local_ruler,
+                document: document_text_axes(
+                    text_type,
+                    shape.placeholder,
+                    master_link.is_some(),
+                    outline_body,
+                    self.presentation.document_text_axes,
+                ),
             },
             self.work_budget,
             self.model_budget,
@@ -693,12 +715,33 @@ mod tests {
             outline_slide_numbers: vec![Vec::new()],
             first_slide_number: 1,
             text_masters: vec![None],
+            document_text_axes: None,
             fonts: Vec::new(),
             schemes: vec![None],
             image_entries: Vec::new(),
             backgrounds: vec![None],
             object_masters: vec![std::rc::Rc::from([])],
             size: (720, 540),
+        }
+    }
+
+    #[test]
+    fn document_type4_origins_are_limited_to_unlinked_freeform_text() {
+        let axes = Some(text_style::ParagraphAxes {
+            margin: Some(180),
+            indent: Some(90),
+        });
+        assert_eq!(document_text_axes(Some(4), false, false, false, axes), axes);
+        for excluded in [
+            (Some(0), false, false, false),
+            (Some(4), true, false, false),
+            (Some(4), false, true, false),
+            (Some(4), false, false, true),
+        ] {
+            assert_eq!(
+                document_text_axes(excluded.0, excluded.1, excluded.2, excluded.3, axes),
+                None
+            );
         }
     }
 

@@ -245,3 +245,34 @@ An empty `textCheckSum` is not an identity check. The
 [DrawingML persistence specification](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oi29500/28f2957d-a978-40c8-bc85-5a32ed0ae8e1)
 states that Office writes an empty value and ignores that attribute. This is
 not a specification of binary-PPT text-slot correspondence.
+
+### Direct-model paragraph origin evidence
+
+The direct PPT path retains local ruler axes by indent level (MS-PPT 2.9.30)
+and a separate snapshot of document type-4 level-0 axes. Document fallback is
+limited to ordinary, unlinked, non-placeholder, non-outline level-0 text.
+Missing fields remain distinct from explicit zero. The byte-conversion path
+and shared renderer are unchanged.
+
+PowerPoint 16.112.3 rendered paired same-length binary counterfactuals with
+document `(margin, indent)` values `(0, 0)` and `(180, 90)` master units.
+Five text bodies used identical-token VT continuations: no local axes,
+indent-only `-144`, indent-only `144`, both axes `288`, and margin-only `144`.
+The margin-only case also has an explicit default tab interval of `144` to
+preserve record length; its text contains no tabs. These are Office-rendered
+binary counterfactuals, not Office-authored variants. Their record framing,
+text lengths, style spans and non-target bytes were verified unchanged.
+
+The no-local control responds to both document fields. Indent-only bodies
+retain their first-line origin while the continuation follows document margin.
+The margin-only body retains its continuation origin while its first line
+follows document indent. The both-present control does not follow either
+document field. A repeated unchanged input produces identical raster output
+on all five tested slides. This supports independent field inheritance in the
+bounded context above, not higher-level or placeholder inheritance.
+
+Negative first-line display remains unresolved: the binary Office PDF retains
+all glyphs at the text inset in the tested negative-indent case, while the
+direct model preserves the signed origin and the renderer paints farther left.
+No clamp or sample-specific correction is added. These observations do not
+establish exact Office display parity or a general negative-indent layout rule.
