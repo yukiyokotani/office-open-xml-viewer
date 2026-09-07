@@ -117,8 +117,12 @@ export function openLegacyPptSource(
 
 async function resolveWasmInput(wasmUrl: string): Promise<unknown> {
   const url = new URL(wasmUrl, import.meta.url);
-  if (url.protocol === 'file:' && typeof process !== 'undefined' && process.versions?.node) {
-    const { readFile } = await import('node:fs/promises');
+  const nodeProcess = (globalThis as { process?: { versions?: { node?: string } } }).process;
+  if (url.protocol === 'file:' && nodeProcess?.versions?.node) {
+    // Keep the optional Node builtin outside browser consumers' static module
+    // graph and type environment. This branch is guarded by the Node runtime.
+    const nodeFsPromises: string = 'node:fs/promises';
+    const { readFile } = await import(/* @vite-ignore */ nodeFsPromises);
     return readFile(url);
   }
   return url;

@@ -88,6 +88,11 @@
       "import": "./dist/legacy-conversion.mjs",
       "default": "./dist/legacy-conversion.mjs"
     },
+    "./legacy-ppt": {
+      "types": "./dist/types/legacy-ppt.d.ts",
+      "import": "./dist/legacy-ppt.mjs",
+      "default": "./dist/legacy-ppt.mjs"
+    },
     "./node": {
       "types": "./dist/types/node.d.ts",
       "import": "./dist/node.mjs",
@@ -103,7 +108,8 @@
     "typecheck": "tsc --build && pnpm --filter @silurus/ooxml-markdown --filter @silurus/ooxml-node --filter ./packages/vscode-extension typecheck",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-legacy-converter wasm",
+    "build:wasm": "pnpm --filter @silurus/ooxml-docx wasm && pnpm --filter @silurus/ooxml-xlsx wasm && pnpm --filter @silurus/ooxml-pptx wasm && pnpm --filter @silurus/ooxml-legacy-converter wasm && pnpm build:wasm:legacy-ppt",
+    "build:wasm:legacy-ppt": "pnpm --filter @silurus/ooxml-legacy-converter wasm:direct-ppt",
     "vrt": "pnpm -r --workspace-concurrency=1 vrt",
     "vrt:snapshot": "pnpm -r --workspace-concurrency=1 vrt:snapshot",
     "vrt:private": "pnpm -r --workspace-concurrency=1 --if-present vrt:private",
@@ -124,6 +130,7 @@
     "check:optional-chart-ex": "node scripts/check-optional-chart-ex.mjs dist",
     "check:optional-tiff": "node scripts/check-optional-tiff.mjs dist",
     "check:optional-legacy-conversion": "node scripts/check-optional-legacy-conversion.mjs dist",
+    "check:optional-legacy-ppt": "node scripts/check-optional-legacy-ppt.mjs dist",
     "lint": "ast-grep scan",
     "lint:test": "ast-grep test --skip-snapshot-tests",
     "test:docx-boundaries": "node --test scripts/check-docx-layout-boundaries.test.mjs",

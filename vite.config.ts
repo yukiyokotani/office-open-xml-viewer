@@ -54,9 +54,12 @@ export function wasmAssetUrl(): Plugin {
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -SUFFIX.length);
       const source = await readFile(filePath);
+      const emittedName = /[\\/]wasm-direct-ppt[\\/]/.test(filePath)
+        ? 'legacy_ppt_direct_bg.wasm'
+        : basename(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
-        name: basename(filePath),
+        name: emittedName,
         source,
       });
       // `import.meta.ROLLUP_FILE_URL_<id>` expands at render time to Rollup's
@@ -124,6 +127,9 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in disposable Worker transport for application-owned legacy
         // Office converter engines. No converter WASM is bundled here.
         'legacy-conversion': resolve(__dirname, 'src/legacy-conversion.ts'),
+        // Opt-in descriptor for the native legacy PPT reader. Importing this
+        // entry emits its dedicated WASM asset URL but does not initialize it.
+        'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),
         // Node-only bounded sessions and server render helpers. Kept as a
         // separate entry so browser consumers never load Node built-ins.
         node:  resolve(__dirname, 'src/node.ts'),
