@@ -13,6 +13,7 @@ import type { WorkerRequest, WorkerResponse } from './types.js';
 import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 import { WorkerWorksheetSourceOwner } from './internal/worker-worksheet-source.js';
+import { XLS_FONT_RESULT } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
 
 // RB6: a `panic = "abort"` build traps (not unwinds) on a Rust panic / OOM /
 // stack overflow, poisoning this worker's single WASM instance so every LATER
@@ -48,6 +49,10 @@ const worksheetPull = new WorksheetPullWorker(
 
 self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<number>>) => {
   const req = e.data;
+
+  // The disposable direct-XLS measurement bridge owns this uncorrelated
+  // response. It must never enter the ordinary request-id dispatcher.
+  if ((req as { type?: unknown }).type === XLS_FONT_RESULT) return;
 
   if (isWorksheetPullCommand(req)) {
     await worksheetPull.dispatchSafely(req, (response, transfer) =>
@@ -97,7 +102,9 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       source.closeLegacy();
       if (req.source) {
         host.disposeArchive();
-        await source.openLegacy(new Uint8Array(req.data), req.source);
+        await source.openLegacy(
+          new Uint8Array(req.data), req.source, req.measureLegacyXlsNormalFont === true,
+        );
       } else {
         if (ooxmlWasmInput === undefined) throw new Error('XLSX WASM input was not configured');
         host.setWasmInput(ooxmlWasmInput);
@@ -124,7 +131,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
           : host.run(() => source.ooxml('resource usage').resource_usage()),
       );
       const workbookJson = json.buffer as ArrayBuffer;
-      const res: WorkerResponse = { type: 'parsed', id, workbookJson, usage };
+      const res: WorkerResponse = {
+        type: 'parsed', id, workbookJson, usage,
+        maximumDigitWidth: source.maximumDigitWidth,
+      };
       (self.postMessage as (message: unknown, transfer: Transferable[]) => void)(res, [
         workbookJson,
       ]);

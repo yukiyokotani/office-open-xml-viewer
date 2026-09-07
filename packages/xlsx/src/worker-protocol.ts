@@ -224,7 +224,7 @@ export function extractViewerRenderContext(opts: WireRenderViewportOptions): {
 // `init` arm is copied verbatim from `WorkerRequest`.
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; renderers?: import('@silurus/ooxml-core/worker').WorkerRendererDescriptors; source?: import('@silurus/ooxml-core/internal/legacy-xls-source').LegacyXlsDirectSourceDescriptor }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; renderers?: import('@silurus/ooxml-core/worker').WorkerRendererDescriptors; source?: import('@silurus/ooxml-core/internal/legacy-xls-source').LegacyXlsDirectSourceDescriptor; measureLegacyXlsNormalFont?: boolean }
   | DelimitedTextParseRequest
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } & PullSessionIdentity<number>)
   | {
@@ -263,6 +263,7 @@ export type RenderWorkerResponse =
       id: number;
       workbook: ParsedWorkbook;
       usage?: OoxmlResourceUsageSnapshot;
+      maximumDigitWidth?: number;
     }
   | DelimitedTextParseResponse
   | { type: 'viewportRendered'; id: number; bitmap: ImageBitmap }

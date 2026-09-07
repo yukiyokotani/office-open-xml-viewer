@@ -1217,6 +1217,7 @@ class XlsxViewerEngine implements ZoomableViewer {
         const pending = XlsxWorkbook[loadXlsxSheetSource](source, {
           password: this.opts.password,
           legacyConversion: conversion.options,
+          measureLegacyXlsNormalFont: this.opts.measureLegacyXlsNormalFont,
           useGoogleFonts: this.opts.useGoogleFonts,
           maxZipEntryBytes: this.opts.maxZipEntryBytes,
           resourceLimits: this.opts.resourceLimits,

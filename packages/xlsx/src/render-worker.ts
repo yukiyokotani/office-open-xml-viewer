@@ -49,6 +49,7 @@ import { readXlsxArchiveBootstrap } from './internal/archive-bootstrap.js';
 import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-worker.js';
 import { WorkerWorksheetSourceOwner } from './internal/worker-worksheet-source.js';
+import { XLS_FONT_RESULT } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
 
 // RB6: self-poison + auto-respawn. A trap during parse / per-sheet parse / image
 // read recycles the instance so the next workbook renders on clean linear
@@ -150,6 +151,10 @@ self.onmessage = async (e: MessageEvent<
   RenderWorkerRequest | PullSessionCommand<number> | WorkerSvgDecodeResponse
 >) => {
   const req = e.data;
+
+  // Consumed by requestXlsFontMeasurement's listener, outside the correlated
+  // renderer protocol.
+  if ((req as { type?: unknown }).type === XLS_FONT_RESULT) return;
   if (isWorkerSvgDecodeResponse(req)) {
     svgDecodeClient.accept(req);
     return;
@@ -241,7 +246,9 @@ self.onmessage = async (e: MessageEvent<
       source.closeLegacy();
       if (req.source) {
         host.disposeArchive();
-        await source.openLegacy(new Uint8Array(req.data), req.source);
+        await source.openLegacy(
+          new Uint8Array(req.data), req.source, req.measureLegacyXlsNormalFont === true,
+        );
       } else {
         if (ooxmlWasmInput === undefined) throw new Error('XLSX WASM input was not configured');
         host.setWasmInput(ooxmlWasmInput);
@@ -275,7 +282,10 @@ self.onmessage = async (e: MessageEvent<
         // and await it in the renderViewport handler.
         fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
       }
-      post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
+      post({
+        type: 'parsed', id, workbook, usage: bootstrap.usage,
+        maximumDigitWidth: source.maximumDigitWidth,
+      });
       return;
     }
     if (req.type === 'renderViewport') {
@@ -300,7 +310,8 @@ self.onmessage = async (e: MessageEvent<
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
-      const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth;
+      const maximumDigitWidth = req.layoutMetrics?.maximumDigitWidth
+        ?? source.maximumDigitWidth;
       if (maximumDigitWidth !== undefined) {
         if (!Number.isFinite(maximumDigitWidth) || maximumDigitWidth <= 0) {
           throw new Error('XLSX maximum digit width must be a finite positive number');

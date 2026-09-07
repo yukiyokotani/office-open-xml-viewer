@@ -130,4 +130,44 @@ describe('XlsxViewer.load() — concurrent-load latch', () => {
     await first;
     v.destroy();
   });
+
+  it('retains a direct source signal after success until the owned workbook is destroyed', async () => {
+    const sourceController = new AbortController();
+    const source = {
+      protocol: 'ooxml-legacy-xls-source/v1' as const,
+      builtin: 'xls' as const,
+      wasmUrl: 'https://example.test/direct.wasm',
+    };
+    const measureLegacyXlsNormalFont = vi.fn(() => 9);
+    const { v } = build({
+      legacyConversion: { xls: { source, signal: sourceController.signal } },
+      measureLegacyXlsNormalFont,
+    });
+    let retainedCleanup: () => void = () => undefined;
+    let closed = false;
+    const destroy = vi.fn(() => {
+      if (closed) return;
+      closed = true;
+      retainedCleanup();
+    });
+    const workbook = {
+      sheetNames: ['Sheet1'],
+      tabColors: {} as Record<number, string>,
+      destroy,
+      getWorksheet: vi.fn().mockResolvedValue(undefined),
+      _retainLegacyXlsSignalCleanup(cleanup: () => void) { retainedCleanup = cleanup; },
+    } as unknown as XlsxWorkbook;
+    vi.spyOn(XlsxWorkbook, 'load').mockImplementation(async (_source, options) => {
+      expect(options?.measureLegacyXlsNormalFont).toBe(measureLegacyXlsNormalFont);
+      options?.legacyConversion?.xls?.signal?.addEventListener('abort', destroy, { once: true });
+      return workbook;
+    });
+
+    await v.load('book.xls');
+    expect(destroy).not.toHaveBeenCalled();
+    sourceController.abort();
+    expect(destroy).toHaveBeenCalledOnce();
+    v.destroy();
+    expect(destroy).toHaveBeenCalledTimes(2);
+  });
 });

@@ -1,4 +1,5 @@
 import { measureXlsFont, type LegacyXlsFontMeasurement, type LegacyXlsNormalFont } from './xls-font-metrics.js';
+export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from './xls-font-metrics.js';
 
 export const XLS_FONT_REQUEST = 'legacy-xls-font-request';
 export const XLS_FONT_RESULT = 'legacy-xls-font-result';

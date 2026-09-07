@@ -120,6 +120,15 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     expect(() => wb.destroy()).not.toThrow();
   });
 
+  it('detaches the direct XLS font measurement bridge exactly once', () => {
+    const { wb } = makeWorkbook();
+    const detach = vi.fn();
+    (wb as unknown as Record<string, unknown>).legacyXlsMeasurementCleanup = detach;
+    wb.destroy();
+    wb.destroy();
+    expect(detach).toHaveBeenCalledOnce();
+  });
+
   it('terminates the owned worker when a partially initialized load rejects', async () => {
     G.Worker = SilentWorker;
     G.location = { href: 'http://localhost/' };

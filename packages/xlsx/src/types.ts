@@ -1151,6 +1151,7 @@ export type WorkerRequest =
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       source?: import('@silurus/ooxml-core/internal/legacy-xls-source').LegacyXlsDirectSourceDescriptor;
+      measureLegacyXlsNormalFont?: boolean;
     }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
       PullSessionIdentity<number>)
@@ -1175,6 +1176,7 @@ export type WorkerResponse =
       id: number;
       workbookJson: ArrayBuffer;
       usage?: OoxmlResourceUsageSnapshot;
+      maximumDigitWidth?: number;
     }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>)
   | { type: 'imageExtracted'; id: number; bytes: ArrayBuffer }

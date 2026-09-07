@@ -4,6 +4,7 @@ export {
   type RenderViewportToBitmapOptions,
 } from './workbook.js';
 export { XlsxViewer, XlsxSheetViewer } from './viewer.js';
+export type { LegacyXlsFontMeasurement, LegacyXlsNormalFont } from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
 // Resolved list-validation values (reachable via XlsxWorkbook.resolveValidationList).
 export type { ResolvedList } from './validation-list.js';
 export type {
@@ -147,6 +148,10 @@ export {
   type LegacyOfficeConversionResult,
   type LegacyOfficeConverter,
   type LegacyOfficeFormatConversionOptions,
+  type LegacyPptDirectConversionOptions,
+  type LegacyPptDirectSourceDescriptor,
+  type LegacyXlsDirectConversionOptions,
+  type LegacyXlsDirectSourceDescriptor,
   type LegacyOfficeFormat,
   type OoxmlErrorCode,
   type OoxmlErrorStage,

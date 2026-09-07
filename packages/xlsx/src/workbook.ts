@@ -21,6 +21,10 @@ import {
 import { resolveXlsWorkbookInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
 import {
+  attachXlsFontMeasurement,
+} from '@silurus/ooxml-legacy-converter/internal/xls-font-worker';
+type LegacyXlsFontMeasurement = Parameters<typeof attachXlsFontMeasurement>[1];
+import {
   deserializeWorkerError,
   disposeRejectedLoad,
   normalizeLoadResourceOptions,
@@ -110,6 +114,8 @@ interface RetainedFontSet {
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `resourceLimits`, the
  *  deprecated `maxZipEntryBytes` alias, and `math`) with worker rendering. */
 export interface LoadOptions extends CoreLoadOptions {
+  /** Measure the actual Normal-style font for direct XLS column geometry. */
+  measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
   /**
    * 'main' (default): parse in a worker, render on the main thread (current
    * behaviour). 'worker': parse AND render inside the worker; use
@@ -187,6 +193,8 @@ export class XlsxWorkbook {
   private resourceFailure: OoxmlResourceLimitError | null = null;
   private legacyXlsSignalCleanup: () => void = () => undefined;
   private destroyed = false;
+  private legacyXlsMeasurementCleanup: () => void = () => undefined;
+  private legacyXlsMaximumDigitWidth: number | undefined;
 
   private constructor(
     worker: Worker | null,
@@ -376,6 +384,11 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, nativeSource === undefined);
+      if (nativeSource && opts.measureLegacyXlsNormalFont) {
+        wb.legacyXlsMeasurementCleanup = attachXlsFontMeasurement(
+          worker, opts.measureLegacyXlsNormalFont,
+        );
+      }
       wb.metrics = metrics;
       await wb.bindLegacyXlsSignal(wb._load(
         buffer,
@@ -471,6 +484,8 @@ export class XlsxWorkbook {
               useGoogleFonts: !!opts.useGoogleFonts,
               renderers: rendererDescriptors,
               source: nativeSource,
+              measureLegacyXlsNormalFont: nativeSource !== undefined
+                && opts.measureLegacyXlsNormalFont !== undefined,
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
@@ -478,6 +493,8 @@ export class XlsxWorkbook {
               data: workerData,
               resourcePolicy,
               source: nativeSource,
+              measureLegacyXlsNormalFont: nativeSource !== undefined
+                && opts.measureLegacyXlsNormalFont !== undefined,
             } satisfies WorkerRequest),
       [workerData],
       { timeoutMs: opts.workerTimeoutMs },
@@ -488,9 +505,11 @@ export class XlsxWorkbook {
     if (this._mode === 'worker') {
       const response = parsed as Extract<RenderWorkerResponse, { type: 'parsed' }>;
       this.parsedWorkbook = response.workbook;
+      this.legacyXlsMaximumDigitWidth = response.maximumDigitWidth;
       if (response.usage) onUsage?.(response.usage);
     } else {
       const { workbookJson, usage } = parsed as Extract<WorkerResponse, { type: 'parsed' }>;
+      this.legacyXlsMaximumDigitWidth = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).maximumDigitWidth;
       if (usage) onUsage?.(usage);
       this.parsedWorkbook = JSON.parse(
         new TextDecoder().decode(new Uint8Array(workbookJson)),
@@ -771,6 +790,9 @@ export class XlsxWorkbook {
       // Only now commit Browser-retained cache ownership/accounting.
       this.retainedSheetUsage = nextCacheUsage;
       this.sheetCache.set(sheetIndex, terminal);
+      if (this.legacyXlsMaximumDigitWidth !== undefined) {
+        GridGeometry.forWorksheet(terminal, this.legacyXlsMaximumDigitWidth);
+      }
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;
@@ -976,8 +998,10 @@ export class XlsxWorkbook {
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
       if (ws !== source) inheritSheetRenderCache(source, ws);
-      if (extracted.layoutMetrics) {
-        GridGeometry.forWorksheet(ws, extracted.layoutMetrics.maximumDigitWidth);
+      const maximumDigitWidth = extracted.layoutMetrics?.maximumDigitWidth
+        ?? this.legacyXlsMaximumDigitWidth;
+      if (maximumDigitWidth !== undefined) {
+        GridGeometry.forWorksheet(ws, maximumDigitWidth);
       }
       return renderWorksheetViewport(
         {
@@ -1034,7 +1058,10 @@ export class XlsxWorkbook {
             sheetIndex,
             viewport,
             opts: wireOpts,
-            layoutMetrics: extracted.layoutMetrics,
+            layoutMetrics: extracted.layoutMetrics
+              ?? (this.legacyXlsMaximumDigitWidth === undefined ? undefined : {
+                maximumDigitWidth: this.legacyXlsMaximumDigitWidth,
+              }),
             viewProjection: extracted.projection,
           }) satisfies RenderWorkerRequest,
         ));
@@ -1096,6 +1123,8 @@ export class XlsxWorkbook {
   }
 
   destroy(): void {
+    this.legacyXlsMeasurementCleanup?.();
+    this.legacyXlsMeasurementCleanup = () => undefined;
     this.legacyXlsSignalCleanup?.();
     this.destroyed = true;
     this.generation = (this.generation ?? 1) + 1;

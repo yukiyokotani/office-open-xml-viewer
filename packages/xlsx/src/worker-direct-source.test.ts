@@ -44,12 +44,23 @@ vi.mock('./wasm/xlsx_parser.js', () => ({
   XlsxArchive: OoxmlArchive,
 }));
 
+// Parse-only worker assertions do not exercise rendering; settle the render
+// worker's lazy module handles inside the test environment.
+vi.mock('./renderer.js', () => ({}));
+vi.mock('./render-orchestrator.js', () => ({}));
+vi.mock('./delimited-text.js', () => ({}));
+
 const bootstrap = { workbook: { sheets: [] }, styles: {}, sharedStrings: [] };
 
-function directArchive() {
+function directArchive(measurement = false) {
   return {
     free: vi.fn(),
-    measurement_request: vi.fn(() => new TextEncoder().encode('{"required":false,"font":null}')),
+    measurement_request: vi.fn(() => new TextEncoder().encode(measurement
+      ? JSON.stringify({
+          required: true,
+          font: { name: 'Arial', sizePoints: 10, bold: false, italic: false },
+        })
+      : '{"required":false,"font":null}')),
     configure_mdw: vi.fn(),
     parse: vi.fn(() => new TextEncoder().encode(JSON.stringify(bootstrap))),
     assert_healthy: vi.fn(),
@@ -67,6 +78,27 @@ function directArchive() {
   };
 }
 
+function workerScope(
+  posted: (message: unknown, transfer?: Transferable[]) => unknown,
+  width: number,
+) {
+  const listeners = new Set<EventListener>();
+  return {
+    onmessage: null as ((event: MessageEvent) => Promise<void>) | null,
+    addEventListener: (_type: string, listener: EventListener) => listeners.add(listener),
+    removeEventListener: (_type: string, listener: EventListener) => listeners.delete(listener),
+    postMessage: (message: unknown, transfer?: Transferable[]) => {
+      posted(message, transfer);
+      if ((message as { type?: string }).type === 'legacy-xls-font-request') {
+        queueMicrotask(() => {
+          const event = { data: { type: 'legacy-xls-font-result', width } } as MessageEvent;
+          for (const listener of [...listeners]) listener(event);
+        });
+      }
+    },
+  };
+}
+
 vi.mock('@silurus/ooxml-legacy-converter/internal/direct-xls-engine', async (load) => ({
   ...await load<typeof import('@silurus/ooxml-legacy-converter/internal/direct-xls-engine')>(),
   openLegacyXlsSource: state.directOpen,
@@ -80,9 +112,9 @@ describe('XLSX parse worker direct source dispatch', () => {
 
   it('does not initialize OOXML for direct parse and closes on reparse', async () => {
     const posted = vi.fn();
-    const scope = { postMessage: posted, onmessage: null as ((event: MessageEvent) => Promise<void>) | null };
+    const scope = workerScope(posted, 7);
     vi.stubGlobal('self', scope);
-    const first = directArchive();
+    const first = directArchive(true);
     const second = directArchive();
     state.directOpen
       .mockResolvedValueOnce({ archive: first, sourceByteLength: 3, closeArchive: state.directClose })
@@ -96,10 +128,14 @@ describe('XLSX parse worker direct source dispatch', () => {
     const policy = { maxArchiveEntryBytes: 1, maxTotalInflatedBytes: 1, maxArchiveEntries: 1 };
 
     await dispatch({ data: { type: 'init', wasmUrl: 'https://example.test/xlsx.wasm' } } as MessageEvent);
-    await dispatch({ data: { type: 'parse', id: 1, data: new ArrayBuffer(3), resourcePolicy: policy, source } } as MessageEvent);
+    await dispatch({ data: { type: 'parse', id: 1, data: new ArrayBuffer(3), resourcePolicy: policy, source, measureLegacyXlsNormalFont: true } } as MessageEvent);
     expect(state.ensureReady).not.toHaveBeenCalled();
     expect(state.setWasmInput).not.toHaveBeenCalled();
     expect(first.parse).toHaveBeenCalledOnce();
+    expect(first.configure_mdw).toHaveBeenCalledWith(7);
+    expect(posted).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'parsed', maximumDigitWidth: 7,
+    }), expect.any(Array));
 
     await dispatch({ data: { type: 'openSheetSession', id: 2, sheetIndex: 0, sheetName: 'S', sessionId: 1, operationId: 1, generation: 1 } } as MessageEvent);
     expect(first.open_sheet_cursor).toHaveBeenCalledWith(0, 'S');
@@ -122,9 +158,9 @@ describe('XLSX parse worker direct source dispatch', () => {
 
   it('keeps render-worker direct parse off the OOXML runtime and cleans up on replacement', async () => {
     const posted = vi.fn();
-    const scope = { postMessage: posted, onmessage: null as ((event: MessageEvent) => Promise<void>) | null };
+    const scope = workerScope(posted, 9);
     vi.stubGlobal('self', scope);
-    const first = directArchive();
+    const first = directArchive(true);
     const second = directArchive();
     state.directOpen
       .mockResolvedValueOnce({ archive: first, sourceByteLength: 3, closeArchive: state.directClose })
@@ -142,10 +178,15 @@ describe('XLSX parse worker direct source dispatch', () => {
     await dispatch({ data: { type: 'init', wasmUrl: 'https://example.test/xlsx.wasm' } } as MessageEvent);
     await dispatch({ data: {
       type: 'parse', id: 11, data: new ArrayBuffer(3), resourcePolicy, source,
+      measureLegacyXlsNormalFont: true,
     } } as MessageEvent);
     expect(state.ensureReady).not.toHaveBeenCalled();
     expect(state.setWasmInput).not.toHaveBeenCalled();
     expect(first.parse).toHaveBeenCalledOnce();
+    expect(first.configure_mdw).toHaveBeenCalledWith(9);
+    expect(posted).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'parsed', maximumDigitWidth: 9,
+    }), undefined);
 
     await dispatch({ data: {
       type: 'parse', id: 12, data: new ArrayBuffer(3), resourcePolicy, source,
