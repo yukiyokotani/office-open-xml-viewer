@@ -17,7 +17,8 @@
 // Implemented records: SETWINDOWORG, SETWINDOWEXT, SETPOLYFILLMODE,
 // SETTEXTCOLOR, SETTEXTALIGN, CREATEPENINDIRECT, CREATEBRUSHINDIRECT,
 // CREATEFONTINDIRECT, SELECTOBJECT, DELETEOBJECT, POLYLINE, POLYGON,
-// POLYPOLYGON, RECTANGLE, TEXTOUT, a bounded ANSI EXTTEXTOUT subset,
+// POLYPOLYGON, RECTANGLE, MOVETO, LINETO, TEXTOUT, a bounded ANSI
+// EXTTEXTOUT subset,
 // STRETCHDIBITS (embedded raster DIB via the
 // shared decoder in ./dib.ts), EOF.
 // Ignored (no-op, skipped by size): SETROP2,
@@ -51,6 +52,8 @@ const META = {
   SETWINDOWEXT: 0x020c,
   SELECTOBJECT: 0x012d,
   DELETEOBJECT: 0x01f0,
+  LINETO: 0x0213,
+  MOVETO: 0x0214,
   TEXTOUT: 0x0521,
   EXTTEXTOUT: 0x0a32,
   ESCAPE: 0x0626,
@@ -135,6 +138,8 @@ interface Pen {
   kind: 'pen';
   stroke: string | null; // null = PS_NULL (no stroke)
   width: number; // device-independent logical width; mapped to ≥1 device px
+  lineWidth: number;
+  lineEligible: boolean;
 }
 interface Brush {
   kind: 'brush';
@@ -242,6 +247,10 @@ interface PlayState {
   bkMode: number;
   extTextSafe: boolean;
   extTextMappingSafe: boolean;
+  currentX: number;
+  currentY: number;
+  currentPositionKnown: boolean;
+  lineStateSafe: boolean;
   drew: boolean;
   // When true, strokes whose edge lies on the window/device boundary are
   // suppressed (docx cosmetic-frame heuristic; see deviceInteriorEdges). When
@@ -386,6 +395,51 @@ function strokePolyline(s: PlayState, pts: Array<[number, number]>): void {
   strokeEdges(s, pts, false);
 }
 
+/** MS-WMF 2.3.3.10: stroke from the playback DC drawing position and then
+ * update it to the destination. The specified endpoint is excluded by GDI;
+ * Canvas has no equivalent endpoint-exclusion primitive, so the geometric
+ * segment is emitted without an arbitrary device-pixel correction. */
+function strokeLineTo(s: PlayState, x: number, y: number): void {
+  const fromX = s.currentX;
+  const fromY = s.currentY;
+  const known = s.currentPositionKnown;
+  s.currentX = x;
+  s.currentY = y;
+  s.currentPositionKnown = true;
+  if (
+    !known ||
+    !s.lineStateSafe ||
+    !s.haveExt ||
+    !s.extTextMappingSafe ||
+    ![s.extX, s.extY, s.W, s.H].every(Number.isFinite) ||
+    !(s.W > 0 && s.H > 0) ||
+    !s.curPen ||
+    !s.curPen.lineEligible ||
+    s.curPen.stroke == null
+  ) return;
+
+  const { ctx } = s;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(mapX(s, fromX), mapY(s, fromY));
+  ctx.lineTo(mapX(s, x), mapY(s, y));
+  ctx.strokeStyle = s.curPen.stroke;
+  // A zero-width cosmetic pen is one device pixel. Positive logical widths use
+  // the window mapping directly; unlike the legacy polygon path, this does not
+  // empirically clamp positive subpixel widths to one pixel.
+  ctx.lineWidth = s.curPen.lineWidth === 0
+    ? 1
+    : s.curPen.lineWidth * (s.W / s.extX);
+  // This bounded path supports the normative PS_SOLID default combination:
+  // cosmetic pen, round end caps, and round joins (MS-WMF 2.1.1.23).
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
+  ctx.stroke();
+  ctx.restore();
+  s.drew = true;
+}
+
 /** Fill (current brush) + stroke (current pen) a single closed polygon. The
  *  stroke routes through {@link strokeEdges}, which applies the
  *  window/device-boundary suppression heuristic only when
@@ -450,6 +504,7 @@ function fillStrokePolyPolygon(s: PlayState, c: Cursor): void {
 }
 
 function createPen(c: Cursor): Pen {
+  const validLength = c.remaining === 10;
   const style = c.u16();
   const widthX = c.i16();
   c.i16(); // widthY (unused — WMF pens are isotropic in practice)
@@ -458,7 +513,11 @@ function createPen(c: Cursor): Pen {
   // PS_NULL (5) → no stroke. Dash/dot styles (1..4) are rendered solid (we do
   // not synthesize a dash pattern); see module note.
   const stroke = lowStyle === 5 ? null : colorRefToCss(color);
-  return { kind: 'pen', stroke, width: Math.abs(widthX) };
+  // Existing polygon/polyline playback retains its historical solid fallback.
+  // LINETO is stricter: only complete PS_SOLID or PS_NULL records with the
+  // default cosmetic/round-cap/round-join combination are eligible.
+  const lineEligible = validLength && widthX >= 0 && (style === 0 || style === 5);
+  return { kind: 'pen', stroke, width: Math.abs(widthX), lineWidth: widthX, lineEligible };
 }
 
 function createBrush(c: Cursor): Brush {
@@ -649,6 +708,12 @@ export function playWmf(
     bkMode: 2,
     extTextSafe: true,
     extTextMappingSafe: false,
+    currentX: 0,
+    currentY: 0,
+    // MS-WMF 3.1.5 makes initial playback-DC state device-dependent. Do not
+    // invent an initial drawing position; wait for META_MOVETO.
+    currentPositionKnown: false,
+    lineStateSafe: true,
     drew: false,
     suppressBoundaryFrame,
   };
@@ -671,13 +736,23 @@ export function playWmf(
     switch (fn) {
       case META.SETWINDOWORG: {
         // params: i16 yOrg, i16 xOrg (Y FIRST)
-        if (c.remaining !== 4) { s.extTextSafe = false; break; }
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+          break;
+        }
         s.orgY = c.i16(); s.orgX = c.i16();
         break;
       }
       case META.SETWINDOWEXT: {
         // params: i16 yExt, i16 xExt (Y FIRST)
-        if (c.remaining !== 4) { s.extTextSafe = false; break; }
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const yExt = c.i16();
         const xExt = c.i16();
         s.extTextMappingSafe = xExt > 0 && yExt > 0;
@@ -697,7 +772,11 @@ export function playWmf(
         break;
       }
       case META.SETTEXTALIGN: {
-        if (c.remaining !== 2 && c.remaining !== 4) { s.extTextSafe = false; break; }
+        if (c.remaining !== 2 && c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         s.textAlign = c.u16();
         if (c.remaining === 2) c.u16(); // Optional Reserved; MUST be ignored.
         break;
@@ -714,30 +793,48 @@ export function playWmf(
         break;
       }
       case META.CREATEPENINDIRECT: {
+        if (c.remaining !== 10) s.lineStateSafe = false;
         insertObject(s.objects, createPen(c));
         break;
       }
       case META.CREATEBRUSHINDIRECT: {
+        if (c.remaining !== 8) s.lineStateSafe = false;
         insertObject(s.objects, createBrush(c));
         break;
       }
       case META.CREATEFONTINDIRECT: {
-        if (c.remaining < 18) { s.extTextSafe = false; break; }
+        if (c.remaining < 18) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
+        if (c.remaining !== 50) s.lineStateSafe = false;
         insertObject(s.objects, createFont(c));
         break;
       }
       case META.SELECTOBJECT: {
-        if (c.remaining !== 2) { s.extTextSafe = false; break; }
+        if (c.remaining !== 2) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const idx = c.u16();
         const obj = s.objects[idx];
         if (obj?.kind === 'pen') s.curPen = obj;
         else if (obj?.kind === 'brush') s.curBrush = obj;
         else if (obj?.kind === 'font') s.curFont = obj;
-        else s.extTextSafe = false;
+        else {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+        }
         break;
       }
       case META.DELETEOBJECT: {
-        if (c.remaining !== 2) { s.extTextSafe = false; break; }
+        if (c.remaining !== 2) {
+          s.extTextSafe = false;
+          s.lineStateSafe = false;
+          break;
+        }
         const idx = c.u16();
         const obj = s.objects[idx];
         if (obj) {
@@ -776,6 +873,30 @@ export function playWmf(
         ]);
         break;
       }
+      case META.MOVETO: {
+        // MS-WMF 2.3.5.4: params are i16 Y followed by i16 X.
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          break;
+        }
+        s.currentY = c.i16();
+        s.currentX = c.i16();
+        s.currentPositionKnown = true;
+        break;
+      }
+      case META.LINETO: {
+        // MS-WMF 2.3.3.10: params are i16 Y followed by i16 X.
+        if (c.remaining !== 4) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          break;
+        }
+        const y = c.i16();
+        const x = c.i16();
+        strokeLineTo(s, x, y);
+        break;
+      }
       case META.TEXTOUT: {
         // META_TEXTOUT params: u16 StringLength, String bytes padded to a WORD
         // boundary, then i16 yStart and i16 xStart.
@@ -785,10 +906,12 @@ export function playWmf(
         const y = c.i16();
         const x = c.i16();
         drawTextOut(s, text, x, y);
+        if ((s.textAlign & 0x1) !== 0) s.currentPositionKnown = false;
         break;
       }
       case META.EXTTEXTOUT: {
         drawExtTextOut(s, c);
+        if ((s.textAlign & 0x1) !== 0) s.currentPositionKnown = false;
         break;
       }
       case META.ESCAPE: {
@@ -796,6 +919,8 @@ export function playWmf(
         const count = c.remaining >= 2 ? c.u16() : -1;
         if (escape !== 15 || count < 0 || c.remaining !== count + (count & 1)) {
           s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
           break;
         }
         const data = c.bytes(count);
@@ -804,7 +929,11 @@ export function playWmf(
         // CommentIdentifier (MS-WMF 2.3.6.25); nested graphics state is outside
         // this player. Historical Microsoft SDK Q81497 documents non-WMFC
         // private comments as ignored during ordinary playback (no DC change).
-        if (data.length >= 4 && new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true) === 0x43464d57) s.extTextSafe = false;
+        if (data.length >= 4 && new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true) === 0x43464d57) {
+          s.extTextSafe = false;
+          s.currentPositionKnown = false;
+          s.lineStateSafe = false;
+        }
         break;
       }
       case META.STRETCHDIBITS: {
@@ -852,6 +981,8 @@ export function playWmf(
         // this bounded player, although established geometry handlers remain
         // unaffected and the record is still skipped by its declared size.
         s.extTextSafe = false;
+        s.currentPositionKnown = false;
+        s.lineStateSafe = false;
         break;
     }
 
