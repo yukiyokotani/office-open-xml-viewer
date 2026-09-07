@@ -3,14 +3,14 @@ use super::*;
 
 #[derive(Clone, Default, PartialEq)]
 pub(super) struct Bullet {
-    enabled: Option<bool>,
-    has_font: Option<bool>,
-    has_color: Option<bool>,
-    has_size: Option<bool>,
-    character: Option<u16>,
-    font: Option<u16>,
-    size: Option<i16>,
-    color: Option<u32>,
+    pub(in crate::ppt::text_style) enabled: Option<bool>,
+    pub(in crate::ppt::text_style) has_font: Option<bool>,
+    pub(in crate::ppt::text_style) has_color: Option<bool>,
+    pub(in crate::ppt::text_style) has_size: Option<bool>,
+    pub(in crate::ppt::text_style) character: Option<u16>,
+    pub(in crate::ppt::text_style) font: Option<u16>,
+    pub(in crate::ppt::text_style) size: Option<i16>,
+    pub(in crate::ppt::text_style) color: Option<u32>,
 }
 impl Bullet {
     pub fn read(reader: &mut Reader<'_, '_>, mask: u32) -> Result<Self, String> {

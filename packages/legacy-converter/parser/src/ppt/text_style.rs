@@ -2,6 +2,10 @@
 use super::*;
 pub(super) mod auto_number;
 mod bullet;
+// This projection is intentionally not wired until the direct slide producer
+// owns a bounded session; keep its focused tests live during that integration.
+#[allow(dead_code)]
+pub(super) mod direct_model;
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct Context<'a> {

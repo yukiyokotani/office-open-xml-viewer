@@ -27,6 +27,8 @@ flate2 = { workspace = true }
 wasm-bindgen = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+pptx-model = { workspace = true }
+ooxml-common = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
