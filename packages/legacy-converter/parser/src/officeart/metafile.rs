@@ -1,15 +1,29 @@
 //! Passive EMF/WMF extraction. MS-ODRAW 2.2.24-25/31.
+use super::raster::DecodedBytes;
 use super::{unsupported, Record};
+#[cfg(test)]
 use std::borrow::Cow;
 
 // Resource policy, not a format limit. Check before allocating or inflating.
 const MAX_METAFILE_BYTES: usize = 32 * 1024 * 1024;
 
+#[cfg(test)]
 pub(super) fn read<'a>(
     record: Record<'a>,
     budget: &mut usize,
     remaining: usize,
 ) -> Result<Option<Cow<'a, [u8]>>, String> {
+    Ok(decode(record, budget, remaining)?.map(|bytes| match bytes {
+        DecodedBytes::Source(range) => Cow::Borrowed(&record.payload[range]),
+        DecodedBytes::Owned(bytes) => Cow::Owned(bytes),
+    }))
+}
+
+pub(super) fn decode(
+    record: Record<'_>,
+    budget: &mut usize,
+    remaining: usize,
+) -> Result<Option<DecodedBytes>, String> {
     let (start, format) = match (record.kind, record.version, record.instance) {
         (0xf01a, 0, 0x3d4) => (16, Format::Emf),
         (0xf01a, 0, 0x3d5) => (32, Format::Emf),
@@ -26,12 +40,13 @@ pub(super) fn read<'a>(
     if expanded > MAX_METAFILE_BYTES || expanded > remaining || stored > MAX_METAFILE_BYTES {
         return Err(unsupported("OfficeArt metafile byte budget exceeded"));
     }
-    let bytes = &record.payload[start + 34..];
+    let source_range = start + 34..record.payload.len();
+    let bytes = &record.payload[source_range.clone()];
     if bytes.len() != stored || header[33] != 0xfe {
         return Err(unsupported("invalid OfficeArt metafile size or filter"));
     }
     let bytes = match header[32] {
-        0xfe if stored == expanded => Cow::Borrowed(bytes),
+        0xfe if stored == expanded => DecodedBytes::Source(source_range),
         0 => {
             // RFC 1950 zlib-wrapped DEFLATE. One spare byte detects a lying
             // cbSize without allowing the decoder to grow its destination.
@@ -49,20 +64,21 @@ pub(super) fn read<'a>(
                 ));
             }
             output.truncate(expanded);
-            Cow::Owned(output)
+            DecodedBytes::Owned(output)
         }
         _ => return Err(unsupported("unsupported OfficeArt metafile compression")),
     };
     // Preserve only the record's declared metafile encoding; never interpret it.
+    let viewed = bytes.view(record.payload);
     match format {
         Format::Emf => {
-            if bytes.len() < 44 || number(&bytes, 0) != 1 || number(&bytes, 40) != 0x464d4520 {
+            if viewed.len() < 44 || number(viewed, 0) != 1 || number(viewed, 40) != 0x464d4520 {
                 return Ok(None);
             }
-            validate_emf(&bytes, budget)?;
+            validate_emf(viewed, budget)?;
         }
         Format::Wmf => {
-            if !validate_wmf(&bytes, budget)? {
+            if !validate_wmf(viewed, budget)? {
                 return Ok(None);
             }
         }
