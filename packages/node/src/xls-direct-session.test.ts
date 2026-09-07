@@ -74,7 +74,8 @@ describe('Node direct XLS native session', () => {
           if (chunk.kind !== 'finished') continue;
           expect(chunk.worksheet.images).toHaveLength(1);
           // Authored STANDARDWIDTH is 10 characters; the anchor is at
-          // 512/1024 of its first column (MS-XLS ClientAnchorSheet).
+          // 512/1024 of its first column ([MS-XLS] 2.5.193,
+          // OfficeArtClientAnchorSheet.dxL).
           expect(chunk.worksheet.images?.[0].fromColOff).toBe(10 * width / 2 * 9525);
           const geometry = GridGeometry.forWorksheetMeasured(chunk.worksheet, () => {
             throw new Error('source geometry must not be remeasured');
