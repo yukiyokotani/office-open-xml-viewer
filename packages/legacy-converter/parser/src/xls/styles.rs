@@ -176,6 +176,10 @@ impl ResolvedStyleFont {
 }
 
 impl ResolvedStyleSheet {
+    pub(super) fn default_font(&self) -> Option<(&str, f64)> {
+        let font = self.fonts.get(self.xfs.first()?.font_id)?;
+        Some((&font.font.name, f64::from(font.font.size_twips) / 20.0))
+    }
     pub(super) fn xml(&self) -> String {
         if self.minimal {
             return minimal_styles();
@@ -219,6 +223,90 @@ impl ResolvedStyleSheet {
                 .collect(),
             dxfs: Vec::new(),
         }
+    }
+
+    pub(super) fn into_model_bounded(
+        self,
+        budget: &mut usize,
+    ) -> Result<xlsx_model::Styles, String> {
+        let mut bytes = self
+            .fonts
+            .len()
+            .checked_mul(std::mem::size_of::<xlsx_model::Font>())
+            .and_then(|n| n.checked_add(self.fills.len() * std::mem::size_of::<xlsx_model::Fill>()))
+            .and_then(|n| {
+                n.checked_add(self.borders.len() * std::mem::size_of::<xlsx_model::Border>())
+            })
+            .and_then(|n| n.checked_add(self.xfs.len() * std::mem::size_of::<xlsx_model::CellXf>()))
+            .and_then(|n| {
+                n.checked_add(self.formats.len() * std::mem::size_of::<xlsx_model::NumFmt>())
+            })
+            .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        for font in &self.fonts {
+            let underline = match font.font.underline {
+                Underline::None | Underline::Single => 0,
+                value => value.xml_value().len(),
+            };
+            let script = match font.font.script {
+                Script::Baseline => 0,
+                value => value.xml_value().len(),
+            };
+            bytes = bytes
+                .checked_add(font.font.name.len())
+                .and_then(|n| n.checked_add(7))
+                .and_then(|n| n.checked_add(underline + script))
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        for fill in &self.fills {
+            let owned = match fill {
+                ResolvedFill::None => "none".len(),
+                ResolvedFill::Gray125 => "gray125".len(),
+                ResolvedFill::Pattern { pattern, .. } => pattern.len() + 14,
+            };
+            bytes = bytes
+                .checked_add(owned)
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        for border in &self.borders {
+            for edge in [
+                &border.left,
+                &border.right,
+                &border.top,
+                &border.bottom,
+                &border.diagonal,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bytes = bytes
+                    .checked_add(edge.style.len() + 7)
+                    .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+            }
+        }
+        for border in &self.borders {
+            // border_model clones the projected diagonal for diagonal_up.
+            if border.diagonal_up {
+                if let Some(edge) = &border.diagonal {
+                    bytes = bytes
+                        .checked_add(edge.style.len() + 7)
+                        .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+                }
+            }
+        }
+        for xf in &self.xfs {
+            bytes = bytes
+                .checked_add(xf.horizontal.len() + xf.vertical.len())
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        for format in self.formats.values() {
+            bytes = bytes
+                .checked_add(format.capacity())
+                .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        }
+        *budget = budget
+            .checked_sub(bytes)
+            .ok_or_else(|| unsupported("XLS style model byte budget exceeded"))?;
+        Ok(self.into_model())
     }
 
     fn run_font(&self, index: u16) -> Result<&ResolvedStyleFont, String> {
@@ -836,6 +924,41 @@ mod tests {
         data.push(b'F');
         data
     }
+    #[test]
+    fn bounded_model_accounts_for_font_variants_and_both_diagonals() {
+        fn fixture() -> ResolvedStyleSheet {
+            let mut source = minimal_resolved();
+            source.fonts[0].font.underline = Underline::Double;
+            source.fonts[0].font.script = Script::Superscript;
+            source.borders[0].diagonal_up = true;
+            source.borders[0].diagonal_down = true;
+            source.borders[0].diagonal = Some(ResolvedEdge {
+                style: "double",
+                color: ColorIdentity::Auto,
+            });
+            source
+        }
+        let mut budget = usize::MAX;
+        let model = fixture().into_model_bounded(&mut budget).unwrap();
+        let required = usize::MAX - budget;
+        assert_eq!(model.fonts[0].underline_style.as_deref(), Some("double"));
+        assert_eq!(model.fonts[0].vert_align.as_deref(), Some("superscript"));
+        assert!(model.borders[0].diagonal_up.is_some());
+        assert!(model.borders[0].diagonal_down.is_some());
+        let mut plain_budget = usize::MAX;
+        minimal_resolved()
+            .into_model_bounded(&mut plain_budget)
+            .unwrap();
+        assert_eq!(
+            plain_budget - budget,
+            "double".len() + "superscript".len() + 2 * ("double".len() + 7)
+        );
+        let mut exact = required;
+        fixture().into_model_bounded(&mut exact).unwrap();
+        assert_eq!(exact, 0);
+        assert!(fixture().into_model_bounded(&mut (required - 1)).is_err());
+    }
+
     #[test]
     fn minimal_native_model_matches_minimal_styles_xml_defaults() {
         let s = Styles {

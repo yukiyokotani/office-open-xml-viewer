@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, HashSet};
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package, xml_attr, xml_text, ROOT_RELS_XLSX};
 
+mod direct;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod direct_corpus_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod direct_strings_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -208,7 +211,18 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
         .stream("Workbook")
         .or_else(|_| cfb.stream("Book"))
         .map_err(unsupported)?;
-    let records = records(&workbook)?;
+    prepare_workbook(&workbook, with_pictures, false)
+}
+
+fn prepare_workbook(
+    workbook: &[u8],
+    with_pictures: bool,
+    direct: bool,
+) -> Result<PreparedXls, String> {
+    let records = records(workbook)?;
+    if direct {
+        validate_direct_retention(&records)?;
+    }
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF workbook"))?;
@@ -360,6 +374,69 @@ pub(crate) fn prepare(cfb: &CompoundFile<'_>, with_pictures: bool) -> Result<Pre
         font,
         pictures,
     })
+}
+
+fn prepare_direct(cfb: &CompoundFile<'_>) -> Result<PreparedXls, String> {
+    const MAX_DIRECT_WORKBOOK_BYTES: usize = 256 * 1024 * 1024;
+    let streams = cfb.scoped_streams().map_err(unsupported)?;
+    let workbook = match streams.optional_stream(&["Workbook"], MAX_DIRECT_WORKBOOK_BYTES) {
+        Ok(Some(value)) => value,
+        Ok(None) => streams
+            .stream(&["Book"], MAX_DIRECT_WORKBOOK_BYTES)
+            .map_err(unsupported)?,
+        Err(error) => return Err(unsupported(error)),
+    };
+    prepare_workbook(&workbook, true, true)
+}
+
+fn validate_direct_retention(records: &[Record<'_>]) -> Result<(), String> {
+    const MAX_DIRECT_NEUTRAL_BYTES: usize = 256 * 1024 * 1024;
+    const MAX_DIRECT_CELLS: usize = 1_000_000;
+    const MAX_DIRECT_ROWS: usize = 1_000_000;
+    let mut cells = 0usize;
+    let mut rows = 0usize;
+    let mut decoded_text_bytes = 0usize;
+    for record in records {
+        match record.kind {
+            NUMBER | RK | LABELSST | LABEL | BOOLERR | FORMULA | 0x0201 => {
+                cells = cells.saturating_add(1)
+            }
+            MULRK => cells = cells.saturating_add(record.data.len().saturating_sub(6) / 6),
+            0x00be => cells = cells.saturating_add(record.data.len().saturating_sub(6) / 2),
+            0x0208 => rows = rows.saturating_add(1),
+            _ => {}
+        }
+        let chars = match record.kind {
+            LABEL => record.data.get(6..8),
+            STRING => record.data.get(..2),
+            _ => None,
+        };
+        if let Some(chars) = chars {
+            let units = usize::from(u16::from_le_bytes([chars[0], chars[1]]));
+            decoded_text_bytes = decoded_text_bytes.saturating_add(units.saturating_mul(3));
+        }
+    }
+    let possible_rows = rows.saturating_add(cells);
+    if cells > MAX_DIRECT_CELLS || possible_rows > MAX_DIRECT_ROWS {
+        return Err(unsupported("XLS direct neutral entry-count limit exceeded"));
+    }
+    // Logical payload accounting only; allocator bookkeeping is intentionally
+    // excluded and independently bounded by the entry-count limits above.
+    // UTF-16 source units may expand to three UTF-8 bytes; count that decoded
+    // upper bound separately before allocating LABEL/formula STRING values.
+    let cell_bytes = std::mem::size_of::<u16>()
+        + std::mem::size_of::<CellValue>()
+        + std::mem::size_of::<((u16, u16), u16)>();
+    let row_bytes = std::mem::size_of::<u16>() + std::mem::size_of::<BTreeMap<u16, CellValue>>();
+    let retained = cells
+        .checked_mul(cell_bytes)
+        .and_then(|value| value.checked_add(possible_rows.checked_mul(row_bytes)?))
+        .and_then(|value| value.checked_add(decoded_text_bytes))
+        .ok_or_else(|| unsupported("XLS direct neutral retention size overflow"))?;
+    if retained > MAX_DIRECT_NEUTRAL_BYTES {
+        return Err(unsupported("XLS direct neutral retention budget exceeded"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

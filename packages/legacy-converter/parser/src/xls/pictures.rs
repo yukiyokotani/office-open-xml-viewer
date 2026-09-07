@@ -375,6 +375,68 @@ fn prefix(last: u16, mut dimension: impl FnMut(u16) -> Option<f64>) -> Vec<Optio
 }
 
 #[cfg(test)]
+pub(super) fn session_fixture() -> (Pictures, SheetData, &'static str, Vec<u8>) {
+    use super::drawing_anchors::PictureReference;
+    let mut sheet = SheetData::default();
+    sheet
+        .geometry
+        .read(&Record {
+            kind: 0x225,
+            offset: 0,
+            data: &[0, 0, 44, 1],
+        })
+        .unwrap();
+    sheet
+        .geometry
+        .read(&Record {
+            kind: 0x55,
+            offset: 0,
+            data: &[10, 0],
+        })
+        .unwrap();
+    let anchor = DrawingAnchor {
+        sheet: 0,
+        shape_id: 1,
+        shape_flags: 0,
+        object_id: 1,
+        object_type: 8,
+        object_flags: 0,
+        group_depth: 1,
+        behavior: 2,
+        from: CellCorner {
+            column: 0,
+            row: 0,
+            dx: 0,
+            dy: 0,
+        },
+        to: CellCorner {
+            column: 1,
+            row: 1,
+            dx: 0,
+            dy: 0,
+        },
+        picture: Some(PictureReference {
+            store_index: 7,
+            crop: [0; 4],
+            rotation: 0,
+            clipboard_format: 9,
+            auto_picture: true,
+        }),
+    };
+    let bytes = vec![1, 2, 3, 4];
+    (
+        Pictures {
+            anchors: BTreeMap::from([(0, vec![anchor])]),
+            images: vec![(7, "png", bytes.clone())],
+            unsupported_images: false,
+        },
+        sheet,
+        "legacy-xls/image/7",
+        bytes,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::drawing_anchors::PictureReference;
     use super::*;

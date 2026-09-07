@@ -92,6 +92,15 @@ impl Text {
         budget: &mut usize,
     ) -> Result<xlsx_model::SharedString, String> {
         charge_model(budget, std::mem::size_of::<xlsx_model::SharedString>())?;
+        self.model_into_reserved_slot(styles, budget)
+    }
+
+    /// The owning vector has already charged and reserved this SharedString slot.
+    pub(super) fn model_into_reserved_slot(
+        &self,
+        styles: &ResolvedStyleSheet,
+        budget: &mut usize,
+    ) -> Result<xlsx_model::SharedString, String> {
         let text = clone_bounded(&self.text, budget)?;
         let runs = if self.runs.is_empty() {
             None
@@ -395,6 +404,29 @@ mod tests {
         let mut xml_budget = usize::MAX;
         let xml = text.xml(&styles, &mut xml_budget).unwrap();
         assert!(xml.contains("a\rb\r\nc�d"));
+    }
+
+    #[test]
+    fn reserved_slot_projection_charges_only_owned_payload() {
+        let styles = super::super::styles::minimal_resolved();
+        let text = super::Text::new(&"sample".encode_utf16().collect::<Vec<_>>(), &[]).unwrap();
+        let mut standalone = usize::MAX;
+        let expected = text.model(&styles, &mut standalone).unwrap();
+        let mut reserved = usize::MAX;
+        let actual = text
+            .model_into_reserved_slot(&styles, &mut reserved)
+            .unwrap();
+        assert_eq!(
+            reserved - standalone,
+            std::mem::size_of::<xlsx_model::SharedString>()
+        );
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        let mut exact = usize::MAX - reserved;
+        text.model_into_reserved_slot(&styles, &mut exact).unwrap();
+        assert_eq!(exact, 0);
     }
 
     #[test]
