@@ -179,6 +179,11 @@ fn resource_index(key: &str) -> Result<u32, String> {
 }
 
 #[cfg(test)]
+pub(super) fn cursor_fixture() -> (DirectSession, Vec<u8>) {
+    tests::cursor_fixture()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cfb::test_support::build_cfb;
@@ -259,6 +264,31 @@ mod tests {
         let shape = record(15, 0xf004, &[shape_flags, anchor].concat());
         let drawing = record(15, 1036, &record(15, 0xf002, &shape));
         record(15, SLIDE_CONTAINER, &drawing)
+    }
+
+    pub(super) fn cursor_fixture() -> (DirectSession, Vec<u8>) {
+        let (mut document, edit) = persist::tests::fixture();
+        let mut work = MAX_RECORDS;
+        let mut presentation = persist::resolve_owned(&document, edit, &mut work).unwrap();
+        let (png, blip) = png_blip();
+        let offset = document.len();
+        document.extend_from_slice(&blip);
+        let entry = record_span_with_end(&document, offset, &mut work, "PowerPoint")
+            .unwrap()
+            .0;
+        presentation.image_entries = vec![entry];
+        let slide_offset = document.len();
+        document.extend_from_slice(&slide_with_shape());
+        presentation.slides[0].0 =
+            record_span_with_end(&document, slide_offset, &mut work, "PowerPoint")
+                .unwrap()
+                .0;
+        let mut session = DirectSession::from_resolved(document, None, presentation, work);
+        assert!(session
+            .media
+            .reference(1, &session.document, None, &mut session.work_budget)
+            .unwrap());
+        (session, png)
     }
 
     #[test]
@@ -345,28 +375,7 @@ mod tests {
 
     #[test]
     fn session_owns_sources_keeps_cumulative_budgets_and_poisoning_hides_admitted_media() {
-        let (mut document, edit) = persist::tests::fixture();
-        let mut work = MAX_RECORDS;
-        let mut presentation = persist::resolve_owned(&document, edit, &mut work).unwrap();
-        let (png, blip) = png_blip();
-        let offset = document.len();
-        document.extend_from_slice(&blip);
-        let entry = record_span_with_end(&document, offset, &mut work, "PowerPoint")
-            .unwrap()
-            .0;
-        presentation.image_entries = vec![entry];
-        let slide_offset = document.len();
-        document.extend_from_slice(&slide_with_shape());
-        presentation.slides[0].0 =
-            record_span_with_end(&document, slide_offset, &mut work, "PowerPoint")
-                .unwrap()
-                .0;
-        let mut session = DirectSession::from_resolved(document, None, presentation, work);
-
-        assert!(session
-            .media
-            .reference(1, &session.document, None, &mut session.work_budget)
-            .unwrap());
+        let (mut session, png) = cursor_fixture();
         let first = session.resource("legacy-ppt/image/1").unwrap();
         assert_eq!(first.extension, "png");
         assert_eq!(first.bytes, png);

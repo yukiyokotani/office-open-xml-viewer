@@ -9,6 +9,8 @@
 use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_PPTX};
 
+#[cfg(any(feature = "direct-ppt", feature = "inspection"))]
+pub(crate) mod direct_cursor;
 pub(crate) mod direct_session;
 mod drawing;
 mod media;

@@ -11,7 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 fuzzing = []
-inspection = ["dep:serde_json"]
+direct-ppt = ["dep:js-sys", "dep:serde_json"]
+inspection = ["direct-ppt"]
 
 [[example]]
 name = "inspect_xls_images"
@@ -28,6 +29,7 @@ required-features = ["inspection"]
 [dependencies]
 console_error_panic_hook = { workspace = true }
 flate2 = { workspace = true }
+js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }

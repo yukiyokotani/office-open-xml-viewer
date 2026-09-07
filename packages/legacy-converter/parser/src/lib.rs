@@ -1,8 +1,10 @@
-//! Purpose-built, minimum-sufficient Office 97-2003 to OOXML converter.
+//! Purpose-built passive Office 97-2003 readers.
 //!
-//! This crate is intentionally independent of the OOXML renderers. It reads an
-//! untrusted CFB container, extracts a documented passive subset, and creates a
-//! new macro-free OOXML package. Unsupported versions and encryption fail closed.
+//! The byte-conversion API extracts a documented passive subset from an untrusted
+//! CFB container into a new macro-free OOXML package. The optional `direct-ppt`
+//! feature instead exposes an experimental presentation source using the shared
+//! renderer model without OOXML emission. Neither path executes document code;
+//! unsupported versions and encryption fail closed.
 
 use wasm_bindgen::prelude::*;
 
@@ -11,6 +13,8 @@ mod doc;
 mod officeart;
 mod ooxml;
 mod ppt;
+#[cfg(feature = "direct-ppt")]
+mod ppt_wasm;
 mod xls;
 
 pub const ENGINE_ID: &str = "silurus-legacy-office";
