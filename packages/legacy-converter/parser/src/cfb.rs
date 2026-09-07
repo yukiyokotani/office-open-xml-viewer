@@ -3,10 +3,10 @@
 //! This intentionally implements only the read path needed by the converter.
 //! Sector chains, DIFAT/FAT tables, MiniFAT streams, and directory entries are
 //! validated before a legacy-format parser sees any bytes. The bounds follow
-//! [MS-CFB] sections 2.2 through 2.6; directory red/black-tree ordering is not
-//! needed because converter stream lookup is by exact well-known name.
+//! [MS-CFB] sections 2.2 through 2.6. Existing top-level lookup remains flat;
+//! parent-scoped lookup additionally validates the directory hierarchy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // [MS-CFB] 2.2 Compound File Header (`_abSig`). This is a byte sequence,
 // not a little-endian integer; reversing it would reject every Office file.
@@ -15,7 +15,6 @@ const FREE_SECTOR: u32 = 0xffff_ffff;
 const END_OF_CHAIN: u32 = 0xffff_fffe;
 const FAT_SECTOR: u32 = 0xffff_fffd;
 const DIFAT_SECTOR: u32 = 0xffff_fffc;
-#[cfg(any(test, feature = "fuzzing"))]
 const NO_STREAM: u32 = 0xffff_ffff;
 const HEADER_BYTES: usize = 512;
 const DIRECTORY_ENTRY_BYTES: usize = 128;
@@ -24,9 +23,14 @@ const MAX_DIRECTORY_ENTRIES: usize = 1_000_000;
 #[derive(Debug, Clone, Copy)]
 struct DirectoryEntry {
     object_type: u8,
+    left_sibling: u32,
+    right_sibling: u32,
+    child: u32,
     start_sector: u32,
     stream_size: u64,
 }
+
+type DirectorySlot = Option<(String, DirectoryEntry)>;
 
 pub struct CompoundFile<'a> {
     bytes: &'a [u8],
@@ -36,8 +40,56 @@ pub struct CompoundFile<'a> {
     physical_sectors: usize,
     fat: Vec<u32>,
     mini_fat: Vec<u32>,
-    directory: Vec<(String, DirectoryEntry)>,
+    // Raw directory IDs index this vector, including unallocated slots.
+    directory: Vec<DirectorySlot>,
     root_mini_stream: Vec<u8>,
+}
+
+pub struct ScopedStreams<'cfb, 'data> {
+    compound: &'cfb CompoundFile<'data>,
+    root: usize,
+    children: Vec<HashMap<String, usize>>,
+    has_non_ascii_child: Vec<bool>,
+}
+
+impl ScopedStreams<'_, '_> {
+    /// Resolve an ASCII Office storage path using ASCII case folding. This
+    /// intentionally does not approximate the full MS-CFB Unicode comparator;
+    /// non-ASCII directory names remain retained but are outside this API.
+    pub fn stream(&self, path: &[&str], maximum_bytes: usize) -> Result<Vec<u8>, String> {
+        if path.is_empty() {
+            return Err("empty CFB stream path".into());
+        }
+        let mut parent = self.root;
+        for (index, expected) in path.iter().enumerate() {
+            if !expected.is_ascii() {
+                return Err("non-ASCII CFB scoped path".into());
+            }
+            if self.has_non_ascii_child[parent] {
+                return Err("non-ASCII sibling in CFB scoped path".into());
+            }
+            let id = *self.children[parent]
+                .get(&expected.to_ascii_uppercase())
+                .ok_or_else(|| format!("missing CFB path entry: {expected}"))?;
+            let (_, entry) = self.compound.directory[id]
+                .as_ref()
+                .expect("validated hierarchy entry");
+            if index + 1 == path.len() {
+                if entry.object_type != 2 {
+                    return Err(format!("CFB path does not end in a stream: {expected}"));
+                }
+                if entry.stream_size > maximum_bytes as u64 {
+                    return Err("CFB scoped stream exceeds its caller limit".into());
+                }
+                return self.compound.read_stream(*entry);
+            }
+            if entry.object_type != 1 {
+                return Err(format!("CFB path traverses a non-storage: {expected}"));
+            }
+            parent = id;
+        }
+        unreachable!()
+    }
 }
 
 impl<'a> CompoundFile<'a> {
@@ -177,6 +229,7 @@ impl<'a> CompoundFile<'a> {
         let directory = parse_directory(&directory_bytes, major)?;
         let root = directory
             .iter()
+            .filter_map(Option::as_ref)
             .find_map(|(_, entry)| (entry.object_type == 5).then_some(*entry))
             .ok_or_else(|| "missing CFB root storage".to_string())?;
         let root_mini_stream = if root.stream_size == 0 {
@@ -230,6 +283,7 @@ impl<'a> CompoundFile<'a> {
     pub fn has_entry(&self, expected: &str) -> bool {
         self.directory
             .iter()
+            .filter_map(Option::as_ref)
             .any(|(name, _)| name.eq_ignore_ascii_case(expected))
     }
 
@@ -237,6 +291,7 @@ impl<'a> CompoundFile<'a> {
         let mut matches = self
             .directory
             .iter()
+            .filter_map(Option::as_ref)
             .filter(|(name, entry)| entry.object_type == 2 && name.eq_ignore_ascii_case(expected));
         let (_, entry) = matches
             .next()
@@ -244,6 +299,22 @@ impl<'a> CompoundFile<'a> {
         if matches.next().is_some() {
             return Err(format!("duplicate CFB stream: {expected}"));
         }
+        self.read_stream(*entry)
+    }
+
+    /// Validate and index raw MS-CFB directory IDs once for repeated ASCII
+    /// parent-scoped lookups. Existing flat lookup does not require this view.
+    pub fn scoped_streams(&self) -> Result<ScopedStreams<'_, 'a>, String> {
+        let (root, children, has_non_ascii_child) = self.validate_hierarchy()?;
+        Ok(ScopedStreams {
+            compound: self,
+            root,
+            children,
+            has_non_ascii_child,
+        })
+    }
+
+    fn read_stream(&self, entry: DirectoryEntry) -> Result<Vec<u8>, String> {
         if entry.stream_size == 0 {
             return Ok(Vec::new());
         }
@@ -260,6 +331,106 @@ impl<'a> CompoundFile<'a> {
                 None,
             )
         }
+    }
+
+    fn validate_hierarchy(
+        &self,
+    ) -> Result<(usize, Vec<HashMap<String, usize>>, Vec<bool>), String> {
+        let roots: Vec<_> = self
+            .directory
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| {
+                slot.as_ref()
+                    .and_then(|(_, entry)| (entry.object_type == 5).then_some(id))
+            })
+            .collect();
+        if roots.len() != 1 {
+            return Err("invalid CFB root storage count".into());
+        }
+        let root = roots[0];
+        if root != 0 {
+            return Err("CFB root storage is not directory entry 0".into());
+        }
+        let (_, root_entry) = self.directory[root].as_ref().expect("root was present");
+        if root_entry.left_sibling != NO_STREAM || root_entry.right_sibling != NO_STREAM {
+            return Err("CFB root storage has siblings".into());
+        }
+        let mut owner = vec![None; self.directory.len()];
+        let mut children = vec![Vec::new(); self.directory.len()];
+        for (parent, slot) in self.directory.iter().enumerate() {
+            let Some((_, entry)) = slot else { continue };
+            if entry.object_type == 2 && entry.child != NO_STREAM {
+                return Err("CFB stream has a child".into());
+            }
+            if !matches!(entry.object_type, 1 | 5) || entry.child == NO_STREAM {
+                continue;
+            }
+            let mut stack = vec![entry.child];
+            let mut seen = HashSet::new();
+            while let Some(raw) = stack.pop() {
+                let id = usize::try_from(raw).map_err(|_| "CFB directory link out of range")?;
+                let Some((_, child)) = self.directory.get(id).and_then(Option::as_ref) else {
+                    return Err("CFB directory link references an unused or missing entry".into());
+                };
+                if !seen.insert(id) {
+                    return Err("cyclic CFB directory sibling tree".into());
+                }
+                if id == root {
+                    return Err("CFB root storage is owned by another entry".into());
+                }
+                if owner[id].replace(parent).is_some() {
+                    return Err("multiply-owned CFB directory entry".into());
+                }
+                children[parent].push(id);
+                if child.left_sibling != NO_STREAM {
+                    stack.push(child.left_sibling);
+                }
+                if child.right_sibling != NO_STREAM {
+                    stack.push(child.right_sibling);
+                }
+            }
+        }
+        for (id, slot) in self.directory.iter().enumerate() {
+            if id != root && slot.is_some() && owner[id].is_none() {
+                return Err("unowned CFB directory entry".into());
+            }
+        }
+        let mut child_index = Vec::with_capacity(children.len());
+        let mut has_non_ascii_child = Vec::with_capacity(children.len());
+        for siblings in &children {
+            let mut names = HashMap::with_capacity(siblings.len());
+            let mut has_non_ascii = false;
+            for id in siblings {
+                let (name, _) = self.directory[*id]
+                    .as_ref()
+                    .expect("validated hierarchy entry");
+                if !name.is_ascii() {
+                    has_non_ascii = true;
+                } else if names.insert(name.to_ascii_uppercase(), *id).is_some() {
+                    return Err("duplicate ASCII CFB child name".into());
+                }
+            }
+            child_index.push(names);
+            has_non_ascii_child.push(has_non_ascii);
+        }
+        let mut reachable = HashSet::with_capacity(self.directory.len());
+        let mut stack = vec![root];
+        while let Some(parent) = stack.pop() {
+            if !reachable.insert(parent) {
+                return Err("cyclic CFB storage ancestry".into());
+            }
+            stack.extend(children[parent].iter().copied());
+        }
+        if self
+            .directory
+            .iter()
+            .enumerate()
+            .any(|(id, slot)| slot.is_some() && !reachable.contains(&id))
+        {
+            return Err("unreachable CFB directory entry".into());
+        }
+        Ok((root, child_index, has_non_ascii_child))
     }
 
     fn read_mini_chain(&self, start: u32, size: u64) -> Result<Vec<u8>, String> {
@@ -296,7 +467,7 @@ impl<'a> CompoundFile<'a> {
     }
 }
 
-fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<(String, DirectoryEntry)>, String> {
+fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<DirectorySlot>, String> {
     if !bytes.len().is_multiple_of(DIRECTORY_ENTRY_BYTES) {
         return Err("misaligned CFB directory stream".into());
     }
@@ -308,6 +479,7 @@ fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<(String, DirectoryEnt
     for entry_bytes in bytes.chunks_exact(DIRECTORY_ENTRY_BYTES) {
         let object_type = entry_bytes[66];
         if object_type == 0 {
+            entries.push(None);
             continue;
         }
         if !matches!(object_type, 1 | 2 | 5) {
@@ -333,14 +505,17 @@ fn parse_directory(bytes: &[u8], major: u16) -> Result<Vec<(String, DirectoryEnt
         if major == 3 {
             stream_size &= 0xffff_ffff;
         }
-        entries.push((
+        entries.push(Some((
             name,
             DirectoryEntry {
                 object_type,
+                left_sibling: u32_at(entry_bytes, 68)?,
+                right_sibling: u32_at(entry_bytes, 72)?,
+                child: u32_at(entry_bytes, 76)?,
                 start_sector,
                 stream_size,
             },
-        ));
+        )));
     }
     Ok(entries)
 }
@@ -729,8 +904,47 @@ pub(crate) mod test_support {
 mod tests {
     use super::{
         test_support::{build_cfb, build_mini_cfb, build_v4_cfb},
-        CompoundFile,
+        CompoundFile, END_OF_CHAIN,
     };
+
+    fn directory_offset(streams: usize) -> usize {
+        // build_cfb pads every synthetic regular stream to eight sectors.
+        512 + streams * 8 * 512
+    }
+
+    fn link(bytes: &mut [u8], streams: usize, id: usize, at: usize, target: u32) {
+        let offset = directory_offset(streams) + id * 128 + at;
+        bytes[offset..offset + 4].copy_from_slice(&target.to_le_bytes());
+    }
+
+    fn object_type(bytes: &mut [u8], streams: usize, id: usize, value: u8) {
+        let offset = directory_offset(streams) + id * 128;
+        bytes[offset + 66] = value;
+        if value == 1 {
+            bytes[offset + 116..offset + 120].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+            bytes[offset + 120..offset + 128].fill(0);
+        }
+    }
+
+    fn nested_presentations() -> Vec<u8> {
+        let streams = [
+            ("ObjectPool", Vec::new()),
+            ("_1", Vec::new()),
+            ("OlePres000", b"first presentation".to_vec()),
+            ("_2", Vec::new()),
+            ("OlePres000", b"second presentation".to_vec()),
+        ];
+        let mut bytes = build_cfb(&streams);
+        object_type(&mut bytes, streams.len(), 1, 1);
+        object_type(&mut bytes, streams.len(), 2, 1);
+        object_type(&mut bytes, streams.len(), 4, 1);
+        link(&mut bytes, streams.len(), 0, 76, 1);
+        link(&mut bytes, streams.len(), 1, 76, 2);
+        link(&mut bytes, streams.len(), 2, 72, 4);
+        link(&mut bytes, streams.len(), 2, 76, 3);
+        link(&mut bytes, streams.len(), 4, 76, 5);
+        bytes
+    }
 
     #[test]
     fn reads_regular_streams() {
@@ -740,6 +954,167 @@ mod tests {
         assert!(cfb.has_entry("workbook"));
         let stream = cfb.stream("Workbook").unwrap();
         assert_eq!(&stream[..source.len()], source);
+    }
+
+    #[test]
+    fn parent_scoped_lookup_distinguishes_duplicate_stream_names() {
+        let bytes = nested_presentations();
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let scoped = cfb.scoped_streams().unwrap();
+        assert_eq!(
+            &scoped
+                .stream(&["objectpool", "_1", "olepres000"], 4096)
+                .unwrap()[..18],
+            b"first presentation"
+        );
+        assert_eq!(
+            &scoped
+                .stream(&["ObjectPool", "_2", "OlePres000"], 4096)
+                .unwrap()[..19],
+            b"second presentation"
+        );
+        assert!(scoped
+            .stream(&["ObjectPool", "_1", "OlePres000"], 4095)
+            .unwrap_err()
+            .contains("caller limit"));
+        assert!(cfb.stream("OlePres000").unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn scoped_lookup_rejects_ambiguous_sibling_names() {
+        let streams = [
+            ("ObjectPool", Vec::new()),
+            ("_1", Vec::new()),
+            ("OlePres000", b"first".to_vec()),
+            ("OlePres000", b"second".to_vec()),
+        ];
+        let mut bytes = build_cfb(&streams);
+        object_type(&mut bytes, streams.len(), 1, 1);
+        object_type(&mut bytes, streams.len(), 2, 1);
+        link(&mut bytes, streams.len(), 0, 76, 1);
+        link(&mut bytes, streams.len(), 1, 76, 2);
+        link(&mut bytes, streams.len(), 2, 76, 3);
+        link(&mut bytes, streams.len(), 3, 72, 4);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(cfb.scoped_streams().err().unwrap().contains("duplicate"));
+    }
+
+    #[test]
+    fn scoped_lookup_rejects_non_ascii_only_on_the_selected_parent() {
+        let streams = [
+            ("ObjectPool", Vec::new()),
+            ("Target", b"target".to_vec()),
+            ("Other", Vec::new()),
+            ("Ä", b"non-ascii sibling".to_vec()),
+        ];
+        let mut bytes = build_cfb(&streams);
+        object_type(&mut bytes, streams.len(), 1, 1);
+        object_type(&mut bytes, streams.len(), 3, 1);
+        link(&mut bytes, streams.len(), 0, 76, 1);
+        link(&mut bytes, streams.len(), 1, 72, 3);
+        link(&mut bytes, streams.len(), 1, 76, 2);
+        link(&mut bytes, streams.len(), 3, 76, 4);
+
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let scoped = cfb.scoped_streams().unwrap();
+        assert_eq!(
+            &scoped.stream(&["ObjectPool", "Target"], 4096).unwrap()[..6],
+            b"target"
+        );
+        assert!(scoped
+            .stream(&["Other", "missing"], 4096)
+            .unwrap_err()
+            .contains("non-ASCII sibling"));
+
+        link(&mut bytes, streams.len(), 2, 72, 4);
+        link(&mut bytes, streams.len(), 3, 76, u32::MAX);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let scoped = cfb.scoped_streams().unwrap();
+        assert!(scoped
+            .stream(&["ObjectPool", "Target"], 4096)
+            .unwrap_err()
+            .contains("non-ASCII sibling"));
+    }
+
+    #[test]
+    fn scoped_lookup_rejects_cycles_unused_links_multiple_owners_and_stream_children() {
+        for (id, field, target, expected) in [
+            (2, 72, 2, "cyclic"),
+            (2, 72, 7, "unused or missing"),
+            (4, 76, 3, "multiply-owned"),
+            (3, 76, 5, "stream has a child"),
+        ] {
+            let mut bytes = nested_presentations();
+            link(&mut bytes, 5, id, field, target);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let error = cfb.scoped_streams().err().unwrap();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn scoped_lookup_retains_raw_ids_across_unused_slots() {
+        let mut bytes = nested_presentations();
+        let directory = directory_offset(5);
+        let moved: [u8; 128] = bytes[directory + 5 * 128..directory + 6 * 128]
+            .try_into()
+            .unwrap();
+        bytes[directory + 5 * 128..directory + 6 * 128].fill(0);
+        bytes[directory + 6 * 128..directory + 7 * 128].copy_from_slice(&moved);
+        link(&mut bytes, 5, 4, 76, 6);
+
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let scoped = cfb.scoped_streams().unwrap();
+        assert_eq!(
+            &scoped
+                .stream(&["ObjectPool", "_2", "OlePres000"], 4096)
+                .unwrap()[..19],
+            b"second presentation"
+        );
+    }
+
+    #[test]
+    fn scoped_lookup_rejects_disconnected_storage_cycles() {
+        let streams = [
+            ("Visible", b"visible".to_vec()),
+            ("DetachedA", Vec::new()),
+            ("DetachedB", Vec::new()),
+        ];
+        let mut bytes = build_cfb(&streams);
+        object_type(&mut bytes, streams.len(), 2, 1);
+        object_type(&mut bytes, streams.len(), 3, 1);
+        link(&mut bytes, streams.len(), 0, 76, 1);
+        link(&mut bytes, streams.len(), 2, 76, 3);
+        link(&mut bytes, streams.len(), 3, 76, 2);
+
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let error = cfb.scoped_streams().err().unwrap();
+        assert!(error.contains("unreachable"), "{error}");
+    }
+
+    #[test]
+    fn scoped_lookup_requires_root_at_directory_id_zero() {
+        let streams = [("Storage", Vec::new()), ("Payload", b"payload".to_vec())];
+        let mut bytes = build_cfb(&streams);
+        object_type(&mut bytes, streams.len(), 0, 1);
+        object_type(&mut bytes, streams.len(), 1, 5);
+        link(&mut bytes, streams.len(), 1, 76, 2);
+
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let error = cfb.scoped_streams().err().unwrap();
+        assert!(error.contains("entry 0"), "{error}");
+    }
+
+    #[test]
+    fn legacy_flat_lookup_still_accepts_unlinked_synthetic_directories() {
+        let bytes = build_cfb(&[("Workbook", b"legacy flat lookup".to_vec())]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(cfb.has_entry("Workbook"));
+        assert_eq!(
+            &cfb.stream("Workbook").unwrap()[..18],
+            b"legacy flat lookup"
+        );
+        assert!(cfb.scoped_streams().is_err());
     }
 
     #[test]
