@@ -1,4 +1,8 @@
 import type { LegacyOfficeConversionOptions } from '../conversion/legacy-office.js';
+import {
+  MAX_LEGACY_XLS_SOURCE_BYTES,
+  validateLegacyXlsSourceDescriptor,
+} from '../conversion/legacy-xls-source.js';
 import { LegacyOfficeConversionError } from '../conversion/legacy-office-error.js';
 import {
   MAX_LEGACY_PPT_SOURCE_BYTES,
@@ -40,36 +44,74 @@ export async function resolvePptPresentationInput(
   options?: LegacyOfficeConversionOptions,
   password?: string,
 ): Promise<ResolvedPptPresentationInput> {
+  return resolveNativeInput(
+    'ppt', 'pptx', validateLegacyPptSourceDescriptor,
+    MAX_LEGACY_PPT_SOURCE_BYTES, bytes, options, password,
+  );
+}
+
+export type ResolvedXlsWorkbookInput =
+  | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>
+  | Readonly<{
+    kind: 'legacy-xls';
+    bytes: Uint8Array;
+    source: import('../conversion/legacy-xls-source.js').LegacyXlsDirectSourceDescriptor;
+    signal?: AbortSignal;
+  }>;
+
+export async function resolveXlsWorkbookInput(
+  bytes: Uint8Array | ArrayBuffer,
+  options?: LegacyOfficeConversionOptions,
+  password?: string,
+): Promise<ResolvedXlsWorkbookInput> {
+  return resolveNativeInput(
+    'xls', 'xlsx', validateLegacyXlsSourceDescriptor,
+    MAX_LEGACY_XLS_SOURCE_BYTES, bytes, options, password,
+  );
+}
+
+async function resolveNativeInput<F extends 'ppt' | 'xls', D>(
+  format: F,
+  target: 'pptx' | 'xlsx',
+  validate: (value: unknown) => D,
+  maximum: number,
+  bytes: Uint8Array | ArrayBuffer,
+  options?: LegacyOfficeConversionOptions,
+  password?: string,
+): Promise<
+  | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>
+  | Readonly<{ kind: `legacy-${F}`; bytes: Uint8Array; source: D; signal?: AbortSignal }>
+> {
   const inspected = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const selected = options?.ppt;
+  const selected = options?.[format];
   if (sniffCfb(inspected) !== 'legacy-binary-format') {
     return { kind: 'ooxml', bytes: await resolveOoxmlContainer(inspected, password) };
   }
   if (!selected || !('source' in selected)) {
     return {
       kind: 'ooxml',
-      bytes: await resolveOfficeInputWithOptionalConversion(inspected, 'pptx', options, password),
+      bytes: await resolveOfficeInputWithOptionalConversion(inspected, target, options, password),
     };
   }
   if ('converter' in selected) {
-    throw new TypeError('legacyConversion.ppt source and converter are mutually exclusive');
+    throw new TypeError(`legacyConversion.${format} source and converter are mutually exclusive`);
   }
-  const source = validateLegacyPptSourceDescriptor(selected.source);
-  const limit = selected.maxInputBytes ?? MAX_LEGACY_PPT_SOURCE_BYTES;
-  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_LEGACY_PPT_SOURCE_BYTES) {
-    throw new RangeError('legacyConversion.ppt.maxInputBytes is invalid');
+  const source = validate(selected.source);
+  const limit = selected.maxInputBytes ?? maximum;
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > maximum) {
+    throw new RangeError(`legacyConversion.${format}.maxInputBytes is invalid`);
   }
-  if (sniffLegacyOfficeFormat(inspected) !== 'ppt') {
-    throw new LegacyOfficeConversionError('unsupported-input', 'ppt', 'pptx');
+  if (sniffLegacyOfficeFormat(inspected) !== format) {
+    throw new LegacyOfficeConversionError('unsupported-input', format, target);
   }
   if (inspected.byteLength > limit) {
-    throw new LegacyOfficeConversionError('source-too-large', 'ppt', 'pptx');
+    throw new LegacyOfficeConversionError('source-too-large', format, target);
   }
   if (selected.signal?.aborted) {
-    throw new LegacyOfficeConversionError('aborted', 'ppt', 'pptx');
+    throw new LegacyOfficeConversionError('aborted', format, target);
   }
   return {
-    kind: 'legacy-ppt',
+    kind: `legacy-${format}`,
     bytes: inspected.byteOffset === 0 && inspected.byteLength === inspected.buffer.byteLength
       ? inspected
       : inspected.slice(),
