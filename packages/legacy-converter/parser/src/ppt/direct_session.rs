@@ -4,6 +4,8 @@
 use super::*;
 
 const MAX_MODEL_BYTES: usize = 256 * 1024 * 1024;
+/// Implementation resource policy for retained source streams, not an MS-PPT format limit.
+const MAX_DIRECT_STREAM_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct DirectSession {
     document: Vec<u8>,
@@ -23,19 +25,31 @@ pub(crate) struct Resource<'a> {
 
 impl DirectSession {
     pub fn new(cfb: &CompoundFile<'_>) -> Result<Self, String> {
-        if cfb.has_entry("EncryptedSummary") {
+        let streams = cfb.scoped_streams().map_err(unsupported)?;
+        if streams
+            .has_stream(&["EncryptedSummary"])
+            .map_err(unsupported)?
+        {
             return Err(unsupported(
                 "encrypted PowerPoint binary documents are not supported",
             ));
         }
-        let document = cfb.stream("PowerPoint Document").map_err(unsupported)?;
-        let current_user = cfb.stream("Current User").map_err(unsupported)?;
+        let document = streams
+            .stream(&["PowerPoint Document"], MAX_DIRECT_STREAM_BYTES)
+            .map_err(unsupported)?;
+        let current_user = streams
+            .stream(&["Current User"], MAX_DIRECT_STREAM_BYTES)
+            .map_err(unsupported)?;
         let mut work_budget = MAX_RECORDS;
         let current_edit = parse_current_user_atom(&current_user, &mut work_budget)?;
         let presentation = persist::resolve_owned(&document, current_edit, &mut work_budget)?;
-        let pictures = (cfb.has_entry("Pictures") && !presentation.image_entries.is_empty())
-            .then(|| cfb.stream("Pictures").map_err(unsupported))
-            .transpose()?;
+        let pictures = if presentation.image_entries.is_empty() {
+            None
+        } else {
+            streams
+                .optional_stream(&["Pictures"], MAX_DIRECT_STREAM_BYTES)
+                .map_err(unsupported)?
+        };
         Ok(Self::from_resolved(
             document,
             pictures,
@@ -167,6 +181,7 @@ fn resource_index(key: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfb::test_support::build_cfb;
 
     fn record(options: u16, kind: u16, payload: &[u8]) -> Vec<u8> {
         [
@@ -200,6 +215,33 @@ mod tests {
         .concat()
     }
 
+    fn valid_current_user(edit: usize) -> Vec<u8> {
+        let mut payload = vec![0; 24];
+        payload[..4].copy_from_slice(&0x14u32.to_le_bytes());
+        payload[4..8].copy_from_slice(&CURRENT_USER_NOT_ENCRYPTED.to_le_bytes());
+        payload[8..12].copy_from_slice(&(edit as u32).to_le_bytes());
+        payload[14..16].copy_from_slice(&0x03f4u16.to_le_bytes());
+        payload[16..18].copy_from_slice(&[3, 0]);
+        payload[20..24].copy_from_slice(&8u32.to_le_bytes());
+        record(0, CURRENT_USER_ATOM, &payload)
+    }
+
+    fn directory_offset(streams: usize) -> usize {
+        512 + streams * 8 * 512
+    }
+
+    fn directory_link(bytes: &mut [u8], streams: usize, id: usize, at: usize, target: u32) {
+        let offset = directory_offset(streams) + id * 128 + at;
+        bytes[offset..offset + 4].copy_from_slice(&target.to_le_bytes());
+    }
+
+    fn make_storage(bytes: &mut [u8], streams: usize, id: usize) {
+        let offset = directory_offset(streams) + id * 128;
+        bytes[offset + 66] = 1;
+        bytes[offset + 116..offset + 120].copy_from_slice(&0xffff_fffeu32.to_le_bytes());
+        bytes[offset + 120..offset + 128].fill(0);
+    }
+
     fn slide_with_shape() -> Vec<u8> {
         let shape_flags = record(
             (1 << 4) | 2,
@@ -230,6 +272,55 @@ mod tests {
         .expect("encrypted input must fail")
         .contains("encrypted"));
         assert!(DirectSession::from_streams(Vec::new(), vec![0; 7], None).is_err());
+    }
+
+    #[test]
+    fn cfb_constructor_uses_only_root_presentation_streams() {
+        let (document, edit) = persist::tests::fixture();
+        let current = valid_current_user(edit);
+        let streams = [
+            ("ObjectPool", Vec::new()),
+            ("PowerPoint Document", b"embedded decoy".to_vec()),
+            ("PowerPoint Document", document),
+            ("Current User", current),
+        ];
+        let mut bytes = build_cfb(&streams);
+        make_storage(&mut bytes, streams.len(), 1);
+        // Root owns ObjectPool, Current User, and the real document. The
+        // duplicate document is owned only by ObjectPool.
+        directory_link(&mut bytes, streams.len(), 0, 76, 1);
+        directory_link(&mut bytes, streams.len(), 1, 68, 4);
+        directory_link(&mut bytes, streams.len(), 1, 72, 3);
+        directory_link(&mut bytes, streams.len(), 1, 76, 2);
+
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let session = DirectSession::new(&cfb).unwrap();
+        assert_eq!(session.slide_count(), 2);
+    }
+
+    #[test]
+    fn cfb_constructor_rejects_nested_only_and_wrong_kind_required_streams() {
+        let streams = [
+            ("ObjectPool", Vec::new()),
+            ("PowerPoint Document", b"nested only".to_vec()),
+        ];
+        let mut nested = build_cfb(&streams);
+        make_storage(&mut nested, streams.len(), 1);
+        directory_link(&mut nested, streams.len(), 0, 76, 1);
+        directory_link(&mut nested, streams.len(), 1, 76, 2);
+        let error = DirectSession::new(&CompoundFile::open(&nested).unwrap())
+            .err()
+            .expect("nested-only document must fail");
+        assert!(error.contains("missing CFB path entry: PowerPoint Document"));
+
+        let streams = [("PowerPoint Document", Vec::new())];
+        let mut wrong_kind = build_cfb(&streams);
+        make_storage(&mut wrong_kind, streams.len(), 1);
+        directory_link(&mut wrong_kind, streams.len(), 0, 76, 1);
+        let error = DirectSession::new(&CompoundFile::open(&wrong_kind).unwrap())
+            .err()
+            .expect("wrong-kind document must fail");
+        assert!(error.contains("does not end in a stream"));
     }
 
     #[test]

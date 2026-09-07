@@ -53,10 +53,11 @@ pub struct ScopedStreams<'cfb, 'data> {
 }
 
 impl ScopedStreams<'_, '_> {
-    /// Resolve an ASCII Office storage path using ASCII case folding. This
-    /// intentionally does not approximate the full MS-CFB Unicode comparator;
-    /// non-ASCII directory names remain retained but are outside this API.
-    pub fn stream(&self, path: &[&str], maximum_bytes: usize) -> Result<Vec<u8>, String> {
+    pub fn has_stream(&self, path: &[&str]) -> Result<bool, String> {
+        Ok(self.resolve_stream_entry(path)?.is_some())
+    }
+
+    fn resolve_stream_entry(&self, path: &[&str]) -> Result<Option<DirectoryEntry>, String> {
         if path.is_empty() {
             return Err("empty CFB stream path".into());
         }
@@ -68,27 +69,61 @@ impl ScopedStreams<'_, '_> {
             if self.has_non_ascii_child[parent] {
                 return Err("non-ASCII sibling in CFB scoped path".into());
             }
-            let id = *self.children[parent]
+            let Some(id) = self.children[parent]
                 .get(&expected.to_ascii_uppercase())
-                .ok_or_else(|| format!("missing CFB path entry: {expected}"))?;
+                .copied()
+            else {
+                return if index + 1 == path.len() {
+                    Ok(None)
+                } else {
+                    Err(format!("missing CFB path entry: {expected}"))
+                };
+            };
             let (_, entry) = self.compound.directory[id]
                 .as_ref()
                 .expect("validated hierarchy entry");
             if index + 1 == path.len() {
-                if entry.object_type != 2 {
-                    return Err(format!("CFB path does not end in a stream: {expected}"));
-                }
-                if entry.stream_size > maximum_bytes as u64 {
-                    return Err("CFB scoped stream exceeds its caller limit".into());
-                }
-                return self.compound.read_stream(*entry);
+                return if entry.object_type == 2 {
+                    Ok(Some(*entry))
+                } else {
+                    Err(format!("CFB path does not end in a stream: {expected}"))
+                };
             }
             if entry.object_type != 1 {
                 return Err(format!("CFB path traverses a non-storage: {expected}"));
             }
             parent = id;
         }
-        unreachable!()
+        unreachable!("nonempty paths return from their final component")
+    }
+
+    /// Resolve an ASCII Office storage path using ASCII case folding. This
+    /// intentionally does not approximate the full MS-CFB Unicode comparator;
+    /// non-ASCII directory names remain retained but are outside this API.
+    pub fn stream(&self, path: &[&str], maximum_bytes: usize) -> Result<Vec<u8>, String> {
+        self.optional_stream(path, maximum_bytes)?.ok_or_else(|| {
+            format!(
+                "missing CFB path entry: {}",
+                path.last().copied().unwrap_or("")
+            )
+        })
+    }
+
+    /// Resolve an optional stream without reading it merely to test presence.
+    /// A missing final entry is `None`; malformed hierarchy, an invalid path,
+    /// or a same-named storage is an error and cannot masquerade as absence.
+    pub fn optional_stream(
+        &self,
+        path: &[&str],
+        maximum_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some(entry) = self.resolve_stream_entry(path)? else {
+            return Ok(None);
+        };
+        if entry.stream_size > maximum_bytes as u64 {
+            return Err("CFB scoped stream exceeds its caller limit".into());
+        }
+        self.compound.read_stream(entry).map(Some)
     }
 }
 
@@ -978,6 +1013,36 @@ mod tests {
             .unwrap_err()
             .contains("caller limit"));
         assert!(cfb.stream("OlePres000").unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn optional_scoped_stream_distinguishes_absence_wrong_kind_and_budget() {
+        let bytes = nested_presentations();
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let scoped = cfb.scoped_streams().unwrap();
+        assert!(scoped
+            .optional_stream(&["OlePres000"], 4096)
+            .unwrap()
+            .is_none());
+        assert!(!scoped.has_stream(&["OlePres000"]).unwrap());
+        assert!(scoped
+            .has_stream(&["ObjectPool", "_1", "OlePres000"])
+            .unwrap());
+        assert_eq!(
+            &scoped
+                .optional_stream(&["ObjectPool", "_1", "OlePres000"], 4096)
+                .unwrap()
+                .unwrap()[..18],
+            b"first presentation"
+        );
+        assert!(scoped.has_stream(&["ObjectPool"]).is_err());
+        assert!(scoped.optional_stream(&["ObjectPool"], 4096).is_err());
+        assert!(scoped
+            .optional_stream(&["ObjectPool", "missing", "x"], 4096)
+            .is_err());
+        assert!(scoped
+            .optional_stream(&["ObjectPool", "_1", "OlePres000"], 4095)
+            .is_err());
     }
 
     #[test]
