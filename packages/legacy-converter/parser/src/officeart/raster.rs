@@ -12,8 +12,117 @@ pub(crate) fn read_store_entry<'a>(
     budget: &mut usize,
     remaining_bytes: usize,
 ) -> Result<Option<Image<'a>>, String> {
+    let source = match locate_store_entry(entry)? {
+        StoreLocation::Direct => return read(entry, budget, remaining_bytes),
+        StoreLocation::Omit => return Ok(None),
+        StoreLocation::Embedded(range) => &entry.payload[range],
+        StoreLocation::Delayed { offset, size } => {
+            let Some(delayed) = delayed else {
+                return Ok(None);
+            };
+            delayed
+                .get(offset..)
+                .and_then(|bytes| bytes.get(..size))
+                .ok_or_else(|| unsupported("OfficeArt delayed BLIP range out of bounds"))?
+        }
+    };
+    let (blip, end) = super::record_with_end(source, 0, budget, "OfficeArt")?;
+    if end != source.len() {
+        return Err(unsupported("OfficeArt BLIP record size mismatch"));
+    }
+    read(blip, budget, remaining_bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreBacking {
+    Primary,
+    Delayed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StoreImageSpan {
+    pub image: ImageSpan,
+    pub backing: StoreBacking,
+}
+
+impl StoreImageSpan {
+    pub(crate) fn view<'a>(
+        &'a self,
+        primary: &'a [u8],
+        delayed: Option<&'a [u8]>,
+    ) -> Result<&'a [u8], String> {
+        match &self.image.bytes {
+            ImageSpanBytes::Owned(bytes) => Ok(bytes),
+            ImageSpanBytes::Source(span) => {
+                match self.backing {
+                    StoreBacking::Primary => span.view(primary),
+                    StoreBacking::Delayed => span.view(delayed.ok_or_else(|| {
+                        unsupported("OfficeArt delayed BLIP backing is unavailable")
+                    })?),
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn read_store_entry_span(
+    entry: &RecordSpan,
+    primary: &[u8],
+    delayed: Option<&[u8]>,
+    budget: &mut usize,
+    remaining_bytes: usize,
+) -> Result<Option<StoreImageSpan>, String> {
+    let viewed = entry.view(primary)?;
+    let (source, backing, bytes) = match locate_store_entry(viewed)? {
+        StoreLocation::Direct => {
+            return Ok(
+                read_span(entry, primary, budget, remaining_bytes)?.map(|image| StoreImageSpan {
+                    image,
+                    backing: StoreBacking::Primary,
+                }),
+            )
+        }
+        StoreLocation::Omit => return Ok(None),
+        StoreLocation::Embedded(range) => (
+            entry
+                .payload_span()
+                .checked_subrange(range, "OfficeArt embedded BLIP")?,
+            StoreBacking::Primary,
+            primary,
+        ),
+        StoreLocation::Delayed { offset, size } => {
+            let Some(delayed) = delayed else {
+                return Ok(None);
+            };
+            let end = offset
+                .checked_add(size)
+                .ok_or_else(|| unsupported("OfficeArt delayed BLIP range out of bounds"))?;
+            (
+                ByteSpan::new(offset..end, delayed.len(), "OfficeArt delayed BLIP")?,
+                StoreBacking::Delayed,
+                delayed,
+            )
+        }
+    };
+    let offset = source.range().start;
+    let (blip, end) = super::record_span_with_end_in(bytes, &source, offset, budget, "OfficeArt")?;
+    if end != source.range().end {
+        return Err(unsupported("OfficeArt BLIP record size mismatch"));
+    }
+    Ok(read_span(&blip, bytes, budget, remaining_bytes)?
+        .map(|image| StoreImageSpan { image, backing }))
+}
+
+enum StoreLocation {
+    Direct,
+    Omit,
+    Embedded(Range<usize>),
+    Delayed { offset: usize, size: usize },
+}
+
+fn locate_store_entry(entry: Record<'_>) -> Result<StoreLocation, String> {
     if entry.kind != 0xf007 {
-        return read(entry, budget, remaining_bytes);
+        return Ok(StoreLocation::Direct);
     }
     let b = entry.payload;
     if entry.version != 2
@@ -23,32 +132,26 @@ pub(crate) fn read_store_entry<'a>(
         return Err(unsupported("invalid OfficeArt BLIP store entry"));
     }
     let name = usize::from(b[33]);
-    if name % 2 != 0 || 36 + name > b.len() {
+    let inline_start = 36 + name;
+    if name % 2 != 0 || inline_start > b.len() {
         return Err(unsupported("invalid OfficeArt BLIP name length"));
     }
     let number = |offset| u32::from_le_bytes(b[offset..offset + 4].try_into().unwrap()) as usize;
     let size = number(20);
     if number(24) == 0 {
-        return Ok(None);
+        return Ok(StoreLocation::Omit);
     }
-    let source = if 36 + name < b.len() {
-        b.get(36 + name..)
-            .filter(|s| s.len() == size)
-            .ok_or_else(|| unsupported("OfficeArt embedded BLIP size mismatch"))?
+    if inline_start < b.len() {
+        if b.len() - inline_start != size {
+            return Err(unsupported("OfficeArt embedded BLIP size mismatch"));
+        }
+        Ok(StoreLocation::Embedded(inline_start..b.len()))
     } else {
-        let Some(delayed) = delayed else {
-            return Ok(None);
-        };
-        delayed
-            .get(number(28)..)
-            .and_then(|s| s.get(..size))
-            .ok_or_else(|| unsupported("OfficeArt delayed BLIP range out of bounds"))?
-    };
-    let (blip, end) = super::record_with_end(source, 0, budget, "OfficeArt")?;
-    if end != source.len() {
-        return Err(unsupported("OfficeArt BLIP record size mismatch"));
+        Ok(StoreLocation::Delayed {
+            offset: number(28),
+            size,
+        })
     }
-    read(blip, budget, remaining_bytes)
 }
 
 const MAX_PIXELS: u64 = 40_000_000;
@@ -316,6 +419,18 @@ mod tests {
         encoded
     }
 
+    fn store_entry(blip: Option<&[u8]>, size: usize, offset: usize, references: u32) -> Vec<u8> {
+        let mut payload = vec![0; 36];
+        payload[0] = 6;
+        payload[20..24].copy_from_slice(&(size as u32).to_le_bytes());
+        payload[24..28].copy_from_slice(&references.to_le_bytes());
+        payload[28..32].copy_from_slice(&(offset as u32).to_le_bytes());
+        if let Some(blip) = blip {
+            payload.extend_from_slice(blip);
+        }
+        record(0x0062, 0xf007, &payload)
+    }
+
     fn assert_parity(encoded: Vec<u8>, expected: &[u8], expected_extension: &str, owned: bool) {
         let (span, _) = record_span_with_end(&encoded, 0, &mut 1, "BLIP").unwrap();
         let mut borrowed_budget = 20;
@@ -389,5 +504,120 @@ mod tests {
         assert!(borrowed.unwrap().is_none());
         assert!(owned.unwrap().is_none());
         assert_eq!(span_budget, borrowed_budget);
+    }
+
+    #[test]
+    fn store_entries_share_framing_and_preserve_primary_or_delayed_identity() {
+        let png = png_blip();
+        let expected_png = png[8 + 17..].to_vec();
+        let (emf, compressed_emf) = emf_test_blip();
+        for (blip, expected, owned) in [
+            (png.as_slice(), expected_png.as_slice(), false),
+            (compressed_emf.as_slice(), emf.as_slice(), true),
+        ] {
+            for delayed_source in [false, true] {
+                let offset = 11;
+                let encoded = if delayed_source {
+                    store_entry(None, blip.len(), offset, 1)
+                } else {
+                    store_entry(Some(blip), blip.len(), 0, 1)
+                };
+                let mut primary = vec![0xaa, 0xbb, 0xcc];
+                primary.extend(encoded);
+                let mut delayed = vec![0xdd; offset];
+                delayed.extend_from_slice(blip);
+                let (entry, _) = record_span_with_end(&primary, 3, &mut 1, "BSE").unwrap();
+
+                let mut borrowed_budget = 20;
+                let borrowed = read_store_entry(
+                    entry.view(&primary).unwrap(),
+                    delayed_source.then_some(delayed.as_slice()),
+                    &mut borrowed_budget,
+                    expected.len(),
+                )
+                .unwrap()
+                .unwrap();
+                let mut span_budget = 20;
+                let spanned = read_store_entry_span(
+                    &entry,
+                    &primary,
+                    delayed_source.then_some(delayed.as_slice()),
+                    &mut span_budget,
+                    expected.len(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(borrowed.bytes.as_ref(), expected);
+                assert_eq!(spanned.view(&primary, Some(&delayed)).unwrap(), expected);
+                assert_eq!(span_budget, borrowed_budget);
+                assert_eq!(
+                    spanned.backing,
+                    if delayed_source {
+                        StoreBacking::Delayed
+                    } else {
+                        StoreBacking::Primary
+                    }
+                );
+                assert_eq!(
+                    matches!(&spanned.image.bytes, ImageSpanBytes::Owned(_)),
+                    owned
+                );
+
+                let moved_primary = primary;
+                let moved_delayed = delayed;
+                assert_eq!(
+                    spanned.view(&moved_primary, Some(&moved_delayed)).unwrap(),
+                    expected
+                );
+                if delayed_source && !owned {
+                    let wrong = vec![0x7e; moved_delayed.len()];
+                    assert_eq!(
+                        spanned.view(&wrong, Some(&moved_delayed)).unwrap(),
+                        expected
+                    );
+                    assert!(spanned.view(&moved_primary, None).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn store_entry_span_preserves_omission_and_exact_source_bounds() {
+        let png = png_blip();
+        for (references, has_delayed) in [(0, false), (1, false)] {
+            let encoded = store_entry(None, png.len(), 7, references);
+            let (entry, _) = record_span_with_end(&encoded, 0, &mut 1, "BSE").unwrap();
+            assert!(read_store_entry_span(
+                &entry,
+                &encoded,
+                has_delayed.then_some(png.as_slice()),
+                &mut 10,
+                usize::MAX,
+            )
+            .unwrap()
+            .is_none());
+        }
+
+        let encoded = store_entry(None, png.len(), 7, 1);
+        let (entry, _) = record_span_with_end(&encoded, 0, &mut 1, "BSE").unwrap();
+        assert!(read_store_entry_span(&entry, &encoded, Some(&png), &mut 10, usize::MAX).is_err());
+        assert!(read_store_entry_span(
+            &entry,
+            &encoded[..encoded.len() - 1],
+            Some(&png),
+            &mut 10,
+            usize::MAX,
+        )
+        .is_err());
+
+        let embedded = store_entry(Some(&png), png.len() - 1, 0, 1);
+        let (entry, _) = record_span_with_end(&embedded, 0, &mut 1, "BSE").unwrap();
+        assert!(read_store_entry_span(&entry, &embedded, None, &mut 10, usize::MAX).is_err());
+
+        let mut blip_with_trailer = png;
+        blip_with_trailer.push(0);
+        let embedded = store_entry(Some(&blip_with_trailer), blip_with_trailer.len(), 0, 1);
+        let (entry, _) = record_span_with_end(&embedded, 0, &mut 1, "BSE").unwrap();
+        assert!(read_store_entry_span(&entry, &embedded, None, &mut 10, usize::MAX).is_err());
     }
 }
