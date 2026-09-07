@@ -44,7 +44,9 @@ pub struct PptConversion {
     pub warnings: Vec<String>,
 }
 
-use crate::officeart::Record;
+use crate::officeart::{
+    record_span_with_end, record_span_with_end_in, ByteSpan, Record, RecordSpan,
+};
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptConversion, String> {
     if cfb.has_entry("EncryptedSummary") {
@@ -217,11 +219,41 @@ fn parse_current_user_atom(bytes: &[u8], budget: &mut usize) -> Result<usize, St
 
 fn parse_records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, String> {
     let mut records = Vec::new();
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        if bytes.len() - offset < 8 {
-            return if bytes[offset..].iter().all(|byte| *byte == 0) {
-                Ok(records)
+    let parent = ByteSpan::new(0..bytes.len(), bytes.len(), "PowerPoint")?;
+    visit_record_spans(bytes, &parent, budget, |span| {
+        records.push(span.view(bytes)?);
+        Ok(())
+    })?;
+    Ok(records)
+}
+
+fn parse_record_spans(
+    bytes: &[u8],
+    parent: &ByteSpan,
+    budget: &mut usize,
+) -> Result<Vec<RecordSpan>, String> {
+    let mut records = Vec::new();
+    visit_record_spans(bytes, parent, budget, |span| {
+        records.push(span);
+        Ok(())
+    })?;
+    Ok(records)
+}
+
+fn visit_record_spans(
+    bytes: &[u8],
+    parent: &ByteSpan,
+    budget: &mut usize,
+    mut visitor: impl FnMut(RecordSpan) -> Result<(), String>,
+) -> Result<(), String> {
+    // Validate the complete parent before using its absolute range for slices.
+    parent.view(bytes)?;
+    let range = parent.range();
+    let mut offset = range.start;
+    while offset < range.end {
+        if range.end - offset < 8 {
+            return if bytes[offset..range.end].iter().all(|byte| *byte == 0) {
+                Ok(())
             } else {
                 Err(unsupported("truncated PowerPoint record header"))
             };
@@ -230,17 +262,17 @@ fn parse_records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'
         let kind = u16_at(bytes, offset + 2)?;
         let size = u32_at(bytes, offset + 4)?;
         if options == 0 && kind == 0 && size == 0 {
-            return if bytes[offset..].iter().all(|byte| *byte == 0) {
-                Ok(records)
+            return if bytes[offset..range.end].iter().all(|byte| *byte == 0) {
+                Ok(())
             } else {
                 Err(unsupported("unexpected zero PowerPoint record"))
             };
         }
-        let (record, end) = parse_record_with_end(bytes, offset, budget)?;
-        records.push(record);
+        let (record, end) = record_span_with_end_in(bytes, parent, offset, budget, "PowerPoint")?;
+        visitor(record)?;
         offset = end;
     }
-    Ok(records)
+    Ok(())
 }
 
 fn parse_record_at<'a>(
@@ -583,6 +615,44 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_and_borrowed_scans_preserve_padding_and_record_budgets() {
+        for padding in 0..=16 {
+            let mut bytes = super::persist::tests::record(0, 7, &[1, 2]);
+            bytes.resize(bytes.len() + padding, 0);
+            let bounds = super::ByteSpan::new(0..bytes.len(), bytes.len(), "test").unwrap();
+            let mut borrowed_budget = 1;
+            let borrowed = super::parse_records(&bytes, &mut borrowed_budget).unwrap();
+            let mut owned_budget = 1;
+            let owned = super::parse_record_spans(&bytes, &bounds, &mut owned_budget).unwrap();
+            assert_eq!((borrowed.len(), owned.len()), (1, 1));
+            assert_eq!((borrowed_budget, owned_budget), (0, 0));
+            assert_eq!(owned[0].view(&bytes).unwrap().payload, &[1, 2]);
+            assert!(super::parse_records(&bytes, &mut 0).is_err());
+            assert!(super::parse_record_spans(&bytes, &bounds, &mut 0).is_err());
+            if padding != 0 {
+                *bytes.last_mut().unwrap() = 1;
+                assert!(super::parse_records(&bytes, &mut 1).is_err());
+                assert!(super::parse_record_spans(&bytes, &bounds, &mut 1).is_err());
+            }
+        }
+        // An all-zero tail is padding, not a charged record, even at zero credit.
+        assert!(super::parse_records(&[0; 16], &mut 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn span_scan_validates_backing_before_reading_headers_or_padding() {
+        let bounds = super::ByteSpan::new(3..16, 16, "test").unwrap();
+        for length in 0..16 {
+            let bytes = vec![0; length];
+            assert!(super::parse_record_spans(&bytes, &bounds, &mut 1).is_err());
+        }
+        let bytes = vec![0; 16];
+        assert!(super::parse_record_spans(&bytes, &bounds, &mut 0)
+            .unwrap()
+            .is_empty());
+    }
+
     use super::{collect_text, parse_current_user_atom, parse_records, MAX_RECORDS};
 
     #[test]
