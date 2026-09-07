@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  configureLegacyXlsMeasurement,
   createLegacyXlsSourceEngine,
   type LegacyXlsNativeArchive,
 } from './direct-xls-engine.js';
@@ -76,6 +77,92 @@ describe('direct XLS source engine', () => {
     await expect(engine.open(new Uint8Array(), { ...descriptor, wasmUrl: 'https://example.test/b.wasm' }))
       .rejects.toThrow('pinned');
     expect(glue.default).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('configureLegacyXlsMeasurement', () => {
+  const encoded = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+  const request = (value: unknown) => ({
+    measurement_request: vi.fn(() => encoded(value)),
+    configure_mdw: vi.fn(),
+  });
+
+  it('maps the validated native font and configures exactly once', async () => {
+    const archive = request({
+      required: true,
+      font: { name: 'Meiryo UI', sizePoints: 10, bold: true, italic: false },
+    });
+    const measure = vi.fn(async () => 7);
+    await expect(configureLegacyXlsMeasurement(archive, measure)).resolves.toBe(7);
+    expect(measure).toHaveBeenCalledWith(
+      { family: 'Meiryo UI', sizePoints: 10, bold: true, italic: false },
+      expect.any(AbortSignal),
+    );
+    expect(archive.configure_mdw).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  it('makes required measurement without a provider an explicit undefined decision', async () => {
+    const archive = request({ required: true, font: null });
+    await expect(configureLegacyXlsMeasurement(archive)).resolves.toBeUndefined();
+    expect(archive.configure_mdw).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it('does not configure when the native session does not require a decision', async () => {
+    const archive = request({ required: false, font: null });
+    const measure = vi.fn();
+    await expect(configureLegacyXlsMeasurement(archive, measure)).resolves.toBeUndefined();
+    expect(measure).not.toHaveBeenCalled();
+    expect(archive.configure_mdw).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {},
+    { required: 1, font: null },
+    { required: true, font: { name: '', sizePoints: 11, bold: false, italic: false } },
+    { required: true, font: { name: 'A', sizePoints: 0, bold: false, italic: false } },
+    { required: true, font: { name: 'A', sizePoints: 11, bold: false, italic: false, extra: 1 } },
+  ])('rejects malformed request %# before configuration', async (value) => {
+    const archive = request(value);
+    await expect(configureLegacyXlsMeasurement(archive, vi.fn())).rejects.toThrow('invalid');
+    expect(archive.configure_mdw).not.toHaveBeenCalled();
+  });
+
+  it('bounds decode and rejects callback failure or cancellation before configure', async () => {
+    const oversized = {
+      measurement_request: () => new Uint8Array(4097),
+      configure_mdw: vi.fn(),
+    };
+    await expect(configureLegacyXlsMeasurement(oversized)).rejects.toThrow('byte budget');
+    expect(oversized.configure_mdw).not.toHaveBeenCalled();
+
+    const archive = request({
+      required: true,
+      font: { name: 'Calibri', sizePoints: 11, bold: false, italic: false },
+    });
+    await expect(configureLegacyXlsMeasurement(archive, async () => { throw new Error('failed'); }))
+      .rejects.toThrow('failed');
+    expect(archive.configure_mdw).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(configureLegacyXlsMeasurement(archive, vi.fn(), controller.signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(archive.measurement_request).toHaveBeenCalledTimes(1);
+    expect(archive.configure_mdw).not.toHaveBeenCalled();
+
+    const during = request({
+      required: true,
+      font: { name: 'Calibri', sizePoints: 11, bold: false, italic: false },
+    });
+    const active = new AbortController();
+    const pending = configureLegacyXlsMeasurement(
+      during,
+      () => new Promise(() => undefined),
+      active.signal,
+    );
+    active.abort();
+    await expect(pending).rejects.toThrow('aborted');
+    expect(during.configure_mdw).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,5 @@
 /** Canonical XLSX workbook/worksheet coordinator entry point consumed by Node. */
+export { GridGeometry } from './grid-geometry.js';
 export {
   isXlsxWorksheetPullResponse,
   XlsxWorksheetPullClient,

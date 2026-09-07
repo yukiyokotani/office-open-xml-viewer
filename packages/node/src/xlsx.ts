@@ -12,6 +12,7 @@ import {
 import {
   acquireXlsxNodeSession,
   acquireXlsxSessionFromArchive,
+  GridGeometry,
   addWorksheetCacheUsage,
   addWorksheetUsage,
   assertWorksheetCacheUsage,
@@ -27,6 +28,7 @@ import {
 } from '@silurus/ooxml-xlsx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import type { LegacyXlsFontMeasurement } from '@silurus/ooxml-legacy-converter';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 import {
@@ -55,7 +57,10 @@ export interface MaterializedXlsxWorkbook {
 }
 
 /** Options for the bounded Node workbook session. */
-export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions;
+export type OpenXlsxWorkbookOptions = OoxmlNodeSessionOptions & {
+  /** Measure the actual Normal-style font for direct XLS. No fallback is assumed. */
+  readonly measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement;
+};
 
 export type XlsxWorksheetRowChunk =
   | {
@@ -85,6 +90,8 @@ export interface XlsxWorkbookSession {
   readonly sheetCount: number;
   readonly sheetNames: ReadonlyArray<string>;
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
+  /** Native source geometry metric, when genuinely measured; absent for ordinary OOXML. */
+  readonly maximumDigitWidth?: number;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
   close(): Promise<void>;
 }
@@ -100,6 +107,7 @@ export async function openXlsxWorkbook(
 ): Promise<XlsxWorkbookSession> {
   const bound = bindLegacyOfficeConversionSignal(options.legacyConversion, 'xlsx', options.signal);
   let acquired: ReturnType<typeof acquireXlsxSessionFromArchive> | undefined;
+  let maximumDigitWidth: number | undefined;
   try {
     const resolved = await resolveXlsWorkbookInput(buffer, bound.options, options.password);
     let signal = options.signal;
@@ -107,13 +115,12 @@ export async function openXlsxWorkbook(
       acquired = await acquireXlsxNodeSession(resolved.bytes, getXlsxWasmModule(), options);
       bound.cleanup();
     } else {
-      const { openLegacyXlsSource } = await import('@silurus/ooxml-legacy-converter/internal/direct-xls-engine');
+      const { openLegacyXlsSource, configureLegacyXlsMeasurement } = await import('@silurus/ooxml-legacy-converter/internal/direct-xls-engine');
       const owned = await openLegacyXlsSource(resolved.bytes, resolved.source, resolved.signal);
       try {
-        const request = JSON.parse(new TextDecoder().decode(owned.archive.measurement_request())) as { required: boolean };
-        // Node has no admitted font measurement provider here. Explicitly
-        // omit metric-dependent pictures instead of guessing a digit width.
-        if (request.required) owned.archive.configure_mdw(undefined);
+        maximumDigitWidth = await configureLegacyXlsMeasurement(
+          owned.archive, options.measureLegacyXlsNormalFont, resolved.signal,
+        );
       } catch (error) {
         try { owned.closeArchive(); } catch {}
         throw error;
@@ -124,7 +131,7 @@ export async function openXlsxWorkbook(
     const owned = acquired;
     return new XlsxWorkbookSessionImpl(
       () => { try { owned.closeArchive(); } finally { bound.cleanup(); } },
-      owned.archive, owned.workbookIndex, owned.metrics, owned.usage, signal,
+      owned.archive, owned.workbookIndex, owned.metrics, owned.usage, signal, maximumDigitWidth,
     );
   } catch (error) {
     try { acquired?.closeArchive(); } catch {}
@@ -160,6 +167,7 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
     private readonly metrics: OoxmlResourceMetricsSession,
     usage: OoxmlResourceUsageSnapshot | undefined,
     private readonly signal?: AbortSignal,
+    readonly maximumDigitWidth?: number,
   ) {
     this.workbookIndex = freezeRecursively(workbook);
     this.sheetNames = Object.freeze(this.workbookIndex.workbook.sheets.map((sheet) => sheet.name));
@@ -233,6 +241,11 @@ class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
             usage: unit.usage,
           };
           continue;
+        }
+        if (this.maximumDigitWidth !== undefined) {
+          // Preserve the native source's one measured metric for both grid
+          // geometry and anchored pictures; do not remeasure in the renderer.
+          GridGeometry.forWorksheet(unit.worksheet, this.maximumDigitWidth);
         }
         yield {
           kind: 'finished',
