@@ -4,28 +4,28 @@ use std::{collections::BTreeMap, rc::Rc};
 
 // Resource policy for retained master-shape metadata, independent of slide count.
 const MAX_MASTER_SHAPES: usize = 100_000;
-pub(super) struct Node<'a> {
+pub(super) struct Node {
     pub id: u32,
     pub parent: Option<u32>,
     pub text_type: Option<u16>,
     pub direct: Vec<Option<text_style::Level>>,
     pub base: Option<Rc<text_style::Master>>,
     pub paint: paint::Paint,
-    pub geometry: crate::officeart::geometry::Geometry<'a>,
+    pub geometry: crate::officeart::geometry::SpannedGeometry,
 }
 #[derive(Default)]
-pub(super) struct Resolver<'a> {
-    nodes: BTreeMap<u32, Node<'a>>,
-    resolved: BTreeMap<u32, Resolved<'a>>,
+pub(super) struct Resolver {
+    nodes: BTreeMap<u32, Node>,
+    resolved: BTreeMap<u32, Resolved>,
 }
-struct Resolved<'a> {
+struct Resolved {
     levels: Rc<Vec<text_style::Level>>,
     paint: paint::Paint,
-    geometry: crate::officeart::geometry::Geometry<'a>,
+    geometry: crate::officeart::geometry::SpannedGeometry,
     depth: usize,
 }
-impl<'a> Resolver<'a> {
-    pub fn insert(&mut self, node: Node<'a>) -> Result<(), String> {
+impl Resolver {
+    pub fn insert(&mut self, node: Node) -> Result<(), String> {
         if self.nodes.len() + self.resolved.len() >= MAX_MASTER_SHAPES {
             return Err(unsupported("PowerPoint master shape limit exceeded"));
         }
@@ -56,7 +56,10 @@ impl<'a> Resolver<'a> {
             .map(|v| &v.paint)
             .ok_or_else(|| unsupported("unresolved PowerPoint master shape"))
     }
-    pub fn geometry(&self, id: u32) -> Result<&crate::officeart::geometry::Geometry<'a>, String> {
+    pub fn geometry(
+        &self,
+        id: u32,
+    ) -> Result<&crate::officeart::geometry::SpannedGeometry, String> {
         self.resolved
             .get(&id)
             .map(|v| &v.geometry)
@@ -100,7 +103,7 @@ impl<'a> Resolver<'a> {
         };
         let geometry = match parent {
             Some(parent) => node.geometry.inherit(&self.resolved[&parent].geometry),
-            None => node.geometry,
+            None => node.geometry.clone(),
         };
         let base = inherited.as_ref().map(|v| v.as_slice()).or_else(|| {
             node.base
@@ -136,7 +139,7 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn node<'a>(id: u32, parent: Option<u32>) -> Node<'a> {
+    fn node(id: u32, parent: Option<u32>) -> Node {
         Node {
             id,
             parent,
@@ -144,7 +147,7 @@ mod tests {
             direct: Vec::new(),
             base: None,
             paint: paint::Paint::default(),
-            geometry: crate::officeart::geometry::Geometry::default(),
+            geometry: crate::officeart::geometry::SpannedGeometry::default(),
         }
     }
     #[test]
@@ -217,12 +220,32 @@ mod tests {
         for id in 1..=MAX_MASTER_SHAPES as u32 {
             r.insert(node(id, None)).unwrap();
         }
-        assert!(r
-            .insert(node(MAX_MASTER_SHAPES as u32 + 1, None))
-            .unwrap_err()
-            .contains("limit"));
+        assert!(
+            r.insert(node(MAX_MASTER_SHAPES as u32 + 1, None))
+                .unwrap_err()
+                .contains("limit")
+        );
         let mut r = Resolver::default();
         r.insert(node(1, None)).unwrap();
         assert!(r.insert(node(1, None)).unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn resolved_master_geometry_survives_backing_move_and_empty_child_reset() {
+        let mut backing = [2u16.to_le_bytes(), 2u16.to_le_bytes(), 8u16.to_le_bytes()].concat();
+        backing.extend([0i32, 0, 10, 10].into_iter().flat_map(i32::to_le_bytes));
+        let span = crate::officeart::ByteSpan::new(0..backing.len(), backing.len(), "geometry").unwrap();
+        let mut root = node(1, None);
+        root.geometry.complex(0x145, span);
+        let mut child = node(2, Some(1));
+        child.geometry.scalar(0x145, 0).unwrap();
+        let mut resolver = Resolver::default();
+        resolver.insert(root).unwrap();
+        resolver.insert(child).unwrap();
+        resolver.finish(&mut 20).unwrap();
+        let moved = backing;
+        assert!(resolver.geometry(1).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_some());
+        assert!(resolver.geometry(2).unwrap().view(&moved).unwrap().decode(&mut 10).unwrap().is_none());
+        assert!(resolver.geometry(1).unwrap().view(&moved[..moved.len() - 1]).is_err());
     }
 }

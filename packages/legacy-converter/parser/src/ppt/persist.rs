@@ -3,20 +3,50 @@
 use super::*;
 use std::collections::{BTreeMap, HashSet};
 
-pub(super) struct Presentation<'a> {
-    pub shape_masters: shape_master::Resolver<'a>,
-    pub slides: Vec<(Record<'a>, Vec<String>)>,
-    pub outline_styles: Vec<Vec<Option<&'a [u8]>>>,
+pub(super) struct PresentationStorage<R, S> {
+    pub shape_masters: shape_master::Resolver,
+    pub slides: Vec<(R, Vec<String>)>,
+    pub outline_styles: Vec<Vec<Option<S>>>,
     pub outline_types: Vec<Vec<u16>>,
     pub outline_slide_numbers: Vec<Vec<Vec<u32>>>,
     pub first_slide_number: u16,
     pub text_masters: Vec<Option<std::rc::Rc<text_style::Master>>>,
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
-    pub image_entries: Vec<Record<'a>>,
+    pub image_entries: Vec<R>,
     pub backgrounds: Vec<Option<paint::Paint>>,
     pub object_masters: Vec<std::rc::Rc<[RecordSpan]>>,
     pub size: (u32, u32),
+}
+
+pub(super) type Presentation<'a> = PresentationStorage<Record<'a>, &'a [u8]>;
+pub(super) type OwnedPresentation = PresentationStorage<RecordSpan, ByteSpan>;
+
+impl OwnedPresentation {
+    fn into_borrowed(self, document: &[u8]) -> Result<Presentation<'_>, String> {
+        Ok(PresentationStorage {
+            slides: self.slides.into_iter()
+                .map(|(record, text)| Ok((record.view(document)?, text)))
+                .collect::<Result<_, String>>()?,
+            outline_styles: self.outline_styles.into_iter()
+                .map(|styles| styles.into_iter()
+                    .map(|style| style.map(|span| span.view(document)).transpose())
+                    .collect::<Result<_, _>>())
+                .collect::<Result<_, _>>()?,
+            image_entries: self.image_entries.into_iter()
+                .map(|record| record.view(document)).collect::<Result<_, _>>()?,
+            shape_masters: self.shape_masters,
+            outline_types: self.outline_types,
+            outline_slide_numbers: self.outline_slide_numbers,
+            first_slide_number: self.first_slide_number,
+            text_masters: self.text_masters,
+            fonts: self.fonts,
+            schemes: self.schemes,
+            backgrounds: self.backgrounds,
+            object_masters: self.object_masters,
+            size: self.size,
+        })
+    }
 }
 
 /// Owned edit-chain index, independent of borrowed slide/master views. Direct
@@ -214,6 +244,16 @@ pub(super) fn resolve<'a>(
     current_edit: usize,
     budget: &mut usize,
 ) -> Result<Presentation<'a>, String> {
+    resolve_owned(document, current_edit, budget)?.into_borrowed(document)
+}
+
+/// Resolve live metadata once; retained references are source-relative ranges.
+/// The caller must keep the immutable document backing until session disposal.
+pub(super) fn resolve_owned(
+    document: &[u8],
+    current_edit: usize,
+    budget: &mut usize,
+) -> Result<OwnedPresentation, String> {
     let PersistDirectory {
         offsets,
         document_offset,
@@ -224,14 +264,12 @@ pub(super) fn resolve<'a>(
         return Err(unsupported("invalid PowerPoint document persist object"));
     }
     let mut children = Vec::new();
-    let mut slide_lists = Vec::new();
-    // Legacy master consumers still need borrowed children. Retain spans only
-    // for slide lists, not a second full vector of document child metadata.
+    let mut child_spans = Vec::new();
+    // Borrowed views are transient inputs to font/master decoders; only owned
+    // metadata and validated spans escape this admission step.
     visit_record_spans(document, record_span.payload_span(), budget, |span| {
         let child = span.view(document)?;
-        if is_slide_list(child) {
-            slide_lists.push(span);
-        }
+        child_spans.push(span);
         children.push(child);
         Ok(())
     })?;
@@ -253,43 +291,37 @@ pub(super) fn resolve<'a>(
     if first_slide_number >= 10000 {
         return Err(unsupported("invalid PowerPoint first slide number"));
     }
-    let slide_index = resolve_slide_list(document, &slide_lists, &offsets, budget)?;
+    let slide_index = resolve_slide_list(document, &child_spans, &offsets, budget)?;
     let mut slides = Vec::with_capacity(slide_index.slides.len());
     let mut outline_styles = Vec::with_capacity(slide_index.slides.len());
     let mut outline_types = Vec::with_capacity(slide_index.slides.len());
     let mut outline_slide_numbers = Vec::with_capacity(slide_index.slides.len());
     for slide in slide_index.slides {
-        slides.push((slide.record.view(document)?, slide.outline));
-        outline_styles.push(
-            slide
-                .outline_styles
-                .into_iter()
-                .map(|style| style.map(|span| span.view(document)).transpose())
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        slides.push((slide.record, slide.outline));
+        outline_styles.push(slide.outline_styles);
         outline_types.push(slide.outline_types);
         outline_slide_numbers.push(slide.outline_slide_numbers);
     }
-    Ok(Presentation {
+    Ok(PresentationStorage {
         first_slide_number,
         outline_slide_numbers,
         object_masters: slides
             .iter()
-            .map(|(slide, _)| schemes.objects(*slide, budget))
+            .map(|(slide, _)| schemes.objects(slide.view(document)?, budget))
             .collect::<Result<_, _>>()?,
         backgrounds: slides
             .iter()
-            .map(|(slide, _)| schemes.background(*slide, budget))
+            .map(|(slide, _)| schemes.background(slide.view(document)?, budget))
             .collect::<Result<_, _>>()?,
-        image_entries: media::catalog(&children, budget)?,
+        image_entries: media::catalog_spans(document, &child_spans, budget)?,
         text_masters: slides
             .iter()
-            .map(|(slide, _)| schemes.text_master(*slide, budget))
+            .map(|(slide, _)| schemes.text_master(slide.view(document)?, budget))
             .collect::<Result<_, _>>()?,
         outline_types,
         schemes: slides
             .iter()
-            .map(|(slide, _)| schemes.slide(*slide, budget))
+            .map(|(slide, _)| schemes.slide(slide.view(document)?, budget))
             .collect::<Result<_, _>>()?,
         shape_masters: schemes.shape_masters,
         slides,
@@ -412,6 +444,44 @@ pub(crate) mod tests {
         assert_eq!(index.offsets.len(), 3);
         assert_eq!(index.offsets[&1], 0);
         assert!(index.offsets[&2] < index.offsets[&3]);
+    }
+
+    #[test]
+    fn owned_presentation_preserves_styles_order_and_admission_work_after_move() {
+        let (stream, edit) = fixture_with_styles(true);
+        let mut owned_budget = MAX_RECORDS;
+        let owned = resolve_owned(&stream, edit, &mut owned_budget).unwrap();
+        let mut borrowed_budget = MAX_RECORDS;
+        let borrowed = resolve(&stream, edit, &mut borrowed_budget).unwrap();
+        assert_eq!(owned_budget, borrowed_budget);
+        assert_eq!(owned.size, borrowed.size);
+        assert_eq!(owned.first_slide_number, borrowed.first_slide_number);
+        assert_eq!(owned.outline_types, borrowed.outline_types);
+        assert_eq!(owned.outline_slide_numbers, borrowed.outline_slide_numbers);
+        for (index, (span, text)) in owned.slides.iter().enumerate() {
+            assert_eq!(text, &borrowed.slides[index].1);
+            assert_eq!(span.view(&stream).unwrap().payload, borrowed.slides[index].0.payload);
+            for (span, bytes) in owned.outline_styles[index].iter()
+                .zip(&borrowed.outline_styles[index]) {
+                assert_eq!(span.as_ref().map(|span| span.view(&stream).unwrap()), *bytes);
+            }
+        }
+        drop(borrowed);
+        let moved = stream;
+        let viewed = owned.into_borrowed(&moved).unwrap();
+        assert_eq!(viewed.slides[0].1, ["second"]);
+        assert_eq!(viewed.slides[1].1, ["first"]);
+        assert!(viewed.outline_styles.iter().all(|styles| styles[0].is_some()));
+        assert_eq!(viewed.slides.len(), 2); // Dead physical slide remains excluded.
+    }
+
+    #[test]
+    fn owned_presentation_rejects_short_backing_at_view_time() {
+        let (stream, edit) = fixture_with_styles(true);
+        let owned = resolve_owned(&stream, edit, &mut MAX_RECORDS.clone()).unwrap();
+        let last_slide_end = owned.slides.iter()
+            .map(|(record, _)| record.payload_span().range().end).max().unwrap();
+        assert!(owned.into_borrowed(&stream[..last_slide_end - 1]).is_err());
     }
 
     #[test]

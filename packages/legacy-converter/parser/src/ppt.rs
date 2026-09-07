@@ -98,6 +98,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
                 types: &presentation.outline_types[index],
                 master: presentation.text_masters[index].as_deref(),
                 shapes: Some(&presentation.shape_masters),
+                backing: &document,
                 outline_slide_numbers: &presentation.outline_slide_numbers[index],
                 slide_number: u32::from(presentation.first_slide_number) + index as u32,
             }),

@@ -66,8 +66,8 @@ fn entry(record: Record<'_>, budget: &mut usize) -> Result<Entry, String> {
 }
 
 #[derive(Default)]
-pub(super) struct Resolver<'a> {
-    pub shape_masters: shape_master::Resolver<'a>,
+pub(super) struct Resolver {
+    pub shape_masters: shape_master::Resolver,
     masters: BTreeMap<u32, Entry>,
     cache: BTreeMap<u32, Option<Scheme>>,
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
@@ -76,9 +76,9 @@ pub(super) struct Resolver<'a> {
     records: BTreeMap<u32, RecordSpan>,
     object_cache: BTreeMap<u32, std::rc::Rc<[RecordSpan]>>,
 }
-impl<'a> Resolver<'a> {
+impl Resolver {
     pub fn new(
-        document: &'a [u8],
+        document: &[u8],
         children: &[Record<'_>],
         offsets: &BTreeMap<u32, usize>,
         budget: &mut usize,
@@ -151,7 +151,8 @@ impl<'a> Resolver<'a> {
                 result.text_master(record, budget)?
             };
             drawing::master_shapes(
-                record.payload,
+                document,
+                &record_span,
                 base,
                 &mut result.shape_masters,
                 budget,

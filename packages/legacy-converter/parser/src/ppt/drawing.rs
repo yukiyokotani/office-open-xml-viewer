@@ -11,7 +11,8 @@ pub(super) struct TextContext<'a> {
     pub scheme: Option<&'a scheme::Scheme>,
     pub types: &'a [u16],
     pub master: Option<&'a text_style::Master>,
-    pub shapes: Option<&'a shape_master::Resolver<'a>>,
+    pub shapes: Option<&'a shape_master::Resolver>,
+    pub backing: &'a [u8],
     pub outline_slide_numbers: &'a [Vec<u32>],
     pub slide_number: u32,
 }
@@ -131,23 +132,162 @@ impl Rect {
     }
 }
 
-struct Shape<'a> {
+trait ShapeSource {
+    type Record: Clone;
+    type Complex: Default + Clone;
+    type Style;
+    fn with_record<T>(
+        &self,
+        record: &Self::Record,
+        f: impl FnOnce(Record<'_>) -> Result<T, String>,
+    ) -> Result<T, String>;
+    fn children(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Vec<Self::Record>, String>;
+    fn primary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String>;
+    fn tertiary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String>;
+    fn style(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Option<Self::Style>, String>;
+}
+
+struct BorrowedSource<'a>(std::marker::PhantomData<&'a [u8]>);
+impl<'a> ShapeSource for BorrowedSource<'a> {
+    type Record = Record<'a>;
+    type Complex = &'a [u8];
+    type Style = &'a [u8];
+    fn with_record<T>(
+        &self,
+        record: &Self::Record,
+        f: impl FnOnce(Record<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        f(*record)
+    }
+    fn children(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Vec<Self::Record>, String> {
+        parse_records(record.payload, budget)
+    }
+    fn primary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        props.read(*record, budget)
+    }
+    fn tertiary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        props.read_tertiary(*record, budget)
+    }
+    fn style(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Option<Self::Style>, String> {
+        text_style::auto_number::local_atom(*record, budget)
+    }
+}
+
+struct SpannedSource<'a> {
+    backing: &'a [u8],
+}
+// Master-metadata adapter only: the previous master path validated PP9 tags
+// without consuming their local styles. A direct slide producer must retain
+// those styles rather than reuse this adapter's unit-valued Style.
+impl ShapeSource for SpannedSource<'_> {
+    type Record = RecordSpan;
+    type Complex = ByteSpan;
+    type Style = ();
+    fn with_record<T>(
+        &self,
+        record: &Self::Record,
+        f: impl FnOnce(Record<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        f(record.view(self.backing)?)
+    }
+    fn children(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Vec<Self::Record>, String> {
+        parse_record_spans(self.backing, record.payload_span(), budget)
+    }
+    fn primary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        props.read_span(record, self.backing, budget)
+    }
+    fn tertiary(
+        &self,
+        record: &Self::Record,
+        props: &mut PropertiesStorage<Self::Complex>,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        props.read_tertiary_span(record, self.backing, budget)
+    }
+    fn style(
+        &self,
+        record: &Self::Record,
+        budget: &mut usize,
+    ) -> Result<Option<Self::Style>, String> {
+        self.with_record(record, |view| {
+            text_style::auto_number::local_atom(view, budget).map(|v| v.map(|_| ()))
+        })
+    }
+}
+
+struct ShapeStorage<R, C, S> {
     id: u32,
     kind: u16,
     flags: u32,
     anchor: Option<Rect>,
     child_space: Option<Rect>,
-    textbox: Option<Record<'a>>,
-    style9: Option<&'a [u8]>,
+    textbox: Option<R>,
+    style9: Option<S>,
     placeholder: bool,
-    props: Properties<'a>,
+    props: PropertiesStorage<C>,
 }
+type Shape<'a> = ShapeStorage<Record<'a>, &'a [u8], &'a [u8]>;
+type SpannedShape = ShapeStorage<RecordSpan, ByteSpan, ()>;
 
-impl<'a> Shape<'a> {
-    fn read(record: Record<'a>, nested: bool, budget: &mut usize) -> Result<Self, String> {
-        if record.kind != 0xf004 || record.version != 15 {
+impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
+    fn read_from(
+        source: &impl ShapeSource<Record = R, Complex = C, Style = S>,
+        record: R,
+        nested: bool,
+        budget: &mut usize,
+    ) -> Result<Self, String> {
+        source.with_record(&record, |view| {
+            if view.kind == 0xf004 && view.version == 15 {
+                Ok(())
+            } else {
             return Err(unsupported("invalid PowerPoint shape container"));
         }
+        })?;
         let mut flags = None;
         let mut id = 0;
         let mut kind = 0;
@@ -158,64 +298,75 @@ impl<'a> Shape<'a> {
         let mut tags_seen = false;
         let mut placeholder = None;
         let mut tertiary_seen = false;
-        let mut props = Properties::default();
-        for child in parse_records(record.payload, budget)? {
-            match child.kind {
+        let mut props = PropertiesStorage::<C>::default();
+        for child in source.children(&record, budget)? {
+            let (child_kind, child_version, child_instance, child_len) = source
+                .with_record(&child, |view| {
+                    Ok((view.kind, view.version, view.instance, view.payload.len()))
+                })?;
+            match child_kind {
                 0xf00a => {
-                    if flags.is_some() || child.version != 2 || child.payload.len() != 8 {
+                    if flags.is_some() || child_version != 2 || child_len != 8 {
                         return Err(unsupported("invalid PowerPoint shape flags"));
                     }
-                    flags = Some(u32_at(child.payload, 4)?);
-                    id = u32_at(child.payload, 0)?;
-                    kind = child.instance;
+                    (id, flags) = source.with_record(&child, |view| {
+                        Ok((u32_at(view.payload, 0)?, Some(u32_at(view.payload, 4)?)))
+                    })?;
+                    kind = child_instance;
                 }
                 0xf010 | 0xf00f => {
-                    if anchor.is_some() || (child.kind == 0xf00f) != nested {
+                    if anchor.is_some() || (child_kind == 0xf00f) != nested {
                         return Err(unsupported("ambiguous PowerPoint shape coordinate space"));
                     }
-                    anchor = Some(Rect::read(child)?);
+                    anchor = Some(source.with_record(&child, Rect::read)?);
                 }
                 0xf009 => {
                     if child_space.is_some() {
                         return Err(unsupported("duplicate PowerPoint group bounds"));
                     }
-                    child_space = Some(Rect::read(child)?);
+                    child_space = Some(source.with_record(&child, Rect::read)?);
                 }
                 0xf00d => {
-                    if textbox.is_some() || child.version != 15 {
+                    if textbox.is_some() || child_version != 15 {
                         return Err(unsupported("invalid PowerPoint shape text container"));
                     }
                     textbox = Some(child);
                 }
-                0xf00b => props.read(child, budget)?,
+                0xf00b => source.primary(&child, &mut props, budget)?,
                 0xf122 => {
                     if tertiary_seen {
                         return Err(unsupported("duplicate PowerPoint tertiary properties"));
                     }
                     tertiary_seen = true;
-                    props.read_tertiary(child, budget)?;
+                    source.tertiary(&child, &mut props, budget)?;
                 }
                 0xf011 => {
-                    if child.version != 15 {
+                    if child_version != 15 {
                         return Err(unsupported("invalid PowerPoint client data"));
                     }
                     // Inspect direct placeholder metadata and exact passive PP9
                     // tags only. Never descend into action/link containers.
-                    for atom in parse_records(child.payload, budget)? {
-                        if atom.kind == 5000 {
+                    for atom in source.children(&child, budget)? {
+                        let (atom_kind, atom_version, atom_len) = source
+                            .with_record(&atom, |view| {
+                                Ok((view.kind, view.version, view.payload.len()))
+                            })?;
+                        if atom_kind == 5000 {
                             if tags_seen {
                                 return Err(unsupported("duplicate PowerPoint shape tags"));
                             }
                             tags_seen = true;
-                            style9 = text_style::auto_number::local_atom(atom, budget)?;
+                            style9 = source.style(&atom, budget)?;
                         }
-                        if atom.kind != 3011 {
+                        if atom_kind != 3011 {
                             continue;
                         }
-                        if placeholder.is_some() || atom.version != 0 || atom.payload.len() != 8 {
+                        if placeholder.is_some() || atom_version != 0 || atom_len != 8 {
                             return Err(unsupported("invalid PowerPoint placeholder metadata"));
                         }
-                        placeholder = Some(u32_at(atom.payload, 0)? != u32::MAX);
+                        placeholder = Some(
+                            source.with_record(&atom, |view| u32_at(view.payload, 0))? != u32::MAX,
+                        );
                     }
                 }
                 _ => {}
@@ -233,6 +384,20 @@ impl<'a> Shape<'a> {
             props,
         })
     }
+}
+
+impl<'a> Shape<'a> {
+    fn read(record: Record<'a>, nested: bool, budget: &mut usize) -> Result<Self, String> {
+        Self::read_from(
+            &BorrowedSource(std::marker::PhantomData),
+            record,
+            nested,
+            budget,
+        )
+    }
+}
+
+impl<R, C, S> ShapeStorage<R, C, S> {
     fn omitted(&self) -> bool {
         self.flags & (8 | 16 | 1024) != 0 || self.props.script
     }
@@ -240,7 +405,16 @@ impl<'a> Shape<'a> {
         (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
     }
     fn transform(&self, anchor: Rect, group: Option<Rect>) -> String {
-        let mut xml = format!("<a:xfrm rot=\"{}\" flipH=\"{}\" flipV=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/>", self.props.rotation, (self.flags >> 6) & 1, (self.flags >> 7) & 1, anchor.x, anchor.y, anchor.w, anchor.h);
+        let mut xml = format!(
+            "<a:xfrm rot=\"{}\" flipH=\"{}\" flipV=\"{}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/>",
+            self.props.rotation,
+            (self.flags >> 6) & 1,
+            (self.flags >> 7) & 1,
+            anchor.x,
+            anchor.y,
+            anchor.w,
+            anchor.h
+        );
         if let Some(ch) = group {
             xml.push_str(&format!(
                 "<a:chOff x=\"{}\" y=\"{}\"/><a:chExt cx=\"{}\" cy=\"{}\"/>",
@@ -252,8 +426,8 @@ impl<'a> Shape<'a> {
     }
 }
 
-struct Properties<'a> {
-    geometry: geometry::Geometry<'a>,
+struct PropertiesStorage<T> {
+    geometry: geometry::GeometryStorage<T>,
     hidden: bool,
     script: bool,
     master: Option<u32>,
@@ -268,10 +442,13 @@ struct Properties<'a> {
     text_flow: Option<u32>,
     font_direction: Option<u32>,
 }
-impl Default for Properties<'_> {
+type Properties<'a> = PropertiesStorage<&'a [u8]>;
+type SpannedProperties = PropertiesStorage<ByteSpan>;
+
+impl<T> Default for PropertiesStorage<T> {
     fn default() -> Self {
         Self {
-            geometry: geometry::Geometry::default(),
+            geometry: geometry::GeometryStorage::default(),
             hidden: false,
             script: false,
             master: None,
@@ -288,25 +465,17 @@ impl Default for Properties<'_> {
         }
     }
 }
-impl<'a> Properties<'a> {
-    fn read_tertiary(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
-        crate::officeart::properties::visit_tertiary(record, budget, |property| {
-            // Only supported fill Boolean fields are interpreted here; other
-            // tertiary properties need their own typed mappings and must not be
-            // routed through the broader primary-property parser.
-            if property.opid == 0x01bf && property.complex.is_none() {
-                self.paint.tertiary_fill_boolean_property(property.value)?;
+impl<T: Default + Clone> PropertiesStorage<T> {
+    fn apply_tertiary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
+        if opid == 0x01bf && complex.is_none() {
+            self.paint.tertiary_fill_boolean_property(value)?;
             }
             Ok(())
-        })
     }
 
-    fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
-        crate::officeart::properties::visit(record, budget, |property| {
-            let opid = property.opid;
-            let value = property.value;
+    fn apply_primary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
             if matches!(opid & 0x3fff, 0x88 | 0x89) {
-                if opid & 0xc000 != 0 || property.complex.is_some() {
+            if opid & 0xc000 != 0 || complex.is_some() {
                     return Err(unsupported("invalid PowerPoint text direction property"));
                 }
                 let target = if opid == 0x88 {
@@ -325,7 +494,7 @@ impl<'a> Properties<'a> {
                 }
                 return Ok(());
             }
-            if let Some(complex) = property.complex {
+        if let Some(complex) = complex {
                 if matches!(opid & 0x3fff, 0x145..=0x150) {
                     self.paint.custom_geometry = true;
                 }
@@ -384,6 +553,46 @@ impl<'a> Properties<'a> {
                 }
             }
             Ok(())
+    }
+}
+
+impl<'a> Properties<'a> {
+    fn read_tertiary(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
+        crate::officeart::properties::visit_tertiary(record, budget, |property| {
+            // Only supported fill Boolean fields are interpreted here; other
+            // tertiary properties need their own typed mappings and must not be
+            // routed through the broader primary-property parser.
+            self.apply_tertiary(property.opid, property.value, property.complex)
+        })
+    }
+
+    fn read(&mut self, record: Record<'a>, budget: &mut usize) -> Result<(), String> {
+        crate::officeart::properties::visit(record, budget, |property| {
+            self.apply_primary(property.opid, property.value, property.complex)
+        })
+    }
+}
+
+impl SpannedProperties {
+    fn read_span(
+        &mut self,
+        record: &RecordSpan,
+        backing: &[u8],
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        crate::officeart::properties::visit_span(record, backing, budget, |property| {
+            self.apply_primary(property.opid, property.value, property.complex)
+        })
+    }
+
+    fn read_tertiary_span(
+        &mut self,
+        record: &RecordSpan,
+        backing: &[u8],
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        crate::officeart::properties::visit_tertiary_span(record, backing, budget, |property| {
+            self.apply_tertiary(property.opid, property.value, property.complex)
         })
     }
 }
@@ -430,34 +639,38 @@ pub(super) fn background(slide: &[u8], budget: &mut usize) -> Result<Option<pain
     Ok(result)
 }
 
-pub(super) fn master_shapes<'a>(
-    slide: &'a [u8],
+pub(super) fn master_shapes(
+    backing: &[u8],
+    slide: &RecordSpan,
     base: Option<std::rc::Rc<text_style::Master>>,
-    output: &mut shape_master::Resolver<'a>,
+    output: &mut shape_master::Resolver,
     budget: &mut usize,
     text_budget: &mut usize,
 ) -> Result<(), String> {
-    fn visit<'a>(
-        record: Record<'a>,
+    fn visit(
+        backing: &[u8],
+        record: RecordSpan,
         nested: bool,
         depth: usize,
         base: &Option<std::rc::Rc<text_style::Master>>,
-        output: &mut shape_master::Resolver<'a>,
+        output: &mut shape_master::Resolver,
         budget: &mut usize,
         text_budget: &mut usize,
     ) -> Result<(), String> {
         if depth >= MAX_DEPTH {
             return Err(unsupported("PowerPoint master drawing depth exceeded"));
         }
-        if record.kind == 0xf003 {
-            if record.version != 15 {
+        let viewed = record.view(backing)?;
+        if viewed.kind == 0xf003 {
+            if viewed.version != 15 {
                 return Err(unsupported("invalid PowerPoint master group"));
             }
-            let children = parse_records(record.payload, budget)?;
+            let children = parse_record_spans(backing, record.payload_span(), budget)?;
             let first = children
                 .first()
                 .ok_or_else(|| unsupported("empty PowerPoint master group"))?;
-            let group = Shape::read(*first, nested, budget)?;
+            let group =
+                SpannedShape::read_from(&SpannedSource { backing }, first.clone(), nested, budget)?;
             if group.flags & 1 == 0 || (nested && group.flags & 4 != 0) {
                 return Err(unsupported("invalid PowerPoint master group flags"));
             }
@@ -465,10 +678,20 @@ pub(super) fn master_shapes<'a>(
                 return Ok(());
             }
             let child_nested = group.flags & 4 == 0;
-            visit(*first, nested, depth + 1, base, output, budget, text_budget)?;
+            visit(
+                backing,
+                first.clone(),
+                nested,
+                depth + 1,
+                base,
+                output,
+                budget,
+                text_budget,
+            )?;
             for child in &children[1..] {
                 visit(
-                    *child,
+                    backing,
+                    child.clone(),
                     child_nested,
                     depth + 1,
                     base,
@@ -477,41 +700,49 @@ pub(super) fn master_shapes<'a>(
                     text_budget,
                 )?;
             }
-        } else if record.kind == 0xf004 {
-            let shape = Shape::read(record, nested, budget)?;
+        } else if viewed.kind == 0xf004 {
+            let shape = SpannedShape::read_from(
+                &SpannedSource { backing },
+                record.clone(),
+                nested,
+                budget,
+            )?;
             if shape.omitted() {
                 return Ok(());
             }
             let (mut kind, mut text, mut style) = (None, None, None);
-            if let Some(textbox) = shape.textbox {
-                for atom in parse_records(textbox.payload, budget)? {
-                    match atom.kind {
+            if let Some(ref textbox) = shape.textbox {
+                for atom in parse_record_spans(backing, textbox.payload_span(), budget)? {
+                    let atom_view = atom.view(backing)?;
+                    match atom_view.kind {
                         3999 => {
                             if kind.is_some() {
                                 return Err(unsupported("duplicate master text header"));
                             }
-                            kind = Some(text_style::text_type(atom)?);
+                            kind = Some(text_style::text_type(atom_view)?);
                         }
                         TEXT_CHARS_ATOM | TEXT_BYTES_ATOM => {
                             if text.is_some() {
                                 return Err(unsupported("duplicate master text body"));
                             }
-                            let decoded = decode_text(atom)?;
+                            let decoded = decode_text(atom_view)?;
                             charge_text(text_budget, decoded.len())?;
                             text = Some(decoded);
                         }
                         4001 => {
-                            if style.is_some() || atom.version != 0 {
+                            if style.is_some() || atom_view.version != 0 {
                                 return Err(unsupported("invalid master text style"));
                             }
-                            style = Some(atom.payload);
+                            style = Some(atom.payload_span().clone());
                         }
                         _ => {} // Actions, links and metacharacter evaluation remain absent.
                     }
                 }
             }
-            let direct = match (text.as_deref(), style) {
-                (Some(text), Some(style)) => text_style::shape_levels(text, style, budget)?,
+            let direct = match (text.as_deref(), style.as_ref()) {
+                (Some(text), Some(style)) => {
+                    text_style::shape_levels(text, style.view(backing)?, budget)?
+                }
                 _ => Vec::new(),
             };
             output.insert(shape_master::Node {
@@ -526,16 +757,17 @@ pub(super) fn master_shapes<'a>(
         }
         Ok(())
     }
-    for drawing in parse_records(slide, budget)?
-        .into_iter()
-        .filter(|r| r.kind == 1036)
-    {
-        for dg in parse_records(drawing.payload, budget)? {
-            if dg.kind != 0xf002 || dg.version != 15 {
+    for drawing in parse_record_spans(backing, slide.payload_span(), budget)? {
+        if drawing.view(backing)?.kind != 1036 {
+            continue;
+        }
+        for dg in parse_record_spans(backing, drawing.payload_span(), budget)? {
+            let dg_view = dg.view(backing)?;
+            if dg_view.kind != 0xf002 || dg_view.version != 15 {
                 return Err(unsupported("invalid master OfficeArt drawing"));
             }
-            for child in parse_records(dg.payload, budget)? {
-                visit(child, false, 0, &base, output, budget, text_budget)?;
+            for child in parse_record_spans(backing, dg.payload_span(), budget)? {
+                visit(backing, child, false, 0, &base, output, budget, text_budget)?;
             }
         }
     }
@@ -760,7 +992,11 @@ impl Writer<'_, '_> {
                 // vector shapes, including master objects, without painting an
                 // extra vector shape over a picture frame.
                 let geometry = match (shape.master(), self.context.and_then(|c| c.shapes)) {
-                    (Some(id), Some(shapes)) => shape.props.geometry.inherit(shapes.geometry(id)?),
+                    (Some(id), Some(shapes)) => shape.props.geometry.inherit(
+                        &shapes
+                            .geometry(id)?
+                            .view(self.context.expect("context").backing)?,
+                    ),
                     _ => shape.props.geometry,
                 };
                 let custom = if shape.kind == 75 {
@@ -1007,6 +1243,69 @@ mod tests {
         record(((values.len() as u16) << 4) | 3, 0xf00b, &payload)
     }
 
+    #[test]
+    fn borrowed_and_spanned_shape_sources_share_structure_properties_and_work() {
+        let bytes = sp(
+            0x20,
+            vec![
+                record(0, 0xf010, &ints(&[-2, 3, 574, 291])),
+                properties(&[(0x301, 77), (0x145, 0), (0x146, 0)]),
+            ],
+        );
+        let borrowed_record = parse_record_at(&bytes, 0, &mut 1).unwrap();
+        let (span, end) = record_span_with_end(&bytes, 0, &mut 1, "shape").unwrap();
+        assert_eq!(end, bytes.len());
+        let mut borrowed_work = 20;
+        let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).unwrap();
+        let mut spanned_work = 20;
+        let spanned = SpannedShape::read_from(
+            &SpannedSource { backing: &bytes },
+            span,
+            false,
+            &mut spanned_work,
+        )
+        .unwrap();
+        assert_eq!(borrowed_work, spanned_work);
+        assert_eq!((borrowed.id, borrowed.flags, borrowed.anchor), (spanned.id, spanned.flags, spanned.anchor));
+        assert_eq!(borrowed.master(), spanned.master());
+        assert!(borrowed.props.geometry.decode(&mut 10).unwrap().is_none());
+        let moved = bytes.clone();
+        assert!(spanned.props.geometry.view(&moved).unwrap().decode(&mut 10).unwrap().is_none());
+        for length in 0..bytes.len() {
+            assert!(span_for_shape_prefix(&bytes[..length]).is_err());
+        }
+        let duplicate_flags = sp(0, vec![record(2, 0xf00a, &[0; 8])]);
+        let malformed_child = record(15, 0xf004, &[record(2, 0xf00a, &[0; 8]), vec![1, 2, 3]].concat());
+        for (invalid, work) in [(&duplicate_flags, 20), (&malformed_child, 20), (&bytes, 0)] {
+            let (borrowed, borrowed_left, spanned, spanned_left) = parse_shape_both(invalid, work);
+            assert_eq!(borrowed, spanned);
+            assert_eq!(borrowed_left, spanned_left);
+            assert!(borrowed.is_err());
+        }
+    }
+
+    fn parse_shape_both(bytes: &[u8], work: usize) -> (Result<(), String>, usize, Result<(), String>, usize) {
+        let borrowed_record = parse_record_at(bytes, 0, &mut 1).unwrap();
+        let (span, _) = record_span_with_end(bytes, 0, &mut 1, "shape").unwrap();
+        let mut borrowed_work = work;
+        let borrowed = Shape::read(borrowed_record, false, &mut borrowed_work).map(|_| ());
+        let mut spanned_work = work;
+        let spanned = SpannedShape::read_from(
+            &SpannedSource { backing: bytes },
+            span,
+            false,
+            &mut spanned_work,
+        )
+        .map(|_| ());
+        (borrowed, borrowed_work, spanned, spanned_work)
+    }
+
+    fn span_for_shape_prefix(bytes: &[u8]) -> Result<(), String> {
+        let (span, _) = record_span_with_end(bytes, 0, &mut 100, "shape")?;
+        SpannedShape::read_from(&SpannedSource { backing: bytes }, span, false, &mut 100)
+            .map(|_| ())
+    }
+
     fn tertiary_properties(values: &[(u16, u32)]) -> Vec<u8> {
         let payload: Vec<u8> = values
             .iter()
@@ -1020,10 +1319,10 @@ mod tests {
     fn authored_png() -> Vec<u8> {
         // Complete authored asymmetric 2x1 RGBA PNG, including valid zlib data and CRCs.
         vec![
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2,
-            0, 0, 0, 1, 8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65,
-            84, 120, 156, 99, 248, 207, 192, 0, 66, 13, 0, 15, 122, 3, 126, 119, 233,
-            127, 151, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 14, 73, 68, 65, 84, 120, 156, 99, 248, 207,
+            192, 0, 66, 13, 0, 15, 122, 3, 126, 119, 233, 127, 151, 0, 0, 0, 0, 73, 69, 78, 68,
+            174, 66, 96, 130,
         ]
     }
     fn png_blip() -> Vec<u8> {
@@ -1043,8 +1342,14 @@ mod tests {
                 crc
             })
         };
-        assert_eq!(crc(&png[12..29]), u32::from_be_bytes(png[29..33].try_into().unwrap()));
-        assert_eq!(crc(&png[37..55]), u32::from_be_bytes(png[55..59].try_into().unwrap()));
+        assert_eq!(
+            crc(&png[12..29]),
+            u32::from_be_bytes(png[29..33].try_into().unwrap())
+        );
+        assert_eq!(
+            crc(&png[37..55]),
+            u32::from_be_bytes(png[55..59].try_into().unwrap())
+        );
         let mut pixels = Vec::new();
         flate2::read::ZlibDecoder::new(&png[41..55])
             .read_to_end(&mut pixels)
@@ -1199,7 +1504,9 @@ mod tests {
         );
         let segments = array(
             2,
-            [0x4000u16, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000]
+            [
+                0x4000u16, 1, 0x6001, 0xaa00, 0x8000, 0x4000, 1, 0x6001, 0xab00, 0x8000,
+            ]
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
                 .collect(),
@@ -1290,7 +1597,8 @@ mod tests {
         let entry = parse_record_at(&image, 0, &mut 100).unwrap();
         let entries = [entry];
         let mut media = media::Store::new(&entries, &[]);
-        assert!(render(
+        assert!(
+            render(
             &shape(2),
             &[],
             &mut MAX_RECORDS.clone(),
@@ -1300,7 +1608,8 @@ mod tests {
             Some(&mut media),
         )
         .unwrap_err()
-        .contains("index out of range"));
+            .contains("index out of range")
+        );
 
         let unsupported = record(0, 0xf01c, &[]); // PICT remains outside Store's allowlist.
         let entry = parse_record_at(&unsupported, 0, &mut 100).unwrap();
@@ -1325,37 +1634,67 @@ mod tests {
     #[test]
     fn local_ruler_tabs_reach_each_paragraph_without_a_style_atom() {
         // MS-PPT 2.9.29-30: explicit ruler tabs, signed positions and enum types.
-        let ruler = record(0, 4006, &[
-            4u32.to_le_bytes().as_slice(), &2u16.to_le_bytes(),
-            &576i16.to_le_bytes(), &0u16.to_le_bytes(),
-            &1152i16.to_le_bytes(), &2u16.to_le_bytes(),
-        ].concat());
-        let textbox = record(15, 0xf00d, &[
+        let ruler = record(
+            0,
+            4006,
+            &[
+                4u32.to_le_bytes().as_slice(),
+                &2u16.to_le_bytes(),
+                &576i16.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &1152i16.to_le_bytes(),
+                &2u16.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        let textbox = record(
+            15,
+            0xf00d,
+            &[
             record(0, 3999, &4u32.to_le_bytes()),
-            record(0, 4008, b"A\tB\rC\tD"), ruler,
-        ].concat());
-        let shape = sp(0xa00, vec![
-            record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox,
-        ]);
+                record(0, 4008, b"A\tB\rC\tD"),
+                ruler,
+            ]
+            .concat(),
+        );
+        let shape = sp(
+            0xa00,
+            vec![record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox],
+        );
         let result = xml(&drawing(vec![shape])).unwrap();
         assert_eq!(result.matches("<a:tabLst>").count(), 2);
-        assert_eq!(result.matches("<a:tab pos=\"914400\" algn=\"l\"/>").count(), 2);
-        assert_eq!(result.matches("<a:tab pos=\"1828800\" algn=\"r\"/>").count(), 2);
+        assert_eq!(
+            result.matches("<a:tab pos=\"914400\" algn=\"l\"/>").count(),
+            2
+        );
+        assert_eq!(
+            result
+                .matches("<a:tab pos=\"1828800\" algn=\"r\"/>")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn rejects_ambiguous_local_ruler_ownership_without_guessing_precedence() {
-        let ruler = record(0, 4006, &[4u32.to_le_bytes().as_slice(), &0u16.to_le_bytes()].concat());
+        let ruler = record(
+            0,
+            4006,
+            &[4u32.to_le_bytes().as_slice(), &0u16.to_le_bytes()].concat(),
+        );
         for atoms in [
             vec![record(0, 4008, b"A"), ruler.clone(), ruler.clone()],
             vec![record(0, 4008, b"A"), record(0, 4008, b"B"), ruler],
         ] {
-            let textbox = record(15, 0xf00d, &[
-                record(0, 3999, &4u32.to_le_bytes()), atoms.concat(),
-            ].concat());
-            let shape = sp(0xa00, vec![
-                record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox,
-            ]);
+            let textbox = record(
+                15,
+                0xf00d,
+                &[record(0, 3999, &4u32.to_le_bytes()), atoms.concat()].concat(),
+            );
+            let shape = sp(
+                0xa00,
+                vec![record(0, 0xf010, &ints(&[0, 0, 5760, 4320])), textbox],
+            );
             assert!(xml(&drawing(vec![shape])).is_err());
         }
     }
@@ -1386,14 +1725,17 @@ mod tests {
         .unwrap();
         assert!(rendered.fallback);
         assert!(rendered.tree.contains("id=\"2\" name=\"Legacy shape 2\""));
-        assert!(rendered
+        assert!(
+            rendered
             .tree
-            .contains("id=\"3\" name=\"Legacy slide text\""));
+                .contains("id=\"3\" name=\"Legacy slide text\"")
+        );
         assert!(
             rendered.tree.find(">Master<").unwrap()
                 < rendered.tree.find(">Local fallback<").unwrap()
         );
-        assert!(render_with_masters(
+        assert!(
+            render_with_masters(
             &local,
             [Ok(layer)],
             &[],
@@ -1403,7 +1745,8 @@ mod tests {
             None,
             None
         )
-        .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -1442,27 +1785,33 @@ mod tests {
     fn backgrounds_are_explicit_ungrouped_live_shapes_without_anchor_requirements() {
         let bg = sp(0xc00, vec![properties(&[(0x181, 0x123456)])]);
         let input = drawing(vec![bg.clone()]);
-        assert!(background(&input, &mut 100)
+        assert!(
+            background(&input, &mut 100)
             .unwrap()
             .unwrap()
             .background_fill(None)
             .unwrap()
-            .contains("563412"));
+                .contains("563412")
+        );
         assert!(xml(&input).unwrap().is_empty()); // Never emit a foreground rectangle.
         for flag in [0x800, 0xc08, 0xc10] {
-            assert!(background(&drawing(vec![sp(flag, vec![])]), &mut 100)
+            assert!(
+                background(&drawing(vec![sp(flag, vec![])]), &mut 100)
                 .unwrap()
-                .is_none());
+                    .is_none()
+            );
         }
         assert!(
             background(&drawing(vec![record(15, 0xf003, &bg)]), &mut 100)
                 .unwrap()
                 .is_none()
         );
-        assert!(background(&drawing(vec![bg.clone(), bg]), &mut 100)
+        assert!(
+            background(&drawing(vec![bg.clone(), bg]), &mut 100)
             .err()
             .unwrap()
-            .contains("duplicate"));
+                .contains("duplicate")
+        );
         assert!(background(&input, &mut 1).is_err());
     }
 
@@ -1489,9 +1838,11 @@ mod tests {
             .unwrap();
         assert_eq!(props.picture, 0);
         let bytes = properties(&[(0x100, i32::MAX as u32)]);
-        assert!(props
+        assert!(
+            props
             .read(parse_record_at(&bytes, 0, &mut 100).unwrap(), &mut 100)
-            .is_err());
+                .is_err()
+        );
     }
 
     #[test]
@@ -1541,6 +1892,7 @@ mod tests {
             &mut MAX_TEXT_BYTES.clone(),
             &mut 8192,
             Some(TextContext {
+                backing: &[],
                 fonts: &[],
                 styles: &[],
                 types: &[],
@@ -1687,9 +2039,11 @@ mod tests {
             &[(0x88, 4)],
             &[(0x88, 5)],
         ] {
-            assert!(!xml(&drawing(vec![shape(values)]))
+            assert!(
+                !xml(&drawing(vec![shape(values)]))
                 .unwrap()
-                .contains(" vert="));
+                    .contains(" vert=")
+            );
         }
         for flags in [0xa00, 0xa40, 0xa80, 0xac0] {
             let out = xml(&drawing(vec![sp(
@@ -1703,13 +2057,17 @@ mod tests {
             .unwrap();
             assert!(out.contains("<a:bodyPr") && out.contains(" vert=\"eaVert\""));
         }
-        assert!(xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
+        assert!(
+            xml(&drawing(vec![shape(&[(0x88, 1), (0x89, 0)])]))
             .unwrap()
-            .contains(" vert=\"eaVert\""));
+                .contains(" vert=\"eaVert\"")
+        );
         for direction in 1..=3 {
-            assert!(!xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
+            assert!(
+                !xml(&drawing(vec![shape(&[(0x88, 1), (0x89, direction)])]))
                 .unwrap()
-                .contains(" vert="));
+                    .contains(" vert=")
+            );
         }
     }
 
@@ -1755,15 +2113,19 @@ mod tests {
     #[test]
     fn validates_complex_property_tails_and_charges_property_work() {
         let malformed = drawing(vec![sp(0x200, vec![properties(&[(0x8380, 100)])])]);
-        assert!(xml(&malformed)
+        assert!(
+            xml(&malformed)
             .unwrap_err()
-            .contains("complex shape property"));
+                .contains("complex shape property")
+        );
         let opts = properties(&[(4, 0), (0x85, 0)]);
         let entry = parse_records(&opts, &mut 1).unwrap()[0];
-        assert!(Properties::default()
+        assert!(
+            Properties::default()
             .read(entry, &mut 1)
             .unwrap_err()
-            .contains("work budget"));
+                .contains("work budget")
+        );
     }
 
     #[test]
@@ -1818,10 +2180,12 @@ mod tests {
             media: None,
         };
         let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
-        assert!(writer
+        assert!(
+            writer
             .node(record, true, 0)
             .unwrap_err()
-            .contains("nesting"));
+                .contains("nesting")
+        );
     }
 
     #[test]
@@ -1905,11 +2269,13 @@ mod tests {
 
     #[test]
     fn rejects_truncated_anchors_and_unbounded_xml() {
-        assert!(xml(&drawing(vec![sp(
+        assert!(
+            xml(&drawing(vec![sp(
             0x200,
             vec![record(0, 0xf010, &[0; 7]), text("x")]
         )]))
-        .is_err());
+            .is_err()
+        );
         let bytes = drawing(vec![sp(
             0x200,
             vec![
@@ -1917,7 +2283,8 @@ mod tests {
                 text("\r".repeat(100).as_str()),
             ],
         )]);
-        assert!(render(
+        assert!(
+            render(
             &bytes,
             &[],
             &mut MAX_RECORDS.clone(),
@@ -1926,6 +2293,7 @@ mod tests {
             None,
             None,
         )
-        .is_err());
+            .is_err()
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Passive image BLIPs: MS-PPT 2.1.3/2.4.3; MS-ODRAW 2.2.20-32.
 use super::*;
-use crate::officeart::raster::Image;
 #[cfg(test)]
 use crate::officeart::raster::{jpeg_size, png_size};
+use crate::officeart::raster::{Image, StoreImageSpan};
 use std::collections::{BTreeMap, BTreeSet};
 
 // Resource policy: do not pass dimension bombs to the ordinary image decoder.
@@ -12,26 +12,76 @@ pub(super) fn catalog<'a>(
     children: &[Record<'a>],
     budget: &mut usize,
 ) -> Result<Vec<Record<'a>>, String> {
+    catalog_core(children, &[], budget)
+}
+
+pub(super) fn catalog_spans(
+    document: &[u8],
+    children: &[RecordSpan],
+    budget: &mut usize,
+) -> Result<Vec<RecordSpan>, String> {
+    catalog_core(children, document, budget)
+}
+
+trait CatalogEntry<'a>: Clone {
+    fn view(&self, backing: &'a [u8]) -> Result<Record<'a>, String>;
+    fn children(&self, backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String>;
+}
+
+impl<'a> CatalogEntry<'a> for Record<'a> {
+    fn view(&self, _backing: &'a [u8]) -> Result<Record<'a>, String> {
+        Ok(*self)
+    }
+
+    fn children(&self, _backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String> {
+        parse_records(self.payload, budget)
+    }
+}
+
+impl<'a> CatalogEntry<'a> for RecordSpan {
+    fn view(&self, backing: &'a [u8]) -> Result<Record<'a>, String> {
+        RecordSpan::view(self, backing)
+    }
+
+    fn children(&self, backing: &'a [u8], budget: &mut usize) -> Result<Vec<Self>, String> {
+        parse_record_spans(backing, self.payload_span(), budget)
+    }
+}
+
+fn catalog_core<'a, T: CatalogEntry<'a>>(
+    children: &[T],
+    backing: &'a [u8],
+    budget: &mut usize,
+) -> Result<Vec<T>, String> {
     let mut result = None;
     let mut group_seen = false;
-    for group in children.iter().filter(|r| r.kind == 1035) {
-        if group_seen || group.version != 15 {
+    for group in children {
+        let group_view = group.view(backing)?;
+        if group_view.kind != 1035 {
+            continue;
+        }
+        if group_seen || group_view.version != 15 {
             return Err(unsupported("invalid PowerPoint drawing group"));
         }
         group_seen = true;
-        let dgg = parse_records(group.payload, budget)?;
-        if dgg.len() != 1 || dgg[0].kind != 0xf000 || dgg[0].version != 15 {
+        let dgg = group.children(backing, budget)?;
+        if dgg.len() != 1 {
             return Err(unsupported("invalid PowerPoint OfficeArt drawing group"));
         }
-        for store in parse_records(dgg[0].payload, budget)?
-            .iter()
-            .filter(|r| r.kind == 0xf001)
-        {
-            if result.is_some() || store.version != 15 {
+        let dgg_view = dgg[0].view(backing)?;
+        if dgg_view.kind != 0xf000 || dgg_view.version != 15 {
+            return Err(unsupported("invalid PowerPoint OfficeArt drawing group"));
+        }
+        for store in dgg[0].children(backing, budget)? {
+            let store_view = store.view(backing)?;
+            if store_view.kind != 0xf001 {
+                continue;
+            }
+            if result.is_some() || store_view.version != 15 {
                 return Err(unsupported("invalid PowerPoint image store"));
             }
-            let entries = parse_records(store.payload, budget)?;
-            if entries.len() != usize::from(store.instance) {
+            let entries = store.children(backing, budget)?;
+            if entries.len() != usize::from(store_view.instance) {
                 return Err(unsupported("PowerPoint image store count mismatch"));
             }
             result = Some(entries);
@@ -114,6 +164,110 @@ impl<'a> Store<'a> {
     }
 }
 
+/// Owned media catalog/cache for direct sessions. The session owns the backing
+/// streams separately and supplies them when resolving or emitting a part;
+/// cached spans record which stream must be used.
+pub(super) struct SpanStore {
+    entries: Vec<RecordSpan>,
+    images: BTreeMap<u32, Option<StoreImageSpan>>,
+    used: BTreeSet<u32>,
+    remaining: usize,
+}
+
+impl SpanStore {
+    pub fn new(entries: Vec<RecordSpan>) -> Self {
+        Self {
+            entries,
+            images: BTreeMap::new(),
+            used: BTreeSet::new(),
+            remaining: MAX_MEDIA_BYTES,
+        }
+    }
+
+    pub fn begin_slide(&mut self) {
+        self.used.clear();
+    }
+
+    pub fn reference(
+        &mut self,
+        index: u32,
+        primary: &[u8],
+        pictures: Option<&[u8]>,
+        budget: &mut usize,
+    ) -> Result<bool, String> {
+        if index == 0 {
+            return Ok(false);
+        }
+        if !self.images.contains_key(&index) {
+            let entry = self
+                .entries
+                .get((index - 1) as usize)
+                .ok_or_else(|| unsupported("PowerPoint picture index out of range"))?;
+            let image = crate::officeart::raster::read_store_entry_span(
+                entry,
+                primary,
+                pictures,
+                budget,
+                self.remaining,
+            )?;
+            if let Some(image) = &image {
+                self.remaining = self
+                    .remaining
+                    .checked_sub(image.view(primary, pictures)?.len())
+                    .ok_or_else(|| unsupported("PowerPoint retained media budget exceeded"))?;
+            }
+            self.images.insert(index, image);
+        }
+        if self.images[&index].is_none() {
+            return Ok(false);
+        }
+        self.used.insert(index);
+        Ok(true)
+    }
+
+    pub fn used_images(&self) -> impl Iterator<Item = (u32, &StoreImageSpan)> {
+        self.used.iter().map(|index| {
+            (
+                *index,
+                self.images[index]
+                    .as_ref()
+                    .expect("only supported referenced images"),
+            )
+        })
+    }
+
+    /// Fetch an already-admitted resource without scanning the presentation's
+    /// cache or decoding an arbitrary unreferenced catalog entry.
+    pub fn image<'a>(
+        &'a self,
+        index: u32,
+        primary: &'a [u8],
+        pictures: Option<&'a [u8]>,
+    ) -> Result<Option<(&'static str, &'a [u8])>, String> {
+        self.images.get(&index)
+            .ok_or_else(|| unsupported("PowerPoint image was not admitted"))?
+            .as_ref()
+            .map(|image| Ok((image.image.extension, image.view(primary, pictures)?)))
+            .transpose()
+    }
+
+    #[cfg(test)]
+    fn images<'a>(
+        &'a self,
+        primary: &'a [u8],
+        pictures: Option<&'a [u8]>,
+    ) -> Result<Vec<(u32, &'static str, &'a [u8])>, String> {
+        self.images
+            .iter()
+            .filter_map(|(id, image)| {
+                image
+                    .as_ref()
+                    .map(|image| Ok((*id, image.image.extension, image.view(primary, pictures)?)))
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 fn image<'a>(
     entry: Record<'a>,
@@ -163,6 +317,12 @@ mod tests {
     }
     fn parsed(bytes: &[u8]) -> Record<'_> {
         parse_record_at(bytes, 0, &mut 1000).unwrap()
+    }
+
+    fn spanned(bytes: &[u8], offset: usize) -> RecordSpan {
+        record_span_with_end(bytes, offset, &mut 1000, "PowerPoint")
+            .unwrap()
+            .0
     }
 
     #[test]
@@ -317,10 +477,115 @@ mod tests {
     fn catalog_validates_counts_and_does_not_scan_unrelated_containers() {
         let blip = blip(&png(1, 1), false);
         let group = record(1035, 15, &record(0xf000, 15, &record(0xf001, 0x1f, &blip)));
-        assert_eq!(catalog(&[parsed(&group)], &mut 100).unwrap().len(), 1);
+        let mut borrowed_budget = 100;
+        assert_eq!(
+            catalog(&[parsed(&group)], &mut borrowed_budget)
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut document = vec![0xaa; 7];
+        document.extend_from_slice(&group);
+        let group_span = spanned(&document, 7);
+        let mut span_budget = 100;
+        let entries = catalog_spans(&document, &[group_span], &mut span_budget).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].view(&document).unwrap().payload,
+            parsed(&blip).payload
+        );
+        assert_eq!(span_budget, borrowed_budget);
         assert!(catalog(&[parsed(&group), parsed(&group)], &mut 100).is_err());
         let bad = record(1035, 15, &record(0xf000, 15, &record(0xf001, 0x2f, &blip)));
         assert!(catalog(&[parsed(&bad)], &mut 100).is_err());
         assert!(catalog(&[parsed(&blip)], &mut 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn span_store_decodes_once_and_keeps_cached_parts_across_slides() {
+        let first = blip(&png(1, 1), false);
+        let second = blip(&png(2, 2), false);
+        let mut primary = vec![0xaa, 0xbb, 0xcc];
+        let first_offset = primary.len();
+        primary.extend_from_slice(&first);
+        let second_offset = primary.len();
+        primary.extend_from_slice(&second);
+        let entries = vec![
+            spanned(&primary, first_offset),
+            spanned(&primary, second_offset),
+        ];
+        let mut store = SpanStore::new(entries);
+        store.remaining = 66;
+
+        assert!(store.image(0, &primary, None).is_err());
+        assert!(store.image(1, &primary, None).is_err());
+
+        assert!(store.reference(1, &primary, None, &mut 100).unwrap());
+        assert!(store.reference(1, &primary, None, &mut 0).unwrap());
+        assert_eq!(store.remaining, 33);
+        assert_eq!(store.images(&primary, None).unwrap().len(), 1);
+        store.begin_slide();
+        assert_eq!(store.used_images().count(), 0);
+        assert_eq!(store.image(1, &primary, None).unwrap().unwrap(), ("png", png(1, 1).as_slice()));
+        assert!(store.image(2, &primary, None).is_err());
+        assert_eq!(store.images(&primary, None).unwrap().len(), 1);
+        assert!(store.reference(2, &primary, None, &mut 100).unwrap());
+        assert_eq!(store.remaining, 0);
+        assert_eq!(
+            store.used_images().map(|(id, _)| id).collect::<Vec<_>>(),
+            [2]
+        );
+        assert_eq!(store.images(&primary, None).unwrap().len(), 2);
+        assert_eq!(store.image(2, &primary, None).unwrap().unwrap(), ("png", png(2, 2).as_slice()));
+    }
+
+    #[test]
+    fn span_store_retains_delayed_inflation_and_enforces_media_limits() {
+        let (source, blip) = crate::officeart::emf_test_blip();
+        let pictures_offset = 17;
+        let entry_bytes = bse(blip.len(), pictures_offset, &[]);
+        let mut primary = vec![0x55; 9];
+        let entry_offset = primary.len();
+        primary.extend_from_slice(&entry_bytes);
+        let mut pictures = vec![0x77; pictures_offset as usize];
+        pictures.extend_from_slice(&blip);
+        let entry = spanned(&primary, entry_offset);
+
+        let mut store = SpanStore::new(vec![entry.clone()]);
+        store.remaining = source.len();
+        assert!(store
+            .reference(1, &primary, Some(&pictures), &mut 100)
+            .unwrap());
+        let pointer = store.images(&primary, Some(&pictures)).unwrap()[0]
+            .2
+            .as_ptr();
+        assert_eq!(
+            store.images(&primary, Some(&pictures)).unwrap()[0].2,
+            source
+        );
+        store.begin_slide();
+        assert!(store
+            .reference(1, &primary, Some(&pictures), &mut 0)
+            .unwrap());
+        assert_eq!(
+            store.images(&primary, Some(&pictures)).unwrap()[0]
+                .2
+                .as_ptr(),
+            pointer
+        );
+        // Inflated bytes are owned by the cache and no longer depend on the
+        // Pictures backing after the first decode.
+        assert_eq!(store.images(&primary, None).unwrap()[0].2, source);
+
+        let mut limited = SpanStore::new(vec![entry]);
+        limited.remaining = source.len() - 1;
+        assert!(limited
+            .reference(1, &primary, Some(&pictures), &mut 100)
+            .unwrap_err()
+            .contains("budget"));
+        assert!(limited
+            .images(&primary, Some(&pictures))
+            .unwrap()
+            .is_empty());
     }
 }
