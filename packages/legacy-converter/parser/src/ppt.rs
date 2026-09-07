@@ -84,7 +84,9 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         }
         let drawing = drawing::render_with_masters(
             record.payload,
-            &presentation.object_masters[index],
+            presentation.object_masters[index]
+                .iter()
+                .map(|span| span.view(&document)),
             outline,
             &mut record_budget,
             &mut text_budget,

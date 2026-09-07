@@ -73,8 +73,8 @@ pub(super) struct Resolver<'a> {
     text_styles: BTreeMap<u32, std::rc::Rc<text_style::Master>>,
     backgrounds: BTreeMap<u32, Option<paint::Paint>>,
     background_cache: BTreeMap<u32, Option<paint::Paint>>,
-    records: BTreeMap<u32, Record<'a>>,
-    object_cache: BTreeMap<u32, std::rc::Rc<[Record<'a>]>>,
+    records: BTreeMap<u32, RecordSpan>,
+    object_cache: BTreeMap<u32, std::rc::Rc<[RecordSpan]>>,
 }
 impl<'a> Resolver<'a> {
     pub fn new(
@@ -114,12 +114,14 @@ impl<'a> Resolver<'a> {
                 let offset = offsets
                     .get(&persist)
                     .ok_or_else(|| unsupported("unresolved PowerPoint master persist ID"))?;
-                let record = parse_record_at(document, *offset, budget)?;
+                let (record_span, _) =
+                    record_span_with_end(document, *offset, budget, "PowerPoint")?;
+                let record = record_span.view(document)?;
                 if !matches!(record.kind, 1006 | 1016) || record.version != 15 {
                     return Err(unsupported("invalid PowerPoint master persist object"));
                 }
                 masters.insert(id, entry(record, budget)?);
-                master_records.push((id, record));
+                master_records.push((id, record_span));
                 backgrounds.insert(id, drawing::background(record.payload, budget)?);
                 if record.kind == 1016 {
                     let records = parse_records(record.payload, budget)?;
@@ -137,11 +139,12 @@ impl<'a> Resolver<'a> {
             text_styles,
             backgrounds,
             background_cache: BTreeMap::new(),
-            records: master_records.iter().copied().collect(),
+            records: master_records.iter().cloned().collect(),
             object_cache: BTreeMap::new(),
         };
         let mut text_budget = MAX_TEXT_BYTES;
-        for (id, record) in master_records {
+        for (id, record_span) in master_records {
+            let record = record_span.view(document)?;
             let base = if record.kind == 1016 {
                 result.text_styles.get(&id).cloned()
             } else {
@@ -159,13 +162,13 @@ impl<'a> Resolver<'a> {
         Ok(result)
     }
     /// MS-PPT 2.5.10-11: object inheritance is independent of scheme and
-    /// background inheritance. Retain only borrowed live master records, sharing
+    /// background inheritance. Retain only owned spans of live master records, sharing
     /// the bounded root-to-leaf layer chain among slides using the same master.
     pub fn objects(
         &mut self,
         slide: Record<'_>,
         budget: &mut usize,
-    ) -> Result<std::rc::Rc<[Record<'a>]>, String> {
+    ) -> Result<std::rc::Rc<[RecordSpan]>, String> {
         let Some(first) = entry(slide, budget)?.objects_parent else {
             return Ok(std::rc::Rc::from([]));
         };
@@ -192,7 +195,7 @@ impl<'a> Resolver<'a> {
                 .records
                 .get(&id)
                 .ok_or_else(|| unsupported("unresolved PowerPoint master objects"))?;
-            layers.push(*record);
+            layers.push(record.clone());
             parent = self
                 .masters
                 .get(&id)
@@ -200,7 +203,7 @@ impl<'a> Resolver<'a> {
                 .objects_parent;
         }
         layers.reverse();
-        let layers: std::rc::Rc<[Record<'a>]> = layers.into();
+        let layers: std::rc::Rc<[RecordSpan]> = layers.into();
         self.object_cache.insert(first, layers.clone());
         Ok(layers)
     }
@@ -360,6 +363,11 @@ mod tests {
     fn parsed(bytes: &[u8]) -> Record<'_> {
         parse_record_at(bytes, 0, &mut 100).unwrap()
     }
+    fn parsed_span(bytes: &[u8], offset: usize) -> RecordSpan {
+        record_span_with_end(bytes, offset, &mut 100, "PowerPoint")
+            .unwrap()
+            .0
+    }
 
     fn background_slide(kind: u16, parent: u32, flags: u16, color: u32) -> Vec<u8> {
         let mut atom = [0; 24];
@@ -397,20 +405,27 @@ mod tests {
     fn master_object_layers_follow_only_object_flags_and_share_cached_chains() {
         let main = background_slide(1016, 0, 7, 0);
         let title = background_slide(1006, 100, 1, 0);
+        let title_offset = main.len();
+        let document = [&main[..], &title].concat();
         let mut resolver = Resolver::default();
-        for (id, bytes) in [(100, &main), (200, &title)] {
-            let r = parsed(bytes);
-            resolver.records.insert(id, r);
+        for (id, offset) in [(100, 0), (200, title_offset)] {
+            let span = parsed_span(&document, offset);
+            let r = span.view(&document).unwrap();
+            resolver.records.insert(id, span);
             resolver.masters.insert(id, entry(r, &mut 100).unwrap());
         }
         let slide = background_slide(1006, 200, 1, 0);
         let layers = resolver.objects(parsed(&slide), &mut 100).unwrap();
         assert_eq!(
-            layers.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            layers
+                .iter()
+                .map(|r| r.view(&document).unwrap().kind)
+                .collect::<Vec<_>>(),
             [1016, 1006]
         );
         let cached = resolver.objects(parsed(&slide), &mut 100).unwrap();
         assert!(std::rc::Rc::ptr_eq(&layers, &cached));
+        assert!(layers[0].view(&document[..main.len() - 1]).is_err());
         let unrelated = background_slide(1006, 200, 6, 0);
         assert!(resolver
             .objects(parsed(&unrelated), &mut 100)
@@ -428,8 +443,9 @@ mod tests {
         let slide = background_slide(1006, 1, 1, 0);
         let mut resolver = Resolver::default();
         assert!(resolver.objects(parsed(&slide), &mut 100).is_err());
+        let main_span = parsed_span(&main, 0);
         for id in 1..=MAX_DEPTH as u32 + 1 {
-            resolver.records.insert(id, parsed(&main));
+            resolver.records.insert(id, main_span.clone());
             resolver.masters.insert(
                 id,
                 Entry {

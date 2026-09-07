@@ -26,7 +26,16 @@ pub(super) fn render<'a>(
     context: Option<TextContext<'a>>,
     media: Option<&mut media::Store<'a>>,
 ) -> Result<Option<String>, String> {
-    let result = render_with_masters(slide, &[], outline, records, text, xml, context, media)?;
+    let result = render_with_masters(
+        slide,
+        std::iter::empty(),
+        outline,
+        records,
+        text,
+        xml,
+        context,
+        media,
+    )?;
     Ok((!result.fallback).then_some(result.tree))
 }
 
@@ -38,7 +47,7 @@ pub(super) struct Rendered {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_with_masters<'a>(
     slide: &[u8],
-    masters: &[Record<'_>],
+    masters: impl IntoIterator<Item = Result<Record<'a>, String>>,
     outline: &'a [String],
     records: &mut usize,
     text: &mut usize,
@@ -60,7 +69,7 @@ pub(super) fn render_with_masters<'a>(
     // Flatten passive master objects below slide-local objects. One writer owns
     // the IDs and budgets across all layers (ECMA-376 19.3.1.45 lexical z-order).
     for master in masters {
-        writer.drawing(master.payload)?;
+        writer.drawing(master?.payload)?;
     }
     writer.inherited = false;
     let local = writer.drawing(slide)?;
@@ -1366,7 +1375,7 @@ mod tests {
         let local = record(0, 4008, b"Local fallback");
         let rendered = render_with_masters(
             &local,
-            &[layer],
+            [Ok(layer)],
             &[],
             &mut 1000,
             &mut 1000,
@@ -1386,7 +1395,7 @@ mod tests {
         );
         assert!(render_with_masters(
             &local,
-            &[layer],
+            [Ok(layer)],
             &[],
             &mut 1000,
             &mut 1000,

@@ -15,7 +15,7 @@ pub(super) struct Presentation<'a> {
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<Record<'a>>,
     pub backgrounds: Vec<Option<paint::Paint>>,
-    pub object_masters: Vec<std::rc::Rc<[Record<'a>]>>,
+    pub object_masters: Vec<std::rc::Rc<[RecordSpan]>>,
     pub size: (u32, u32),
 }
 
