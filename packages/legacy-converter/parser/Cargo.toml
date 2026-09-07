@@ -35,7 +35,12 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 pptx-model = { workspace = true }
 ooxml-common = { workspace = true }
+xlsx-model = { workspace = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+xlsx-parser = { path = "../../xlsx/parser" }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]

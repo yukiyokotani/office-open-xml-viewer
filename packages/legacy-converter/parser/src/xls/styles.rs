@@ -70,6 +70,155 @@ pub(crate) struct NormalFont {
     pub italic: bool,
 }
 
+pub(super) struct ResolvedStyleSheet {
+    minimal: bool,
+    fonts: Vec<ResolvedStyleFont>,
+    fills: Vec<ResolvedFill>,
+    borders: Vec<ResolvedBorder>,
+    xfs: Vec<ResolvedXf>,
+    formats: BTreeMap<u16, String>,
+}
+
+#[derive(Clone)]
+struct ResolvedStyleFont {
+    font: ResolvedFont,
+    color: ColorIdentity,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ResolvedFill {
+    None,
+    Gray125,
+    Pattern {
+        pattern: &'static str,
+        foreground: ColorIdentity,
+        background: ColorIdentity,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ResolvedEdge {
+    style: &'static str,
+    color: ColorIdentity,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ResolvedBorder {
+    seed: bool,
+    diagonal_down: bool,
+    diagonal_up: bool,
+    left: Option<ResolvedEdge>,
+    right: Option<ResolvedEdge>,
+    top: Option<ResolvedEdge>,
+    bottom: Option<ResolvedEdge>,
+    diagonal: Option<ResolvedEdge>,
+}
+
+#[derive(Clone)]
+struct ResolvedXf {
+    num_fmt_id: u16,
+    font_id: usize,
+    fill_id: usize,
+    border_id: usize,
+    quote_prefix: bool,
+    horizontal: &'static str,
+    vertical: &'static str,
+    wrap_text: bool,
+    text_rotation: u8,
+    indent: u16,
+    shrink_to_fit: bool,
+    reading_order: u8,
+    justify_last_line: bool,
+    locked: bool,
+    hidden: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FontKey {
+    name: String,
+    size_twips: u16,
+    color: ColorIdentity,
+    family: u8,
+    charset: u8,
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    outline: bool,
+    shadow: bool,
+    condense: bool,
+    extend: bool,
+    underline: Underline,
+    script: Script,
+}
+
+impl ResolvedStyleFont {
+    fn key(&self) -> FontKey {
+        FontKey {
+            name: self.font.name.clone(),
+            size_twips: self.font.size_twips,
+            color: self.color,
+            family: self.font.family,
+            charset: self.font.charset,
+            bold: self.font.weight == 700,
+            italic: self.font.italic,
+            strike: self.font.strike,
+            outline: self.font.outline,
+            shadow: self.font.shadow,
+            condense: self.font.condense,
+            extend: self.font.extend,
+            underline: self.font.underline,
+            script: self.font.script,
+        }
+    }
+}
+
+impl ResolvedStyleSheet {
+    pub(super) fn xml(&self) -> String {
+        if self.minimal {
+            return minimal_styles();
+        }
+        let fonts: Vec<_> = self.fonts.iter().map(font_style_xml).collect();
+        let fills: Vec<_> = self.fills.iter().map(fill_xml).collect();
+        let borders: Vec<_> = self.borders.iter().map(border_xml).collect();
+        let xfs: Vec<_> = self.xfs.iter().map(xf_xml).collect();
+        let normal = xfs[0].replace(" xfId=\"0\"", "");
+        let formats: String = self
+            .formats
+            .iter()
+            .map(|(id, code)| {
+                format!(
+                    "<numFmt numFmtId=\"{id}\" formatCode=\"{}\"/>",
+                    xml_attr(code)
+                )
+            })
+            .collect();
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"{}\">{formats}</numFmts><fonts count=\"{}\">{}</fonts><fills count=\"{}\">{}</fills><borders count=\"{}\">{}</borders><cellStyleXfs count=\"1\">{normal}</cellStyleXfs><cellXfs count=\"{}\">{}</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>", self.formats.len(), fonts.len(), fonts.join(""), fills.len(), fills.join(""), borders.len(), borders.join(""), xfs.len(), xfs.join(""))
+    }
+
+    #[allow(dead_code)] // Consumed by the direct XLS session in the next unit.
+    pub(super) fn into_model(self) -> xlsx_model::Styles {
+        xlsx_model::Styles {
+            fonts: self
+                .fonts
+                .into_iter()
+                .map(|v| v.font.model(v.color.model()))
+                .collect(),
+            fills: self.fills.into_iter().map(fill_model).collect(),
+            borders: self.borders.into_iter().map(border_model).collect(),
+            cell_xfs: self.xfs.into_iter().map(xf_model).collect(),
+            num_fmts: self
+                .formats
+                .into_iter()
+                .map(|(num_fmt_id, format_code)| xlsx_model::NumFmt {
+                    num_fmt_id: num_fmt_id.into(),
+                    format_code,
+                })
+                .collect(),
+            dxfs: Vec::new(),
+        }
+    }
+}
+
 impl<'a> Styles<'a> {
     /// MS-XLS 2.2.6.1.2.2: Normal references XF zero, not FONT zero.
     /// Return no measurement request for font variants we cannot reproduce.
@@ -174,8 +323,10 @@ impl<'a> Styles<'a> {
         }
     }
 
+    #[cfg(test)]
     fn font(&self, data: &[u8]) -> Result<String, String> {
-        self.font_xml(&ResolvedFont::decode(data)?, false, None)
+        let font = ResolvedFont::decode(data)?;
+        Ok(font_xml_value(&font, false, self.color(font.color_index)))
     }
 
     pub(super) fn run_font(&self, index: u16) -> Result<String, String> {
@@ -186,77 +337,36 @@ impl<'a> Styles<'a> {
             .get(offset)
             .filter(|_| index != 4)
             .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))?;
-        self.font_xml(&ResolvedFont::decode(data)?, true, None)
+        let font = ResolvedFont::decode(data)?;
+        Ok(font_xml_value(&font, true, self.color(font.color_index)))
     }
 
-    fn font_xml(
-        &self,
-        font: &ResolvedFont,
-        run: bool,
-        color: Option<&str>,
-    ) -> Result<String, String> {
-        let (tag, name_tag) = if run {
-            ("rPr", "rFont")
-        } else {
-            ("font", "name")
-        };
-        let base_color = self.color(font.color_index).xml();
-        let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&font.name), f64::from(font.size_twips) / 20.0, color.unwrap_or(&base_color), font.family, font.charset);
-        // OOXML exposes only bold/normal, not arbitrary LOGFONT weight.
-        if font.weight == 700 {
-            xml.push_str("<b/>");
-        } else if run {
-            xml.push_str("<b val=\"0\"/>");
-        }
-        for (enabled, tag) in [
-            (font.italic, "i"),
-            (font.strike, "strike"),
-            (font.outline, "outline"),
-            (font.shadow, "shadow"),
-            (font.condense, "condense"),
-            (font.extend, "extend"),
-        ] {
-            if enabled {
-                xml.push_str(&format!("<{tag}/>"));
-            } else if run {
-                xml.push_str(&format!("<{tag} val=\"0\"/>"));
-            }
-        }
-        if font.underline != Underline::None || run {
-            xml.push_str(&format!("<u val=\"{}\"/>", font.underline.xml_value()));
-        }
-        if font.script != Script::Baseline || run {
-            xml.push_str(&format!("<vertAlign val=\"{}\"/>", font.script.xml_value()));
-        }
-        xml.push_str(&format!("</{tag}>"));
-        Ok(xml)
-    }
-
-    pub fn xml(&self) -> Result<String, String> {
+    pub(super) fn resolve(&self) -> Result<ResolvedStyleSheet, String> {
         if self.xfs.is_empty() && self.fonts.is_empty() {
-            return Ok(minimal_styles());
+            return Ok(minimal_resolved());
         }
-        let mut fonts = Vec::new();
+        let mut fonts: Vec<ResolvedStyleFont> = Vec::new();
         for font in &self.fonts {
-            fonts.push(self.font(font)?);
+            let resolved = ResolvedFont::decode(font)?;
+            let color = self.color(resolved.color_index);
+            fonts.push(ResolvedStyleFont {
+                font: resolved,
+                color,
+            });
         }
         if fonts.is_empty() {
             return Err(unsupported("BIFF styles reference missing fonts"));
         }
+        let mut font_ids = BTreeMap::new();
+        for (id, font) in fonts.iter().enumerate() {
+            font_ids.entry(font.key()).or_insert(id);
+        }
         // Keep original font indices stable for shared-string rich runs. XF-local
         // color overrides append an interned variant, never mutate a shared font.
-        let mut font_ids = BTreeMap::new();
-        for (id, xml) in fonts.iter().enumerate() {
-            font_ids.entry(xml.clone()).or_insert(id);
-        }
-        let mut fills = vec![
-            "<fill><patternFill patternType=\"none\"/></fill>".to_string(),
-            "<fill><patternFill patternType=\"gray125\"/></fill>".to_string(),
-        ];
-        let mut borders =
-            vec!["<border><left/><right/><top/><bottom/><diagonal/></border>".to_string()];
-        let mut fill_ids = BTreeMap::from([(fills[0].clone(), 0usize), (fills[1].clone(), 1)]);
-        let mut border_ids = BTreeMap::from([(borders[0].clone(), 0usize)]);
+        let mut fills = vec![ResolvedFill::None, ResolvedFill::Gray125];
+        let mut fill_ids = BTreeMap::from([(ResolvedFill::None, 0), (ResolvedFill::Gray125, 1)]);
+        let mut borders = vec![ResolvedBorder::seed()];
+        let mut border_ids = BTreeMap::from([(ResolvedBorder::seed(), 0)]);
         let mut xfs = Vec::new();
         for (index, data) in self.xfs.iter().enumerate() {
             let ifnt = u16_at(data, 0)?;
@@ -265,22 +375,25 @@ impl<'a> Styles<'a> {
                 return Err(unsupported("BIFF XF font index out of range"));
             }
             if let Some(color) = self.extensions.color(index, 13) {
-                let color = color.xml();
-                font = intern(
-                    self.font_xml(
-                        &ResolvedFont::decode(self.fonts[font])?,
-                        false,
-                        Some(&color),
-                    )?,
-                    &mut fonts,
-                    &mut font_ids,
-                );
+                let resolved = ResolvedFont::decode(self.fonts[font])?;
+                let variant = ResolvedStyleFont {
+                    font: resolved,
+                    color,
+                };
+                let key = variant.key();
+                font = if let Some(id) = font_ids.get(&key) {
+                    *id
+                } else {
+                    let id = fonts.len();
+                    fonts.push(variant);
+                    font_ids.insert(key, id);
+                    id
+                };
             }
-            let color = |property, fallback| {
+            let color = |property, fallback| -> ColorIdentity {
                 self.extensions
                     .color(index, property)
-                    .map(ColorIdentity::xml)
-                    .unwrap_or_else(|| self.color(fallback).xml())
+                    .unwrap_or_else(|| self.color(fallback))
             };
             let flags = u16_at(data, 4)?;
             let b1 = u32_at(data, 10)?;
@@ -290,37 +403,45 @@ impl<'a> Styles<'a> {
                 .get((b2 >> 26) as usize)
                 .ok_or_else(|| unsupported("invalid BIFF fill pattern"))?;
             let fill = if *pattern == "none" {
-                fills[0].clone()
+                ResolvedFill::None
             } else {
-                format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", color(4, colors & 127), color(5, (colors >> 7) & 127))
+                ResolvedFill::Pattern {
+                    pattern,
+                    foreground: color(4, colors & 127),
+                    background: color(5, (colors >> 7) & 127),
+                }
             };
-            let fill_id = intern(fill, &mut fills, &mut fill_ids);
-            let mut border = format!(
-                "<border diagonalDown=\"{}\" diagonalUp=\"{}\">",
-                (b1 >> 30) & 1,
-                (b1 >> 31) & 1
-            );
-            for (tag, style, palette_color, property) in [
-                ("left", b1 & 15, (b1 >> 16) & 127, 9),
-                ("right", (b1 >> 4) & 15, (b1 >> 23) & 127, 10),
-                ("top", (b1 >> 8) & 15, b2 & 127, 7),
-                ("bottom", (b1 >> 12) & 15, (b2 >> 7) & 127, 8),
-                ("diagonal", (b2 >> 21) & 15, (b2 >> 14) & 127, 11),
+            let fill_id = intern_typed(fill, &mut fills, &mut fill_ids);
+            let mut edges = Vec::with_capacity(5);
+            for (style, palette_color, property) in [
+                (b1 & 15, (b1 >> 16) & 127, 9),
+                ((b1 >> 4) & 15, (b1 >> 23) & 127, 10),
+                ((b1 >> 8) & 15, b2 & 127, 7),
+                ((b1 >> 12) & 15, (b2 >> 7) & 127, 8),
+                ((b2 >> 21) & 15, (b2 >> 14) & 127, 11),
             ] {
                 let style = BORDERS
                     .get(style as usize)
                     .ok_or_else(|| unsupported("invalid BIFF border style"))?;
-                if *style == "none" {
-                    border.push_str(&format!("<{tag}/>"));
-                } else {
-                    border.push_str(&format!(
-                        "<{tag} style=\"{style}\"><color {}/></{tag}>",
-                        color(property, palette_color as u16)
-                    ));
-                }
+                edges.push((*style != "none").then(|| ResolvedEdge {
+                    style,
+                    color: color(property, palette_color as u16),
+                }));
             }
-            border.push_str("</border>");
-            let border_id = intern(border, &mut borders, &mut border_ids);
+            let border_id = intern_typed(
+                ResolvedBorder {
+                    seed: false,
+                    diagonal_down: b1 >> 30 & 1 != 0,
+                    diagonal_up: b1 >> 31 & 1 != 0,
+                    left: edges[0].clone(),
+                    right: edges[1].clone(),
+                    top: edges[2].clone(),
+                    bottom: edges[3].clone(),
+                    diagonal: edges[4].clone(),
+                },
+                &mut borders,
+                &mut border_ids,
+            );
             let horizontal = [
                 "general",
                 "left",
@@ -342,36 +463,254 @@ impl<'a> Styles<'a> {
                 .indent(index)
                 .unwrap_or(u16::from(data[8] & 15));
             let reading = data[8] >> 6;
-            xfs.push(format!("<xf numFmtId=\"{}\" fontId=\"{font}\" fillId=\"{fill_id}\" borderId=\"{border_id}\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\" applyProtection=\"1\" quotePrefix=\"{}\"><alignment horizontal=\"{horizontal}\" vertical=\"{vertical}\" wrapText=\"{}\" textRotation=\"{}\" indent=\"{indent}\" shrinkToFit=\"{}\" readingOrder=\"{reading}\" justifyLastLine=\"{}\"/><protection locked=\"{}\" hidden=\"{}\"/></xf>", u16_at(data, 2)?, (flags >> 3) & 1, (data[6] >> 3) & 1, data[7], (data[8] >> 4) & 1, data[6] >> 7, flags & 1, (flags >> 1) & 1));
+            xfs.push(ResolvedXf {
+                num_fmt_id: u16_at(data, 2)?,
+                font_id: font,
+                fill_id,
+                border_id,
+                quote_prefix: flags >> 3 & 1 != 0,
+                horizontal,
+                vertical,
+                wrap_text: data[6] >> 3 & 1 != 0,
+                text_rotation: data[7],
+                indent,
+                shrink_to_fit: data[8] >> 4 & 1 != 0,
+                reading_order: reading,
+                justify_last_line: data[6] >> 7 != 0,
+                locked: flags & 1 != 0,
+                hidden: flags >> 1 & 1 != 0,
+            });
         }
         if xfs.is_empty() {
-            xfs.push(
-                "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>".into(),
-            );
+            xfs.push(ResolvedXf::default_xf());
         }
-        let normal = xfs[0].replace(" xfId=\"0\"", "");
-        let formats: String = self
-            .formats
-            .iter()
-            .map(|(id, code)| {
-                format!(
-                    "<numFmt numFmtId=\"{id}\" formatCode=\"{}\"/>",
-                    xml_attr(code)
-                )
-            })
-            .collect();
-        Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"{}\">{formats}</numFmts><fonts count=\"{}\">{}</fonts><fills count=\"{}\">{}</fills><borders count=\"{}\">{}</borders><cellStyleXfs count=\"1\">{normal}</cellStyleXfs><cellXfs count=\"{}\">{}</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>", self.formats.len(), fonts.len(), fonts.join(""), fills.len(), fills.join(""), borders.len(), borders.join(""), xfs.len(), xfs.join("")))
+        Ok(ResolvedStyleSheet {
+            minimal: false,
+            fonts,
+            fills,
+            borders,
+            xfs,
+            formats: self.formats.clone(),
+        })
+    }
+
+    pub fn xml(&self) -> Result<String, String> {
+        Ok(self.resolve()?.xml())
+    }
+
+    #[cfg(test)]
+    fn model(&self) -> Result<xlsx_model::Styles, String> {
+        Ok(self.resolve()?.into_model())
     }
 }
 
-fn intern(value: String, values: &mut Vec<String>, ids: &mut BTreeMap<String, usize>) -> usize {
-    if let Some(index) = ids.get(&value) {
-        return *index;
+impl ResolvedBorder {
+    fn seed() -> Self {
+        Self {
+            seed: true,
+            diagonal_down: false,
+            diagonal_up: false,
+            left: None,
+            right: None,
+            top: None,
+            bottom: None,
+            diagonal: None,
+        }
     }
-    let index = values.len();
-    ids.insert(value.clone(), index);
-    values.push(value);
-    index
+}
+
+impl ResolvedXf {
+    fn default_xf() -> Self {
+        Self {
+            num_fmt_id: 0,
+            font_id: 0,
+            fill_id: 0,
+            border_id: 0,
+            quote_prefix: false,
+            horizontal: "",
+            vertical: "",
+            wrap_text: false,
+            text_rotation: 0,
+            indent: 0,
+            shrink_to_fit: false,
+            reading_order: 0,
+            justify_last_line: false,
+            locked: false,
+            hidden: false,
+        }
+    }
+}
+
+fn minimal_resolved() -> ResolvedStyleSheet {
+    let font = ResolvedFont::minimal_calibri();
+    ResolvedStyleSheet {
+        minimal: true,
+        fonts: vec![ResolvedStyleFont {
+            font,
+            color: ColorIdentity::Auto,
+        }],
+        fills: vec![ResolvedFill::None, ResolvedFill::Gray125],
+        borders: vec![ResolvedBorder::seed()],
+        xfs: vec![ResolvedXf::default_xf()],
+        formats: BTreeMap::new(),
+    }
+}
+
+fn intern_typed<T: Clone + Ord>(
+    value: T,
+    values: &mut Vec<T>,
+    ids: &mut BTreeMap<T, usize>,
+) -> usize {
+    if let Some(id) = ids.get(&value) {
+        return *id;
+    }
+    let id = values.len();
+    values.push(value.clone());
+    ids.insert(value, id);
+    id
+}
+
+fn font_style_xml(value: &ResolvedStyleFont) -> String {
+    font_xml_value(&value.font, false, value.color)
+}
+
+fn font_xml_value(font: &ResolvedFont, run: bool, color: ColorIdentity) -> String {
+    let (tag, name_tag) = if run {
+        ("rPr", "rFont")
+    } else {
+        ("font", "name")
+    };
+    let mut xml = format!("<{tag}><{name_tag} val=\"{}\"/><sz val=\"{}\"/><color {}/><family val=\"{}\"/><charset val=\"{}\"/>", xml_attr(&font.name), f64::from(font.size_twips) / 20.0, color.xml(), font.family, font.charset);
+    if font.weight == 700 {
+        xml.push_str("<b/>");
+    } else if run {
+        xml.push_str("<b val=\"0\"/>");
+    }
+    for (enabled, tag) in [
+        (font.italic, "i"),
+        (font.strike, "strike"),
+        (font.outline, "outline"),
+        (font.shadow, "shadow"),
+        (font.condense, "condense"),
+        (font.extend, "extend"),
+    ] {
+        if enabled {
+            xml.push_str(&format!("<{tag}/>"));
+        } else if run {
+            xml.push_str(&format!("<{tag} val=\"0\"/>"));
+        }
+    }
+    if font.underline != Underline::None || run {
+        xml.push_str(&format!("<u val=\"{}\"/>", font.underline.xml_value()));
+    }
+    if font.script != Script::Baseline || run {
+        xml.push_str(&format!("<vertAlign val=\"{}\"/>", font.script.xml_value()));
+    }
+    xml.push_str(&format!("</{tag}>"));
+    xml
+}
+
+fn fill_xml(value: &ResolvedFill) -> String {
+    match value {
+        ResolvedFill::None => "<fill><patternFill patternType=\"none\"/></fill>".into(),
+        ResolvedFill::Gray125 => "<fill><patternFill patternType=\"gray125\"/></fill>".into(),
+        ResolvedFill::Pattern { pattern, foreground, background } => format!("<fill><patternFill patternType=\"{pattern}\"><fgColor {}/><bgColor {}/></patternFill></fill>", foreground.xml(), background.xml()),
+    }
+}
+
+fn fill_model(value: ResolvedFill) -> xlsx_model::Fill {
+    match value {
+        ResolvedFill::None => xlsx_model::Fill {
+            pattern_type: "none".into(),
+            ..Default::default()
+        },
+        ResolvedFill::Gray125 => xlsx_model::Fill {
+            pattern_type: "gray125".into(),
+            ..Default::default()
+        },
+        ResolvedFill::Pattern {
+            pattern,
+            foreground,
+            background,
+        } => xlsx_model::Fill {
+            pattern_type: pattern.into(),
+            fg_color: foreground.model(),
+            bg_color: background.model(),
+            gradient: None,
+        },
+    }
+}
+
+fn edge_xml(tag: &str, edge: &Option<ResolvedEdge>) -> String {
+    edge.as_ref()
+        .map(|e| {
+            format!(
+                "<{tag} style=\"{}\"><color {}/></{tag}>",
+                e.style,
+                e.color.xml()
+            )
+        })
+        .unwrap_or_else(|| format!("<{tag}/>"))
+}
+
+fn border_xml(value: &ResolvedBorder) -> String {
+    if value.seed {
+        return "<border><left/><right/><top/><bottom/><diagonal/></border>".into();
+    }
+    format!(
+        "<border diagonalDown=\"{}\" diagonalUp=\"{}\">{}{}{}{}{}</border>",
+        value.diagonal_down as u8,
+        value.diagonal_up as u8,
+        edge_xml("left", &value.left),
+        edge_xml("right", &value.right),
+        edge_xml("top", &value.top),
+        edge_xml("bottom", &value.bottom),
+        edge_xml("diagonal", &value.diagonal)
+    )
+}
+
+fn edge_model(value: Option<ResolvedEdge>) -> Option<xlsx_model::BorderEdge> {
+    value.map(|e| xlsx_model::BorderEdge {
+        style: e.style.into(),
+        color: e.color.model(),
+    })
+}
+
+fn border_model(value: ResolvedBorder) -> xlsx_model::Border {
+    let diagonal = edge_model(value.diagonal);
+    xlsx_model::Border {
+        left: edge_model(value.left),
+        right: edge_model(value.right),
+        top: edge_model(value.top),
+        bottom: edge_model(value.bottom),
+        diagonal_up: value.diagonal_up.then(|| diagonal.clone()).flatten(),
+        diagonal_down: value.diagonal_down.then_some(diagonal).flatten(),
+        horizontal: None,
+        vertical: None,
+    }
+}
+
+fn xf_xml(value: &ResolvedXf) -> String {
+    if value.horizontal.is_empty() {
+        return "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>".into();
+    }
+    format!("<xf numFmtId=\"{}\" fontId=\"{}\" fillId=\"{}\" borderId=\"{}\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\" applyProtection=\"1\" quotePrefix=\"{}\"><alignment horizontal=\"{}\" vertical=\"{}\" wrapText=\"{}\" textRotation=\"{}\" indent=\"{}\" shrinkToFit=\"{}\" readingOrder=\"{}\" justifyLastLine=\"{}\"/><protection locked=\"{}\" hidden=\"{}\"/></xf>", value.num_fmt_id, value.font_id, value.fill_id, value.border_id, value.quote_prefix as u8, value.horizontal, value.vertical, value.wrap_text as u8, value.text_rotation, value.indent, value.shrink_to_fit as u8, value.reading_order, value.justify_last_line as u8, value.locked as u8, value.hidden as u8)
+}
+
+fn xf_model(value: ResolvedXf) -> xlsx_model::CellXf {
+    xlsx_model::CellXf {
+        font_id: value.font_id as u32,
+        fill_id: value.fill_id as u32,
+        border_id: value.border_id as u32,
+        num_fmt_id: value.num_fmt_id.into(),
+        align_h: (!value.horizontal.is_empty()).then(|| value.horizontal.into()),
+        align_v: (!value.vertical.is_empty()).then(|| value.vertical.into()),
+        wrap_text: value.wrap_text,
+        indent: (value.indent != 0).then_some(value.indent.into()),
+        text_rotation: (value.text_rotation != 0).then_some(value.text_rotation.into()),
+        shrink_to_fit: value.shrink_to_fit,
+        reading_order: (value.reading_order != 0).then_some(value.reading_order.into()),
+    }
 }
 
 #[cfg(test)]
@@ -428,6 +767,32 @@ mod tests {
         data[14] = 1;
         data.push(b'F');
         data
+    }
+    #[test]
+    fn minimal_native_model_matches_minimal_styles_xml_defaults() {
+        let s = Styles {
+            fonts: vec![],
+            xfs: vec![],
+            formats: BTreeMap::new(),
+            palette: None,
+            extensions_omitted: false,
+            extensions: extensions::Extensions::default(),
+        };
+        let model = s.model().unwrap();
+        assert_eq!(
+            (
+                model.fonts.len(),
+                model.fills.len(),
+                model.borders.len(),
+                model.cell_xfs.len()
+            ),
+            (1, 2, 1, 1)
+        );
+        assert_eq!(model.fonts[0].name.as_deref(), Some("Calibri"));
+        assert_eq!(model.fonts[0].size, 11.0);
+        assert_eq!(model.fonts[0].color, None);
+        assert_eq!(model.fills[0].pattern_type, "none");
+        assert_eq!(model.fills[1].pattern_type, "gray125");
     }
     #[test]
     fn normal_measurement_resolves_style_xf_and_reserved_font_gap() {
@@ -708,6 +1073,20 @@ mod tests {
         assert!(xml.contains("fontId=\"4\""));
         assert!(xml.contains("<fills count=\"2\">"));
         assert!(xml.contains("<cellXfs count=\"100\">"));
+        let model = s.model().unwrap();
+        assert_eq!(
+            (model.fonts.len(), model.fills.len(), model.borders.len()),
+            (5, 2, 2)
+        );
+        assert_eq!(model.cell_xfs.len(), 100);
+        assert_eq!(model.cell_xfs[0].font_id, 4);
+        assert_eq!(model.cell_xfs[0].fill_id, 0);
+        assert_eq!(model.cell_xfs[0].border_id, 1);
+        assert_eq!(model.cell_xfs[0].align_h.as_deref(), Some("general"));
+        assert_eq!(model.cell_xfs[0].align_v.as_deref(), Some("top"));
+        assert_eq!(model.cell_xfs[0].indent, None);
+        assert_eq!(model.cell_xfs[0].text_rotation, None);
+        assert_eq!(model.cell_xfs[0].reading_order, None);
     }
     #[test]
     fn typed_font_keeps_legacy_cell_and_run_xml_byte_exact() {
@@ -733,6 +1112,16 @@ mod tests {
         assert_eq!(s.font(&font).unwrap(), "<font><name val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></font>");
         assert_eq!(s.run_font(0).unwrap(), "<rPr><rFont val=\"A&amp;B\"/><sz val=\"12\"/><color indexed=\"10\"/><family val=\"3\"/><charset val=\"128\"/><b/><i/><strike/><outline/><shadow/><condense/><extend/><u val=\"singleAccounting\"/><vertAlign val=\"superscript\"/></rPr>");
         assert!(s.run_font(4).is_err());
+        let model = s.model().unwrap();
+        assert_eq!(model.fonts.len(), 1);
+        assert_eq!(model.fonts[0].name.as_deref(), Some("A&B"));
+        assert_eq!(model.fonts[0].color.as_deref(), Some("#FF0000"));
+        assert!(model.fonts[0].bold && model.fonts[0].italic && model.fonts[0].strike);
+        assert_eq!(
+            model.fonts[0].underline_style.as_deref(),
+            Some("singleAccounting")
+        );
+        assert_eq!(model.fonts[0].vert_align.as_deref(), Some("superscript"));
 
         let mut plain = font.clone();
         plain[2] = 0;
@@ -811,6 +1200,64 @@ mod tests {
         assert!(xml.contains("<fonts count=\"1\">"));
         assert_eq!(xml.matches("rgb=\"FF123456\"").count(), 1);
     }
+    #[test]
+    fn font_override_interns_emission_equivalent_weights_without_removing_source_slots() {
+        let mut normal = font();
+        normal[4..6].copy_from_slice(&10u16.to_le_bytes());
+        let mut other = normal.clone();
+        other[6..8].copy_from_slice(&650u16.to_le_bytes());
+        let mut xf = [0u8; 20];
+        xf[0] = 1;
+        xf[17] = 2;
+        let mut xfs = [xf; 16];
+        xfs[0][0] = 0;
+        let (check, ext) = extended_color(&xfs, 1, 13, [0xff, 0x12, 0x34, 0x56]);
+        let mut palette = vec![0; 226];
+        palette[..2].copy_from_slice(&56u16.to_le_bytes());
+        palette[10..14].copy_from_slice(&[0x12, 0x34, 0x56, 0]);
+        let mut records = vec![
+            Record {
+                kind: 0x31,
+                offset: 0,
+                data: &normal,
+            },
+            Record {
+                kind: 0x31,
+                offset: 0,
+                data: &other,
+            },
+        ];
+        records.extend(xfs.iter().map(|xf| Record {
+            kind: 0xe0,
+            offset: 0,
+            data: xf,
+        }));
+        records.extend([
+            Record {
+                kind: 0x92,
+                offset: 0,
+                data: &palette,
+            },
+            Record {
+                kind: 0x87c,
+                offset: 0,
+                data: &check,
+            },
+            Record {
+                kind: 0x87d,
+                offset: 0,
+                data: &ext,
+            },
+        ]);
+        let resolved = Styles::parse(&records).unwrap().resolve().unwrap();
+        assert_eq!(resolved.fonts.len(), 2);
+        assert_eq!(resolved.fonts[1].font.weight, 650);
+        assert!(resolved.xml().contains("<fonts count=\"2\">"));
+        let model = resolved.into_model();
+        assert_eq!(model.cell_xfs[1].font_id, 0);
+        assert_eq!(model.cell_xfs[2].font_id, 1);
+    }
+
     #[test]
     fn extended_argb_alpha_remains_distinct_for_font_interning() {
         let font = font();

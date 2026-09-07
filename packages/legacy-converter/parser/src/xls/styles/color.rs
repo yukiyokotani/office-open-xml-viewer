@@ -16,6 +16,16 @@ impl ColorIdentity {
             Self::Argb([a, r, g, b]) => format!("rgb=\"{a:02X}{r:02X}{g:02X}{b:02X}\""),
         }
     }
+
+    pub(super) fn model(self) -> Option<String> {
+        use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
+        let color = match self {
+            Self::Auto => SpreadsheetColor::Auto,
+            Self::Indexed(index) => SpreadsheetColor::Indexed(index.into()),
+            Self::Argb(argb) => SpreadsheetColor::Argb(argb),
+        };
+        resolve_color(color, None, &[])
+    }
 }
 
 #[cfg(test)]

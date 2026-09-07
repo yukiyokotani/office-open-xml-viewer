@@ -3,7 +3,7 @@
 
 use super::super::{decode_biff_chars, u16_at, unsupported};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Underline {
     None,
     Single,
@@ -24,7 +24,7 @@ impl Underline {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Script {
     Baseline,
     Superscript,
@@ -60,6 +60,25 @@ pub(super) struct ResolvedFont {
 }
 
 impl ResolvedFont {
+    pub(super) fn minimal_calibri() -> Self {
+        Self {
+            name: "Calibri".into(),
+            size_twips: 220,
+            color_index: 0x7fff,
+            weight: 400,
+            family: 0,
+            charset: 0,
+            italic: false,
+            strike: false,
+            outline: false,
+            shadow: false,
+            condense: false,
+            extend: false,
+            underline: Underline::None,
+            script: Script::Baseline,
+        }
+    }
+
     pub(super) fn decode(data: &[u8]) -> Result<Self, String> {
         if data.len() < 16 {
             return Err(unsupported("truncated BIFF font"));
@@ -99,6 +118,26 @@ impl ResolvedFont {
             underline,
             script,
         })
+    }
+
+    pub(super) fn model(&self, color: Option<String>) -> xlsx_model::Font {
+        xlsx_model::Font {
+            bold: self.weight == 700,
+            italic: self.italic,
+            underline: self.underline != Underline::None,
+            strike: self.strike,
+            size: f64::from(self.size_twips) / 20.0,
+            color,
+            name: Some(self.name.clone()),
+            underline_style: match self.underline {
+                Underline::None | Underline::Single => None,
+                value => Some(value.xml_value().to_string()),
+            },
+            vert_align: match self.script {
+                Script::Baseline => None,
+                value => Some(value.xml_value().to_string()),
+            },
+        }
     }
 }
 

@@ -23,6 +23,8 @@ mod rich;
 mod styles;
 mod theme;
 mod views;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod direct_styles_tests;
 
 const BOF: u16 = 0x0809;
 const EOF: u16 = 0x000a;

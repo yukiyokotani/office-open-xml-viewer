@@ -419,6 +419,8 @@ dependencies = [
  "quick-xml",
  "serde_json",
  "wasm-bindgen",
+ "xlsx-model",
+ "xlsx-parser",
  "zip",
 ]
 
