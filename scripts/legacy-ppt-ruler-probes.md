@@ -130,8 +130,34 @@ Both generators produce source descriptions only; neither launches Office nor
 asserts binary-text correspondence.
 
 A local 45-slide authored source has been checked against transitional PML and
-the exact manifest text/properties, including empty runs and paragraphs. Its
-Office roundtrip is still pending. Non-Office previews are not an oracle:
+the exact manifest text/properties, including empty runs and paragraphs. It has
+now completed a PowerPoint for Mac 16.112.3 roundtrip: save as PPT, close, reopen
+the saved PPT, export its PDF, and save a separate OOXML copy. The authored
+source hash remained unchanged. The PDF contains 45 pages and each condition ID
+occurs once; all pages have received an initial visual inspection.
+
+Unlike the first same-body experiment, separate-body treatments now produce
+visible differences in tab spacing, margins, first-line offsets, tab alignment
+and paragraph direction. Live-persist inspection of `S001` through `S029`
+finds the treatment facts in classic `TextRulerAtom` records. Alternative shape
+XML on these slides belongs to the probe titles, not the control or treatment
+bodies. The reconverted OOXML reflects the ruler facts in each body's list style.
+
+Serialization does not preserve every authored distinction. Tiny signed
+margins/first-line offsets become absent, tiny default intervals become explicit
+zero, negative and zero tab positions converge to zero, and an explicit empty
+tab list becomes absent. Larger margins, first-line offsets, representable tab
+positions, all four tested alignments and the two-tab condition survive. A
+changed left margin moves the first word while subsequent explicit ruler tab
+positions remain fixed in the direct-binary PDF.
+
+These are observations from the specified source conditions and Office version,
+not a general rounding algorithm or a conflicting-source precedence rule. The
+experiment does not contain conflicting master values or competing treatment
+alternatives. The additional `M` text-slot conditions still require a separate
+correspondence audit before any text substitution behavior can be inferred.
+
+Non-Office previews are not an oracle:
 some tab conditions can fail to display even when the source XML retains every
 authored character. Do not remove those conditions or tune the source to make
 an unrelated renderer pass.
