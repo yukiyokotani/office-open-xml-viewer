@@ -135,6 +135,8 @@ impl Rect {
 mod direct_geometry;
 pub(super) mod direct_model;
 mod direct_transform;
+#[cfg(test)]
+mod gradient_integration_tests;
 
 trait ShapeSource {
     type Record: Clone;
@@ -929,7 +931,7 @@ impl Writer<'_, '_> {
                 return Err(unsupported("invalid PowerPoint OfficeArt drawing"));
             }
             for child in parse_records(dg.payload, self.records)? {
-                self.node(child, false, 0)?;
+                self.node(child, false, 0, true)?;
             }
         }
         Ok(true)
@@ -945,7 +947,13 @@ impl Writer<'_, '_> {
         self.id += 1;
         Ok(self.id)
     }
-    fn node(&mut self, record: Record<'_>, nested: bool, depth: usize) -> Result<(), String> {
+    fn node(
+        &mut self,
+        record: Record<'_>,
+        nested: bool,
+        depth: usize,
+        gradient_transform_supported: bool,
+    ) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err(unsupported("PowerPoint drawing nesting is too deep"));
         }
@@ -984,7 +992,14 @@ impl Writer<'_, '_> {
                     self.push(&format!("<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"{id}\" name=\"Legacy group {id}\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>{}</p:grpSpPr>", group.transform(anchor, Some(child_space))))?;
                 }
                 for child in &children[1..] {
-                    self.node(*child, !patriarch, depth + 1)?;
+                    self.node(
+                        *child,
+                        !patriarch,
+                        depth + 1,
+                        gradient_transform_supported
+                            && (patriarch
+                                || (group.props.rotation == 0 && group.flags & 0xc0 == 0)),
+                    )?;
                 }
                 if !patriarch {
                     self.push("</p:grpSp>")?;
@@ -1002,9 +1017,7 @@ impl Writer<'_, '_> {
                     (Some(id), Some(shapes)) => shape.props.paint.inherit(shapes.paint(id)?),
                     _ => shape.props.paint,
                 };
-                // Resolve retained shade-array ownership at the visible shape
-                // boundary. Semantic decoding waits for supported projection.
-                let _gradient = match (shape.master(), self.context.and_then(|c| c.shapes)) {
+                let gradient = match (shape.master(), self.context.and_then(|c| c.shapes)) {
                     (Some(id), Some(shapes)) => shape.props.gradient.inherit(
                         &shapes
                             .gradient(id)?
@@ -1189,6 +1202,24 @@ impl Writer<'_, '_> {
                 } else {
                     None
                 };
+                // Controlled Office cases cover leaf reflections and scaled
+                // groups, but not rotated leaves or rotated/reflected groups.
+                let mut gradient_bytes = *self.remaining;
+                let gradient_fill = if gradient_transform_supported && shape.props.rotation == 0 {
+                    paint
+                        .project_gradient(
+                            &gradient,
+                            allow_fill,
+                            self.context.and_then(|c| c.scheme),
+                            self.records,
+                            &mut gradient_bytes,
+                        )?
+                        .map(|value| value.to_xml(&mut gradient_bytes))
+                        .transpose()?
+                } else {
+                    None
+                };
+                let extra_fill = gradient_fill.or(image_fill);
                 let anchor = shape
                     .anchor
                     .ok_or_else(|| unsupported("missing PowerPoint shape anchor"))?;
@@ -1208,15 +1239,15 @@ impl Writer<'_, '_> {
                         scheme,
                         fill,
                         stroke,
-                        image_fill.as_deref(),
+                        extra_fill.as_deref(),
                     ))?;
                 } else {
-                    let paint_xml = if image_fill.is_some() {
+                    let paint_xml = if extra_fill.is_some() {
                         paint.xml_with_custom_geometry_and_fill(
                             scheme,
                             !matches!(shape.kind, 20 | 32),
                             true,
-                            image_fill.as_deref(),
+                            extra_fill.as_deref(),
                         )
                     } else {
                         paint.xml_with_scheme(shape.kind, scheme)
@@ -2145,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_gradient_does_not_change_xml_before_projection_is_supported() {
+    fn retained_gradient_is_projected_to_xml_without_a_solid_fill_guess() {
         let shade = [1, 0, 1, 0, 8, 0, 7, 0, 0, 0, 0, 0, 0, 0];
         let gradient = record(
             (2 << 4) | 3,
@@ -2165,7 +2196,11 @@ mod tests {
                 vec![record(0, 0xf010, &ints(&[0, 0, 576, 288])), extra, text("x")],
             )])
         };
-        assert_eq!(xml(&shape(properties(&[(0x180, 4)]))).unwrap(), xml(&shape(gradient)).unwrap());
+        let output = xml(&shape(gradient)).unwrap();
+        assert!(output.contains("<a:gradFill rotWithShape=\"0\">"));
+        assert!(output.contains("<a:gs pos=\"0\"><a:srgbClr val=\"FFFFFF\"/>"));
+        assert!(output.contains("<a:gs pos=\"100000\"><a:srgbClr val=\"070000\"/>"));
+        assert!(output.contains("<a:lin ang=\"5400000\"/>"));
     }
 
     #[test]
@@ -2328,7 +2363,7 @@ mod tests {
                 media: None,
             };
             let record = parse_records(&bytes, &mut MAX_RECORDS.clone()).unwrap()[0];
-            assert!(writer.node(record, false, 0).unwrap_err().contains(message));
+            assert!(writer.node(record, false, 0, true).unwrap_err().contains(message));
         }
     }
 
@@ -2535,7 +2570,7 @@ mod tests {
         let record = parse_records(&group, &mut MAX_RECORDS.clone()).unwrap()[0];
         assert!(
             writer
-            .node(record, true, 0)
+            .node(record, true, 0, true)
             .unwrap_err()
                 .contains("nesting")
         );

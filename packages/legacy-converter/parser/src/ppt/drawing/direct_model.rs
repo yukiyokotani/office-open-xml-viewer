@@ -85,7 +85,18 @@ impl Context<'_> {
                     .map(|(id, alpha)| self.image_fill(id, alpha, false))
                     .transpose()?
                     .flatten();
-                background.paint.background_model(scheme, image)
+                let gradient = background
+                    .paint
+                    .project_gradient(
+                        &background.gradient.view(self.backing)?,
+                        true,
+                        scheme,
+                        self.work_budget,
+                        self.model_budget,
+                    )?
+                    .map(|value| value.to_model(self.model_budget))
+                    .transpose()?;
+                gradient.or_else(|| background.paint.background_model(scheme, image))
             }
             None => None,
         };
@@ -207,7 +218,7 @@ impl Context<'_> {
             .map(|id| self.presentation.shape_masters.paint(id))
             .transpose()?;
         let paint = master.map_or(shape.props.paint, |base| shape.props.paint.inherit(base));
-        let _gradient = match shape.master() {
+        let gradient = match shape.master() {
             Some(id) => shape
                 .props
                 .gradient
@@ -326,6 +337,25 @@ impl Context<'_> {
             allow_line,
             image,
         );
+        let gradient_fill = if shape.props.rotation == 0
+            && ancestors
+                .iter()
+                .all(|group| group.rot == 0.0 && !group.flip_h && !group.flip_v)
+        {
+            paint
+                .project_gradient(
+                    &gradient,
+                    allow_fill,
+                    self.presentation.schemes[self.index].as_ref(),
+                    self.work_budget,
+                    self.model_budget,
+                )?
+                .map(|value| value.to_model(self.model_budget))
+                .transpose()?
+        } else {
+            None
+        };
+        let fill = gradient_fill.or(fill);
         self.push(
             SlideElement::Shape(ShapeElement {
                 x: transform.x,

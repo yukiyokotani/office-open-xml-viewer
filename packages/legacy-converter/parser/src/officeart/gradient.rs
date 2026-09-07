@@ -1,6 +1,7 @@
 //! Neutral OfficeArt gradient facts (MS-ODRAW 2.2.51 and 2.2.61).
 
 use super::{unsupported, ByteSpan};
+pub(crate) mod projection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ShadeColor {

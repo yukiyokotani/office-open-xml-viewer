@@ -1,6 +1,7 @@
 //! OfficeArt preset geometry and solid paint, without renderer extensions.
 use super::{scheme, unsupported};
 use pptx_model::{ArrowEnd, Fill, Stroke};
+mod gradient;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Paint {

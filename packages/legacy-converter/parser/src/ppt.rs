@@ -111,9 +111,11 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<PptCon
         let background = match &presentation.backgrounds[index] {
             Some(background) => background_xml(
                 &background.paint,
+                &background.gradient,
                 presentation.schemes[index].as_ref(),
                 &mut media,
                 &mut record_budget,
+                xml_budget,
             )?,
             None => String::new(),
         };
@@ -480,11 +482,17 @@ fn build_pptx(
 
 fn background_xml(
     paint: &paint::Paint,
+    gradient: &crate::officeart::gradient::Borrowed<'_>,
     scheme: Option<&scheme::Scheme>,
     media: &mut media::Store<'_>,
     budget: &mut usize,
+    output_bytes: usize,
 ) -> Result<String, String> {
-    let fill = if let Some((index, opacity)) = paint.background_image() {
+    let mut gradient_bytes = output_bytes;
+    let gradient = paint.project_gradient(gradient, true, scheme, budget, &mut gradient_bytes)?;
+    let fill = if let Some(gradient) = gradient {
+        gradient.to_xml(&mut gradient_bytes)?
+    } else if let Some((index, opacity)) = paint.background_image() {
         if !media.reference(index, budget)? {
             return Ok(String::new());
         }
@@ -503,7 +511,18 @@ fn background_xml(
         };
         fill
     };
-    Ok(format!("<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>"))
+    let size = fill
+        .len()
+        .checked_add("<p:bg><p:bgPr></p:bgPr></p:bg>".len())
+        .filter(|size| *size <= output_bytes)
+        .ok_or_else(|| "OUTPUT_TOO_LARGE".to_owned())?;
+    let mut xml = String::new();
+    xml.try_reserve_exact(size)
+        .map_err(|_| "OUTPUT_TOO_LARGE".to_owned())?;
+    use std::fmt::Write as _;
+    write!(&mut xml, "<p:bg><p:bgPr>{fill}</p:bgPr></p:bg>")
+        .map_err(|_| "OUTPUT_TOO_LARGE".to_owned())?;
+    Ok(xml)
 }
 
 /// MS-PPT 2.5.1 / 2.6.6: only the live slide's own optional
