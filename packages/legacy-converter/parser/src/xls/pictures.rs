@@ -21,6 +21,36 @@ pub(super) struct Parts {
     pub sheets: BTreeSet<usize>,
 }
 
+pub(super) struct ResolvedPictures {
+    sheets: BTreeMap<usize, Vec<ResolvedPicture>>,
+    images: Vec<(u32, &'static str, Vec<u8>)>,
+}
+
+struct ResolvedPicture {
+    from: CellCorner,
+    to: CellCorner,
+    x: i64,
+    y: i64,
+    dx: i64,
+    dy: i64,
+    tdx: i64,
+    tdy: i64,
+    cx: i64,
+    cy: i64,
+    crop: [f64; 4],
+    rotation: i64,
+    flip_h: bool,
+    flip_v: bool,
+    store_index: u32,
+    extension: &'static str,
+    edit_as: &'static str,
+}
+
+pub(super) struct NativePictures {
+    pub sheets: BTreeMap<usize, Vec<xlsx_model::ImageAnchor>>,
+    pub resources: BTreeMap<String, Vec<u8>>,
+}
+
 impl Pictures {
     pub fn prepare(records: &[Record<'_>], tabs: &[usize]) -> Result<Self, String> {
         let sheet_ids: BTreeMap<_, _> = tabs.iter().enumerate().map(|(i, &tab)| (tab, i)).collect();
@@ -61,12 +91,17 @@ impl Pictures {
         mdw: f64,
         warnings: &mut Vec<String>,
     ) -> Parts {
-        let mut parts = Parts {
-            xml: vec![],
-            media: vec![],
-            types: String::new(),
-            sheets: BTreeSet::new(),
-        };
+        self.resolve(sheets, mdw, warnings).into_parts()
+    }
+
+    /// Resolve source geometry once. Neither XML nor renderer DTOs are retained here.
+    pub(super) fn resolve(
+        self,
+        sheets: &[(String, SheetData)],
+        mdw: f64,
+        warnings: &mut Vec<String>,
+    ) -> ResolvedPictures {
+        let mut resolved_sheets = BTreeMap::new();
         let mut used = BTreeSet::new();
         let mut omitted = false;
         // Resource governance, not a layout threshold. Prefixes are built once
@@ -99,9 +134,7 @@ impl Pictures {
             work = left;
             let columns = prefix(max_col, |c| sheet.geometry.column_emu(c, mdw));
             let rows = prefix(max_row, |r| sheet.geometry.row_emu(r));
-            let mut xml = String::from("<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">");
-            let mut rels = String::from("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
-            let mut count = 0;
+            let mut resolved = Vec::new();
             for anchor in anchors {
                 let Some(picture) = anchor.picture else {
                     continue;
@@ -155,24 +188,151 @@ impl Pictures {
                         continue;
                     }
                 };
-                count += 1;
                 used.insert(id);
+                resolved.push(ResolvedPicture {
+                    from: anchor.from,
+                    to: anchor.to,
+                    x,
+                    y,
+                    dx,
+                    dy,
+                    tdx,
+                    tdy,
+                    cx,
+                    cy,
+                    crop,
+                    rotation: (f64::from(picture.rotation) * 60000.0 / 65536.0).round() as i64,
+                    flip_h: anchor.shape_flags & 64 != 0,
+                    flip_v: anchor.shape_flags & 128 != 0,
+                    store_index: id,
+                    extension: *ext,
+                    edit_as,
+                });
+            }
+            if !resolved.is_empty() {
+                resolved_sheets.insert(sheet_index, resolved);
+            }
+        }
+        let images = self
+            .images
+            .into_iter()
+            .filter(|image| used.contains(&image.0))
+            .collect();
+        if omitted {
+            warnings.push("legacy-xls:unresolved-picture-geometry-omitted".into());
+        }
+        ResolvedPictures {
+            sheets: resolved_sheets,
+            images,
+        }
+    }
+}
+
+impl ResolvedPictures {
+    /// Charge retained payload and model slots, excluding allocator bookkeeping.
+    /// Source anchor/media limits bound map entry counts separately.
+    pub(super) fn into_models(self, budget: &mut usize) -> Result<NativePictures, String> {
+        fn charge(budget: &mut usize, bytes: usize) -> Result<(), String> {
+            *budget = budget
+                .checked_sub(bytes)
+                .ok_or_else(|| super::unsupported("XLS picture model byte budget exceeded"))?;
+            Ok(())
+        }
+        fn key(id: u32, budget: &mut usize) -> Result<String, String> {
+            charge(
+                budget,
+                "legacy-xls/image/".len() + id.max(1).ilog10() as usize + 1,
+            )?;
+            Ok(format!("legacy-xls/image/{id}"))
+        }
+        let mut sheets = BTreeMap::new();
+        for (index, values) in self.sheets {
+            charge(
+                budget,
+                std::mem::size_of::<(usize, Vec<xlsx_model::ImageAnchor>)>(),
+            )?;
+            let bytes = values
+                .len()
+                .checked_mul(std::mem::size_of::<xlsx_model::ImageAnchor>())
+                .ok_or_else(|| super::unsupported("XLS picture model byte budget exceeded"))?;
+            charge(budget, bytes)?;
+            let mut anchors = Vec::new();
+            anchors
+                .try_reserve_exact(values.len())
+                .map_err(|_| super::unsupported("XLS picture model allocation failed"))?;
+            for (ordinal, value) in values.into_iter().enumerate() {
+                let image_path = key(value.store_index, budget)?;
+                let mime = ooxml_common::blip::mime_from_ext(value.extension);
+                charge(budget, mime.len() + value.edit_as.len())?;
+                anchors.push(xlsx_model::ImageAnchor {
+                    // Relative picture order, not an artificial XML byte offset.
+                    z_order: ordinal as u64,
+                    from_col: u32::from(value.from.column),
+                    from_row: u32::from(value.from.row),
+                    from_col_off: value.dx,
+                    from_row_off: value.dy,
+                    to_col: u32::from(value.to.column),
+                    to_row: u32::from(value.to.row),
+                    to_col_off: value.tdx,
+                    to_row_off: value.tdy,
+                    edit_as: Some(value.edit_as.into()),
+                    native_ext_cx: value.cx,
+                    native_ext_cy: value.cy,
+                    rotation: (value.rotation != 0).then_some(value.rotation as f64 / 60000.0),
+                    flip_h: value.flip_h.then_some(true),
+                    flip_v: value.flip_v.then_some(true),
+                    image_path,
+                    mime_type: mime.into(),
+                    svg_image_path: None,
+                    src_rect: value.crop.iter().any(|v| *v != 0.0).then_some(
+                        ooxml_common::blip::SrcRect {
+                            t: value.crop[0] / 100000.0,
+                            b: value.crop[1] / 100000.0,
+                            l: value.crop[2] / 100000.0,
+                            r: value.crop[3] / 100000.0,
+                        },
+                    ),
+                    alpha: None,
+                    duotone: None,
+                });
+            }
+            sheets.insert(index, anchors);
+        }
+        let mut resources = BTreeMap::new();
+        for (id, _, bytes) in self.images {
+            charge(budget, std::mem::size_of::<(String, Vec<u8>)>())?;
+            charge(budget, bytes.capacity())?;
+            resources.insert(key(id, budget)?, bytes);
+        }
+        Ok(NativePictures { sheets, resources })
+    }
+
+    fn into_parts(self) -> Parts {
+        let mut parts = Parts {
+            xml: vec![],
+            media: vec![],
+            types: String::new(),
+            sheets: BTreeSet::new(),
+        };
+        for (sheet_index, values) in self.sheets {
+            let mut xml = String::from("<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">");
+            let mut rels = String::from("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+            for (ordinal, value) in values.into_iter().enumerate() {
+                let count = ordinal + 1;
+                let (x, y, dx, dy, tdx, tdy, cx, cy) = (
+                    value.x, value.y, value.dx, value.dy, value.tdx, value.tdy, value.cx, value.cy,
+                );
+                let (crop, rotation) = (value.crop, value.rotation);
+                let (flip_h, flip_v) = (u8::from(value.flip_h), u8::from(value.flip_v));
+                let (id, ext, edit_as) = (value.store_index, value.extension, value.edit_as);
                 xml.push_str(&format!("<xdr:twoCellAnchor editAs=\"{edit_as}\">"));
                 for (tag, corner, ox, oy) in
-                    [("from", anchor.from, dx, dy), ("to", anchor.to, tdx, tdy)]
+                    [("from", value.from, dx, dy), ("to", value.to, tdx, tdy)]
                 {
                     xml.push_str(&format!("<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{ox}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{oy}</xdr:rowOff></xdr:{tag}>", corner.column, corner.row));
                 }
-                let rotation = (f64::from(picture.rotation) * 60000.0 / 65536.0).round() as i64;
-                let (flip_h, flip_v) = (
-                    u8::from(anchor.shape_flags & 64 != 0),
-                    u8::from(anchor.shape_flags & 128 != 0),
-                );
                 xml.push_str(&format!("<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{count}\" name=\"Picture {count}\"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId{count}\"/><a:srcRect t=\"{}\" b=\"{}\" l=\"{}\" r=\"{}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm rot=\"{rotation}\" flipH=\"{flip_h}\" flipV=\"{flip_v}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>", crop[0], crop[1], crop[2], crop[3], x + dx, y + dy));
                 rels.push_str(&format!("<Relationship Id=\"rId{count}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image{id}.{ext}\"/>"));
-            }
-            if count == 0 {
-                continue;
             }
             let id = sheet_index + 1;
             xml.push_str("</xdr:wsDr>");
@@ -188,9 +348,6 @@ impl Pictures {
             parts.sheets.insert(sheet_index);
         }
         for (id, ext, bytes) in self.images {
-            if !used.contains(&id) {
-                continue;
-            }
             let mime = match ext {
                 "png" => "image/png",
                 "jpg" | "jpeg" => "image/jpeg",
@@ -203,9 +360,6 @@ impl Pictures {
                 "<Override PartName=\"/{name}\" ContentType=\"{mime}\"/>"
             ));
             parts.media.push((name, bytes));
-        }
-        if omitted {
-            warnings.push("legacy-xls:unresolved-picture-geometry-omitted".into());
         }
         parts
     }
@@ -282,6 +436,77 @@ mod tests {
             images: vec![(1, "png", vec![1, 2, 3])],
             unsupported_images: false,
         }
+    }
+
+    #[test]
+    fn native_picture_projection_matches_existing_xlsx_parser() {
+        let sheets = [("S".into(), sheet())];
+        let parts = pictures(vec![anchor(), anchor()]).emit(&sheets, 7.0, &mut Vec::new());
+        let bytes = super::super::build_xlsx_with_drawings(
+            &sheets,
+            &super::super::styles::minimal_resolved(),
+            Vec::new(),
+            false,
+            1,
+            16 * 1024 * 1024,
+            Some(7.0),
+            Some(&parts),
+        )
+        .unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&xlsx_parser::parse_sheet_native(&bytes, 0, "S").unwrap())
+                .unwrap();
+        let mut budget = usize::MAX;
+        let native = pictures(vec![anchor(), anchor()])
+            .resolve(&sheets, 7.0, &mut Vec::new())
+            .into_models(&mut budget)
+            .unwrap();
+        let expected = parsed["images"].as_array().unwrap();
+        assert_eq!(expected.len(), native.sheets[&0].len());
+        for (ordinal, (expected, actual)) in expected.iter().zip(&native.sheets[&0]).enumerate() {
+            let mut expected = expected.clone();
+            // Resource identity and relative ordering replace ZIP paths/XML offsets.
+            expected["imagePath"] = serde_json::json!("legacy-xls/image/1");
+            expected["zOrder"] = serde_json::json!(ordinal);
+            assert_eq!(expected, serde_json::to_value(actual).unwrap());
+        }
+    }
+
+    #[test]
+    fn native_picture_models_preserve_transforms_and_charge_exact_payload_budget() {
+        let resolve = || {
+            pictures(vec![anchor(), anchor()]).resolve(
+                &[("S".into(), sheet())],
+                7.0,
+                &mut Vec::new(),
+            )
+        };
+        let mut remaining = usize::MAX;
+        let native = resolve().into_models(&mut remaining).unwrap();
+        let required = usize::MAX - remaining;
+        assert_eq!(native.resources.len(), 1);
+        assert_eq!(native.resources["legacy-xls/image/1"], [1, 2, 3]);
+        let anchors = &native.sheets[&0];
+        assert_eq!(anchors.len(), 2);
+        assert!(anchors[0].z_order < anchors[1].z_order);
+        assert_eq!(anchors[0].from_col_off, -333375);
+        assert_eq!(anchors[0].rotation, Some(-90.0));
+        assert_eq!(anchors[0].flip_h, Some(true));
+        assert_eq!(anchors[0].flip_v, Some(true));
+        assert_eq!(anchors[0].mime_type, "image/png");
+        assert_eq!(
+            anchors[0].src_rect.unwrap(),
+            ooxml_common::blip::SrcRect {
+                t: 0.5,
+                b: -0.25,
+                l: 0.25,
+                r: 0.0,
+            }
+        );
+        let mut exact = required;
+        assert!(resolve().into_models(&mut exact).is_ok());
+        assert_eq!(exact, 0);
+        assert!(resolve().into_models(&mut (required - 1)).is_err());
     }
 
     #[test]
