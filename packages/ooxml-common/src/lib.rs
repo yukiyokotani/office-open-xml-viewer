@@ -25,6 +25,7 @@ pub mod package_session;
 pub mod pull;
 pub mod rels;
 pub mod resource;
+pub mod spreadsheet_color;
 pub mod text;
 pub mod theme;
 pub mod units;

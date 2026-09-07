@@ -1,3 +1,4 @@
+pub(crate) use ooxml_common::spreadsheet_color::resolve_color_attrs;
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(test)]
 use std::io::Cursor;
@@ -311,27 +312,6 @@ fn degraded_container_workbook(parse_error: String) -> ParsedWorkbook {
 fn degraded_container_sheet(parse_error: String) -> Worksheet {
     Worksheet::placeholder(CONTAINER_PART, parse_error)
 }
-
-// Excel built-in indexed color palette (indices 0-63)
-// Standard Excel 2003 color palette
-const INDEXED_COLORS: &[&str] = &[
-    "#000000", "#FFFFFF", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF",
-    "#00FFFF", // 0-7
-    "#000000", "#FFFFFF", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF",
-    "#00FFFF", // 8-15
-    "#800000", "#008000", "#000080", "#808000", "#800080", "#008080", "#C0C0C0",
-    "#808080", // 16-23
-    "#9999FF", "#993366", "#FFFFCC", "#CCFFFF", "#660066", "#FF8080", "#0066CC",
-    "#CCCCFF", // 24-31
-    "#000080", "#FF00FF", "#FFFF00", "#00FFFF", "#800080", "#800000", "#008080",
-    "#0000FF", // 32-39
-    "#00CCFF", "#CCFFFF", "#CCFFCC", "#FFFF99", "#99CCFF", "#FF99CC", "#CC99FF",
-    "#FFCC99", // 40-47
-    "#3366FF", "#33CCCC", "#99CC00", "#FFCC00", "#FF9900", "#FF6600", "#666699",
-    "#969696", // 48-55
-    "#003366", "#339966", "#003300", "#333300", "#993300", "#993366", "#333399",
-    "#333333", // 56-63
-];
 
 /// Parse a xlsx archive's workbook index and return it as UTF-8 JSON **bytes**.
 ///
@@ -996,91 +976,6 @@ fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<St
     )
 }
 
-/// Convert hex color + tint to resulting hex color using HLS model.
-/// tint > 0: lighten; tint < 0: darken.
-fn apply_tint(hex: &str, tint: f64) -> String {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 {
-        return format!("#{}", hex);
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f64 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f64 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f64 / 255.0;
-
-    // RGB → HLS
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let s = if max == min {
-        0.0
-    } else if l < 0.5 {
-        (max - min) / (max + min)
-    } else {
-        (max - min) / (2.0 - max - min)
-    };
-    let h = if max == min {
-        0.0
-    } else if max == r {
-        (g - b) / (max - min) / 6.0
-    } else if max == g {
-        ((b - r) / (max - min) + 2.0) / 6.0
-    } else {
-        ((r - g) / (max - min) + 4.0) / 6.0
-    };
-    let h = if h < 0.0 { h + 1.0 } else { h };
-
-    // Apply tint to luminance
-    let new_l = if tint > 0.0 {
-        l * (1.0 - tint) + tint
-    } else {
-        l * (1.0 + tint)
-    };
-
-    // HLS → RGB
-    let (nr, ng, nb) = hls_to_rgb(h, new_l, s);
-    format!(
-        "#{:02X}{:02X}{:02X}",
-        (nr * 255.0).round() as u8,
-        (ng * 255.0).round() as u8,
-        (nb * 255.0).round() as u8
-    )
-}
-
-fn hls_to_rgb(h: f64, l: f64, s: f64) -> (f64, f64, f64) {
-    if s == 0.0 {
-        return (l, l, l);
-    }
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
-    let g = hue_to_rgb(p, q, h);
-    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
-    (r, g, b)
-}
-
-fn hue_to_rgb(p: f64, q: f64, mut t: f64) -> f64 {
-    if t < 0.0 {
-        t += 1.0;
-    }
-    if t > 1.0 {
-        t -= 1.0;
-    }
-    if t < 1.0 / 6.0 {
-        return p + (q - p) * 6.0 * t;
-    }
-    if t < 1.0 / 2.0 {
-        return q;
-    }
-    if t < 2.0 / 3.0 {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    p
-}
-
 pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Option<String> {
     resolve_color_attrs(
         node.attribute("rgb"),
@@ -1089,81 +984,6 @@ pub(crate) fn parse_color(node: &roxmltree::Node, theme_colors: &[String]) -> Op
         node.attribute("indexed"),
         theme_colors,
     )
-}
-
-/// Resolve a SpreadsheetML color from its raw attribute values
-/// (`rgb` / `theme` + `tint` / `indexed`). Split out from [`parse_color`] so
-/// callers that scan attributes without a roxmltree node (e.g. the bounded
-/// tab-color head probe) share the exact same resolution rules.
-pub(crate) fn resolve_color_attrs(
-    rgb: Option<&str>,
-    theme: Option<&str>,
-    tint: Option<&str>,
-    indexed: Option<&str>,
-    theme_colors: &[String],
-) -> Option<String> {
-    // ECMA-376 18.8.3/18.8.19 (CT_Color): tint applies to the resolved
-    // RGB value, regardless of whether it came from rgb, theme or indexed.
-    // Invalid tint metadata is ignored, not clamped to a different color.
-    let tint = tint
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|v| (-1.0..=1.0).contains(v))
-        .unwrap_or(0.0);
-    let finish = |base: std::borrow::Cow<'_, str>| {
-        let hex = base.strip_prefix('#').unwrap_or(&base);
-        if tint != 0.0 && hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            apply_tint(&base, tint)
-        } else {
-            base.into_owned()
-        }
-    };
-    // rgb attribute (ARGB: 8 chars, drop alpha; or 6-char RGB)
-    if let Some(rgb) = rgb {
-        let rgb = if rgb.len() == 8 { rgb.get(2..)? } else { rgb };
-        return Some(finish(format!("#{}", rgb.to_uppercase()).into()));
-    }
-
-    // theme attribute → resolve from theme color array + optional tint
-    //
-    // ECMA-376 §18.8.3 stores the theme clrScheme in the order
-    //   dk1, lt1, dk2, lt2, accent1..accent6, hlink, folHlink
-    // but cell style references (c:color/@theme, c:fgColor/@theme, etc.) use
-    // the Excel-internal index where dk1↔lt1 and dk2↔lt2 are SWAPPED:
-    //   0=lt1, 1=dk1, 2=lt2, 3=dk2, 4..11 unchanged.
-    // This is a well-known interoperability quirk (see Open-XML-SDK issue #46
-    // and ECMA-376 §22.1.2.7 where "index values of 0 and 1 are swapped").
-    // This is an index→index remap, not a logical→slot-name mapping, so the
-    // shared ooxml_common::color::SCHEME_DEFAULT_SLOTS table (the canonical
-    // §19.3.1.6 logical→slot names) does not apply here; this stays local.
-    if let Some(theme_str) = theme {
-        if let Ok(idx) = theme_str.parse::<usize>() {
-            let mapped = match idx {
-                0 => 1,
-                1 => 0,
-                2 => 3,
-                3 => 2,
-                n => n,
-            };
-            if let Some(base) = theme_colors.get(mapped) {
-                return Some(finish(base.as_str().into()));
-            }
-        }
-    }
-
-    // indexed attribute → Excel built-in palette
-    if let Some(indexed_str) = indexed {
-        if let Ok(idx) = indexed_str.parse::<usize>() {
-            // indices 64 (foreground) and 65 (background) are special: use black/white
-            let color = match idx {
-                64 => "#000000",
-                65 => "#FFFFFF",
-                _ => INDEXED_COLORS.get(idx).copied().unwrap_or("#000000"),
-            };
-            return Some(finish(color.into()));
-        }
-    }
-
-    None
 }
 
 /// Parse the workbook-level date system from `<workbookPr date1904>`
