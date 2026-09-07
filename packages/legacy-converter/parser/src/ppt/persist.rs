@@ -19,11 +19,18 @@ pub(super) struct Presentation<'a> {
     pub size: (u32, u32),
 }
 
-pub(super) fn resolve<'a>(
-    document: &'a [u8],
+/// Owned edit-chain index, independent of borrowed slide/master views. Direct
+/// sessions can retain this once and resolve individual records on demand.
+pub(super) struct PersistDirectory {
+    pub offsets: BTreeMap<u32, usize>,
+    pub document_offset: usize,
+}
+
+pub(super) fn resolve_directory(
+    document: &[u8],
     current_edit: usize,
     budget: &mut usize,
-) -> Result<Presentation<'a>, String> {
+) -> Result<PersistDirectory, String> {
     let mut offsets = BTreeMap::new();
     let mut edit_offset = current_edit;
     let mut document_id = None;
@@ -83,10 +90,25 @@ pub(super) fn resolve<'a>(
     }
     let document_id =
         document_id.ok_or_else(|| unsupported("missing PowerPoint current document"))?;
-    let offset = offsets
+    let document_offset = *offsets
         .get(&document_id)
         .ok_or_else(|| unsupported("unresolved PowerPoint document persist ID"))?;
-    let record = parse_record_at(document, *offset, budget)?;
+    Ok(PersistDirectory {
+        offsets,
+        document_offset,
+    })
+}
+
+pub(super) fn resolve<'a>(
+    document: &'a [u8],
+    current_edit: usize,
+    budget: &mut usize,
+) -> Result<Presentation<'a>, String> {
+    let PersistDirectory {
+        offsets,
+        document_offset,
+    } = resolve_directory(document, current_edit, budget)?;
+    let record = parse_record_at(document, document_offset, budget)?;
     if record.kind != DOCUMENT_CONTAINER || record.version != 15 {
         return Err(unsupported("invalid PowerPoint document persist object"));
     }
@@ -297,6 +319,25 @@ pub(crate) mod tests {
         (stream, edit)
     }
     #[test]
+    fn directory_index_is_owned_and_does_not_parse_slide_or_document_bodies() {
+        let index = {
+            let (stream, edit) = fixture();
+            // One UserEditAtom, one directory record and three persist entries.
+            // No budget remains for even one document or slide body record.
+            let mut budget = 5;
+            let index = resolve_directory(&stream, edit, &mut budget).unwrap();
+            assert_eq!(budget, 0);
+            assert!(resolve_directory(&stream, edit, &mut 4).is_err());
+            index
+        };
+        // Source lifetime is not part of the retained directory type.
+        assert_eq!(index.document_offset, 0);
+        assert_eq!(index.offsets.len(), 3);
+        assert_eq!(index.offsets[&1], 0);
+        assert!(index.offsets[&2] < index.offsets[&3]);
+    }
+
+    #[test]
     fn resolves_order_outline_text_and_size_without_deleted_slides() {
         let (stream, edit) = fixture();
         let mut budget = MAX_RECORDS;
@@ -341,6 +382,12 @@ pub(crate) mod tests {
         user[12..16].copy_from_slice(&directory.to_le_bytes());
         user[16..20].copy_from_slice(&1u32.to_le_bytes());
         stream.extend(record(0, USER_EDIT_ATOM, &user));
+        let original = resolve_directory(&stream, old_edit, &mut MAX_RECORDS.clone()).unwrap();
+        let latest = resolve_directory(&stream, current, &mut MAX_RECORDS.clone()).unwrap();
+        assert_eq!(latest.offsets.len(), original.offsets.len());
+        assert_eq!(latest.document_offset, original.document_offset);
+        assert_eq!(latest.offsets[&2], original.offsets[&2]);
+        assert_eq!(latest.offsets[&3], replacement as usize);
         let mut budget = MAX_RECORDS;
         let result = resolve(&stream, current, &mut budget).unwrap();
         assert_eq!(result.slides.len(), 2);
