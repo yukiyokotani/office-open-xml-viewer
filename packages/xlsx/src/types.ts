@@ -1150,6 +1150,7 @@ export type WorkerRequest =
       id: number;
       data: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
+      source?: import('@silurus/ooxml-core/internal/legacy-xls-source').LegacyXlsDirectSourceDescriptor;
     }
   | ({ type: 'openSheetSession'; id: number; sheetIndex: number; sheetName: string } &
       PullSessionIdentity<number>)

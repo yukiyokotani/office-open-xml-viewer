@@ -18,7 +18,8 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
-import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { resolveXlsWorkbookInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import type { LegacyXlsDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-xls-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -184,6 +185,8 @@ export class XlsxWorkbook {
    * on main, so this latch is the document-level poison boundary for every
    * later public operation on the same workbook instance. */
   private resourceFailure: OoxmlResourceLimitError | null = null;
+  private legacyXlsSignalCleanup: () => void = () => undefined;
+  private destroyed = false;
 
   private constructor(
     worker: Worker | null,
@@ -353,12 +356,14 @@ export class XlsxWorkbook {
     } else {
       buffer = source;
     }
-    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+    const resolvedInput = await resolveXlsWorkbookInput(
       buffer,
-      'xlsx',
       opts.legacyConversion,
       opts.password,
-    ));
+    );
+    buffer = toArrayBuffer(resolvedInput.bytes);
+    const nativeSource = resolvedInput.kind === 'legacy-xls' ? resolvedInput.source : undefined;
+    const nativeSignal = resolvedInput.kind === 'legacy-xls' ? resolvedInput.signal : undefined;
     const preserveCallerBuffer = buffer === callerBuffer;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
@@ -370,15 +375,16 @@ export class XlsxWorkbook {
         : new InlineWorker();
     let wb: XlsxWorkbook | undefined;
     try {
-      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      wb = new XlsxWorkbook(worker, mode, opts.wasmUrl, nativeSource === undefined);
       wb.metrics = metrics;
-      await wb._load(
+      await wb.bindLegacyXlsSignal(wb._load(
         buffer,
         opts,
         resourceOptions.policy,
         (usage) => metrics.observeUsage(usage),
         preserveCallerBuffer,
-      );
+        nativeSource,
+      ), nativeSignal);
       metrics.checkpoint('workbook index ready');
       metrics.succeed({ sheets: wb.sheetCount });
       return wb;
@@ -403,6 +409,7 @@ export class XlsxWorkbook {
     resourcePolicy: NormalizedOoxmlResourcePolicy = normalizeResourcePolicy(opts),
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
+    nativeSource?: LegacyXlsDirectSourceDescriptor,
   ): Promise<void> {
     const bridge = this.requireBridge();
     this.resourceFailure = null;
@@ -463,12 +470,14 @@ export class XlsxWorkbook {
               resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
               renderers: rendererDescriptors,
+              source: nativeSource,
             } satisfies RenderWorkerRequest)
           : ({
               type: 'parse',
               id,
               data: workerData,
               resourcePolicy,
+              source: nativeSource,
             } satisfies WorkerRequest),
       [workerData],
       { timeoutMs: opts.workerTimeoutMs },
@@ -1087,6 +1096,8 @@ export class XlsxWorkbook {
   }
 
   destroy(): void {
+    this.legacyXlsSignalCleanup?.();
+    this.destroyed = true;
     this.generation = (this.generation ?? 1) + 1;
     void this.worksheetPullClient?.cancelAll('closed').catch(() => undefined);
     this.worksheetPullClient = null;
@@ -1109,6 +1120,55 @@ export class XlsxWorkbook {
     dropSvgImageCache(this._fetchImage);
     this.rawParts.clear();
     this.queuedImageLoads?.clear();
+  }
+
+  /** @internal Transfer viewer-composed direct XLS signal cleanup to this owner. */
+  _retainLegacyXlsSignalCleanup(cleanup: () => void): void {
+    if (this.destroyed) {
+      cleanup();
+      return;
+    }
+    const releaseNativeListener = this.legacyXlsSignalCleanup;
+    let active = true;
+    this.legacyXlsSignalCleanup = () => {
+      if (!active) return;
+      active = false;
+      try {
+        releaseNativeListener?.();
+      } finally {
+        cleanup();
+      }
+    };
+  }
+
+  private bindLegacyXlsSignal<T>(pending: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return pending;
+    this.legacyXlsSignalCleanup?.();
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+      const abortError = (): Error => {
+        const error = new Error('Legacy XLS workbook session was aborted');
+        error.name = 'AbortError';
+        return error;
+      };
+      const onAbort = (): void => {
+        this.legacyXlsSignalCleanup();
+        try { this.destroy(); } catch {}
+        if (!settled) reject(abortError());
+      };
+      this.legacyXlsSignalCleanup = () => {
+        cleanup();
+        this.legacyXlsSignalCleanup = () => undefined;
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      pending.then((value) => { settled = true; resolve(value); }, (error: unknown) => {
+        settled = true;
+        this.legacyXlsSignalCleanup();
+        reject(error);
+      });
+      if (signal.aborted) onAbort();
+    });
   }
 
   private assertResourceHealthy(): void {
