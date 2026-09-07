@@ -1,7 +1,7 @@
 # Opt-in legacy Office conversion
 
-The viewer can normalize legacy binary Office bytes before its existing OOXML
-parser runs:
+The byte-conversion API can normalize legacy binary Office bytes before an
+existing OOXML parser runs:
 
 - `.doc` to macro-free `.docx`
 - `.xls` to macro-free `.xlsx`
@@ -10,11 +10,90 @@ parser runs:
 The opt-in `@silurus/ooxml/legacy-conversion` entry contains both a purpose-built
 local WASM converter and the implementation-neutral adapter API. Ordinary DOCX,
 XLSX, and PPTX entry points do not import, fetch, initialize, or retain the
-converter Worker or its WASM. If no converter is supplied, legacy input
-continues to reject with `OoxmlError.code === 'legacy-binary-format'`.
+converter Worker or its WASM. If neither a converter nor the direct PPT source
+is supplied, legacy input continues to reject with
+`OoxmlError.code === 'legacy-binary-format'`.
 
-The renderer remains OOXML-only. A successful conversion enters exactly the
-same parser, model, layout, and Canvas renderer as a native OOXML package.
+For PPT only, an additional experimental source reads the supported binary
+presentation subset directly into the shared presentation model. It does not
+generate an OOXML ZIP or reparse generated XML. Both paths use the same layout
+and Canvas renderer.
+
+## Experimental direct PPT source
+
+Import `createLegacyPptSource` from the separate
+`@silurus/ooxml/legacy-ppt` entry and enable it only for `ppt`. Importing the
+entry makes the dedicated `legacy_ppt_direct_bg.wasm` asset available, but the
+factory only returns a validated source descriptor: it does not fetch or
+initialize WASM. The presentation loader initializes that asset only when a
+legacy PPT input selects the source.
+
+Browser:
+
+```typescript
+import { PptxPresentation } from '@silurus/ooxml/pptx';
+import { createLegacyPptSource } from '@silurus/ooxml/legacy-ppt';
+
+const presentation = await PptxPresentation.load(legacyPptArrayBuffer, {
+  legacyConversion: {
+    ppt: { source: createLegacyPptSource() },
+  },
+});
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+
+try {
+  await presentation.renderSlide(canvas, 0, { width: 960 });
+} finally {
+  presentation.destroy();
+}
+```
+
+Node:
+
+```typescript
+import { openPptxPresentation } from '@silurus/ooxml/node';
+import { createLegacyPptSource } from '@silurus/ooxml/legacy-ppt';
+
+const session = await openPptxPresentation(legacyPptBytes, {
+  legacyConversion: {
+    ppt: { source: createLegacyPptSource() },
+  },
+});
+
+try {
+  for await (const slide of session.slides()) {
+    // Consume each ordinary shared slide model.
+  }
+} finally {
+  await session.close();
+}
+```
+
+Applications with a custom asset pipeline can override the emitted asset URL:
+
+```typescript
+const source = createLegacyPptSource({
+  wasmUrl: new URL('/assets/legacy_ppt_direct_bg.wasm', location.href).href,
+});
+```
+
+The direct source is an experimental, bounded subset, not a full-fidelity
+PowerPoint implementation. Its current omissions include audio/video media,
+embedded fonts, Markdown production, and ZIP-based resource-usage metrics.
+The support matrix below describes the byte-conversion engine, not the direct
+reader's admission contract. The direct reader is currently narrower and can
+reject otherwise convertible constructs, including unresolved paragraph
+margin or indentation and positive paragraph before/after percentages. Its
+explicit unsupported diagnostics are authoritative; conversion support does
+not imply direct-reader support.
+
+This is a per-format opt-in. Direct DOC and XLS sources are not implemented;
+those formats continue to use byte conversion. Existing converter options and
+`convert()` behavior are unchanged, so no migration is required unless an
+application chooses the native PPT source. A `ppt` configuration selects either
+`source` or `converter`, never both.
+Importing the ordinary DOCX, XLSX, or PPTX entries alone does not select this
+source or fetch its dedicated WASM asset.
 
 ## Built-in browser converter
 

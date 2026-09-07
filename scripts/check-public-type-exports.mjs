@@ -9,7 +9,7 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
 const typesDir = path.resolve(process.cwd(), 'dist/types');
 const formats = ['docx', 'pptx', 'xlsx'];
-const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion']
+const files = ['index', ...formats, 'math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'legacy-conversion', 'legacy-ppt']
   .map((entry) => path.join(typesDir, `${entry}.d.ts`));
 
 const program = ts.createProgram(files, {
@@ -88,14 +88,14 @@ for (const name of sharedOoxmlTypes) {
   }
 }
 
-const tiffExports = moduleExports(files.at(-2));
+const tiffExports = moduleExports(path.join(typesDir, 'tiff.d.ts'));
 assert.deepEqual(
   [...tiffExports.keys()].sort(),
   ['TiffDecodeError', 'TiffRenderOptions', 'TiffRenderer', 'isTiffDecodeError', 'tiff'],
   'The ./tiff declaration entry must expose the runtime codec and its shared contract.',
 );
 
-const legacyConversionExports = moduleExports(files.at(-1));
+const legacyConversionExports = moduleExports(path.join(typesDir, 'legacy-conversion.d.ts'));
 assert.deepEqual(
   [...legacyConversionExports.keys()].sort(),
   [
@@ -115,8 +115,11 @@ assert.deepEqual(
     'LegacyOfficeConverter',
     'LegacyOfficeFormat',
     'LegacyOfficeWasmConverterOptions',
+    'LegacyOfficeWasmWorkerConverterOptions',
     'LegacyOfficeWorkerRequest',
     'LegacyOfficeWorkerResponse',
+    'LegacyXlsFontMeasurement',
+    'LegacyXlsNormalFont',
     'createDisposableWorkerLegacyOfficeConverter',
     'createLegacyOfficeWasmConverter',
     'createLegacyOfficeWasmWorkerConverter',
@@ -124,6 +127,17 @@ assert.deepEqual(
     'validateConvertedOoxml',
   ].sort(),
   'The ./legacy-conversion declaration entry must expose the Worker transport and shared contract.',
+);
+
+const legacyPptExports = moduleExports(path.join(typesDir, 'legacy-ppt.d.ts'));
+assert.deepEqual(
+  [...legacyPptExports.keys()].sort(),
+  [
+    'LegacyPptDirectSourceDescriptor',
+    'LegacyPptSourceOptions',
+    'createLegacyPptSource',
+  ].sort(),
+  'The ./legacy-ppt declaration entry must expose only the direct PPT descriptor factory and types.',
 );
 
 process.stdout.write(

@@ -21,6 +21,7 @@ const entries = [
   'chart-ex',
   'tiff',
   'legacy-conversion',
+  'legacy-ppt',
   'node',
 ];
 const dist = path.resolve(process.cwd(), 'dist');
