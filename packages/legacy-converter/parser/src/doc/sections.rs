@@ -2,11 +2,19 @@
 //! 2.2.5.1 Sprm, 2.6.4 section properties. ECMA-376 17.6.
 use super::{u16_at, u32_at, unsupported};
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+
 pub(super) struct Section {
     pub end: usize,
     pub incomplete_margins: bool,
     properties: Properties,
     header_footer_references: [Option<HeaderFooterReference>; 6],
+    /// MS-DOC 2.6.4 `sprmSDxaColumns` installation-language default.
+    /// Retained separately so direct model production never substitutes the
+    /// unrelated fixed OOXML `w:cols/@space` default.
+    #[cfg(feature = "direct-doc")]
+    default_column_spacing: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +47,8 @@ impl Section {
             incomplete_margins: true,
             properties,
             header_footer_references: [None; 6],
+            #[cfg(feature = "direct-doc")]
+            default_column_spacing: None,
         }
     }
 
@@ -155,6 +165,8 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         // document text's language, the converter host locale or a guessed
         // base language. Explicit distances, including zero, take priority.
         let default = header_distance_for_install_lid(u16_at(word, 6)?);
+        #[cfg(feature = "direct-doc")]
+        let default_column_spacing = column_spacing_for_install_lid(u16_at(word, 6)?);
         for distance in &mut properties.margins[4..] {
             *distance = distance.or(default);
         }
@@ -164,10 +176,28 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
             incomplete_margins: properties.margins.iter().any(Option::is_none),
             properties,
             header_footer_references: [None; 6],
+            #[cfg(feature = "direct-doc")]
+            default_column_spacing,
         });
         previous = end;
     }
     Ok(sections)
+}
+
+// MS-DOC 2.6.4 sprmSDxaColumns. This table is deliberately independent from
+// the header-distance table: several LCIDs differ, and Lithuanian (1063) uses
+// 1296 twips for column spacing but 567 twips for header/footer distance.
+#[cfg(feature = "direct-doc")]
+fn column_spacing_for_install_lid(lid: u16) -> Option<u16> {
+    match lid {
+        1025 | 1028 | 1031 | 1032 | 1033 | 1034 | 1036 | 1037 | 1040 | 1041 | 1042 | 1046
+        | 1049 | 1050 | 1053 | 1058 | 1059 | 1062 | 1067 | 1068 | 1079 | 1086 | 1087 | 1092
+        | 1104 | 2052 | 2070 => Some(720),
+        1026 | 1027 | 1029 | 1030 | 1035 | 1038 | 1039 | 1043 | 1044 | 1045 | 1048 | 1051
+        | 1055 | 1060 | 1061 | 1069 | 1078 | 1088 | 1089 | 2074 => Some(708),
+        1063 => Some(1296),
+        _ => None,
+    }
 }
 
 // MS-DOC 2.6.4 sprmSDyaHdrTop / sprmSDyaHdrBottom share this default table.

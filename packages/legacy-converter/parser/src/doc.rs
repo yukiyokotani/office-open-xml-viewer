@@ -48,6 +48,21 @@ pub struct DocConversion {
     pub warnings: Vec<String>,
 }
 
+/// Borrowed, typed facts acquired from the DOC streams before any output
+/// representation is chosen. The callback scope keeps the backing stream
+/// vectors alive without self-references, clones, or duplicate decoding.
+struct AcquiredDoc<'a> {
+    document_settings: Option<settings::Properties>,
+    story: Story<'a>,
+    note_stories: Vec<Option<notes::Notes<'a>>>,
+    sections: Vec<sections::Section>,
+    headers: Option<headers::Headers<'a>>,
+    formatting: formatting::Formatting<'a>,
+    note_references: notes::References,
+    pictures: pictures::Store<'a>,
+    floating: floating::Store<'a>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Text(String),
@@ -72,6 +87,13 @@ struct StoryParts {
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
+    with_acquired_doc(cfb, |facts| build_conversion(max_output_bytes, facts))
+}
+
+fn with_acquired_doc<T>(
+    cfb: &CompoundFile<'_>,
+    visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let word = cfb.stream("WordDocument").map_err(unsupported)?;
     if word.len() < LCB_CLX_OFFSET + 4 {
         return Err(unsupported("truncated Word FIB"));
@@ -120,8 +142,36 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     };
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
-    let mut pictures = pictures::Store::new(&data);
-    let mut floating = floating::Store::read(&word, &table, ccp_text)?;
+    let pictures = pictures::Store::new(&data);
+    let floating = floating::Store::read(&word, &table, ccp_text)?;
+    visit(AcquiredDoc {
+        document_settings,
+        story,
+        note_stories,
+        sections,
+        headers,
+        formatting,
+        note_references,
+        pictures,
+        floating,
+    })
+}
+
+fn build_conversion(
+    max_output_bytes: usize,
+    facts: AcquiredDoc<'_>,
+) -> Result<DocConversion, String> {
+    let AcquiredDoc {
+        document_settings,
+        story,
+        note_stories,
+        sections,
+        headers,
+        mut formatting,
+        note_references,
+        mut pictures,
+        mut floating,
+    } = facts;
     let document_xml = build_formatted_story(
         &story,
         Content::Document(&sections, Some(&note_references)),
@@ -910,15 +960,15 @@ fn build_formatted_story(
 fn write_text_runs(
     xml: &mut String,
     text: &str,
-    mut cp: usize,
+    cp: usize,
     story: &Story<'_>,
     style: usize,
     formatting: &mut Option<&mut formatting::Formatting<'_>>,
     max_bytes: usize,
 ) -> Result<(), String> {
-    let mut start = 0;
-    let mut key = None;
-    let mut properties = String::new();
+    if !text.is_empty() && xml.len() > max_bytes {
+        return Err("OUTPUT_TOO_LARGE".into());
+    }
     let write = |xml: &mut String, text: &str, properties: &str| -> Result<(), String> {
         // Check expansion before allocating an escaped copy of a potentially
         // document-sized run. Also bound the raw part before ZIP construction.
@@ -947,6 +997,32 @@ fn write_text_runs(
         xml.push_str("</w:t></w:r>");
         Ok(())
     };
+    visit_text_runs(
+        text,
+        cp,
+        story,
+        formatting,
+        |f, fc, prm| f.run_xml(style, fc, prm, &story.prcs),
+        |text, properties| write(xml, text, properties.as_deref().unwrap_or("")),
+    )
+}
+
+/// Visit consecutive physical character-format ranges without choosing an
+/// output representation. MS-DOC CLX/PCD and CHPX ownership, including UTF-16
+/// positions, remains shared by the XML and direct-model producers. Resolve
+/// once per range, retain one result, and move it to the sink without cloning
+/// model fields. Stop immediately on a sink error.
+fn visit_text_runs<T>(
+    text: &str,
+    mut cp: usize,
+    story: &Story<'_>,
+    formatting: &mut Option<&mut formatting::Formatting<'_>>,
+    mut resolve: impl FnMut(&mut formatting::Formatting<'_>, usize, u16) -> Result<T, String>,
+    mut emit: impl FnMut(&str, Option<T>) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut start = 0;
+    let mut key = None;
+    let mut properties = None;
     for (byte, character) in text.char_indices() {
         if let Some(f) = formatting.as_deref_mut() {
             let (piece_index, fc, piece) = story
@@ -955,12 +1031,9 @@ fn write_text_runs(
             let next_key = Some((piece_index, f.characters.at(fc).map(|(id, _)| id)));
             if key != next_key {
                 if byte > start {
-                    write(xml, &text[start..byte], &properties)?;
+                    emit(&text[start..byte], properties.take())?;
                 }
-                if xml.len() > max_bytes {
-                    return Err("OUTPUT_TOO_LARGE".into());
-                }
-                properties = f.run_xml(style, fc, piece.prm, &story.prcs)?;
+                properties = Some(resolve(f, fc, piece.prm)?);
                 key = next_key;
                 start = byte;
             }
@@ -968,7 +1041,7 @@ fn write_text_runs(
         cp += character.len_utf16();
     }
     if start < text.len() {
-        write(xml, &text[start..], &properties)?;
+        emit(&text[start..], properties)?;
     }
     Ok(())
 }
@@ -1024,6 +1097,18 @@ mod tests {
         properties: &[&[u8]],
         paragraph: bool,
     ) -> String {
+        with_formatted_fixture(pieces, ranges, properties, paragraph, |story, f| {
+            super::build_formatted_document(story, &[], Some(f), None, None, usize::MAX).unwrap()
+        })
+    }
+
+    fn with_formatted_fixture<T>(
+        pieces: &[(&str, usize, bool)],
+        ranges: &[u32],
+        properties: &[&[u8]],
+        paragraph: bool,
+        visit: impl FnOnce(&super::Story<'_>, &mut super::formatting::Formatting<'_>) -> T,
+    ) -> T {
         let mut word = vec![0; 4096];
         let mut clx = vec![2];
         clx.extend(((pieces.len() * 12 + 4) as u32).to_le_bytes());
@@ -1085,7 +1170,94 @@ mod tests {
         page[511] = properties.len() as u8;
         let story = super::read_story(&word, &clx, cp as usize).unwrap();
         let mut f = super::formatting::Formatting::read(&word, &table, &[]).unwrap();
-        super::build_formatted_document(&story, &[], Some(&mut f), None, None, usize::MAX).unwrap()
+        visit(&story, &mut f)
+    }
+
+    #[test]
+    fn text_span_visitor_preserves_piece_and_character_range_boundaries_without_xml() {
+        with_formatted_fixture(
+            &[("😀A", 1600, false), ("BC", 1500, true)],
+            &[1500, 1501, 1502, 1600, 1606],
+            &[&[], &[], &[], &[]],
+            false,
+            |story, f| {
+                let mut spans = Vec::new();
+                super::visit_text_runs(
+                    &story.text,
+                    0,
+                    story,
+                    &mut Some(f),
+                    |_, fc, prm| Ok((fc, prm)),
+                    |text, fact| {
+                        spans.push((text.to_owned(), fact));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    spans,
+                    vec![
+                        ("😀A".into(), Some((1600, 0))),
+                        ("B".into(), Some((1500, 0))),
+                        ("C".into(), Some((1501, 0))),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn text_span_visitor_stops_before_resolving_the_next_span_after_sink_failure() {
+        with_formatted_fixture(
+            &[("AB", 1500, true)],
+            &[1500, 1501, 1502],
+            &[&[], &[]],
+            false,
+            |story, f| {
+                let mut resolved = Vec::new();
+                let result = super::visit_text_runs(
+                    &story.text,
+                    0,
+                    story,
+                    &mut Some(f),
+                    |_, fc, _| {
+                        resolved.push(fc);
+                        Ok(())
+                    },
+                    |_, _| Err("sink budget exhausted".to_owned()),
+                );
+                assert_eq!(result.unwrap_err(), "sink budget exhausted");
+                assert_eq!(resolved, [1500]);
+            },
+        );
+    }
+
+    #[test]
+    fn text_span_visitor_borrows_unformatted_text_and_emits_nothing_for_empty_input() {
+        let story = super::Story {
+            text: "A😀B".into(),
+            pieces: vec![],
+            prcs: vec![],
+        };
+        let mut calls = 0;
+        for text in ["", story.text.as_str()] {
+            super::visit_text_runs::<()>(
+                text,
+                0,
+                &story,
+                &mut None,
+                |_, _, _| panic!("no formatting must not resolve properties"),
+                |span, fact| {
+                    calls += 1;
+                    assert_eq!(span, story.text);
+                    assert_eq!(span.as_ptr(), story.text.as_ptr());
+                    assert!(fact.is_none());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(calls, 1);
     }
 
     #[test]

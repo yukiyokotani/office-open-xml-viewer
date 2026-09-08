@@ -6,6 +6,9 @@ use super::{u16_at, u32_at, unsupported};
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Properties {
     values: BTreeMap<&'static str, String>,
