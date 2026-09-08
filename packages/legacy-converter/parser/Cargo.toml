@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 fuzzing = []
 direct-ppt = ["dep:js-sys", "dep:serde_json"]
 direct-xls = ["dep:js-sys", "dep:serde", "dep:serde_json"]
-direct-doc = ["dep:docx-model"]
+direct-doc = ["dep:docx-model", "dep:serde", "dep:serde_json"]
 inspection = ["direct-ppt"]
 
 [[example]]

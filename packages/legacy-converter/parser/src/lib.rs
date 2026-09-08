@@ -10,6 +10,8 @@ use wasm_bindgen::prelude::*;
 
 mod cfb;
 mod doc;
+#[cfg(feature = "direct-doc")]
+mod doc_wasm;
 mod officeart;
 mod ooxml;
 mod ppt;

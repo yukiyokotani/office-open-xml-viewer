@@ -16,6 +16,8 @@ mod border;
 mod character;
 #[cfg(feature = "direct-doc")]
 mod direct_model;
+#[cfg(feature = "direct-doc")]
+pub(crate) mod direct_cursor;
 mod fkp;
 mod floating;
 mod formatting;
