@@ -5,6 +5,7 @@ import {
 } from '@silurus/ooxml-core/internal/legacy-doc-source';
 import {
   createDirectSourceRuntime,
+  resolveDirectWasmInput,
   type OwnedDirectSource,
 } from './direct-source-runtime.js';
 
@@ -57,4 +58,17 @@ export function createLegacyDocSourceEngine(
     // Closing ends the pull cursor. free()/Drop owns the retained image resources.
     closeNative: (document) => document.close_document_session(),
   });
+}
+
+const defaultEngine = createLegacyDocSourceEngine(
+  () => import('./wasm-direct-doc/legacy_office_converter.js'),
+  resolveDirectWasmInput,
+);
+
+export function openLegacyDocSource(
+  bytes: Uint8Array,
+  descriptor: LegacyDocDirectSourceDescriptor,
+  signal?: AbortSignal,
+): Promise<OwnedLegacyDocSource> {
+  return defaultEngine.open(bytes, descriptor, signal);
 }

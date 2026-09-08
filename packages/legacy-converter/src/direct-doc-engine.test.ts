@@ -2,8 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
 import {
   createLegacyDocSourceEngine,
+  openLegacyDocSource,
   type LegacyDocNativeDocument,
 } from './direct-doc-engine.js';
+
+const defaultGlue = vi.hoisted(() => ({ loaded: vi.fn() }));
+vi.mock('./wasm-direct-doc/legacy_office_converter.js', () => {
+  defaultGlue.loaded();
+  return { default: vi.fn(), LegacyDocDocument: class {} };
+});
 import { DocumentPullWorker } from '../../docx/src/document-pull-worker.js';
 import { createLocalDocumentPullTransport } from '../../docx/src/document-pull-worker.js';
 import { materializeDocumentPullSession } from '../../docx/src/document-pull-client.js';
@@ -14,6 +21,13 @@ const descriptor: LegacyDocDirectSourceDescriptor = {
 };
 
 describe('direct DOC source engine', () => {
+  it('keeps the production generated-glue loader lazy on pre-admission failure', async () => {
+    const abort = new AbortController(); abort.abort();
+    await expect(openLegacyDocSource(new Uint8Array(), descriptor, abort.signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(defaultGlue.loaded).not.toHaveBeenCalled();
+  });
+
   it('initializes once, pins the URL, and passes the optional model budget', async () => {
     const documents: FakeDocument[] = [];
     const glue = {

@@ -9,6 +9,7 @@ export { decodeDataUrl } from './decode-data-url.js';
 export {
   WasmParserHost,
   WasmTrapError,
+  detachWasmBindgenResource,
   isWasmTrap,
   type WasmTrapErrorCode,
   type WasmInit,
