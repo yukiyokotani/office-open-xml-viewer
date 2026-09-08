@@ -106,6 +106,15 @@ impl Properties {
             return Ok(true);
         }
         match code {
+            0x6467 => {
+                // MS-DOC 2.6.2 sprmPRsid is nonvisual revision-session
+                // provenance, not a paragraph revision mark. Viewer policy:
+                // validate its fixed-width ID and intentionally omit it.
+                if operand.len() != 4 {
+                    return Err(unsupported("invalid Word paragraph revision session ID"));
+                }
+                let _ = super::u32_at(operand, 0)?;
+            }
             0xc66c => {
                 // MS-DOC 2.6.2 sprmPTIstdInfo / 2.9.221
                 // PTIstdInfoOperand: cb MUST be 16 and all 16 reserved bytes
@@ -452,6 +461,35 @@ mod tests {
         }
         let truncated = [0x6c, 0xc6, 16, 0, 0];
         assert!(Sprms::new(&truncated).next(&mut Budget::default()).is_err());
+    }
+
+    #[test]
+    fn paragraph_revision_session_id_is_validated_and_nonvisual() {
+        let baseline = Properties::default().xml();
+        for value in [0, 0x7856_3412, u32::MAX] {
+            let mut properties = Properties::default();
+            assert!(properties.apply(0x6467, &value.to_le_bytes()).unwrap());
+            assert_eq!(properties.xml(), baseline);
+        }
+        assert!(Properties::default().apply(0x6467, &[0; 3]).is_err());
+        assert!(Properties::default().apply(0x6467, &[0; 5]).is_err());
+
+        let mut bytes = vec![0x67, 0x64];
+        bytes.extend(0x7856_3412u32.to_le_bytes());
+        bytes.extend([0x07, 0x24, 1]);
+        let mut sprms = Sprms::new(&bytes);
+        let mut budget = Budget::default();
+        let mut properties = Properties::default();
+        while let Some((code, operand)) = sprms.next(&mut budget).unwrap() {
+            assert!(properties.apply(code, operand).unwrap());
+        }
+        assert!(properties
+            .xml()
+            .contains("<w:pageBreakBefore w:val=\"1\"/>"));
+
+        assert!(Sprms::new(&[0x67, 0x64, 1, 2, 3])
+            .next(&mut Budget::default())
+            .is_err());
     }
 
     #[test]

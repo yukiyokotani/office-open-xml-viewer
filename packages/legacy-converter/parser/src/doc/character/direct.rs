@@ -421,6 +421,27 @@ mod tests {
     }
 
     #[test]
+    fn revision_session_ids_do_not_create_direct_revision_state() {
+        let baseline = serde_json::to_value(
+            Properties::default()
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        for code in 0x6815..=0x6817 {
+            let properties = applied(&[(code, 0x7856_3412u32.to_le_bytes().to_vec())]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert!(run.revision.is_none());
+            assert_eq!(serde_json::to_value(run).unwrap(), baseline);
+            assert_parser_parity(&properties, &[]);
+        }
+    }
+
+    #[test]
     fn adjacent_highlights_remain_distinct_across_xml_and_direct_projection() {
         let magenta = applied(&[(0x2a0c, vec![12])]);
         let cleared = applied(&[(0x2a0c, vec![0])]);

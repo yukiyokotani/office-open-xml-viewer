@@ -220,6 +220,18 @@ impl Properties {
             return Ok(true);
         }
         let (key, value) = match code {
+            0x6815..=0x6817 => {
+                // MS-DOC 2.6.1 identifies these as revision-session IDs for
+                // character formatting, inserted text, and deleted text. They
+                // do not themselves establish a revision mark. Viewer policy:
+                // validate and omit this nonvisual provenance; the actual
+                // CFRMarkIns/CFRMarkDel revision properties remain unsupported.
+                if operand.len() != 4 {
+                    return Err(unsupported("invalid Word character revision session ID"));
+                }
+                let _ = u32_at(operand, 0)?;
+                return Ok(true);
+            }
             0x2a0c => {
                 let index = usize::from(
                     *operand
@@ -436,6 +448,7 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::sprm::{Budget, Sprms};
 
     #[test]
     fn indexed_text_color_uses_shared_palette_and_normal_cascade_order() {
@@ -495,6 +508,34 @@ mod tests {
         value.apply(0x2a0c, &[12], &base).unwrap();
         value.reset_to(&base, true);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
+    }
+
+    #[test]
+    fn revision_session_ids_are_validated_nonvisual_viewer_provenance() {
+        let base = Properties::default();
+        for code in 0x6815..=0x6817 {
+            for value in [0, 0x7856_3412, u32::MAX] {
+                let mut properties = base.clone();
+                assert!(properties.apply(code, &value.to_le_bytes(), &base).unwrap());
+                assert_eq!(properties.xml(&[]).unwrap(), base.xml(&[]).unwrap());
+            }
+            assert!(base.clone().apply(code, &[0; 3], &base).is_err());
+            assert!(base.clone().apply(code, &[0; 5], &base).is_err());
+        }
+
+        let mut adjacent = base.clone();
+        adjacent
+            .apply(0x6816, &0x7856_3412u32.to_le_bytes(), &base)
+            .unwrap();
+        adjacent.apply(0x0835, &[1], &base).unwrap();
+        assert!(adjacent.xml(&[]).unwrap().contains("<w:b w:val=\"1\"/>"));
+        adjacent.reset_to(&base, false);
+        assert_eq!(adjacent.xml(&[]).unwrap(), base.xml(&[]).unwrap());
+        // A session ID associated with deletion cannot manufacture a deletion.
+        assert!(!adjacent.apply(0x0800, &[1], &base).unwrap());
+
+        let truncated = [0x16, 0x68, 0x12, 0x34, 0x56];
+        assert!(Sprms::new(&truncated).next(&mut Budget::default()).is_err());
     }
 
     #[test]

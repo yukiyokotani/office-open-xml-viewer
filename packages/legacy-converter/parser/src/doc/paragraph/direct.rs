@@ -183,6 +183,23 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_revision_session_id_has_no_direct_or_xml_model_effect() {
+        let baseline = Properties::default();
+        let baseline_direct = serde_json::to_value(baseline.direct_paragraph()).unwrap();
+        let baseline_xml = baseline.xml();
+        for value in [0, 0x7856_3412, u32::MAX] {
+            let mut properties = baseline.clone();
+            assert!(properties.apply(0x6467, &value.to_le_bytes()).unwrap());
+            assert_eq!(properties.xml(), baseline_xml);
+            assert_eq!(
+                serde_json::to_value(properties.direct_paragraph()).unwrap(),
+                baseline_direct
+            );
+            assert_property_parity(&properties);
+        }
+    }
+
+    #[test]
     fn full_resolved_property_projection_matches_docx_parser_semantics() {
         let mut properties = Properties::default();
         for (code, operand) in [
