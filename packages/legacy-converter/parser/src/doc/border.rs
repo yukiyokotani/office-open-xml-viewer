@@ -158,6 +158,31 @@ impl Border {
         )
     }
 
+    /// Table/cell border projection matching the current DOCX parser's
+    /// `BorderSpec` contract. Spacing, shadow and frame remain available to
+    /// paragraph typography, but `BorderSpec` has no fields for them.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct_spec(&self) -> docx_model::BorderSpec {
+        let Some(value) = &self.facts else {
+            return docx_model::BorderSpec {
+                width: 0.5,
+                color: None,
+                style: "none".into(),
+            };
+        };
+        docx_model::BorderSpec {
+            width: value
+                .width_eighth_points
+                .map_or(0.5, |width| f64::from(width) / 8.0),
+            color: value
+                .color
+                .as_deref()
+                .filter(|color| *color != "auto")
+                .map(str::to_ascii_lowercase),
+            style: value.style.clone(),
+        }
+    }
+
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn direct_edge(&self) -> docx_model::ParaBorderEdge {
         let Some(value) = &self.facts else {
@@ -241,6 +266,60 @@ impl Border {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "direct-doc")]
+    use std::io::{Cursor, Write};
+    #[cfg(feature = "direct-doc")]
+    use zip::write::SimpleFileOptions;
+
+    #[cfg(feature = "direct-doc")]
+    fn parsed_table(xml: &str) -> serde_json::Value {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr>{xml}</w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        json["body"][0].clone()
+    }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_table_border_matches_docx_parser_contract_at_boundaries() {
+        let default = Border::default().direct_spec();
+        assert_eq!(
+            (default.style.as_str(), default.width, default.color),
+            ("none", 0.5, None)
+        );
+        let nil = Border::read(&[255; 8], false).unwrap().direct_spec();
+        assert_eq!(
+            (nil.style.as_str(), nil.width, nil.color),
+            ("nil", 0.5, None)
+        );
+        let value = Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 27, 31, 0], false)
+            .unwrap()
+            .direct_spec();
+        assert_eq!(
+            (value.style.as_str(), value.width, value.color.as_deref()),
+            ("inset", 31.875, Some("abcdef"))
+        );
+        let parsed = parsed_table(&format!(
+            "<w:tblBorders>{}</w:tblBorders>",
+            Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 27, 31, 0], false)
+                .unwrap()
+                .xml("top")
+        ));
+        assert_eq!(
+            serde_json::to_value(value).unwrap(),
+            parsed["borders"]["top"]
+        );
+    }
     #[test]
     fn paragraph_border_effects_follow_logical_side_and_record_version() {
         for old in [false, true] {

@@ -2,9 +2,11 @@
 //! A row's definition belongs to its TTP mark, not its first text paragraph.
 use super::{border::Border, u16_at, u32_at, unsupported};
 mod shading;
-use shading::Shading;
+pub(in crate::doc) use shading::Shading;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use shading::{Color, DirectShadingFacts};
 mod position;
-use position::Position;
+pub(in crate::doc) use position::Position;
 
 #[derive(Clone, Default)]
 pub struct Cell {

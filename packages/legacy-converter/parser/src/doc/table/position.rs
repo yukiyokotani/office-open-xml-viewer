@@ -39,20 +39,11 @@ impl Position {
     }
 
     pub fn xml(&self) -> String {
-        let pc = self.anchors.unwrap_or(0);
-        let vertical = (pc >> 4) & 3;
-        let horizontal = pc >> 6;
-        // MS-DOC 2.7.13 Copts identifies tblpPr with
-        // nondefault position/wrapping properties. No-overlap alone is not one.
-        let active = self.anchors.is_some()
-            || self.x != 0
-            || self.y != 0
-            || self.distances.iter().any(|v| *v != 0);
         let mut xml = String::new();
-        if active && vertical != 3 && horizontal != 3 {
+        if let Some((horizontal, vertical)) = self.active_anchors() {
+            let (horizontal_anchor, vertical_anchor) = anchors(horizontal, vertical);
             xml.push_str(&format!("<w:tblpPr w:horzAnchor=\"{}\" w:vertAnchor=\"{}\" {} {} w:leftFromText=\"{}\" w:topFromText=\"{}\" w:rightFromText=\"{}\" w:bottomFromText=\"{}\"/>",
-                ["text", "margin", "page"][horizontal as usize],
-                ["margin", "page", "text"][vertical as usize],
+                horizontal_anchor, vertical_anchor,
                 coordinate("X", self.x), coordinate("Y", self.y),
                 self.distances[0], self.distances[1], self.distances[2], self.distances[3]));
         }
@@ -61,9 +52,75 @@ impl Position {
         }
         xml
     }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct(&self) -> (Option<docx_model::TblpPr>, Option<String>) {
+        let position = self.active_anchors().map(|(horizontal, vertical)| {
+            let (tblp_x, tblp_x_spec) = direct_coordinate("X", self.x);
+            let (tblp_y, tblp_y_spec) = direct_coordinate("Y", self.y);
+            let (horizontal_anchor, vertical_anchor) = anchors(horizontal, vertical);
+            docx_model::TblpPr {
+                left_from_text: f64::from(self.distances[0]) / 20.0,
+                top_from_text: f64::from(self.distances[1]) / 20.0,
+                right_from_text: f64::from(self.distances[2]) / 20.0,
+                bottom_from_text: f64::from(self.distances[3]) / 20.0,
+                horz_anchor: horizontal_anchor.into(),
+                // The canonical XML adapter always emits horzAnchor and an X
+                // coordinate for every retained tblpPr, including Y-only and
+                // wrap-distance-only DOC inputs. Match that authored wire.
+                horz_specified: true,
+                vert_anchor: vertical_anchor.into(),
+                tblp_x,
+                tblp_y,
+                tblp_x_spec,
+                tblp_y_spec,
+            }
+        });
+        (position, self.no_overlap.then(|| "never".into()))
+    }
+
+    /// MS-DOC 2.7.13 Copts: nondefault position/wrapping facts create tblpPr;
+    /// no-overlap alone does not. Reserved anchor values suppress placement.
+    fn active_anchors(&self) -> Option<(u8, u8)> {
+        let pc = self.anchors.unwrap_or(0);
+        let vertical = (pc >> 4) & 3;
+        let horizontal = pc >> 6;
+        let active = self.anchors.is_some()
+            || self.x != 0
+            || self.y != 0
+            || self.distances.iter().any(|value| *value != 0);
+        (active && vertical != 3 && horizontal != 3).then_some((horizontal, vertical))
+    }
+}
+
+fn anchors(horizontal: u8, vertical: u8) -> (&'static str, &'static str) {
+    (
+        ["text", "margin", "page"][horizontal as usize],
+        ["margin", "page", "text"][vertical as usize],
+    )
+}
+
+#[cfg(feature = "direct-doc")]
+fn direct_coordinate(axis: &str, value: i32) -> (f64, Option<String>) {
+    match resolved_coordinate(axis, value) {
+        Coordinate::Spec(value) => (0.0, Some(value.into())),
+        Coordinate::Offset(value) => (f64::from(value) / 20.0, None),
+    }
 }
 
 fn coordinate(axis: &str, value: i32) -> String {
+    match resolved_coordinate(axis, value) {
+        Coordinate::Spec(value) => format!("w:tblp{axis}Spec=\"{value}\""),
+        Coordinate::Offset(value) => format!("w:tblp{axis}=\"{value}\""),
+    }
+}
+
+enum Coordinate {
+    Spec(&'static str),
+    Offset(i32),
+}
+
+fn resolved_coordinate(axis: &str, value: i32) -> Coordinate {
     let special = match (axis, value) {
         ("X", 0) => Some("left"),
         ("X", -4) => Some("center"),
@@ -78,17 +135,79 @@ fn coordinate(axis: &str, value: i32) -> String {
         ("Y", -20) => Some("outside"),
         _ => None,
     };
-    if let Some(value) = special {
-        format!("w:tblp{axis}Spec=\"{value}\"")
-    } else {
+    match special {
+        Some(value) => Coordinate::Spec(value),
         // MS-DOC 2.9.351/357: distances are stored one greater than twips.
-        format!("w:tblp{axis}=\"{}\"", value - 1)
+        None => Coordinate::Offset(value - 1),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "direct-doc")]
+    use std::io::{Cursor, Write};
+    #[cfg(feature = "direct-doc")]
+    use zip::write::SimpleFileOptions;
+
+    #[cfg(feature = "direct-doc")]
+    fn parsed_table(xml: &str) -> serde_json::Value {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr>{xml}</w:tblPr><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        json["body"][0].clone()
+    }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_position_uses_the_serializer_mapping_and_preserves_disabled_authorship() {
+        let mut p = Position::default();
+        p.apply(0x360d, &[0x21]).unwrap();
+        p.apply(0x940e, &721i16.to_le_bytes()).unwrap();
+        p.apply(0x940f, &(-8i16).to_le_bytes()).unwrap();
+        p.apply(0x9410, &20u16.to_le_bytes()).unwrap();
+        p.apply(0x3465, &[1]).unwrap();
+        let (position, overlap) = p.direct();
+        let position = position.unwrap();
+        assert_eq!(position.horz_anchor, "text");
+        assert_eq!(position.vert_anchor, "text");
+        assert_eq!(position.tblp_x, 36.0);
+        assert_eq!(position.tblp_y_spec.as_deref(), Some("center"));
+        assert_eq!(position.left_from_text, 1.0);
+        assert!(position.horz_specified);
+        assert_eq!(overlap.as_deref(), Some("never"));
+        let parsed = parsed_table(&p.xml());
+        assert_eq!(serde_json::to_value(position).unwrap(), parsed["tblpPr"]);
+        assert_eq!(parsed["overlap"], "never");
+
+        for code in [0x940f, 0x9410] {
+            let mut canonical = Position::default();
+            canonical.apply(code, &20i16.to_le_bytes()).unwrap();
+            let position = canonical.direct().0.unwrap();
+            assert!(position.horz_specified, "code {code:#x}");
+            assert_eq!(
+                serde_json::to_value(position).unwrap(),
+                parsed_table(&canonical.xml())["tblpPr"],
+                "code {code:#x}"
+            );
+        }
+
+        let mut disabled = Position::default();
+        disabled.apply(0x360d, &[0xf0]).unwrap();
+        disabled.apply(0x3465, &[1]).unwrap();
+        assert!(disabled.direct().0.is_none());
+        assert_eq!(disabled.direct().1.as_deref(), Some("never"));
+    }
     #[test]
     fn anchors_and_ignored_padding_cover_the_complete_byte_domain() {
         for bits in 0..=255u8 {

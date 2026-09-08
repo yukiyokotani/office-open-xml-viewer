@@ -10,9 +10,17 @@ pub struct Shading {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Color {
+pub(in crate::doc) enum Color {
     Auto,
     Rgb([u8; 3]),
+}
+
+#[cfg(feature = "direct-doc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) struct DirectShadingFacts {
+    pub pattern: &'static str,
+    pub foreground: Color,
+    pub background: Color,
 }
 impl std::fmt::Display for Color {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -132,11 +140,52 @@ impl Shading {
             self.pattern, self.foreground, self.background
         )
     }
+
+    /// Exact decoded DOC shading facts. The current table-cell renderer model
+    /// retains only an RGB background fill; callers must handle non-clear
+    /// patterns as an explicit known loss rather than approximate their tint.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct_facts(&self) -> DirectShadingFacts {
+        DirectShadingFacts {
+            pattern: self.pattern,
+            foreground: self.foreground,
+            background: self.background,
+        }
+    }
+
+    /// Background representable by `DocTableCell.background`, matching the
+    /// existing DOCX parser's fill-only projection without pattern fitting.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct_background(&self) -> Option<String> {
+        match self.background {
+            Color::Auto => None,
+            Color::Rgb([r, g, b]) => Some(format!("{r:02x}{g:02x}{b:02x}")),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_shading_exposes_exact_pattern_colors_and_only_literal_rgb_fill() {
+        let patterned = Shading::read(&modern(18), false).unwrap().unwrap();
+        assert_eq!(
+            patterned.direct_facts(),
+            DirectShadingFacts {
+                pattern: "horzCross",
+                foreground: Color::Rgb([0x12, 0x34, 0x56]),
+                background: Color::Rgb([0x98, 0x76, 0x54]),
+            }
+        );
+        assert_eq!(patterned.direct_background().as_deref(), Some("987654"));
+        let auto = Shading::read(&[0, 0, 0, 255, 0, 0, 0, 255, 0, 0], false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(auto.direct_background(), None);
+        assert_eq!(auto.direct_facts().background, Color::Auto);
+    }
     fn modern(ipat: u16) -> [u8; 10] {
         let [a, b] = ipat.to_le_bytes();
         [0x12, 0x34, 0x56, 0, 0x98, 0x76, 0x54, 0, a, b]
