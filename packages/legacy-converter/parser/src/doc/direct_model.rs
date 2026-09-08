@@ -15,7 +15,17 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
             "direct DOC model does not yet support multiple sections",
         ));
     }
-    if facts.headers.is_some() || facts.note_stories.iter().any(Option::is_some) {
+    // MS-DOC 2.3.3 / 2.8.22: the first six header-document stories are
+    // footnote/endnote separators, not page headers. Only authored nonempty
+    // header/footer ranges produce entries; an explicitly blank paragraph DOES
+    // produce an entry and must not be discarded. No entries in any section
+    // means there is no earlier header/footer to inherit either.
+    if facts
+        .headers
+        .as_ref()
+        .is_some_and(|headers| !headers.entries.is_empty())
+        || facts.note_stories.iter().any(Option::is_some)
+    {
         return Err(unsupported(
             "direct DOC model does not yet support headers or notes",
         ));
@@ -307,13 +317,26 @@ mod tests {
     use crate::cfb::{test_support::build_cfb, CompoundFile};
 
     fn source(text: &str) -> Vec<u8> {
-        let units: Vec<u16> = text.encode_utf16().collect();
+        source_with_header_document(text, None)
+    }
+
+    fn source_with_header_document(text: &str, authored_blank_header: Option<bool>) -> Vec<u8> {
+        let main_units = text.encode_utf16().count();
+        // A separator-only header document is not an authored page header.
+        // The optional blank header has its own paragraph plus guard mark.
+        let header = match authored_blank_header {
+            None => "",
+            Some(false) => "\r\r",
+            Some(true) => "\r\r\r\r",
+        };
+        let units: Vec<u16> = text.encode_utf16().chain(header.encode_utf16()).collect();
         let text_offset = 0x400usize;
         let mut word = vec![0u8; text_offset + units.len() * 2];
         word[0..2].copy_from_slice(&0xa5ecu16.to_le_bytes());
         word[2..4].copy_from_slice(&0x00c1u16.to_le_bytes());
         word[6..8].copy_from_slice(&1033u16.to_le_bytes());
-        word[0x4c..0x50].copy_from_slice(&(units.len() as u32).to_le_bytes());
+        word[0x4c..0x50].copy_from_slice(&(main_units as u32).to_le_bytes());
+        word[0x54..0x58].copy_from_slice(&(header.len() as u32).to_le_bytes());
         word[0x1a2..0x1a6].copy_from_slice(&0u32.to_le_bytes());
         word[0x1a6..0x1aa].copy_from_slice(&21u32.to_le_bytes());
         for (index, unit) in units.iter().enumerate() {
@@ -342,11 +365,30 @@ mod tests {
         word.extend((sepx.len() as u16).to_le_bytes());
         word.extend(sepx);
         let mut section_table = vec![0; 20];
-        section_table[4..8].copy_from_slice(&(units.len() as u32).to_le_bytes());
+        section_table[4..8].copy_from_slice(&(main_units as u32).to_le_bytes());
         section_table[10..14].copy_from_slice(&(sepx_offset as u32).to_le_bytes());
         table.extend(section_table);
         word[0xca..0xce].copy_from_slice(&(section_table_offset as u32).to_le_bytes());
         word[0xce..0xd2].copy_from_slice(&20u32.to_le_bytes());
+
+        if let Some(authored) = authored_blank_header {
+            let mut hdd = Vec::new();
+            for index in 0..14 {
+                let cp: u32 = match index {
+                    0 | 13 => 0,
+                    1..=6 => 1,
+                    _ => {
+                        if authored {
+                            3
+                        } else {
+                            1
+                        }
+                    }
+                };
+                hdd.extend(cp.to_le_bytes());
+            }
+            append_table_part(&mut word, &mut table, 0xf2, &hdd);
+        }
 
         let mut font_table = vec![1, 0, 0, 0];
         let mut font = vec![0; 39];
@@ -421,6 +463,28 @@ mod tests {
         }
         assert_eq!(actual_body, expected_body);
         assert_eq!(actual["section"], expected["section"]);
+    }
+
+    #[test]
+    fn separator_only_header_document_is_not_an_authored_page_header() {
+        let plain = source("Body\r");
+        let separators = source_with_header_document("Body\r", Some(false));
+        let blank_header = source_with_header_document("Body\r", Some(true));
+        let expected =
+            super::super::direct_model(&CompoundFile::open(&plain).unwrap(), 1024 * 1024).unwrap();
+        let actual =
+            super::super::direct_model(&CompoundFile::open(&separators).unwrap(), 1024 * 1024)
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(super::super::direct_model(
+            &CompoundFile::open(&blank_header).unwrap(),
+            1024 * 1024
+        )
+        .unwrap_err()
+        .contains("headers or notes"));
     }
 
     #[test]
