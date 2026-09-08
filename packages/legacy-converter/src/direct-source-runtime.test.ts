@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createDirectSourceRuntime } from './direct-source-runtime.js';
+import { createDirectSourceRuntime, resolveDirectWasmInput } from './direct-source-runtime.js';
 
 class Archive {
   free = vi.fn();
@@ -22,6 +22,20 @@ function engine(glue: object, construct: () => Archive) {
 }
 
 describe('direct source WASM trap containment', () => {
+  it.each([
+    'https://example.test/direct.wasm',
+    'blob:https://example.test/01234567-89ab-cdef-0123-456789abcdef',
+    'data:application/wasm;base64,AGFzbQ==',
+  ])('retains validated absolute WASM input %s without a module-relative base', async (wasmUrl) => {
+    const resolved = await resolveDirectWasmInput(wasmUrl);
+    expect(resolved).toBeInstanceOf(URL);
+    expect((resolved as URL).href).toBe(wasmUrl);
+  });
+
+  it('rejects a relative WASM input instead of resolving it against worker code', async () => {
+    await expect(resolveDirectWasmInput('./direct.wasm')).rejects.toThrow();
+  });
+
   it('poisons sibling live handles and never calls poisoned destructors', async () => {
     const glue = { default: vi.fn(async () => undefined) };
     const firstArchive = new Archive(); const secondArchive = new Archive();

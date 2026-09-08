@@ -158,7 +158,11 @@ export function createDirectSourceRuntime<D extends DirectSourceDescriptor, G ex
 }
 
 export async function resolveDirectWasmInput(wasmUrl: string): Promise<unknown> {
-  const url = new URL(wasmUrl, import.meta.url);
+  // Every per-format descriptor validator admits only absolute URLs. Avoid an
+  // import.meta-relative fallback here: besides being unreachable through a
+  // validated descriptor, it would make the emitted worker asset unsuitable
+  // for consumers that copy it as an opaque classic-script-compatible file.
+  const url = new URL(wasmUrl);
   const nodeProcess = (globalThis as { process?: { versions?: { node?: string } } }).process;
   if (url.protocol === 'file:' && nodeProcess?.versions?.node) {
     const nodeFsPromises: string = 'node:fs/promises';
