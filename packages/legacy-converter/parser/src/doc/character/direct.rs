@@ -32,7 +32,10 @@ impl Properties {
         // Validate referenced fonts before applying visibility, matching the
         // legacy XML construction step that precedes DOCX run filtering.
         let axes = self.direct_font_axes(fonts)?;
-        let lang_bidi = self.resolved_lang_bidi()?.map(str::to_ascii_lowercase);
+        let languages = self.resolved_languages()?;
+        let lang_default = languages.default.map(str::to_ascii_lowercase);
+        let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
+        let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         if self.bool_value("vanish").unwrap_or(false) {
             return Ok(None);
         }
@@ -96,6 +99,8 @@ impl Properties {
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
             lang_bidi: lang_bidi.clone(),
+            lang_default: lang_default.clone(),
+            lang_east_asia: lang_east_asia.clone(),
             char_spacing,
             char_scale,
             position,
@@ -133,7 +138,8 @@ impl Properties {
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
                 bidi: lang_bidi,
-                ..TypographyLanguagesWire::default()
+                default: lang_default,
+                east_asia: lang_east_asia,
             },
             ..RunTypographyWire::default()
         });
@@ -149,7 +155,10 @@ impl Properties {
     ) -> Result<RunFontFacts, String> {
         let axes = self.direct_font_axes(fonts)?;
         let font_size = self.half_points("sz")?;
-        let lang_bidi = self.resolved_lang_bidi()?.map(str::to_ascii_lowercase);
+        let languages = self.resolved_languages()?;
+        let lang_default = languages.default.map(str::to_ascii_lowercase);
+        let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
+        let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         Ok(RunFontFacts {
             font_family: axes[0].clone().or_else(|| axes[1].clone()),
             font_family_high_ansi: axes[2].clone(),
@@ -166,6 +175,8 @@ impl Properties {
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
             lang_bidi,
+            lang_default,
+            lang_east_asia,
             kerning: self.half_points("kern")?,
             ..RunFontFacts::default()
         })
@@ -519,6 +530,85 @@ mod tests {
     }
 
     #[test]
+    fn modern_default_and_east_asian_languages_match_xml_parser() {
+        let properties = applied(&[
+            (0x486d, 0x0411u16.to_le_bytes().to_vec()),
+            (0x486e, 0x0412u16.to_le_bytes().to_vec()),
+            (0x4873, 0x040cu16.to_le_bytes().to_vec()),
+            (0x4874, 0x0404u16.to_le_bytes().to_vec()),
+            (0x485f, 0x0401u16.to_le_bytes().to_vec()),
+        ]);
+        assert_parser_parity(&properties, &[]);
+        let run = properties
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.lang_default.as_deref(), Some("fr-fr"));
+        assert_eq!(run.lang_east_asia.as_deref(), Some("zh-tw"));
+        assert_eq!(run.lang_bidi.as_deref(), Some("ar-sa"));
+        let languages = &run.typography_acquisition.as_ref().unwrap().languages;
+        assert_eq!(languages.default.as_deref(), Some("fr-fr"));
+        assert_eq!(languages.east_asia.as_deref(), Some("zh-tw"));
+        assert_eq!(languages.bidi.as_deref(), Some("ar-sa"));
+
+        let facts = properties.direct_font_facts(&[]).unwrap();
+        assert_eq!(facts.lang_default.as_deref(), Some("fr-fr"));
+        assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-tw"));
+        assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
+
+        for (code, lid) in [(0x4873, 0x0400u16), (0x4874, 0xffff)] {
+            let unresolved = applied(&[(code, lid.to_le_bytes().to_vec())]);
+            assert!(unresolved.xml(&[]).is_err());
+            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
+            assert!(unresolved.direct_font_facts(&[]).is_err());
+        }
+    }
+
+    #[test]
+    fn modern_languages_win_compatibility_metadata_in_both_orders() {
+        for entries in [
+            vec![(0x486d, 0x0411u16), (0x4873, 0x040cu16)],
+            vec![(0x4873, 0x040cu16), (0x486d, 0x0411u16)],
+        ] {
+            let entries = entries
+                .into_iter()
+                .map(|(code, lid)| (code, lid.to_le_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            let properties = applied(&entries);
+            assert_parser_parity(&properties, &[]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.lang_default.as_deref(), Some("fr-fr"));
+            assert_eq!(
+                properties
+                    .direct_font_facts(&[])
+                    .unwrap()
+                    .lang_default
+                    .as_deref(),
+                Some("fr-fr")
+            );
+        }
+
+        let compatibility_only = applied(&[
+            (0x486d, 0x0411u16.to_le_bytes().to_vec()),
+            (0x486e, 0x0412u16.to_le_bytes().to_vec()),
+        ]);
+        assert_parser_parity(&compatibility_only, &[]);
+        let run = compatibility_only
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.lang_default, None);
+        assert_eq!(run.lang_east_asia, None);
+        assert_eq!(run.typography_acquisition.unwrap().languages.default, None);
+        let facts = compatibility_only.direct_font_facts(&[]).unwrap();
+        assert_eq!(facts.lang_default, None);
+        assert_eq!(facts.lang_east_asia, None);
+    }
+
+    #[test]
     fn adjacent_highlights_remain_distinct_across_xml_and_direct_projection() {
         let magenta = applied(&[(0x2a0c, vec![12])]);
         let cleared = applied(&[(0x2a0c, vec![0])]);
@@ -594,12 +684,10 @@ mod tests {
     #[test]
     fn hidden_text_is_absent_but_mark_font_facts_remain_available() {
         let properties = applied(&[(0x083c, vec![1]), (0x0835, vec![1])]);
-        assert!(
-            properties
-                .direct_text_run("hidden".into(), &[])
-                .unwrap()
-                .is_none()
-        );
+        assert!(properties
+            .direct_text_run("hidden".into(), &[])
+            .unwrap()
+            .is_none());
         assert!(properties.direct_vanish());
         let facts = properties.direct_font_facts(&[]).unwrap();
         assert!(facts.bold);
@@ -719,11 +807,9 @@ mod tests {
         for operand in [vec![0xab, 0xcd, 0xef, 0], vec![0, 0, 0, 0xff]] {
             assert_parser_parity(&applied(&[(0x6870, operand)]), &[]);
         }
-        assert!(
-            Properties::default()
-                .apply(0x4a43, &0u16.to_le_bytes(), &Properties::default())
-                .is_err()
-        );
+        assert!(Properties::default()
+            .apply(0x4a43, &0u16.to_le_bytes(), &Properties::default())
+            .is_err());
     }
 
     #[test]

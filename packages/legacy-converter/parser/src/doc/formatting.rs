@@ -759,8 +759,7 @@ mod tests {
             for kind in [1, 2] {
                 for bits in 0..4u16 {
                     let grfstd = 0xf000 | (bits << 2);
-                    let bytes =
-                        stylesheet_with_style_flags(base_size, &[(0x0fff, kind, grfstd)]);
+                    let bytes = stylesheet_with_style_flags(base_size, &[(0x0fff, kind, grfstd)]);
                     let (_, styles) = read_styles(&bytes).unwrap();
                     let style = styles[0].as_ref().unwrap();
                     assert_eq!(style.kind, kind);
@@ -811,8 +810,7 @@ mod tests {
             short_header[0..2].copy_from_slice(&17u16.to_le_bytes());
             assert!(read_styles(&short_header).is_err());
 
-            let mut short_std =
-                stylesheet_with_style_flags(base_size, &[(0x0fff, 1, 0)]);
+            let mut short_std = stylesheet_with_style_flags(base_size, &[(0x0fff, 1, 0)]);
             short_std[20..22].copy_from_slice(&(base_size - 2).to_le_bytes());
             assert!(read_styles(&short_std).is_err());
         }
@@ -1033,18 +1031,13 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_raw_language_axes_remain_unsupported_through_formatting() {
-        const CASES: [[u8; 4]; 4] = [
-            [0x6d, 0x48, 0x34, 0x12],
-            [0x6e, 0x48, 0x34, 0x12],
-            [0x73, 0x48, 0x34, 0x12],
-            [0x74, 0x48, 0x34, 0x12],
-        ];
-        for direct in &CASES {
+    fn compatibility_languages_are_metadata_and_modern_languages_project() {
+        const COMPATIBILITY: [[u8; 4]; 2] = [[0x6d, 0x48, 0x34, 0x12], [0x6e, 0x48, 0x34, 0x12]];
+        for direct in &COMPATIBILITY {
             let mut formatting = empty();
             let xml = formatting.run_xml(0, 0, 1, &[direct]).unwrap();
             assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
-            assert!(formatting.unsupported_character_properties);
+            assert!(!formatting.unsupported_character_properties);
 
             let mut formatting = empty();
             formatting.styles = vec![Some(Style {
@@ -1056,8 +1049,51 @@ mod tests {
             })];
             let xml = formatting.run_xml(0, 0, 0, &[]).unwrap();
             assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
+            assert!(!formatting.unsupported_character_properties);
+        }
+
+        for direct in [[0x73, 0x48, 0x0c, 0x04], [0x74, 0x48, 0x11, 0x04]] {
+            let mut formatting = empty();
+            let xml = formatting.run_xml(0, 0, 1, &[&direct]).unwrap();
+            assert!(xml.contains(if direct[0] == 0x73 {
+                "w:val=\"fr-FR\""
+            } else {
+                "w:eastAsia=\"ja-JP\""
+            }));
+            assert!(!formatting.unsupported_character_properties);
+        }
+
+        for direct in [[0x73, 0x48, 0x00, 0x04], [0x74, 0x48, 0xff, 0xff]] {
+            let mut formatting = empty();
+            let xml = formatting.run_xml(0, 0, 1, &[&direct]).unwrap();
+            assert!(!xml.contains("<w:lang"));
             assert!(formatting.unsupported_character_properties);
         }
+    }
+
+    #[test]
+    fn byte_language_policy_preserves_resolved_axes_when_one_axis_is_unresolved() {
+        let base = Properties::default();
+        let mut properties = base.clone();
+        properties
+            .apply(0x4873, &0x040cu16.to_le_bytes(), &base)
+            .unwrap();
+        properties
+            .apply(0x4874, &u16::MAX.to_le_bytes(), &base)
+            .unwrap();
+        properties
+            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
+            .unwrap();
+        properties.apply(0x0875, &[1], &base).unwrap();
+
+        assert!(properties.xml(&[]).is_err());
+        let mut formatting = empty();
+        let xml = formatting.byte_run_xml(&properties).unwrap();
+        assert!(xml.contains("w:val=\"fr-FR\""), "{xml}");
+        assert!(!xml.contains("w:eastAsia="), "{xml}");
+        assert!(xml.contains("w:bidi=\"ar-SA\""), "{xml}");
+        assert!(xml.contains("<w:noProof w:val=\"1\"/>"), "{xml}");
+        assert!(formatting.unsupported_character_properties);
     }
 
     #[test]

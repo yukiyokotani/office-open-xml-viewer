@@ -45,9 +45,9 @@ pub struct Properties {
     // Raw MS-DOC LID. Resolution is deferred so an assigned locale and an
     // unknown/custom identifier never collapse into the same absent value.
     lang_bidi_lid: Option<u16>,
-    // Raw language axes from MS-DOC 2.6.1. The compatibility and modern
-    // properties remain distinct until their precedence and style flags can be
-    // resolved without guessing. Capturing them does not admit projection.
+    // Raw language axes from MS-DOC 2.6.1. Modern properties supply the
+    // projected language; compatibility properties remain acquisition metadata,
+    // never a guessed fallback or an implicit noProof toggle.
     lang_default_80_lid: Option<u16>,
     lang_east_asia_80_lid: Option<u16>,
     lang_default_lid: Option<u16>,
@@ -62,10 +62,17 @@ enum FontHint {
     ComplexScript,
 }
 
-enum BidiLanguage {
+enum LanguageResolution {
     Absent,
     Assigned(&'static str),
     Unsupported(u16),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ResolvedLanguages {
+    pub(super) default: Option<&'static str>,
+    pub(super) east_asia: Option<&'static str>,
+    pub(super) bidi: Option<&'static str>,
 }
 
 impl FontHint {
@@ -287,8 +294,10 @@ impl Properties {
                 // MS-DOC 2.6.1 sprmCRgLid0_80, sprmCRgLid1_80,
                 // sprmCRgLid0, and sprmCRgLid1; their operand is the exact
                 // two-byte LID from 2.9.134. Keep all four raw axes distinct.
-                // Resolution is intentionally deferred: returning false keeps
-                // the existing unsupported-formatting warning/native gate.
+                // Controlled Word roundtrips over the tested flag/order
+                // combinations confirm that modern LIDs govern the emitted
+                // language. Compatibility LIDs remain typed acquisition
+                // metadata only; they never synthesize language or noProof.
                 if operand.len() != 2 {
                     return Err(unsupported("invalid Word character language ID"));
                 }
@@ -299,7 +308,7 @@ impl Properties {
                     0x4873 => self.lang_default_lid = lid,
                     _ => self.lang_east_asia_lid = lid,
                 }
-                return Ok(false);
+                return Ok(true);
             }
             0x6815..=0x6817 => {
                 // MS-DOC 2.6.1 identifies these as revision-session IDs for
@@ -451,10 +460,7 @@ impl Properties {
     /// languages only. The caller must surface the returned omission flag;
     /// direct model projection remains strict and never guesses a locale.
     pub(in crate::doc) fn byte_xml(&self, fonts: &[String]) -> Result<(String, bool), String> {
-        match self.bidi_language() {
-            BidiLanguage::Unsupported(_) => self.xml_with_language_policy(fonts, true),
-            _ => self.xml(fonts).map(|xml| (xml, false)),
-        }
+        self.xml_with_language_policy(fonts, true)
     }
 
     fn xml_with_language_policy(
@@ -506,40 +512,77 @@ impl Properties {
                 xml.push_str(&format!("<w:u w:color=\"{color}\"/>"));
             }
         }
-        let omitted_language = match self.bidi_language() {
-            BidiLanguage::Absent => false,
-            BidiLanguage::Assigned(language) => {
-                xml.push_str(&format!("<w:lang w:bidi=\"{language}\"/>"));
-                false
+        let axes = [
+            ("val", "default", self.language(self.lang_default_lid)),
+            (
+                "eastAsia",
+                "East Asian",
+                self.language(self.lang_east_asia_lid),
+            ),
+            ("bidi", "complex-script", self.bidi_language()),
+        ];
+        let mut omitted_language = false;
+        let mut language_started = false;
+        for (attribute, name, value) in axes {
+            match value {
+                LanguageResolution::Absent => {}
+                LanguageResolution::Assigned(language) => {
+                    if !language_started {
+                        xml.push_str("<w:lang");
+                        language_started = true;
+                    }
+                    xml.push_str(&format!(" w:{attribute}=\"{language}\""));
+                }
+                LanguageResolution::Unsupported(_) if omit_unsupported_language => {
+                    omitted_language = true;
+                }
+                LanguageResolution::Unsupported(lid) => {
+                    return Err(unsupported(format!(
+                        "unsupported Word {name} language ID 0x{lid:04X}"
+                    )));
+                }
             }
-            BidiLanguage::Unsupported(_) if omit_unsupported_language => true,
-            BidiLanguage::Unsupported(lid) => {
-                return Err(unsupported(format!(
-                    "unsupported Word complex-script language ID 0x{lid:04X}"
-                )));
-            }
-        };
+        }
+        if language_started {
+            xml.push_str("/>");
+        }
         xml.push_str("</w:rPr>");
         Ok((xml, omitted_language))
     }
 
-    fn resolved_lang_bidi(&self) -> Result<Option<&'static str>, String> {
-        match self.bidi_language() {
-            BidiLanguage::Absent => Ok(None),
-            BidiLanguage::Assigned(language) => Ok(Some(language)),
-            BidiLanguage::Unsupported(lid) => Err(unsupported(format!(
-                "unsupported Word complex-script language ID 0x{lid:04X}"
+    pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
+        Ok(ResolvedLanguages {
+            default: self.resolve_language_axis(self.lang_default_lid, "default")?,
+            east_asia: self.resolve_language_axis(self.lang_east_asia_lid, "East Asian")?,
+            bidi: self.resolve_language_axis(self.lang_bidi_lid, "complex-script")?,
+        })
+    }
+
+    fn resolve_language_axis(
+        &self,
+        lid: Option<u16>,
+        name: &str,
+    ) -> Result<Option<&'static str>, String> {
+        match self.language(lid) {
+            LanguageResolution::Absent => Ok(None),
+            LanguageResolution::Assigned(language) => Ok(Some(language)),
+            LanguageResolution::Unsupported(lid) => Err(unsupported(format!(
+                "unsupported Word {name} language ID 0x{lid:04X}"
             ))),
         }
     }
 
-    fn bidi_language(&self) -> BidiLanguage {
-        let Some(lid) = self.lang_bidi_lid else {
-            return BidiLanguage::Absent;
+    fn bidi_language(&self) -> LanguageResolution {
+        self.language(self.lang_bidi_lid)
+    }
+
+    fn language(&self, lid: Option<u16>) -> LanguageResolution {
+        let Some(lid) = lid else {
+            return LanguageResolution::Absent;
         };
         match crate::lcid::resolve(u32::from(lid)) {
-            crate::lcid::Resolution::Assigned(language) => BidiLanguage::Assigned(language),
-            _ => BidiLanguage::Unsupported(lid),
+            crate::lcid::Resolution::Assigned(language) => LanguageResolution::Assigned(language),
+            _ => LanguageResolution::Unsupported(lid),
         }
     }
 }
@@ -589,12 +632,10 @@ mod tests {
         for (index, expected) in ICO_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a42, &[index as u8], &base).unwrap());
-            assert!(
-                value
-                    .xml(&[])
-                    .unwrap()
-                    .contains(&format!("<w:color w:val=\"{expected}\"/>"))
-            );
+            assert!(value
+                .xml(&[])
+                .unwrap()
+                .contains(&format!("<w:color w:val=\"{expected}\"/>")));
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a42, &[index], &base).is_err());
@@ -618,12 +659,10 @@ mod tests {
         for (index, expected) in HIGHLIGHT_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a0c, &[index as u8], &base).unwrap());
-            assert!(
-                value
-                    .xml(&[])
-                    .unwrap()
-                    .contains(&format!("<w:highlight w:val=\"{expected}\"/>"))
-            );
+            assert!(value
+                .xml(&[])
+                .unwrap()
+                .contains(&format!("<w:highlight w:val=\"{expected}\"/>")));
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a0c, &[index], &base).is_err());
@@ -679,17 +718,13 @@ mod tests {
     fn complex_script_language_is_typed_cascading_and_strictly_resolved() {
         let base = Properties::default();
         let mut style = Properties::sparse();
-        assert!(
-            style
-                .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
-                .unwrap()
-        );
-        assert!(
-            style
-                .xml(&[])
-                .unwrap()
-                .contains("<w:lang w:bidi=\"ar-SA\"/>")
-        );
+        assert!(style
+            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
+            .unwrap());
+        assert!(style
+            .xml(&[])
+            .unwrap()
+            .contains("<w:lang w:bidi=\"ar-SA\"/>"));
 
         let mut patch = Properties::sparse();
         patch
@@ -744,13 +779,13 @@ mod tests {
     }
 
     #[test]
-    fn western_and_east_asian_language_ids_are_captured_but_not_admitted() {
+    fn modern_languages_project_while_compatibility_languages_remain_metadata() {
         let base = Properties::default();
         let cases: [(u16, u16, usize); 4] = [
             (0x486d, 0x0400, 0),
             (0x486e, 0x007f, 1),
-            (0x4873, 0xf123, 2),
-            (0x4874, 0xffff, 3),
+            (0x4873, 0x040c, 2),
+            (0x4874, 0x0411, 3),
         ];
         let slots = |p: &Properties| {
             [
@@ -763,29 +798,32 @@ mod tests {
 
         let mut properties = Properties::sparse();
         for (code, lid, slot) in cases {
-            assert!(!properties.apply(code, &lid.to_le_bytes(), &base).unwrap());
+            assert!(properties.apply(code, &lid.to_le_bytes(), &base).unwrap());
             assert_eq!(slots(&properties)[slot], Some(lid));
         }
         assert_eq!(
             slots(&properties),
-            [Some(0x0400), Some(0x007f), Some(0xf123), Some(0xffff)]
+            [Some(0x0400), Some(0x007f), Some(0x040c), Some(0x0411)]
         );
-        assert_eq!(properties.xml(&[]).unwrap(), "<w:rPr></w:rPr>");
+        assert_eq!(
+            properties.xml(&[]).unwrap(),
+            "<w:rPr><w:lang w:val=\"fr-FR\" w:eastAsia=\"ja-JP\"/></w:rPr>"
+        );
 
         // Repeated properties retain their ordered last value without merging
         // the four source axes.
-        assert!(!properties
+        assert!(properties
             .apply(0x4873, &0x1234u16.to_le_bytes(), &base)
             .unwrap());
         assert_eq!(slots(&properties)[2], Some(0x1234));
-        assert_eq!(slots(&properties)[3], Some(0xffff));
+        assert_eq!(slots(&properties)[3], Some(0x0411));
 
         let mut inherited = Properties::sparse();
         inherited
             .apply(0x486d, &0x1111u16.to_le_bytes(), &base)
             .unwrap();
         inherited
-            .apply(0x4874, &0x2222u16.to_le_bytes(), &base)
+            .apply(0x4874, &0x0404u16.to_le_bytes(), &base)
             .unwrap();
         let mut patch = Properties::sparse();
         patch
@@ -794,12 +832,12 @@ mod tests {
         inherited.overlay_visible(&patch);
         assert_eq!(
             slots(&inherited),
-            [Some(0x1111), Some(0x3333), None, Some(0x2222)]
+            [Some(0x1111), Some(0x3333), None, Some(0x0404)]
         );
         inherited.overlay_visible(&Properties::sparse());
         assert_eq!(
             slots(&inherited),
-            [Some(0x1111), Some(0x3333), None, Some(0x2222)]
+            [Some(0x1111), Some(0x3333), None, Some(0x0404)]
         );
 
         // CPlain and CIstd use this reset primitive. Language is not among
@@ -807,19 +845,20 @@ mod tests {
         // target while bidi/noProof remain independent properties.
         let mut paragraph = Properties::sparse();
         paragraph
-            .apply(0x4873, &0x4444u16.to_le_bytes(), &base)
+            .apply(0x4873, &0x0409u16.to_le_bytes(), &base)
             .unwrap();
         inherited
             .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
             .unwrap();
         inherited.apply(0x0875, &[1], &base).unwrap();
         let independent_xml = inherited.xml(&[]).unwrap();
-        assert!(independent_xml.contains("<w:lang w:bidi=\"ar-SA\"/>"));
+        assert!(independent_xml.contains("w:eastAsia=\"zh-TW\""));
+        assert!(independent_xml.contains("w:bidi=\"ar-SA\""));
         assert!(independent_xml.contains("<w:noProof w:val=\"1\"/>"));
         for preserve_object in [false, true] {
             let mut reset = inherited.clone();
             reset.reset_to(&paragraph, preserve_object);
-            assert_eq!(slots(&reset), [None, None, Some(0x4444), None]);
+            assert_eq!(slots(&reset), [None, None, Some(0x0409), None]);
             assert_eq!(reset.lang_bidi_lid, paragraph.lang_bidi_lid);
             assert!(!reset.xml(&[]).unwrap().contains("<w:noProof"));
         }
@@ -852,12 +891,10 @@ mod tests {
         let mut style = base.clone();
         style.apply(0x2a3e, &[11], &base).unwrap();
         style.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
-        assert!(
-            style
-                .xml(&[])
-                .unwrap()
-                .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>")
-        );
+        assert!(style
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>"));
         let mut direct = style.clone();
         direct.apply(0x6877, &[0, 0, 0, 0xff], &style).unwrap();
         assert!(direct.xml(&[]).unwrap().contains("w:color=\"auto\""));
@@ -870,19 +907,15 @@ mod tests {
         color_only
             .apply(0x6877, &[0x12, 0x34, 0x56, 0], &base)
             .unwrap();
-        assert!(
-            color_only
-                .xml(&[])
-                .unwrap()
-                .contains("<w:u w:color=\"123456\"/>")
-        );
+        assert!(color_only
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:color=\"123456\"/>"));
         color_only.apply(0x2a3e, &[4], &base).unwrap();
-        assert!(
-            color_only
-                .xml(&[])
-                .unwrap()
-                .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>")
-        );
+        assert!(color_only
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>"));
     }
 
     #[test]
