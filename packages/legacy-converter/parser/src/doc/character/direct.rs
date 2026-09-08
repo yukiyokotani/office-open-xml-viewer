@@ -36,6 +36,9 @@ impl Properties {
         }
         let underline_token = self.values.get("u").map(String::as_str);
         let underline = underline_token.is_some_and(|value| value != "none");
+        let underline_color = underline
+            .then(|| self.values.get("uColor").map(|value| value.to_ascii_lowercase()))
+            .flatten();
         let color_token = self.values.get("color").map(String::as_str);
         let color_auto = color_token == Some("auto");
         let vertical_token = self.values.get("vertAlign").cloned();
@@ -55,6 +58,7 @@ impl Properties {
             underline_style: underline_token
                 .filter(|value| !matches!(*value, "none" | "single"))
                 .map(str::to_string),
+            underline_color: underline_color.clone(),
             strikethrough: self.bool_value("strike").unwrap_or(false),
             font_size,
             color: color_token
@@ -87,7 +91,16 @@ impl Properties {
             ..TextRun::default()
         };
         run.typography_acquisition = Some(RunTypographyWire {
-            underline: underline_token.map(underline_wire),
+            underline: match (
+                underline_token,
+                self.values.get("uColor").map(String::as_str),
+            ) {
+                (None, None) => None,
+                // MS-DOC 2.6.1 sprmCCvUl and MS-OI29500 2.1.100(c): retain a
+                // color-only underline acquisition, while the public run stays
+                // un-underlined until an effective underline value exists.
+                (token, color) => Some(underline_wire(token, color)),
+            },
             strike: run.strikethrough,
             double_strike: run.double_strikethrough,
             caps: run.all_caps,
@@ -244,9 +257,14 @@ fn number_wire(raw: Option<String>, value: Option<f64>) -> TypographyValueWire<f
     }
 }
 
-fn underline_wire(token: &str) -> UnderlineTypographyWire {
+fn underline_wire(token: Option<&str>, color: Option<&str>) -> UnderlineTypographyWire {
     UnderlineTypographyWire {
-        val: valid_wire(token.to_string(), token.to_string()),
+        val: token.map_or_else(TypographyValueWire::default, |value| {
+            valid_wire(value.to_string(), value.to_string())
+        }),
+        color: color.map_or_else(TypographyValueWire::default, |value| {
+            valid_wire(value.to_string(), value.to_ascii_lowercase())
+        }),
         ..UnderlineTypographyWire::default()
     }
 }
@@ -451,6 +469,53 @@ mod tests {
     }
 
     #[test]
+    fn underline_color_matches_the_xml_parser_route() {
+        for (underline, color, expected) in [
+            (0, vec![0x12, 0x34, 0x56, 0], None),
+            (1, vec![0x12, 0x34, 0x56, 0], Some("123456")),
+            (11, vec![0, 0, 0, 0xff], Some("auto")),
+        ] {
+            let properties = applied(&[(0x2a3e, vec![underline]), (0x6877, color)]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.underline_color.as_deref(), expected);
+            assert_parser_parity(&properties, &[]);
+        }
+        let color_only = applied(&[(0x6877, vec![0x12, 0x34, 0x56, 0])]);
+        let run = color_only.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert!(!run.underline);
+        assert_eq!(run.underline_color, None);
+        assert_eq!(
+            run.typography_acquisition
+                .as_ref()
+                .and_then(|wire| wire.underline.as_ref())
+                .and_then(|wire| wire.color.value.as_deref()),
+            Some("123456"),
+        );
+        assert_parser_parity(&color_only, &[]);
+    }
+
+    #[test]
+    fn underline_color_tracks_effective_underline_style_and_clearing() {
+        let base = Properties::default();
+        let mut style = base.clone();
+        style.apply(0x2a3e, &[4], &base).unwrap();
+        style.apply(0x6877, &[0, 0, 0xff, 0], &base).unwrap();
+        let inherited = style.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(inherited.underline_style.as_deref(), Some("dotted"));
+        assert_eq!(inherited.underline_color.as_deref(), Some("0000ff"));
+
+        let mut cleared = style.clone();
+        cleared.apply(0x2a3e, &[0], &style).unwrap();
+        let run = cleared.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert!(!run.underline);
+        assert_eq!(run.underline_color, None);
+        assert_parser_parity(&cleared, &[]);
+    }
+
+    #[test]
     fn numeric_and_color_boundaries_match_the_xml_parser_route() {
         for (code, operands) in [
             (0x4a43, vec![2u16, 3276]),
@@ -564,6 +629,7 @@ mod tests {
             (0x4852, 67u16.to_le_bytes().to_vec()),
             (0x2a48, vec![2]),
             (0x2a3e, vec![11]),
+            (0x6877, vec![0x65, 0x43, 0x21, 0]),
             (0x6870, vec![0x12, 0x34, 0x56, 0]),
         ]);
         let fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"].map(String::from);

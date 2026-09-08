@@ -304,12 +304,9 @@ impl Properties {
             ),
             0x6870 => (
                 "color",
-                match operand[3] {
-                    0 => format!("{:02X}{:02X}{:02X}", operand[0], operand[1], operand[2]),
-                    255 => "auto".into(),
-                    _ => return Err(unsupported("invalid Word COLORREF")),
-                },
+                colorref(operand)?,
             ),
+            0x6877 => ("uColor", colorref(operand)?),
             _ => return Ok(false),
         };
         self.values.insert(key, value);
@@ -339,10 +336,39 @@ impl Properties {
             return Err(unsupported("Word font index outside empty font table"));
         }
         for (key, value) in &self.values {
-            xml.push_str(&format!("<w:{key} w:val=\"{value}\"/>"));
+            if *key == "uColor" {
+                continue;
+            }
+            if *key == "u" {
+                xml.push_str(&format!("<w:u w:val=\"{value}\""));
+                if let Some(color) = self.values.get("uColor") {
+                    xml.push_str(&format!(" w:color=\"{color}\""));
+                }
+                xml.push_str("/>");
+            } else {
+                xml.push_str(&format!("<w:{key} w:val=\"{value}\"/>"));
+            }
+        }
+        if !self.values.contains_key("u") {
+            if let Some(color) = self.values.get("uColor") {
+                // MS-DOC 2.6.1 sprmCCvUl retains underline color independently.
+                // MS-OI29500 2.1.100(c), refining ECMA-376 17.3.2.40: absent
+                // w:u@val inherits and ultimately means no underline; color
+                // alone therefore preserves authorship without activating it.
+                xml.push_str(&format!("<w:u w:color=\"{color}\"/>"));
+            }
         }
         xml.push_str("</w:rPr>");
         Ok(xml)
+    }
+}
+
+fn colorref(operand: &[u8]) -> Result<String, String> {
+    match operand.get(3).copied() {
+        Some(0) => Ok(format!("{:02X}{:02X}{:02X}", operand[0], operand[1], operand[2])),
+        Some(0xff) => Ok("auto".into()),
+        Some(_) => Err(unsupported("invalid Word COLORREF")),
+        None => Err(unsupported("short Word COLORREF")),
     }
 }
 
@@ -397,6 +423,37 @@ mod tests {
         assert!(value.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
         value.reset_to(&style, false);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"0000FF\""));
+    }
+
+    #[test]
+    fn underline_color_is_an_attribute_and_follows_style_resets() {
+        let base = Properties::default();
+        let mut style = base.clone();
+        style.apply(0x2a3e, &[11], &base).unwrap();
+        style.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
+        assert!(style
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>"));
+        let mut direct = style.clone();
+        direct.apply(0x6877, &[0, 0, 0, 0xff], &style).unwrap();
+        assert!(direct.xml(&[]).unwrap().contains("w:color=\"auto\""));
+        direct.reset_to(&base, false);
+        assert!(!direct.xml(&[]).unwrap().contains("w:color="));
+        assert!(base.clone().apply(0x6877, &[], &base).is_err());
+        assert!(base.clone().apply(0x6877, &[1, 2, 3, 1], &base).is_err());
+
+        let mut color_only = base.clone();
+        color_only.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
+        assert!(color_only
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:color=\"123456\"/>"));
+        color_only.apply(0x2a3e, &[4], &base).unwrap();
+        assert!(color_only
+            .xml(&[])
+            .unwrap()
+            .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>"));
     }
 
     #[test]
