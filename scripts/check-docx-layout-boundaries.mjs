@@ -2070,6 +2070,8 @@ const CONVERSION_TYPES = new Set([
   'LegacyOfficeConversionOptions', 'LegacyOfficeConversionRecord',
   'LegacyOfficeConversionResult', 'LegacyOfficeConverter',
   'LegacyOfficeFormatConversionOptions', 'LegacyOfficeFormat',
+  'LegacyPptDirectConversionOptions', 'LegacyPptDirectSourceDescriptor',
+  'LegacyXlsDirectConversionOptions', 'LegacyXlsDirectSourceDescriptor',
 ]);
 
 function namedConversionImport(node, name) {

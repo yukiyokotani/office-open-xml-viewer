@@ -443,6 +443,43 @@ export { LegacyOfficeConversionError, type LegacyOfficeConversionOptions, type L
   assert.equal(result.status, 0, result.output);
 });
 
+test('accepts direct legacy conversion contracts only as unaliased core type re-exports', () => {
+  for (const name of [
+    'LegacyPptDirectConversionOptions',
+    'LegacyPptDirectSourceDescriptor',
+    'LegacyXlsDirectConversionOptions',
+    'LegacyXlsDirectSourceDescriptor',
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-direct-conversion-${name}-`);
+    write(root, 'packages/docx/src/index.ts',
+      `export { type ${name} } from '@silurus/ooxml-core';\n`);
+    const result = runChecker(root, '--final');
+    assert.equal(result.status, 0, `${name}: ${result.output}`);
+  }
+});
+
+test('direct legacy conversion contract names remain forbidden outside exact core type re-exports', () => {
+  for (const name of [
+    'LegacyPptDirectConversionOptions',
+    'LegacyPptDirectSourceDescriptor',
+    'LegacyXlsDirectConversionOptions',
+    'LegacyXlsDirectSourceDescriptor',
+  ]) {
+    const cases = [
+      ['index.ts', `export { ${name} } from '@silurus/ooxml-core';`],
+      ['index.ts', `export { type ${name} as DirectConversion } from '@silurus/ooxml-core';`],
+      ['index.ts', `export { type ${name} } from './alternate-layout';`],
+      ['layout/direct-conversion.ts', `export type Selected = ${name};`],
+      ['viewer.ts', `const ${name} = true;`],
+    ];
+    for (const [file, source] of cases) {
+      const root = initializeCanonicalFixture(`docx-layout-boundary-direct-conversion-abuse-${name}-`);
+      write(root, `packages/docx/src/${file}`, `${source}\n`);
+      expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', `${name} in ${file}: ${source}`, '--final');
+    }
+  }
+});
+
 test('conversion names do not exempt layout flags, alternate calls or arbitrary exports', () => {
   const cases = [
     ['layout/conversion.ts', conversionViewer],
