@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkerBridgeTransport } from '@silurus/ooxml-core';
 import type { PullSessionResponse } from '@silurus/ooxml-core/worker';
+import type {
+  LegacyDocNativeDocument,
+} from '@silurus/ooxml-legacy-converter/internal/direct-doc-engine';
 import { materializeDocumentPullSession } from './document-pull-client.js';
+import {
+  createLocalDocumentPullTransport,
+  DocumentPullWorker,
+} from './document-pull-worker.js';
 
 const state = vi.hoisted(() => ({
   init: vi.fn(async () => undefined), ensureReady: vi.fn(async () => undefined),
@@ -36,6 +43,47 @@ vi.mock('@silurus/ooxml-legacy-converter/internal/direct-doc-engine', () => ({
 }));
 
 describe('DOCX parse worker direct source dispatch', () => {
+  it('consumes the real legacy engine source through the DOCX pull protocol', async () => {
+    const { createLegacyDocSourceEngine } = await vi.importActual<
+      typeof import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine')
+    >('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+    const document = new EngineDocument();
+    const glue = {
+      default: vi.fn(async () => undefined),
+      LegacyDocDocument: class extends EngineDocument {
+        constructor() { super(); return document; }
+      },
+    };
+    const engine = createLegacyDocSourceEngine(
+      async () => glue,
+      async () => new Uint8Array([0]),
+    );
+    const source = await engine.open(new Uint8Array([1]), {
+      protocol: 'ooxml-legacy-doc-source/v1',
+      builtin: 'doc',
+      wasmUrl: 'https://example.test/direct-doc.wasm',
+    });
+    const worker = new DocumentPullWorker(() => source.archive);
+    const identity = { sessionId: 17, operationId: 23, generation: 29 };
+    worker.open(identity);
+
+    await expect(materializeDocumentPullSession(
+      createLocalDocumentPullTransport(worker), identity,
+    )).resolves.toMatchObject({ body: [] });
+    expect(() => source.archive.acknowledge_document_chunk(0, 24, 29)).toThrow('stale identity');
+    expect(document.close).not.toHaveBeenCalled();
+    source.archive.assert_healthy();
+    expect(source.archive.extract_image('image/1')).toEqual(new Uint8Array([9]));
+    source.archive.cancel_document_cursor();
+    expect(document.calls).toEqual([
+      'open:23:29', 'pull:0:23:29', 'done', 'ack:0:23:29',
+      'healthy', 'image:image/1', 'cancel',
+    ]);
+    source.closeArchive();
+    expect(document.close).toHaveBeenCalledTimes(1);
+    expect(document.released).toHaveBeenCalledTimes(1);
+  });
+
   it('streams native units, retains images, cleans replacement, fails closed, and preserves OOXML', async () => {
     const first = new CursorArchive();
     const second = new CursorArchive();
@@ -123,6 +171,42 @@ describe('DOCX parse worker direct source dispatch', () => {
       .toMatchObject({ type: 'documentSessionOpened' });
   });
 });
+
+class EngineDocument implements LegacyDocNativeDocument {
+  readonly calls: string[] = [];
+  readonly close = vi.fn();
+  readonly released = vi.fn();
+  private identity: { operation: number; generation: number } | undefined;
+  free(): void { this.released(); }
+  open_document_cursor(operation: number, generation: number): void {
+    this.identity = { operation, generation };
+    this.calls.push(`open:${operation}:${generation}`);
+  }
+  pull_document_chunk(sequence: number, operation: number, generation: number): Uint8Array {
+    this.assertIdentity(operation, generation);
+    this.calls.push(`pull:${sequence}:${operation}:${generation}`);
+    return new TextEncoder().encode(JSON.stringify({
+      kind: 'complete', document: { body: [] },
+    }));
+  }
+  document_chunk_done(): boolean { this.calls.push('done'); return true; }
+  acknowledge_document_chunk(sequence: number, operation: number, generation: number): void {
+    this.assertIdentity(operation, generation);
+    this.calls.push(`ack:${sequence}:${operation}:${generation}`);
+  }
+  cancel_document_cursor(): void { this.calls.push('cancel'); }
+  close_document_session(): void { this.close(); }
+  assert_healthy(): void { this.calls.push('healthy'); }
+  extract_image(key: string): Uint8Array {
+    this.calls.push(`image:${key}`);
+    return new Uint8Array([9]);
+  }
+  private assertIdentity(operation: number, generation: number): void {
+    if (this.identity?.operation !== operation || this.identity.generation !== generation) {
+      throw new Error('stale identity');
+    }
+  }
+}
 
 class CursorArchive {
   private index = 0;

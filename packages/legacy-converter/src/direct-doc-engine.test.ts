@@ -11,9 +11,6 @@ vi.mock('./wasm-direct-doc/legacy_office_converter.js', () => {
   defaultGlue.loaded();
   return { default: vi.fn(), LegacyDocDocument: class {} };
 });
-import { DocumentPullWorker } from '../../docx/src/document-pull-worker.js';
-import { createLocalDocumentPullTransport } from '../../docx/src/document-pull-worker.js';
-import { materializeDocumentPullSession } from '../../docx/src/document-pull-client.js';
 
 const descriptor: LegacyDocDirectSourceDescriptor = {
   protocol: 'ooxml-legacy-doc-source/v1', builtin: 'doc',
@@ -46,29 +43,6 @@ describe('direct DOC source engine', () => {
     await expect(engine.open(new Uint8Array(), { ...descriptor,
       wasmUrl: 'https://example.test/other.wasm' })).rejects.toThrow('pinned');
     first.closeArchive(); second.closeArchive();
-  });
-
-  it('uses the existing DocumentPullWorker identity, pull, ACK and terminal protocol', async () => {
-    const document = new FakeDocument(new Uint8Array([1]));
-    const source = await engineFor(document).open(new Uint8Array([1]), descriptor);
-    const worker = new DocumentPullWorker(() => source.archive);
-    const identity = { sessionId: 17, operationId: 23, generation: 29 };
-    worker.open(identity);
-    await expect(materializeDocumentPullSession(
-      createLocalDocumentPullTransport(worker), identity,
-    )).resolves.toMatchObject({ body: [] });
-    expect(() => source.archive.acknowledge_document_chunk(0, 24, 29)).toThrow('stale identity');
-    expect(document.close).not.toHaveBeenCalled();
-    source.archive.assert_healthy();
-    expect(source.archive.extract_image('image/1')).toEqual(new Uint8Array([9]));
-    source.archive.cancel_document_cursor();
-    expect(document.calls).toEqual([
-      'open:23:29', 'pull:0:23:29', 'done', 'ack:0:23:29',
-      'healthy', 'image:image/1', 'cancel',
-    ]);
-    source.closeArchive();
-    expect(document.close).toHaveBeenCalledTimes(1);
-    expect(document.released).toHaveBeenCalledTimes(1);
   });
 
   it('rejects validation, byte budget, and pre-abort before loading', async () => {
