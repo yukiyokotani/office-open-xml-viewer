@@ -111,7 +111,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
     let mut sections = sections::read(&word, &table, ccp_text)?;
     let headers = headers::read(&word, &table, clx, sections.len())?;
     if let Some(headers) = &headers {
-        headers.attach_references(&mut sections);
+        headers.attach_references(&mut sections)?;
     }
     let data = if cfb.has_entry("Data") {
         cfb.stream("Data").map_err(unsupported)?
@@ -716,7 +716,7 @@ fn build_formatted_story(
                     }
                 }
                 if section_end {
-                    xml.push_str(&sections[section_index].xml);
+                    xml.push_str(&sections[section_index].xml()?);
                 }
                 xml.push_str("</w:pPr>");
             }
@@ -885,7 +885,7 @@ fn build_formatted_story(
     }
     if let Content::Document(..) = content {
         if let Some(last) = sections.last() {
-            xml.push_str(&last.xml);
+            xml.push_str(&last.xml()?);
         } else {
             // Existing compatibility policy when no section table is available;
             // explicitly warned, not inferred from the file's name or content.
@@ -1200,38 +1200,28 @@ mod tests {
     #[test]
     fn keeps_the_empty_paragraph_that_owns_a_section_break() {
         let sections = [
-            super::sections::Section {
-                end: 3,
-                xml: "<w:sectPr/>".into(),
-                incomplete_margins: false,
-            },
-            super::sections::Section {
-                end: 5,
-                xml: "<w:sectPr/>".into(),
-                incomplete_margins: false,
-            },
+            super::sections::Section::for_test(3, 2),
+            super::sections::Section::for_test(5, 2),
         ];
         let xml = super::build_document_xml("A\r\u{c}B\r", &sections).unwrap();
-        assert!(xml.contains("</w:r></w:p><w:p><w:pPr><w:sectPr/></w:pPr></w:p>"));
+        assert!(xml.contains(&format!(
+            "</w:r></w:p><w:p><w:pPr>{}</w:pPr></w:p>",
+            sections[0].xml().unwrap()
+        )));
     }
 
     #[test]
     fn writes_section_properties_at_their_ooxml_positions_without_extra_page_breaks() {
         let sections = [
-            super::sections::Section {
-                end: 2,
-                xml: "<w:sectPr><w:type w:val=\"continuous\"/></w:sectPr>".into(),
-                incomplete_margins: false,
-            },
-            super::sections::Section {
-                end: 6,
-                xml: "<w:sectPr/>".into(),
-                incomplete_margins: false,
-            },
+            super::sections::Section::for_test(2, 0),
+            super::sections::Section::for_test(6, 2),
         ];
         let xml = super::build_document_xml("A\u{c}B\u{c}\u{e}C", &sections).unwrap();
         assert!(xml.contains("<w:p><w:pPr><w:sectPr>"));
-        assert!(xml.ends_with("</w:p><w:sectPr/></w:body></w:document>"));
+        assert!(xml.ends_with(&format!(
+            "</w:p>{}</w:body></w:document>",
+            sections[1].xml().unwrap()
+        )));
         assert_eq!(xml.matches("w:type=\"page\"").count(), 1);
         assert_eq!(xml.matches("w:type=\"column\"").count(), 1);
     }
@@ -1239,16 +1229,8 @@ mod tests {
     #[test]
     fn field_instructions_remain_hidden_across_section_boundaries() {
         let sections = [
-            super::sections::Section {
-                end: 3,
-                xml: "<w:sectPr/>".into(),
-                incomplete_margins: false,
-            },
-            super::sections::Section {
-                end: 8,
-                xml: "<w:sectPr/>".into(),
-                incomplete_margins: false,
-            },
+            super::sections::Section::for_test(3, 2),
+            super::sections::Section::for_test(8, 2),
         ];
         let xml = super::build_document_xml("\u{13}X\u{c}Y\u{14}OK\u{15}", &sections).unwrap();
         assert!(!xml.contains('X') && !xml.contains('Y'));

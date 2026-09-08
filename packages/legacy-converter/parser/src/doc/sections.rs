@@ -4,8 +4,105 @@ use super::{u16_at, u32_at, unsupported};
 
 pub(super) struct Section {
     pub end: usize,
-    pub xml: String,
     pub incomplete_margins: bool,
+    properties: Properties,
+    header_footer_references: [Option<HeaderFooterReference>; 6],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HeaderFooterKind {
+    Header,
+    Footer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HeaderFooterVariant {
+    Even,
+    Default,
+    First,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct HeaderFooterReference {
+    pub kind: HeaderFooterKind,
+    pub variant: HeaderFooterVariant,
+    pub index: usize,
+}
+
+impl Section {
+    #[cfg(test)]
+    pub(super) fn for_test(end: usize, kind: u8) -> Self {
+        let mut properties = Properties::parse(&[], &mut 1).unwrap();
+        properties.kind = kind;
+        Self {
+            end,
+            incomplete_margins: true,
+            properties,
+            header_footer_references: [None; 6],
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn header_footer_references(&self) -> &[Option<HeaderFooterReference>; 6] {
+        &self.header_footer_references
+    }
+
+    pub fn attach_header_footer_reference(
+        &mut self,
+        reference: HeaderFooterReference,
+    ) -> Result<(), String> {
+        let slot = reference.index % 6;
+        if self.header_footer_references[slot].is_some() {
+            return Err(unsupported("duplicate Word header reference"));
+        }
+        self.header_footer_references[slot] = Some(reference);
+        Ok(())
+    }
+
+    pub fn xml(&self) -> Result<String, String> {
+        let mut xml = self.properties.xml()?;
+        let mut references = String::new();
+        for reference in self.header_footer_references.iter().flatten() {
+            references.push_str(&reference.xml());
+        }
+        // CT_SectPr: header/footer references precede the page geometry.
+        xml.insert_str("<w:sectPr>".len(), &references);
+        Ok(xml)
+    }
+}
+
+impl HeaderFooterReference {
+    pub(super) fn id(self) -> String {
+        format!("rIdHf{}", self.index + 1)
+    }
+
+    pub(super) fn xml(self) -> String {
+        let kind = self.kind.as_str();
+        let variant = self.variant.as_str();
+        format!(
+            r#"<w:{kind}Reference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="{variant}" r:id="{}"/>"#,
+            self.id()
+        )
+    }
+}
+
+impl HeaderFooterKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            HeaderFooterKind::Header => "header",
+            HeaderFooterKind::Footer => "footer",
+        }
+    }
+}
+
+impl HeaderFooterVariant {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            HeaderFooterVariant::Even => "even",
+            HeaderFooterVariant::Default => "default",
+            HeaderFooterVariant::First => "first",
+        }
+    }
 }
 
 pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Section>, String> {
@@ -61,10 +158,12 @@ pub(super) fn read(word: &[u8], table: &[u8], ccp_text: usize) -> Result<Vec<Sec
         for distance in &mut properties.margins[4..] {
             *distance = distance.or(default);
         }
+        properties.validate()?;
         sections.push(Section {
             end,
-            xml: properties.xml()?,
             incomplete_margins: properties.margins.iter().any(Option::is_none),
+            properties,
+            header_footer_references: [None; 6],
         });
         previous = end;
     }
@@ -145,6 +244,23 @@ struct Properties {
 }
 
 impl Properties {
+    fn validate(&self) -> Result<(), String> {
+        if self.page_restart && self.page_start > 2147483646 {
+            return Err(unsupported("invalid Word page-number restart"));
+        }
+        if !self.equal
+            && self.widths[..usize::from(self.columns)]
+                .iter()
+                .any(Option::is_none)
+        {
+            return Err(unsupported("Word unequal columns lack a width"));
+        }
+        if self.grid != 0 && self.line_pitch.is_none() {
+            return Err(unsupported("Word document grid lacks line pitch"));
+        }
+        Ok(())
+    }
+
     fn parse(mut bytes: &[u8], budget: &mut usize) -> Result<Self, String> {
         let mut p = Self {
             size: (12240, 15840),
@@ -340,6 +456,7 @@ impl Properties {
     }
 
     fn xml(&self) -> Result<String, String> {
+        self.validate()?;
         let kind = [
             "continuous",
             "nextColumn",
@@ -373,9 +490,6 @@ impl Properties {
         if self.page_restart || self.page_format != "decimal" {
             xml.push_str(&format!("<w:pgNumType w:fmt=\"{}\"", self.page_format));
             if self.page_restart {
-                if self.page_start > 2147483646 {
-                    return Err(unsupported("invalid Word page-number restart"));
-                }
                 xml.push_str(&format!(" w:start=\"{}\"", self.page_start));
             }
             xml.push_str("/>");
@@ -392,8 +506,7 @@ impl Properties {
         xml.push('>');
         if !self.equal {
             for index in 0..usize::from(self.columns) {
-                let width = self.widths[index]
-                    .ok_or_else(|| unsupported("Word unequal columns lack a width"))?;
+                let width = self.widths[index].expect("validated unequal column width");
                 xml.push_str(&format!(
                     "<w:col w:w=\"{width}\" w:space=\"{}\"/>",
                     self.spaces[index]
@@ -413,9 +526,7 @@ impl Properties {
             xml.push_str(&format!("<w:{name} w:val=\"{}\"/>", u8::from(value)));
         }
         if self.grid != 0 {
-            let pitch = self
-                .line_pitch
-                .ok_or_else(|| unsupported("Word document grid lacks line pitch"))?;
+            let pitch = self.line_pitch.expect("validated document grid pitch");
             xml.push_str(&format!(
                 "<w:docGrid w:type=\"{}\" w:linePitch=\"{pitch}\" w:charSpace=\"{}\"/>",
                 ["default", "linesAndChars", "lines", "snapToChars"][usize::from(self.grid)],
@@ -550,13 +661,23 @@ mod tests {
                 table[4..8].copy_from_slice(&3u32.to_le_bytes());
                 table[10..14].copy_from_slice(&300u32.to_le_bytes());
                 let sections = read(&word, &table, 3).unwrap();
+                assert_eq!(
+                    sections[0].properties.margins[4],
+                    explicit
+                        .map(i32::from)
+                        .or((default != 0).then_some(i32::from(default)))
+                );
+                assert_eq!(
+                    sections[0].properties.margins[5],
+                    (default != 0).then_some(i32::from(default))
+                );
                 assert!(
-                    sections[0].xml.contains(&format!(
+                    sections[0].xml().unwrap().contains(&format!(
                         "w:header=\"{}\" w:footer=\"{default}\"",
                         explicit.unwrap_or(default)
                     )),
                     "lid={lid}, explicit={explicit:?}: {}",
-                    sections[0].xml
+                    sections[0].xml().unwrap()
                 );
                 assert_eq!(sections[0].incomplete_margins, default == 0);
             }
@@ -609,7 +730,7 @@ mod tests {
             }
             let sections = read(&word, &table, 4).unwrap();
             for (section, flow) in sections.iter().zip(flows) {
-                assert_eq!(section.xml.contains("tbRl"), flow == 1);
+                assert_eq!(section.xml().unwrap().contains("tbRl"), flow == 1);
             }
         }
     }
@@ -708,18 +829,7 @@ mod tests {
     }
     #[test]
     fn section_boundaries_count_surrogate_pairs_and_do_not_double_page_breaks() {
-        let sections = [
-            Section {
-                end: 4,
-                xml: String::new(),
-                incomplete_margins: false,
-            },
-            Section {
-                end: 9,
-                xml: String::new(),
-                incomplete_margins: false,
-            },
-        ];
+        let sections = [Section::for_test(4, 2), Section::for_test(9, 2)];
         assert_eq!(
             split_story("A😀\u{c}B\u{c}C", &sections).unwrap(),
             ["A😀", "B\u{c}C"]
@@ -732,5 +842,66 @@ mod tests {
         assert!(Properties::parse(&prl(0xb01f, 100), &mut 100).is_err());
         assert!(Properties::parse(&prl(0xb01f, 12000), &mut 0).is_err());
         assert!(Properties::parse(&[0x34, 0xd2, 8, 0], &mut 100).is_err());
+    }
+
+    #[test]
+    fn read_rejects_effective_invalid_properties_before_serialization() {
+        for (properties, message) in [
+            (
+                [
+                    vec![0x11, 0x30, 1],
+                    0x7044u16.to_le_bytes().to_vec(),
+                    u32::MAX.to_le_bytes().to_vec(),
+                ]
+                .concat(),
+                "UNSUPPORTED:invalid Word page-number restart",
+            ),
+            (
+                [vec![0x05, 0x30, 0], prl(0x500b, 1)].concat(),
+                "UNSUPPORTED:Word unequal columns lack a width",
+            ),
+            (
+                prl(0x5032, 1),
+                "UNSUPPORTED:Word document grid lacks line pitch",
+            ),
+        ] {
+            let mut word = vec![0; 512];
+            word[0xce..0xd2].copy_from_slice(&20u32.to_le_bytes());
+            word[300..302].copy_from_slice(&(properties.len() as u16).to_le_bytes());
+            word[302..302 + properties.len()].copy_from_slice(&properties);
+            let mut table = vec![0; 20];
+            table[4..8].copy_from_slice(&3u32.to_le_bytes());
+            table[10..14].copy_from_slice(&300u32.to_le_bytes());
+            assert_eq!(read(&word, &table, 3).err().unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn read_retains_typed_section_facts_without_ooxml_projection() {
+        let properties = [
+            prl(0xb017, 0),
+            prl(0x500b, 1),
+            prl(0x5032, 2),
+            prl(0x9031, 360),
+            vec![0x0e, 0x30, 2],
+        ]
+        .concat();
+        let mut word = vec![0; 512];
+        word[0xce..0xd2].copy_from_slice(&20u32.to_le_bytes());
+        word[300..302].copy_from_slice(&(properties.len() as u16).to_le_bytes());
+        word[302..302 + properties.len()].copy_from_slice(&properties);
+        let mut table = vec![0; 20];
+        table[4..8].copy_from_slice(&3u32.to_le_bytes());
+        table[10..14].copy_from_slice(&300u32.to_le_bytes());
+
+        let sections = read(&word, &table, 3).unwrap();
+        let facts = &sections[0].properties;
+        assert_eq!(facts.margins[4], Some(0));
+        assert_eq!(facts.margins[5], None);
+        assert_eq!(facts.columns, 2);
+        assert_eq!(facts.grid, 2);
+        assert_eq!(facts.line_pitch, Some(360));
+        assert_eq!(facts.page_format, "lowerRoman");
+        assert!(sections[0].incomplete_margins);
     }
 }

@@ -19,17 +19,22 @@ pub(super) struct Entry {
 }
 
 impl Headers<'_> {
-    pub fn attach_references(&self, sections: &mut [sections::Section]) {
-        let mut entries = self.entries.iter().peekable();
-        for (index, section) in sections.iter_mut().enumerate() {
-            let mut references = String::new();
-            while entries.peek().is_some_and(|entry| entry.section() == index) {
-                references.push_str(&entries.next().unwrap().reference());
-            }
-            // CT_SectPr: header/footer references precede the page geometry.
-            section.xml.insert_str("<w:sectPr>".len(), &references);
-        }
+    pub fn attach_references(&self, sections: &mut [sections::Section]) -> Result<(), String> {
+        attach_entries(&self.entries, sections)
     }
+}
+
+fn attach_entries(entries: &[Entry], sections: &mut [sections::Section]) -> Result<(), String> {
+    for entry in entries {
+        sections
+            .get_mut(entry.section())
+            .ok_or_else(|| unsupported("Word header references an absent section"))?
+            .attach_header_footer_reference(entry.section_reference())?;
+    }
+    Ok(())
+}
+
+impl Headers<'_> {
     pub fn build_parts(
         &self,
         formatting: &mut formatting::Formatting<'_>,
@@ -90,36 +95,36 @@ impl Headers<'_> {
 }
 
 impl Entry {
+    fn section_reference(&self) -> sections::HeaderFooterReference {
+        sections::HeaderFooterReference {
+            kind: if matches!(self.index % 6, 0 | 1 | 4) {
+                sections::HeaderFooterKind::Header
+            } else {
+                sections::HeaderFooterKind::Footer
+            },
+            variant: match self.index % 6 {
+                0 | 2 => sections::HeaderFooterVariant::Even,
+                1 | 3 => sections::HeaderFooterVariant::Default,
+                _ => sections::HeaderFooterVariant::First,
+            },
+            index: self.index,
+        }
+    }
     pub fn section(&self) -> usize {
         self.index / 6
     }
     pub fn kind(&self) -> &'static str {
-        if matches!(self.index % 6, 0 | 1 | 4) {
-            "header"
-        } else {
-            "footer"
-        }
+        self.section_reference().kind.as_str()
     }
+    #[cfg(test)]
     pub fn variant(&self) -> &'static str {
-        match self.index % 6 {
-            0 | 2 => "even",
-            1 | 3 => "default",
-            _ => "first",
-        }
+        self.section_reference().variant.as_str()
     }
     pub fn id(&self) -> String {
-        format!("rIdHf{}", self.index + 1)
+        self.section_reference().id()
     }
     pub fn filename(&self) -> String {
         format!("{}{}.xml", self.kind(), self.index + 1)
-    }
-    pub fn reference(&self) -> String {
-        format!(
-            r#"<w:{}Reference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="{}" r:id="{}"/>"#,
-            self.kind(),
-            self.variant(),
-            self.id()
-        )
     }
 }
 
@@ -318,6 +323,69 @@ mod tests {
         assert_eq!(entries[1].section(), 2);
         assert_eq!(&text[entries[1].text.clone()], "\r");
         assert_eq!(entries[1].variant(), "default");
+        let mut sections = [
+            sections::Section::for_test(1, 2),
+            sections::Section::for_test(2, 2),
+            sections::Section::for_test(3, 2),
+        ];
+        attach_entries(&entries, &mut sections).unwrap();
+        assert_eq!(sections[0].header_footer_references()[1].unwrap().index, 1);
+        assert!(sections[1]
+            .header_footer_references()
+            .iter()
+            .all(Option::is_none));
+        assert_eq!(sections[2].header_footer_references()[1].unwrap().index, 13);
+    }
+
+    #[test]
+    fn attaches_all_six_typed_slots_in_section_order() {
+        let entries: Vec<_> = (0..12)
+            .map(|index| Entry {
+                index,
+                cp: 0,
+                text: 0..0,
+            })
+            .collect();
+        let mut sections = [
+            sections::Section::for_test(1, 2),
+            sections::Section::for_test(2, 2),
+        ];
+        attach_entries(&entries, &mut sections).unwrap();
+        use sections::{
+            HeaderFooterKind::{Footer, Header},
+            HeaderFooterVariant::{Default, Even, First},
+        };
+        let expected = [
+            (Header, Even),
+            (Header, Default),
+            (Footer, Even),
+            (Footer, Default),
+            (Header, First),
+            (Footer, First),
+        ];
+        for (section_index, section) in sections.iter().enumerate() {
+            for (slot, reference) in section.header_footer_references().iter().enumerate() {
+                assert_eq!(reference.unwrap().index, section_index * 6 + slot);
+                assert_eq!(
+                    (reference.unwrap().kind, reference.unwrap().variant),
+                    expected[slot]
+                );
+            }
+            let xml = section.xml().unwrap();
+            let mut previous = 0;
+            for slot in 0..6 {
+                let index = section_index * 6 + slot;
+                let marker = format!("r:id=\"rIdHf{}\"", index + 1);
+                let position = xml.find(&marker).unwrap();
+                assert!(position >= previous);
+                previous = position;
+                assert!(position < xml.find("<w:type").unwrap());
+            }
+        }
+        let before = sections[0].xml().unwrap();
+        assert!(attach_entries(&entries[..1], &mut sections).is_err());
+        assert_eq!(sections[0].xml().unwrap(), before);
+        assert!(attach_entries(&entries[6..7], &mut sections[..1]).is_err());
     }
     #[test]
     fn rejects_broken_guards_unicode_boundaries_and_short_text() {
