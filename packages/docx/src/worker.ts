@@ -87,7 +87,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       requestedParseGeneration = requestedGeneration;
       await documentPull.reset();
       if (requestedGeneration !== parseGeneration) throw supersededParseError();
-      source.closeLegacy();
+      source.closeNative();
       host.run(() => host.disposeArchive());
       const bytes = new Uint8Array(req.data);
       // OOXML construction/cursor calls run under `host.run`; native calls use
@@ -95,7 +95,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
       // correlated pull session; complete body units, never a monolithic model
       // JSON value, cross to Window and require consumer ACK.
       if (req.source) {
-        await source.openLegacy(bytes, req.source);
+        await source.openNative(bytes, req.source);
         if (requestedGeneration !== parseGeneration) {
           throw supersededParseError();
         }
@@ -152,7 +152,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest | PullSessionCommand<numbe
     if (requestedParseGeneration !== undefined && requestedParseGeneration === parseGeneration) {
       await documentPull.reset().catch(() => undefined);
       if (requestedParseGeneration === parseGeneration) {
-        try { source.closeLegacy(); } catch {}
+        try { source.closeNative(); } catch {}
       }
     }
     const res: WorkerResponse = { type: 'error', id, ...serializeWorkerError(err) };

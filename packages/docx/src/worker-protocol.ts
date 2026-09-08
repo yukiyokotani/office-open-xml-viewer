@@ -12,6 +12,7 @@ import type {
 import type { OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
 import type { DocxElementContextOptions } from './element-context';
 import type { DocxElementContext, DocxPagePoint } from './selection-context';
+import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
 
 /** Lightweight summary returned by the render worker's `parse` — everything
  *  the main-thread proxy needs for its synchronous getters. The full model
@@ -104,7 +105,7 @@ export type RenderWorkerRequest =
   // changes measured widths, so each combination is a genuinely different
   // pagination with its own page count. Omitted means the document's default
   // view, which is what every load selected before these existed.
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; useGoogleFonts?: boolean; defaultCurrentDateMs: number; currentDateMs?: number; showTrackedChanges?: boolean; renderers?: WorkerRendererDescriptors; progressiveLayout?: boolean }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; source?: LegacyDocDirectSourceDescriptor; useGoogleFonts?: boolean; defaultCurrentDateMs: number; currentDateMs?: number; showTrackedChanges?: boolean; renderers?: WorkerRendererDescriptors; progressiveLayout?: boolean }
   | { type: 'selectLayoutView'; id: number; currentDateMs: number; showTrackedChanges: boolean }
   | { type: 'renderPage'; id: number; pageIndex: number; opts: WireRenderPageOptions }
   // IX6 — collect a page's text-run geometry WITHOUT transferring a bitmap. The

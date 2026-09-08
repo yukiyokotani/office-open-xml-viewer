@@ -2065,6 +2065,11 @@ const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?
 
 const CONVERSION_MODULE = '@silurus/ooxml-core/internal/legacy-office-conversion';
 const CONVERSION_BINDER = 'bindLegacyOfficeConversionSignal';
+const DOC_INPUT_RESOLVER = 'resolveDocDocumentInput';
+const LEGACY_DOC_SOURCE_MODULE = '@silurus/ooxml-core/internal/legacy-doc-source';
+const LEGACY_DOC_ENGINE_MODULE = '@silurus/ooxml-legacy-converter/internal/direct-doc-engine';
+const WORKER_SOURCE_OWNER_FILE = `${DOCX_SOURCE}/internal/worker-document-source.ts`;
+const WORKER_SOURCE_OWNER_MODULE = './internal/worker-document-source.js';
 const CONVERSION_TYPES = new Set([
   'LegacyOfficeConversionFailureReason', 'LegacyOfficeConversionInput',
   'LegacyOfficeConversionOptions', 'LegacyOfficeConversionRecord',
@@ -2088,6 +2093,116 @@ function hasConversionImport(source, name) {
     && statement.importClause?.namedBindings
     && ts.isNamedImports(statement.importClause.namedBindings)
     && statement.importClause.namedBindings.elements.some(node => namedConversionImport(node, name)));
+}
+
+function exactNamedImport(node, module, name, typeOnly) {
+  if (!ts.isImportSpecifier(node) || node.propertyName || node.name.text !== name) return false;
+  const clause = node.parent.parent;
+  const declaration = clause.parent;
+  return ts.isImportClause(clause) && ts.isImportDeclaration(declaration)
+    && ts.isStringLiteral(declaration.moduleSpecifier)
+    && declaration.moduleSpecifier.text === module
+    && (typeOnly ? (node.isTypeOnly || clause.isTypeOnly) : (!node.isTypeOnly && !clause.isTypeOnly));
+}
+
+function hasExactNamedImport(source, module, name, typeOnly) {
+  return source.statements.some(statement => ts.isImportDeclaration(statement)
+    && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+    && statement.importClause.namedBindings.elements.some(node => exactNamedImport(node, module, name, typeOnly)));
+}
+
+function inTypePosition(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (ts.isImportSpecifier(current)) return true;
+    if (ts.isTypeNode(current)) return true;
+    if (ts.isStatement(current) || ts.isExpression(current)) return false;
+  }
+  return false;
+}
+
+function isExactDirectDocOpenCall(call) {
+  if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)
+    || call.expression.name.text !== 'openLegacyDocSource'
+    || !ts.isIdentifier(call.expression.expression)
+    || call.expression.expression.text !== 'engine'
+    || call.arguments.length !== 3) return false;
+  const returned = call.parent;
+  const block = returned.parent;
+  const arrow = block.parent;
+  if (!ts.isReturnStatement(returned) || returned.expression !== call
+    || !ts.isBlock(block) || block.statements.length !== 2
+    || block.statements[1] !== returned || !ts.isArrowFunction(arrow)) return false;
+  const statement = block.statements[0];
+  if (!ts.isVariableStatement(statement)
+    || !(statement.declarationList.flags & ts.NodeFlags.Const)
+    || statement.declarationList.declarations.length !== 1) return false;
+  const declaration = statement.declarationList.declarations[0];
+  return ts.isIdentifier(declaration.name) && declaration.name.text === 'engine'
+    && ts.isVariableDeclaration(declaration)
+    && declaration.initializer && ts.isAwaitExpression(declaration.initializer)
+    && ts.isCallExpression(declaration.initializer.expression)
+    && declaration.initializer.expression.expression.kind === ts.SyntaxKind.ImportKeyword
+    && declaration.initializer.expression.arguments.length === 1
+    && ts.isStringLiteral(declaration.initializer.expression.arguments[0])
+    && declaration.initializer.expression.arguments[0].text === LEGACY_DOC_ENGINE_MODULE;
+}
+
+function isDirectDocAcquisitionIdentifier(node, file, source) {
+  const parent = node.parent;
+  if (node.text === 'LegacyDocDirectSourceDescriptor') {
+    if (!new Set([
+      `${DOCX_SOURCE}/document.ts`, `${DOCX_SOURCE}/types.ts`,
+      `${DOCX_SOURCE}/worker-protocol.ts`, WORKER_SOURCE_OWNER_FILE,
+    ]).has(file)) return false;
+    if (ts.isImportSpecifier(parent)) {
+      return exactNamedImport(parent, LEGACY_DOC_SOURCE_MODULE, node.text, true);
+    }
+    if (inTypePosition(node)
+      && hasExactNamedImport(source, LEGACY_DOC_SOURCE_MODULE, node.text, true)) return true;
+    if (file === `${DOCX_SOURCE}/types.ts` && ts.isImportTypeNode(parent)
+      && parent.qualifier === node && ts.isLiteralTypeNode(parent.argument)
+      && ts.isStringLiteral(parent.argument.literal)
+      && parent.argument.literal.text === LEGACY_DOC_SOURCE_MODULE) return true;
+    return false;
+  }
+  if (file === WORKER_SOURCE_OWNER_FILE) {
+    if (['LegacyDocNativeDocument', 'OwnedLegacyDocSource'].includes(node.text)) {
+      return (ts.isImportSpecifier(parent)
+        && exactNamedImport(parent, LEGACY_DOC_ENGINE_MODULE, node.text, true))
+        || (inTypePosition(node)
+          && hasExactNamedImport(source, LEGACY_DOC_ENGINE_MODULE, node.text, true));
+    }
+    if (node.text === 'openLegacyDocSource') {
+      const call = parent.parent;
+      return ts.isPropertyAccessExpression(parent) && parent.name === node
+        && ts.isIdentifier(parent.expression) && parent.expression.text === 'engine'
+        && ts.isCallExpression(call) && call.expression === parent
+        && isExactDirectDocOpenCall(call);
+    }
+    if (node.text === 'WorkerDocumentSourceOwner') {
+      return ts.isClassDeclaration(parent) && parent.name === node;
+    }
+  }
+  if ((file === `${DOCX_SOURCE}/worker.ts` || file === `${DOCX_SOURCE}/render-worker.ts`)
+    && node.text === 'WorkerDocumentSourceOwner') {
+    return (ts.isImportSpecifier(parent)
+      && exactNamedImport(parent, WORKER_SOURCE_OWNER_MODULE, node.text, false))
+      || (ts.isNewExpression(parent) && parent.expression === node
+        && hasExactNamedImport(source, WORKER_SOURCE_OWNER_MODULE, node.text, false));
+  }
+  if (file === `${DOCX_SOURCE}/document.ts`) {
+    if (node.text === 'legacyConversion' && ts.isPropertyAccessExpression(parent)
+      && parent.name === node && propertyAccess(parent, 'opts', 'legacyConversion')) {
+      const call = parent.parent;
+      return ts.isCallExpression(call) && ts.isIdentifier(call.expression)
+        && call.expression.text === DOC_INPUT_RESOLVER
+        && hasConversionImport(source, DOC_INPUT_RESOLVER)
+        && call.arguments.length === 3 && call.arguments[1] === parent
+        && ts.isIdentifier(call.arguments[0]) && call.arguments[0].text === 'buffer'
+        && propertyAccess(call.arguments[2], 'opts', 'password');
+    }
+  }
+  return false;
 }
 
 function propertyAccess(node, object, name) {
@@ -2117,11 +2232,13 @@ function hasLocalConversionBinding(node, source) {
   return false;
 }
 
-// A legacy *file* is normalized into OOXML before acquisition. That public API
-// is not an old layout/paint algorithm. Recognize only the reviewed syntax at
+// A legacy file is resolved to either OOXML bytes or the native DOC model input
+// before layout acquisition. Neither route selects an old layout algorithm.
+// Recognize only the reviewed syntax at
 // the three acquisition adapters and the unaliased public re-export; the same
 // names in layout, flags, other calls or local declarations remain forbidden.
 function isInputConversionIdentifier(node, file, source) {
+  if (isDirectDocAcquisitionIdentifier(node, file, source)) return true;
   const parent = node.parent;
   if (file === `${DOCX_SOURCE}/index.ts` && ts.isExportSpecifier(parent)
     && parent.name === node && !parent.propertyName) {

@@ -24,7 +24,7 @@ describe('WorkerDocumentSourceOwner', () => {
     const owner = new WorkerDocumentSourceOwner(host.value, open);
     const signal = new AbortController().signal;
 
-    expect(await owner.openLegacy(new Uint8Array([1, 2, 3]), descriptor, signal)).toBe(native);
+    expect(await owner.openNative(new Uint8Array([1, 2, 3]), descriptor, signal)).toBe(native);
     expect(open).toHaveBeenCalledExactlyOnceWith(new Uint8Array([1, 2, 3]), descriptor, signal);
     expect(host.run).not.toHaveBeenCalled();
     expect(owner.kind).toBe('legacy-doc');
@@ -32,7 +32,7 @@ describe('WorkerDocumentSourceOwner', () => {
     expect(owner.execute((current) => current.extract_image('legacy-doc/image/1')))
       .toEqual(new Uint8Array([9]));
     expect(closeArchive).not.toHaveBeenCalled();
-    owner.closeLegacy(); owner.closeLegacy();
+    owner.closeNative(); owner.closeNative();
     expect(closeArchive).toHaveBeenCalledTimes(1);
   });
 
@@ -55,7 +55,7 @@ describe('WorkerDocumentSourceOwner', () => {
     const failure = new Error('native failed');
     const host = hostFor(null);
     const owner = new WorkerDocumentSourceOwner(host.value, vi.fn(async () => { throw failure; }));
-    await expect(owner.openLegacy(new Uint8Array(), descriptor)).rejects.toBe(failure);
+    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toBe(failure);
     expect(owner.cursor()).toBeNull();
     expect(host.run).not.toHaveBeenCalled();
   });
@@ -65,16 +65,16 @@ describe('WorkerDocumentSourceOwner', () => {
     const closeArchive = vi.fn();
     const open = vi.fn(async () => ({ archive: native, sourceByteLength: 0, closeArchive }));
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    await owner.openLegacy(new Uint8Array(), descriptor);
+    await owner.openNative(new Uint8Array(), descriptor);
     expect(() => owner.ooxml('resource usage')).toThrow(
       'resource usage is unsupported for direct legacy DOC sources',
     );
-    await expect(owner.openLegacy(new Uint8Array(), descriptor)).rejects.toThrow('already loaded');
+    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toThrow('already loaded');
     expect(open).toHaveBeenCalledTimes(1);
-    owner.closeLegacy();
-    await owner.openLegacy(new Uint8Array(), descriptor);
+    owner.closeNative();
+    await owner.openNative(new Uint8Array(), descriptor);
     expect(open).toHaveBeenCalledTimes(2);
-    owner.closeLegacy();
+    owner.closeNative();
     expect(closeArchive).toHaveBeenCalledTimes(2);
   });
 
@@ -83,9 +83,9 @@ describe('WorkerDocumentSourceOwner', () => {
     const pending = new Promise<OwnedLegacyDocSource>((accept) => { resolve = accept; });
     const open = vi.fn(() => pending);
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    const first = owner.openLegacy(new Uint8Array([1]), descriptor);
-    await expect(owner.openLegacy(new Uint8Array([2]), descriptor)).rejects.toThrow('opening');
-    owner.closeLegacy();
+    const first = owner.openNative(new Uint8Array([1]), descriptor);
+    await expect(owner.openNative(new Uint8Array([2]), descriptor)).rejects.toThrow('opening');
+    owner.closeNative();
     const closeArchive = vi.fn();
     resolve({ archive: archive(), sourceByteLength: 1, closeArchive });
     await expect(first).rejects.toThrow('superseded');
@@ -97,19 +97,19 @@ describe('WorkerDocumentSourceOwner', () => {
     const resolvers: ((source: OwnedLegacyDocSource) => void)[] = [];
     const open = vi.fn(() => new Promise<OwnedLegacyDocSource>((resolve) => { resolvers.push(resolve); }));
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    const oldOpen = owner.openLegacy(new Uint8Array([1]), descriptor);
-    owner.closeLegacy();
-    const newOpen = owner.openLegacy(new Uint8Array([2]), descriptor);
+    const oldOpen = owner.openNative(new Uint8Array([1]), descriptor);
+    owner.closeNative();
+    const newOpen = owner.openNative(new Uint8Array([2]), descriptor);
     const oldClose = vi.fn();
     resolvers[0]!({ archive: archive(), sourceByteLength: 1, closeArchive: oldClose });
     await expect(oldOpen).rejects.toThrow('superseded');
-    await expect(owner.openLegacy(new Uint8Array([3]), descriptor)).rejects.toThrow('opening');
+    await expect(owner.openNative(new Uint8Array([3]), descriptor)).rejects.toThrow('opening');
     const current = archive();
     const newClose = vi.fn();
     resolvers[1]!({ archive: current, sourceByteLength: 1, closeArchive: newClose });
     await expect(newOpen).resolves.toBe(current);
     expect(oldClose).toHaveBeenCalledTimes(1);
-    owner.closeLegacy();
+    owner.closeNative();
     expect(newClose).toHaveBeenCalledTimes(1);
   });
 
@@ -125,12 +125,12 @@ describe('WorkerDocumentSourceOwner', () => {
       })
       .mockResolvedValueOnce({ archive: native, sourceByteLength: 0, closeArchive });
     const owner = new WorkerDocumentSourceOwner(hostFor(null).value, open);
-    await expect(owner.openLegacy(new Uint8Array(), descriptor)).rejects.toThrow('failed');
-    await expect(owner.openLegacy(new Uint8Array(), descriptor, controller.signal))
+    await expect(owner.openNative(new Uint8Array(), descriptor)).rejects.toThrow('failed');
+    await expect(owner.openNative(new Uint8Array(), descriptor, controller.signal))
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(closeArchive).toHaveBeenCalledTimes(1);
-    await expect(owner.openLegacy(new Uint8Array(), descriptor)).resolves.toBe(native);
-    owner.closeLegacy();
+    await expect(owner.openNative(new Uint8Array(), descriptor)).resolves.toBe(native);
+    owner.closeNative();
     expect(closeArchive).toHaveBeenCalledTimes(2);
   });
 });

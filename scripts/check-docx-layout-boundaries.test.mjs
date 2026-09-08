@@ -431,9 +431,9 @@ test('accepts legacy file conversion only at the OOXML acquisition boundary', ()
   write(root, 'packages/docx/src/viewer.ts', conversionViewer);
   write(root, 'packages/docx/src/scroll-viewer.ts', conversionViewer);
   write(root, 'packages/docx/src/document.ts', `
-import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { resolveDocDocumentInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
 async function load(buffer, opts) {
-  return resolveOfficeInputWithOptionalConversion(buffer, 'docx', opts.legacyConversion, opts.password);
+  return resolveDocDocumentInput(buffer, opts.legacyConversion, opts.password);
 }
 `);
   write(root, 'packages/docx/src/index.ts', `
@@ -441,6 +441,93 @@ export { LegacyOfficeConversionError, type LegacyOfficeConversionOptions, type L
 `);
   const result = runChecker(root, '--final');
   assert.equal(result.status, 0, result.output);
+});
+
+test('accepts exact native DOC acquisition contracts without exempting layout', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-native-doc-');
+  write(root, 'packages/docx/src/types.ts', `
+export type Request = { source?: import('@silurus/ooxml-core/internal/legacy-doc-source').LegacyDocDirectSourceDescriptor };
+`);
+  write(root, 'packages/docx/src/worker-protocol.ts', `
+import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
+export type Request = { source?: LegacyDocDirectSourceDescriptor };
+`);
+  write(root, 'packages/docx/src/internal/worker-document-source.ts', `
+import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
+import type { LegacyDocNativeDocument, OwnedLegacyDocSource } from '@silurus/ooxml-legacy-converter/internal/direct-doc-engine';
+type OpenNativeDocument = (descriptor: LegacyDocDirectSourceDescriptor) => Promise<OwnedLegacyDocSource>;
+const openNativeDocument: OpenNativeDocument = async (descriptor) => {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  return engine.openLegacyDocSource(new Uint8Array(), descriptor, undefined);
+};
+export class WorkerDocumentSourceOwner {
+  async openNative(descriptor: LegacyDocDirectSourceDescriptor): Promise<LegacyDocNativeDocument> {
+    return (await openNativeDocument(descriptor)).archive;
+  }
+  closeNative() {}
+}
+`);
+  const result = runChecker(root, '--final');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('rejects native DOC contract aliases, value imports, wrong modules and arbitrary calls', () => {
+  const cases = [
+    ['worker-protocol.ts', "import { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';"],
+    ['worker-protocol.ts', "import type { LegacyDocDirectSourceDescriptor as Source } from '@silurus/ooxml-core/internal/legacy-doc-source';"],
+    ['worker-protocol.ts', "import type { LegacyDocDirectSourceDescriptor } from './alternate-layout';"],
+    ['layout/native.ts', "import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source'; export type Input = LegacyDocDirectSourceDescriptor;"],
+    ['internal/worker-document-source.ts', 'alternate.openLegacyDocSource();'],
+    ['internal/worker-document-source.ts', `
+async function approved(bytes, descriptor, signal) {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  const saved = engine.openLegacyDocSource;
+  return saved(bytes, descriptor, signal);
+}`],
+    ['internal/worker-document-source.ts', `
+async function approved(bytes, descriptor, signal) {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  function shadow(engine) { return engine.openLegacyDocSource(bytes, descriptor, signal); }
+  return shadow(engine);
+}`],
+    ['internal/worker-document-source.ts', `
+async function approved(bytes, descriptor, signal) {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  return engine.openLegacyDocSource(bytes, descriptor, signal);
+  { const engine = alternate; }
+}`],
+    ['internal/worker-document-source.ts', `
+async function approved(bytes, descriptor, signal) {
+  let engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  engine = alternate;
+  return engine.openLegacyDocSource(bytes, descriptor, signal);
+}`],
+    ['internal/worker-document-source.ts', `
+async function approved() {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+}
+engine.openLegacyDocSource(bytes, descriptor, signal);
+`],
+    ['internal/worker-document-source.ts', `
+async function approved(bytes, descriptor) {
+  const engine = await import('@silurus/ooxml-legacy-converter/internal/direct-doc-engine');
+  return engine.openLegacyDocSource(bytes, descriptor);
+}`],
+    ['worker.ts', 'alternate.openLegacy();'],
+    ['document.ts', `
+import { resolveDocDocumentInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+resolveDocDocumentInput(buffer, 'docx', opts.legacyConversion, opts.password);
+`],
+    ['document.ts', `
+import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+resolveOfficeInputWithOptionalConversion(buffer, opts.legacyConversion, opts.password);
+`],
+  ];
+  for (const [file, source] of cases) {
+    const root = initializeCanonicalFixture('docx-layout-boundary-native-doc-abuse-');
+    write(root, `packages/docx/src/${file}`, `${source}\n`);
+    expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', `${file}: ${source}`, '--final');
+  }
 });
 
 test('accepts direct legacy conversion contracts only as unaliased core type re-exports', () => {

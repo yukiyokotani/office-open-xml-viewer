@@ -21,7 +21,8 @@ import {
   type OoxmlResourceMetrics,
   workerRendererDescriptors,
 } from '@silurus/ooxml-core';
-import { resolveOfficeInputWithOptionalConversion } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import { resolveDocDocumentInput } from '@silurus/ooxml-core/internal/legacy-office-conversion';
+import type { LegacyDocDirectSourceDescriptor } from '@silurus/ooxml-core/internal/legacy-doc-source';
 import {
   deserializeWorkerError,
   disposeRejectedLoad,
@@ -291,6 +292,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+function nativeDocAbortError(): Error {
+  const error = new Error('legacy DOC source was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 /** Identity-stable empties for the two anchor projections.
  *  `commentAnchorRanges()` is polled per draw and consumers cache on identity
  *  (`DocxScrollViewer._hasDisplayableComments`), so returning a fresh `[]` each
@@ -358,6 +365,8 @@ export class DocxDocument {
    * order; only this generation may atomically install its variant + metadata. */
   private _layoutViewGeneration = 0;
   private _mode: 'main' | 'worker' = 'main';
+  private _sourceKind: 'ooxml' | 'legacy-doc' = 'ooxml';
+  private _nativeDocSignalCleanup: () => void = () => undefined;
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
   private _chartEx: ChartExRenderer | undefined;
@@ -462,12 +471,14 @@ export class DocxDocument {
     // Resolve the container on the main thread before spinning up the worker.
     // Container errors remain typed OoxmlError instances here; `instanceof`
     // would not survive the worker boundary.
-    buffer = toArrayBuffer(await resolveOfficeInputWithOptionalConversion(
+    const resolvedInput = await resolveDocDocumentInput(
       buffer,
-      'docx',
       opts.legacyConversion,
       opts.password,
-    ));
+    );
+    buffer = toArrayBuffer(resolvedInput.bytes);
+    const nativeSource = resolvedInput.kind === 'legacy-doc' ? resolvedInput.source : undefined;
+    const nativeSignal = resolvedInput.kind === 'legacy-doc' ? resolvedInput.signal : undefined;
     metrics.setSourceBytes(buffer.byteLength);
     metrics.checkpoint('container ready');
     // The render worker is reachable only through this dynamic import, so
@@ -481,6 +492,7 @@ export class DocxDocument {
     let doc: DocxDocument | undefined;
     try {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+      doc._sourceKind = resolvedInput.kind;
       doc._metrics = metrics;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
@@ -499,7 +511,7 @@ export class DocxDocument {
       // In worker mode the worker preloads fonts before paginating (pagination
       // measures text), so the flag is forwarded; in main mode fonts are loaded
       // here after parse, before the lazy first pagination.
-      await doc._parse(
+      await doc._bindNativeDocSignal(() => doc!._parse(
         buffer,
         resourceOptions.policy,
         mode === 'worker' ? !!opts.useGoogleFonts : false,
@@ -518,7 +530,9 @@ export class DocxDocument {
               settled: false,
             }
           : undefined,
-      );
+        nativeSource,
+      ), nativeSignal);
+      doc._throwIfNativeDocAborted(nativeSignal);
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
         console.warn(
@@ -555,10 +569,10 @@ export class DocxDocument {
       }
       doc._tiff = doc._mode === 'worker' ? undefined : opts.tiff;
       if (doc._mode === 'main' && opts.useGoogleFonts && doc._document) {
-        doc._googleFontFaces = await preloadGoogleFonts(
+        doc._googleFontFaces = await doc._awaitNativeDoc(preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
           DOCX_GOOGLE_FONTS,
-        );
+        ), nativeSignal, unloadGoogleFonts);
       }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
       // the worker's zip-entry extraction) before the lazy first pagination, so
@@ -566,14 +580,18 @@ export class DocxDocument {
       // inside the worker (before it paginates); here it runs on the main thread.
       if (doc._mode === 'main' && doc._document?.embeddedFonts?.length) {
         const loadingDocument = doc;
-        doc._embeddedFontFaces = await loadEmbeddedFonts(
+        doc._embeddedFontFaces = await doc._awaitNativeDoc(loadEmbeddedFonts(
           doc._document,
           (p) => loadingDocument.getFontBytes(p),
-        );
+        ), nativeSignal, unregisterEmbeddedFonts);
       }
       let localMetrics: Awaited<ReturnType<typeof loadDocxLocalFontMetrics>> | undefined;
       if (doc._mode === 'main' && doc._document) {
-        localMetrics = await loadDocxLocalFontMetrics(doc._document);
+        localMetrics = await doc._awaitNativeDoc(
+          loadDocxLocalFontMetrics(doc._document),
+          nativeSignal,
+          (late) => unloadLocalFontMetrics(late.faces),
+        );
         doc._localMetricFontFaces = localMetrics.faces;
       }
       // Equations are converted + rasterized before pagination (which reads their
@@ -582,7 +600,10 @@ export class DocxDocument {
       // mode performs the same preparation with the renderer's imported engine.
       let preparedMath;
       if (doc._mode === 'main' && opts.math && doc._document && documentHasMath(doc._document)) {
-        preparedMath = await prepareMathRuns(doc._document, opts.math);
+        preparedMath = await doc._awaitNativeDoc(
+          prepareMathRuns(doc._document, opts.math),
+          nativeSignal,
+        );
       }
       if (doc._mode === 'main' && doc._document && doc._source) {
         const layoutDocument = doc;
@@ -747,14 +768,14 @@ export class DocxDocument {
               'onLayoutComplete', opts.onLayoutComplete, layoutError,
             );
           });
-          await firstPublication.promise;
+          await doc._awaitNativeDoc(firstPublication.promise, nativeSignal);
         } else if (deferrable && (opts.sliceLayout || opts.onLayoutProgress)) {
-          const layout = await layoutDocumentInputAsync(
+          const layout = await doc._awaitNativeDoc(layoutDocumentInputAsync(
             doc._source.bodyLayoutInput,
             services,
             layoutOptions,
             scheduler,
-          );
+          ), nativeSignal);
           retained.layoutVariants.prime(layoutOptions, layout);
         } else {
           // Build the variant that will be rendered, not the default one.
@@ -765,12 +786,16 @@ export class DocxDocument {
       // after the parse response. Telemetry is strictly best-effort: a worker
       // failure or a silent worker may omit the newest counters, but must not
       // turn an otherwise successful load into a rejection or an endless wait.
-      await doc._resourceUsage(
-        opts.workerTimeoutMs ?? OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
-      ).then(
-        (usage) => metrics.observeUsage(usage),
-        () => undefined,
-      );
+      if (doc._sourceKind === 'ooxml') {
+        await doc._resourceUsage(
+          opts.workerTimeoutMs ?? OOXML_RESOURCE_METRICS_PROBE_TIMEOUT_MS,
+        ).then(
+          (usage) => metrics.observeUsage(usage),
+          () => undefined,
+        );
+        doc._throwIfNativeDocAborted(nativeSignal);
+      }
+      doc._throwIfNativeDocAborted(nativeSignal);
       metrics.checkpoint('model and layout ready');
       metrics.succeed({ pages: doc.pageCount });
       return doc;
@@ -793,6 +818,7 @@ export class DocxDocument {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: WorkerProgressiveLoad,
+    nativeSource?: LegacyDocDirectSourceDescriptor,
   ): Promise<void> {
     if (progressive) {
       await this._parseProgressively(
@@ -803,14 +829,15 @@ export class DocxDocument {
         onUsage,
         renderers,
         progressive,
+        nativeSource,
       );
       return;
     }
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
-          : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}), useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, resourcePolicy, ...(nativeSource ? { source: nativeSource } : {}) } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
     );
@@ -846,6 +873,71 @@ export class DocxDocument {
       this._meta?.comments ?? this._document?.comments ?? [],
       this._meta?.revisions ?? this._document?.revisions ?? [],
     );
+  }
+
+  private _bindNativeDocSignal<T>(start: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return start();
+    if (signal.aborted) return Promise.reject(nativeDocAbortError());
+    this._nativeDocSignalCleanup();
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+      const onAbort = (): void => {
+        this._nativeDocSignalCleanup();
+        try { this.destroy(); } catch { try { this._worker.terminate(); } catch {} }
+        if (!settled) reject(nativeDocAbortError());
+      };
+      this._nativeDocSignalCleanup = () => {
+        cleanup();
+        this._nativeDocSignalCleanup = () => undefined;
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      const pending = start();
+      pending.then(
+        (value) => { settled = true; resolve(value); },
+        (error: unknown) => {
+          settled = true;
+          this._nativeDocSignalCleanup();
+          reject(error);
+        },
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private _throwIfNativeDocAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) throw nativeDocAbortError();
+  }
+
+  private _awaitNativeDoc<T>(
+    pending: Promise<T>,
+    signal: AbortSignal | undefined,
+    disposeLate?: (value: T) => void,
+  ): Promise<T> {
+    if (!signal) return pending;
+    return new Promise<T>((resolve, reject) => {
+      let aborted = signal.aborted;
+      const onAbort = (): void => {
+        aborted = true;
+        reject(nativeDocAbortError());
+      };
+      if (!aborted) signal.addEventListener('abort', onAbort, { once: true });
+      else reject(nativeDocAbortError());
+      pending.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          if (aborted) {
+            try { disposeLate?.(value); } catch {}
+            return;
+          }
+          resolve(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', onAbort);
+          if (!aborted) reject(error);
+        },
+      );
+    });
   }
 
   /**
@@ -1097,6 +1189,7 @@ export class DocxDocument {
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
     progressive: WorkerProgressiveLoad,
+    nativeSource: LegacyDocDirectSourceDescriptor | undefined,
   ): Promise<void> {
     this._progressive = progressive;
     this._layoutAbort = progressive.abort;
@@ -1109,6 +1202,7 @@ export class DocxDocument {
           id,
           data: buffer,
           resourcePolicy,
+          ...(nativeSource ? { source: nativeSource } : {}),
           useGoogleFonts,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
@@ -1179,6 +1273,7 @@ export class DocxDocument {
   }
 
   destroy(): void {
+    this._nativeDocSignalCleanup();
     // Stop background layout first: without this, a destroyed document's
     // remaining pagination kept consuming main-thread slices to completion for
     // a viewer that no longer exists.
@@ -1282,6 +1377,9 @@ export class DocxDocument {
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     const metrics = this._metrics;
     if (!metrics) throw new Error('Document not loaded');
+    if (this._sourceKind === 'legacy-doc') {
+      throw new Error('resource usage is unsupported for direct legacy DOC sources');
+    }
     return readLatestOoxmlResourceMetrics(metrics, (timeoutMs) => this._resourceUsage(timeoutMs));
   }
 
