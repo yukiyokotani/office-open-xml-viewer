@@ -2,6 +2,7 @@
 //! unsupported body owners fail closed while incremental model coverage lands.
 
 use super::{unsupported, AcquiredDoc, Fields, Token};
+use docx_model::paragraph_breaks::{visit_para_on_page_breaks, ParaPiece};
 use docx_model::{BodyElement, BreakType, DocRun, Document, DocumentSettings};
 
 mod payload;
@@ -10,16 +11,9 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
     if max_bytes == 0 {
         return Err("OUTPUT_TOO_LARGE".into());
     }
-    if facts.sections.len() > 1 {
-        return Err(unsupported(
-            "direct DOC model does not yet support multiple sections",
-        ));
-    }
     // MS-DOC 2.3.3 / 2.8.22: the first six header-document stories are
     // footnote/endnote separators, not page headers. Only authored nonempty
-    // header/footer ranges produce entries; an explicitly blank paragraph DOES
-    // produce an entry and must not be discarded. No entries in any section
-    // means there is no earlier header/footer to inherit either.
+    // header/footer ranges produce entries; an explicitly blank paragraph does.
     if facts
         .headers
         .as_ref()
@@ -40,8 +34,8 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
         .document_settings
         .as_ref()
         .is_some_and(|settings| settings.even_and_odd_headers);
-    let section = match facts.sections.first() {
-        Some(section) => section.project_final(0, even_and_odd)?,
+    let section = match facts.sections.last() {
+        Some(section) => section.project_final(facts.sections.len() - 1, even_and_odd)?,
         None => {
             return Err(unsupported(
                 "direct DOC model requires resolved section facts",
@@ -70,126 +64,208 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
-    let paragraphs =
-        super::tokenize_with_fields(&facts.story.text, &mut Fields::default(), 0, true);
     let mut body = Vec::new();
+    let chunks = super::sections::split_story(&facts.story.text, &facts.sections)?;
+    let mut fields = Fields::default();
+    for (section_index, chunk) in chunks.iter().enumerate() {
+        let ending = (section_index + 1 < chunks.len())
+            .then(|| facts.sections[section_index].project_ending(section_index))
+            .transpose()?;
+        let base_cp = if section_index == 0 {
+            0
+        } else {
+            facts.sections[section_index - 1].end
+        };
+        let mut paragraphs = super::tokenize_with_fields(
+            chunk,
+            &mut fields,
+            base_cp,
+            section_index + 1 == chunks.len(),
+        );
+        if section_index + 1 < chunks.len() {
+            // split_story consumed the section-break form feed. The paragraph
+            // mark formatting remains owned by the preceding physical CP.
+            paragraphs.last_mut().expect("opening paragraph").end_cp =
+                facts.sections[section_index].end - 1;
+        }
 
-    for source in paragraphs {
-        if source.mark == '\u{7}' {
-            return Err(unsupported("direct DOC model does not yet support tables"));
-        }
-        let (_, mark_fc, mark_piece) = facts
-            .story
-            .position(source.end_cp)
-            .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
-        let style = facts.formatting.paragraph_style(mark_fc)?;
-        if facts
-            .formatting
-            .table_properties(mark_fc, mark_piece.prm, &facts.story.prcs)?
-            .depth()?
-            != 0
-        {
-            return Err(unsupported("direct DOC model does not yet support tables"));
-        }
-        let direct =
-            facts
+        let paragraph_count = paragraphs.len();
+        for (paragraph_index, source) in paragraphs.into_iter().enumerate() {
+            if source.mark == '\u{7}' {
+                return Err(unsupported("direct DOC model does not yet support tables"));
+            }
+            let (_, mark_fc, mark_piece) = facts
+                .story
+                .position(source.end_cp)
+                .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
+            let style = facts.formatting.paragraph_style(mark_fc)?;
+            if facts
                 .formatting
-                .direct_paragraph(style, mark_fc, mark_piece.prm, &facts.story.prcs)?;
-        if direct.numbering.is_some() {
-            return Err(unsupported(
-                "direct DOC model does not yet support numbered paragraphs",
-            ));
-        }
-        let mut paragraph = direct.paragraph;
-        budget.paragraph(&paragraph)?;
-        // The empty template owns its own fonts/tabs/borders. Account for it
-        // independently, even though it is released after this source paragraph.
-        budget.paragraph(&paragraph)?;
-        let base = paragraph.clone();
-        let mut emitted_content = false;
-        let mut emitted_segment = false;
+                .table_properties(mark_fc, mark_piece.prm, &facts.story.prcs)?
+                .depth()?
+                != 0
+            {
+                return Err(unsupported("direct DOC model does not yet support tables"));
+            }
+            let direct = facts.formatting.direct_paragraph(
+                style,
+                mark_fc,
+                mark_piece.prm,
+                &facts.story.prcs,
+            )?;
+            if direct.numbering.is_some() {
+                return Err(unsupported(
+                    "direct DOC model does not yet support numbered paragraphs",
+                ));
+            }
+            let mut paragraph = direct.paragraph;
+            budget.paragraph(&paragraph)?;
 
-        for (token, cp) in source.tokens {
-            match token {
-                Token::Text(text) => {
-                    super::visit_text_runs(
-                        &text,
-                        cp,
-                        &facts.story,
-                        &mut Some(&mut facts.formatting),
-                        |formatting, fc, prm| {
-                            formatting.direct_text_run(
-                                style,
-                                fc,
-                                prm,
-                                &facts.story.prcs,
-                                String::new(),
-                            )
-                        },
-                        |part, run| {
-                            if let Some(mut run) = run.flatten() {
-                                budget.text(&mut paragraph.runs, &mut run, part)?;
-                                emitted_content = true;
-                            }
-                            Ok(())
-                        },
-                    )?;
-                }
-                Token::Tab => {
-                    emitted_content |= push_control_text(
-                        &mut paragraph,
-                        &mut facts,
-                        style,
-                        cp,
-                        "\t",
-                        &mut budget,
-                    )?;
-                }
-                Token::LineBreak => {
-                    budget.push(
-                        &mut paragraph.runs,
-                        DocRun::Break {
-                            break_type: BreakType::Line,
-                        },
-                    )?;
-                    emitted_content = true;
-                }
-                Token::PageBreak | Token::ColumnBreak => {
-                    if !paragraph.runs.is_empty() {
-                        budget.push(&mut body, BodyElement::Paragraph(Box::new(paragraph)))?;
-                        budget.paragraph(&base)?;
-                        paragraph = base.clone();
+            for (token, cp) in source.tokens {
+                match token {
+                    Token::Text(text) => {
+                        super::visit_text_runs(
+                            &text,
+                            cp,
+                            &facts.story,
+                            &mut Some(&mut facts.formatting),
+                            |formatting, fc, prm| {
+                                formatting.direct_text_run(
+                                    style,
+                                    fc,
+                                    prm,
+                                    &facts.story.prcs,
+                                    String::new(),
+                                )
+                            },
+                            |part, run| {
+                                if let Some(mut run) = run.flatten() {
+                                    budget.text(&mut paragraph.runs, &mut run, part)?;
+                                }
+                                Ok(())
+                            },
+                        )?;
                     }
-                    let element = match token {
-                        Token::PageBreak => BodyElement::PageBreak {
-                            parity: None,
-                            same_paragraph_as_previous: emitted_content.then_some(true),
-                        },
-                        Token::ColumnBreak => BodyElement::ColumnBreak,
-                        _ => unreachable!(),
-                    };
-                    budget.push(&mut body, element)?;
-                    emitted_segment = true;
-                }
-                Token::Picture | Token::FloatingPicture => {
-                    return Err(unsupported(
-                        "direct DOC model does not yet support pictures",
-                    ));
-                }
-                Token::NoteMarker | Token::NoteReference(_) => {
-                    return Err(unsupported(
-                        "direct DOC model does not yet support note content",
-                    ));
-                }
-                Token::FieldBegin(_) | Token::FieldEnd => {
-                    return Err(unsupported(
-                        "direct DOC model does not retain field structures yet",
-                    ));
+                    Token::Tab => {
+                        push_control_text(
+                            &mut paragraph,
+                            &facts.story,
+                            &mut facts.formatting,
+                            style,
+                            cp,
+                            "\t",
+                            &mut budget,
+                        )?;
+                    }
+                    Token::LineBreak => {
+                        budget.push(
+                            &mut paragraph.runs,
+                            DocRun::Break {
+                                break_type: BreakType::Line,
+                            },
+                        )?;
+                    }
+                    Token::PageBreak | Token::ColumnBreak => {
+                        budget.push(
+                            &mut paragraph.runs,
+                            DocRun::Break {
+                                break_type: if matches!(token, Token::PageBreak) {
+                                    BreakType::Page
+                                } else {
+                                    BreakType::Column
+                                },
+                            },
+                        )?;
+                    }
+                    Token::Picture | Token::FloatingPicture => {
+                        return Err(unsupported(
+                            "direct DOC model does not yet support pictures",
+                        ));
+                    }
+                    Token::NoteMarker | Token::NoteReference(_) => {
+                        return Err(unsupported(
+                            "direct DOC model does not yet support note content",
+                        ));
+                    }
+                    Token::FieldBegin(_) | Token::FieldEnd => {
+                        return Err(unsupported(
+                            "direct DOC model does not retain field structures yet",
+                        ));
+                    }
                 }
             }
+            // Match the shared parser's boundary contract on projected runs,
+            // after vanish filtering but before chunk visibility normalization.
+            // A whitespace/line-break run is not the same as an absent run.
+            match paragraph.runs.as_slice() {
+                [DocRun::Break {
+                    break_type: BreakType::Page,
+                }] => {
+                    let subsumed = paragraph_index + 1 == paragraph_count
+                        && ending.as_ref().is_some_and(|ending| {
+                            !matches!(ending.kind.as_str(), "continuous" | "nextColumn")
+                        });
+                    if !subsumed {
+                        budget.push(
+                            &mut body,
+                            BodyElement::PageBreak {
+                                parity: None,
+                                same_paragraph_as_previous: None,
+                            },
+                        )?;
+                    }
+                }
+                [DocRun::Break {
+                    break_type: BreakType::Column,
+                }] => {
+                    budget.push(&mut body, BodyElement::ColumnBreak)?;
+                }
+                _ => visit_para_on_page_breaks(paragraph, |piece| {
+                    let element = match piece {
+                        ParaPiece::Para(paragraph) => {
+                            // Runs move through the normalizer; their text/font
+                            // payload was already charged during acquisition.
+                            // Charge output metadata and the new vector backing
+                            // before retaining each piece, and stop on failure.
+                            budget.normalized_paragraph(&paragraph)?;
+                            BodyElement::Paragraph(Box::new(paragraph))
+                        }
+                        ParaPiece::PageBreak {
+                            same_paragraph_as_previous,
+                        } => BodyElement::PageBreak {
+                            parity: None,
+                            same_paragraph_as_previous: same_paragraph_as_previous.then_some(true),
+                        },
+                        ParaPiece::ColumnBreak => BodyElement::ColumnBreak,
+                    };
+                    budget.push(&mut body, element)
+                })?,
+            }
         }
-        if !paragraph.runs.is_empty() || !emitted_segment {
-            budget.push(&mut body, BodyElement::Paragraph(Box::new(paragraph)))?;
+
+        if let Some(ending) = ending {
+            budget.charge(payload::ending_section(
+                &ending.kind,
+                ending.columns.as_ref(),
+                ending.page_num_type.as_ref(),
+                &ending.text_direction,
+                ending.geom.as_ref(),
+                ending.placement.as_ref(),
+            )?)?;
+            budget.push(
+                &mut body,
+                BodyElement::SectionBreak {
+                    kind: ending.kind,
+                    columns: ending.columns,
+                    headers: Box::default(),
+                    footers: Box::default(),
+                    title_page: ending.title_page,
+                    geom: Some(ending.geom),
+                    page_num_type: ending.page_num_type,
+                    text_direction: ending.text_direction,
+                    section_placement: ending.placement,
+                },
+            )?;
         }
     }
 
@@ -218,20 +294,18 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
 
 fn push_control_text(
     paragraph: &mut docx_model::DocParagraph,
-    facts: &mut AcquiredDoc<'_>,
+    story: &super::Story<'_>,
+    formatting: &mut super::formatting::Formatting<'_>,
     style: usize,
     cp: usize,
     text: &str,
     budget: &mut ModelBudget,
 ) -> Result<bool, String> {
-    let (_, fc, piece) = facts
-        .story
+    let (_, fc, piece) = story
         .position(cp)
         .ok_or_else(|| unsupported("Word control outside piece table"))?;
     if let Some(mut run) =
-        facts
-            .formatting
-            .direct_text_run(style, fc, piece.prm, &facts.story.prcs, String::new())?
+        formatting.direct_text_run(style, fc, piece.prm, &story.prcs, String::new())?
     {
         budget.text(&mut paragraph.runs, &mut run, text)?;
         return Ok(true);
@@ -264,6 +338,18 @@ impl ModelBudget {
     fn paragraph(&mut self, paragraph: &docx_model::DocParagraph) -> Result<(), String> {
         self.charge(std::mem::size_of::<docx_model::DocParagraph>())?;
         self.charge(payload::paragraph(paragraph)?)
+    }
+
+    fn normalized_paragraph(&mut self, paragraph: &docx_model::DocParagraph) -> Result<(), String> {
+        self.charge(std::mem::size_of::<docx_model::DocParagraph>())?;
+        self.charge(payload::paragraph_metadata(paragraph)?)?;
+        self.charge(
+            paragraph
+                .runs
+                .capacity()
+                .checked_mul(std::mem::size_of::<DocRun>())
+                .ok_or("OUTPUT_TOO_LARGE")?,
+        )
     }
 
     fn push<T>(&mut self, values: &mut Vec<T>, value: T) -> Result<(), String> {
@@ -317,13 +403,20 @@ mod tests {
     use crate::cfb::{test_support::build_cfb, CompoundFile};
 
     fn source(text: &str) -> Vec<u8> {
-        source_with_header_document(text, None)
+        let units: Vec<u16> = text.encode_utf16().collect();
+        source_with_sections_and_header(text, &[(units.len(), 2, 12240, 15840, 1, 720)], None)
     }
 
-    fn source_with_header_document(text: &str, authored_blank_header: Option<bool>) -> Vec<u8> {
+    fn source_with_sections(text: &str, sections: &[(usize, u8, u16, u16, u16, u16)]) -> Vec<u8> {
+        source_with_sections_and_header(text, sections, None)
+    }
+
+    fn source_with_sections_and_header(
+        text: &str,
+        sections: &[(usize, u8, u16, u16, u16, u16)],
+        authored_blank_header: Option<bool>,
+    ) -> Vec<u8> {
         let main_units = text.encode_utf16().count();
-        // A separator-only header document is not an authored page header.
-        // The optional blank header has its own paragraph plus guard mark.
         let header = match authored_blank_header {
             None => "",
             Some(false) => "\r\r",
@@ -336,7 +429,7 @@ mod tests {
         word[2..4].copy_from_slice(&0x00c1u16.to_le_bytes());
         word[6..8].copy_from_slice(&1033u16.to_le_bytes());
         word[0x4c..0x50].copy_from_slice(&(main_units as u32).to_le_bytes());
-        word[0x54..0x58].copy_from_slice(&(header.len() as u32).to_le_bytes());
+        word[0x54..0x58].copy_from_slice(&(header.encode_utf16().count() as u32).to_le_bytes());
         word[0x1a2..0x1a6].copy_from_slice(&0u32.to_le_bytes());
         word[0x1a6..0x1aa].copy_from_slice(&21u32.to_le_bytes());
         for (index, unit) in units.iter().enumerate() {
@@ -351,25 +444,39 @@ mod tests {
         table.extend_from_slice(&(text_offset as u32).to_le_bytes());
         table.extend_from_slice(&0u16.to_le_bytes());
         let section_table_offset = table.len();
-        let sepx_offset = word.len();
-        let mut sepx = Vec::new();
-        for (code, value) in [
-            (0x9023u16, 1440i16),
-            (0x9024, 1440),
-            (0xb021, 1440),
-            (0xb022, 1440),
-        ] {
-            sepx.extend(code.to_le_bytes());
-            sepx.extend(value.to_le_bytes());
+        let mut sepx_offsets = Vec::new();
+        for &(_, kind, width, height, columns, spacing) in sections {
+            let mut sepx = Vec::new();
+            sepx.extend([0x09, 0x30, kind]);
+            for (code, value) in [
+                (0x9023u16, 1440u16),
+                (0x9024, 1440),
+                (0xb021, 1440),
+                (0xb022, 1440),
+                (0xb01f, width),
+                (0xb020, height),
+                (0x500b, columns - 1),
+                (0x900c, spacing),
+            ] {
+                sepx.extend(code.to_le_bytes());
+                sepx.extend(value.to_le_bytes());
+            }
+            sepx_offsets.push(word.len());
+            word.extend((sepx.len() as u16).to_le_bytes());
+            word.extend(sepx);
         }
-        word.extend((sepx.len() as u16).to_le_bytes());
-        word.extend(sepx);
-        let mut section_table = vec![0; 20];
-        section_table[4..8].copy_from_slice(&(main_units as u32).to_le_bytes());
-        section_table[10..14].copy_from_slice(&(sepx_offset as u32).to_le_bytes());
+        let section_table_size = 4 + sections.len() * 16;
+        let mut section_table = vec![0; section_table_size];
+        for (index, &(end, ..)) in sections.iter().enumerate() {
+            section_table[(index + 1) * 4..(index + 2) * 4]
+                .copy_from_slice(&(end as u32).to_le_bytes());
+            let sed = (sections.len() + 1) * 4 + index * 12;
+            section_table[sed + 2..sed + 6]
+                .copy_from_slice(&(sepx_offsets[index] as u32).to_le_bytes());
+        }
         table.extend(section_table);
         word[0xca..0xce].copy_from_slice(&(section_table_offset as u32).to_le_bytes());
-        word[0xce..0xd2].copy_from_slice(&20u32.to_le_bytes());
+        word[0xce..0xd2].copy_from_slice(&(section_table_size as u32).to_le_bytes());
 
         if let Some(authored) = authored_blank_header {
             let mut hdd = Vec::new();
@@ -377,13 +484,8 @@ mod tests {
                 let cp: u32 = match index {
                     0 | 13 => 0,
                     1..=6 => 1,
-                    _ => {
-                        if authored {
-                            3
-                        } else {
-                            1
-                        }
-                    }
+                    _ if authored => 3,
+                    _ => 1,
                 };
                 hdd.extend(cp.to_le_bytes());
             }
@@ -442,6 +544,24 @@ mod tests {
         table.extend(part);
     }
 
+    fn hide_first_utf16_unit(bytes: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        let end = u32::from_le_bytes(page[4..8].try_into().unwrap());
+        page[0..4].copy_from_slice(&0x400u32.to_le_bytes());
+        page[4..8].copy_from_slice(&0x402u32.to_le_bytes());
+        page[8..12].copy_from_slice(&end.to_le_bytes());
+        page[12] = 32;
+        page[13] = 0;
+        page[64..68].copy_from_slice(&[3, 0x3c, 0x08, 1]);
+        page[511] = 2;
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     #[test]
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
         let bytes = source("A\tB\u{b}C\r\u{13}PAGE\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
@@ -467,9 +587,10 @@ mod tests {
 
     #[test]
     fn separator_only_header_document_is_not_an_authored_page_header() {
+        let section = [(5, 2, 12_240, 15_840, 1, 720)];
         let plain = source("Body\r");
-        let separators = source_with_header_document("Body\r", Some(false));
-        let blank_header = source_with_header_document("Body\r", Some(true));
+        let separators = source_with_sections_and_header("Body\r", &section, Some(false));
+        let blank_header = source_with_sections_and_header("Body\r", &section, Some(true));
         let expected =
             super::super::direct_model(&CompoundFile::open(&plain).unwrap(), 1024 * 1024).unwrap();
         let actual =
@@ -596,6 +717,210 @@ mod tests {
             assert!(
                 result.unwrap_err().starts_with("UNSUPPORTED:"),
                 "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_sections_preserve_utf16_boundaries_geometry_columns_and_break_kinds() {
+        // First section ends after A (1 CP), supplementary 😀 (2 CP), and the
+        // consumed section-break form feed (1 CP).
+        let bytes = source_with_sections(
+            "A😀\u{c}B\r",
+            &[
+                (4, 0, 11_906, 16_838, 2, 360),
+                (6, 4, 15_840, 12_240, 1, 720),
+            ],
+        );
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+        let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
+        let actual = serde_json::to_value(&direct).unwrap();
+        let normalize = |body: &serde_json::Value| {
+            let mut body = body.clone();
+            for value in body.as_array_mut().unwrap() {
+                if value["type"] == "paragraph" {
+                    value.as_object_mut().unwrap().remove("styleId");
+                }
+            }
+            body
+        };
+        assert_eq!(normalize(&actual["body"]), normalize(&expected["body"]));
+        assert_eq!(actual["section"], expected["section"]);
+        assert_eq!(actual["body"][1]["kind"], "continuous");
+        assert_eq!(actual["body"][1]["columns"]["count"], 2);
+        assert_eq!(actual["section"]["sectionStart"], "oddPage");
+    }
+
+    #[test]
+    fn lone_page_break_at_section_boundary_matches_section_kind_normalization() {
+        for (kind, expected_page_breaks) in [(0, 1), (1, 1), (2, 0), (3, 0), (4, 0)] {
+            // The first form feed is an authored page break. The second is the
+            // section mark consumed by split_story.
+            let bytes = source_with_sections(
+                "\u{c}\u{c}B\r",
+                &[
+                    (2, kind, 12_240, 15_840, 1, 720),
+                    (4, 2, 12_240, 15_840, 1, 720),
+                ],
+            );
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+            let expected: serde_json::Value =
+                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                    .unwrap();
+            let actual = serde_json::to_value(&direct).unwrap();
+            let normalize = |body: &serde_json::Value| {
+                let mut body = body.clone();
+                for value in body.as_array_mut().unwrap() {
+                    if value["type"] == "paragraph" {
+                        value.as_object_mut().unwrap().remove("styleId");
+                    }
+                }
+                body
+            };
+            assert_eq!(
+                normalize(&actual["body"]),
+                normalize(&expected["body"]),
+                "section kind {kind}"
+            );
+            assert_eq!(
+                actual["body"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|element| element["type"] == "pageBreak")
+                    .count(),
+                expected_page_breaks,
+                "section kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_page_break_before_section_ending_paragraph_is_never_suppressed() {
+        for kind in 0..=4 {
+            // The first form feed belongs to its own paragraph. Only the later
+            // form feed terminates the section containing paragraph "A".
+            let bytes = source_with_sections(
+                "\u{c}\rA\u{c}B\r",
+                &[
+                    (4, kind, 12_240, 15_840, 1, 720),
+                    (6, 2, 12_240, 15_840, 1, 720),
+                ],
+            );
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+            let expected: serde_json::Value =
+                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                    .unwrap();
+            let actual = serde_json::to_value(&direct).unwrap();
+            let normalize = |body: &serde_json::Value| {
+                let mut body = body.clone();
+                for value in body.as_array_mut().unwrap() {
+                    if value["type"] == "paragraph" {
+                        value.as_object_mut().unwrap().remove("styleId");
+                    }
+                }
+                body
+            };
+            assert_eq!(
+                normalize(&actual["body"]),
+                normalize(&expected["body"]),
+                "section kind {kind}"
+            );
+            assert_eq!(
+                actual["body"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|element| element["type"] == "pageBreak")
+                    .count(),
+                1,
+                "section kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn section_break_subsumes_only_the_sole_projected_page_break() {
+        for (kind, expected_page_breaks) in [(0, 1), (1, 1), (2, 0), (3, 0), (4, 0)] {
+            let source = source_with_sections(
+                "X\u{c}\u{c}B\r",
+                &[
+                    (3, kind, 12_240, 15_840, 1, 720),
+                    (5, 2, 12_240, 15_840, 1, 720),
+                ],
+            );
+            let bytes = hide_first_utf16_unit(&source);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+            let expected: serde_json::Value =
+                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                    .unwrap();
+            let actual = serde_json::to_value(&direct).unwrap();
+            let normalize = |body: &serde_json::Value| {
+                let mut body = body.clone();
+                for value in body.as_array_mut().unwrap() {
+                    if value["type"] == "paragraph" {
+                        value.as_object_mut().unwrap().remove("styleId");
+                    }
+                }
+                body
+            };
+            assert_eq!(
+                normalize(&actual["body"]),
+                normalize(&expected["body"]),
+                "section kind {kind}"
+            );
+            assert_eq!(
+                actual["body"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|element| element["type"] == "pageBreak")
+                    .count(),
+                expected_page_breaks,
+                "section kind {kind}"
+            );
+        }
+
+        for text in ["X\u{c}\u{c}B\r", "\u{c}\u{c}\u{c}B\r", "\u{b}\u{c}\u{c}B\r"] {
+            let first_end = text[..text.len() - "B\r".len()].encode_utf16().count();
+            let total = text.encode_utf16().count();
+            let bytes = source_with_sections(
+                text,
+                &[
+                    (first_end, 2, 12_240, 15_840, 1, 720),
+                    (total, 2, 12_240, 15_840, 1, 720),
+                ],
+            );
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+            let expected: serde_json::Value =
+                serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                    .unwrap();
+            let actual = serde_json::to_value(&direct).unwrap();
+            let normalize = |body: &serde_json::Value| {
+                let mut body = body.clone();
+                for value in body.as_array_mut().unwrap() {
+                    if value["type"] == "paragraph" {
+                        value.as_object_mut().unwrap().remove("styleId");
+                    }
+                }
+                body
+            };
+            assert_eq!(
+                normalize(&actual["body"]),
+                normalize(&expected["body"]),
+                "source {text:?}"
             );
         }
     }

@@ -27,6 +27,7 @@ use crate::styles::{
 };
 use crate::types::*;
 use crate::xml_util::*;
+use docx_model::paragraph_breaks::{split_para_on_page_breaks, ParaPiece};
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
@@ -3573,7 +3574,8 @@ fn apply_cover_page_breaks(
 // boxing the Para variant would add a heap allocation per paragraph on the hot
 // parse path with no real memory benefit for a transient `Vec<ParaPiece>`.
 #[allow(clippy::large_enum_variant)]
-enum ParaPiece {
+#[cfg(test)]
+enum OldParaPiece {
     Para(DocParagraph),
     PageBreak { same_paragraph_as_previous: bool },
     ColumnBreak,
@@ -3602,7 +3604,9 @@ enum ParaPiece {
 ///
 /// Pure-page-break paragraphs are handled upstream as
 /// BodyElement::PageBreak before this function ever sees them.
-fn split_para_on_page_breaks(para: DocParagraph) -> Vec<ParaPiece> {
+#[cfg(test)]
+fn old_split_para_on_page_breaks(para: DocParagraph) -> Vec<OldParaPiece> {
+    use OldParaPiece as ParaPiece;
     // `<w:lastRenderedPageBreak/>` (BreakType::RenderedPage) is Word's layout
     // cache, not an authoritative break (ECMA-376 §17.3.1.20). We paginate the
     // body ourselves (computePages, TS side), so these hints are ignored
@@ -13792,6 +13796,90 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
     use crate::xml_util::W_NS;
+
+    fn piece_shape(piece: ParaPiece) -> String {
+        match piece {
+            ParaPiece::Para(para) => format!("p:{}", serde_json::to_string(&para).unwrap()),
+            ParaPiece::PageBreak {
+                same_paragraph_as_previous,
+            } => {
+                format!("page:{same_paragraph_as_previous}")
+            }
+            ParaPiece::ColumnBreak => "column".into(),
+        }
+    }
+
+    fn old_piece_shape(piece: OldParaPiece) -> String {
+        match piece {
+            OldParaPiece::Para(para) => format!("p:{}", serde_json::to_string(&para).unwrap()),
+            OldParaPiece::PageBreak {
+                same_paragraph_as_previous,
+            } => {
+                format!("page:{same_paragraph_as_previous}")
+            }
+            OldParaPiece::ColumnBreak => "column".into(),
+        }
+    }
+
+    #[test]
+    fn shared_paragraph_break_normalizer_matches_previous_short_sequence_matrix() {
+        let run = |kind| match kind {
+            0 => DocRun::Text(Box::new(TextRun {
+                text: "x".into(),
+                ..Default::default()
+            })),
+            1 => DocRun::Text(Box::new(TextRun {
+                text: " \t".into(),
+                ..Default::default()
+            })),
+            2 => DocRun::Break {
+                break_type: BreakType::Line,
+            },
+            3 => DocRun::Break {
+                break_type: BreakType::Page,
+            },
+            4 => DocRun::Break {
+                break_type: BreakType::Column,
+            },
+            5 => DocRun::Break {
+                break_type: BreakType::RenderedPage,
+            },
+            _ => unreachable!(),
+        };
+        for length in 0..=4 {
+            for encoded in 0..6usize.pow(length) {
+                let mut value = encoded;
+                let mut para = DocParagraph::default();
+                for _ in 0..length {
+                    para.runs.push(run(value % 6));
+                    value /= 6;
+                }
+                for (occurrence_id, run_index) in [para.runs.len(), 0, para.runs.len() + 3, 1]
+                    .into_iter()
+                    .enumerate()
+                {
+                    para.complex_field_boundaries
+                        .push(ComplexFieldBoundaryWire {
+                            occurrence_id: occurrence_id as u32,
+                            boundary: "start".into(),
+                            run_index,
+                            field_type: "other".into(),
+                            instruction: String::new(),
+                            hyperlink_anchor: None,
+                        });
+                }
+                let expected: Vec<_> = old_split_para_on_page_breaks(para.clone())
+                    .into_iter()
+                    .map(old_piece_shape)
+                    .collect();
+                let actual: Vec<_> = split_para_on_page_breaks(para)
+                    .into_iter()
+                    .map(piece_shape)
+                    .collect();
+                assert_eq!(actual, expected, "length={length} encoded={encoded}");
+            }
+        }
+    }
 
     fn parse_tbl(body: &str) -> DocTable {
         parse_tbl_in_story(body, TablePositioningContext::Normal)

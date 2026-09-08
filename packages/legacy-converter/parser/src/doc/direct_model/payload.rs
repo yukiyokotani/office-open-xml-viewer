@@ -54,8 +54,15 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
 }
 
 pub(super) fn paragraph(value: &DocParagraph) -> Result<usize, String> {
+    if value.runs.capacity() != 0 {
+        return Err(unsupported("unaccounted direct DOC paragraph run payload"));
+    }
+    paragraph_metadata(value)
+}
+
+/// Metadata only: run payloads are owned and charged by the run producer.
+pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> {
     if value.numbering.is_some()
-        || value.runs.capacity() != 0
         || value.run_revisions.capacity() != 0
         || value.complex_field_boundaries.capacity() != 0
         || value.bookmarks.capacity() != 0
@@ -132,6 +139,27 @@ pub(super) fn section(value: &SectionProps) -> Result<usize, String> {
     Ok(total.0)
 }
 
+pub(super) fn ending_section(
+    kind: &String,
+    columns: Option<&docx_model::ColumnsSpec>,
+    page_num_type: Option<&docx_model::PageNumType>,
+    text_direction: &Option<String>,
+    geom: &docx_model::SectionGeom,
+    placement: &docx_model::SectionPlacementWire,
+) -> Result<usize, String> {
+    let mut total = Total::default();
+    total.string(kind)?;
+    total.columns(columns)?;
+    if let Some(numbering) = page_num_type {
+        total.option_string(&numbering.fmt)?;
+    }
+    total.option_string(text_direction)?;
+    total.add(std::mem::size_of_val(geom))?;
+    total.add(2 * std::mem::size_of::<docx_model::HeadersFooters>())?;
+    total.section_placement(placement)?;
+    Ok(total.0)
+}
+
 #[derive(Default)]
 struct Total(usize);
 
@@ -191,6 +219,32 @@ impl Total {
         }
         if let Some(slots) = &facts.font_slots {
             self.font_slots(slots)?;
+        }
+        Ok(())
+    }
+
+    fn columns(&mut self, columns: Option<&docx_model::ColumnsSpec>) -> Result<(), String> {
+        if let Some(columns) = columns {
+            self.vec::<docx_model::ColSpec>(columns.cols.capacity())?;
+        }
+        Ok(())
+    }
+
+    fn section_placement(
+        &mut self,
+        placement: &docx_model::SectionPlacementWire,
+    ) -> Result<(), String> {
+        if placement.line_numbering.is_some() || placement.page_borders.is_some() {
+            return Err(unsupported(
+                "unaccounted direct DOC section placement payload",
+            ));
+        }
+        self.add(std::mem::size_of_val(placement))?;
+        self.string(&placement.section_id)?;
+        self.option_string(&placement.v_align)?;
+        self.option_string(&placement.doc_grid_type)?;
+        if let Some(geometry) = &placement.page_geometry {
+            self.add(std::mem::size_of_val(geometry.as_ref()))?;
         }
         Ok(())
     }
