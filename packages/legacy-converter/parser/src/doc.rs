@@ -96,7 +96,7 @@ pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocCon
 pub(crate) fn direct_model(
     cfb: &CompoundFile<'_>,
     max_model_bytes: usize,
-) -> Result<docx_model::Document, String> {
+) -> Result<direct_model::DirectDocResult, String> {
     with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
 }
 

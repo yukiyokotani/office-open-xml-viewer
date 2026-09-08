@@ -16,7 +16,7 @@ pub(in crate::doc) struct DirectInlinePicture {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::doc) struct DirectPictureResource {
+pub(crate) struct DirectPictureResource {
     pub key: String,
     pub mime_type: &'static str,
     pub bytes: Vec<u8>,

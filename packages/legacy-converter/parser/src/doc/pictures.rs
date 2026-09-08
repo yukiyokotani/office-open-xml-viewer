@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "direct-doc")]
 mod direct;
 #[cfg(feature = "direct-doc")]
-pub(in crate::doc) use direct::{DirectInlinePicture, DirectPictureResource};
+pub(in crate::doc) use direct::DirectInlinePicture;
+#[cfg(feature = "direct-doc")]
+pub(crate) use direct::DirectPictureResource;
 
 pub(super) struct Store<'a> {
     data: &'a [u8],

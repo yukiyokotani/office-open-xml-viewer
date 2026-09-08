@@ -5,7 +5,7 @@
 //! is a real replacement and therefore projects to an empty paragraph.
 
 use super::{story, ModelBudget};
-use crate::doc::{formatting, headers, tokenize_with_fields, Fields};
+use crate::doc::{formatting, headers, pictures, tokenize_with_fields, Fields};
 use docx_model::{HeaderFooter, HeadersFooters};
 
 pub(super) struct Resolver<'a, 'h> {
@@ -28,6 +28,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         &mut self,
         section: usize,
         formatting: &mut formatting::Formatting<'a>,
+        pictures: &mut pictures::Store<'a>,
         budget: &mut ModelBudget,
     ) -> Result<(HeadersFooters, HeadersFooters), String> {
         if let Some(source) = self.source {
@@ -42,7 +43,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         for entry in self.inherited {
             projected.push(
                 entry
-                    .map(|entry| self.project_entry(entry, formatting, budget))
+                    .map(|entry| self.project_entry(entry, formatting, pictures, budget))
                     .transpose()?,
             );
         }
@@ -64,6 +65,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         &self,
         entry: &headers::Entry,
         formatting: &mut formatting::Formatting<'a>,
+        pictures: &mut pictures::Store<'a>,
         budget: &mut ModelBudget,
     ) -> Result<HeaderFooter, String> {
         let source = self.source.expect("entry belongs to a header source");
@@ -81,6 +83,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             &source.story,
             paragraphs,
             formatting,
+            pictures,
             budget,
             &mut body,
             None,

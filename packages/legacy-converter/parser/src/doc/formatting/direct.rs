@@ -9,6 +9,11 @@ pub(in crate::doc) struct DirectResolvedParagraph {
     pub(in crate::doc) numbering: Option<(numbering::Reference, Properties)>,
 }
 
+pub(in crate::doc) struct DirectInlinePictureFacts {
+    pub(in crate::doc) location: Option<usize>,
+    pub(in crate::doc) vanish: bool,
+}
+
 impl Formatting<'_> {
     pub(in crate::doc) fn direct_normal_style_font_size_pt(&mut self) -> Result<f64, String> {
         // MS-DOC 2.6.4 sprmSDxtCharSpace is relative to the Normal style,
@@ -54,5 +59,22 @@ impl Formatting<'_> {
     ) -> Result<Option<TextRun>, String> {
         self.run_properties(paragraph_style, fc, prm, prcs)?
             .direct_text_run(text, &self.fonts)
+    }
+
+    /// Resolve the CHPX cascade once for an inline-picture character. Visibility
+    /// is a run property just as it is for text; picture acquisition must not
+    /// create a resource for a vanished run.
+    pub(in crate::doc) fn direct_inline_picture_facts(
+        &mut self,
+        paragraph_style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<DirectInlinePictureFacts, String> {
+        let properties = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        Ok(DirectInlinePictureFacts {
+            location: properties.picture.inline_location()?,
+            vanish: properties.direct_vanish(),
+        })
     }
 }

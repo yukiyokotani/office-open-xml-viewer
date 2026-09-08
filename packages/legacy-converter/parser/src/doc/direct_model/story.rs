@@ -4,14 +4,15 @@
 //! callers; PAP/CHPX resolution and hard-break normalization live here once.
 
 use super::{ModelBudget, ParaPiece};
-use crate::doc::{formatting, unsupported, Paragraph, Story, Token};
+use crate::doc::{formatting, pictures, unsupported, Paragraph, Story, Token};
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
-use docx_model::{BodyElement, BreakType, DocRun};
+use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
 pub(super) fn project(
     story: &Story<'_>,
     paragraphs: Vec<Paragraph>,
     formatting: &mut formatting::Formatting<'_>,
+    pictures: &mut pictures::Store<'_>,
     budget: &mut ModelBudget,
     body: &mut Vec<BodyElement>,
     ending_kind: Option<&str>,
@@ -79,9 +80,66 @@ pub(super) fn project(
                         },
                     },
                 )?,
-                Token::Picture | Token::FloatingPicture => {
+                Token::Picture => {
+                    let (_, fc, piece) = story
+                        .position(cp)
+                        .ok_or_else(|| unsupported("Word picture outside piece table"))?;
+                    let facts = formatting.direct_inline_picture_facts(
+                        style,
+                        fc,
+                        piece.prm,
+                        &story.prcs,
+                    )?;
+                    if !facts.vanish {
+                        let offset = facts.location.ok_or_else(|| {
+                            unsupported("visible Word picture has no inline location")
+                        })?;
+                        let image: Option<pictures::DirectInlinePicture> =
+                            pictures.direct_inline(offset, &mut budget.remaining_bytes)?;
+                        if let Some(image) = image {
+                            let mime_type = image.mime_type.to_string();
+                            budget
+                                .charge(std::mem::size_of::<ImageRun>() + mime_type.capacity())?;
+                            budget.push(
+                                &mut paragraph.runs,
+                                DocRun::Image(Box::new(ImageRun {
+                                    image_path: image.resource_key,
+                                    mime_type,
+                                    svg_image_path: None,
+                                    src_rect: image.crop,
+                                    width_pt: image.width_pt,
+                                    height_pt: image.height_pt,
+                                    rotation: image.rotation,
+                                    flip_h: image.flip_h,
+                                    flip_v: image.flip_v,
+                                    anchor: false,
+                                    anchor_x_pt: 0.0,
+                                    anchor_y_pt: 0.0,
+                                    anchor_x_from_margin: false,
+                                    anchor_y_from_para: false,
+                                    color_replace_from: None,
+                                    duotone: None,
+                                    alpha: None,
+                                    wrap_mode: None,
+                                    dist_top: 0.0,
+                                    dist_bottom: 0.0,
+                                    dist_left: 0.0,
+                                    dist_right: 0.0,
+                                    wrap_side: None,
+                                    allow_overlap: true,
+                                    anchor_x_align: None,
+                                    anchor_y_align: None,
+                                    anchor_x_relative_from: None,
+                                    anchor_y_relative_from: None,
+                                    anchor_acquisition: None,
+                                })),
+                            )?;
+                        }
+                    }
+                }
+                Token::FloatingPicture => {
                     return Err(unsupported(
-                        "direct DOC model does not yet support pictures",
+                        "direct DOC model does not yet support floating pictures",
                     ));
                 }
                 Token::NoteMarker | Token::NoteReference(_) => {

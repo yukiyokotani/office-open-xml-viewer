@@ -1176,6 +1176,12 @@ mod tests {
             .direct_text_run(0, 100, 1, &[&hidden], "hidden".into())
             .unwrap()
             .is_none());
+        let picture = [0x55, 0x08, 1, 0x03, 0x6a, 123, 0, 0, 0, 0x3c, 0x08, 1];
+        let facts = f
+            .direct_inline_picture_facts(0, 100, 1, &[&picture])
+            .unwrap();
+        assert_eq!(facts.location, Some(123));
+        assert!(facts.vanish);
         assert!(
             f.direct_paragraph(0, 109, 1, &[&hidden])
                 .unwrap()

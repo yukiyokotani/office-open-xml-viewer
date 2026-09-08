@@ -9,7 +9,16 @@ mod headers;
 mod payload;
 mod story;
 
-pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Document, String> {
+#[derive(Debug)]
+pub(crate) struct DirectDocResult {
+    pub(crate) document: Document,
+    pub(crate) resources: Vec<super::pictures::DirectPictureResource>,
+}
+
+pub(super) fn build(
+    mut facts: AcquiredDoc<'_>,
+    max_bytes: usize,
+) -> Result<DirectDocResult, String> {
     if max_bytes == 0 {
         return Err("OUTPUT_TOO_LARGE".into());
     }
@@ -46,7 +55,7 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
     });
 
     let mut budget = ModelBudget::new(max_bytes);
-    budget.charge(std::mem::size_of::<Document>())?;
+    budget.charge(std::mem::size_of::<DirectDocResult>())?;
     budget.charge(payload::section(&section)?)?;
     if facts
         .story
@@ -91,13 +100,18 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
             &facts.story,
             paragraphs,
             &mut facts.formatting,
+            &mut facts.pictures,
             &mut budget,
             &mut body,
             ending.as_ref().map(|ending| ending.kind.as_str()),
         )?;
 
-        let (section_headers, section_footers) =
-            header_resolver.project_section(section_index, &mut facts.formatting, &mut budget)?;
+        let (section_headers, section_footers) = header_resolver.project_section(
+            section_index,
+            &mut facts.formatting,
+            &mut facts.pictures,
+            &mut budget,
+        )?;
 
         if let Some(ending) = ending {
             budget.charge(payload::ending_section(
@@ -143,7 +157,10 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
         ));
     }
 
-    Ok(Document {
+    let resources = facts
+        .pictures
+        .finish_direct_resources(&mut budget.remaining_bytes)?;
+    let document = Document {
         section,
         body,
         headers: final_headers.unwrap_or_default(),
@@ -151,6 +168,10 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
         settings,
         document_typography_settings,
         ..Document::default()
+    };
+    Ok(DirectDocResult {
+        document,
+        resources,
     })
 }
 
@@ -242,6 +263,7 @@ impl ModelBudget {
 mod tests {
     use super::*;
     use crate::cfb::{test_support::build_cfb, CompoundFile};
+    use std::io::{Cursor, Read};
 
     fn source(text: &str) -> Vec<u8> {
         let units: Vec<u16> = text.encode_utf16().collect();
@@ -473,6 +495,72 @@ mod tests {
         build_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    fn picture_record(kind: u16, options: u16, body: &[u8]) -> Vec<u8> {
+        [
+            options.to_le_bytes().as_slice(),
+            &kind.to_le_bytes(),
+            &(body.len() as u32).to_le_bytes(),
+            body,
+        ]
+        .concat()
+    }
+
+    fn picture_source(text: &str, vanish: bool) -> Vec<u8> {
+        with_picture_data(&source(text), vanish)
+    }
+
+    fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
+        let cfb = CompoundFile::open(source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        let mut sprms = vec![0x55, 0x08, 1, 0x03, 0x6a, 0, 0, 0, 0];
+        if vanish {
+            sprms.extend([0x3c, 0x08, 1]);
+        }
+        page[8] = 32;
+        page[64] = sprms.len() as u8;
+        page[65..65 + sprms.len()].copy_from_slice(&sprms);
+
+        let png = {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+            bytes.extend_from_slice(&2u32.to_be_bytes());
+            bytes.extend_from_slice(&3u32.to_be_bytes());
+            bytes.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+            bytes
+        };
+        let raster = picture_record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png].concat());
+        let mut options = Vec::new();
+        for (key, value) in [
+            (0x0104u16, 1u32),
+            (0x0100, 8192),
+            (0x0101, 16384),
+            (0x0102, 24576),
+            (0x0103, 32768),
+            (4, 90 * 65536),
+        ] {
+            options.extend(key.to_le_bytes());
+            options.extend(value.to_le_bytes());
+        }
+        let mut shape = picture_record(0xf00a, (75 << 4) | 2, &[1, 0, 0, 0, 0x40, 8, 0, 0]);
+        shape.extend(picture_record(0xf00b, (6 << 4) | 3, &options));
+        let mut data = vec![0u8; 68];
+        data[4..6].copy_from_slice(&68u16.to_le_bytes());
+        data[6..8].copy_from_slice(&100u16.to_le_bytes());
+        data[28..30].copy_from_slice(&1440u16.to_le_bytes());
+        data[30..32].copy_from_slice(&720u16.to_le_bytes());
+        data[32..34].copy_from_slice(&500u16.to_le_bytes());
+        data[34..36].copy_from_slice(&2000u16.to_le_bytes());
+        data.extend(picture_record(0xf004, 15, &shape));
+        data.extend(raster);
+        let length = data.len() as u32;
+        data[..4].copy_from_slice(&length.to_le_bytes());
+        data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
+        build_cfb(&[("WordDocument", word), ("0Table", table), ("Data", data)])
+    }
+
     fn make_normal_style_self_referential(bytes: &[u8]) -> Vec<u8> {
         let cfb = CompoundFile::open(bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
@@ -504,7 +592,9 @@ mod tests {
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
         let bytes = source("A\tB\u{b}C\r\u{13}PAGE\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
-        let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+        let direct = super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap()
+            .document;
         let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
         let expected: serde_json::Value =
             serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
@@ -523,6 +613,126 @@ mod tests {
         assert_eq!(actual["section"], expected["section"]);
     }
 
+    fn image_runs(document: &Document) -> Vec<&docx_model::ImageRun> {
+        document
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => Some(paragraph.runs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|run| match run {
+                DocRun::Image(image) => Some(image.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_picture_result_owns_one_resource_and_preserves_model_geometry() {
+        let bytes = picture_source("\u{1}\u{1}\r", false);
+        let result = {
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            super::super::direct_model(&cfb, 1024 * 1024).unwrap()
+        };
+        drop(bytes);
+        let images = image_runs(&result.document);
+        assert_eq!(images.len(), 2);
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(images[0].image_path, result.resources[0].key);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!((images[0].width_pt, images[0].height_pt), (36.0, 72.0));
+        assert_eq!(images[0].rotation, 90.0);
+        assert!(images[0].flip_h && images[0].flip_v);
+        assert_eq!(images[0].src_rect.as_ref().unwrap().l, 0.375);
+        assert!(result.resources[0].bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let converted = super::super::convert(
+            &CompoundFile::open(&picture_source("\u{1}\r", false)).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&converted.bytes)).unwrap();
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut document_xml)
+            .unwrap();
+        assert!(document_xml.contains("rot=\"5400000\" flipH=\"1\" flipV=\"1\""));
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
+        let actual = serde_json::to_value(&result.document).unwrap();
+        let mut normalized = actual["body"][0]["runs"][0].clone();
+        normalized["imagePath"] = expected["body"][0]["runs"][0]["imagePath"].clone();
+        normalized.as_object_mut().unwrap().remove("rotation");
+        normalized.as_object_mut().unwrap().remove("flipH");
+        normalized.as_object_mut().unwrap().remove("flipV");
+        assert_eq!(normalized, expected["body"][0]["runs"][0]);
+        // The byte adapter emits these acquired facts on pic:spPr/a:xfrm, but
+        // the current DOCX inline parser does not yet project that transform.
+        assert!(expected["body"][0]["runs"][0].get("rotation").is_none());
+        assert!(expected["body"][0]["runs"][0].get("flipH").is_none());
+        assert!(expected["body"][0]["runs"][0].get("flipV").is_none());
+
+        let sections = [(3, 2, 12_240, 15_840, 1, 720)];
+        let slots = [None, Some("\u{1}\r"), None, None, None, None];
+        let header_source =
+            source_with_typography("B\u{1}\r", &sections, None, None, None, Some(&slots));
+        let header_result = super::super::direct_model(
+            &CompoundFile::open(&with_picture_data(&header_source, false)).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(header_result.resources.len(), 1);
+        let body_key = image_runs(&header_result.document)[0].image_path.clone();
+        let header = header_result.document.headers.default.unwrap();
+        let BodyElement::Paragraph(paragraph) = &header.body[0] else {
+            panic!("header paragraph")
+        };
+        let DocRun::Image(header_image) = &paragraph.runs[0] else {
+            panic!("header image")
+        };
+        assert_eq!(body_key, header_image.image_path);
+        assert_eq!(body_key, header_result.resources[0].key);
+
+        let hidden = picture_source("\u{1}\r", true);
+        let hidden =
+            super::super::direct_model(&CompoundFile::open(&hidden).unwrap(), 1024 * 1024).unwrap();
+        assert!(image_runs(&hidden.document).is_empty());
+        assert!(hidden.resources.is_empty());
+
+        let bytes = picture_source("\u{1}\r", false);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut low = 1usize;
+        let sufficient = loop {
+            if super::super::direct_model(&cfb, low).is_ok() {
+                break low;
+            }
+            low *= 2;
+        };
+        let mut left = sufficient / 2;
+        let mut right = sufficient;
+        while left + 1 < right {
+            let middle = left + (right - left) / 2;
+            if super::super::direct_model(&cfb, middle).is_ok() {
+                right = middle;
+            } else {
+                left = middle;
+            }
+        }
+        assert_eq!(
+            super::super::direct_model(&cfb, right - 1).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert_eq!(
+            image_runs(&super::super::direct_model(&cfb, right).unwrap().document).len(),
+            1
+        );
+    }
+
     #[test]
     fn document_typography_uses_resolved_normal_style_size_not_body_chpx() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
@@ -536,7 +746,8 @@ mod tests {
                 source_with_typography("Body\r", &sections, None, normal_hps, body_hps, None);
             let document =
                 super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
-                    .unwrap();
+                    .unwrap()
+                    .document;
             assert_eq!(
                 document
                     .document_typography_settings
@@ -576,17 +787,21 @@ mod tests {
         let separators = source_with_sections_and_header("Body\r", &section, Some(false));
         let blank_header = source_with_sections_and_header("Body\r", &section, Some(true));
         let expected =
-            super::super::direct_model(&CompoundFile::open(&plain).unwrap(), 1024 * 1024).unwrap();
+            super::super::direct_model(&CompoundFile::open(&plain).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
         let actual =
             super::super::direct_model(&CompoundFile::open(&separators).unwrap(), 1024 * 1024)
-                .unwrap();
+                .unwrap()
+                .document;
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
         let blank =
             super::super::direct_model(&CompoundFile::open(&blank_header).unwrap(), 1024 * 1024)
-                .unwrap();
+                .unwrap()
+                .document;
         let authored = blank.headers.even.as_ref().expect("authored even header");
         assert_eq!(authored.body.len(), 1);
         let BodyElement::Paragraph(paragraph) = &authored.body[0] else {
@@ -676,7 +891,9 @@ mod tests {
         let bytes =
             source_with_typography("A\u{c}B\u{c}C\r", &sections, None, None, None, Some(&slots));
         let document =
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
         let converted =
             super::super::convert(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
         let expected: serde_json::Value =
@@ -763,7 +980,9 @@ mod tests {
         let bytes = source_with_typography(&story, &sections, None, None, None, Some(&slots));
         let bytes = mark_header_field_results_private(&bytes);
         let projected =
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
         assert!(projected
             .headers
             .default
@@ -784,13 +1003,20 @@ mod tests {
             super::super::direct_model(&cfb, 1).unwrap_err(),
             "OUTPUT_TOO_LARGE"
         );
-        for text in ["\u{1}\r", "cell\u{7}"] {
+        for text in ["cell\u{7}"] {
             let bytes = source(text);
             let cfb = CompoundFile::open(&bytes).unwrap();
             assert!(super::super::direct_model(&cfb, 1024 * 1024)
                 .unwrap_err()
                 .starts_with("UNSUPPORTED:"));
         }
+        let missing_location = source("\u{1}\r");
+        assert!(super::super::direct_model(
+            &CompoundFile::open(&missing_location).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap_err()
+        .contains("no inline location"));
         let bytes = source(&format!("{}\r", "x".repeat(100)));
         let cfb = CompoundFile::open(&bytes).unwrap();
         assert!(super::super::direct_model(&cfb, 64 * 1024).is_ok());
@@ -901,7 +1127,9 @@ mod tests {
             ],
         );
         let cfb = CompoundFile::open(&bytes).unwrap();
-        let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+        let direct = super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap()
+            .document;
         let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
         let expected: serde_json::Value =
             serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
@@ -936,7 +1164,9 @@ mod tests {
                 ],
             );
             let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024)
+                .unwrap()
+                .document;
             let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
             let expected: serde_json::Value =
                 serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
@@ -982,7 +1212,9 @@ mod tests {
                 ],
             );
             let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024)
+                .unwrap()
+                .document;
             let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
             let expected: serde_json::Value =
                 serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
@@ -1027,7 +1259,9 @@ mod tests {
             );
             let bytes = hide_first_utf16_unit(&source);
             let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024)
+                .unwrap()
+                .document;
             let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
             let expected: serde_json::Value =
                 serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
@@ -1070,7 +1304,9 @@ mod tests {
                 ],
             );
             let cfb = CompoundFile::open(&bytes).unwrap();
-            let direct = super::super::direct_model(&cfb, 1024 * 1024).unwrap();
+            let direct = super::super::direct_model(&cfb, 1024 * 1024)
+                .unwrap()
+                .document;
             let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
             let expected: serde_json::Value =
                 serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
