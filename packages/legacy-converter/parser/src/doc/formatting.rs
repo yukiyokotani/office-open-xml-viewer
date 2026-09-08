@@ -75,6 +75,11 @@ pub struct Formatting<'a> {
     pub unsupported_table_properties: bool,
 }
 
+pub(in crate::doc) struct ResolvedParagraph {
+    pub(in crate::doc) properties: paragraph::Properties,
+    pub(in crate::doc) numbering: Option<(numbering::Reference, Properties)>,
+}
+
 impl<'a> Formatting<'a> {
     pub fn read(word: &'a [u8], table: &'a [u8], data: &'a [u8]) -> Result<Self, String> {
         let fonts = read_fonts(fkp::table_part(word, table, 0x112)?)?;
@@ -118,6 +123,29 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<String, String> {
+        let mut resolved = self.resolve_paragraph(style, fc, prm, prcs)?;
+        if let Some((reference, marker)) = resolved.numbering {
+            let ppr = resolved.properties.xml();
+            let rpr = marker.xml(&self.fonts)?;
+            let id = self.numbering_output.activate(
+                &self.numbering,
+                reference,
+                ppr,
+                rpr,
+                super::MAX_DOCUMENT_XML_BYTES,
+            )?;
+            resolved.properties.numbering = id.map(|id| (id, reference.level));
+        }
+        Ok(resolved.properties.xml())
+    }
+
+    pub(in crate::doc) fn resolve_paragraph(
+        &mut self,
+        style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<ResolvedParagraph, String> {
         let mut props = if let Some(props) = self.paragraph_layout_cache.get(&style) {
             props.clone()
         } else {
@@ -210,18 +238,15 @@ impl<'a> Formatting<'a> {
             }
             let mut character_style = baseline.clone();
             self.apply_direct(&mut marker, &mut character_style, &baseline, level.chpx)?;
-            let ppr = props.xml();
-            let rpr = marker.xml(&self.fonts)?;
-            let id = self.numbering_output.activate(
-                &self.numbering,
-                reference,
-                ppr,
-                rpr,
-                super::MAX_DOCUMENT_XML_BYTES,
-            )?;
-            props.numbering = id.map(|id| (id, reference.level));
+            return Ok(ResolvedParagraph {
+                properties: props,
+                numbering: Some((reference, marker)),
+            });
         }
-        Ok(props.xml())
+        Ok(ResolvedParagraph {
+            properties: props,
+            numbering: None,
+        })
     }
 
     fn apply_paragraph<'b>(
@@ -675,6 +700,117 @@ mod tests {
 
     fn list_piece(ilfo: i16) -> Vec<u8> {
         [vec![0x0b, 0x46], ilfo.to_le_bytes().to_vec()].concat()
+    }
+
+    #[test]
+    fn typed_paragraph_resolution_does_not_activate_numbering() {
+        let piece = list_piece(1);
+        let mut resolved_formatting = empty();
+        resolved_formatting.numbering = level_bidi_formatting(1);
+        let resolved = resolved_formatting
+            .resolve_paragraph(0, 0, 1, &[&piece])
+            .unwrap();
+        assert_eq!(resolved.properties.numbering, None);
+        let (reference, marker) = resolved.numbering.unwrap();
+        assert_eq!((reference.index, reference.level), (0, 0));
+        assert!(marker.xml(&[]).unwrap().starts_with("<w:rPr>"));
+        assert_eq!(
+            resolved_formatting.numbering_output.xml(10_000).unwrap(),
+            None
+        );
+
+        let after_resolution = resolved_formatting
+            .paragraph_xml(0, 0, 1, &[&piece])
+            .unwrap();
+        let after_numbering = resolved_formatting.numbering_output.xml(10_000).unwrap();
+        let mut adapter_only = empty();
+        adapter_only.numbering = level_bidi_formatting(1);
+        let expected = adapter_only.paragraph_xml(0, 0, 1, &[&piece]).unwrap();
+        assert_eq!(after_resolution, expected);
+        assert_eq!(
+            after_numbering,
+            adapter_only.numbering_output.xml(10_000).unwrap()
+        );
+    }
+
+    #[test]
+    fn typed_resolver_and_xml_adapter_preserve_piece_reference_errors() {
+        let mut typed = empty();
+        let typed_error = match typed.resolve_paragraph(0, 0, 1, &[]) {
+            Ok(_) => panic!("invalid piece reference unexpectedly resolved"),
+            Err(error) => error,
+        };
+        assert!(typed_error.contains("outside CLX"), "{typed_error}");
+        assert_eq!(typed.numbering_output.xml(10_000).unwrap(), None);
+
+        let mut adapter = empty();
+        let adapter_error = adapter.paragraph_xml(0, 0, 1, &[]).unwrap_err();
+        assert_eq!(adapter_error, typed_error);
+        assert_eq!(adapter.numbering_output.xml(10_000).unwrap(), None);
+        assert_eq!(
+            adapter.unsupported_paragraph_properties,
+            typed.unsupported_paragraph_properties
+        );
+        assert_eq!(
+            adapter.unsupported_piece_properties,
+            typed.unsupported_piece_properties
+        );
+
+        let unsupported = [0x00, 0x24, 0];
+        let mut typed = empty();
+        let resolved = typed.resolve_paragraph(0, 0, 1, &[&unsupported]).unwrap();
+        assert!(typed.unsupported_paragraph_properties);
+        assert_eq!(typed.numbering_output.xml(10_000).unwrap(), None);
+
+        let mut adapter = empty();
+        let xml = adapter.paragraph_xml(0, 0, 1, &[&unsupported]).unwrap();
+        assert!(adapter.unsupported_paragraph_properties);
+        assert_eq!(xml, resolved.properties.xml());
+        assert_eq!(adapter.numbering_output.xml(10_000).unwrap(), None);
+    }
+
+    #[test]
+    fn typed_plain_and_suppressed_numbering_leave_output_inactive() {
+        let mut typed = empty();
+        let resolved = typed.resolve_paragraph(0, 0, 0, &[]).unwrap();
+        assert!(resolved.numbering.is_none());
+        let typed_xml = resolved.properties.xml();
+        let mut adapter = empty();
+        assert_eq!(adapter.paragraph_xml(0, 0, 0, &[]).unwrap(), typed_xml);
+
+        for piece in [
+            list_piece(-2047),
+            [list_piece(1), vec![0x0a, 0x26, 12]].concat(),
+        ] {
+            let mut formatting = empty();
+            let resolved = formatting.resolve_paragraph(0, 0, 1, &[&piece]).unwrap();
+            assert!(resolved.numbering.is_none());
+            assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
+            let expected = resolved.properties.xml();
+            assert_eq!(
+                formatting.paragraph_xml(0, 0, 1, &[&piece]).unwrap(),
+                expected
+            );
+            assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn marker_font_validation_remains_in_xml_adapter_before_activation() {
+        let piece = list_piece(1);
+        let mut formatting = empty();
+        formatting.numbering = level_bidi_formatting(1);
+        formatting.numbering.lists[0].levels[0].chpx =
+            Box::leak(vec![0x4f, 0x4a, 1, 0].into_boxed_slice());
+        let resolved = formatting.resolve_paragraph(0, 0, 1, &[&piece]).unwrap();
+        assert!(resolved.numbering.is_some());
+        assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
+        let error = formatting.paragraph_xml(0, 0, 1, &[&piece]).unwrap_err();
+        assert!(
+            error.contains("font index outside empty font table"),
+            "{error}"
+        );
+        assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
     }
 
     #[test]
