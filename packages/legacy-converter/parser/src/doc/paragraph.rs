@@ -106,6 +106,15 @@ impl Properties {
             return Ok(true);
         }
         match code {
+            0xc66c => {
+                // MS-DOC 2.6.2 sprmPTIstdInfo / 2.9.221
+                // PTIstdInfoOperand: cb MUST be 16 and all 16 reserved bytes
+                // MUST be ignored. Validate the complete framed operand before
+                // treating this property as the required no-op.
+                if operand.len() != 17 || operand[0] != 16 {
+                    return Err(unsupported("invalid Word PTIstdInfo operand"));
+                }
+            }
             0x260a => self.ilvl = operand[0],
             0x460b => self.ilfo = u16_at(operand, 0)? as i16,
             0x6424..=0x6428 => {
@@ -407,6 +416,43 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::sprm::{Budget, Sprms};
+
+    #[test]
+    fn ptistdinfo_validates_and_ignores_exact_operand_without_consuming_neighbors() {
+        for fill in [0x00, 0x55, 0xff] {
+            let baseline = Properties::default().xml();
+            let mut bytes = vec![0x6c, 0xc6, 16];
+            bytes.extend([fill; 16]);
+            bytes.extend([0x07, 0x24, 1]);
+            let mut sprms = Sprms::new(&bytes);
+            let mut budget = Budget::default();
+            let mut properties = Properties::default();
+            let (code, operand) = sprms.next(&mut budget).unwrap().unwrap();
+            assert_eq!((code, operand.len()), (0xc66c, 17));
+            assert!(properties.apply(code, operand).unwrap());
+            assert_eq!(properties.xml(), baseline);
+            let (code, operand) = sprms.next(&mut budget).unwrap().unwrap();
+            assert_eq!(code, 0x2407);
+            assert!(properties.apply(code, operand).unwrap());
+            assert!(properties
+                .xml()
+                .contains("<w:pageBreakBefore w:val=\"1\"/>"));
+            assert!(sprms.next(&mut budget).unwrap().is_none());
+        }
+
+        for cb in [0, 15, 17, 255] {
+            let mut bytes = vec![0x6c, 0xc6, cb];
+            bytes.resize(3 + usize::from(cb), 0);
+            bytes.extend([0x07, 0x24, 1]);
+            let mut sprms = Sprms::new(&bytes);
+            let (code, operand) = sprms.next(&mut Budget::default()).unwrap().unwrap();
+            assert_eq!(code, 0xc66c);
+            assert!(Properties::default().apply(code, operand).is_err());
+        }
+        let truncated = [0x6c, 0xc6, 16, 0, 0];
+        assert!(Sprms::new(&truncated).next(&mut Budget::default()).is_err());
+    }
 
     #[test]
     fn negative_list_reference_protects_logical_indents_in_rtl_without_freezing_the_other_side() {

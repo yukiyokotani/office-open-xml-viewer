@@ -164,6 +164,25 @@ mod tests {
     }
 
     #[test]
+    fn ignored_ptistdinfo_has_no_direct_or_xml_model_effect() {
+        let baseline = Properties::default();
+        let baseline_direct = serde_json::to_value(baseline.direct_paragraph()).unwrap();
+        let baseline_xml = baseline.xml();
+        for fill in [0x00, 0x55, 0xff] {
+            let mut properties = baseline.clone();
+            let mut operand = vec![16];
+            operand.extend([fill; 16]);
+            assert!(properties.apply(0xc66c, &operand).unwrap());
+            assert_eq!(properties.xml(), baseline_xml);
+            assert_eq!(
+                serde_json::to_value(properties.direct_paragraph()).unwrap(),
+                baseline_direct
+            );
+            assert_property_parity(&properties);
+        }
+    }
+
+    #[test]
     fn full_resolved_property_projection_matches_docx_parser_semantics() {
         let mut properties = Properties::default();
         for (code, operand) in [
