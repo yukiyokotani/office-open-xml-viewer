@@ -1139,12 +1139,7 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     )
 }
 
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub(crate) enum StreamedDocumentUnit {
-    Body { body: Vec<BodyElement> },
-    Complete { document: Box<Document> },
-}
+pub(crate) use docx_model::StreamedDocumentUnit;
 
 /// Persistent semantic cursor for the second document pass. It owns exactly
 /// one temporary projected-block arena, the compact preflight facts, and the

@@ -200,10 +200,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "docx-model"
+version = "0.1.0"
+dependencies = [
+ "ooxml-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "docx-parser"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "docx-model",
  "ooxml-common",
  "quick-xml",
  "roxmltree",

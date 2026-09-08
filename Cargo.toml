@@ -5,6 +5,7 @@ members = [
   "packages/legacy-converter/parser",
   "packages/pptx/model",
   "packages/xlsx/model",
+  "packages/docx/model",
   "packages/pptx/parser",
   "packages/docx/parser",
   "packages/xlsx/parser",
@@ -25,6 +26,7 @@ console_error_panic_hook = "0.1"
 ooxml-common = { path = "packages/ooxml-common" }
 pptx-model = { path = "packages/pptx/model" }
 xlsx-model = { path = "packages/xlsx/model" }
+docx-model = { path = "packages/docx/model" }
 
 [profile.release]
 opt-level = "s"
