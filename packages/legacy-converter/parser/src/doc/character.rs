@@ -45,6 +45,13 @@ pub struct Properties {
     // Raw MS-DOC LID. Resolution is deferred so an assigned locale and an
     // unknown/custom identifier never collapse into the same absent value.
     lang_bidi_lid: Option<u16>,
+    // Raw language axes from MS-DOC 2.6.1. The compatibility and modern
+    // properties remain distinct until their precedence and style flags can be
+    // resolved without guessing. Capturing them does not admit projection.
+    lang_default_80_lid: Option<u16>,
+    lang_east_asia_80_lid: Option<u16>,
+    lang_default_lid: Option<u16>,
+    lang_east_asia_lid: Option<u16>,
     pub picture: Picture,
 }
 
@@ -107,6 +114,10 @@ impl Default for Properties {
             font_hint: None,
             font_hint_present: false,
             lang_bidi_lid: None,
+            lang_default_80_lid: None,
+            lang_east_asia_80_lid: None,
+            lang_default_lid: None,
+            lang_east_asia_lid: None,
             picture: Picture::default(),
         }
     }
@@ -122,6 +133,10 @@ impl Properties {
             font_hint: None,
             font_hint_present: false,
             lang_bidi_lid: None,
+            lang_default_80_lid: None,
+            lang_east_asia_80_lid: None,
+            lang_default_lid: None,
+            lang_east_asia_lid: None,
             picture: Picture::default(),
         }
     }
@@ -140,6 +155,23 @@ impl Properties {
         }
         if patch.lang_bidi_lid.is_some() {
             self.lang_bidi_lid = patch.lang_bidi_lid;
+        }
+        for (current, added) in [
+            &mut self.lang_default_80_lid,
+            &mut self.lang_east_asia_80_lid,
+            &mut self.lang_default_lid,
+            &mut self.lang_east_asia_lid,
+        ]
+        .into_iter()
+        .zip([
+            patch.lang_default_80_lid,
+            patch.lang_east_asia_80_lid,
+            patch.lang_default_lid,
+            patch.lang_east_asia_lid,
+        ]) {
+            if added.is_some() {
+                *current = added;
+            }
         }
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
@@ -250,6 +282,24 @@ impl Properties {
                 }
                 self.lang_bidi_lid = Some(u16_at(operand, 0)?);
                 return Ok(true);
+            }
+            0x486d | 0x486e | 0x4873 | 0x4874 => {
+                // MS-DOC 2.6.1 sprmCRgLid0_80, sprmCRgLid1_80,
+                // sprmCRgLid0, and sprmCRgLid1; their operand is the exact
+                // two-byte LID from 2.9.134. Keep all four raw axes distinct.
+                // Resolution is intentionally deferred: returning false keeps
+                // the existing unsupported-formatting warning/native gate.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word character language ID"));
+                }
+                let lid = Some(u16_at(operand, 0)?);
+                match code {
+                    0x486d => self.lang_default_80_lid = lid,
+                    0x486e => self.lang_east_asia_80_lid = lid,
+                    0x4873 => self.lang_default_lid = lid,
+                    _ => self.lang_east_asia_lid = lid,
+                }
+                return Ok(false);
             }
             0x6815..=0x6817 => {
                 // MS-DOC 2.6.1 identifies these as revision-session IDs for
@@ -689,6 +739,109 @@ mod tests {
         assert_eq!(
             framed.next(&mut budget).unwrap(),
             Some((0x485f, &[0x01, 0x04][..]))
+        );
+        assert_eq!(framed.next(&mut budget).unwrap(), Some((0x0835, &[1][..])));
+    }
+
+    #[test]
+    fn western_and_east_asian_language_ids_are_captured_but_not_admitted() {
+        let base = Properties::default();
+        let cases: [(u16, u16, usize); 4] = [
+            (0x486d, 0x0400, 0),
+            (0x486e, 0x007f, 1),
+            (0x4873, 0xf123, 2),
+            (0x4874, 0xffff, 3),
+        ];
+        let slots = |p: &Properties| {
+            [
+                p.lang_default_80_lid,
+                p.lang_east_asia_80_lid,
+                p.lang_default_lid,
+                p.lang_east_asia_lid,
+            ]
+        };
+
+        let mut properties = Properties::sparse();
+        for (code, lid, slot) in cases {
+            assert!(!properties.apply(code, &lid.to_le_bytes(), &base).unwrap());
+            assert_eq!(slots(&properties)[slot], Some(lid));
+        }
+        assert_eq!(
+            slots(&properties),
+            [Some(0x0400), Some(0x007f), Some(0xf123), Some(0xffff)]
+        );
+        assert_eq!(properties.xml(&[]).unwrap(), "<w:rPr></w:rPr>");
+
+        // Repeated properties retain their ordered last value without merging
+        // the four source axes.
+        assert!(!properties
+            .apply(0x4873, &0x1234u16.to_le_bytes(), &base)
+            .unwrap());
+        assert_eq!(slots(&properties)[2], Some(0x1234));
+        assert_eq!(slots(&properties)[3], Some(0xffff));
+
+        let mut inherited = Properties::sparse();
+        inherited
+            .apply(0x486d, &0x1111u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited
+            .apply(0x4874, &0x2222u16.to_le_bytes(), &base)
+            .unwrap();
+        let mut patch = Properties::sparse();
+        patch
+            .apply(0x486e, &0x3333u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited.overlay_visible(&patch);
+        assert_eq!(
+            slots(&inherited),
+            [Some(0x1111), Some(0x3333), None, Some(0x2222)]
+        );
+        inherited.overlay_visible(&Properties::sparse());
+        assert_eq!(
+            slots(&inherited),
+            [Some(0x1111), Some(0x3333), None, Some(0x2222)]
+        );
+
+        // CPlain and CIstd use this reset primitive. Language is not among
+        // their preserved properties, so all four axes come from the reset
+        // target while bidi/noProof remain independent properties.
+        let mut paragraph = Properties::sparse();
+        paragraph
+            .apply(0x4873, &0x4444u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited
+            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
+            .unwrap();
+        inherited.apply(0x0875, &[1], &base).unwrap();
+        let independent_xml = inherited.xml(&[]).unwrap();
+        assert!(independent_xml.contains("<w:lang w:bidi=\"ar-SA\"/>"));
+        assert!(independent_xml.contains("<w:noProof w:val=\"1\"/>"));
+        for preserve_object in [false, true] {
+            let mut reset = inherited.clone();
+            reset.reset_to(&paragraph, preserve_object);
+            assert_eq!(slots(&reset), [None, None, Some(0x4444), None]);
+            assert_eq!(reset.lang_bidi_lid, paragraph.lang_bidi_lid);
+            assert!(!reset.xml(&[]).unwrap().contains("<w:noProof"));
+        }
+    }
+
+    #[test]
+    fn western_and_east_asian_language_ids_require_exact_operands() {
+        let base = Properties::default();
+        for code in [0x486d, 0x486e, 0x4873, 0x4874] {
+            assert!(base.clone().apply(code, &[], &base).is_err());
+            assert!(base.clone().apply(code, &[1], &base).is_err());
+            assert!(base.clone().apply(code, &[1, 2, 3], &base).is_err());
+        }
+
+        let mut truncated = Sprms::new(&[0x6d, 0x48, 0x01]);
+        assert!(truncated.next(&mut Budget::default()).is_err());
+        let framed = [0x6d, 0x48, 0x01, 0x04, 0x35, 0x08, 0x01];
+        let mut framed = Sprms::new(&framed);
+        let mut budget = Budget::default();
+        assert_eq!(
+            framed.next(&mut budget).unwrap(),
+            Some((0x486d, &[0x01, 0x04][..]))
         );
         assert_eq!(framed.next(&mut budget).unwrap(), Some((0x0835, &[1][..])));
     }

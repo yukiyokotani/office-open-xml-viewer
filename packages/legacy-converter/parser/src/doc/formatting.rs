@@ -892,6 +892,33 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_raw_language_axes_remain_unsupported_through_formatting() {
+        const CASES: [[u8; 4]; 4] = [
+            [0x6d, 0x48, 0x34, 0x12],
+            [0x6e, 0x48, 0x34, 0x12],
+            [0x73, 0x48, 0x34, 0x12],
+            [0x74, 0x48, 0x34, 0x12],
+        ];
+        for direct in &CASES {
+            let mut formatting = empty();
+            let xml = formatting.run_xml(0, 0, 1, &[direct]).unwrap();
+            assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
+            assert!(formatting.unsupported_character_properties);
+
+            let mut formatting = empty();
+            formatting.styles = vec![Some(Style {
+                kind: 1,
+                base: 0xfff,
+                chpx: direct,
+                papx: &[],
+            })];
+            let xml = formatting.run_xml(0, 0, 0, &[]).unwrap();
+            assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
+            assert!(formatting.unsupported_character_properties);
+        }
+    }
+
+    #[test]
     fn direct_absolute_indent_axes_replay_after_list_in_last_write_order() {
         let mut f = with_direct_paragraph(&[
             0, 0, 0x41, 0x24, 1, // direct RTL
