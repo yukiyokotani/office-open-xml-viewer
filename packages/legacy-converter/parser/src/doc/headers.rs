@@ -22,6 +22,29 @@ impl Headers<'_> {
     pub fn attach_references(&self, sections: &mut [sections::Section]) -> Result<(), String> {
         attach_entries(&self.entries, sections)
     }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn entry(&self, index: usize) -> Option<&Entry> {
+        self.entries
+            .binary_search_by_key(&index, |entry| entry.index)
+            .ok()
+            .map(|position| &self.entries[position])
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn entry_text<'a>(&'a self, entry: &Entry) -> &'a str {
+        &self.story.text[entry.text.clone()]
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn restore_fields(
+        &self,
+        text: &str,
+        base_cp: usize,
+        paragraphs: &mut [super::Paragraph],
+    ) {
+        self.fields.restore(text, base_cp, paragraphs);
+    }
 }
 
 fn attach_entries(entries: &[Entry], sections: &mut [sections::Section]) -> Result<(), String> {

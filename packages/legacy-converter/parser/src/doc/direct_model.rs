@@ -1,30 +1,20 @@
 //! Internal direct DOC body producer. This is intentionally not a public route:
 //! unsupported body owners fail closed while incremental model coverage lands.
 
-use super::{unsupported, AcquiredDoc, Fields, Token};
-use docx_model::paragraph_breaks::{visit_para_on_page_breaks, ParaPiece};
-use docx_model::{
-    BodyElement, BreakType, DocRun, Document, DocumentSettings, DocumentTypographySettingsWire,
-};
+use super::{unsupported, AcquiredDoc, Fields};
+use docx_model::paragraph_breaks::ParaPiece;
+use docx_model::{BodyElement, DocRun, Document, DocumentSettings, DocumentTypographySettingsWire};
 
+mod headers;
 mod payload;
+mod story;
 
 pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Document, String> {
     if max_bytes == 0 {
         return Err("OUTPUT_TOO_LARGE".into());
     }
-    // MS-DOC 2.3.3 / 2.8.22: the first six header-document stories are
-    // footnote/endnote separators, not page headers. Only authored nonempty
-    // header/footer ranges produce entries; an explicitly blank paragraph does.
-    if facts
-        .headers
-        .as_ref()
-        .is_some_and(|headers| !headers.entries.is_empty())
-        || facts.note_stories.iter().any(Option::is_some)
-    {
-        return Err(unsupported(
-            "direct DOC model does not yet support headers or notes",
-        ));
+    if facts.note_stories.iter().any(Option::is_some) {
+        return Err(unsupported("direct DOC model does not yet support notes"));
     }
     if facts.formatting.missing_tables {
         return Err(unsupported(
@@ -70,6 +60,9 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
         return Err(unsupported("Word story structure budget exceeded"));
     }
     let mut body = Vec::new();
+    let mut header_resolver = headers::Resolver::new(facts.headers.as_ref());
+    let mut final_headers = None;
+    let mut final_footers = None;
     let chunks = super::sections::split_story(&facts.story.text, &facts.sections)?;
     let mut fields = Fields::default();
     for (section_index, chunk) in chunks.iter().enumerate() {
@@ -94,159 +87,17 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
                 facts.sections[section_index].end - 1;
         }
 
-        let paragraph_count = paragraphs.len();
-        for (paragraph_index, source) in paragraphs.into_iter().enumerate() {
-            if source.mark == '\u{7}' {
-                return Err(unsupported("direct DOC model does not yet support tables"));
-            }
-            let (_, mark_fc, mark_piece) = facts
-                .story
-                .position(source.end_cp)
-                .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
-            let style = facts.formatting.paragraph_style(mark_fc)?;
-            if facts
-                .formatting
-                .table_properties(mark_fc, mark_piece.prm, &facts.story.prcs)?
-                .depth()?
-                != 0
-            {
-                return Err(unsupported("direct DOC model does not yet support tables"));
-            }
-            let direct = facts.formatting.direct_paragraph(
-                style,
-                mark_fc,
-                mark_piece.prm,
-                &facts.story.prcs,
-            )?;
-            if direct.numbering.is_some() {
-                return Err(unsupported(
-                    "direct DOC model does not yet support numbered paragraphs",
-                ));
-            }
-            let mut paragraph = direct.paragraph;
-            budget.paragraph(&paragraph)?;
+        story::project(
+            &facts.story,
+            paragraphs,
+            &mut facts.formatting,
+            &mut budget,
+            &mut body,
+            ending.as_ref().map(|ending| ending.kind.as_str()),
+        )?;
 
-            for (token, cp) in source.tokens {
-                match token {
-                    Token::Text(text) => {
-                        super::visit_text_runs(
-                            &text,
-                            cp,
-                            &facts.story,
-                            &mut Some(&mut facts.formatting),
-                            |formatting, fc, prm| {
-                                formatting.direct_text_run(
-                                    style,
-                                    fc,
-                                    prm,
-                                    &facts.story.prcs,
-                                    String::new(),
-                                )
-                            },
-                            |part, run| {
-                                if let Some(mut run) = run.flatten() {
-                                    budget.text(&mut paragraph.runs, &mut run, part)?;
-                                }
-                                Ok(())
-                            },
-                        )?;
-                    }
-                    Token::Tab => {
-                        push_control_text(
-                            &mut paragraph,
-                            &facts.story,
-                            &mut facts.formatting,
-                            style,
-                            cp,
-                            "\t",
-                            &mut budget,
-                        )?;
-                    }
-                    Token::LineBreak => {
-                        budget.push(
-                            &mut paragraph.runs,
-                            DocRun::Break {
-                                break_type: BreakType::Line,
-                            },
-                        )?;
-                    }
-                    Token::PageBreak | Token::ColumnBreak => {
-                        budget.push(
-                            &mut paragraph.runs,
-                            DocRun::Break {
-                                break_type: if matches!(token, Token::PageBreak) {
-                                    BreakType::Page
-                                } else {
-                                    BreakType::Column
-                                },
-                            },
-                        )?;
-                    }
-                    Token::Picture | Token::FloatingPicture => {
-                        return Err(unsupported(
-                            "direct DOC model does not yet support pictures",
-                        ));
-                    }
-                    Token::NoteMarker | Token::NoteReference(_) => {
-                        return Err(unsupported(
-                            "direct DOC model does not yet support note content",
-                        ));
-                    }
-                    Token::FieldBegin(_) | Token::FieldEnd => {
-                        return Err(unsupported(
-                            "direct DOC model does not retain field structures yet",
-                        ));
-                    }
-                }
-            }
-            // Match the shared parser's boundary contract on projected runs,
-            // after vanish filtering but before chunk visibility normalization.
-            // A whitespace/line-break run is not the same as an absent run.
-            match paragraph.runs.as_slice() {
-                [DocRun::Break {
-                    break_type: BreakType::Page,
-                }] => {
-                    let subsumed = paragraph_index + 1 == paragraph_count
-                        && ending.as_ref().is_some_and(|ending| {
-                            !matches!(ending.kind.as_str(), "continuous" | "nextColumn")
-                        });
-                    if !subsumed {
-                        budget.push(
-                            &mut body,
-                            BodyElement::PageBreak {
-                                parity: None,
-                                same_paragraph_as_previous: None,
-                            },
-                        )?;
-                    }
-                }
-                [DocRun::Break {
-                    break_type: BreakType::Column,
-                }] => {
-                    budget.push(&mut body, BodyElement::ColumnBreak)?;
-                }
-                _ => visit_para_on_page_breaks(paragraph, |piece| {
-                    let element = match piece {
-                        ParaPiece::Para(paragraph) => {
-                            // Runs move through the normalizer; their text/font
-                            // payload was already charged during acquisition.
-                            // Charge output metadata and the new vector backing
-                            // before retaining each piece, and stop on failure.
-                            budget.normalized_paragraph(&paragraph)?;
-                            BodyElement::Paragraph(Box::new(paragraph))
-                        }
-                        ParaPiece::PageBreak {
-                            same_paragraph_as_previous,
-                        } => BodyElement::PageBreak {
-                            parity: None,
-                            same_paragraph_as_previous: same_paragraph_as_previous.then_some(true),
-                        },
-                        ParaPiece::ColumnBreak => BodyElement::ColumnBreak,
-                    };
-                    budget.push(&mut body, element)
-                })?,
-            }
-        }
+        let (section_headers, section_footers) =
+            header_resolver.project_section(section_index, &mut facts.formatting, &mut budget)?;
 
         if let Some(ending) = ending {
             budget.charge(payload::ending_section(
@@ -262,8 +113,8 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
                 BodyElement::SectionBreak {
                     kind: ending.kind,
                     columns: ending.columns,
-                    headers: Box::default(),
-                    footers: Box::default(),
+                    headers: Box::new(section_headers),
+                    footers: Box::new(section_footers),
                     title_page: ending.title_page,
                     geom: Some(ending.geom),
                     page_num_type: ending.page_num_type,
@@ -271,6 +122,9 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
                     section_placement: ending.placement,
                 },
             )?;
+        } else {
+            final_headers = Some(section_headers);
+            final_footers = Some(section_footers);
         }
     }
 
@@ -292,31 +146,12 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
     Ok(Document {
         section,
         body,
+        headers: final_headers.unwrap_or_default(),
+        footers: final_footers.unwrap_or_default(),
         settings,
         document_typography_settings,
         ..Document::default()
     })
-}
-
-fn push_control_text(
-    paragraph: &mut docx_model::DocParagraph,
-    story: &super::Story<'_>,
-    formatting: &mut super::formatting::Formatting<'_>,
-    style: usize,
-    cp: usize,
-    text: &str,
-    budget: &mut ModelBudget,
-) -> Result<bool, String> {
-    let (_, fc, piece) = story
-        .position(cp)
-        .ok_or_else(|| unsupported("Word control outside piece table"))?;
-    if let Some(mut run) =
-        formatting.direct_text_run(style, fc, piece.prm, &story.prcs, String::new())?
-    {
-        budget.text(&mut paragraph.runs, &mut run, text)?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 /// Cumulative admitted model storage, not serialized size or an RSS estimate.
@@ -422,7 +257,7 @@ mod tests {
         sections: &[(usize, u8, u16, u16, u16, u16)],
         authored_blank_header: Option<bool>,
     ) -> Vec<u8> {
-        source_with_typography(text, sections, authored_blank_header, None, None)
+        source_with_typography(text, sections, authored_blank_header, None, None, None)
     }
 
     fn source_with_typography(
@@ -431,12 +266,34 @@ mod tests {
         authored_blank_header: Option<bool>,
         normal_hps: Option<u16>,
         body_hps: Option<u16>,
+        header_slots: Option<&[Option<&str>]>,
     ) -> Vec<u8> {
         let main_units = text.encode_utf16().count();
-        let header = match authored_blank_header {
-            None => "",
-            Some(false) => "\r\r",
-            Some(true) => "\r\r\r\r",
+        let (header, header_cps) = if let Some(slots) = header_slots {
+            assert_eq!(slots.len(), sections.len() * 6);
+            let mut header = String::from("\r");
+            let mut cps = vec![0u32, 1, 1, 1, 1, 1, 1];
+            let mut cp = 1u32;
+            for slot in slots {
+                if let Some(content) = slot {
+                    assert!(content.ends_with('\r'));
+                    header.push_str(content);
+                    header.push('\r');
+                    cp += content.encode_utf16().count() as u32 + 1;
+                }
+                cps.push(cp);
+            }
+            header.push('\r');
+            (header, Some(cps))
+        } else {
+            (
+                match authored_blank_header {
+                    None => String::new(),
+                    Some(false) => "\r\r".into(),
+                    Some(true) => "\r\r\r\r".into(),
+                },
+                None,
+            )
         };
         let units: Vec<u16> = text.encode_utf16().chain(header.encode_utf16()).collect();
         let text_offset = 0x400usize;
@@ -494,7 +351,14 @@ mod tests {
         word[0xca..0xce].copy_from_slice(&(section_table_offset as u32).to_le_bytes());
         word[0xce..0xd2].copy_from_slice(&(section_table_size as u32).to_le_bytes());
 
-        if let Some(authored) = authored_blank_header {
+        if let Some(cps) = header_cps {
+            let mut hdd = Vec::new();
+            for cp in cps {
+                hdd.extend(cp.to_le_bytes());
+            }
+            hdd.extend(u32::MAX.to_le_bytes());
+            append_table_part(&mut word, &mut table, 0xf2, &hdd);
+        } else if let Some(authored) = authored_blank_header {
             let mut hdd = Vec::new();
             for index in 0..14 {
                 let cp: u32 = match index {
@@ -506,6 +370,25 @@ mod tests {
                 hdd.extend(cp.to_le_bytes());
             }
             append_table_part(&mut word, &mut table, 0xf2, &hdd);
+        }
+        let mut field_positions = Vec::new();
+        let mut cp = 0u32;
+        for character in header.chars() {
+            if matches!(character, '\u{13}'..='\u{15}') {
+                field_positions.push((cp, character as u8));
+            }
+            cp += character.len_utf16() as u32;
+        }
+        if !field_positions.is_empty() {
+            let mut field_table = Vec::new();
+            for (position, _) in &field_positions {
+                field_table.extend(position.to_le_bytes());
+            }
+            field_table.extend(cp.to_le_bytes());
+            for (_, marker) in field_positions {
+                field_table.extend([marker, 0]);
+            }
+            append_table_part(&mut word, &mut table, 0x122, &field_table);
         }
 
         let mut font_table = vec![1, 0, 0, 0];
@@ -601,6 +484,22 @@ mod tests {
         build_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    fn mark_header_field_results_private(bytes: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let offset = u32::from_le_bytes(word[0x122..0x126].try_into().unwrap()) as usize;
+        let size = u32::from_le_bytes(word[0x126..0x12a].try_into().unwrap()) as usize;
+        let count = (size - 4) / 6;
+        let records = offset + (count + 1) * 4;
+        for index in 0..count {
+            if table[records + index * 2] & 0x1f == 0x15 {
+                table[records + index * 2 + 1] |= 0x20;
+            }
+        }
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     #[test]
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
         let bytes = source("A\tB\u{b}C\r\u{13}PAGE\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
@@ -633,7 +532,8 @@ mod tests {
             (Some(22), Some(48), 11.0),
             (Some(3276), Some(20), 1638.0),
         ] {
-            let bytes = source_with_typography("Body\r", &sections, None, normal_hps, body_hps);
+            let bytes =
+                source_with_typography("Body\r", &sections, None, normal_hps, body_hps, None);
             let document =
                 super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                     .unwrap();
@@ -654,13 +554,13 @@ mod tests {
             assert_eq!(run.font_size, f64::from(body_hps.unwrap()) / 2.0);
         }
 
-        let malformed = source_with_typography("Body\r", &sections, None, Some(1), Some(44));
+        let malformed = source_with_typography("Body\r", &sections, None, Some(1), Some(44), None);
         assert!(
             super::super::direct_model(&CompoundFile::open(&malformed).unwrap(), 1024 * 1024,)
                 .is_err()
         );
 
-        let valid = source_with_typography("Body\r", &sections, None, Some(22), Some(44));
+        let valid = source_with_typography("Body\r", &sections, None, Some(22), Some(44), None);
         let cyclic = make_normal_style_self_referential(&valid);
         assert!(
             super::super::direct_model(&CompoundFile::open(&cyclic).unwrap(), 1024 * 1024,)
@@ -684,12 +584,196 @@ mod tests {
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
-        assert!(super::super::direct_model(
-            &CompoundFile::open(&blank_header).unwrap(),
-            1024 * 1024
-        )
-        .unwrap_err()
-        .contains("headers or notes"));
+        let blank =
+            super::super::direct_model(&CompoundFile::open(&blank_header).unwrap(), 1024 * 1024)
+                .unwrap();
+        let authored = blank.headers.even.as_ref().expect("authored even header");
+        assert_eq!(authored.body.len(), 1);
+        let BodyElement::Paragraph(paragraph) = &authored.body[0] else {
+            panic!("authored blank header remains an empty paragraph")
+        };
+        assert!(paragraph.runs.is_empty());
+
+        let converted =
+            super::super::convert(&CompoundFile::open(&blank_header).unwrap(), 1024 * 1024)
+                .unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
+        let actual = serde_json::to_value(blank).unwrap();
+        assert_eq!(
+            actual["headers"]["even"]["body"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            actual["headers"]["even"]["body"][0]["runs"],
+            expected["headers"]["even"]["body"][0]["runs"]
+        );
+    }
+
+    fn header_text(value: &docx_model::HeaderFooter) -> String {
+        value
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => Some(
+                    paragraph
+                        .runs
+                        .iter()
+                        .filter_map(|run| match run {
+                            DocRun::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn normalized_header_json(value: &serde_json::Value) -> serde_json::Value {
+        let mut value = value.clone();
+        for slot in ["even", "default", "first"] {
+            let Some(body) = value[slot]["body"].as_array_mut() else {
+                continue;
+            };
+            for element in body {
+                if element["type"] == "paragraph" {
+                    element.as_object_mut().unwrap().remove("styleId");
+                }
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn all_six_slots_inherit_and_authored_blank_clears_only_its_slot() {
+        let sections = [
+            (2, 0, 12_240, 15_840, 1, 720),
+            (4, 2, 12_240, 15_840, 1, 720),
+            (6, 2, 12_240, 15_840, 1, 720),
+        ];
+        let slots = [
+            Some("HE😀\r"),
+            Some("HD\r"),
+            Some("FE\r"),
+            Some("FD\r"),
+            Some("HF\r"),
+            Some("FF\r"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("\r"),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let bytes =
+            source_with_typography("A\u{c}B\u{c}C\r", &sections, None, None, None, Some(&slots));
+        let document =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let converted =
+            super::super::convert(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
+        let actual = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            normalized_header_json(&actual["headers"]),
+            normalized_header_json(&expected["headers"])
+        );
+        assert_eq!(
+            normalized_header_json(&actual["footers"]),
+            normalized_header_json(&expected["footers"])
+        );
+        let breaks: Vec<_> = document
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::SectionBreak {
+                    headers, footers, ..
+                } => Some((headers.as_ref(), footers.as_ref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(breaks.len(), 2);
+        for (headers, footers) in &breaks {
+            assert_eq!(header_text(headers.even.as_ref().unwrap()), "HE😀");
+            assert_eq!(header_text(headers.default.as_ref().unwrap()), "HD");
+            assert_eq!(header_text(headers.first.as_ref().unwrap()), "HF");
+            assert_eq!(header_text(footers.even.as_ref().unwrap()), "FE");
+            assert_eq!(header_text(footers.default.as_ref().unwrap()), "FD");
+            assert_eq!(header_text(footers.first.as_ref().unwrap()), "FF");
+        }
+        assert_eq!(header_text(document.headers.even.as_ref().unwrap()), "HE😀");
+        assert_eq!(header_text(document.headers.first.as_ref().unwrap()), "HF");
+        assert!(document
+            .headers
+            .default
+            .as_ref()
+            .is_some_and(|header| header_text(header).is_empty()));
+        assert_eq!(header_text(document.footers.even.as_ref().unwrap()), "FE");
+        assert_eq!(
+            header_text(document.footers.default.as_ref().unwrap()),
+            "FD"
+        );
+        assert_eq!(header_text(document.footers.first.as_ref().unwrap()), "FF");
+    }
+
+    #[test]
+    fn restored_page_field_is_rejected_instead_of_exposing_cached_digits_as_text() {
+        let sections = [(5, 2, 12_240, 15_840, 1, 720)];
+        let slots = [
+            None,
+            Some("\u{13}PAGE\u{14}42\u{15}\r"),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
+        assert!(
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap_err()
+                .contains("field structures")
+        );
+    }
+
+    #[test]
+    fn inherited_hidden_header_work_is_cumulatively_bounded_before_retokenization() {
+        let section_count = 8usize;
+        let mut story = String::new();
+        let mut sections = Vec::new();
+        for section in 0..section_count {
+            story.push(if section + 1 == section_count {
+                '\r'
+            } else {
+                '\u{c}'
+            });
+            sections.push((section + 1, 2, 12_240, 15_840, 1, 720));
+        }
+        let hidden = format!("\u{13}IF\u{14}{}\u{15}\r", "x".repeat(16 * 1024));
+        let mut slots = vec![None; section_count * 6];
+        slots[1] = Some(hidden.as_str());
+        let bytes = source_with_typography(&story, &sections, None, None, None, Some(&slots));
+        let bytes = mark_header_field_results_private(&bytes);
+        let projected =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        assert!(projected
+            .headers
+            .default
+            .as_ref()
+            .is_some_and(|header| header_text(header).is_empty()));
+        assert_eq!(
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 192 * 1024)
+                .unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
     }
 
     #[test]
