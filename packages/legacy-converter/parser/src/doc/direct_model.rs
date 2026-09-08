@@ -3,7 +3,9 @@
 
 use super::{unsupported, AcquiredDoc, Fields, Token};
 use docx_model::paragraph_breaks::{visit_para_on_page_breaks, ParaPiece};
-use docx_model::{BodyElement, BreakType, DocRun, Document, DocumentSettings};
+use docx_model::{
+    BodyElement, BreakType, DocRun, Document, DocumentSettings, DocumentTypographySettingsWire,
+};
 
 mod payload;
 
@@ -49,6 +51,9 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
             default_tab_stop: Some(f64::from(settings.default_tab_twips) / 20.0),
             ..DocumentSettings::default()
         });
+    let document_typography_settings = Some(DocumentTypographySettingsWire {
+        normal_style_font_size_pt: facts.formatting.direct_normal_style_font_size_pt()?,
+    });
 
     let mut budget = ModelBudget::new(max_bytes);
     budget.charge(std::mem::size_of::<Document>())?;
@@ -288,6 +293,7 @@ pub(super) fn build(mut facts: AcquiredDoc<'_>, max_bytes: usize) -> Result<Docu
         section,
         body,
         settings,
+        document_typography_settings,
         ..Document::default()
     })
 }
@@ -416,6 +422,16 @@ mod tests {
         sections: &[(usize, u8, u16, u16, u16, u16)],
         authored_blank_header: Option<bool>,
     ) -> Vec<u8> {
+        source_with_typography(text, sections, authored_blank_header, None, None)
+    }
+
+    fn source_with_typography(
+        text: &str,
+        sections: &[(usize, u8, u16, u16, u16, u16)],
+        authored_blank_header: Option<bool>,
+        normal_hps: Option<u16>,
+        body_hps: Option<u16>,
+    ) -> Vec<u8> {
         let main_units = text.encode_utf16().count();
         let header = match authored_blank_header {
             None => "",
@@ -512,6 +528,12 @@ mod tests {
         stylesheet.extend(style_header);
         let mut normal = vec![0; 14];
         normal[2..4].copy_from_slice(&0xfff1u16.to_le_bytes());
+        if let Some(size) = normal_hps {
+            normal[4..6].copy_from_slice(&2u16.to_le_bytes());
+            normal.extend([2, 0, 0, 0]);
+            normal.extend([4, 0, 0x43, 0x4a]);
+            normal.extend(size.to_le_bytes());
+        }
         stylesheet.extend((normal.len() as u16).to_le_bytes());
         stylesheet.append(&mut normal);
         for _ in 1..15 {
@@ -527,6 +549,12 @@ mod tests {
             let mut page = vec![0; 512];
             page[0..4].copy_from_slice(&(text_offset as u32).to_le_bytes());
             page[4..8].copy_from_slice(&((text_offset + units.len() * 2) as u32).to_le_bytes());
+            if fib_offset == 0xfa {
+                if let Some(size) = body_hps {
+                    page[8] = 32;
+                    page[64..69].copy_from_slice(&[4, 0x43, 0x4a, size as u8, (size >> 8) as u8]);
+                }
+            }
             page[511] = 1;
             word.extend(page);
             let mut bte = Vec::new();
@@ -562,6 +590,17 @@ mod tests {
         build_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
+    fn make_normal_style_self_referential(bytes: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let styles = u32::from_le_bytes(word[0xa2..0xa6].try_into().unwrap()) as usize;
+        // STSHI is prefixed by its 2-byte size. The first STD follows the
+        // 18-byte header and its own 2-byte size; offset 2 is sti/base.
+        table[styles + 24..styles + 26].copy_from_slice(&1u16.to_le_bytes());
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     #[test]
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
         let bytes = source("A\tB\u{b}C\r\u{13}PAGE\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
@@ -583,6 +622,51 @@ mod tests {
         }
         assert_eq!(actual_body, expected_body);
         assert_eq!(actual["section"], expected["section"]);
+    }
+
+    #[test]
+    fn document_typography_uses_resolved_normal_style_size_not_body_chpx() {
+        let sections = [(5, 2, 12_240, 15_840, 1, 720)];
+        for (normal_hps, body_hps, expected_pt) in [
+            (None, Some(44), 10.0),
+            (Some(2), Some(44), 1.0),
+            (Some(22), Some(48), 11.0),
+            (Some(3276), Some(20), 1638.0),
+        ] {
+            let bytes = source_with_typography("Body\r", &sections, None, normal_hps, body_hps);
+            let document =
+                super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                    .unwrap();
+            assert_eq!(
+                document
+                    .document_typography_settings
+                    .unwrap()
+                    .normal_style_font_size_pt,
+                expected_pt,
+                "normal={normal_hps:?}, body={body_hps:?}"
+            );
+            let BodyElement::Paragraph(paragraph) = &document.body[0] else {
+                panic!("expected body paragraph");
+            };
+            let DocRun::Text(run) = &paragraph.runs[0] else {
+                panic!("expected independently formatted body text");
+            };
+            assert_eq!(run.font_size, f64::from(body_hps.unwrap()) / 2.0);
+        }
+
+        let malformed = source_with_typography("Body\r", &sections, None, Some(1), Some(44));
+        assert!(
+            super::super::direct_model(&CompoundFile::open(&malformed).unwrap(), 1024 * 1024,)
+                .is_err()
+        );
+
+        let valid = source_with_typography("Body\r", &sections, None, Some(22), Some(44));
+        let cyclic = make_normal_style_self_referential(&valid);
+        assert!(
+            super::super::direct_model(&CompoundFile::open(&cyclic).unwrap(), 1024 * 1024,)
+                .unwrap_err()
+                .contains("cyclic")
+        );
     }
 
     #[test]

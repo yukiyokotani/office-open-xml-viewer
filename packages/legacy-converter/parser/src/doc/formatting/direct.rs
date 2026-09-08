@@ -10,6 +10,12 @@ pub(in crate::doc) struct DirectResolvedParagraph {
 }
 
 impl Formatting<'_> {
+    pub(in crate::doc) fn direct_normal_style_font_size_pt(&mut self) -> Result<f64, String> {
+        // MS-DOC 2.6.4 sprmSDxtCharSpace is relative to the Normal style,
+        // not the paragraph mark or any visible body run's direct formatting.
+        self.paragraph_base(0)?.direct_font_size_pt()
+    }
+
     pub(in crate::doc) fn direct_paragraph(
         &mut self,
         style: usize,

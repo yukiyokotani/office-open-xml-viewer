@@ -14,6 +14,13 @@ use docx_model::{
 type FontAxes = [Option<String>; 4];
 
 impl Properties {
+    pub(in crate::doc) fn direct_font_size_pt(&self) -> Result<f64, String> {
+        // Resolved properties already include the MS-DOC 2.6.1 sprmCHps
+        // default (20 half-points). A sparse patch is not a resolved font.
+        self.half_points("sz")?
+            .ok_or_else(|| unsupported("Word resolved font size is absent"))
+    }
+
     /// Project one visible text span. Hidden text is absent from the normal/print
     /// DOC model, matching the existing DOC-to-OOXML-to-DOCX-parser route.
     pub(in crate::doc) fn direct_text_run(
