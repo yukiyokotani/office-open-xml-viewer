@@ -9,6 +9,9 @@ use super::sprm::{self, Budget, Sprms};
 use super::{numbering, paragraph, table, u16_at, unsupported};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+
 struct Style<'a> {
     base: usize,
     kind: u16,
@@ -78,6 +81,8 @@ pub struct Formatting<'a> {
 pub(in crate::doc) struct ResolvedParagraph {
     pub(in crate::doc) properties: paragraph::Properties,
     pub(in crate::doc) numbering: Option<(numbering::Reference, Properties)>,
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) paragraph_mark: Option<Properties>,
 }
 
 impl<'a> Formatting<'a> {
@@ -217,6 +222,11 @@ impl<'a> Formatting<'a> {
                 props.preserve_list_indent(&original);
             }
 
+            #[cfg(feature = "direct-doc")]
+            let paragraph_mark = self.run_properties(style, fc, prm, prcs)?;
+            #[cfg(feature = "direct-doc")]
+            let mut marker = paragraph_mark.clone();
+            #[cfg(not(feature = "direct-doc"))]
             let mut marker = self.run_properties(style, fc, prm, prcs)?;
             let mut baseline = self.paragraph_base(style)?;
             if linked != 0xfff {
@@ -241,11 +251,15 @@ impl<'a> Formatting<'a> {
             return Ok(ResolvedParagraph {
                 properties: props,
                 numbering: Some((reference, marker)),
+                #[cfg(feature = "direct-doc")]
+                paragraph_mark: Some(paragraph_mark),
             });
         }
         Ok(ResolvedParagraph {
             properties: props,
             numbering: None,
+            #[cfg(feature = "direct-doc")]
+            paragraph_mark: None,
         })
     }
 
@@ -593,6 +607,31 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "direct-doc")]
+    fn parse_direct_fixture(ppr: &str, rpr: &str, mark_rpr: &str) -> serde_json::Value {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+
+        let mark_inner = mark_rpr
+            .strip_prefix("<w:rPr>")
+            .and_then(|value| value.strip_suffix("</w:rPr>"))
+            .expect("resolved run properties");
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr>{ppr}<w:rPr>{mark_inner}</w:rPr></w:pPr><w:r>{rpr}<w:t>x</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            zip.start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        parsed["body"][0].clone()
+    }
 
     #[test]
     fn reads_font_names_after_ffn_metadata_not_as_latin1() {
@@ -1017,6 +1056,155 @@ mod tests {
         assert!(xml.contains("w:b w:val=\"0\""));
         let xml = f.run_xml(1, 0, 0x0100 | (0x55 << 1), &[]).unwrap();
         assert!(xml.contains("w:sz w:val=\"32\""));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_run_and_mark_use_the_existing_style_and_piece_cascade() {
+        let mut f = empty();
+        f.fonts = ["ASCII", "East Asia", "High ANSI", "Complex Script"]
+            .map(String::from)
+            .to_vec();
+        f.styles = vec![
+            Some(Style {
+                kind: 1,
+                base: 0xfff,
+                chpx: &[0x43, 0x4a, 24, 0, 0x4f, 0x4a, 0, 0, 0x35, 8, 1],
+                papx: &[],
+            }),
+            Some(Style {
+                kind: 1,
+                base: 0,
+                chpx: &[0x50, 0x4a, 1, 0, 0x51, 0x4a, 2, 0, 0x5e, 0x4a, 3, 0],
+                papx: &[],
+            }),
+            Some(Style {
+                kind: 2,
+                base: 0xfff,
+                chpx: &[0x36, 8, 1],
+                papx: &[],
+            }),
+        ];
+        let piece = [
+            0x30, 0x4a, 2, 0, // character style
+            0x35, 8, 0x81, // toggle inherited bold off
+            0x70, 0x68, 0, 0, 0, 0xff, // auto color
+        ];
+        let ppr = f
+            .resolve_paragraph(1, 0, 1, &[&piece])
+            .unwrap()
+            .properties
+            .xml();
+        let rpr = f.run_xml(1, 0, 1, &[&piece]).unwrap();
+        let expected = parse_direct_fixture(&ppr, &rpr, &rpr);
+
+        let direct_run = f
+            .direct_text_run(1, 0, 1, &[&piece], "x".into())
+            .unwrap()
+            .unwrap();
+        let mut expected_run = expected["runs"][0].clone();
+        expected_run.as_object_mut().unwrap().remove("type");
+        assert_eq!(serde_json::to_value(direct_run).unwrap(), expected_run);
+
+        let direct = f.direct_paragraph(1, 0, 1, &[&piece]).unwrap();
+        let mut expected_paragraph = expected;
+        let object = expected_paragraph.as_object_mut().unwrap();
+        object.remove("type");
+        object.remove("styleId");
+        object.insert("runs".into(), serde_json::json!([]));
+        assert_eq!(
+            serde_json::to_value(&direct.paragraph).unwrap(),
+            expected_paragraph
+        );
+        assert!(direct.numbering.is_none());
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_font_validation_precedes_hidden_mark_and_run_filtering() {
+        let mut f = empty();
+        let base = f.defaults.clone();
+        assert!(f.defaults.apply(0x083c, &[1], &base).unwrap());
+        assert!(f
+            .defaults
+            .apply(0x4a4f, &1u16.to_le_bytes(), &base)
+            .unwrap());
+        assert!(f.direct_paragraph(0, 0, 0, &[]).is_err());
+        assert!(f.direct_text_run(0, 0, 0, &[], "hidden".into()).is_err());
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_projection_uses_physical_chpx_before_piece_overrides() {
+        let mut word = vec![0u8; 1024];
+        let table: Vec<u8> = [100u32, 110, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        word[0xfe..0x102].copy_from_slice(&12u32.to_le_bytes());
+        let page = &mut word[512..];
+        page[..4].copy_from_slice(&100u32.to_le_bytes());
+        page[4..8].copy_from_slice(&110u32.to_le_bytes());
+        page[8] = 32;
+        page[64..68].copy_from_slice(&[3, 0x35, 0x08, 1]);
+        page[511] = 1;
+        let mut f = Formatting::read(&word, &table, &[]).unwrap();
+        assert!(
+            f.direct_text_run(0, 100, 0, &[], "x".into())
+                .unwrap()
+                .unwrap()
+                .bold
+        );
+        assert!(
+            f.direct_paragraph(0, 109, 0, &[])
+                .unwrap()
+                .paragraph
+                .paragraph_mark_font_facts
+                .unwrap()
+                .bold
+        );
+        let clear = [0x35, 0x08, 0];
+        assert!(
+            !f.direct_text_run(0, 100, 1, &[&clear], "x".into())
+                .unwrap()
+                .unwrap()
+                .bold
+        );
+        assert!(f.direct_text_run(0, 110, 0, &[], "outside".into()).is_err());
+        let hidden = [0x3c, 0x08, 1];
+        assert!(f
+            .direct_text_run(0, 100, 1, &[&hidden], "hidden".into())
+            .unwrap()
+            .is_none());
+        assert!(
+            f.direct_paragraph(0, 109, 1, &[&hidden])
+                .unwrap()
+                .paragraph
+                .mark_vanish
+        );
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_paragraph_retains_numbering_reference_and_marker_without_activation() {
+        let mut f = empty();
+        f.numbering = level_bidi_formatting(1);
+        f.numbering.lists[0].levels[0].chpx = &[0x35, 8, 1];
+        let piece = [0x0b, 0x46, 1, 0];
+        let direct = f.direct_paragraph(0, 0, 1, &[&piece]).unwrap();
+        let (reference, marker) = direct.numbering.expect("resolved numbering");
+        assert_eq!(reference.level, 0);
+        assert!(
+            !direct
+                .paragraph
+                .paragraph_mark_font_facts
+                .as_ref()
+                .unwrap()
+                .bold
+        );
+        assert!(marker.direct_font_facts(&[]).unwrap().bold);
+        assert!(direct.paragraph.numbering.is_none());
+        assert_eq!(f.numbering_output.xml(10_000).unwrap(), None);
     }
 
     #[test]

@@ -136,6 +136,13 @@ impl Properties {
         self.bool_value("vanish").unwrap_or(false)
     }
 
+    pub(in crate::doc) fn direct_color(&self) -> Option<String> {
+        self.values
+            .get("color")
+            .filter(|value| value.as_str() != "auto")
+            .map(|value| value.to_ascii_lowercase())
+    }
+
     fn direct_font_axes(&self, fonts: &[String]) -> Result<FontAxes, String> {
         if fonts.is_empty() {
             if self.fonts.iter().flatten().any(|index| *index != 0) {
