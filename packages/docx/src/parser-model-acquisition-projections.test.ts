@@ -9,7 +9,7 @@ import {
   tableFormatInput,
   tableParticipatesInOrdinaryFlow,
 } from './parser-model.js';
-import type { DocParagraph, DocxDocumentModel } from './types.js';
+import type { DocParagraph, DocxDocumentModel, NumberingInfo } from './types.js';
 import type { SourceRef } from './layout/types.js';
 
 const paragraph = (): DocParagraph => ({
@@ -62,6 +62,23 @@ const bodySource = (path: number[] = [0]): SourceRef => ({
 });
 
 describe('parser-to-body-acquisition projection capability', () => {
+  it('retains default-language provenance in immutable marker inputs', () => {
+    const numbering = {
+      fontFacts: { langDefault: 'en-gb' },
+    } as unknown as NumberingInfo;
+    const marker = numberingMarkerShapeInput(numbering, 10);
+    expect(marker.langDefault).toBe('en-gb');
+    expect(Object.isFrozen(marker)).toBe(true);
+
+    const markParagraph = {
+      ...paragraph(),
+      paragraphMarkFontFacts: { langDefault: 'fr-ca' },
+    } as unknown as DocParagraph;
+    const mark = paragraphMarkShapeInput(markParagraph);
+    expect(mark?.langDefault).toBe('fr-ca');
+    expect(Object.isFrozen(mark)).toBe(true);
+  });
+
   it('is one frozen identity-preserving record without compatibility wrappers', () => {
     expect(Object.isFrozen(bodyAcquisitionInputProjections)).toBe(true);
     expect(Object.keys(bodyAcquisitionInputProjections).sort()).toEqual([

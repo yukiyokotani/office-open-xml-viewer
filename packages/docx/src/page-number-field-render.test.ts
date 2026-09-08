@@ -351,7 +351,7 @@ describe('PAGE field renders the per-section displayed number (footer)', () => {
       snapToGrid: null, characterSpacingPt: null, characterScale: null,
       kerningThresholdPt: null,
       emphasis: { status: 'missing', raw: null, value: null },
-      languages: { eastAsia: null, bidi: null },
+      languages: { default: null, eastAsia: null, bidi: null },
       eastAsianLayout: {
         vert: null, vertCompress: null, combine: null,
         combineBrackets: { status: 'missing', raw: null, value: null },

@@ -172,7 +172,7 @@ mod private_typography_wire_tests {
           <w:vertAlign w:val="superscript"/><w:position w:val="4"/>
           <w:color w:val="auto"/><w:snapToGrid w:val="0"/><w:spacing w:val="20"/>
           <w:w w:val="80"/><w:fitText w:val="2400" w:id="-7"/><w:kern w:val="24"/>
-          <w:em w:val="dot"/><w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+          <w:em w:val="dot"/><w:lang w:val="EN-us" w:eastAsia="ja-JP" w:bidi="ar-SA"/>
           <w:eastAsianLayout w:vert="1" w:vertCompress="0" w:combine="1" w:combineBrackets="round"/>
           <w:bdr w:val="double" w:color="Auto" w:themeColor="accent1"
                  w:themeTint="80" w:themeShade="40" w:sz="24" w:space="2"
@@ -187,6 +187,8 @@ mod private_typography_wire_tests {
 
         let text_wire = first_run_json(&text, "text")["__typographyAcquisition"].clone();
         let field_wire = first_run_json(&field, "field")["__typographyAcquisition"].clone();
+        assert_eq!(first_run_json(&text, "text")["langDefault"], "en-us");
+        assert_eq!(first_run_json(&field, "field")["langDefault"], "en-us");
 
         assert_eq!(
             field_wire, text_wire,
@@ -205,6 +207,7 @@ mod private_typography_wire_tests {
         assert_eq!(text_wire["fitText"]["valTwips"], 2400.0);
         assert_eq!(text_wire["fitText"]["id"], "-7");
         assert_eq!(text_wire["kerningThresholdPt"], 12.0);
+        assert_eq!(text_wire["languages"]["default"], "en-us");
         assert_eq!(text_wire["languages"]["eastAsia"], "ja-jp");
         assert_eq!(
             text_wire["eastAsianLayout"]["combineBrackets"]["value"],
@@ -5979,6 +5982,7 @@ fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
         italic: fmt.italic.unwrap_or(false),
         bold_cs: fmt.bold_cs,
         italic_cs: fmt.italic_cs,
+        lang_default: fmt.lang_default.clone(),
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
         kerning: fmt.kerning,
@@ -6131,6 +6135,7 @@ fn run_typography_wire(
             .clone()
             .unwrap_or_else(missing_typography_value),
         languages: TypographyLanguagesWire {
+            default: fmt.lang_default.clone(),
             east_asia: fmt.lang_east_asia.clone(),
             bidi: fmt.lang_bidi.clone(),
         },
@@ -6185,6 +6190,7 @@ fn make_field_run(
         font_size_cs: fmt.font_size_cs,
         bold_cs: fmt.bold_cs,
         italic_cs: fmt.italic_cs,
+        lang_default: fmt.lang_default.clone(),
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
         background: fmt.background.clone(),
@@ -6286,6 +6292,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.font_size_cs == b.font_size_cs
         && a.bold_cs == b.bold_cs
         && a.italic_cs == b.italic_cs
+        && a.lang_default == b.lang_default
         && a.lang_bidi == b.lang_bidi
         && a.lang_east_asia == b.lang_east_asia
         && a.snap_to_grid == b.snap_to_grid
@@ -6493,6 +6500,7 @@ fn parse_run_inner(
     // route cs-classified content to cs formatting and decide AN digit ordering.
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
+    let lang_default = fmt.lang_default.clone();
     let lang_bidi = fmt.lang_bidi.clone();
     let lang_east_asia = fmt.lang_east_asia.clone();
     let font_hint = fmt.font_hint.clone();
@@ -6583,6 +6591,7 @@ fn parse_run_inner(
                         font_size_cs,
                         bold_cs,
                         italic_cs,
+                        lang_default: lang_default.clone(),
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
@@ -6690,6 +6699,7 @@ fn parse_run_inner(
                         font_size_cs,
                         bold_cs,
                         italic_cs,
+                        lang_default: lang_default.clone(),
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
                         snap_to_grid,
@@ -6748,6 +6758,7 @@ fn parse_run_inner(
                     font_size_cs,
                     bold_cs,
                     italic_cs,
+                    lang_default: lang_default.clone(),
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
@@ -6854,6 +6865,7 @@ fn parse_run_inner(
                     font_size_cs,
                     bold_cs,
                     italic_cs,
+                    lang_default: lang_default.clone(),
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
@@ -7091,6 +7103,7 @@ fn parse_run_inner(
                     font_size_cs,
                     bold_cs,
                     italic_cs,
+                    lang_default: lang_default.clone(),
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
                     snap_to_grid,
@@ -15836,6 +15849,13 @@ mod tests {
         slots.theme_present.high_ansi = true;
         themed.font_slots = Some(slots);
         assert!(!text_runs_mergeable(&first, &themed));
+
+        let mut other_language = first.clone();
+        other_language.lang_default = Some("fr-ca".to_string());
+        assert!(
+            !text_runs_mergeable(&first, &other_language),
+            "runs with different default-language provenance must remain separate"
+        );
     }
 
     #[test]
@@ -16693,7 +16713,7 @@ mod math_jc_tests {
         let p = parse_p(
             r#"<w:pPr><w:rPr><w:rFonts w:ascii="Century" w:hAnsi="Arial"
               w:eastAsia="ＭＳ 明朝" w:cs="Traditional Arabic" w:hint="eastAsia"/>
-              <w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/>
+              <w:lang w:val="EN-us" w:eastAsia="ja-JP" w:bidi="ar-SA"/>
             </w:rPr></w:pPr>"#,
         );
         assert_eq!(p.default_font_family.as_deref(), Some("Century"));
@@ -16708,6 +16728,7 @@ mod math_jc_tests {
         assert_eq!(facts.font_family_high_ansi.as_deref(), Some("Arial"));
         assert_eq!(facts.font_family_cs.as_deref(), Some("Traditional Arabic"));
         assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_default.as_deref(), Some("en-us"));
         assert_eq!(facts.lang_east_asia.as_deref(), Some("ja-jp"));
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
     }
@@ -17774,6 +17795,7 @@ mod rtl_tests {
             .expect("text run present");
         assert_eq!(run.bold_cs, Some(true), "w:bCs → run.boldCs");
         assert_eq!(run.italic_cs, Some(true), "w:iCs → run.italicCs");
+        assert_eq!(run.lang_default.as_deref(), Some("en-ae"));
         assert_eq!(
             run.lang_bidi.as_deref(),
             Some("ae-ar"),
@@ -25285,6 +25307,7 @@ mod numbering_marker_font_tests {
                   w:eastAsia="Direct EA" w:eastAsiaTheme="majorEastAsia"
                   w:cs="Direct CS" w:cstheme="majorBidi" w:hint="eastAsia"/>
                   <w:rtl/><w:cs/><w:szCs w:val="28"/><w:bCs/><w:iCs/>
+                  <w:lang w:val="EN-gb" w:eastAsia="ZH-cn" w:bidi="AR-sa"/>
                 </w:rPr>
               </w:lvl></w:abstractNum>
               <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
@@ -25333,6 +25356,7 @@ mod numbering_marker_font_tests {
         assert!(slots.theme_present.east_asia);
         assert!(slots.theme_present.complex_script);
         assert_eq!(facts.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(facts.lang_default.as_deref(), Some("en-gb"));
         assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-cn"));
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
         assert_eq!(facts.rtl, Some(true));

@@ -45,7 +45,11 @@ export interface InternalRunTypographyWire {
   readonly fitText?: Readonly<{ valTwips: number; id: string | null }>;
   readonly kerningThresholdPt: number | null;
   readonly emphasis: TypographyValueInput<string>;
-  readonly languages: Readonly<{ eastAsia: string | null; bidi: string | null }>;
+  readonly languages: Readonly<{
+    default: string | null;
+    eastAsia: string | null;
+    bidi: string | null;
+  }>;
   readonly eastAsianLayout: Readonly<{
     vert: boolean | null;
     vertCompress: boolean | null;

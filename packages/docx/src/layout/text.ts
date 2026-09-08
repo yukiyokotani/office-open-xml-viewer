@@ -144,6 +144,8 @@ type ParagraphTextFacts = Readonly<{
   fontSizeCs?: number;
   boldCs?: boolean;
   italicCs?: boolean;
+  /** Retained w:lang/@w:val provenance; no shaping policy is assigned here. */
+  langDefault?: string;
   langBidi?: string;
   langEastAsia?: string;
   fontSlots?: Readonly<{

@@ -2094,6 +2094,8 @@ pub struct RunFontFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic_cs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_default: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
@@ -2148,6 +2150,7 @@ pub struct UnderlineTypographyWire {
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypographyLanguagesWire {
+    pub default: Option<String>,
     pub east_asia: Option<String>,
     pub bidi: Option<String>,
 }
@@ -2288,6 +2291,8 @@ pub struct FieldRun {
     pub bold_cs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic_cs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_default: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2463,6 +2468,9 @@ pub struct TextRun {
     /// when unspecified (renderer falls back to `italic`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val — default language for run content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_default: Option<String>,
     /// ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — the complex-script (RTL) language
     /// tag, lower-cased (e.g. "ar-sa", "ae-ar", "he-il"). Used to decide whether
     /// European digits in a complex-script run are classified as AN (Word's

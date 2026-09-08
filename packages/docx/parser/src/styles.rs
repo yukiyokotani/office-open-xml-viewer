@@ -127,6 +127,8 @@ pub struct RunFmt {
     pub bold_cs: Option<bool>,
     /// ECMA-376 §17.3.2.17 w:iCs — complex-script italic toggle.
     pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased.
+    pub lang_default: Option<String>,
     /// ECMA-376 §17.3.2.20 w:lang/@w:bidi — complex-script (RTL) language tag,
     /// lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering.
     pub lang_bidi: Option<String>,
@@ -1225,6 +1227,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.italic_cs.is_some() {
         dst.italic_cs = src.italic_cs;
     }
+    if src.lang_default.is_some() {
+        dst.lang_default = src.lang_default.clone();
+    }
     if src.lang_bidi.is_some() {
         dst.lang_bidi = src.lang_bidi.clone();
     }
@@ -2003,6 +2008,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // Complex-script language tag (ECMA-376 §17.3.2.20 w:lang/@w:bidi). Lower-
     // cased; its primary subtag later decides European-digit AN classification.
     if let Some(lang) = child_w(rpr, "lang") {
+        if let Some(default) = attr_w(lang, "val") {
+            if !default.is_empty() {
+                fmt.lang_default = Some(default.to_lowercase());
+            }
+        }
         if let Some(bidi) = attr_w(lang, "bidi") {
             if !bidi.is_empty() {
                 fmt.lang_bidi = Some(bidi.to_lowercase());
@@ -2901,11 +2911,26 @@ mod tests {
 
     #[test]
     fn east_asia_font_hint_and_language_override_through_run_merge() {
-        let mut dst = run_fmt_from(r#"<w:rFonts w:hint="default"/><w:lang w:eastAsia="ja-JP"/>"#);
-        let src = run_fmt_from(r#"<w:rFonts w:hint="eastAsia"/><w:lang w:eastAsia="ZH-cn"/>"#);
+        let mut dst = run_fmt_from(
+            r#"<w:rFonts w:hint="default"/><w:lang w:val="EN-us" w:eastAsia="ja-JP"/>"#,
+        );
+        let src = run_fmt_from(
+            r#"<w:rFonts w:hint="eastAsia"/><w:lang w:val="FR-ca" w:eastAsia="ZH-cn"/>"#,
+        );
         apply_run(&mut dst, &src);
         assert_eq!(dst.font_hint.as_deref(), Some("eastAsia"));
+        assert_eq!(dst.lang_default.as_deref(), Some("fr-ca"));
         assert_eq!(dst.lang_east_asia.as_deref(), Some("zh-cn"));
+    }
+
+    #[test]
+    fn language_axes_inherit_independently_and_ignore_empty_values() {
+        let mut dst = run_fmt_from(r#"<w:lang w:val="EN-us" w:eastAsia="JA-jp" w:bidi="AR-sa"/>"#);
+        let src = run_fmt_from(r#"<w:lang w:val="" w:eastAsia="ZH-cn"/>"#);
+        apply_run(&mut dst, &src);
+        assert_eq!(dst.lang_default.as_deref(), Some("en-us"));
+        assert_eq!(dst.lang_east_asia.as_deref(), Some("zh-cn"));
+        assert_eq!(dst.lang_bidi.as_deref(), Some("ar-sa"));
     }
 
     #[test]

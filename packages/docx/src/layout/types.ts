@@ -1112,6 +1112,8 @@ export interface NumberingMarkerShapeInput {
   readonly style: 'normal' | 'italic';
   readonly complexScript: boolean;
   readonly fontHint?: 'default' | 'eastAsia' | 'cs';
+  /** Retained w:lang/@w:val provenance; not consumed as renderer policy. */
+  readonly langDefault?: string;
   readonly eastAsiaLanguage?: string;
   readonly kerning?: boolean;
 }

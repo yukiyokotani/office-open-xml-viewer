@@ -1148,6 +1148,9 @@ export interface FieldRun {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.2.20 `<w:lang w:val>` — default language for the field's
+   * displayed run content; retained without assigning renderer policy. */
+  langDefault?: string;
   /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark, mirrors
    *  {@link DocxTextRun.emphasisMark} (§17.18.24 ST_Em). Absent (or the
    *  authored `val="none"`) ⇒ no mark. */
@@ -1239,6 +1242,9 @@ export interface DocxTextRun {
   boldCs?: boolean;
   /** ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. */
   italicCs?: boolean;
+  /** ECMA-376 §17.3.2.20 `<w:lang w:val>` — default language for run content,
+   * retained as an authored/inherited fact without assigning renderer policy. */
+  langDefault?: string;
   /** ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — complex-script (RTL) language tag,
    *  lower-cased (e.g. "ar-sa", "ae-ar"). Drives Word's AN digit ordering. */
   langBidi?: string;
