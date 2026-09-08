@@ -176,6 +176,10 @@ jobs:
           pnpm check:optional-chart-ex
           pnpm check:optional-tiff
           pnpm check:optional-legacy-conversion
+          pnpm check:optional-legacy-doc
+          pnpm check:optional-legacy-ppt
+          pnpm check:optional-legacy-xls
+          node --test scripts/vite-wasm-asset-name.test.mjs
           pnpm check:public-type-exports
           pnpm check:public-api:built
 

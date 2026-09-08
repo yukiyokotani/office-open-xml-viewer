@@ -40,7 +40,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * bare `.wasm`, and every `?url` here is a real on-disk asset we want emitted —
  * exactly what Vite's non-lib mode would do anyway.
  */
-export function wasmAssetUrl(): Plugin {
+export function wasmAssetUrl(
+  readAsset: (path: string) => Promise<Uint8Array> = readFile,
+): Plugin {
   const SUFFIX = '?url';
   return {
     name: 'wasm-asset-url',
@@ -53,12 +55,14 @@ export function wasmAssetUrl(): Plugin {
     async load(id) {
       if (!id.endsWith(SUFFIX)) return null;
       const filePath = id.slice(0, -SUFFIX.length);
-      const source = await readFile(filePath);
-      const emittedName = /[\\/]wasm-direct-ppt[\\/]/.test(filePath)
-        ? 'legacy_ppt_direct_bg.wasm'
-        : /[\\/]wasm-direct-xls[\\/]/.test(filePath)
-          ? 'legacy_xls_direct_bg.wasm'
-          : basename(filePath);
+      const source = await readAsset(filePath);
+      const emittedName = /[\\/]wasm-direct-doc[\\/]/.test(filePath)
+        ? 'legacy_doc_direct_bg.wasm'
+        : /[\\/]wasm-direct-ppt[\\/]/.test(filePath)
+          ? 'legacy_ppt_direct_bg.wasm'
+          : /[\\/]wasm-direct-xls[\\/]/.test(filePath)
+            ? 'legacy_xls_direct_bg.wasm'
+            : basename(filePath);
       const referenceId = this.emitFile({
         type: 'asset',
         name: emittedName,
@@ -129,6 +133,9 @@ export default defineConfig(({ command, mode }) => ({
         // Opt-in disposable Worker transport for application-owned legacy
         // Office converter engines. No converter WASM is bundled here.
         'legacy-conversion': resolve(__dirname, 'src/legacy-conversion.ts'),
+        // Opt-in descriptor for the native legacy DOC reader. Importing this
+        // entry emits its dedicated WASM asset URL but does not initialize it.
+        'legacy-doc': resolve(__dirname, 'src/legacy-doc.ts'),
         // Opt-in descriptor for the native legacy PPT reader. Importing this
         // entry emits its dedicated WASM asset URL but does not initialize it.
         'legacy-ppt': resolve(__dirname, 'src/legacy-ppt.ts'),

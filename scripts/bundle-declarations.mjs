@@ -21,6 +21,7 @@ const entries = [
   'chart-ex',
   'tiff',
   'legacy-conversion',
+  'legacy-doc',
   'legacy-ppt',
   'legacy-xls',
   'node',

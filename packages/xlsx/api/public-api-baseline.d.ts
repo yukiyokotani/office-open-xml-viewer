@@ -8,6 +8,7 @@ export interface ArrowEnd {
     w: string;
     len: string;
 }
+function attachXlsFontMeasurement(worker: MessagePort, measure: LegacyXlsFontMeasurement): () => void;
 export function autoResize(render: (width: number, height: number) => void | Promise<void>, element: Element, opts?: AutoResizeOptions): () => void;
 export interface AutoResizeOptions {
     pauseWhenHidden?: boolean;
@@ -1099,6 +1100,9 @@ export interface ImageAnchor {
     editAs?: string;
     nativeExtCx: number;
     nativeExtCy: number;
+    rotation?: number;
+    flipH?: boolean;
+    flipV?: boolean;
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -1132,6 +1136,19 @@ export interface ImageResourceOptions {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export function isTiffDecodeError(error: unknown): error is TiffDecodeError;
+interface LegacyDirectSourceDescriptor<F extends 'doc' | 'ppt' | 'xls'> {
+    readonly protocol: `ooxml-legacy-${F}-source/v1`;
+    readonly builtin: F;
+    readonly wasmUrl: string;
+}
+interface LegacyDocDirectConversionOptions {
+    readonly source: LegacyDocDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+interface LegacyDocDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'doc'> {
+}
 export class LegacyOfficeConversionError extends Error {
     readonly code: 'legacy-office-conversion';
     readonly stage: 'conversion';
@@ -1149,17 +1166,9 @@ export interface LegacyOfficeConversionInput {
     readonly signal: AbortSignal;
 }
 export interface LegacyOfficeConversionOptions {
-    readonly doc?: LegacyOfficeFormatConversionOptions;
-    readonly xls?: LegacyOfficeFormatConversionOptions;
-    readonly ppt?: LegacyOfficeFormatConversionOptions;
-}
-export interface LegacyOfficeFormatConversionOptions {
-    readonly converter: LegacyOfficeConverter;
-    readonly signal?: AbortSignal;
-    readonly timeoutMs?: number;
-    readonly maxInputBytes?: number;
-    readonly maxOutputBytes?: number;
-    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+    readonly doc?: LegacyOfficeFormatConversionOptions | LegacyDocDirectConversionOptions;
+    readonly xls?: LegacyOfficeFormatConversionOptions | LegacyXlsDirectConversionOptions;
+    readonly ppt?: LegacyOfficeFormatConversionOptions | LegacyPptDirectConversionOptions;
 }
 export interface LegacyOfficeConversionRecord {
     readonly from: LegacyOfficeFormat;
@@ -1182,6 +1191,39 @@ export interface LegacyOfficeConverter {
     convert(input: Readonly<LegacyOfficeConversionInput>): Promise<LegacyOfficeConversionResult>;
 }
 export type LegacyOfficeFormat = 'doc' | 'xls' | 'ppt';
+export interface LegacyOfficeFormatConversionOptions {
+    readonly converter: LegacyOfficeConverter;
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly maxInputBytes?: number;
+    readonly maxOutputBytes?: number;
+    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+    readonly source?: never;
+}
+export interface LegacyPptDirectConversionOptions {
+    readonly source: LegacyPptDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+export interface LegacyPptDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'ppt'> {
+}
+export interface LegacyXlsDirectConversionOptions {
+    readonly source: LegacyXlsDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+export interface LegacyXlsDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'xls'> {
+}
+export type LegacyXlsFontMeasurement = (font: Readonly<LegacyXlsNormalFont>, signal: AbortSignal) => number | undefined | Promise<number | undefined>;
+type LegacyXlsFontMeasurement__emitterCollision1 = Parameters<typeof attachXlsFontMeasurement>[1];
+export interface LegacyXlsNormalFont {
+    readonly family: string;
+    readonly sizePoints: number;
+    readonly bold: boolean;
+    readonly italic: boolean;
+}
 export interface LegendManualLayout {
     xMode?: string;
     yMode?: string;
@@ -1193,6 +1235,7 @@ export interface LegendManualLayout {
     h?: number;
 }
 export interface LoadOptions extends LoadOptions__emitterCollision1 {
+    measureLegacyXlsNormalFont?: LegacyXlsFontMeasurement__emitterCollision1;
     mode?: 'main' | 'worker';
 }
 interface LoadOptions__emitterCollision1 {
@@ -1211,6 +1254,7 @@ interface LoadOptions__emitterCollision1 {
     chartEx?: ChartExRenderer;
     tiff?: TiffRenderer;
 }
+const loadXlsxViewerSource: unique symbol;
 export interface MathAccent {
     kind: 'accent';
     char: string;
@@ -1333,6 +1377,11 @@ export interface MergeCell {
     left: number;
     bottom: number;
     right: number;
+}
+interface MessagePort {
+    addEventListener(type: 'message', listener: EventListener): void;
+    removeEventListener(type: 'message', listener: EventListener): void;
+    postMessage(message: unknown): void;
 }
 export interface NoFill {
     fillType: 'none';
@@ -2034,7 +2083,6 @@ export interface XlsxCommentReply {
 }
 export interface XlsxCommentsOptions extends ViewerCommentsOptions {
 }
-declare const loadXlsxViewerSource: unique symbol;
 export type XlsxCopyResult = Readonly<{
     status: 'copied';
     cellCount: number;

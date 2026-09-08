@@ -118,6 +118,13 @@ jobs:
       - name: Verify optional legacy Office converter boundary
         run: pnpm check:optional-legacy-conversion
 
+      - name: Verify per-format native Office bundle boundaries
+        run: |
+          pnpm check:optional-legacy-doc
+          pnpm check:optional-legacy-ppt
+          pnpm check:optional-legacy-xls
+          node --test scripts/vite-wasm-asset-name.test.mjs
+
       # ── Verify the package that is about to be published ──────────────────────
       # publint checks packaging correctness (exports ordering, file presence,
       # module/type field sanity). attw checks that every entrypoint resolves to

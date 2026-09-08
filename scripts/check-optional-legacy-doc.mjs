@@ -3,8 +3,9 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const distDir = resolve(process.argv[2] ?? 'dist');
-const factoryMarker = 'packages/legacy-converter/src/direct-ppt.ts';
-const wasmAsset = 'legacy_ppt_direct_bg.wasm';
+const factoryMarker = 'packages/legacy-converter/src/direct-doc.ts';
+const engineMarker = 'packages/legacy-converter/src/direct-doc-engine.ts';
+const wasmAsset = 'legacy_doc_direct_bg.wasm';
 
 async function dependencyClosure(entry) {
   const pending = [join(distDir, entry)];
@@ -28,28 +29,29 @@ function assertAbsent(files, marker, entry) {
   if (hit) throw new Error(entry + ' unexpectedly reaches ' + marker + ' via ' + basename(hit.file));
 }
 
-const directClosure = await dependencyClosure('legacy-ppt.mjs');
-const directModule = await import(pathToFileURL(join(distDir, 'legacy-ppt.mjs')).href);
-if (typeof directModule.createLegacyPptSource !== 'function') {
-  throw new Error('legacy-ppt.mjs does not export createLegacyPptSource');
+const directClosure = await dependencyClosure('legacy-doc.mjs');
+const directModule = await import(pathToFileURL(join(distDir, 'legacy-doc.mjs')).href);
+if (typeof directModule.createLegacyDocSource !== 'function') {
+  throw new Error('legacy-doc.mjs does not export createLegacyDocSource');
 }
 if (!directClosure.some(({ source }) => source.includes(factoryMarker))) {
-  throw new Error('legacy-ppt.mjs does not reach the direct PPT descriptor factory');
+  throw new Error('legacy-doc.mjs does not reach the direct DOC descriptor factory');
 }
 if (!directClosure.some(({ source }) => source.includes(wasmAsset))) {
-  throw new Error('legacy-ppt.mjs does not reference the direct PPT WASM asset');
+  throw new Error('legacy-doc.mjs does not reference the direct DOC WASM asset');
 }
+assertAbsent(directClosure, engineMarker, 'legacy-doc.mjs');
 const directWasm = await stat(join(distDir, wasmAsset));
 if (!directWasm.isFile() || directWasm.size === 0) {
-  throw new Error('direct PPT WASM asset is missing or empty');
+  throw new Error('direct DOC WASM asset is missing or empty');
 }
 
-const descriptor = directModule.createLegacyPptSource({
-  wasmUrl: 'https://example.test/direct-ppt.wasm',
+const descriptor = directModule.createLegacyDocSource({
+  wasmUrl: 'https://example.test/direct-doc.wasm',
 });
-if (!Object.isFrozen(descriptor) || descriptor.protocol !== 'ooxml-legacy-ppt-source/v1' ||
-    descriptor.builtin !== 'ppt' || descriptor.wasmUrl !== 'https://example.test/direct-ppt.wasm') {
-  throw new Error('legacy-ppt.mjs returned an invalid descriptor');
+if (!Object.isFrozen(descriptor) || descriptor.protocol !== 'ooxml-legacy-doc-source/v1' ||
+    descriptor.builtin !== 'doc' || descriptor.wasmUrl !== 'https://example.test/direct-doc.wasm') {
+  throw new Error('legacy-doc.mjs returned an invalid descriptor');
 }
 
 for (const entry of [
@@ -59,7 +61,7 @@ for (const entry of [
   'pptx.mjs',
   'node.mjs',
   'legacy-conversion.mjs',
-  'legacy-doc.mjs',
+  'legacy-ppt.mjs',
   'legacy-xls.mjs',
 ]) {
   const closure = await dependencyClosure(entry);
@@ -67,4 +69,4 @@ for (const entry of [
   assertAbsent(closure, wasmAsset, entry);
 }
 
-console.log('optional direct PPT static bundle boundary verified');
+console.log('optional direct DOC static bundle boundary verified');

@@ -14,10 +14,50 @@ converter Worker or its WASM. If neither a converter nor the matching direct
 source is supplied, legacy input continues to reject with
 `OoxmlError.code === 'legacy-binary-format'`.
 
-Experimental direct sources are available for PPT and XLS. They read supported
-binary subsets into the shared presentation or workbook models without
-generating an OOXML ZIP or reparsing generated XML. Both paths use the ordinary
-layout and Canvas renderers. Direct DOC input is not implemented.
+Experimental direct sources are available for DOC, PPT and XLS. They read
+supported binary subsets into the existing document, presentation or workbook
+models without generating an OOXML ZIP or reparsing generated XML. These paths
+use the ordinary layout and Canvas renderers.
+
+## Experimental direct DOC source (browser)
+
+Import the separate `@silurus/ooxml/legacy-doc` entry and enable it only for
+`doc`. The factory returns a validated descriptor without fetching or
+initializing WASM. The browser document loader opens the dedicated
+`legacy_doc_direct_bg.wasm` asset only when a DOC input selects this source.
+
+```typescript
+import { DocxDocument } from '@silurus/ooxml/docx';
+import { createLegacyDocSource } from '@silurus/ooxml/legacy-doc';
+
+const document = await DocxDocument.load(legacyDocArrayBuffer, {
+  legacyConversion: {
+    doc: { source: createLegacyDocSource() },
+  },
+});
+const canvas = window.document.querySelector('canvas') as HTMLCanvasElement;
+
+try {
+  await document.renderPage(canvas, 0, { width: 960 });
+} finally {
+  document.destroy();
+}
+```
+
+Both browser rendering modes and progressive layout use the same retained
+layout pipeline. A custom asset pipeline can supply an absolute `wasmUrl` to
+`createLegacyDocSource`. The native source remains alive for image reads until
+the document is destroyed; finishing a model cursor does not dispose it.
+An optional `legacyConversion.doc.signal` can cancel loading and remains
+attached to the loaded document until destruction.
+
+This is a narrow experimental reader, not full DOC support. Unsupported
+formatting, fields, numbering, notes and other unimplemented structures may
+reject the entire document. The byte-converter support matrix below does not
+describe native-reader coverage. No fallback to byte conversion occurs after
+a native failure. ZIP resource metrics and Markdown export are unsupported for
+this source. Node document APIs do not yet support the direct DOC source;
+continue using byte conversion there. Neither route executes macros.
 
 ## Experimental direct PPT source
 
@@ -89,8 +129,7 @@ not imply direct-reader support.
 
 ## Experimental direct XLS source
 
-Like PPT, XLS is a per-format opt-in. Direct DOC input is not implemented and
-continues to use byte conversion. XLS applications can instead import
+Like DOC and PPT, XLS is a per-format opt-in. XLS applications can import
 `createLegacyXlsSource` from `@silurus/ooxml/legacy-xls` and select it only in
 `legacyConversion.xls`:
 
@@ -113,10 +152,10 @@ kind of optional absolute `wasmUrl` override as the PPT factory.
 
 Existing converter options and `convert()` behavior are unchanged, so no
 migration is required unless an application chooses a native source.
-Each `ppt` or `xls` configuration selects
+Each `doc`, `ppt` or `xls` configuration selects
 either `source` or `converter`, never both.
 Importing the ordinary DOCX, XLSX, or PPTX entries alone does not select this
-functionality or fetch either dedicated WASM asset.
+functionality or fetch a dedicated WASM asset.
 
 ## Built-in browser converter
 

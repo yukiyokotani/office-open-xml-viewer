@@ -66,6 +66,7 @@ for (const entry of [
   'pptx.mjs',
   'node.mjs',
   'legacy-conversion.mjs',
+  'legacy-doc.mjs',
   'legacy-ppt.mjs',
 ]) {
   const closure = await dependencyClosure(entry);

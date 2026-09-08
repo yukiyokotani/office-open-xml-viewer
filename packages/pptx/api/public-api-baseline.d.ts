@@ -975,6 +975,19 @@ export interface ImageResourceOptions {
 }
 export function isOoxmlDecodedImageLimitError(error: unknown): error is OoxmlDecodedImageLimitError;
 export function isTiffDecodeError(error: unknown): error is TiffDecodeError;
+interface LegacyDirectSourceDescriptor<F extends 'doc' | 'ppt' | 'xls'> {
+    readonly protocol: `ooxml-legacy-${F}-source/v1`;
+    readonly builtin: F;
+    readonly wasmUrl: string;
+}
+interface LegacyDocDirectConversionOptions {
+    readonly source: LegacyDocDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+interface LegacyDocDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'doc'> {
+}
 export class LegacyOfficeConversionError extends Error {
     readonly code: 'legacy-office-conversion';
     readonly stage: 'conversion';
@@ -992,17 +1005,9 @@ export interface LegacyOfficeConversionInput {
     readonly signal: AbortSignal;
 }
 export interface LegacyOfficeConversionOptions {
-    readonly doc?: LegacyOfficeFormatConversionOptions;
-    readonly xls?: LegacyOfficeFormatConversionOptions;
-    readonly ppt?: LegacyOfficeFormatConversionOptions;
-}
-export interface LegacyOfficeFormatConversionOptions {
-    readonly converter: LegacyOfficeConverter;
-    readonly signal?: AbortSignal;
-    readonly timeoutMs?: number;
-    readonly maxInputBytes?: number;
-    readonly maxOutputBytes?: number;
-    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+    readonly doc?: LegacyOfficeFormatConversionOptions | LegacyDocDirectConversionOptions;
+    readonly xls?: LegacyOfficeFormatConversionOptions | LegacyXlsDirectConversionOptions;
+    readonly ppt?: LegacyOfficeFormatConversionOptions | LegacyPptDirectConversionOptions;
 }
 export interface LegacyOfficeConversionRecord {
     readonly from: LegacyOfficeFormat;
@@ -1025,6 +1030,31 @@ export interface LegacyOfficeConverter {
     convert(input: Readonly<LegacyOfficeConversionInput>): Promise<LegacyOfficeConversionResult>;
 }
 export type LegacyOfficeFormat = 'doc' | 'xls' | 'ppt';
+export interface LegacyOfficeFormatConversionOptions {
+    readonly converter: LegacyOfficeConverter;
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly maxInputBytes?: number;
+    readonly maxOutputBytes?: number;
+    readonly onResult?: (result: Readonly<LegacyOfficeConversionRecord>) => void | Promise<void>;
+    readonly source?: never;
+}
+export interface LegacyPptDirectConversionOptions {
+    readonly source: LegacyPptDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+export interface LegacyPptDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'ppt'> {
+}
+export interface LegacyXlsDirectConversionOptions {
+    readonly source: LegacyXlsDirectSourceDescriptor;
+    readonly converter?: never;
+    readonly maxInputBytes?: number;
+    readonly signal?: AbortSignal;
+}
+export interface LegacyXlsDirectSourceDescriptor extends LegacyDirectSourceDescriptor<'xls'> {
+}
 export interface LegendManualLayout {
     xMode?: string;
     yMode?: string;
