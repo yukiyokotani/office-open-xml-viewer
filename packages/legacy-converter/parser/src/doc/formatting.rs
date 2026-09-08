@@ -17,6 +17,29 @@ struct Style<'a> {
     kind: u16,
     chpx: &'a [u8],
     papx: &'a [u8],
+    language_compatibility: StyleLanguageCompatibility,
+}
+
+/// Raw MS-DOC 2.9.112 GRFSTD language-compatibility facts. Interpretation is
+/// deferred until the _80/modern language precedence is established.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // Acquired now; consumed by the subsequent language-resolution slice.
+pub(in crate::doc) struct StyleLanguageCompatibility {
+    f97_lids_set: bool,
+    f_copy_lang: bool,
+}
+
+#[allow(dead_code)] // Acquired now; consumed by the subsequent resolution slice.
+impl StyleLanguageCompatibility {
+    pub(in crate::doc) fn compatibility_lids_applied(self) -> bool {
+        self.f97_lids_set
+    }
+
+    /// `None` represents MS-DOC's requirement to ignore fCopyLang when
+    /// f97LidsSet is clear; the raw bit remains retained in this value.
+    pub(in crate::doc) fn copy_language(self) -> Option<bool> {
+        self.f97_lids_set.then_some(self.f_copy_lang)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -86,6 +109,17 @@ pub(in crate::doc) struct ResolvedParagraph {
 }
 
 impl<'a> Formatting<'a> {
+    #[allow(dead_code)] // Internal producer seam for the next resolution slice.
+    pub(in crate::doc) fn style_language_compatibility(
+        &self,
+        index: usize,
+    ) -> Option<StyleLanguageCompatibility> {
+        self.styles
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|style| style.language_compatibility)
+    }
+
     pub fn read(word: &'a [u8], table: &'a [u8], data: &'a [u8]) -> Result<Self, String> {
         let fonts = read_fonts(fkp::table_part(word, table, 0x112)?)?;
         let (defaults, styles) = read_styles(fkp::table_part(word, table, 0xa2)?)?;
@@ -576,6 +610,13 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
         let kind_and_base = u16_at(std, 2)?;
         let kind = kind_and_base & 15;
         let count = (u16_at(std, 4)? & 15) as usize;
+        // MS-DOC 2.9.260 StdfBase: GRFSTD follows the two-byte bchUpe
+        // at offset 6, in both accepted STD header sizes.
+        let grfstd = u16_at(std, 8)?;
+        let language_compatibility = StyleLanguageCompatibility {
+            f97_lids_set: grfstd & (1 << 2) != 0,
+            f_copy_lang: grfstd & (1 << 3) != 0,
+        };
         let name_len = u16_at(std, base_size)? as usize;
         let mut p = base_size + 2 + name_len * 2;
         if u16_at(std, p)? != 0 {
@@ -607,6 +648,7 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
             kind,
             chpx,
             papx,
+            language_compatibility,
         }));
     }
     Ok((defaults, styles))
@@ -674,6 +716,105 @@ mod tests {
             unsupported_piece_properties: false,
             missing_tables: true,
             unsupported_table_properties: false,
+        }
+    }
+
+    fn stylesheet_with_style_flags(base_size: u16, flags: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut header = vec![0; 18];
+        header[0..2].copy_from_slice(&15u16.to_le_bytes());
+        header[2..4].copy_from_slice(&base_size.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend((header.len() as u16).to_le_bytes());
+        bytes.extend(header);
+        for &(base, kind, grfstd) in flags {
+            let cupx = if kind == 1 { 2 } else { 1 };
+            let property_bytes = if kind == 1 { 6 } else { 2 };
+            let mut std = vec![0; usize::from(base_size) + 4 + property_bytes];
+            std[2..4].copy_from_slice(&((base << 4) | kind).to_le_bytes());
+            std[4..6].copy_from_slice(&(cupx as u16).to_le_bytes());
+            let std_size = std.len() as u16;
+            std[6..8].copy_from_slice(&std_size.to_le_bytes());
+            std[8..10].copy_from_slice(&grfstd.to_le_bytes());
+            let properties = usize::from(base_size) + 4;
+            if kind == 1 {
+                // StkParaGRLPUPX: a minimal two-byte istd PAPX, then empty CHPX.
+                std[properties..properties + 2].copy_from_slice(&2u16.to_le_bytes());
+                std[properties + 4..properties + 6].copy_from_slice(&0u16.to_le_bytes());
+            } else {
+                // StkCharGRLPUPX: one empty CHPX.
+                std[properties..properties + 2].copy_from_slice(&0u16.to_le_bytes());
+            }
+            bytes.extend((std.len() as u16).to_le_bytes());
+            bytes.extend(std);
+        }
+        for _ in flags.len()..15 {
+            bytes.extend(0u16.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn reads_raw_style_language_compatibility_from_both_std_base_sizes() {
+        for base_size in [10, 18] {
+            for kind in [1, 2] {
+                for bits in 0..4u16 {
+                    let grfstd = 0xf000 | (bits << 2);
+                    let bytes =
+                        stylesheet_with_style_flags(base_size, &[(0x0fff, kind, grfstd)]);
+                    let (_, styles) = read_styles(&bytes).unwrap();
+                    let style = styles[0].as_ref().unwrap();
+                    assert_eq!(style.kind, kind);
+                    let facts = style.language_compatibility;
+                    assert_eq!(facts.f97_lids_set, bits & 1 != 0);
+                    assert_eq!(facts.f_copy_lang, bits & 2 != 0);
+                    assert_eq!(facts.compatibility_lids_applied(), bits & 1 != 0);
+                    assert_eq!(
+                        facts.copy_language(),
+                        (bits & 1 != 0).then_some(bits & 2 != 0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn style_language_compatibility_is_per_style_and_strictly_bounded() {
+        for kind in [1, 2] {
+            let bytes =
+                stylesheet_with_style_flags(10, &[(0x0fff, kind, 0x000c), (0, kind, 0x0008)]);
+            let (_, styles) = read_styles(&bytes).unwrap();
+            assert_eq!(styles[0].as_ref().unwrap().base, 0x0fff);
+            assert_eq!(styles[1].as_ref().unwrap().base, 0);
+            assert_eq!(styles[0].as_ref().unwrap().kind, kind);
+            assert_eq!(styles[1].as_ref().unwrap().kind, kind);
+            let mut formatting = empty();
+            formatting.styles = styles;
+            assert_eq!(
+                formatting
+                    .style_language_compatibility(0)
+                    .unwrap()
+                    .copy_language(),
+                Some(true)
+            );
+            // The derived style's raw bits are its own; inheritance is not
+            // applied during acquisition, and fCopyLang is ignored while
+            // f97LidsSet=false.
+            let derived = formatting.style_language_compatibility(1).unwrap();
+            assert!(!derived.compatibility_lids_applied());
+            assert_eq!(derived.copy_language(), None);
+            assert!(formatting.style_language_compatibility(14).is_none());
+            assert!(formatting.style_language_compatibility(15).is_none());
+        }
+
+        for base_size in [10, 18] {
+            let mut short_header = stylesheet_with_style_flags(base_size, &[]);
+            short_header[0..2].copy_from_slice(&17u16.to_le_bytes());
+            assert!(read_styles(&short_header).is_err());
+
+            let mut short_std =
+                stylesheet_with_style_flags(base_size, &[(0x0fff, 1, 0)]);
+            short_std[20..22].copy_from_slice(&(base_size - 2).to_le_bytes());
+            assert!(read_styles(&short_std).is_err());
         }
     }
 
@@ -911,6 +1052,7 @@ mod tests {
                 base: 0xfff,
                 chpx: direct,
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             })];
             let xml = formatting.run_xml(0, 0, 0, &[]).unwrap();
             assert_eq!(xml, "<w:rPr><w:sz w:val=\"20\"/></w:rPr>");
@@ -1100,18 +1242,21 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x43, 0x4a, 24, 0, 0x35, 8, 1],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 1,
                 base: 0,
                 chpx: &[0x43, 0x4a, 32, 0],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 2,
                 base: 0xfff,
                 chpx: &[0x36, 8, 1],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
         let xml = f
@@ -1137,18 +1282,21 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x43, 0x4a, 24, 0, 0x4f, 0x4a, 0, 0, 0x35, 8, 1],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 1,
                 base: 0,
                 chpx: &[0x50, 0x4a, 1, 0, 0x51, 0x4a, 2, 0, 0x5e, 0x4a, 3, 0],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 2,
                 base: 0xfff,
                 chpx: &[0x36, 8, 1],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
         let piece = [
@@ -1299,18 +1447,21 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x6f, 0x28, 1], // eastAsia
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 1,
                 base: 0,
                 chpx: &[0x6f, 0x28, 0], // inherited eastAsia -> default
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 2,
                 base: 0xfff,
                 chpx: &[0x6f, 0x28, 0], // must not replace a pre-CIstd hint
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
 
@@ -1372,6 +1523,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x35, 0x08, 0x81],
                 papx: &[],
+                language_compatibility: StyleLanguageCompatibility::default(),
             })];
             f.numbering = numbering::Tables {
                 lists: vec![numbering::List {
@@ -1437,12 +1589,14 @@ mod tests {
                     base: 0xfff,
                     chpx: &[0x6f, 0x28, 1], // paragraph inherits eastAsia
                     papx: &[],
+                    language_compatibility: StyleLanguageCompatibility::default(),
                 }),
                 Some(Style {
                     kind: 1,
                     base: 0,
                     chpx: &[0x6f, 0x28, 0xff], // linked marker style: no guidance
                     papx: &[],
+                    language_compatibility: StyleLanguageCompatibility::default(),
                 }),
             ];
             f.numbering = numbering::Tables {
@@ -1505,12 +1659,14 @@ mod tests {
                 base: 0xfff,
                 chpx: &[],
                 papx: &[0x24, 0x64, 8, 1, 2, 0, 0x26, 0x64, 8, 1, 2, 0],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
                 kind: 1,
                 base: 0,
                 chpx: &[],
                 papx: &[0x50, 0xc6, 8, 0xff, 0, 0, 0, 16, 3, 0, 0],
+                language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
         let before = f.paragraph_xml(1, 0, 0, &[]).unwrap();
@@ -1533,6 +1689,7 @@ mod tests {
             base: 0,
             chpx: &[],
             papx: &[],
+            language_compatibility: StyleLanguageCompatibility::default(),
         })];
         assert!(f.run_xml(0, 0, 0, &[]).unwrap_err().contains("cyclic"));
         f.styles.clear();
@@ -1548,6 +1705,7 @@ mod tests {
             chpx: &[],
             // Two tabs: 720 left/dotted, 1440 right/no leader.
             papx: &[0x0d, 0xc6, 8, 0, 2, 0xd0, 2, 0xa0, 5, 8, 2],
+            language_compatibility: StyleLanguageCompatibility::default(),
         })];
         let original = f.paragraph_xml(0, 0, 0, &[]).unwrap();
         assert!(original.contains("<w:tab w:val=\"left\" w:pos=\"720\" w:leader=\"dot\"/>"));
@@ -1568,6 +1726,7 @@ mod tests {
             base: 0xfff,
             chpx: &[],
             papx: &[0x12, 0x64, 0xd4, 0xfe, 0, 0, 0x13, 0xa4, 240, 0],
+            language_compatibility: StyleLanguageCompatibility::default(),
         })];
         let xml = f
             .paragraph_xml(0, 0, 1, &[&[0x13, 0xa4, 0, 0, 0x07, 0x24, 1]])
