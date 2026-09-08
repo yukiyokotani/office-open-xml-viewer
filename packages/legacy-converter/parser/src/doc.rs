@@ -14,6 +14,8 @@ use crate::cfb::CompoundFile;
 use crate::ooxml::{write_package_bytes, xml_text, ROOT_RELS_DOCX};
 mod border;
 mod character;
+#[cfg(feature = "direct-doc")]
+mod direct_model;
 mod fkp;
 mod floating;
 mod formatting;
@@ -88,6 +90,14 @@ struct StoryParts {
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
     with_acquired_doc(cfb, |facts| build_conversion(max_output_bytes, facts))
+}
+
+#[cfg(feature = "direct-doc")]
+pub(crate) fn direct_model(
+    cfb: &CompoundFile<'_>,
+    max_model_bytes: usize,
+) -> Result<docx_model::Document, String> {
+    with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
 }
 
 fn with_acquired_doc<T>(
