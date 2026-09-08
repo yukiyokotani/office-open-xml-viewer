@@ -67,6 +67,79 @@ pub struct Level<'a> {
     pub placeholders: [Option<(u8, u8)>; 9],
 }
 
+impl Level<'_> {
+    /// Decode the LVLF.rgbxchNums/Xst pair without interpreting literal `%N`
+    /// text as a counter. [MS-DOC] 2.9.149 (LVL), 2.9.150 (LVLF), and 2.4.6.3.
+    #[allow(dead_code)] // consumed by the next direct paragraph/list projection slice
+    pub fn numbering_template(
+        &self,
+        current_level: u8,
+        mut format_at: impl FnMut(u8) -> Option<u8>,
+    ) -> Result<ooxml_common::numbering::NumberingTemplate, String> {
+        use ooxml_common::numbering::{NumberingTemplate, TemplatePart};
+        let placeholders: Vec<(u8, u8)> = self.placeholders.iter().flatten().copied().collect();
+        if current_level > 8
+            || placeholders.len() > 9
+            || self.text.len() % 2 != 0
+            || self.text.len() / 2 > ooxml_common::numbering::MAX_MARKER_BYTES
+        {
+            return Err(unsupported("invalid Word numbering template"));
+        }
+        let units = self.text.len() / 2;
+        let mut previous = 0;
+        for &(offset, target) in &placeholders {
+            if offset == 0
+                || offset <= previous
+                || usize::from(offset) > units
+                || target > current_level
+            {
+                return Err(unsupported("invalid Word list placeholder offsets"));
+            }
+            previous = offset;
+        }
+        let mut parts = Vec::with_capacity(placeholders.len() * 2 + 1);
+        let mut literal = Vec::new();
+        let mut next = 0;
+        for (index, pair) in self.text.chunks_exact(2).enumerate() {
+            let unit = u16::from_le_bytes([pair[0], pair[1]]);
+            if let Some(&(offset, target)) = placeholders.get(next) {
+                if usize::from(offset) == index + 1 {
+                    if target > current_level || unit != u16::from(target) {
+                        return Err(unsupported("invalid Word list placeholder offsets"));
+                    }
+                    if !literal.is_empty() {
+                        parts.push(TemplatePart::Literal(
+                            String::from_utf16(&literal)
+                                .map_err(|_| unsupported("invalid Word numbering text Unicode"))?,
+                        ));
+                        literal.clear();
+                    }
+                    if !matches!(format_at(target), Some(0x17 | 0xff) | None) {
+                        parts.push(TemplatePart::Counter(target));
+                    }
+                    next += 1;
+                    continue;
+                }
+            }
+            if unit < 0x20 || matches!(unit, 0xfffe | 0xffff) {
+                return Err(unsupported("invalid Word numbering text Unicode"));
+            }
+            literal.push(unit);
+        }
+        if next != placeholders.len() {
+            return Err(unsupported("invalid Word list placeholder offsets"));
+        }
+        if !literal.is_empty() {
+            parts.push(TemplatePart::Literal(
+                String::from_utf16(&literal)
+                    .map_err(|_| unsupported("invalid Word numbering text Unicode"))?,
+            ));
+        }
+        NumberingTemplate::new(parts)
+            .map_err(|error| format!("UNSUPPORTED: invalid Word numbering template: {error:?}"))
+    }
+}
+
 #[derive(Debug)]
 pub struct List<'a> {
     pub id: i32,

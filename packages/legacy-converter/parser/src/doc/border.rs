@@ -9,7 +9,17 @@ pub(super) const ICO_COLORS: [&str; 17] = [
 
 #[derive(Clone, Default)]
 pub struct Border {
-    attributes: String,
+    facts: Option<BorderFacts>,
+}
+
+#[derive(Clone)]
+struct BorderFacts {
+    style: String,
+    color: Option<String>,
+    width_eighth_points: Option<u8>,
+    space_points: Option<u8>,
+    shadow: Option<bool>,
+    frame: Option<bool>,
 }
 impl Border {
     /// Paragraph Brc80/Brc values, including the documented no-border sentinel.
@@ -53,7 +63,14 @@ impl Border {
             .ok_or_else(|| unsupported("short Word border"))?;
         if u32_at(b, size - 4)? == u32::MAX {
             return Ok(Self {
-                attributes: "w:val=\"nil\"".into(),
+                facts: Some(BorderFacts {
+                    style: "nil".into(),
+                    color: None,
+                    width_eighth_points: None,
+                    space_points: None,
+                    shadow: None,
+                    frame: None,
+                }),
             });
         }
         let (width, kind, color, flags) = if old {
@@ -108,10 +125,116 @@ impl Border {
             _ => return Err(unsupported("invalid Word cell border type")),
         };
         // Brc widths below 2 are normatively treated as 2 eighth-points.
-        Ok(Self {attributes:format!("w:val=\"{style}\" w:sz=\"{}\" w:color=\"{color}\" w:space=\"{}\" w:shadow=\"{}\" w:frame=\"{}\"",width.max(2),flags&31,u8::from(flags&32!=0),u8::from(flags&64!=0))})
+        let width = width.max(2);
+        let space = flags & 31;
+        let shadow = flags & 32 != 0;
+        let frame = flags & 64 != 0;
+        Ok(Self {
+            facts: Some(BorderFacts {
+                style: style.into(),
+                color: Some(color),
+                width_eighth_points: Some(width),
+                space_points: Some(space),
+                shadow: Some(shadow),
+                frame: Some(frame),
+            }),
+        })
     }
     pub fn xml(&self, side: &str) -> String {
-        format!("<w:{side} {}/>", self.attributes)
+        let Some(value) = &self.facts else {
+            return format!("<w:{side} />");
+        };
+        if value.style == "nil" {
+            return format!("<w:{side} w:val=\"nil\"/>");
+        }
+        format!(
+            "<w:{side} w:val=\"{}\" w:sz=\"{}\" w:color=\"{}\" w:space=\"{}\" w:shadow=\"{}\" w:frame=\"{}\"/>",
+            value.style,
+            value.width_eighth_points.expect("decoded border width"),
+            value.color.as_deref().expect("decoded border color"),
+            value.space_points.expect("decoded border space"),
+            u8::from(value.shadow.expect("decoded border shadow")),
+            u8::from(value.frame.expect("decoded border frame")),
+        )
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct_edge(&self) -> docx_model::ParaBorderEdge {
+        let Some(value) = &self.facts else {
+            return docx_model::ParaBorderEdge {
+                style: "none".into(),
+                color: None,
+                width: 0.5,
+                space: 1.0,
+            };
+        };
+        let cleared = matches!(value.style.as_str(), "none" | "nil");
+        docx_model::ParaBorderEdge {
+            style: if cleared {
+                "none".into()
+            } else {
+                value.style.clone()
+            },
+            color: (!cleared)
+                .then(|| value.color.as_deref())
+                .flatten()
+                .filter(|color| *color != "auto")
+                .map(str::to_ascii_lowercase),
+            width: if cleared {
+                0.0
+            } else {
+                value
+                    .width_eighth_points
+                    .map_or(0.5, |v| f64::from(v) / 8.0)
+            },
+            space: if cleared {
+                0.0
+            } else {
+                value.space_points.map_or(1.0, f64::from)
+            },
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct_typography(&self) -> docx_model::CtBorderTypographyWire {
+        use docx_model::{TypographyValueStatusWire::Valid, TypographyValueWire};
+        let Some(value) = &self.facts else {
+            return docx_model::CtBorderTypographyWire::default();
+        };
+        let string = |raw: String, normalized: String| TypographyValueWire {
+            status: Valid,
+            raw: Some(raw),
+            value: Some(normalized),
+        };
+        let number = |raw: u8, divisor: f64| TypographyValueWire {
+            status: Valid,
+            raw: Some(raw.to_string()),
+            value: Some(f64::from(raw) / divisor),
+        };
+        let boolean = |raw: bool| TypographyValueWire {
+            status: Valid,
+            raw: Some(u8::from(raw).to_string()),
+            value: Some(raw),
+        };
+        docx_model::CtBorderTypographyWire {
+            val: string(value.style.clone(), value.style.clone()),
+            color: value
+                .color
+                .as_ref()
+                .map(|raw| string(raw.clone(), raw.to_ascii_lowercase()))
+                .unwrap_or_default(),
+            size_pt: value
+                .width_eighth_points
+                .map(|raw| number(raw, 8.0))
+                .unwrap_or_default(),
+            space_pt: value
+                .space_points
+                .map(|raw| number(raw, 1.0))
+                .unwrap_or_default(),
+            shadow: value.shadow.map(boolean).unwrap_or_default(),
+            frame: value.frame.map(boolean).unwrap_or_default(),
+            ..docx_model::CtBorderTypographyWire::default()
+        }
     }
 }
 
@@ -178,5 +301,32 @@ mod tests {
             .unwrap()
             .xml("left")
             .contains("w:color=\"123456\""));
+    }
+
+    #[test]
+    fn typed_storage_preserves_exact_xml_at_binary_boundaries() {
+        assert_eq!(Border::default().xml("top"), "<w:top />");
+        assert_eq!(
+            Border::read(&[0xAB, 0xCD, 0xEF, 0, 255, 1, 31, 0], false)
+                .unwrap()
+                .xml("bottom"),
+            "<w:bottom w:val=\"single\" w:sz=\"255\" w:color=\"ABCDEF\" w:space=\"31\" w:shadow=\"0\" w:frame=\"0\"/>"
+        );
+        assert_eq!(
+            Border::read(&[0, 0, 0, 255, 255, 1, 31, 0], false)
+                .unwrap()
+                .xml("bottom"),
+            "<w:bottom w:val=\"single\" w:sz=\"255\" w:color=\"auto\" w:space=\"31\" w:shadow=\"0\" w:frame=\"0\"/>"
+        );
+        assert_eq!(
+            Border::read(&[0, 0, 0, 0, 8, 0, 0, 0], false)
+                .unwrap()
+                .xml("bottom"),
+            "<w:bottom w:val=\"none\" w:sz=\"8\" w:color=\"000000\" w:space=\"0\" w:shadow=\"0\" w:frame=\"0\"/>"
+        );
+        assert_eq!(
+            Border::read(&[255; 8], false).unwrap().xml("bottom"),
+            "<w:bottom w:val=\"nil\"/>"
+        );
     }
 }

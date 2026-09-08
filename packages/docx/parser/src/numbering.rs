@@ -561,6 +561,7 @@ impl NumberingMap {
             Some(CounterError::OutputTooLarge) => {
                 Err("numbering marker output too large".to_string())
             }
+            Some(CounterError::InvalidTemplate) => Err("invalid numbering template".to_string()),
         }
     }
 }

@@ -4,6 +4,9 @@
 use super::{border::Border, u16_at, unsupported};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+
 #[derive(Clone)]
 pub struct Properties {
     pub ilfo: i16,
@@ -267,7 +270,6 @@ impl Properties {
             }
         }
         xml.push_str("/>");
-        let bidi = self.flags.get("bidi") == Some(&true);
         let [left, right] = self.logical_indents();
         let first = self
             .protected_list_indent
@@ -294,8 +296,18 @@ impl Properties {
             ));
         }
         xml.push_str("/>");
+        let alignment = self.normalized_alignment();
+        xml.push_str(&format!("<w:jc w:val=\"{alignment}\"/>"));
+        if let Some(value) = self.text_alignment {
+            xml.push_str(&format!("<w:textAlignment w:val=\"{value}\"/>"));
+        }
+        xml
+    }
+
+    fn normalized_alignment(&self) -> &'static str {
+        let bidi = self.flags.get("bidi") == Some(&true);
         let (value, physical) = self.alignment;
-        let alignment = if physical {
+        if physical {
             match value {
                 0 if bidi => "right",
                 2 if bidi => "left",
@@ -319,12 +331,17 @@ impl Properties {
                 "lowKashida",
                 "thaiDistribute",
             ][value as usize]
-        };
-        xml.push_str(&format!("<w:jc w:val=\"{alignment}\"/>"));
-        if let Some(value) = self.text_alignment {
-            xml.push_str(&format!("<w:textAlignment w:val=\"{value}\"/>"));
         }
-        xml
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn normalized_model_alignment(&self) -> &'static str {
+        match self.normalized_alignment() {
+            // Match the DOCX parser's stable renderer-facing normalization.
+            "both" => "justify",
+            "numTab" => "left",
+            value => value,
+        }
     }
 
     /// MS-DOC sprmPIlfo: negative references retain the paragraph's logical

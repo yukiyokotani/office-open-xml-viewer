@@ -37,6 +37,18 @@ fn positions(b: &[u8], p: usize, n: usize, close: bool) -> Result<Vec<i16>, Stri
     Ok(result)
 }
 impl Stops {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn direct(&self) -> Vec<docx_model::TabStop> {
+        self.0
+            .iter()
+            .map(|(&position, &(alignment, leader))| docx_model::TabStop {
+                pos: f64::from(position) / 20.0,
+                alignment: alignment.to_string(),
+                leader: leader.to_string(),
+            })
+            .collect()
+    }
+
     pub fn apply(&mut self, b: &[u8], close: bool) -> Result<(), String> {
         let cb = byte(b, 0)? as usize;
         if cb < 2 || (!(close && cb == 255) && cb + 1 != b.len()) {

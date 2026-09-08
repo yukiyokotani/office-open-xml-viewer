@@ -8,6 +8,22 @@ fn level(index: u8) -> Vec<u8> {
     bytes
 }
 
+fn typed_level(text: &[u8]) -> Level<'_> {
+    Level {
+        start: Some(1),
+        format: 0,
+        justification: 0,
+        legal: false,
+        restart: Some(0),
+        follow: 0,
+        tentative: false,
+        papx: &[],
+        chpx: &[],
+        text,
+        placeholders: [None; 9],
+    }
+}
+
 fn list(id: i32, simple: bool) -> Vec<u8> {
     let mut bytes = vec![0; 28];
     bytes[..4].copy_from_slice(&id.to_le_bytes());
@@ -447,4 +463,73 @@ fn checks_each_level_prefix_and_charges_the_exact_borrowed_payload() {
     let (mut word, table) = one();
     word[FC_PLF_LST + 4..FC_PLF_LST + 8].copy_from_slice(&31_u32.to_le_bytes());
     assert!(Tables::read(&word, &table).is_err());
+}
+
+#[test]
+fn typed_template_uses_utf16_offsets_without_reinterpreting_literals() {
+    let bytes: Vec<u8> = "A%1😀\u{0}Z"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let mut value = typed_level(&bytes);
+    value.placeholders = [Some((6, 0)), None, None, None, None, None, None, None, None];
+    let template = value.numbering_template(0, |_| Some(0)).unwrap();
+    assert_eq!(template.expand(|_| 7, |_| "decimal").unwrap(), "A%1😀7Z");
+
+    value.placeholders[0] = Some((2, 0)); // points into literal "%1", whose unit is '%'
+    assert!(value.numbering_template(0, |_| Some(0)).is_err());
+    value.placeholders[0] = Some((4, 0)); // splits the surrogate pair
+    assert!(value.numbering_template(0, |_| Some(0)).is_err());
+    value.placeholders[0] = Some((6, 1)); // future/deeper reference
+    assert!(value.numbering_template(0, |_| Some(0)).is_err());
+}
+
+#[test]
+fn typed_template_omits_references_to_numberless_levels() {
+    let bytes = [0_u8, 0, b'x', 0];
+    let mut value = typed_level(&bytes);
+    value.placeholders = [Some((1, 0)), None, None, None, None, None, None, None, None];
+    for format in [0x17, 0xff] {
+        let template = value.numbering_template(0, |_| Some(format)).unwrap();
+        assert_eq!(template.expand(|_| 1, |_| "bullet").unwrap(), "x");
+    }
+}
+
+#[test]
+fn typed_template_rejects_unconsumed_offsets_before_callbacks() {
+    let bytes = [b'a', 0];
+    for offsets in [vec![(0, 0)], vec![(2, 0)], vec![(1, 0), (1, 0)]] {
+        let mut value = typed_level(&bytes);
+        for (slot, offset) in value.placeholders.iter_mut().zip(offsets) {
+            *slot = Some(offset);
+        }
+        assert!(value
+            .numbering_template(0, |_| panic!("invalid offsets reached lookup"))
+            .is_err());
+    }
+    let odd = typed_level(&[b'a']);
+    assert!(odd
+        .numbering_template(0, |_| panic!("odd UTF-16 reached lookup"))
+        .is_err());
+    let invalid_unicode = typed_level(&[0x00, 0xd8]);
+    assert!(invalid_unicode.numbering_template(0, |_| None).is_err());
+}
+
+#[test]
+fn typed_template_literal_utf8_budget_is_not_a_character_count() {
+    let exact = vec![b'a', 0].repeat(ooxml_common::numbering::MAX_MARKER_BYTES);
+    let value = typed_level(&exact);
+    assert_eq!(
+        value
+            .numbering_template(0, |_| None)
+            .unwrap()
+            .expand(|_| 0, |_| "decimal")
+            .unwrap()
+            .len(),
+        ooxml_common::numbering::MAX_MARKER_BYTES
+    );
+    let oversized_utf8 = vec![0x42, 0x30].repeat(ooxml_common::numbering::MAX_MARKER_BYTES / 3 + 1);
+    assert!(typed_level(&oversized_utf8)
+        .numbering_template(0, |_| None)
+        .is_err());
 }

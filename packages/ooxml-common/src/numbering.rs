@@ -18,11 +18,93 @@ pub enum CounterError {
     InvalidLevel,
     Overflow,
     OutputTooLarge,
+    InvalidTemplate,
 }
 
 /// Per-marker retained UTF-8 ceiling. This is an implementation resource
 /// policy, not an OOXML schema limit or compatibility heuristic.
-const MAX_MARKER_BYTES: usize = 64 * 1024;
+#[doc(hidden)]
+pub const MAX_MARKER_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TemplatePart {
+    Literal(String),
+    Counter(u8),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumberingTemplate {
+    parts: Vec<TemplatePart>,
+}
+
+impl NumberingTemplate {
+    /// Resource policy for the typed acquisition seam: at most nine explicit
+    /// references and their ten intervening literal spans. This does not
+    /// constrain repeated `%N` occurrences in the separate OOXML text adapter.
+    pub fn new(parts: Vec<TemplatePart>) -> Result<Self, CounterError> {
+        if parts.len() > 19
+            || parts
+                .iter()
+                .filter(|part| matches!(part, TemplatePart::Counter(_)))
+                .count()
+                > 9
+            || parts
+                .iter()
+                .any(|part| matches!(part, TemplatePart::Counter(level) if *level > 8))
+        {
+            return Err(CounterError::InvalidTemplate);
+        }
+        let template = Self { parts };
+        if template.literal_bytes()? > MAX_MARKER_BYTES {
+            return Err(CounterError::OutputTooLarge);
+        }
+        Ok(template)
+    }
+
+    fn literal_bytes(&self) -> Result<usize, CounterError> {
+        self.parts
+            .iter()
+            .try_fold(0usize, |total, part| match part {
+                TemplatePart::Literal(value) => total
+                    .checked_add(value.len())
+                    .ok_or(CounterError::OutputTooLarge),
+                TemplatePart::Counter(_) => Ok(total),
+            })
+    }
+
+    /// Expand explicit counter parts. The adapter supplies the effective format
+    /// for each reference, including any source-format-specific legal policy.
+    pub fn expand<'a>(
+        &self,
+        mut value_at: impl FnMut(u8) -> u32,
+        mut format_at: impl FnMut(u8) -> &'a str,
+    ) -> Result<String, CounterError> {
+        let mut output = String::new();
+        for part in &self.parts {
+            match part {
+                TemplatePart::Literal(value) => {
+                    if value.len() > MAX_MARKER_BYTES.saturating_sub(output.len()) {
+                        return Err(CounterError::OutputTooLarge);
+                    }
+                    output.push_str(value);
+                }
+                TemplatePart::Counter(level) => {
+                    let value = format::format_counter_bounded(
+                        value_at(*level),
+                        format_at(*level),
+                        MAX_MARKER_BYTES,
+                    )
+                    .map_err(|()| CounterError::OutputTooLarge)?;
+                    if value.len() > MAX_MARKER_BYTES.saturating_sub(output.len()) {
+                        return Err(CounterError::OutputTooLarge);
+                    }
+                    output.push_str(&value);
+                }
+            }
+        }
+        Ok(output)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CounterIdentity<Shared, Orphan> {
@@ -175,6 +257,42 @@ where
             text = text.replace(&placeholder, &replacement);
         }
         Ok(text)
+    }
+
+    /// Expand an explicitly segmented source template against this engine's
+    /// live counters. Placeholder identity comes from source offsets, never
+    /// from scanning literal text.
+    pub fn resolve_template<'a>(
+        &self,
+        identity: CounterIdentity<Shared, Orphan>,
+        level: u32,
+        counter: u32,
+        template: &NumberingTemplate,
+        mut start_at: impl FnMut(u8) -> u32,
+        format_at: impl FnMut(u8) -> &'a str,
+    ) -> Result<String, CounterError> {
+        if level > 8 {
+            return Err(CounterError::InvalidLevel);
+        }
+        if template.parts.iter().any(
+            |part| matches!(part, TemplatePart::Counter(referenced) if u32::from(*referenced) > level),
+        ) {
+            return Err(CounterError::InvalidTemplate);
+        }
+        template.expand(
+            |referenced| {
+                if u32::from(referenced) == level {
+                    counter
+                } else {
+                    self.counters
+                        .get(&identity)
+                        .and_then(|counts| counts.get(&u32::from(referenced)))
+                        .copied()
+                        .unwrap_or_else(|| start_at(referenced))
+                }
+            },
+            format_at,
+        )
     }
 }
 
@@ -431,5 +549,69 @@ mod tests {
             Err(CounterError::OutputTooLarge)
         );
         assert_eq!(marker("%1", u32::MAX, "decimal"), Ok(u32::MAX.to_string()));
+    }
+
+    #[test]
+    fn typed_template_preserves_literal_percent_digits_and_unicode() {
+        let template = NumberingTemplate::new(vec![
+            TemplatePart::Literal("A%1😀".to_string()),
+            TemplatePart::Counter(0),
+            TemplatePart::Literal("Z".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(template.expand(|_| 7, |_| "decimal").unwrap(), "A%1😀7Z");
+        let engine = CounterEngine::<u32, u32, u32>::default();
+        assert_eq!(
+            engine
+                .resolve_template(
+                    CounterIdentity::Shared(1),
+                    0,
+                    7,
+                    &template,
+                    |_| 1,
+                    |_| "decimal",
+                )
+                .unwrap(),
+            "A%1😀7Z"
+        );
+    }
+
+    #[test]
+    fn typed_template_rejects_excessive_or_future_references() {
+        assert_eq!(
+            NumberingTemplate::new(vec![TemplatePart::Counter(9)]),
+            Err(CounterError::InvalidTemplate)
+        );
+        let template = NumberingTemplate::new(vec![TemplatePart::Counter(1)]).unwrap();
+        let engine = CounterEngine::<u32, u32, u32>::default();
+        assert_eq!(
+            engine.resolve_template(
+                CounterIdentity::Shared(1),
+                0,
+                1,
+                &template,
+                |_| 1,
+                |_| "decimal"
+            ),
+            Err(CounterError::InvalidTemplate)
+        );
+    }
+
+    #[test]
+    fn explicit_template_expansion_obeys_exact_output_budget() {
+        let exact = "x".repeat(MAX_MARKER_BYTES);
+        assert_eq!(
+            NumberingTemplate::new(vec![TemplatePart::Literal(exact)])
+                .unwrap()
+                .expand(|_| 1, |_| "decimal")
+                .unwrap()
+                .len(),
+            MAX_MARKER_BYTES
+        );
+        let over = "x".repeat(MAX_MARKER_BYTES + 1);
+        assert_eq!(
+            NumberingTemplate::new(vec![TemplatePart::Literal(over)]),
+            Err(CounterError::OutputTooLarge)
+        );
     }
 }
