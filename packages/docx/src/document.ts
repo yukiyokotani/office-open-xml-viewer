@@ -381,6 +381,7 @@ export class DocxDocument {
    *  shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in core,
    *  so a web font shared with another open document survives until both go). */
   private _googleFontFaces: FontFace[] = [];
+  private _googleFontsCssOrigin: CoreLoadOptions['googleFontsCssOrigin'];
   /** One stable closure per instance: core's path-keyed SVG cache namespaces on
    *  this identity, so two open documents never swap a shared zip path (e.g.
    *  word/media/image1.svg). Reusing one reference also lets the SVG cache hit
@@ -475,6 +476,7 @@ export class DocxDocument {
     let doc: DocxDocument | undefined;
     try {
       doc = new DocxDocument(worker, mode, defaultCurrentDateMs, opts.wasmUrl);
+      doc._googleFontsCssOrigin = opts.googleFontsCssOrigin;
       doc._metrics = metrics;
       // The variant the caller will actually render, recorded for BOTH render
       // modes and recorded BEFORE the parse: geometry accessors and the
@@ -552,6 +554,8 @@ export class DocxDocument {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document),
           DOCX_GOOGLE_FONTS,
+          undefined,
+          opts.googleFontsCssOrigin,
         );
       }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
@@ -807,7 +811,7 @@ export class DocxDocument {
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, googleFontsCssOrigin: this._googleFontsCssOrigin, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1109,6 +1113,7 @@ export class DocxDocument {
           data: buffer,
           resourcePolicy,
           useGoogleFonts,
+          googleFontsCssOrigin: this._googleFontsCssOrigin,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),
           renderers,

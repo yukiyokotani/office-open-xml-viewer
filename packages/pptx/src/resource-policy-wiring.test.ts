@@ -7,6 +7,7 @@ describe('PptxPresentation resource-policy wiring', () => {
     let request: Record<string, unknown> | undefined;
     const instance = Object.create(PptxPresentation.prototype) as Record<string, unknown>;
     instance._mode = 'worker';
+    instance._googleFontsCssOrigin = 'https://fonts.internal.example';
     instance._bridge = {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {
         request = createRequest(3);
@@ -55,6 +56,7 @@ describe('PptxPresentation resource-policy wiring', () => {
     )._parse(new ArrayBuffer(1), policy, false, 30_000, onUsage);
 
     expect(request).toMatchObject({ kind: 'parse', id: 3, resourcePolicy: policy });
+    expect(request).toHaveProperty('googleFontsCssOrigin', 'https://fonts.internal.example');
     expect(request).not.toHaveProperty('maxZipEntryBytes');
     expect(request).not.toHaveProperty('parserResourceLimits');
     expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({

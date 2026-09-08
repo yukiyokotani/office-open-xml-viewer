@@ -88,6 +88,7 @@ export type RenderWorkerRequest =
       buffer: ArrayBuffer;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       useGoogleFonts?: boolean;
+      googleFontsCssOrigin?: import('@silurus/ooxml-core').LoadOptions['googleFontsCssOrigin'];
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;
     }

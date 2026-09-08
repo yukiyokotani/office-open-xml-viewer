@@ -170,6 +170,7 @@ export class XlsxWorkbook {
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   private googleFontNames: string[] = [];
+  private googleFontsCssOrigin: CoreLoadOptions['googleFontsCssOrigin'];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   private fontsDestroyed = false;
   private _mode: 'main' | 'worker' = 'main';
@@ -292,6 +293,7 @@ export class XlsxWorkbook {
       let workbook: XlsxWorkbook | undefined;
       try {
         const loaded = new XlsxWorkbook(worker, mode, undefined, false);
+        loaded.googleFontsCssOrigin = opts.googleFontsCssOrigin;
         workbook = loaded;
         loaded.metrics = metrics;
         await loaded._loadDelimitedText(
@@ -366,6 +368,7 @@ export class XlsxWorkbook {
     let wb: XlsxWorkbook | undefined;
     try {
       wb = new XlsxWorkbook(worker, mode, opts.wasmUrl);
+      wb.googleFontsCssOrigin = opts.googleFontsCssOrigin;
       wb.metrics = metrics;
       await wb._load(
         buffer,
@@ -457,6 +460,7 @@ export class XlsxWorkbook {
               data: workerData,
               resourcePolicy,
               useGoogleFonts: !!opts.useGoogleFonts,
+              googleFontsCssOrigin: opts.googleFontsCssOrigin,
               renderers: rendererDescriptors,
             } satisfies RenderWorkerRequest)
           : ({
@@ -533,6 +537,7 @@ export class XlsxWorkbook {
         data,
         options,
         useGoogleFonts: !!opts.useGoogleFonts,
+        googleFontsCssOrigin: opts.googleFontsCssOrigin,
         renderers: rendererDescriptors,
       } satisfies DelimitedTextParseRequest),
       [data],
@@ -567,7 +572,7 @@ export class XlsxWorkbook {
     if (retained) {
       retained.refs++;
     } else {
-      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet);
+      const loading = preloadGoogleFonts(this.googleFontNames, XLSX_GOOGLE_FONTS, fontSet, this.googleFontsCssOrigin);
       retained = { refs: 1, faces: null, loading };
       this.retainedFontSets.set(fontSet, retained);
       loading.then((faces) => {

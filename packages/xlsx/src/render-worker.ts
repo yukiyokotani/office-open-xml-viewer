@@ -227,7 +227,7 @@ self.onmessage = async (e: MessageEvent<
         sheetCache.set(0, parsed.worksheet);
         sheetCacheUsage.set(0, measured);
         fontsLoaded = req.useGoogleFonts
-          ? preloadGoogleFonts(xlsxFontPreloadNames(parsed.workbook), XLSX_GOOGLE_FONTS)
+          ? preloadGoogleFonts(xlsxFontPreloadNames(parsed.workbook), XLSX_GOOGLE_FONTS, undefined, req.googleFontsCssOrigin)
           : Promise.resolve();
         const worksheetJson = new TextEncoder()
           .encode(JSON.stringify(parsed.worksheet)).buffer as ArrayBuffer;
@@ -265,7 +265,7 @@ self.onmessage = async (e: MessageEvent<
         // every styled font name, plus the generic Arabic fallbacks. Fonts must
         // land before rendering (which measures text), so we keep the promise
         // and await it in the renderViewport handler.
-        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS);
+        fontsLoaded = preloadGoogleFonts(xlsxFontPreloadNames(workbook), XLSX_GOOGLE_FONTS, undefined, req.googleFontsCssOrigin);
       }
       post({ type: 'parsed', id, workbook, usage: bootstrap.usage });
       return;

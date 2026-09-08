@@ -261,6 +261,7 @@ export class PptxPresentation {
    *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
    *  core, so a web font shared with another open deck survives until both go). */
   private _googleFontFaces: FontFace[] = [];
+  private _googleFontsCssOrigin: CoreLoadOptions['googleFontsCssOrigin'];
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
@@ -371,6 +372,7 @@ export class PptxPresentation {
     let pres: PptxPresentation | undefined;
     try {
       pres = new PptxPresentation(worker, mode, opts.wasmUrl);
+      pres._googleFontsCssOrigin = opts.googleFontsCssOrigin;
       pres._metrics = metrics;
       if (opts.math && mode === 'worker' && !rendererDescriptors?.math) {
         console.warn(
@@ -430,6 +432,8 @@ export class PptxPresentation {
             pres._embeddedFontAliases,
           ),
           PPTX_GOOGLE_FONTS,
+          undefined,
+          opts.googleFontsCssOrigin,
         );
       }
       metrics.succeed({ slides: pres.slideCount });
@@ -470,7 +474,7 @@ export class PptxPresentation {
     const response = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers } satisfies RenderWorkerRequest)
+          ? ({ kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, googleFontsCssOrigin: this._googleFontsCssOrigin, renderers } satisfies RenderWorkerRequest)
           : ({ kind: 'parse', id, buffer, resourcePolicy } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
@@ -608,7 +612,7 @@ export class PptxPresentation {
       ).filter((name): name is string => !!name && !loadedGoogleFonts.has(name));
       if (requested.length === 0) return;
       for (const name of requested) loadedGoogleFonts.add(name);
-      this._googleFontFaces.push(...await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS));
+      this._googleFontFaces.push(...await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS, undefined, this._googleFontsCssOrigin));
     };
     const full = (async () => {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
@@ -648,7 +652,7 @@ export class PptxPresentation {
       (id) => {
         this._parseRequestId = id;
         return {
-          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, renderers,
+          kind: 'parse', id, buffer, resourcePolicy, useGoogleFonts, googleFontsCssOrigin: this._googleFontsCssOrigin, renderers,
           progressiveLayout: true,
         } satisfies RenderWorkerRequest;
       },

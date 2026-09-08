@@ -57,15 +57,26 @@ export interface ProgressiveLayoutPartial {
 export interface LoadOptions {
   /**
    * Opt in to loading webfont substitutes from Google Fonts
-   * (`fonts.googleapis.com`). Default `false` — the canvas falls back to
-   * locally available fonts.
+   * (`fonts.googleapis.com` or `googleFontsCssOrigin`). Default `false` —
+   * the canvas falls back to locally available fonts.
    *
-   * When enabled, end-user IP / User-Agent is sent to Google, which may
-   * have privacy / GDPR implications for your application. To avoid the
+   * When using Google endpoints, end-user IP / User-Agent is sent to Google,
+   * which may have privacy / GDPR implications for your application. To avoid the
    * third-party request, host the substitutes yourself and reference them
    * via `@font-face` in your application CSS.
    */
   useGoogleFonts?: boolean;
+  /**
+   * HTTP(S) origin of a Google Fonts-compatible CSS service, e.g.
+   * `https://fonts.googleapis.cn` or `https://fonts.internal.example`.
+   * Defaults to `https://fonts.googleapis.com`. Supply an origin only (no
+   * path, query, fragment, or credentials); CSS paths and queries are preserved.
+   * Requires `useGoogleFonts: true`. Font files are loaded from the URLs in
+   * the returned CSS, with relative URLs resolved against the stylesheet URL.
+   * For an offline deployment, the service must also serve the font files
+   * and return URLs reachable on that network.
+   */
+  googleFontsCssOrigin?: string;
   /**
    * Password for an encrypted OOXML file ([MS-OFFCRYPTO] Agile Encryption).
    *

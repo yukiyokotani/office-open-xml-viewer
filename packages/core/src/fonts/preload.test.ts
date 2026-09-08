@@ -52,6 +52,7 @@ interface FakeFace {
   family: string;
   source: string;
   loadCalls: number;
+  descriptors?: object;
   load: () => Promise<FakeFace>;
 }
 
@@ -375,5 +376,111 @@ describe('preloadGoogleFonts — dedup + unloadGoogleFonts (SPA leak)', () => {
     expect(added).toHaveLength(2); // B still holds
     unloadGoogleFonts(b);
     expect(added).toHaveLength(0);
+  });
+});
+
+
+
+describe('custom Google Fonts CSS origins', () => {
+  it.each(['document', 'worker'])('uses a custom CSS origin in %s', async (context) => {
+    const { set, added } = installFakes();
+    delete G.document;
+    delete G.self;
+    G[context === 'document' ? 'document' : 'self'] = { fonts: set };
+    const css = CSS.replaceAll('https://fonts.gstatic.com', 'https://fonts.internal.example');
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => css }));
+
+    await preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example/');
+
+    expect(G.fetch).toHaveBeenCalledWith('https://fonts.internal.example/css2?family=Carlito');
+    expect(added).toHaveLength(2);
+    expect(added.every((face) => face.source.includes('https://fonts.internal.example/'))).toBe(true);
+    expect(added.every((face) => face.loadCalls === 1)).toBe(true);
+    expect(added[0].descriptors).toMatchObject({ style: 'italic', weight: '700', unicodeRange: 'U+0000-00FF' });
+    expect(MAP.calibri.url).toBe('https://fonts.googleapis.com/css2?family=Carlito');
+  });
+
+  it('preserves the endpoint path and family query with an HTTP origin and port', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    const map = { calibri: { ...MAP.calibri, url: MAP.calibri.url + ':ital,wght@0,400;1,700&display=swap' } };
+    await preloadGoogleFonts(['Calibri'], map, undefined, 'http://fonts.internal.example:8080');
+    expect(G.fetch).toHaveBeenCalledWith('http://fonts.internal.example:8080/css2?family=Carlito:ital,wght@0,400;1,700&display=swap');
+  });
+
+  it('uses the font URLs returned by the China CSS service', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => CSS.replaceAll('fonts.gstatic.com', 'fonts.gstatic.cn') }));
+    await preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.googleapis.cn');
+    expect(G.fetch).toHaveBeenCalledWith('https://fonts.googleapis.cn/css2?family=Carlito');
+    expect(added[0].source).toContain('https://fonts.gstatic.cn/');
+  });
+
+  it('isolates concurrent origins and deduplicates normalized origins independently', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    const [globalFaces, internalFaces, internalAgain] = await Promise.all([
+      preloadGoogleFonts(['Calibri'], MAP),
+      preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example'),
+      preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example/'),
+    ]);
+    expect(G.fetch).toHaveBeenCalledTimes(2);
+    expect(globalFaces[0]).not.toBe(internalFaces[0]);
+    expect(internalFaces[0]).toBe(internalAgain[0]);
+    unloadGoogleFonts(internalFaces);
+    unloadGoogleFonts(internalAgain);
+    expect(set.faces).toEqual(globalFaces);
+    unloadGoogleFonts(globalFaces);
+    expect(set.faces).toHaveLength(0);
+  });
+
+  it.each([
+    ['url("../files/a.woff2")', 'url("https://fonts.internal.example/files/a.woff2")'],
+    ["url('/files/a.woff2')", 'url("https://fonts.internal.example/files/a.woff2")'],
+    ['url(a.woff2)', 'url("https://fonts.internal.example/styles/a.woff2")'],
+    ['url(//assets.internal.example/a.woff2)', 'url("https://assets.internal.example/a.woff2")'],
+    ['url(https://fonts.gstatic.com/s/a.woff2)', 'url(https://fonts.gstatic.com/s/a.woff2)'],
+  ])('resolves font sources relative to the final stylesheet URL: %s', async (src, expected) => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    G.fetch = vi.fn(async () => ({
+      ok: true, url: 'https://fonts.internal.example/styles/redirected.css',
+      text: async () => `@font-face { font-family: Carlito; src: ${src}; }`,
+    }));
+    await preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example');
+    expect(added[0].source).toBe(expected);
+  });
+
+  it('resolves a relative font source against the requested URL when response.url is unavailable', async () => {
+    const { set, added } = installFakes();
+    G.document = { fonts: set };
+    G.fetch = vi.fn(async () => ({ ok: true, text: async () => '@font-face { font-family: Carlito; src: local("Carlito"), url(/fonts/a.woff2) format("woff2"); }' }));
+    await preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example');
+    expect(added[0].source).toBe('local("Carlito"), url("https://fonts.internal.example/fonts/a.woff2") format("woff2")');
+  });
+
+  it('leaves unrelated stylesheet hosts unchanged', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    const map = { calibri: { ...MAP.calibri, url: 'https://fonts.googleapis.com.example.com/css2?family=Carlito' } };
+    await preloadGoogleFonts(['Calibri'], map, undefined, 'https://fonts.internal.example');
+    expect(G.fetch).toHaveBeenCalledExactlyOnceWith(map.calibri.url);
+  });
+
+  it.each(['', '/fonts', 'file:///fonts', 'ftp://fonts.example', 'https://fonts.example/proxy', 'https://fonts.example?key=1', 'https://fonts.example#fragment', 'https://user:pass@fonts.example'])('rejects an invalid origin before fetching: %s', async (origin) => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    await expect(preloadGoogleFonts(['Calibri'], MAP, undefined, origin)).rejects.toThrow(/googleFontsCssOrigin/);
+    expect(G.fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to a public origin after a custom service fails', async () => {
+    const { set } = installFakes();
+    G.document = { fonts: set };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    G.fetch = vi.fn(async () => ({ ok: false, status: 503 }));
+    expect(await preloadGoogleFonts(['Calibri'], MAP, undefined, 'https://fonts.internal.example')).toEqual([]);
+    expect(G.fetch).toHaveBeenCalledExactlyOnceWith('https://fonts.internal.example/css2?family=Carlito');
   });
 });

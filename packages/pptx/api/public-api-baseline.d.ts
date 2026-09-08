@@ -1002,6 +1002,7 @@ export type LoadOptions = LoadOptions__emitterCollision1 & {
 };
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
+    googleFontsCssOrigin?: string;
     password?: string;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;

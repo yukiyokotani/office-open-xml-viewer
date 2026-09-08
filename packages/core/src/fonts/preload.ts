@@ -22,6 +22,7 @@
  * use a system fallback and shift once a later interaction re-rasterized
  * the canvas after the font landed.
  */
+import type { LoadOptions } from '../types/load-options.js';
 import { retainFace, releaseFaces } from './font-registry.js';
 
 export interface FontPreloadEntry {
@@ -143,14 +144,48 @@ function googleFaceSignature(url: string, f: ParsedFontFace): string {
   ].join('|');
 }
 
+/** An origin keeps the built-in CSS endpoint paths and family queries intact. */
+function normalizeGoogleFontsCssOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const invalid = () => new TypeError(
+    'googleFontsCssOrigin must be an HTTP(S) origin without a path, query, fragment, or credentials',
+  );
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalid();
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
+      value.includes('?') || value.includes('#')) throw invalid();
+  return url.origin;
+}
+
+/** FontFace URL sources resolve in the document/worker realm unless made
+ * absolute. A CSS service may serve fonts relative to its own stylesheet,
+ * including after a redirect, so resolve those references before registration. */
+function resolveFontSources(src: string, stylesheetUrl: string): string {
+  return src.replace(
+    /url\(\s*(?:"([^"]*)"|'([^']*)'|([^\s)]+))\s*\)/gi,
+    (match, doubleQuoted: string | undefined, singleQuoted: string | undefined, bare: string | undefined) => {
+      const value = doubleQuoted ?? singleQuoted ?? bare ?? '';
+      if (/^[a-z][a-z\d+.-]*:/i.test(value)) return match;
+      return `url("${new URL(value, stylesheetUrl).href}")`;
+    },
+  );
+}
+
 export async function preloadGoogleFonts(
   fontNames: Iterable<string | null | undefined>,
   map: Record<string, FontPreloadEntry>,
   targetFontSet: FontFaceSet | null = activeFontSet(),
+  cssOrigin?: LoadOptions['googleFontsCssOrigin'],
 ): Promise<FontFace[]> {
   const fonts = targetFontSet;
   if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return [];
 
+  const origin = normalizeGoogleFontsCssOrigin(cssOrigin);
   const seen = new Set<string>();
   const targetFamilies = new Set<string>();
   const cssUrls = new Set<string>();
@@ -175,13 +210,16 @@ export async function preloadGoogleFonts(
     seen.add(key);
     const entry = map[key];
     if (!entry) continue;
-    cssUrls.add(entry.url);
+    const url = origin
+      ? entry.url.replace(/^https:\/\/fonts\.googleapis\.com(?=[/?#]|$)/i, () => origin)
+      : entry.url;
+    cssUrls.add(url);
     const family = (entry.loadFamily ?? requestedName).toLowerCase();
     targetFamilies.add(family);
-    let targets = urlTargets.get(entry.url);
+    let targets = urlTargets.get(url);
     if (!targets) {
       targets = new Set<string>();
-      urlTargets.set(entry.url, targets);
+      urlTargets.set(url, targets);
     }
     targets.add(family);
   }
@@ -203,7 +241,11 @@ export async function preloadGoogleFonts(
           try {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return parseFontFaceRules(await res.text());
+            const stylesheetUrl = res.url || url;
+            return parseFontFaceRules(await res.text()).map((rule) => ({
+              ...rule,
+              src: resolveFontSources(rule.src, stylesheetUrl),
+            }));
           } catch {
             cssFetches.delete(url); // free the slot so a later call retries
             for (const family of urlTargets.get(url) ?? []) {

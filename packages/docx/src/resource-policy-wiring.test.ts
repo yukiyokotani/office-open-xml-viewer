@@ -9,6 +9,7 @@ describe('DocxDocument resource-policy wiring', () => {
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
     attachDocumentLayoutRuntime(instance, 0);
     instance._mode = 'worker';
+    instance._googleFontsCssOrigin = 'https://fonts.internal.example';
     instance._bridge = {
       request: vi.fn(async (createRequest: (id: number) => Record<string, unknown>) => {
         request = createRequest(7);
@@ -57,6 +58,7 @@ describe('DocxDocument resource-policy wiring', () => {
       id: 7,
       resourcePolicy: policy,
     });
+    expect(request).toHaveProperty('googleFontsCssOrigin', 'https://fonts.internal.example');
     expect(request).not.toHaveProperty('maxZipEntryBytes');
     expect(request).not.toHaveProperty('parserResourceLimits');
     expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({

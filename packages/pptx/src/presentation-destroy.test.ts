@@ -240,6 +240,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     const presentation = await PptxPresentation.load(new ArrayBuffer(0), {
       mode: 'main',
       useGoogleFonts: false,
+      googleFontsCssOrigin: 'https://fonts.internal.example',
     });
 
     expect(fetch).not.toHaveBeenCalled();
