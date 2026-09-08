@@ -177,6 +177,10 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     instance._googleFontFaces = [];
     instance._localMetricFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
+    // Object.create bypasses DocxDocument's field initializers. Mirror the
+    // constructor's initial native-DOC abort-listener cleanup state so this
+    // focused destroy harness exercises the lifecycle of a real instance.
+    instance._nativeDocSignalCleanup = () => undefined;
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
   }
 
