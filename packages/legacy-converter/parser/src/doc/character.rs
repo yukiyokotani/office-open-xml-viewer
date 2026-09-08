@@ -2,7 +2,7 @@
 //! using their encoded operand size, never interpreted as text or executed.
 //! [MS-DOC] 2.2.5, 2.6.1, 2.9.327; ECMA-376 17.3.2 (run properties).
 
-use super::{u16_at, u32_at, unsupported};
+use super::{border::ICO_COLORS, u16_at, u32_at, unsupported};
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
 
@@ -195,6 +195,22 @@ impl Properties {
             return Ok(true);
         }
         let (key, value) = match code {
+            0x2a42 => {
+                // MS-DOC 2.6.1 sprmCIco / 2.9.119 Ico: fixed palette index,
+                // with zero representing automatic text color.
+                let index = usize::from(
+                    *operand
+                        .first()
+                        .ok_or_else(|| unsupported("short Word text color index"))?,
+                );
+                (
+                    "color",
+                    ICO_COLORS
+                        .get(index)
+                        .ok_or_else(|| unsupported("invalid Word text color index"))?
+                        .to_string(),
+                )
+            }
             0x286f => {
                 // MS-DOC 2.6.1 sprmCIdctHint. 0xFF is an explicit absence of
                 // guidance and therefore cancels an inherited ST_Hint value.
@@ -355,6 +371,33 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_text_color_uses_shared_palette_and_normal_cascade_order() {
+        let base = Properties::default();
+        for (index, expected) in ICO_COLORS.iter().enumerate() {
+            let mut value = base.clone();
+            assert!(value.apply(0x2a42, &[index as u8], &base).unwrap());
+            assert!(value
+                .xml(&[])
+                .unwrap()
+                .contains(&format!("<w:color w:val=\"{expected}\"/>")));
+        }
+        for index in 17..=255u8 {
+            assert!(base.clone().apply(0x2a42, &[index], &base).is_err());
+        }
+        assert!(base.clone().apply(0x2a42, &[], &base).is_err());
+
+        let mut style = base.clone();
+        style.apply(0x2a42, &[2], &base).unwrap();
+        let mut value = style.clone();
+        value.apply(0x6870, &[0x12, 0x34, 0x56, 0], &style).unwrap();
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"123456\""));
+        value.apply(0x2a42, &[6], &style).unwrap();
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
+        value.reset_to(&style, false);
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"0000FF\""));
+    }
 
     #[test]
     fn picture_metadata_survives_style_reset_without_becoming_run_xml() {

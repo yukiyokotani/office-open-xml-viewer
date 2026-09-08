@@ -254,6 +254,7 @@ fn underline_wire(token: &str) -> UnderlineTypographyWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::border::ICO_COLORS;
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
 
@@ -343,6 +344,20 @@ mod tests {
             valid_wire("subscript".into(), "sub".into())
         );
         assert_eq!(wire.underline.unwrap().val.value.as_deref(), Some("wave"));
+    }
+
+    #[test]
+    fn indexed_text_colors_match_the_existing_docx_parser_projection() {
+        for index in 0..17u8 {
+            let properties = applied(&[(0x2a42, vec![index])]);
+            assert_parser_parity(&properties, &[]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            let expected = (index != 0).then(|| ICO_COLORS[index as usize].to_ascii_lowercase());
+            assert_eq!(run.color, expected);
+        }
     }
 
     #[test]
