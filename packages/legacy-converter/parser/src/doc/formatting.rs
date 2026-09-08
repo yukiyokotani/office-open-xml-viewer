@@ -1182,6 +1182,17 @@ mod tests {
             .unwrap();
         assert_eq!(facts.location, Some(123));
         assert!(facts.vanish);
+        let special = [0x55, 0x08, 1];
+        let host = f
+            .direct_anchor_host_metrics(0, 100, 1, &[&special])
+            .unwrap()
+            .unwrap();
+        assert_eq!(host.font_size, 10.0);
+        assert!(f
+            .direct_anchor_host_metrics(0, 100, 1, &[&picture])
+            .unwrap()
+            .is_none());
+        assert!(f.direct_anchor_host_metrics(0, 100, 0, &[]).is_err());
         assert!(
             f.direct_paragraph(0, 109, 1, &[&hidden])
                 .unwrap()

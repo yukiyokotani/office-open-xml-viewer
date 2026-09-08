@@ -4,7 +4,7 @@
 //! callers; PAP/CHPX resolution and hard-break normalization live here once.
 
 use super::{ModelBudget, ParaPiece};
-use crate::doc::{formatting, pictures, unsupported, Paragraph, Story, Token};
+use crate::doc::{floating, formatting, pictures, unsupported, Paragraph, Story, Token};
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
@@ -13,6 +13,7 @@ pub(super) fn project(
     paragraphs: Vec<Paragraph>,
     formatting: &mut formatting::Formatting<'_>,
     pictures: &mut pictures::Store<'_>,
+    mut floating: Option<&mut floating::Store<'_>>,
     budget: &mut ModelBudget,
     body: &mut Vec<BodyElement>,
     ending_kind: Option<&str>,
@@ -138,9 +139,37 @@ pub(super) fn project(
                     }
                 }
                 Token::FloatingPicture => {
-                    return Err(unsupported(
-                        "direct DOC model does not yet support floating pictures",
-                    ));
+                    let store = floating.as_deref_mut().ok_or_else(|| {
+                        unsupported("direct DOC model does not support header floating pictures")
+                    })?;
+                    let (_, fc, piece) = story
+                        .position(cp)
+                        .ok_or_else(|| unsupported("Word floating picture outside piece table"))?;
+                    let Some(mut host) = formatting.direct_anchor_host_metrics(
+                        style,
+                        fc,
+                        piece.prm,
+                        &story.prcs,
+                    )? else {
+                        continue;
+                    };
+                    let image: Option<floating::DirectFloatingPicture> =
+                        store.direct_picture(cp, &mut budget.remaining_bytes)?;
+                    if let Some(image) = image {
+                        host.anchor_occurrence_id = Some(image.occurrence_id);
+                        let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
+                            .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
+                            .and_then(|bytes| bytes.checked_add(
+                                host.font_family_east_asia.as_ref().map_or(0, String::capacity),
+                            ))
+                            .ok_or("OUTPUT_TOO_LARGE")?;
+                        budget.charge(host_payload)?;
+                        budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
+                        budget.push(
+                            &mut paragraph.runs,
+                            DocRun::Image(Box::new(image.image)),
+                        )?;
+                    }
                 }
                 Token::NoteMarker | Token::NoteReference(_) => {
                     return Err(unsupported(

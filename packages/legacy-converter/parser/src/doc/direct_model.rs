@@ -101,6 +101,7 @@ pub(super) fn build(
             paragraphs,
             &mut facts.formatting,
             &mut facts.pictures,
+            Some(&mut facts.floating),
             &mut budget,
             &mut body,
             ending.as_ref().map(|ending| ending.kind.as_str()),
@@ -157,9 +158,12 @@ pub(super) fn build(
         ));
     }
 
-    let resources = facts
+    let mut resources = facts
         .pictures
         .finish_direct_resources(&mut budget.remaining_bytes)?;
+    facts
+        .floating
+        .append_direct_resources(&mut resources, &mut budget.remaining_bytes)?;
     let document = Document {
         section,
         body,
@@ -561,6 +565,115 @@ mod tests {
         build_cfb(&[("WordDocument", word), ("0Table", table), ("Data", data)])
     }
 
+    fn floating_picture_source(text: &str, vanish: bool) -> Vec<u8> {
+        let source = source(text);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        let mut chpx = vec![0x55, 0x08, 1];
+        if vanish {
+            chpx.extend([0x3c, 0x08, 1]);
+        }
+        page[8] = 32;
+        page[64] = chpx.len() as u8;
+        page[65..65 + chpx.len()].copy_from_slice(&chpx);
+
+        let main_units = text.encode_utf16().count();
+        let anchor_offset = table.len();
+        let flags = (1u16 << 1) | (2 << 3) | (2 << 5) | (2 << 9) | (1 << 15);
+        let mut anchors = [
+            1u32.to_le_bytes().as_slice(),
+            &(main_units as u32).to_le_bytes(),
+            &1027u32.to_le_bytes(),
+            &(-100i32).to_le_bytes(),
+            &200i32.to_le_bytes(),
+            &300i32.to_le_bytes(),
+            &500i32.to_le_bytes(),
+            &flags.to_le_bytes(),
+            &[0; 4],
+        ]
+        .concat();
+        word[0x1da..0x1de].copy_from_slice(&(anchor_offset as u32).to_le_bytes());
+        word[0x1de..0x1e2].copy_from_slice(&(anchors.len() as u32).to_le_bytes());
+        table.append(&mut anchors);
+
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(2u32.to_be_bytes());
+        png.extend(3u32.to_be_bytes());
+        png.extend([8, 2, 0, 0, 0, 0, 0, 0, 0]);
+        let blip = picture_record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png].concat());
+        let delayed = word.len();
+        word.extend(&blip);
+        let mut bse = vec![0; 36];
+        bse[0] = 6;
+        bse[1] = 6;
+        bse[20..24].copy_from_slice(&(blip.len() as u32).to_le_bytes());
+        bse[24] = 1;
+        bse[28..32].copy_from_slice(&(delayed as u32).to_le_bytes());
+        let group = picture_record(
+            0xf000,
+            15,
+            &picture_record(0xf001, 31, &picture_record(0xf007, 0x62, &bse)),
+        );
+        let properties = [
+            (0x4104u16, 1u32),
+            (0x3bf, 0x8200_0000),
+            (0x384, 12_700),
+            (0x385, 25_400),
+            (0x386, 38_100),
+            (0x387, 50_800),
+            (0x3aa, 77),
+            (0x0100, 8192),
+            (0x0101, 16384),
+            (0x0102, 24576),
+            (0x0103, 32768),
+        ];
+        let mut options = Vec::new();
+        for (key, value) in properties {
+            options.extend(key.to_le_bytes());
+            options.extend(value.to_le_bytes());
+        }
+        let shape = picture_record(
+            0xf004,
+            15,
+            &[
+                picture_record(
+                    0xf00a,
+                    (75 << 4) | 2,
+                    &[1027u32.to_le_bytes(), 0xac0u32.to_le_bytes()].concat(),
+                ),
+                picture_record(0xf00b, ((properties.len() as u16) << 4) | 3, &options),
+                picture_record(0xf010, 0, &0u32.to_le_bytes()),
+            ]
+            .concat(),
+        );
+        let art = [
+            group,
+            vec![0],
+            picture_record(0xf002, 15, &picture_record(0xf003, 15, &shape)),
+        ]
+        .concat();
+        word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+        table.extend(art);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    fn passive_special_source(source: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        page[8] = 32;
+        page[64..68].copy_from_slice(&[3, 0x55, 0x08, 1]);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     fn make_normal_style_self_referential(bytes: &[u8]) -> Vec<u8> {
         let cfb = CompoundFile::open(bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
@@ -731,6 +844,80 @@ mod tests {
             image_runs(&super::super::direct_model(&cfb, right).unwrap().document).len(),
             1
         );
+    }
+
+    #[test]
+    fn floating_picture_projects_anchor_host_sidecar_and_owned_resource() {
+        let bytes = floating_picture_source("B\u{8}\r", false);
+        let result = {
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            super::super::direct_model(&cfb, 1024 * 1024).unwrap()
+        };
+        drop(bytes);
+        assert_eq!(result.resources.len(), 1);
+        assert!(result.resources[0].bytes.starts_with(b"\x89PNG"));
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [DocRun::Text(_), DocRun::AnchorHost(host), DocRun::Image(image)] = paragraph.runs.as_slice() else {
+            panic!("text, anchor host, image")
+        };
+        let acquisition = image.anchor_acquisition.as_ref().unwrap();
+        assert_eq!(host.anchor_occurrence_id.as_deref(), Some(acquisition.occurrence_id.as_str()));
+        assert_eq!(image.image_path, result.resources[0].key);
+        assert!(image.anchor && image.flip_h && image.flip_v);
+        assert_eq!((image.anchor_x_pt, image.anchor_y_pt), (-5.0, 10.0));
+        assert_eq!((image.width_pt, image.height_pt), (20.0, 15.0));
+        assert_eq!(image.wrap_mode.as_deref(), Some("square"));
+        assert_eq!(image.wrap_side.as_deref(), Some("right"));
+        assert_eq!((image.dist_left, image.dist_top, image.dist_right, image.dist_bottom), (1.0, 2.0, 3.0, 4.0));
+        assert!(!image.allow_overlap);
+        assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
+        assert_eq!(image.anchor_y_relative_from.as_deref(), Some("paragraph"));
+        assert_eq!(acquisition.wrap.authored_kinds, ["wrapSquare"]);
+        assert_eq!(acquisition.behavior.relative_height, Some(77));
+        assert_eq!(acquisition.behavior.locked, Some(true));
+        assert_eq!(acquisition.behavior.layout_in_cell, Some(false));
+        assert_eq!(acquisition.behavior.allow_overlap, Some(false));
+        assert_eq!(acquisition.anchor_distances.left_pt, Some(1.0));
+
+        // Cross-check the complete host and acquisition contract, not only
+        // selected display fields. The byte parser's known picture-flip loss
+        // remains explicit; direct projection preserves the authored flips.
+        let reference_source = floating_picture_source("B\u{8}\r", false);
+        let converted = super::super::convert(
+            &CompoundFile::open(&reference_source).unwrap(), 1024 * 1024,
+        ).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(
+            &docx_parser::parse_docx_native(&converted.bytes).unwrap(),
+        ).unwrap();
+        let actual = serde_json::to_value(&result.document).unwrap();
+        let expected_runs = &expected["body"][0]["runs"];
+        let mut actual_host = actual["body"][0]["runs"][1].clone();
+        actual_host["__anchorOccurrenceId"] = expected_runs[1]["__anchorOccurrenceId"].clone();
+        assert_eq!(actual_host, expected_runs[1]);
+        let mut actual_image = actual["body"][0]["runs"][2].clone();
+        actual_image["imagePath"] = expected_runs[2]["imagePath"].clone();
+        actual_image["__anchorAcquisition"]["occurrenceId"] =
+            expected_runs[2]["__anchorAcquisition"]["occurrenceId"].clone();
+        assert!(expected_runs[2].get("flipH").is_none());
+        assert!(expected_runs[2].get("flipV").is_none());
+        actual_image.as_object_mut().unwrap().remove("flipH");
+        actual_image.as_object_mut().unwrap().remove("flipV");
+        assert_eq!(actual_image, expected_runs[2]);
+
+        let hidden_bytes = floating_picture_source("B\u{8}\r", true);
+        let hidden = super::super::direct_model(
+            &CompoundFile::open(&hidden_bytes).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert!(image_runs(&hidden.document).is_empty());
+        assert!(hidden.resources.is_empty());
+
+        let bytes = floating_picture_source("B\u{8}\r", false);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert_eq!(super::super::direct_model(&cfb, 1).unwrap_err(), "OUTPUT_TOO_LARGE");
     }
 
     #[test]
@@ -1017,6 +1204,30 @@ mod tests {
         )
         .unwrap_err()
         .contains("no inline location"));
+        let non_passive_float = source("\u{8}\r");
+        assert!(super::super::direct_model(
+            &CompoundFile::open(&non_passive_float).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap_err()
+        .contains("not passive-special"));
+        let sections = [(2, 2, 12_240, 15_840, 1, 720)];
+        let slots = [None, Some("\u{8}\r"), None, None, None, None];
+        let header_float = source_with_typography(
+            "B\r",
+            &sections,
+            None,
+            None,
+            None,
+            Some(&slots),
+        );
+        let header_float = passive_special_source(&header_float);
+        assert!(super::super::direct_model(
+            &CompoundFile::open(&header_float).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap_err()
+        .contains("header floating pictures"));
         let bytes = source(&format!("{}\r", "x".repeat(100)));
         let cfb = CompoundFile::open(&bytes).unwrap();
         assert!(super::super::direct_model(&cfb, 64 * 1024).is_ok());

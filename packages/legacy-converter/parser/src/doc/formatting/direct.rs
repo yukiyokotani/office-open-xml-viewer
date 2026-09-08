@@ -3,6 +3,7 @@
 
 use super::{numbering, Formatting, Properties};
 use docx_model::{DocParagraph, TextRun};
+use docx_model::AnchorHostMetrics;
 
 pub(in crate::doc) struct DirectResolvedParagraph {
     pub(in crate::doc) paragraph: DocParagraph,
@@ -15,6 +16,35 @@ pub(in crate::doc) struct DirectInlinePictureFacts {
 }
 
 impl Formatting<'_> {
+    pub(in crate::doc) fn direct_anchor_host_metrics(
+        &mut self,
+        paragraph_style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Option<AnchorHostMetrics>, String> {
+        let properties = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        if !properties.picture.passive_special() {
+            return Err(super::super::unsupported(
+                "floating picture character is not passive-special",
+            ));
+        }
+        if properties.direct_vanish() {
+            return Ok(None);
+        }
+        let facts = properties.direct_font_facts(&self.fonts)?;
+        Ok(Some(AnchorHostMetrics {
+            font_size: facts.font_size.ok_or_else(|| {
+                super::super::unsupported("floating picture host has no resolved font size")
+            })?,
+            font_family: facts.font_family,
+            font_family_east_asia: facts.font_family_east_asia,
+            bold: facts.bold,
+            italic: facts.italic,
+            anchor_occurrence_id: None,
+        }))
+    }
+
     pub(in crate::doc) fn direct_normal_style_font_size_pt(&mut self) -> Result<f64, String> {
         // MS-DOC 2.6.4 sprmSDxtCharSpace is relative to the Normal style,
         // not the paragraph mark or any visible body run's direct formatting.

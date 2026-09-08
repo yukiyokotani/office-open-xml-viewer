@@ -7,6 +7,11 @@ use crate::officeart::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use direct::DirectFloatingPicture;
+
 pub(super) struct Store<'a> {
     anchors: Vec<Anchor>,
     shapes: BTreeMap<u32, (usize, u32, Record<'a>)>,
@@ -16,6 +21,8 @@ pub(super) struct Store<'a> {
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
+    #[cfg(feature = "direct-doc")]
+    selected_images: std::collections::BTreeSet<usize>,
     pub omitted: bool,
 }
 
@@ -31,6 +38,8 @@ impl<'a> Store<'a> {
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
+            #[cfg(feature = "direct-doc")]
+            selected_images: std::collections::BTreeSet::new(),
             omitted: false,
         };
         if result.anchors.is_empty() {
@@ -132,14 +141,58 @@ impl<'a> Store<'a> {
     }
 
     pub fn drawing(&mut self, cp: usize) -> Result<String, String> {
+        let Some(resolved) = self.resolve(cp)? else {
+            return Ok(String::new());
+        };
+        let image = self.images[&resolved.image_index]
+            .as_ref()
+            .expect("resolved floating image");
+        let [dist_l, dist_t, dist_r, dist_b] = resolved.distances;
+        let x = position(resolved.horizontal, resolved.x_emu, false)?;
+        let y = position(resolved.vertical, resolved.y_emu, true)?;
+        let wrap = match resolved.wrapping {
+            1 => "<wp:wrapTopAndBottom/>".to_string(),
+            2 => format!("<wp:wrapSquare wrapText=\"{}\"/>", resolved.side),
+            3 => "<wp:wrapNone/>".into(),
+            _ => unreachable!(),
+        };
+        let opening = format!(
+            r#"<wp:anchor distL="{dist_l}" distT="{dist_t}" distR="{dist_r}" distB="{dist_b}" simplePos="0" relativeHeight="{}" behindDoc="{}" locked="{}" layoutInCell="{}" allowOverlap="{}"><wp:simplePos x="0" y="0"/>{x}{y}<wp:extent cx="{}" cy="{}"/>{wrap}"#,
+            resolved.z_order,
+            u8::from(resolved.behind),
+            u8::from(resolved.locked),
+            u8::from(resolved.in_cell),
+            u8::from(resolved.overlap),
+            resolved.extent[0],
+            resolved.extent[1]
+        );
+        let image = Picture {
+            image: Image {
+                bytes: std::borrow::Cow::Borrowed(image.bytes.as_ref()),
+                extension: image.extension,
+            },
+            extent: resolved.extent,
+            crop: resolved.crop,
+            flip: resolved.flip,
+            rotation: 0,
+        };
+        Ok(image.xml(
+            1_000_000 + resolved.occurrence,
+            &format!("rFloatImg{}", resolved.image_index),
+            &opening,
+            "</wp:anchor>",
+        ))
+    }
+
+    fn resolve(&mut self, cp: usize) -> Result<Option<ResolvedDrawing>, String> {
         let Ok(index) = self.anchors.binary_search_by_key(&cp, |a| a.cp) else {
             self.omitted = true;
-            return Ok(String::new());
+            return Ok(None);
         };
         let anchor = &self.anchors[index];
         let Some(&(anchor_index, order, shape)) = self.shapes.get(&anchor.shape_id) else {
             self.omitted = true;
-            return Ok(String::new());
+            return Ok(None);
         };
         if anchor_index != index {
             return Err(unsupported("Word shape/anchor index mismatch"));
@@ -183,11 +236,11 @@ impl<'a> Store<'a> {
             || matches!(anchor.wrapping, 0 | 4 | 5)
         {
             self.omitted = true;
-            return Ok(String::new());
+            return Ok(None);
         }
         let Some(image_index) = picture.pib else {
             self.omitted = true;
-            return Ok(String::new());
+            return Ok(None);
         };
         if !self.images.contains_key(&image_index) {
             let entry = *self
@@ -210,7 +263,7 @@ impl<'a> Store<'a> {
         }
         let Some(image) = self.images[&image_index].as_ref() else {
             self.omitted = true;
-            return Ok(String::new());
+            return Ok(None);
         };
         let [left, top, right, bottom] = anchor.rect.map(i64::from);
         let extent = [(right - left) * 635, (bottom - top) * 635];
@@ -222,45 +275,34 @@ impl<'a> Store<'a> {
         {
             return Err(unsupported("empty Word floating picture crop"));
         }
-        let x = position(anchor.horizontal, left * 635, false)?;
-        let y = position(anchor.vertical, top * 635, true)?;
-        let wrap = match anchor.wrapping {
-            1 => "<wp:wrapTopAndBottom/>".to_string(),
-            2 => format!("<wp:wrapSquare wrapText=\"{}\"/>", anchor.side),
-            3 => "<wp:wrapNone/>".into(),
-            _ => unreachable!(),
-        };
+        i32::try_from(left * 635)
+            .and_then(|_| i32::try_from(top * 635))
+            .map_err(|_| unsupported("Word floating position exceeds DrawingML range"))?;
         let [dist_l, dist_t, dist_r, dist_b] = placement.distances;
-        let opening = format!(
-            r#"<wp:anchor distL="{dist_l}" distT="{dist_t}" distR="{dist_r}" distB="{dist_b}" simplePos="0" relativeHeight="{}" behindDoc="{}" locked="{}" layoutInCell="{}" allowOverlap="{}"><wp:simplePos x="0" y="0"/>{x}{y}<wp:extent cx="{}" cy="{}"/>{wrap}"#,
-            placement.z_order.unwrap_or(order),
-            u8::from(anchor.behind),
-            u8::from(anchor.locked),
-            u8::from(placement.in_cell),
-            u8::from(placement.overlap),
-            extent[0],
-            extent[1]
-        );
         if self.occurrences >= 100_000 {
             return Err(unsupported("Word floating occurrence budget exceeded"));
         }
         self.occurrences += 1;
-        let image = Picture {
-            image: Image {
-                bytes: std::borrow::Cow::Borrowed(image.bytes.as_ref()),
-                extension: image.extension,
-            },
+        Ok(Some(ResolvedDrawing {
+            image_index,
+            extension: image.extension,
             extent,
             crop: picture.crop,
             flip: [flags & 0x40 != 0, flags & 0x80 != 0],
-            rotation: 0,
-        };
-        Ok(image.xml(
-            1_000_000 + self.occurrences,
-            &format!("rFloatImg{image_index}"),
-            &opening,
-            "</wp:anchor>",
-        ))
+            x_emu: left * 635,
+            y_emu: top * 635,
+            horizontal: anchor.horizontal,
+            vertical: anchor.vertical,
+            wrapping: anchor.wrapping,
+            side: anchor.side,
+            behind: anchor.behind,
+            locked: anchor.locked,
+            distances: [dist_l, dist_t, dist_r, dist_b],
+            in_cell: placement.in_cell,
+            overlap: placement.overlap,
+            z_order: placement.z_order.unwrap_or(order),
+            occurrence: self.occurrences,
+        }))
     }
     pub fn relationships(&self) -> String {
         self.images.iter().filter_map(|(id,image)|image.as_ref().map(|p|format!(r#"<Relationship Id="rFloatImg{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/float{id}.{}"/>"#,p.extension))).collect()
@@ -278,6 +320,27 @@ impl<'a> Store<'a> {
             })
             .collect()
     }
+}
+
+struct ResolvedDrawing {
+    image_index: usize,
+    extension: &'static str,
+    extent: [i64; 2],
+    crop: [i64; 4],
+    flip: [bool; 2],
+    x_emu: i64,
+    y_emu: i64,
+    horizontal: &'static str,
+    vertical: &'static str,
+    wrapping: u8,
+    side: &'static str,
+    behind: bool,
+    locked: bool,
+    distances: [u32; 4],
+    in_cell: bool,
+    overlap: bool,
+    z_order: u32,
+    occurrence: u32,
 }
 
 fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, String> {
@@ -632,6 +695,103 @@ mod tests {
         assert!(store.parts()[0].1.starts_with(b"\x89PNG"));
         let mut truncated = Store::read(&word[..1024], &table, 20).unwrap();
         assert!(truncated.drawing(12).is_err());
+    }
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_floating_deduplicates_resources_and_admits_before_reserving() {
+        let (word, table) = drawing_with_options(
+            0xac0,
+            0x8200_0000,
+            &[(0x384, 12_700), (0x385, 25_400), (0x386, 38_100), (0x387, 50_800)],
+        );
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        let mut budget = usize::MAX;
+        let first = store.direct_picture(12, &mut budget).unwrap().unwrap();
+        let second = store.direct_picture(12, &mut budget).unwrap().unwrap();
+        assert_eq!(first.image.image_path, second.image.image_path);
+        assert_ne!(first.occurrence_id, second.occurrence_id);
+        assert_eq!(first.image.wrap_mode.as_deref(), Some("square"));
+        assert_eq!(first.image.anchor_acquisition.as_ref().unwrap().wrap.authored_kinds, ["wrapSquare"]);
+        let acquisition = first.image.anchor_acquisition.as_ref().unwrap();
+        let expected_payload = std::mem::size_of::<docx_model::ImageRun>()
+            + first.image.image_path.capacity()
+            + first.image.mime_type.capacity()
+            + first.image.wrap_mode.as_ref().unwrap().capacity()
+            + first.image.wrap_side.as_ref().unwrap().capacity()
+            + first.image.anchor_x_relative_from.as_ref().unwrap().capacity()
+            + first.image.anchor_y_relative_from.as_ref().unwrap().capacity()
+            + first.occurrence_id.capacity()
+            + acquisition.occurrence_id.capacity()
+            + acquisition.horizontal.relative_from.as_ref().unwrap().capacity()
+            + acquisition.vertical.relative_from.as_ref().unwrap().capacity()
+            + acquisition.wrap.side.as_ref().unwrap().capacity()
+            + acquisition.wrap.authored_kinds.capacity() * std::mem::size_of::<String>()
+            + acquisition.wrap.authored_kinds[0].capacity();
+        let mut exact_store = Store::read(&word, &table, 20).unwrap();
+        let mut short = expected_payload - 1;
+        assert_eq!(
+            exact_store.direct_picture(12, &mut short).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+
+        let mut resources = Vec::new();
+        let mut none = 0;
+        assert_eq!(
+            store.append_direct_resources(&mut resources, &mut none).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert_eq!(resources.capacity(), 0);
+
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        let mut budget = usize::MAX;
+        store.direct_picture(12, &mut budget).unwrap().unwrap();
+        store.direct_picture(12, &mut budget).unwrap().unwrap();
+        let mut resources = Vec::new();
+        store.append_direct_resources(&mut resources, &mut budget).unwrap();
+        assert_eq!(resources.len(), 1);
+        assert!(resources[0].bytes.starts_with(b"\x89PNG"));
+
+        for horizontal in 0u16..=2 {
+            for vertical in 0u16..=2 {
+                for wrapping in 1u16..=3 {
+                    let (word, mut table) = drawing_input(0xa00, 0);
+                    let flags = (horizontal << 1) | (vertical << 3) | (wrapping << 5);
+                    table[28..30].copy_from_slice(&flags.to_le_bytes());
+                    let mut store = Store::read(&word, &table, 20).unwrap();
+                    let mut budget = usize::MAX;
+                    let image = store.direct_picture(12, &mut budget).unwrap().unwrap().image;
+                    assert_eq!(
+                        image.anchor_x_relative_from.as_deref(),
+                        Some(["margin", "page", "column"][horizontal as usize])
+                    );
+                    assert_eq!(
+                        image.anchor_y_relative_from.as_deref(),
+                        Some(["margin", "page", "paragraph"][vertical as usize])
+                    );
+                    assert_eq!(image.anchor_x_from_margin, horizontal != 1);
+                    assert_eq!(image.anchor_y_from_para, vertical == 2);
+                    assert_eq!(
+                        image.wrap_mode.as_deref(),
+                        Some(["", "topAndBottom", "square", "none"][wrapping as usize])
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn shared_resolution_rejects_position_overflow_before_occurrence() {
+        let (word, table) = drawing_input(0xa00, 0);
+        let anchor_offset = u32_at(&word, 0x1da).unwrap() as usize;
+        let record = anchor_offset + 8;
+        let mut table = table;
+        table[record + 4..record + 8].copy_from_slice(&4_000_000i32.to_le_bytes());
+        table[record + 12..record + 16].copy_from_slice(&4_000_400i32.to_le_bytes());
+        let mut store = Store::read(&word, &table, 20).unwrap();
+        let mut budget = usize::MAX;
+        assert!(store.direct_picture(12, &mut budget).unwrap_err().contains("position"));
+        assert_eq!(store.occurrences, 0);
     }
     #[test]
     fn ole_shapes_admit_only_their_validated_passive_blip() {

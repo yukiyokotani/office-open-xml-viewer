@@ -84,6 +84,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             paragraphs,
             formatting,
             pictures,
+            None,
             budget,
             &mut body,
             None,
