@@ -32,6 +32,7 @@
     "./internal/chart-ex-renderer": "./src/chart/chart-ex-renderer.ts",
     "./internal/dom-interaction-boundary": "./src/internal/dom-interaction-boundary.ts",
     "./internal/dom-geometry": "./src/internal/dom-geometry.ts",
+    "./internal/legacy-doc-source": "./src/conversion/legacy-doc-source.ts",
     "./internal/in-process-pull-transport": "./src/internal/in-process-pull-transport.ts",
     "./internal/legacy-ppt-source": "./src/conversion/legacy-ppt-source.ts",
     "./internal/legacy-xls-source": "./src/conversion/legacy-xls-source.ts",

@@ -7,6 +7,7 @@ import {
 } from './legacy-office-error.js';
 import type { LegacyPptDirectSourceDescriptor } from './legacy-ppt-source.js';
 import type { LegacyXlsDirectSourceDescriptor } from './legacy-xls-source.js';
+import type { LegacyDocDirectSourceDescriptor } from './legacy-doc-source.js';
 
 export {
   LegacyOfficeConversionError,
@@ -93,6 +94,13 @@ export interface LegacyPptDirectConversionOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface LegacyDocDirectConversionOptions {
+  readonly source: LegacyDocDirectSourceDescriptor;
+  readonly converter?: never;
+  readonly maxInputBytes?: number;
+  readonly signal?: AbortSignal;
+}
+
 export interface LegacyXlsDirectConversionOptions {
   readonly source: LegacyXlsDirectSourceDescriptor;
   readonly converter?: never;
@@ -105,7 +113,7 @@ export interface LegacyXlsDirectConversionOptions {
  * even when another format uses the same converter implementation.
  */
 export interface LegacyOfficeConversionOptions {
-  readonly doc?: LegacyOfficeFormatConversionOptions;
+  readonly doc?: LegacyOfficeFormatConversionOptions | LegacyDocDirectConversionOptions;
   readonly xls?: LegacyOfficeFormatConversionOptions | LegacyXlsDirectConversionOptions;
   readonly ppt?: LegacyOfficeFormatConversionOptions | LegacyPptDirectConversionOptions;
 }
@@ -174,7 +182,8 @@ export async function normalizeOfficeInput(
     throw new TypeError(`legacyConversion.${from} source and converter are mutually exclusive`);
   }
   if ('source' in selected) {
-    throw new TypeError(`direct legacy ${from.toUpperCase()} sources require the ${from === 'ppt' ? 'presentation' : 'workbook'} session API`);
+    const session = from === 'ppt' ? 'presentation' : from === 'xls' ? 'workbook' : 'document';
+    throw new TypeError(`direct legacy ${from.toUpperCase()} sources require the ${session} session API`);
   }
 
   const inputByteLength = inspected.byteLength;

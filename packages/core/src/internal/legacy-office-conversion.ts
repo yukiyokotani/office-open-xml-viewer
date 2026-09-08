@@ -1,5 +1,9 @@
 import type { LegacyOfficeConversionOptions } from '../conversion/legacy-office.js';
 import {
+  MAX_LEGACY_DOC_SOURCE_BYTES,
+  validateLegacyDocSourceDescriptor,
+} from '../conversion/legacy-doc-source.js';
+import {
   MAX_LEGACY_XLS_SOURCE_BYTES,
   validateLegacyXlsSourceDescriptor,
 } from '../conversion/legacy-xls-source.js';
@@ -28,6 +32,26 @@ export function resolveOfficeInputWithOptionalConversion(
   return import('../conversion/legacy-office.js')
     .then(({ normalizeOfficeInput }) => normalizeOfficeInput(bytes, target, options, password))
     .then((result) => result.bytes);
+}
+
+export type ResolvedDocDocumentInput =
+  | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>
+  | Readonly<{
+    kind: 'legacy-doc';
+    bytes: Uint8Array;
+    source: import('../conversion/legacy-doc-source.js').LegacyDocDirectSourceDescriptor;
+    signal?: AbortSignal;
+  }>;
+
+export async function resolveDocDocumentInput(
+  bytes: Uint8Array | ArrayBuffer,
+  options?: LegacyOfficeConversionOptions,
+  password?: string,
+): Promise<ResolvedDocDocumentInput> {
+  return resolveNativeInput(
+    'doc', 'docx', validateLegacyDocSourceDescriptor,
+    MAX_LEGACY_DOC_SOURCE_BYTES, bytes, options, password,
+  );
 }
 
 export type ResolvedPptPresentationInput =
@@ -70,9 +94,9 @@ export async function resolveXlsWorkbookInput(
   );
 }
 
-async function resolveNativeInput<F extends 'ppt' | 'xls', D>(
+async function resolveNativeInput<F extends 'doc' | 'ppt' | 'xls', D>(
   format: F,
-  target: 'pptx' | 'xlsx',
+  target: 'docx' | 'pptx' | 'xlsx',
   validate: (value: unknown) => D,
   maximum: number,
   bytes: Uint8Array | ArrayBuffer,

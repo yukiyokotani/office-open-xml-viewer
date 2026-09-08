@@ -1,5 +1,5 @@
 /** Versioned, structured-clone-safe first-party native decoder selection. */
-export interface LegacyDirectSourceDescriptor<F extends 'ppt' | 'xls'> {
+export interface LegacyDirectSourceDescriptor<F extends 'doc' | 'ppt' | 'xls'> {
   readonly protocol: `ooxml-legacy-${F}-source/v1`;
   readonly builtin: F;
   readonly wasmUrl: string;
@@ -9,7 +9,7 @@ const SUPPORTED_WASM_PROTOCOLS = new Set(['http:', 'https:', 'file:', 'blob:', '
 const FIELDS = ['protocol', 'builtin', 'wasmUrl'] as const;
 
 /** Validate and detach a structured-clone-safe native source descriptor. */
-export function validateLegacySourceDescriptor<F extends 'ppt' | 'xls'>(
+export function validateLegacySourceDescriptor<F extends 'doc' | 'ppt' | 'xls'>(
   value: unknown,
   format: F,
 ): LegacyDirectSourceDescriptor<F> {

@@ -16,13 +16,17 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./direct-doc": "./src/direct-doc.ts",
     "./direct-ppt": "./src/direct-ppt.ts",
     "./direct-xls": "./src/direct-xls.ts",
     "./internal/direct-ppt-engine": "./src/direct-ppt-engine.ts",
+    "./internal/direct-doc-engine": "./src/direct-doc-engine.ts",
     "./internal/direct-xls-engine": "./src/direct-xls-engine.ts",
     "./internal/xls-font-worker": "./src/xls-font-worker.ts",
     "./wasm": "./src/wasm/legacy_office_converter.js",
     "./wasm-binary": "./src/wasm/legacy_office_converter_bg.wasm",
+    "./wasm-direct-doc": "./src/wasm-direct-doc/legacy_office_converter.js",
+    "./wasm-direct-doc-binary": "./src/wasm-direct-doc/legacy_office_converter_bg.wasm",
     "./wasm-direct-ppt": "./src/wasm-direct-ppt/legacy_office_converter.js",
     "./wasm-direct-ppt-binary": "./src/wasm-direct-ppt/legacy_office_converter_bg.wasm",
     "./wasm-direct-xls": "./src/wasm-direct-xls/legacy_office_converter.js",
@@ -30,6 +34,7 @@
   },
   "scripts": {
     "wasm": "cd parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/legacy_office_converter.js",
+    "wasm:direct-doc": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-doc --features direct-doc && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-doc/legacy_office_converter.js",
     "wasm:direct-ppt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-ppt --features direct-ppt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-ppt/legacy_office_converter.js",
     "wasm:direct-xls": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-direct-xls --features direct-xls && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-direct-xls/legacy_office_converter.js",
     "typecheck": "tsc --noEmit"
