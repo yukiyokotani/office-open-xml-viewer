@@ -5,6 +5,8 @@
 use super::{fkp, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;
 
+#[cfg(feature = "direct-doc")]
+pub(super) mod direct;
 pub(super) mod output;
 
 const FC_PLF_LST: usize = 0x2e2;

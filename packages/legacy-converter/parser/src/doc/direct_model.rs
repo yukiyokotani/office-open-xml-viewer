@@ -8,9 +8,9 @@ use docx_model::{BodyElement, DocRun, Document, DocumentSettings, DocumentTypogr
 mod headers;
 mod payload;
 mod story;
-mod tables;
 #[cfg(test)]
 mod table_tests;
+mod tables;
 
 #[derive(Debug)]
 pub(crate) struct DirectDocResult {
@@ -78,6 +78,8 @@ pub(super) fn build(
     let chunks = super::sections::split_story(&facts.story.text, &facts.sections)?;
     let mut fields = Fields::default();
     let mut table_sequence = 0;
+    let mut numbering = super::numbering::direct::Store::default();
+    numbering.begin_story()?;
     for (section_index, chunk) in chunks.iter().enumerate() {
         let ending = (section_index + 1 < chunks.len())
             .then(|| facts.sections[section_index].project_ending(section_index))
@@ -104,6 +106,7 @@ pub(super) fn build(
             &facts.story,
             paragraphs,
             &mut facts.formatting,
+            &mut numbering,
             &mut facts.pictures,
             Some(&mut facts.floating),
             &mut budget,
@@ -487,6 +490,53 @@ mod tests {
         table.extend(part);
     }
 
+    fn numbered_source(text: &str) -> Vec<u8> {
+        with_numbering(&source(text))
+    }
+
+    fn with_numbering(source: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(&source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+
+        // One simple decimal LST/LVL. LVLF.rgbxchNums points at the first
+        // UTF-16 unit; the unit value is the referenced zero-based level.
+        let list_start = table.len();
+        let mut list = vec![0; 28];
+        list[..4].copy_from_slice(&42i32.to_le_bytes());
+        for style in list[8..26].chunks_exact_mut(2) {
+            style.copy_from_slice(&0x0fffu16.to_le_bytes());
+        }
+        list[26] = 1;
+        table.extend(1u16.to_le_bytes());
+        table.extend(list);
+        word[0x2e2..0x2e6].copy_from_slice(&(list_start as u32).to_le_bytes());
+        word[0x2e6..0x2ea].copy_from_slice(&30u32.to_le_bytes());
+        let mut level = vec![0; 28];
+        level[0] = 1;
+        level[6] = 1;
+        level.extend([2, 0, 0, 0, b'.', 0]);
+        table.extend(level);
+
+        let lfo_start = table.len();
+        table.extend(1u32.to_le_bytes());
+        let mut lfo = vec![0; 16];
+        lfo[..4].copy_from_slice(&42i32.to_le_bytes());
+        table.extend(lfo);
+        table.extend([0xff; 4]);
+        word[0x2ea..0x2ee].copy_from_slice(&(lfo_start as u32).to_le_bytes());
+        word[0x2ee..0x2f2].copy_from_slice(&24u32.to_le_bytes());
+
+        // Apply sprmPIlvl=0 and sprmPIlfo=1 to the existing single PAPX run.
+        let bte = u32::from_le_bytes(word[0x102..0x106].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        page[8] = 32;
+        page[64] = 5;
+        page[65..74].copy_from_slice(&[0, 0, 0x0a, 0x26, 0, 0x0b, 0x46, 1, 0]);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     fn hide_first_utf16_unit(bytes: &[u8]) -> Vec<u8> {
         let cfb = CompoundFile::open(bytes).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
@@ -730,6 +780,84 @@ mod tests {
         }
         assert_eq!(actual_body, expected_body);
         assert_eq!(actual["section"], expected["section"]);
+    }
+
+    #[test]
+    fn numbered_paragraphs_project_once_per_source_paragraph_without_ooxml_round_trip() {
+        let bytes = numbered_source("A\rB\r");
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let direct = super::super::direct_model(&cfb, 1024 * 1024)
+            .unwrap()
+            .document;
+        let markers: Vec<_> = direct
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.numbering.as_deref(),
+                _ => None,
+            })
+            .map(|numbering| numbering.text.as_str())
+            .collect();
+        assert_eq!(markers, ["1.", "2."]);
+
+        let converted = super::super::convert(&cfb, 1024 * 1024).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
+        let actual = serde_json::to_value(&direct).unwrap();
+        for index in 0..2 {
+            assert_eq!(
+                actual["body"][index]["numbering"],
+                expected["body"][index]["numbering"]
+            );
+        }
+    }
+
+    #[test]
+    fn body_numbering_survives_section_headers_while_each_header_story_restarts() {
+        let sections = [
+            (2, 2, 12_240, 15_840, 1, 720),
+            (4, 2, 12_240, 15_840, 1, 720),
+        ];
+        let mut slots = [None; 12];
+        slots[1] = Some("H\r");
+        let bytes = with_numbering(&source_with_typography(
+            "A\u{c}B\r",
+            &sections,
+            None,
+            None,
+            None,
+            Some(&slots),
+        ));
+        let direct = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+            .unwrap()
+            .document;
+        let body_markers: Vec<_> = direct
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => paragraph.numbering.as_deref(),
+                _ => None,
+            })
+            .map(|numbering| numbering.text.as_str())
+            .collect();
+        assert_eq!(body_markers, ["1.", "2."]);
+        let header_markers: Vec<_> = direct
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::SectionBreak { headers, .. } => headers.default.as_ref(),
+                _ => None,
+            })
+            .chain(direct.headers.default.as_ref())
+            .map(|header| {
+                let BodyElement::Paragraph(paragraph) = &header.body[0] else {
+                    panic!("numbered header paragraph")
+                };
+                paragraph.numbering.as_ref().unwrap().text.as_str()
+            })
+            .collect();
+        assert_eq!(header_markers, ["1.", "1."]);
     }
 
     fn image_runs(document: &Document) -> Vec<&docx_model::ImageRun> {

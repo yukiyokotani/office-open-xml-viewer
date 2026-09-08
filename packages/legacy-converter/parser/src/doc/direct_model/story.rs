@@ -7,7 +7,7 @@ use super::{
     tables::{Block, Blocks, Writer},
     ModelBudget, ParaPiece,
 };
-use crate::doc::{floating, formatting, pictures, unsupported, Paragraph, Story, Token};
+use crate::doc::{floating, formatting, numbering, pictures, unsupported, Paragraph, Story, Token};
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
@@ -15,6 +15,7 @@ pub(super) fn project(
     story: &Story<'_>,
     paragraphs: Vec<Paragraph>,
     formatting: &mut formatting::Formatting<'_>,
+    numbering: &mut numbering::direct::Store,
     pictures: &mut pictures::Store<'_>,
     mut floating: Option<&mut floating::Store<'_>>,
     budget: &mut ModelBudget,
@@ -38,12 +39,12 @@ pub(super) fn project(
             return Err(unsupported("Word section break inside table"));
         }
         let direct = formatting.direct_paragraph(style, mark_fc, mark_piece.prm, &story.prcs)?;
-        if direct.numbering.is_some() {
-            return Err(unsupported(
-                "direct DOC model does not yet support numbered paragraphs",
+        let mut paragraph = direct.paragraph;
+        if let Some((reference, marker)) = direct.numbering {
+            paragraph.numbering = Some(Box::new(
+                formatting.direct_numbering(numbering, reference, &marker, &paragraph)?,
             ));
         }
-        let mut paragraph = direct.paragraph;
         budget.paragraph(&paragraph)?;
 
         for (token, cp) in source.tokens {

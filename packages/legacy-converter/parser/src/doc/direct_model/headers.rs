@@ -5,7 +5,7 @@
 //! is a real replacement and therefore projects to an empty paragraph.
 
 use super::{story, ModelBudget};
-use crate::doc::{formatting, headers, pictures, tokenize_with_fields, Fields};
+use crate::doc::{formatting, headers, numbering, pictures, tokenize_with_fields, Fields};
 use docx_model::{HeaderFooter, HeadersFooters};
 
 pub(super) struct Resolver<'a, 'h> {
@@ -83,10 +83,13 @@ impl<'a, 'h> Resolver<'a, 'h> {
         let mut paragraphs = tokenize_with_fields(text, &mut Fields::default(), entry.cp, true);
         source.restore_fields(text, entry.cp, &mut paragraphs);
         let mut body = Vec::new();
+        let mut numbering = numbering::direct::Store::default();
+        numbering.begin_story()?;
         story::project(
             &source.story,
             paragraphs,
             formatting,
+            &mut numbering,
             pictures,
             None,
             budget,

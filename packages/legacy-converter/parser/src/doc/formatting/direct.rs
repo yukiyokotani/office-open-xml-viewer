@@ -2,8 +2,8 @@
 //! the legacy WordprocessingML adapter. Numbering remains deferred to its owner.
 
 use super::{numbering, Formatting, Properties};
-use docx_model::{DocParagraph, TextRun};
 use docx_model::AnchorHostMetrics;
+use docx_model::{DocParagraph, NumberingInfo, TextRun};
 
 pub(in crate::doc) struct DirectResolvedParagraph {
     pub(in crate::doc) paragraph: DocParagraph,
@@ -16,6 +16,16 @@ pub(in crate::doc) struct DirectInlinePictureFacts {
 }
 
 impl Formatting<'_> {
+    pub(in crate::doc) fn direct_numbering(
+        &mut self,
+        store: &mut numbering::direct::Store,
+        reference: numbering::Reference,
+        marker: &Properties,
+        paragraph: &DocParagraph,
+    ) -> Result<NumberingInfo, String> {
+        store.activate(&self.numbering, reference, marker, paragraph, &self.fonts)
+    }
+
     pub(in crate::doc) fn direct_anchor_host_metrics(
         &mut self,
         paragraph_style: usize,

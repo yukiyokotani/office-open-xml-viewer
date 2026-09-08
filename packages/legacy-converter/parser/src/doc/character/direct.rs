@@ -173,6 +173,10 @@ impl Properties {
             .map(|value| value.to_ascii_lowercase())
     }
 
+    pub(in crate::doc) fn direct_color_auto(&self) -> bool {
+        self.values.get("color").is_some_and(|value| value == "auto")
+    }
+
     fn direct_font_axes(&self, fonts: &[String]) -> Result<FontAxes, String> {
         if fonts.is_empty() {
             if self.fonts.iter().flatten().any(|index| *index != 0) {

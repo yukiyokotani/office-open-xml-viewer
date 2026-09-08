@@ -132,8 +132,7 @@ pub(super) fn paragraph(value: &DocParagraph) -> Result<usize, String> {
 
 /// Metadata only: run payloads are owned and charged by the run producer.
 pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> {
-    if value.numbering.is_some()
-        || value.run_revisions.capacity() != 0
+    if value.run_revisions.capacity() != 0
         || value.complex_field_boundaries.capacity() != 0
         || value.bookmarks.capacity() != 0
         || value.comment_marks.capacity() != 0
@@ -142,6 +141,29 @@ pub(super) fn paragraph_metadata(value: &DocParagraph) -> Result<usize, String> 
         return Err(unsupported("unaccounted direct DOC paragraph payload"));
     }
     let mut total = Total::default();
+    if let Some(numbering) = &value.numbering {
+        total.add(std::mem::size_of::<docx_model::NumberingInfo>())?;
+        for string in [
+            &numbering.format,
+            &numbering.text,
+            &numbering.suff,
+            &numbering.jc,
+        ] {
+            total.string(string)?;
+        }
+        for string in [
+            &numbering.font_family,
+            &numbering.font_family_east_asia,
+            &numbering.color,
+            &numbering.pic_bullet_image_path,
+            &numbering.pic_bullet_mime_type,
+        ] {
+            total.option_string(string)?;
+        }
+        if let Some(facts) = &numbering.font_facts {
+            total.font_facts(facts)?;
+        }
+    }
     for string in [
         &value.paragraph_id,
         &value.shading,
