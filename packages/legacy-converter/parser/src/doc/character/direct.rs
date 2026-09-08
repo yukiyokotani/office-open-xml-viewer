@@ -37,7 +37,11 @@ impl Properties {
         let underline_token = self.values.get("u").map(String::as_str);
         let underline = underline_token.is_some_and(|value| value != "none");
         let underline_color = underline
-            .then(|| self.values.get("uColor").map(|value| value.to_ascii_lowercase()))
+            .then(|| {
+                self.values
+                    .get("uColor")
+                    .map(|value| value.to_ascii_lowercase())
+            })
             .flatten();
         let color_token = self.values.get("color").map(String::as_str);
         let color_auto = color_token == Some("auto");
@@ -49,6 +53,11 @@ impl Properties {
         let char_scale = self.unsigned_number("w")?.map(|value| value / 100.0);
         let position = self.signed_number("position")?.map(|value| value / 2.0);
         let kerning = self.half_points("kern")?;
+        let highlight = self
+            .values
+            .get("highlight")
+            .filter(|value| value.as_str() != "none")
+            .cloned();
 
         let mut run = TextRun {
             text,
@@ -88,6 +97,7 @@ impl Properties {
             char_scale,
             position,
             kerning,
+            highlight,
             ..TextRun::default()
         };
         run.typography_acquisition = Some(RunTypographyWire {
@@ -379,6 +389,80 @@ mod tests {
     }
 
     #[test]
+    fn highlights_match_the_existing_docx_parser_projection() {
+        let expected = [
+            None,
+            Some("black"),
+            Some("blue"),
+            Some("cyan"),
+            Some("green"),
+            Some("magenta"),
+            Some("red"),
+            Some("yellow"),
+            Some("white"),
+            Some("darkBlue"),
+            Some("darkCyan"),
+            Some("darkGreen"),
+            Some("darkMagenta"),
+            Some("darkRed"),
+            Some("darkYellow"),
+            Some("darkGray"),
+            Some("lightGray"),
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let properties = applied(&[(0x2a0c, vec![index as u8])]);
+            assert_parser_parity(&properties, &[]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.highlight.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn adjacent_highlights_remain_distinct_across_xml_and_direct_projection() {
+        let magenta = applied(&[(0x2a0c, vec![12])]);
+        let cleared = applied(&[(0x2a0c, vec![0])]);
+        let red = applied(&[(0x2a0c, vec![13])]);
+        let runs = [&magenta, &cleared, &red]
+            .into_iter()
+            .map(|properties| {
+                properties
+                    .direct_text_run("x".into(), &[])
+                    .unwrap()
+                    .unwrap()
+                    .highlight
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            runs,
+            vec![Some("darkMagenta".into()), None, Some("darkRed".into())]
+        );
+
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>{}<w:t>a</w:t></w:r><w:r>{}<w:t>b</w:t></w:r><w:r>{}<w:t>c</w:t></w:r></w:p></w:body></w:document>"#,
+            magenta.xml(&[]).unwrap(),
+            cleared.xml(&[]).unwrap(),
+            red.xml(&[]).unwrap(),
+        );
+        let mut bytes = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&bytes).unwrap()).unwrap();
+        assert_eq!(parsed["body"][0]["runs"][0]["highlight"], "darkMagenta");
+        assert!(parsed["body"][0]["runs"][1].get("highlight").is_none());
+        assert_eq!(parsed["body"][0]["runs"][2]["highlight"], "darkRed");
+    }
+
+    #[test]
     fn projects_four_literal_font_axes_and_hint_without_theme_facts() {
         let properties = applied(&[
             (0x4a4f, 0u16.to_le_bytes().to_vec()),
@@ -484,7 +568,10 @@ mod tests {
             assert_parser_parity(&properties, &[]);
         }
         let color_only = applied(&[(0x6877, vec![0x12, 0x34, 0x56, 0])]);
-        let run = color_only.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        let run = color_only
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
         assert!(!run.underline);
         assert_eq!(run.underline_color, None);
         assert_eq!(

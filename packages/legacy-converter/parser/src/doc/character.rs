@@ -6,6 +6,31 @@ use super::{border::ICO_COLORS, u16_at, u32_at, unsupported};
 use crate::ooxml::xml_attr;
 use std::collections::BTreeMap;
 
+// MS-DOC 2.6.1 sprmCHighlight / 2.9.119 Ico. This is deliberately separate
+// from ICO_COLORS: highlight is a symbolic OOXML palette, and controlled
+// Word DOC roundtrips distinguish 0x0C darkMagenta from 0x0D darkRed despite
+// the duplicated RGB entries in the published Ico table. The control covered
+// direct CHPX operands in two fonts; it does not establish style inheritance.
+const HIGHLIGHT_COLORS: [&str; 17] = [
+    "none",
+    "black",
+    "blue",
+    "cyan",
+    "green",
+    "magenta",
+    "red",
+    "yellow",
+    "white",
+    "darkBlue",
+    "darkCyan",
+    "darkGreen",
+    "darkMagenta",
+    "darkRed",
+    "darkYellow",
+    "darkGray",
+    "lightGray",
+];
+
 #[cfg(feature = "direct-doc")]
 mod direct;
 
@@ -195,6 +220,20 @@ impl Properties {
             return Ok(true);
         }
         let (key, value) = match code {
+            0x2a0c => {
+                let index = usize::from(
+                    *operand
+                        .first()
+                        .ok_or_else(|| unsupported("short Word highlight index"))?,
+                );
+                (
+                    "highlight",
+                    HIGHLIGHT_COLORS
+                        .get(index)
+                        .ok_or_else(|| unsupported("invalid Word highlight index"))?
+                        .to_string(),
+                )
+            }
             0x2a42 => {
                 // MS-DOC 2.6.1 sprmCIco / 2.9.119 Ico: fixed palette index,
                 // with zero representing automatic text color.
@@ -423,6 +462,39 @@ mod tests {
         assert!(value.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
         value.reset_to(&style, false);
         assert!(value.xml(&[]).unwrap().contains("w:val=\"0000FF\""));
+    }
+
+    #[test]
+    fn highlight_uses_symbolic_palette_and_explicit_none() {
+        let base = Properties::default();
+        for (index, expected) in HIGHLIGHT_COLORS.iter().enumerate() {
+            let mut value = base.clone();
+            assert!(value.apply(0x2a0c, &[index as u8], &base).unwrap());
+            assert!(value
+                .xml(&[])
+                .unwrap()
+                .contains(&format!("<w:highlight w:val=\"{expected}\"/>")));
+        }
+        for index in 17..=255u8 {
+            assert!(base.clone().apply(0x2a0c, &[index], &base).is_err());
+        }
+        assert!(base.clone().apply(0x2a0c, &[], &base).is_err());
+
+        let mut style = base.clone();
+        style.apply(0x2a0c, &[12], &base).unwrap();
+        let mut value = style.clone();
+        value.apply(0x2a0c, &[13], &style).unwrap();
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"darkRed\""));
+        value.apply(0x2a0c, &[0], &style).unwrap();
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"none\""));
+
+        // MS-DOC 2.6.1 explicitly excludes highlight from both CPlain and
+        // CIstd resets. This tests the shared reset primitive used by both.
+        value.reset_to(&base, false);
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"none\""));
+        value.apply(0x2a0c, &[12], &base).unwrap();
+        value.reset_to(&base, true);
+        assert!(value.xml(&[]).unwrap().contains("w:val=\"darkMagenta\""));
     }
 
     #[test]
