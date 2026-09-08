@@ -42,6 +42,9 @@ pub struct Properties {
     // Sparse style patches must distinguish an absent hint from 0xFF, which
     // explicitly removes inherited guidance but has no ST_Hint equivalent.
     font_hint_present: bool,
+    // Raw MS-DOC LID. Resolution is deferred so an assigned locale and an
+    // unknown/custom identifier never collapse into the same absent value.
+    lang_bidi_lid: Option<u16>,
     pub picture: Picture,
 }
 
@@ -50,6 +53,12 @@ enum FontHint {
     Default,
     EastAsia,
     ComplexScript,
+}
+
+enum BidiLanguage {
+    Absent,
+    Assigned(&'static str),
+    Unsupported(u16),
 }
 
 impl FontHint {
@@ -97,6 +106,7 @@ impl Default for Properties {
             fonts: [None; 4],
             font_hint: None,
             font_hint_present: false,
+            lang_bidi_lid: None,
             picture: Picture::default(),
         }
     }
@@ -111,6 +121,7 @@ impl Properties {
             fonts: [None; 4],
             font_hint: None,
             font_hint_present: false,
+            lang_bidi_lid: None,
             picture: Picture::default(),
         }
     }
@@ -126,6 +137,9 @@ impl Properties {
         if patch.font_hint_present {
             self.font_hint = patch.font_hint;
             self.font_hint_present = true;
+        }
+        if patch.lang_bidi_lid.is_some() {
+            self.lang_bidi_lid = patch.lang_bidi_lid;
         }
         // Object/special flags are not visual run formatting and must not
         // turn numbering text into a picture or an executable object.
@@ -220,6 +234,16 @@ impl Properties {
             return Ok(true);
         }
         let (key, value) = match code {
+            0x485f => {
+                // MS-DOC 2.6.1 sprmCLidBi / 2.9.134 LID: this axis is used for
+                // RTL or complex-script presentation. The language itself is
+                // not required to belong to either family.
+                if operand.len() != 2 {
+                    return Err(unsupported("invalid Word complex-script language ID"));
+                }
+                self.lang_bidi_lid = Some(u16_at(operand, 0)?);
+                return Ok(true);
+            }
             0x6815..=0x6817 => {
                 // MS-DOC 2.6.1 identifies these as revision-session IDs for
                 // character formatting, inserted text, and deleted text. They
@@ -353,10 +377,7 @@ impl Properties {
                 }
                 .into(),
             ),
-            0x6870 => (
-                "color",
-                colorref(operand)?,
-            ),
+            0x6870 => ("color", colorref(operand)?),
             0x6877 => ("uColor", colorref(operand)?),
             _ => return Ok(false),
         };
@@ -365,6 +386,25 @@ impl Properties {
     }
 
     pub fn xml(&self, fonts: &[String]) -> Result<String, String> {
+        self.xml_with_language_policy(fonts, false)
+            .map(|(xml, _)| xml)
+    }
+
+    /// Preserve the byte adapter's warning-based omission policy for unresolved
+    /// languages only. The caller must surface the returned omission flag;
+    /// direct model projection remains strict and never guesses a locale.
+    pub(in crate::doc) fn byte_xml(&self, fonts: &[String]) -> Result<(String, bool), String> {
+        match self.bidi_language() {
+            BidiLanguage::Unsupported(_) => self.xml_with_language_policy(fonts, true),
+            _ => self.xml(fonts).map(|xml| (xml, false)),
+        }
+    }
+
+    fn xml_with_language_policy(
+        &self,
+        fonts: &[String],
+        omit_unsupported_language: bool,
+    ) -> Result<(String, bool), String> {
         let mut xml = String::from("<w:rPr>");
         let has_font_index = self.fonts.iter().any(Option::is_some);
         if self.font_hint.is_some() || (has_font_index && !fonts.is_empty()) {
@@ -409,14 +449,50 @@ impl Properties {
                 xml.push_str(&format!("<w:u w:color=\"{color}\"/>"));
             }
         }
+        let omitted_language = match self.bidi_language() {
+            BidiLanguage::Absent => false,
+            BidiLanguage::Assigned(language) => {
+                xml.push_str(&format!("<w:lang w:bidi=\"{language}\"/>"));
+                false
+            }
+            BidiLanguage::Unsupported(_) if omit_unsupported_language => true,
+            BidiLanguage::Unsupported(lid) => {
+                return Err(unsupported(format!(
+                    "unsupported Word complex-script language ID 0x{lid:04X}"
+                )));
+            }
+        };
         xml.push_str("</w:rPr>");
-        Ok(xml)
+        Ok((xml, omitted_language))
+    }
+
+    fn resolved_lang_bidi(&self) -> Result<Option<&'static str>, String> {
+        match self.bidi_language() {
+            BidiLanguage::Absent => Ok(None),
+            BidiLanguage::Assigned(language) => Ok(Some(language)),
+            BidiLanguage::Unsupported(lid) => Err(unsupported(format!(
+                "unsupported Word complex-script language ID 0x{lid:04X}"
+            ))),
+        }
+    }
+
+    fn bidi_language(&self) -> BidiLanguage {
+        let Some(lid) = self.lang_bidi_lid else {
+            return BidiLanguage::Absent;
+        };
+        match crate::lcid::resolve(u32::from(lid)) {
+            crate::lcid::Resolution::Assigned(language) => BidiLanguage::Assigned(language),
+            _ => BidiLanguage::Unsupported(lid),
+        }
     }
 }
 
 fn colorref(operand: &[u8]) -> Result<String, String> {
     match operand.get(3).copied() {
-        Some(0) => Ok(format!("{:02X}{:02X}{:02X}", operand[0], operand[1], operand[2])),
+        Some(0) => Ok(format!(
+            "{:02X}{:02X}{:02X}",
+            operand[0], operand[1], operand[2]
+        )),
         Some(0xff) => Ok("auto".into()),
         Some(_) => Err(unsupported("invalid Word COLORREF")),
         None => Err(unsupported("short Word COLORREF")),
@@ -456,10 +532,12 @@ mod tests {
         for (index, expected) in ICO_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a42, &[index as u8], &base).unwrap());
-            assert!(value
-                .xml(&[])
-                .unwrap()
-                .contains(&format!("<w:color w:val=\"{expected}\"/>")));
+            assert!(
+                value
+                    .xml(&[])
+                    .unwrap()
+                    .contains(&format!("<w:color w:val=\"{expected}\"/>"))
+            );
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a42, &[index], &base).is_err());
@@ -483,10 +561,12 @@ mod tests {
         for (index, expected) in HIGHLIGHT_COLORS.iter().enumerate() {
             let mut value = base.clone();
             assert!(value.apply(0x2a0c, &[index as u8], &base).unwrap());
-            assert!(value
-                .xml(&[])
-                .unwrap()
-                .contains(&format!("<w:highlight w:val=\"{expected}\"/>")));
+            assert!(
+                value
+                    .xml(&[])
+                    .unwrap()
+                    .contains(&format!("<w:highlight w:val=\"{expected}\"/>"))
+            );
         }
         for index in 17..=255u8 {
             assert!(base.clone().apply(0x2a0c, &[index], &base).is_err());
@@ -539,15 +619,85 @@ mod tests {
     }
 
     #[test]
+    fn complex_script_language_is_typed_cascading_and_strictly_resolved() {
+        let base = Properties::default();
+        let mut style = Properties::sparse();
+        assert!(
+            style
+                .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
+                .unwrap()
+        );
+        assert!(
+            style
+                .xml(&[])
+                .unwrap()
+                .contains("<w:lang w:bidi=\"ar-SA\"/>")
+        );
+
+        let mut patch = Properties::sparse();
+        patch
+            .apply(0x485f, &0x0411u16.to_le_bytes(), &base)
+            .unwrap();
+        style.overlay_visible(&patch);
+        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        style.overlay_visible(&Properties::sparse());
+        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        style
+            .apply(0x485f, &0x0409u16.to_le_bytes(), &base)
+            .unwrap();
+        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"en-US\""));
+
+        // Both CPlain and CIstd reset language: neither preserved-property
+        // list in MS-DOC 2.6.1 includes language.
+        let mut paragraph = base.clone();
+        paragraph
+            .apply(0x485f, &0x0411u16.to_le_bytes(), &base)
+            .unwrap();
+        style.reset_to(&paragraph, false);
+        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        style
+            .apply(0x485f, &0x0401u16.to_le_bytes(), &paragraph)
+            .unwrap();
+        style.reset_to(&paragraph, true);
+        assert!(style.xml(&[]).unwrap().contains("w:bidi=\"ja-JP\""));
+        for preserve_object in [false, true] {
+            let mut reset = style.clone();
+            reset.reset_to(&base, preserve_object);
+            assert!(!reset.xml(&[]).unwrap().contains("<w:lang"));
+        }
+
+        assert!(base.clone().apply(0x485f, &[1], &base).is_err());
+        assert!(base.clone().apply(0x485f, &[1, 2, 3], &base).is_err());
+        for lid in [u16::MAX, 0x1000, 0x0400, 0x007f, 0x0467, 0x040a] {
+            let mut unresolved = base.clone();
+            unresolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
+            assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
+        }
+
+        let mut truncated = Sprms::new(&[0x5f, 0x48, 0x01]);
+        assert!(truncated.next(&mut Budget::default()).is_err());
+        let framed = [0x5f, 0x48, 0x01, 0x04, 0x35, 0x08, 0x01];
+        let mut framed = Sprms::new(&framed);
+        let mut budget = Budget::default();
+        assert_eq!(
+            framed.next(&mut budget).unwrap(),
+            Some((0x485f, &[0x01, 0x04][..]))
+        );
+        assert_eq!(framed.next(&mut budget).unwrap(), Some((0x0835, &[1][..])));
+    }
+
+    #[test]
     fn underline_color_is_an_attribute_and_follows_style_resets() {
         let base = Properties::default();
         let mut style = base.clone();
         style.apply(0x2a3e, &[11], &base).unwrap();
         style.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
-        assert!(style
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>"));
+        assert!(
+            style
+                .xml(&[])
+                .unwrap()
+                .contains("<w:u w:val=\"wave\" w:color=\"123456\"/>")
+        );
         let mut direct = style.clone();
         direct.apply(0x6877, &[0, 0, 0, 0xff], &style).unwrap();
         assert!(direct.xml(&[]).unwrap().contains("w:color=\"auto\""));
@@ -557,16 +707,22 @@ mod tests {
         assert!(base.clone().apply(0x6877, &[1, 2, 3, 1], &base).is_err());
 
         let mut color_only = base.clone();
-        color_only.apply(0x6877, &[0x12, 0x34, 0x56, 0], &base).unwrap();
-        assert!(color_only
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:color=\"123456\"/>"));
+        color_only
+            .apply(0x6877, &[0x12, 0x34, 0x56, 0], &base)
+            .unwrap();
+        assert!(
+            color_only
+                .xml(&[])
+                .unwrap()
+                .contains("<w:u w:color=\"123456\"/>")
+        );
         color_only.apply(0x2a3e, &[4], &base).unwrap();
-        assert!(color_only
-            .xml(&[])
-            .unwrap()
-            .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>"));
+        assert!(
+            color_only
+                .xml(&[])
+                .unwrap()
+                .contains("<w:u w:val=\"dotted\" w:color=\"123456\"/>")
+        );
     }
 
     #[test]

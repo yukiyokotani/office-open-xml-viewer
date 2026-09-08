@@ -9,6 +9,7 @@
 use wasm_bindgen::prelude::*;
 
 mod cfb;
+mod lcid;
 mod doc;
 #[cfg(feature = "direct-doc")]
 mod doc_wasm;

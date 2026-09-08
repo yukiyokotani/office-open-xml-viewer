@@ -131,7 +131,7 @@ impl<'a> Formatting<'a> {
         let mut resolved = self.resolve_paragraph(style, fc, prm, prcs)?;
         if let Some((reference, marker)) = resolved.numbering {
             let ppr = resolved.properties.xml();
-            let rpr = marker.xml(&self.fonts)?;
+            let rpr = self.byte_run_xml(&marker)?;
             let id = self.numbering_output.activate(
                 &self.numbering,
                 reference,
@@ -394,7 +394,15 @@ impl<'a> Formatting<'a> {
         prcs: &[&[u8]],
     ) -> Result<String, String> {
         let props = self.run_properties(paragraph_style, fc, prm, prcs)?;
-        props.xml(&self.fonts)
+        self.byte_run_xml(&props)
+    }
+
+    fn byte_run_xml(&mut self, properties: &Properties) -> Result<String, String> {
+        let (xml, omitted_language) = properties.byte_xml(&self.fonts)?;
+        if omitted_language {
+            self.unsupported_character_properties = true;
+        }
+        Ok(xml)
     }
 
     pub fn inline_picture_location(
@@ -850,6 +858,37 @@ mod tests {
             "{error}"
         );
         assert_eq!(formatting.numbering_output.xml(10_000).unwrap(), None);
+    }
+
+    #[test]
+    fn byte_adapter_omits_only_unresolved_complex_script_language_and_warns() {
+        let base = Properties::default();
+        let mut unresolved = base.clone();
+        unresolved
+            .apply(0x485f, &u16::MAX.to_le_bytes(), &base)
+            .unwrap();
+        assert!(unresolved.xml(&[]).is_err());
+
+        let mut formatting = empty();
+        let xml = formatting.byte_run_xml(&unresolved).unwrap();
+        assert!(!xml.contains("<w:lang"));
+        assert!(formatting.unsupported_character_properties);
+
+        let mut invalid_font = unresolved.clone();
+        invalid_font.fonts[0] = Some(1);
+        assert!(formatting
+            .byte_run_xml(&invalid_font)
+            .unwrap_err()
+            .contains("font index outside empty font table"));
+
+        let mut overridden = unresolved;
+        overridden
+            .apply(0x485f, &0x0401u16.to_le_bytes(), &base)
+            .unwrap();
+        let mut formatting = empty();
+        let xml = formatting.byte_run_xml(&overridden).unwrap();
+        assert!(xml.contains("<w:lang w:bidi=\"ar-SA\"/>"));
+        assert!(!formatting.unsupported_character_properties);
     }
 
     #[test]

@@ -8,7 +8,8 @@ use super::Properties;
 use crate::doc::unsupported;
 use docx_model::{
     RunFontAxisPresence, RunFontAxisValues, RunFontFacts, RunFontSlots, RunTypographyWire, TextRun,
-    TypographyValueStatusWire, TypographyValueWire, UnderlineTypographyWire,
+    TypographyLanguagesWire, TypographyValueStatusWire, TypographyValueWire,
+    UnderlineTypographyWire,
 };
 
 type FontAxes = [Option<String>; 4];
@@ -31,6 +32,7 @@ impl Properties {
         // Validate referenced fonts before applying visibility, matching the
         // legacy XML construction step that precedes DOCX run filtering.
         let axes = self.direct_font_axes(fonts)?;
+        let lang_bidi = self.resolved_lang_bidi()?.map(str::to_ascii_lowercase);
         if self.bool_value("vanish").unwrap_or(false) {
             return Ok(None);
         }
@@ -93,6 +95,7 @@ impl Properties {
             font_size_cs,
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
+            lang_bidi: lang_bidi.clone(),
             char_spacing,
             char_scale,
             position,
@@ -128,6 +131,10 @@ impl Properties {
             character_spacing_pt: run.char_spacing,
             character_scale: run.char_scale,
             kerning_threshold_pt: run.kerning,
+            languages: TypographyLanguagesWire {
+                bidi: lang_bidi,
+                ..TypographyLanguagesWire::default()
+            },
             ..RunTypographyWire::default()
         });
         Ok(Some(run))
@@ -142,6 +149,7 @@ impl Properties {
     ) -> Result<RunFontFacts, String> {
         let axes = self.direct_font_axes(fonts)?;
         let font_size = self.half_points("sz")?;
+        let lang_bidi = self.resolved_lang_bidi()?.map(str::to_ascii_lowercase);
         Ok(RunFontFacts {
             font_family: axes[0].clone().or_else(|| axes[1].clone()),
             font_family_high_ansi: axes[2].clone(),
@@ -157,6 +165,7 @@ impl Properties {
             italic: self.bool_value("i").unwrap_or(false),
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
+            lang_bidi,
             kerning: self.half_points("kern")?,
             ..RunFontFacts::default()
         })
@@ -174,7 +183,9 @@ impl Properties {
     }
 
     pub(in crate::doc) fn direct_color_auto(&self) -> bool {
-        self.values.get("color").is_some_and(|value| value == "auto")
+        self.values
+            .get("color")
+            .is_some_and(|value| value == "auto")
     }
 
     fn direct_font_axes(&self, fonts: &[String]) -> Result<FontAxes, String> {
@@ -446,6 +457,48 @@ mod tests {
     }
 
     #[test]
+    fn complex_script_language_matches_xml_parser_without_family_inference() {
+        for (lid, expected) in [(0x0401u16, "ar-sa"), (0x0411, "ja-jp"), (0x0409, "en-us")] {
+            let properties = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
+            assert_parser_parity(&properties, &[]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.lang_bidi.as_deref(), Some(expected));
+            assert_eq!(
+                run.typography_acquisition
+                    .as_ref()
+                    .and_then(|wire| wire.languages.bidi.as_deref()),
+                Some(expected),
+            );
+            assert_eq!(
+                properties
+                    .direct_font_facts(&[])
+                    .unwrap()
+                    .lang_bidi
+                    .as_deref(),
+                Some(expected),
+            );
+        }
+
+        for lid in [u16::MAX, 0x1000, 0x0400, 0x007f, 0x0467, 0x040a] {
+            let unresolved = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
+            assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
+            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
+            assert!(unresolved.direct_font_facts(&[]).is_err());
+        }
+
+        // Projection validates the retained language before visibility, just as
+        // the XML writer validates run properties before the DOCX parser drops
+        // a vanished run.
+        let hidden_unknown =
+            applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec()), (0x083c, vec![1])]);
+        assert!(hidden_unknown.xml(&[]).is_err());
+        assert!(hidden_unknown.direct_text_run("x".into(), &[]).is_err());
+    }
+
+    #[test]
     fn adjacent_highlights_remain_distinct_across_xml_and_direct_projection() {
         let magenta = applied(&[(0x2a0c, vec![12])]);
         let cleared = applied(&[(0x2a0c, vec![0])]);
@@ -521,10 +574,12 @@ mod tests {
     #[test]
     fn hidden_text_is_absent_but_mark_font_facts_remain_available() {
         let properties = applied(&[(0x083c, vec![1]), (0x0835, vec![1])]);
-        assert!(properties
-            .direct_text_run("hidden".into(), &[])
-            .unwrap()
-            .is_none());
+        assert!(
+            properties
+                .direct_text_run("hidden".into(), &[])
+                .unwrap()
+                .is_none()
+        );
         assert!(properties.direct_vanish());
         let facts = properties.direct_font_facts(&[]).unwrap();
         assert!(facts.bold);
@@ -644,9 +699,11 @@ mod tests {
         for operand in [vec![0xab, 0xcd, 0xef, 0], vec![0, 0, 0, 0xff]] {
             assert_parser_parity(&applied(&[(0x6870, operand)]), &[]);
         }
-        assert!(Properties::default()
-            .apply(0x4a43, &0u16.to_le_bytes(), &Properties::default())
-            .is_err());
+        assert!(
+            Properties::default()
+                .apply(0x4a43, &0u16.to_le_bytes(), &Properties::default())
+                .is_err()
+        );
     }
 
     #[test]
