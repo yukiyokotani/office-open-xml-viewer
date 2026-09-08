@@ -10,14 +10,14 @@ existing OOXML parser runs:
 The opt-in `@silurus/ooxml/legacy-conversion` entry contains both a purpose-built
 local WASM converter and the implementation-neutral adapter API. Ordinary DOCX,
 XLSX, and PPTX entry points do not import, fetch, initialize, or retain the
-converter Worker or its WASM. If neither a converter nor the direct PPT source
-is supplied, legacy input continues to reject with
+converter Worker or its WASM. If neither a converter nor the matching direct
+source is supplied, legacy input continues to reject with
 `OoxmlError.code === 'legacy-binary-format'`.
 
-For PPT only, an additional experimental source reads the supported binary
-presentation subset directly into the shared presentation model. It does not
-generate an OOXML ZIP or reparse generated XML. Both paths use the same layout
-and Canvas renderer.
+Experimental direct sources are available for PPT and XLS. They read supported
+binary subsets into the shared presentation or workbook models without
+generating an OOXML ZIP or reparsing generated XML. Both paths use the ordinary
+layout and Canvas renderers. Direct DOC input is not implemented.
 
 ## Experimental direct PPT source
 
@@ -87,13 +87,36 @@ margin or indentation and positive paragraph before/after percentages. Its
 explicit unsupported diagnostics are authoritative; conversion support does
 not imply direct-reader support.
 
-This is a per-format opt-in. Direct DOC and XLS sources are not implemented;
-those formats continue to use byte conversion. Existing converter options and
-`convert()` behavior are unchanged, so no migration is required unless an
-application chooses the native PPT source. A `ppt` configuration selects either
-`source` or `converter`, never both.
+## Experimental direct XLS source
+
+Like PPT, XLS is a per-format opt-in. Direct DOC input is not implemented and
+continues to use byte conversion. XLS applications can instead import
+`createLegacyXlsSource` from `@silurus/ooxml/legacy-xls` and select it only in
+`legacyConversion.xls`:
+
+```typescript
+import { XlsxWorkbook } from '@silurus/ooxml/xlsx';
+import { createLegacyXlsSource } from '@silurus/ooxml/legacy-xls';
+
+const workbook = await XlsxWorkbook.load(legacyXlsArrayBuffer, {
+  legacyConversion: {
+    xls: { source: createLegacyXlsSource() },
+  },
+});
+```
+
+The direct XLS source is likewise experimental and bounded. It preserves its
+supported BIFF workbook subset in the shared worksheet model; unsupported
+features still reject or remain omitted as documented by diagnostics. Its
+dedicated asset is `legacy_xls_direct_bg.wasm`, and the factory accepts the same
+kind of optional absolute `wasmUrl` override as the PPT factory.
+
+Existing converter options and `convert()` behavior are unchanged, so no
+migration is required unless an application chooses a native source.
+Each `ppt` or `xls` configuration selects
+either `source` or `converter`, never both.
 Importing the ordinary DOCX, XLSX, or PPTX entries alone does not select this
-source or fetch its dedicated WASM asset.
+functionality or fetch either dedicated WASM asset.
 
 ## Built-in browser converter
 
@@ -147,7 +170,7 @@ legacy document in Microsoft Office.
 |---|---|---|---|
 | DOC | CFB Word 97-2003 documents with a readable main-story CLX piece table | main-story text, paragraphs, tabs, custom tab stops and document-wide default tab interval, line/page/column breaks, displayed field results, font names and explicit sizes, paragraph-style character defaults, character styles and direct bold/italic/underline/strike/caps/color/spacing properties, paragraph alignment/indentation/line spacing/before-after spacing/keep options, ordinary single-level and multilevel list definitions, list starts/restarts and marker formatting, literal list-bullet glyph references with resolved marker fonts, nested table structure, explicit cell widths/margins/borders/merges and row heights, section boundaries, page size/orientation, explicit body margins and gutter, columns, vertical alignment, document grid, inline JPEG/PNG/EMF/WMF picture frames with display size, cropping, rotation and flips, explicitly positioned main-story floating JPEG/PNG/EMF/WMF frames with basic wrapping, formatted header/footer variants and supported passive page-number fields, paragraph borders, formatted footnote/endnote content and references | frames, unsupported paragraph/list-style interactions and conditional table styles, legacy automatic-numbering fields and unrepresentable list templates, advanced table/character/section properties, header/footer and note floating drawings, note numbering/positioning/custom separators and custom-mark rendering, advanced floating drawings, non-raster images other than EMF/WMF, picture borders/effects and nonrectangular geometry, revisions, OLE; non-Western compressed code-page pieces are not decoded yet |
 | XLS | CFB BIFF8 workbooks, including shared-string character data split across `CONTINUE` records | worksheet names and visibility (including very hidden), scalar values, cached formula results, merged ranges, date system, BIFF8 number formats, fonts, palette colors and supported checksum-bound extension colors, fills, borders, alignment, shared-string rich-text runs, styled blank cells, row heights and column widths, row/column hiding and outlines, print setup/margins/options, basic header/footer commands, manual page breaks, and measured passive embedded PNG/JPEG/EMF/WMF picture frames with supported cell anchors, cropping, rotation and flips | formula programs, phonetic string data, unsupported extended styles/theme colors/gradients, conditional formatting, print areas/titles, extended headers/footers, saved custom views, charts, non-picture drawings, grouped or active/linked picture objects, picture effects, external links, pre-BIFF8 sheets |
-| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG, EMF and WMF picture frames with signed cropping, local/inherited solid and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, gradients/patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
+| PPT | CFB PowerPoint 97-2003 files with a resolvable current edit chain and persist directory | live slide order and dimensions, UTF-16/compressed Unicode text and outline references, individual shape anchors, nested group coordinates, basic rotation/flips, direct text margins/wrapping/vertical anchoring, direct font names/sizes/bold/italic/underline, literal and slide/master-scheme colors, paragraph alignment/spacing and explicit local ruler custom tabs, character bullets, explicit shape-local automatic numbering and paragraph-style offsets, verified-placeholder and explicit master-shape text-style inheritance, manual line breaks, unmodified basic presets with direct or explicitly linked master solid fill/line colors, supported classic linear gradients, line widths and opacity, line caps/joins, arrow ends and standard dash patterns, embedded/delayed JPEG, PNG, EMF and WMF picture frames with signed cropping, local/inherited solid, linear-gradient and stretched-image backgrounds, eligible foreground picture fills on supported preset and uniform custom paths, enabled non-placeholder master objects using the same supported drawing subset, static slide-number metacharacters, explicit full-coordinate line/cubic paths with uniform path paint; superseded slides, deleted and explicitly hidden shapes are not emitted | unlinked placeholder and nonuniform master text overrides, unlinked/drawing-default paint, master placeholder content and header/footer fields, system/palette color indices, inherited/outline automatic numbering, picture bullets, text-ruler offsets/default intervals and inherited ruler tabs, advanced character formatting, embedded fonts, guide-dependent or compact custom geometry, arc/editing escapes, mixed per-path paint, some rotated/grouped geometry, rotated gradient shapes or gradients inside rotated/reflected groups, non-linear gradients, patterns, custom dash arrays/compound lines, effects, custom fill rectangles and origins, charts, notes, PICT/DIB/TIFF/other image formats, picture effects and advanced foreground image-fill sizing, audio/video, transitions, animations, actions, OLE |
 
 XLS literal, untinted RGBA colors in checksum-matched XF extensions are preserved
 for text, pattern fills, and all five border edges. Cell-specific font colors do
@@ -353,6 +376,22 @@ ratio, orientation or placement from Office; explicit path support does not
 resolve those existing transform limitations. Effects remain unsupported.
 DOC/XLS drawing reconstruction is not enabled by this PPT integration; the
 OfficeArt decoder is shared so later format-specific wiring need not duplicate it.
+
+PPT classic linear gradients retain ordered shade colors, signed focus and the
+16.16 angle through the compatibility and direct-model projections. Explicit
+shade-array stops at either endpoint take precedence over scalar front or back
+colors; a missing final endpoint uses the scalar back color. The current subset
+requires a nonempty shade array beginning at position zero and linear RGB
+interpolation. Admission excludes rotated leaves, rotated or reflected ancestor
+groups, nonopaque fills,
+`fillUseRect`, non-shape fill modes and other gradient types. Leaf flips and
+unrotated scaled groups remain supported, and `rotateFillWithShape` is
+preserved. Twenty controlled Office comparisons covered focus, angle, endpoint
+conflicts and leaf flips. Native rational positions were within one DrawingML
+position unit of Office's serialized integers. Compatibility gradient XML
+matched 18 cases semantically; two focus cases differed by one serialized
+position unit. These
+checks define the tested subset and do not claim complete gradient fidelity.
 
 Plain eligible `msofillPicture` foreground fills resolve through the converter's
 existing validated passive media store and become ordinary DrawingML image fills.
