@@ -3,6 +3,11 @@ use super::{u16_at, u32_at, unsupported};
 use crate::officeart::{raster::Image, record_with_end, Record};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(feature = "direct-doc")]
+mod direct;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use direct::{DirectInlinePicture, DirectPictureResource};
+
 pub(super) struct Store<'a> {
     data: &'a [u8],
     cache: BTreeMap<usize, Option<Picture<'a>>>,
@@ -25,20 +30,7 @@ impl<'a> Store<'a> {
         }
     }
     pub fn drawing(&mut self, offset: usize) -> Result<String, String> {
-        if !self.cache.contains_key(&offset) {
-            if self.cache.len() >= 100_000 {
-                return Err(unsupported("Word picture cache budget exceeded"));
-            }
-            let picture =
-                read_with_limit(self.data, offset, &mut self.budget, self.remaining_bytes)?;
-            if let Some(picture) = &picture {
-                self.remaining_bytes = self
-                    .remaining_bytes
-                    .checked_sub(picture.image.bytes.len())
-                    .ok_or_else(|| unsupported("Word retained media budget exceeded"))?;
-            }
-            self.cache.insert(offset, picture);
-        }
+        self.load(offset)?;
         let Some(picture) = self.cache[&offset].as_ref() else {
             self.omitted = true;
             return Ok(String::new());
@@ -58,6 +50,24 @@ impl<'a> Store<'a> {
             ),
             "</wp:inline>",
         ))
+    }
+
+    fn load(&mut self, offset: usize) -> Result<(), String> {
+        if !self.cache.contains_key(&offset) {
+            if self.cache.len() >= 100_000 {
+                return Err(unsupported("Word picture cache budget exceeded"));
+            }
+            let picture =
+                read_with_limit(self.data, offset, &mut self.budget, self.remaining_bytes)?;
+            if let Some(picture) = &picture {
+                self.remaining_bytes = self
+                    .remaining_bytes
+                    .checked_sub(picture.image.bytes.len())
+                    .ok_or_else(|| unsupported("Word retained media budget exceeded"))?;
+            }
+            self.cache.insert(offset, picture);
+        }
+        Ok(())
     }
     pub fn relationships(&self) -> String {
         self.part_offsets.iter().filter_map(|offset| self.cache[offset].as_ref().map(|p| format!(r#"<Relationship Id="rImg{offset}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image{offset}.{}"/>"#, p.image.extension))).collect()
@@ -336,6 +346,122 @@ mod tests {
     }
     fn raster() -> Vec<u8> {
         record(0xf01e, 0x6e0 << 4, &[vec![0; 17], png()].concat())
+    }
+    #[cfg(feature = "direct-doc")]
+    fn jpeg_raster() -> Vec<u8> {
+        let jpeg = [0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 3, 0, 2, 1, 1, 0x11, 0];
+        record(0xf01d, 0x46a << 4, &[vec![0; 17], jpeg.to_vec()].concat())
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_inline_png_jpeg_metadata_resources_dedup_and_budget() {
+        for (image, mime) in [(raster(), "image/png"), (jpeg_raster(), "image/jpeg")] {
+            let mut data = fixture(
+                &[
+                    (0x0104, 1),
+                    (0x0100, 8192),
+                    (0x0101, 16384),
+                    (0x0102, 24576),
+                    (0x0103, 32768),
+                    (4, 90 * 65536),
+                ],
+                &[image],
+            );
+            data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
+            let mut store = Store::new(&data);
+            let mut model_budget = 4096;
+            let first = store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            let second = store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first.mime_type, mime);
+            assert_eq!((first.width_pt, first.height_pt), (36.0, 72.0));
+            assert_eq!(first.rotation, 90.0);
+            assert!(first.flip_h && first.flip_v);
+            let crop = first.crop.unwrap();
+            assert_eq!((crop.t, crop.b, crop.l, crop.r), (0.125, 0.25, 0.375, 0.5));
+
+            let mut too_small = 0;
+            assert_eq!(
+                store.finish_direct_resources(&mut too_small).unwrap_err(),
+                "OUTPUT_TOO_LARGE"
+            );
+
+            let mut store = Store::new(&data);
+            let mut model_budget = 4096;
+            store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            store.direct_inline(0, &mut model_budget).unwrap().unwrap();
+            let resources = store.finish_direct_resources(&mut model_budget).unwrap();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].key, "legacy-doc/image/0");
+            assert_eq!(resources[0].mime_type, mime);
+            assert!(!resources[0].bytes.is_empty());
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_inline_rejects_unavailable_types_and_admits_before_metadata() {
+        let unsupported_image = record(0xf01a, 0, &[]);
+        let data = fixture(&[(0x0104, 1)], &[unsupported_image]);
+        let mut store = Store::new(&data);
+        let mut budget = usize::MAX;
+        assert!(store.direct_inline(0, &mut budget).is_err());
+
+        let data = fixture(&[(0x0104, 1)], &[raster()]);
+        let mut store = Store::new(&data);
+        let mut budget = 0;
+        assert_eq!(
+            store.direct_inline(0, &mut budget).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        assert!(store.part_offsets.is_empty());
+
+        let mut truncated = data;
+        truncated.truncate(truncated.len() - 1);
+        let mut store = Store::new(&truncated);
+        let mut budget = usize::MAX;
+        assert!(store.direct_inline(0, &mut budget).is_err());
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_owned_resource_budget_uses_retained_vector_capacity() {
+        let owned_store = || {
+            let mut bytes = Vec::with_capacity(128);
+            bytes.extend_from_slice(&png());
+            let mut store = Store::new(&[]);
+            store.cache.insert(
+                7,
+                Some(Picture {
+                    image: Image {
+                        bytes: std::borrow::Cow::Owned(bytes),
+                        extension: "png",
+                    },
+                    extent: [12_700, 12_700],
+                    crop: [0; 4],
+                    flip: [false; 2],
+                    rotation: 0,
+                }),
+            );
+            store.part_offsets.insert(7);
+            store
+        };
+        let key = "legacy-doc/image/7".to_string();
+        let mut bytes_only =
+            std::mem::size_of::<direct::DirectPictureResource>() + key.capacity() + png().len();
+        assert_eq!(
+            owned_store()
+                .finish_direct_resources(&mut bytes_only)
+                .unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
+        let mut sufficient = 4096;
+        let resources = owned_store()
+            .finish_direct_resources(&mut sufficient)
+            .unwrap();
+        assert_eq!(resources[0].bytes.capacity(), 128);
+        assert!(sufficient < 4096);
     }
     #[test]
     fn retains_owned_emf_once_for_repeated_inline_pictures() {
