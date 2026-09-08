@@ -217,10 +217,17 @@ impl Properties {
             0x085a => Some("rtl"),
             0x085c => Some("bCs"),
             0x085d => Some("iCs"),
+            // MS-DOC 2.6.1 sprmCFNoProof / 2.9.327 ToggleOperand maps to
+            // ECMA-376 17.3.2.21. The byte route retains it; the display-only
+            // direct viewer validates it without introducing proofing UI state.
+            0x0875 => Some("noProof"),
             0x0882 => Some("cs"),
             _ => None,
         };
         if let Some(key) = flag {
+            if operand.len() != 1 {
+                return Err(unsupported("invalid Word character toggle"));
+            }
             let base = style.values.get(key).is_some_and(|v| v == "1");
             let value = match operand[0] {
                 0 => false,
@@ -769,6 +776,69 @@ mod tests {
         direct.apply(0x0835, &[0x80], &style).unwrap();
         assert_eq!(direct, style);
         assert!(direct.apply(0x0835, &[2], &style).is_err());
+        assert!(direct.apply(0x0835, &[], &style).is_err());
+        assert!(direct.apply(0x0835, &[1, 0], &style).is_err());
+    }
+
+    #[test]
+    fn no_proof_is_a_validated_style_relative_toggle_and_resets_normally() {
+        let base = Properties::default();
+        let mut style = base.clone();
+        assert!(style.apply(0x0875, &[1], &base).unwrap());
+        assert!(style.xml(&[]).unwrap().contains("<w:noProof w:val=\"1\"/>"));
+
+        for (operand, expected) in [(0, "0"), (1, "1"), (0x80, "1"), (0x81, "0")] {
+            let mut direct = style.clone();
+            assert!(direct.apply(0x0875, &[operand], &style).unwrap());
+            assert!(direct
+                .xml(&[])
+                .unwrap()
+                .contains(&format!("<w:noProof w:val=\"{expected}\"/>")));
+        }
+
+        let mut false_style = base.clone();
+        false_style.apply(0x0875, &[0], &base).unwrap();
+        let mut opposite = false_style.clone();
+        opposite.apply(0x0875, &[0x81], &false_style).unwrap();
+        assert!(opposite
+            .xml(&[])
+            .unwrap()
+            .contains("<w:noProof w:val=\"1\"/>"));
+        opposite.apply(0x0875, &[0], &false_style).unwrap();
+        assert!(opposite
+            .xml(&[])
+            .unwrap()
+            .contains("<w:noProof w:val=\"0\"/>"));
+
+        let mut inherited = style.clone();
+        inherited.overlay_visible(&Properties::sparse());
+        assert!(inherited
+            .xml(&[])
+            .unwrap()
+            .contains("<w:noProof w:val=\"1\"/>"));
+        for preserve_object in [false, true] {
+            let mut reset = inherited.clone();
+            reset.reset_to(&false_style, preserve_object);
+            assert!(reset.xml(&[]).unwrap().contains("<w:noProof w:val=\"0\"/>"));
+        }
+
+        for operand in [vec![], vec![2], vec![0x82], vec![1, 0]] {
+            assert!(base.clone().apply(0x0875, &operand, &style).is_err());
+        }
+
+        assert!(Sprms::new(&[0x75, 0x08])
+            .next(&mut Budget::default())
+            .is_err());
+        let mut adjacent = Sprms::new(&[0x75, 0x08, 1, 0x35, 0x08, 1]);
+        let mut budget = Budget::default();
+        assert_eq!(
+            adjacent.next(&mut budget).unwrap(),
+            Some((0x0875, &[1][..]))
+        );
+        assert_eq!(
+            adjacent.next(&mut budget).unwrap(),
+            Some((0x0835, &[1][..]))
+        );
     }
 
     #[test]

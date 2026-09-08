@@ -569,6 +569,24 @@ mod tests {
         with_picture_data(&source(text), vanish)
     }
 
+    fn source_with_proofing(text: &str, no_proof: bool) -> Vec<u8> {
+        let source = source(text);
+        let cfb = CompoundFile::open(&source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let table = cfb.stream("0Table").unwrap();
+        let bte = u32::from_le_bytes(word[0xfa..0xfe].try_into().unwrap()) as usize;
+        let page_number = u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+        let page = &mut word[page_number * 512..(page_number + 1) * 512];
+        let mut chpx = vec![0x35, 0x08, 1];
+        if no_proof {
+            chpx.extend([0x75, 0x08, 1]);
+        }
+        page[8] = 32;
+        page[64] = chpx.len() as u8;
+        page[65..65 + chpx.len()].copy_from_slice(&chpx);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
     pub(super) fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
@@ -1112,6 +1130,41 @@ mod tests {
             super::super::direct_model(&CompoundFile::open(&cyclic).unwrap(), 1024 * 1024,)
                 .unwrap_err()
                 .contains("cyclic")
+        );
+    }
+
+    #[test]
+    fn proofing_only_chpx_reaches_the_native_document_without_display_state() {
+        let bytes = source_with_proofing("Proof\r", true);
+        let document =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
+        let BodyElement::Paragraph(paragraph) = &document.body[0] else {
+            panic!("expected body paragraph");
+        };
+        let DocRun::Text(run) = &paragraph.runs[0] else {
+            panic!("expected text run");
+        };
+        assert_eq!(run.text, "Proof");
+        assert!(run.bold);
+
+        let baseline_bytes = source_with_proofing("Proof\r", false);
+        let baseline = super::super::direct_model(
+            &CompoundFile::open(&baseline_bytes).unwrap(),
+            1024 * 1024,
+        )
+        .unwrap()
+        .document;
+        let BodyElement::Paragraph(baseline_paragraph) = &baseline.body[0] else {
+            panic!("expected baseline paragraph");
+        };
+        let DocRun::Text(baseline_run) = &baseline_paragraph.runs[0] else {
+            panic!("expected baseline text run");
+        };
+        assert_eq!(
+            serde_json::to_value(run.as_ref()).unwrap(),
+            serde_json::to_value(baseline_run.as_ref()).unwrap()
         );
     }
 

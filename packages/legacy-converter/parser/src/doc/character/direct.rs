@@ -457,6 +457,26 @@ mod tests {
     }
 
     #[test]
+    fn proofing_only_differences_do_not_change_the_native_display_model() {
+        let baseline = serde_json::to_value(
+            Properties::default()
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        for operand in [0, 1, 0x80, 0x81] {
+            let properties = applied(&[(0x0875, vec![operand])]);
+            assert_parser_parity(&properties, &[]);
+            let run = properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::to_value(run).unwrap(), baseline);
+        }
+    }
+
+    #[test]
     fn complex_script_language_matches_xml_parser_without_family_inference() {
         for (lid, expected) in [(0x0401u16, "ar-sa"), (0x0411, "ja-jp"), (0x0409, "en-us")] {
             let properties = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
