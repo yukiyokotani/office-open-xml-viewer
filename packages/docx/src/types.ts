@@ -1608,7 +1608,7 @@ export interface CellBorders {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy }
+  | { type: 'parse'; id: number; data: ArrayBuffer; resourcePolicy: NormalizedOoxmlResourcePolicy; source?: import('@silurus/ooxml-core/internal/legacy-doc-source').LegacyDocDirectSourceDescriptor }
   | { type: 'extractImage'; id: number; path: string }
   | { type: 'resourceUsage'; id: number }
   // Project the retained archive to GitHub-flavoured markdown (`DocxArchive.to_markdown`,
