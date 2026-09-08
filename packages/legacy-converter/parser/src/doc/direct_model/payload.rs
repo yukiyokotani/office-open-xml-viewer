@@ -11,6 +11,76 @@ use docx_model::{
     TypographyValueWire,
 };
 
+pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
+    let mut total = Total::default();
+    for string in [&value.jc, &value.table_layout.logical_sequence_id] {
+        total.string(string)?;
+    }
+    total.option_string(&value.layout)?;
+    total.option_string(&value.overlap)?;
+    total.option_string(&value.table_layout.effective_style_id)?;
+    if let Some(position) = &value.tblp_pr {
+        total.string(&position.horz_anchor)?;
+        total.string(&position.vert_anchor)?;
+        total.option_string(&position.tblp_x_spec)?;
+        total.option_string(&position.tblp_y_spec)?;
+    }
+    for column in &value.table_layout.grid.columns {
+        total.option_string(&column.width)?;
+    }
+    if let Some(width) = &value.table_layout.preferred_width {
+        total.table_width(width)?;
+    }
+    if let Some(layout) = &value.table_layout.layout {
+        total.option_string(&layout.kind)?;
+    }
+    if let Some(margins) = &value.table_layout.cell_margins {
+        total.table_margins(margins)?;
+    }
+    for row in &value.rows {
+        total.string(&row.row_height_rule)?;
+        if let Some(height) = &row.table_row_layout.height {
+            total.option_string(&height.value)?;
+            total.string(&height.rule)?;
+        }
+        for width in [
+            &row.table_row_layout.before_width,
+            &row.table_row_layout.after_width,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            total.option_string(&width.kind)?;
+            total.option_string(&width.value)?;
+        }
+        for cell in &row.cells {
+            total.string(&cell.v_align)?;
+            total.option_string(&cell.background)?;
+            if let Some(width) = &cell.table_cell_layout.preferred_width {
+                total.table_width(width)?;
+            }
+            if let Some(margins) = &cell.table_cell_layout.margins {
+                total.table_margins(margins)?;
+            }
+            for border in [
+                &cell.borders.top,
+                &cell.borders.left,
+                &cell.borders.bottom,
+                &cell.borders.right,
+                &cell.borders.inside_h,
+                &cell.borders.inside_v,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                total.string(&border.style)?;
+                total.option_string(&border.color)?;
+            }
+        }
+    }
+    Ok(total.0)
+}
+
 pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
     if run.no_break_hyphen_offsets.capacity() != 0
         || run.border.is_some()
@@ -186,6 +256,31 @@ impl Total {
                 .checked_mul(std::mem::size_of::<T>())
                 .ok_or("OUTPUT_TOO_LARGE")?,
         )
+    }
+
+    fn table_width(&mut self, value: &docx_model::TableWidthAcquisitionWire) -> Result<(), String> {
+        self.option_string(&value.kind)?;
+        self.option_string(&value.value)
+    }
+
+    fn table_margins(
+        &mut self,
+        value: &docx_model::TableMarginAcquisitionWire,
+    ) -> Result<(), String> {
+        for width in [
+            &value.top,
+            &value.bottom,
+            &value.start,
+            &value.end,
+            &value.left,
+            &value.right,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.table_width(width)?;
+        }
+        Ok(())
     }
 
     fn axes(&mut self, axes: &RunFontAxisValues) -> Result<(), String> {

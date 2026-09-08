@@ -3,7 +3,10 @@
 //! Section ownership and header-field restoration remain with their respective
 //! callers; PAP/CHPX resolution and hard-break normalization live here once.
 
-use super::{ModelBudget, ParaPiece};
+use super::{
+    tables::{Block, Blocks, Writer},
+    ModelBudget, ParaPiece,
+};
 use crate::doc::{floating, formatting, pictures, unsupported, Paragraph, Story, Token};
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
@@ -17,22 +20,22 @@ pub(super) fn project(
     budget: &mut ModelBudget,
     body: &mut Vec<BodyElement>,
     ending_kind: Option<&str>,
+    table_sequence: &mut usize,
 ) -> Result<(), String> {
     let paragraph_count = paragraphs.len();
+    let mut tables = Writer::new(table_sequence);
     for (paragraph_index, source) in paragraphs.into_iter().enumerate() {
-        if source.mark == '\u{7}' {
-            return Err(unsupported("direct DOC model does not yet support tables"));
-        }
         let (_, mark_fc, mark_piece) = story
             .position(source.end_cp)
             .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
         let style = formatting.paragraph_style(mark_fc)?;
-        if formatting
-            .table_properties(mark_fc, mark_piece.prm, &story.prcs)?
-            .depth()?
-            != 0
-        {
-            return Err(unsupported("direct DOC model does not yet support tables"));
+        let table_properties = formatting.table_properties(mark_fc, mark_piece.prm, &story.prcs)?;
+        let table_depth = table_properties.depth()?;
+        if source.mark == '\u{7}' && table_depth == 0 {
+            return Err(unsupported("Word table cell mark outside table"));
+        }
+        if ending_kind.is_some() && paragraph_index + 1 == paragraph_count && table_depth != 0 {
+            return Err(unsupported("Word section break inside table"));
         }
         let direct = formatting.direct_paragraph(style, mark_fc, mark_piece.prm, &story.prcs)?;
         if direct.numbering.is_some() {
@@ -145,12 +148,9 @@ pub(super) fn project(
                     let (_, fc, piece) = story
                         .position(cp)
                         .ok_or_else(|| unsupported("Word floating picture outside piece table"))?;
-                    let Some(mut host) = formatting.direct_anchor_host_metrics(
-                        style,
-                        fc,
-                        piece.prm,
-                        &story.prcs,
-                    )? else {
+                    let Some(mut host) =
+                        formatting.direct_anchor_host_metrics(style, fc, piece.prm, &story.prcs)?
+                    else {
                         continue;
                     };
                     let image: Option<floating::DirectFloatingPicture> =
@@ -159,16 +159,17 @@ pub(super) fn project(
                         host.anchor_occurrence_id = Some(image.occurrence_id);
                         let host_payload = std::mem::size_of::<docx_model::AnchorHostMetrics>()
                             .checked_add(host.font_family.as_ref().map_or(0, String::capacity))
-                            .and_then(|bytes| bytes.checked_add(
-                                host.font_family_east_asia.as_ref().map_or(0, String::capacity),
-                            ))
+                            .and_then(|bytes| {
+                                bytes.checked_add(
+                                    host.font_family_east_asia
+                                        .as_ref()
+                                        .map_or(0, String::capacity),
+                                )
+                            })
                             .ok_or("OUTPUT_TOO_LARGE")?;
                         budget.charge(host_payload)?;
                         budget.push(&mut paragraph.runs, DocRun::AnchorHost(host))?;
-                        budget.push(
-                            &mut paragraph.runs,
-                            DocRun::Image(Box::new(image.image)),
-                        )?;
+                        budget.push(&mut paragraph.runs, DocRun::Image(Box::new(image.image)))?;
                     }
                 }
                 Token::NoteMarker | Token::NoteReference(_) => {
@@ -184,42 +185,61 @@ pub(super) fn project(
             }
         }
 
-        match paragraph.runs.as_slice() {
-            [DocRun::Break {
-                break_type: BreakType::Page,
-            }] => {
-                let subsumed = paragraph_index + 1 == paragraph_count
-                    && ending_kind.is_some_and(|kind| !matches!(kind, "continuous" | "nextColumn"));
-                if !subsumed {
-                    budget.push(
-                        body,
-                        BodyElement::PageBreak {
-                            parity: None,
-                            same_paragraph_as_previous: None,
-                        },
-                    )?;
-                }
-            }
-            [DocRun::Break {
-                break_type: BreakType::Column,
-            }] => budget.push(body, BodyElement::ColumnBreak)?,
-            _ => visit_para_on_page_breaks(paragraph, |piece| {
-                let element = match piece {
-                    ParaPiece::Para(paragraph) => {
-                        budget.normalized_paragraph(&paragraph)?;
-                        BodyElement::Paragraph(Box::new(paragraph))
+        let mut blocks = Blocks::default();
+        if table_depth != 0 {
+            budget.push(&mut blocks.0, Block::Paragraph(Box::new(paragraph)))?;
+        } else {
+            match paragraph.runs.as_slice() {
+                [DocRun::Break {
+                    break_type: BreakType::Page,
+                }] => {
+                    let subsumed = paragraph_index + 1 == paragraph_count
+                        && ending_kind
+                            .is_some_and(|kind| !matches!(kind, "continuous" | "nextColumn"));
+                    if !subsumed {
+                        budget.push(
+                            &mut blocks.0,
+                            Block::PageBreak {
+                                same_paragraph_as_previous: None,
+                            },
+                        )?;
                     }
-                    ParaPiece::PageBreak {
-                        same_paragraph_as_previous,
-                    } => BodyElement::PageBreak {
-                        parity: None,
-                        same_paragraph_as_previous: same_paragraph_as_previous.then_some(true),
-                    },
-                    ParaPiece::ColumnBreak => BodyElement::ColumnBreak,
-                };
-                budget.push(body, element)
-            })?,
+                }
+                [DocRun::Break {
+                    break_type: BreakType::Column,
+                }] => budget.push(&mut blocks.0, Block::ColumnBreak)?,
+                _ => visit_para_on_page_breaks(paragraph, |piece| {
+                    let element = match piece {
+                        ParaPiece::Para(paragraph) => {
+                            budget.normalized_paragraph(&paragraph)?;
+                            Block::Paragraph(Box::new(paragraph))
+                        }
+                        ParaPiece::PageBreak {
+                            same_paragraph_as_previous,
+                        } => Block::PageBreak {
+                            same_paragraph_as_previous: same_paragraph_as_previous.then_some(true),
+                        },
+                        ParaPiece::ColumnBreak => Block::ColumnBreak,
+                    };
+                    budget.push(&mut blocks.0, element)
+                })?,
+            }
         }
+        tables.push(table_properties, source.mark, blocks, budget)?;
+    }
+    for block in tables.finish(budget)?.0 {
+        let element = match block {
+            Block::Paragraph(value) => BodyElement::Paragraph(value),
+            Block::Table(value) => BodyElement::Table(value),
+            Block::PageBreak {
+                same_paragraph_as_previous,
+            } => BodyElement::PageBreak {
+                parity: None,
+                same_paragraph_as_previous,
+            },
+            Block::ColumnBreak => BodyElement::ColumnBreak,
+        };
+        budget.push(body, element)?;
     }
     Ok(())
 }

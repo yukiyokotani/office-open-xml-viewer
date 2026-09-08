@@ -31,6 +31,7 @@ mod settings;
 mod sprm;
 mod table;
 mod table_output;
+mod table_structure;
 mod tabs;
 
 const FIB_IDENT: u16 = 0xa5ec;

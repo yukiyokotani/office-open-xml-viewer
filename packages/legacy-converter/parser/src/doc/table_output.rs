@@ -1,34 +1,39 @@
 //! Assemble MS-DOC 2.4.3 table/cell/row marks into ECMA-376 17.4 tables.
 //! Row grids share the union of explicit cell edges, without fitted widths.
 use super::{
-    table::{Properties, Row},
+    table::Properties,
+    table_structure::{Assembler, Event, LogicalTable, Payload},
     unsupported,
 };
-use std::collections::BTreeMap;
 
 #[derive(Default)]
-struct Pending {
-    rows: Vec<(Row, Vec<String>)>,
-    cells: Vec<String>,
-    cell: String,
+struct Xml(String);
+impl Payload for Xml {
+    fn append<A: FnMut(usize) -> Result<(), String>>(
+        &mut self,
+        other: Self,
+        _admit: &mut A,
+    ) -> Result<(), String> {
+        self.0.push_str(&other.0);
+        Ok(())
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 pub struct Writer {
-    stack: Vec<Pending>,
-    body: String,
+    structure: Assembler<Xml>,
     charged: usize,
     limit: usize,
-    rows: usize,
 }
 
 impl Writer {
     pub fn new(limit: usize) -> Self {
         Self {
-            stack: vec![],
-            body: String::new(),
+            structure: Assembler::new(),
             charged: 0,
             limit,
-            rows: 0,
         }
     }
     fn charge(&mut self, bytes: usize) -> Result<(), String> {
@@ -39,100 +44,53 @@ impl Writer {
             .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
         Ok(())
     }
-    fn close(&mut self) -> Result<(), String> {
-        let pending = self.stack.pop().expect("open table");
-        if !pending.cell.is_empty() || !pending.cells.is_empty() {
-            return Err(unsupported("unterminated Word table row"));
-        }
-        let mut xml = String::new();
-        // Distinct table-level properties partition adjacent rows. More complex
-        // floating/frame and protection-bookmark separation remains unsupported.
-        let mut first = 0;
-        while first < pending.rows.len() {
-            let key = &pending.rows[first].0;
-            let mut end = first + 1;
-            while end < pending.rows.len()
-                && pending.rows[end].0.bidi == key.bidi
-                && pending.rows[end].0.identity == key.identity
-            {
-                end += 1;
-            }
-            serialize(&pending.rows[first..end], &mut xml, self.limit)?;
-            first = end;
-        }
-        // Input paragraph bytes were charged on arrival; now charge only table
-        // markup. Retention and intermediate copies remain bounded by this limit.
-        let content = pending
-            .rows
-            .iter()
-            .flat_map(|(_, c)| c.iter())
-            .map(String::len)
-            .sum::<usize>();
-        self.charge(xml.len().saturating_sub(content))?;
-        if let Some(parent) = self.stack.last_mut() {
-            parent.cell.push_str(&xml);
-        } else {
-            self.body.push_str(&xml);
-        }
-        Ok(())
-    }
     pub fn push(&mut self, props: Properties, mark: char, paragraph: String) -> Result<(), String> {
-        let depth = props.depth()?;
-        while self.stack.len() > depth {
-            self.close()?;
-        }
-        while self.stack.len() < depth {
-            self.stack.push(Pending::default());
-        }
-        if depth == 0 {
-            self.charge(paragraph.len())?;
-            self.body.push_str(&paragraph);
-            return Ok(());
-        }
-        let row_end = if depth == 1 {
-            mark == '\u{7}' && props.row_end
-        } else {
-            mark == '\r' && props.inner_row
-        };
-        let cell_end = if depth == 1 {
-            mark == '\u{7}'
-        } else {
-            mark == '\r' && props.inner_cell
-        };
-        if !row_end {
-            self.charge(paragraph.len())?;
-        }
-        let current = self.stack.last_mut().expect("open table");
-        if row_end {
-            self.rows += 1;
-            if self.rows > 100_000 {
-                return Err(unsupported("Word table row budget exceeded"));
-            }
-            if !current.cell.is_empty()
-                || current.cells.len() != props.row.cells.len()
-                || current.cells.is_empty()
-            {
-                return Err(unsupported("Word row definition does not match cell marks"));
-            }
-            current
-                .rows
-                .push((props.row, std::mem::take(&mut current.cells)));
-        } else {
-            current.cell.push_str(&paragraph);
-            if cell_end {
-                if current.cells.len() >= 63 {
-                    return Err(unsupported("too many Word table cell marks"));
-                }
-                current.cells.push(std::mem::take(&mut current.cell));
-            }
+        let paragraph_len = paragraph.len();
+        let limit = self.limit;
+        let charged = &mut self.charged;
+        let retained = self.structure.push(
+            props,
+            mark,
+            Xml(paragraph),
+            |event| emit(event, limit, charged),
+            &mut |_| Ok(()),
+        )?;
+        if retained {
+            self.charge(paragraph_len)?;
         }
         Ok(())
     }
     pub fn finish(mut self) -> Result<String, String> {
-        while !self.stack.is_empty() {
-            self.close()?;
+        let limit = self.limit;
+        let charged = &mut self.charged;
+        Ok(self
+            .structure
+            .finish(|event| emit(event, limit, charged), &mut |_| Ok(()))?
+            .0)
+    }
+}
+
+fn emit(event: Event<Xml>, limit: usize, charged: &mut usize) -> Result<Xml, String> {
+    match event {
+        Event(tables) => {
+            let mut xml = String::new();
+            let content = tables
+                .iter()
+                .flat_map(|table| table.rows.iter())
+                .flat_map(|row| row.cells.iter())
+                .map(|cell| cell.content.0.len())
+                .try_fold(0usize, |sum, len| {
+                    sum.checked_add(len).ok_or("OUTPUT_TOO_LARGE")
+                })?;
+            for table in tables {
+                serialize(table, &mut xml, limit)?;
+            }
+            *charged = charged
+                .checked_add(xml.len().saturating_sub(content))
+                .filter(|n| *n <= limit)
+                .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())?;
+            Ok(Xml(xml))
         }
-        Ok(self.body)
     }
 }
 
@@ -142,37 +100,11 @@ fn margins(xml: &mut String, values: [u16; 4]) {
     }
 }
 
-fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Result<(), String> {
-    let first = &rows[0].0;
-    let mut boundaries = BTreeMap::<i32, usize>::new();
-    for (row, _) in rows {
-        let mut edge = row.origin();
-        let mut local = BTreeMap::<i32, usize>::new();
-        local.insert(edge, 1);
-        for c in &row.cells {
-            edge += c.width;
-            *local.entry(edge).or_default() += 1;
-        }
-        for (edge, count) in local {
-            let n = boundaries.entry(edge).or_default();
-            *n = (*n).max(count);
-        }
-        if boundaries.len() > 65536 {
-            return Err(unsupported("Word table grid budget exceeded"));
-        }
-    }
-    if boundaries.values().sum::<usize>() > 65536 {
-        return Err(unsupported("Word table grid budget exceeded"));
-    }
-    let grid: Vec<_> = boundaries
-        .into_iter()
-        .flat_map(|(edge, n)| std::iter::repeat_n(edge, n))
-        .collect();
-    if grid.len() < 2 {
-        return Err(unsupported("Word table has no cell boundaries"));
-    }
-    let origin = grid[0];
-    let total = grid[grid.len() - 1] - origin;
+fn serialize(table: LogicalTable<Xml>, xml: &mut String, limit: usize) -> Result<(), String> {
+    let first = &table.rows[0].source;
+    let grid = &table.grid;
+    let origin = table.origin;
+    let total = table.total;
     let (jc, physical) = first.alignment;
     let jc = if physical && first.bidi { 2 - jc } else { jc };
     xml.push_str("<w:tbl><w:tblPr>");
@@ -191,8 +123,8 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
         xml.push_str(&format!("<w:gridCol w:w=\"{}\"/>", edges[1] - edges[0]));
     }
     xml.push_str("</w:tblGrid>");
-    let mut header_prefix = true;
-    for (row_index, (row, content)) in rows.iter().enumerate() {
+    for (row_index, planned) in table.rows.iter().enumerate() {
+        let row = &planned.source;
         xml.push_str("<w:tr>");
         if row.shading != first.shading {
             // ECMA-376 17.4.30: table-level exceptions belong to the row;
@@ -206,31 +138,18 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
             xml.push_str("</w:tblPrEx>");
         }
         xml.push_str("<w:trPr>");
-        let edge = row.origin();
-        let before = grid.partition_point(|e| *e < edge);
-        let mut cell_grid = vec![before];
-        let mut endpoint = edge;
-        for c in &row.cells {
-            endpoint += c.width;
-            let next = if c.width == 0 {
-                cell_grid.last().unwrap() + 1
-            } else {
-                grid.partition_point(|e| *e < endpoint)
-            };
-            cell_grid.push(next);
-        }
+        let before = planned.grid_before;
         if before != 0 {
             xml.push_str(&format!(
                 "<w:gridBefore w:val=\"{before}\"/><w:wBefore w:w=\"{}\" w:type=\"dxa\"/>",
-                edge - origin
+                planned.width_before
             ));
         }
-        let end = edge + row.cells.iter().map(|c| c.width).sum::<i32>();
-        let after = grid.len() - 1 - cell_grid.last().unwrap();
+        let after = planned.grid_after;
         if after != 0 {
             xml.push_str(&format!(
                 "<w:gridAfter w:val=\"{after}\"/><w:wAfter w:w=\"{}\" w:type=\"dxa\"/>",
-                grid[grid.len() - 1] - end
+                planned.width_after
             ));
         }
         if row.cant_split {
@@ -243,29 +162,23 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
                 if row.height < 0 { "exact" } else { "atLeast" }
             ));
         }
-        header_prefix &= row.header;
-        if header_prefix {
+        if planned.is_header {
             xml.push_str("<w:tblHeader/>");
         }
         xml.push_str("</w:trPr>");
-        let mut i = 0;
-        while i < row.cells.len() {
-            let c = &row.cells[i];
-            let mut end_cell = i + 1;
-            if c.flags & 3 >= 2 {
-                while end_cell < row.cells.len() && row.cells[end_cell].flags & 3 == 1 {
-                    end_cell += 1;
-                }
-            }
-            let width = row.cells[i..end_cell].iter().map(|c| c.width).sum::<i32>();
-            let span = cell_grid[end_cell] - cell_grid[i];
+        for planned_cell in &planned.cells {
+            let c = &planned_cell.source;
+            let i = planned_cell.source_index;
+            let end_cell = planned_cell.source_end;
+            let width = planned_cell.width;
+            let span = planned_cell.grid_span;
             xml.push_str(&format!(
                 "<w:tc><w:tcPr><w:tcW w:w=\"{width}\" w:type=\"dxa\"/>"
             ));
             if span > 1 {
                 xml.push_str(&format!("<w:gridSpan w:val=\"{span}\"/>"));
             }
-            let vertical = (c.flags >> 5) & 3;
+            let vertical = planned_cell.vertical;
             if vertical == 1 || vertical == 3 {
                 xml.push_str(&format!(
                     "<w:vMerge w:val=\"{}\"/>",
@@ -280,8 +193,16 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
                 let fallback = match side {
                     0 => Some(if row_index == 0 { 0 } else { 4 }),
                     1 => Some(if i == 0 { 1 } else { 5 }),
-                    2 => Some(if row_index + 1 == rows.len() { 2 } else { 4 }),
-                    3 => Some(if end_cell == row.cells.len() { 3 } else { 5 }),
+                    2 => Some(if row_index + 1 == table.rows.len() {
+                        2
+                    } else {
+                        4
+                    }),
+                    3 => Some(if end_cell == planned.source_cell_count {
+                        3
+                    } else {
+                        5
+                    }),
                     _ => None,
                 };
                 if let Some(b) = c.borders[side]
@@ -319,13 +240,12 @@ fn serialize(rows: &[(Row, Vec<String>)], xml: &mut String, limit: usize) -> Res
             if vertical == 1 {
                 xml.push_str("<w:p/>");
             } else {
-                xml.push_str(&content[i]);
+                xml.push_str(&planned_cell.content.0);
             }
             xml.push_str("</w:tc>");
             if xml.len() > limit {
                 return Err("OUTPUT_TOO_LARGE".into());
             }
-            i = end_cell;
         }
         xml.push_str("</w:tr>");
     }
@@ -478,7 +398,7 @@ mod tests {
         w.push(row(1, &[1000]), '\u{7}', String::new()).unwrap();
         assert!(w.finish().unwrap_err().contains("OUTPUT_TOO_LARGE"));
         let mut w = Writer::new(100000);
-        w.rows = 100000;
+        w.structure.set_row_count(100000);
         w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
         assert!(w
             .push(row(1, &[1000]), '\u{7}', String::new())

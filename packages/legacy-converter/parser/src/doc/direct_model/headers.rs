@@ -30,6 +30,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         formatting: &mut formatting::Formatting<'a>,
         pictures: &mut pictures::Store<'a>,
         budget: &mut ModelBudget,
+        table_sequence: &mut usize,
     ) -> Result<(HeadersFooters, HeadersFooters), String> {
         if let Some(source) = self.source {
             for (slot, inherited) in self.inherited.iter_mut().enumerate() {
@@ -43,7 +44,9 @@ impl<'a, 'h> Resolver<'a, 'h> {
         for entry in self.inherited {
             projected.push(
                 entry
-                    .map(|entry| self.project_entry(entry, formatting, pictures, budget))
+                    .map(|entry| {
+                        self.project_entry(entry, formatting, pictures, budget, table_sequence)
+                    })
                     .transpose()?,
             );
         }
@@ -67,6 +70,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         formatting: &mut formatting::Formatting<'a>,
         pictures: &mut pictures::Store<'a>,
         budget: &mut ModelBudget,
+        table_sequence: &mut usize,
     ) -> Result<HeaderFooter, String> {
         let source = self.source.expect("entry belongs to a header source");
         let text = source.entry_text(entry);
@@ -88,6 +92,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             budget,
             &mut body,
             None,
+            table_sequence,
         )?;
         Ok(HeaderFooter { body })
     }

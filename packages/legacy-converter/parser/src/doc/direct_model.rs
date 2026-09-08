@@ -8,6 +8,9 @@ use docx_model::{BodyElement, DocRun, Document, DocumentSettings, DocumentTypogr
 mod headers;
 mod payload;
 mod story;
+mod tables;
+#[cfg(test)]
+mod table_tests;
 
 #[derive(Debug)]
 pub(crate) struct DirectDocResult {
@@ -74,6 +77,7 @@ pub(super) fn build(
     let mut final_footers = None;
     let chunks = super::sections::split_story(&facts.story.text, &facts.sections)?;
     let mut fields = Fields::default();
+    let mut table_sequence = 0;
     for (section_index, chunk) in chunks.iter().enumerate() {
         let ending = (section_index + 1 < chunks.len())
             .then(|| facts.sections[section_index].project_ending(section_index))
@@ -105,6 +109,7 @@ pub(super) fn build(
             &mut budget,
             &mut body,
             ending.as_ref().map(|ending| ending.kind.as_str()),
+            &mut table_sequence,
         )?;
 
         let (section_headers, section_footers) = header_resolver.project_section(
@@ -112,6 +117,7 @@ pub(super) fn build(
             &mut facts.formatting,
             &mut facts.pictures,
             &mut budget,
+            &mut table_sequence,
         )?;
 
         if let Some(ending) = ending {
@@ -286,7 +292,7 @@ mod tests {
         source_with_typography(text, sections, authored_blank_header, None, None, None)
     }
 
-    fn source_with_typography(
+    pub(super) fn source_with_typography(
         text: &str,
         sections: &[(usize, u8, u16, u16, u16, u16)],
         authored_blank_header: Option<bool>,
@@ -513,7 +519,7 @@ mod tests {
         with_picture_data(&source(text), vanish)
     }
 
-    fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
+    pub(super) fn with_picture_data(source: &[u8], vanish: bool) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let table = cfb.stream("0Table").unwrap();
@@ -859,18 +865,31 @@ mod tests {
         let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
             panic!("body paragraph")
         };
-        let [DocRun::Text(_), DocRun::AnchorHost(host), DocRun::Image(image)] = paragraph.runs.as_slice() else {
+        let [DocRun::Text(_), DocRun::AnchorHost(host), DocRun::Image(image)] =
+            paragraph.runs.as_slice()
+        else {
             panic!("text, anchor host, image")
         };
         let acquisition = image.anchor_acquisition.as_ref().unwrap();
-        assert_eq!(host.anchor_occurrence_id.as_deref(), Some(acquisition.occurrence_id.as_str()));
+        assert_eq!(
+            host.anchor_occurrence_id.as_deref(),
+            Some(acquisition.occurrence_id.as_str())
+        );
         assert_eq!(image.image_path, result.resources[0].key);
         assert!(image.anchor && image.flip_h && image.flip_v);
         assert_eq!((image.anchor_x_pt, image.anchor_y_pt), (-5.0, 10.0));
         assert_eq!((image.width_pt, image.height_pt), (20.0, 15.0));
         assert_eq!(image.wrap_mode.as_deref(), Some("square"));
         assert_eq!(image.wrap_side.as_deref(), Some("right"));
-        assert_eq!((image.dist_left, image.dist_top, image.dist_right, image.dist_bottom), (1.0, 2.0, 3.0, 4.0));
+        assert_eq!(
+            (
+                image.dist_left,
+                image.dist_top,
+                image.dist_right,
+                image.dist_bottom
+            ),
+            (1.0, 2.0, 3.0, 4.0)
+        );
         assert!(!image.allow_overlap);
         assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
         assert_eq!(image.anchor_y_relative_from.as_deref(), Some("paragraph"));
@@ -885,12 +904,12 @@ mod tests {
         // selected display fields. The byte parser's known picture-flip loss
         // remains explicit; direct projection preserves the authored flips.
         let reference_source = floating_picture_source("B\u{8}\r", false);
-        let converted = super::super::convert(
-            &CompoundFile::open(&reference_source).unwrap(), 1024 * 1024,
-        ).unwrap();
-        let expected: serde_json::Value = serde_json::from_str(
-            &docx_parser::parse_docx_native(&converted.bytes).unwrap(),
-        ).unwrap();
+        let converted =
+            super::super::convert(&CompoundFile::open(&reference_source).unwrap(), 1024 * 1024)
+                .unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&converted.bytes).unwrap())
+                .unwrap();
         let actual = serde_json::to_value(&result.document).unwrap();
         let expected_runs = &expected["body"][0]["runs"];
         let mut actual_host = actual["body"][0]["runs"][1].clone();
@@ -907,17 +926,18 @@ mod tests {
         assert_eq!(actual_image, expected_runs[2]);
 
         let hidden_bytes = floating_picture_source("B\u{8}\r", true);
-        let hidden = super::super::direct_model(
-            &CompoundFile::open(&hidden_bytes).unwrap(),
-            1024 * 1024,
-        )
-        .unwrap();
+        let hidden =
+            super::super::direct_model(&CompoundFile::open(&hidden_bytes).unwrap(), 1024 * 1024)
+                .unwrap();
         assert!(image_runs(&hidden.document).is_empty());
         assert!(hidden.resources.is_empty());
 
         let bytes = floating_picture_source("B\u{8}\r", false);
         let cfb = CompoundFile::open(&bytes).unwrap();
-        assert_eq!(super::super::direct_model(&cfb, 1).unwrap_err(), "OUTPUT_TOO_LARGE");
+        assert_eq!(
+            super::super::direct_model(&cfb, 1).unwrap_err(),
+            "OUTPUT_TOO_LARGE"
+        );
     }
 
     #[test]
@@ -1213,14 +1233,7 @@ mod tests {
         .contains("not passive-special"));
         let sections = [(2, 2, 12_240, 15_840, 1, 720)];
         let slots = [None, Some("\u{8}\r"), None, None, None, None];
-        let header_float = source_with_typography(
-            "B\r",
-            &sections,
-            None,
-            None,
-            None,
-            Some(&slots),
-        );
+        let header_float = source_with_typography("B\r", &sections, None, None, None, Some(&slots));
         let header_float = passive_special_source(&header_float);
         assert!(super::super::direct_model(
             &CompoundFile::open(&header_float).unwrap(),
