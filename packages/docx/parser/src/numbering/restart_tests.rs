@@ -47,10 +47,10 @@ fn restart_boundaries_follow_one_based_threshold_in_both_namespaces() {
                     .unwrap_or(level);
                 for parent in 0..level {
                     let mut map = numbering(ns, level, raw.as_deref(), "");
-                    assert_eq!(map.advance(2, level), 1);
-                    map.advance(2, parent);
+                    assert_eq!(map.advance(2, level).unwrap(), 1);
+                    map.advance(2, parent).unwrap();
                     assert_eq!(
-                        map.advance(2, level),
+                        map.advance(2, level).unwrap(),
                         if parent < threshold { 1 } else { 2 },
                         "namespace={ns}, level={level}, restart={raw:?}, parent={parent}"
                     );
@@ -69,9 +69,9 @@ fn full_level_override_replaces_restart_instead_of_merging_abstract() {
     ] {
         let instance = format!("<w:lvlOverride w:ilvl=\"2\"><w:lvl w:ilvl=\"2\">{replacement}<w:lvlText w:val=\"%3\"/></w:lvl></w:lvlOverride>");
         let mut map = numbering(TRANSITIONAL, 2, Some(abstract_value), &instance);
-        assert_eq!(map.advance(2, 2), 1);
-        map.advance(2, 0);
-        assert_eq!(map.advance(2, 2), expected);
+        assert_eq!(map.advance(2, 2).unwrap(), 1);
+        map.advance(2, 0).unwrap();
+        assert_eq!(map.advance(2, 2).unwrap(), expected);
     }
 }
 
@@ -83,21 +83,21 @@ fn never_restart_still_honors_explicit_start_override_once() {
         Some("0"),
         "<w:lvlOverride w:ilvl=\"2\"><w:startOverride w:val=\"7\"/></w:lvlOverride>",
     );
-    assert_eq!(map.advance(2, 2), 7);
-    map.advance(2, 1);
-    assert_eq!(map.advance(2, 2), 8);
-    map.advance(2, 0);
-    assert_eq!(map.advance(2, 2), 9);
+    assert_eq!(map.advance(2, 2).unwrap(), 7);
+    map.advance(2, 1).unwrap();
+    assert_eq!(map.advance(2, 2).unwrap(), 8);
+    map.advance(2, 0).unwrap();
+    assert_eq!(map.advance(2, 2).unwrap(), 9);
 }
 
 #[test]
 fn never_restart_parent_does_not_protect_its_descendants() {
     let mut map = numbering(TRANSITIONAL, 1, Some("0"), "");
-    assert_eq!(map.advance(2, 1), 1);
-    assert_eq!(map.advance(2, 2), 1);
-    map.advance(2, 0);
-    assert_eq!(map.advance(2, 1), 2);
-    assert_eq!(map.advance(2, 2), 1);
+    assert_eq!(map.advance(2, 1).unwrap(), 1);
+    assert_eq!(map.advance(2, 2).unwrap(), 1);
+    map.advance(2, 0).unwrap();
+    assert_eq!(map.advance(2, 1).unwrap(), 2);
+    assert_eq!(map.advance(2, 2).unwrap(), 1);
 }
 
 #[test]

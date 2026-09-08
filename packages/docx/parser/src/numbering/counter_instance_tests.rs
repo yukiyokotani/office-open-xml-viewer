@@ -39,7 +39,7 @@ fn instance(num_id: u32, abstract_id: u32, override_xml: &str) -> String {
 fn counters(mut map: NumberingMap, sequence: &[u32]) -> Vec<u32> {
     sequence
         .iter()
-        .map(|num_id| map.advance(*num_id, 0))
+        .map(|num_id| map.advance(*num_id, 0).unwrap())
         .collect()
 }
 

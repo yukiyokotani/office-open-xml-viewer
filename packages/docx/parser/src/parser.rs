@@ -30,6 +30,10 @@ use crate::xml_util::*;
 
 const DEFAULT_FONT_SIZE: f64 = 10.0; // pt fallback
 
+#[cfg(test)]
+#[path = "parser/numbering_safety_tests.rs"]
+mod numbering_safety_tests;
+
 /// DOCX-local adapter over one owned, validated package session. Every public
 /// call owns one explicit operation. Focused parser tests lazily receive a
 /// compatibility operation while using the same bounded decoder path.
@@ -1233,6 +1237,13 @@ impl DocxBodyCursor {
             }
         }
 
+        environment
+            .num_map
+            .check_counter_error()
+            .map_err(|error| DocumentCursorFailure {
+                error,
+                theme: Box::new(degraded_theme.clone()),
+            })?;
         let projector =
             open_document_body_projector(zip).map_err(|error| DocumentCursorFailure {
                 error,
@@ -1270,6 +1281,9 @@ impl DocxBodyCursor {
     pub(crate) fn next_unit(&mut self, zip: &mut Zip) -> Result<StreamedDocumentUnit, String> {
         if self.terminal_emitted {
             return Err("document body cursor is complete".to_string());
+        }
+        if let Some(environment) = &self.environment {
+            environment.num_map.check_counter_error()?;
         }
 
         loop {
@@ -1371,6 +1385,10 @@ impl DocxBodyCursor {
                 self.emitted_body_len,
                 Some(&mut self.diagnostics),
             );
+            // No provisional paragraph with a rejected counter may cross the
+            // pull boundary. Numbering snapshots share only this failure fact,
+            // so errors inside text-box stories cannot disappear with a clone.
+            environment.num_map.check_counter_error()?;
             self.revisions.extend(collect_revisions(root));
 
             if self.pending_cover_break && !body.is_empty() {
@@ -1463,6 +1481,7 @@ fn finish_document(
     revisions: Vec<crate::types::DocxRevision>,
     diagnostics: Vec<ParseDiagnostic>,
 ) -> Result<Document, String> {
+    environment.num_map.check_counter_error()?;
     let major_font = environment.theme.theme_font("major", "latin");
     let minor_font = environment.theme.theme_font("minor", "latin");
     // ECMA-376 §17.6.5 defines the document-grid character pitch relative to
@@ -1567,6 +1586,7 @@ fn finish_document(
         })
         .unwrap_or_default();
 
+    environment.num_map.check_counter_error()?;
     Ok(Document {
         section,
         body,
@@ -4791,7 +4811,10 @@ fn resolve_numbering_marker(
     num_level: u32,
     paragraph_mark_run: &RunFmt,
     theme: &ThemeColors,
-) -> NumberingInfo {
+) -> Option<NumberingInfo> {
+    if num_map.check_counter_error().is_err() {
+        return None;
+    }
     let (
         format,
         indent_left,
@@ -4838,8 +4861,20 @@ fn resolve_numbering_marker(
                 None,
             )
         });
-    let counter = num_map.advance(num_id, num_level);
-    let text = num_map.resolve_text(num_id, num_level, counter);
+    let counter = match num_map.advance(num_id, num_level) {
+        Ok(counter) => counter,
+        Err(error) => {
+            num_map.record_counter_error(error);
+            return None;
+        }
+    };
+    let text = match num_map.resolve_text(num_id, num_level, counter) {
+        Ok(text) => text,
+        Err(error) => {
+            num_map.record_counter_error(error);
+            return None;
+        }
+    };
     let (pic_bullet_image_path, pic_bullet_mime_type, pic_bullet_width_pt, pic_bullet_height_pt) =
         match picture_bullet {
             // §17.9.20 defines no default size; absence stays absent so layout can
@@ -4853,7 +4888,7 @@ fn resolve_numbering_marker(
             None => (None, None, None, None),
         };
 
-    NumberingInfo {
+    Some(NumberingInfo {
         num_id,
         level: num_level,
         format,
@@ -4871,7 +4906,7 @@ fn resolve_numbering_marker(
         pic_bullet_mime_type,
         pic_bullet_width_pt,
         pic_bullet_height_pt,
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4968,9 +5003,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
     let numbering = if let (Some(num_id), Some(num_level)) = (base_para.num_id, base_para.num_level)
     {
         if num_id != 0 {
-            Some(Box::new(resolve_numbering_marker(
-                num_map, num_id, num_level, &mark_run, theme,
-            )))
+            resolve_numbering_marker(num_map, num_id, num_level, &mark_run, theme).map(Box::new)
         } else {
             None
         }
@@ -10215,9 +10248,7 @@ fn extract_simple_paragraph_text(
             return None;
         }
         let num_level = direct_ind.num_level.or(style_para.num_level).unwrap_or(0);
-        Some(Box::new(resolve_numbering_marker(
-            num_map, num_id, num_level, &mark_run, theme,
-        )))
+        resolve_numbering_marker(num_map, num_id, num_level, &mark_run, theme).map(Box::new)
     });
     let level = numbering
         .as_ref()

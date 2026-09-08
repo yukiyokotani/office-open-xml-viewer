@@ -1364,10 +1364,15 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
     // Numbering
     if let Some(pnpr) = child_w(ppr, "numPr") {
         // ilvl defaults to 0 when absent
-        fmt.num_level = child_w(pnpr, "ilvl")
-            .and_then(|n| attr_w(n, "val"))
-            .and_then(|v| v.parse().ok())
-            .or(Some(0));
+        fmt.num_level = Some(match child_w(pnpr, "ilvl") {
+            None => 0,
+            // Preserve malformed/out-of-representation authored values as an
+            // unsupported level for validation at consumption, not as an
+            // absent level that silently selects zero. No raw string is kept.
+            Some(level) => attr_w(level, "val")
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(u32::MAX),
+        });
         if let Some(nid) = child_w(pnpr, "numId") {
             fmt.num_id = attr_w(nid, "val").and_then(|v| v.parse().ok());
         }

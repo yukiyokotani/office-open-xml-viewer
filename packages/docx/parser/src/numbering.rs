@@ -3,7 +3,12 @@ use crate::xml_util::*;
 use ooxml_common::blip::mime_from_ext;
 use ooxml_common::depth::parse_guarded;
 use ooxml_common::ns::{attr_ns, relationships};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use ooxml_common::numbering::format_counter;
+use ooxml_common::numbering::{CounterEngine, CounterError, CounterIdentity, LevelFacts};
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[cfg(test)]
 #[path = "numbering/restart_tests.rs"]
@@ -140,18 +145,6 @@ impl Default for LevelDef {
     }
 }
 
-/// Key into the running-counter map. numId values and abstractNumId values are
-/// independent ID sequences in WordprocessingML (§17.9.2 / §17.9.5), so they
-/// must NOT share a `u32` key space: a dangling numId (no `<w:num>`) that
-/// happens to equal a real abstractNumId would otherwise hijack that abstract's
-/// live count. `Abstract` holds the shared count for a resolved num; `OrphanNum`
-/// gives an unresolved num its own disjoint counter.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum CounterKey {
-    Abstract(u32),
-    OrphanNum(u32),
-}
-
 #[derive(Default, Clone)]
 pub struct NumberingMap {
     /// abstractNumId → [level0..level8]
@@ -175,17 +168,18 @@ pub struct NumberingMap {
     /// The §17.9.26 `startOverride` example establishes shared restart behavior:
     /// numIds 5, 5, 6, 5 on one abstractNum produce 1, 2, 1, 2. The wider alias
     /// and full-level-replacement policy is bounded native-Word compatibility
-    /// evidence (see `counter_instance_tests`). Keyed by `CounterKey` so an
-    /// unresolved numId gets a disjoint counter instead of colliding with an
-    /// abstractNumId.
-    counters: HashMap<CounterKey, HashMap<u32, u32>>,
-    /// (numId, level) pairs already advanced at least once. A numId carrying a
+    /// evidence (see `counter_instance_tests`). The shared engine uses disjoint
+    /// `CounterIdentity` variants so an unresolved numId gets a disjoint counter
+    /// instead of colliding with an abstractNumId. It also owns the (numId,
+    /// level) pairs already advanced at
+    /// least once. A numId carrying a
     /// `<w:lvlOverride><w:startOverride>` restarts the shared abstract counter
     /// only on its FIRST appearance at that level. ECMA-376 §17.9.26 defines
     /// `startOverride` and demonstrates its reset propagating across numIds on
     /// one abstractNum; applying it only once per numId follows measured
     /// native-Word compatibility behavior.
-    started: HashSet<(u32, u32)>,
+    counters: CounterEngine<u32, u32, u32>,
+    counter_error: Rc<Cell<Option<CounterError>>>,
 }
 
 /// Parse one `<w:lvl>` element (ECMA-376 §17.9.6) into a [`LevelDef`].
@@ -440,19 +434,13 @@ impl NumberingMap {
     /// [`Self::get_level`] so a backlink carried by a per-numId `<w:lvlOverride>`
     /// substitution (§17.9.7) participates too. `None` ⇒ the list has no
     /// association for this style (or the numId dangles). WordprocessingML caps
-    /// lists at 9 levels (ST_Ilvl, §17.18.38).
+    /// This model supports nine levels, matching CT_AbstractNum's maximum of
+    /// nine lvl children (§A.1); ilvl itself uses ST_DecimalNumber (§17.9.3).
     pub fn level_for_style(&self, num_id: u32, style_id: &str) -> Option<u32> {
         (0..9).find(|&l| {
             self.get_level(num_id, l)
                 .is_some_and(|def| def.p_style.as_deref() == Some(style_id))
         })
-    }
-
-    pub fn get_start(&self, num_id: u32, level: u32) -> u32 {
-        if let Some(ov) = self.num_overrides.get(&num_id).and_then(|m| m.get(&level)) {
-            return *ov;
-        }
-        self.get_level(num_id, level).map(|l| l.start).unwrap_or(1)
     }
 
     /// Advance the counter for (numId, level), resetting deeper levels.
@@ -474,73 +462,47 @@ impl NumberingMap {
     /// §17.9.26 defines `startOverride` and demonstrates the shared reset with
     /// numIds 5, 5, 6, 5 producing 1, 2, 1, 2. The once-per-numId application is
     /// measured native-Word compatibility behavior. Returns the value to display.
-    pub fn advance(&mut self, num_id: u32, level: u32) -> u32 {
-        // Pre-compute start values to avoid borrow conflicts. `get_start`
-        // already folds in any per-numId `<w:startOverride>` for the level.
-        let starts: Vec<u32> = (0..=level).map(|l| self.get_start(num_id, l)).collect();
-        let key = self.counter_key(num_id);
-        let has_override = self
+    pub fn advance(&mut self, num_id: u32, level: u32) -> Result<u32, CounterError> {
+        let identity = counter_identity(&self.num_to_abstract, num_id);
+        let abstract_nums = &self.abstract_nums;
+        let level_overrides = &self.num_level_overrides;
+        let start_override = self
             .num_overrides
             .get(&num_id)
-            .is_some_and(|m| m.contains_key(&level));
-        // `insert` returns true when the pair was NOT already present.
-        let first_for_num = self.started.insert((num_id, level));
-
-        // Resolve each live descendant's own policy, including a complete
-        // level replacement. A never-restarting parent does not shield its
-        // children, and merely seeding an ancestor is not an occurrence of it.
-        // Iterate existing counters, never an input-provided restart range.
-        let resets: Vec<u32> = self
-            .counters
-            .get(&key)
-            .into_iter()
-            .flat_map(|counts| counts.keys().copied())
-            .filter(|&deeper| {
-                let threshold = self
-                    .get_level(num_id, deeper)
-                    .and_then(|def| def.restart)
-                    .filter(|&value| value <= deeper)
-                    .unwrap_or(deeper);
-                deeper > level && level < threshold
-            })
-            .collect();
-
-        let entry = self.counters.entry(key).or_default();
-
-        for k in resets {
-            entry.remove(&k);
-        }
-
-        // Seed shallower levels to their start (their displayed value when they
-        // are never advanced themselves) — but never clobber a live ancestor.
-        for (lvl, &start) in starts.iter().enumerate().take(level as usize) {
-            entry.entry(lvl as u32).or_insert(start);
-        }
-
-        // A startOverride restarts the shared counter on first use of this num;
-        // otherwise the level shows `start` on its first appearance on the
-        // abstract and increments thereafter.
-        let val = if first_for_num && has_override {
-            starts[level as usize]
-        } else {
-            match entry.get(&level) {
-                Some(&v) => v + 1,
-                None => starts[level as usize],
-            }
-        };
-        entry.insert(level, val);
-        val
-    }
-
-    /// The counter-map key for a numId: the shared `Abstract(abstractNumId)`
-    /// when the `<w:num>` resolves, else an `OrphanNum(numId)` in a disjoint key
-    /// space so a dangling numId can never collide with a real abstractNumId's
-    /// running counter.
-    fn counter_key(&self, num_id: u32) -> CounterKey {
-        match self.num_to_abstract.get(&num_id) {
-            Some(&abs) => CounterKey::Abstract(abs),
-            None => CounterKey::OrphanNum(num_id),
-        }
+            .and_then(|levels| levels.get(&level))
+            .copied();
+        self.counters.advance(
+            identity,
+            num_id,
+            level,
+            start_override,
+            |index| {
+                self.num_overrides
+                    .get(&num_id)
+                    .and_then(|levels| levels.get(&index))
+                    .copied()
+                    .or_else(|| {
+                        level_facts(
+                            abstract_nums,
+                            level_overrides,
+                            &self.num_to_abstract,
+                            num_id,
+                            index,
+                        )
+                        .map(|facts| facts.start)
+                    })
+                    .unwrap_or(1)
+            },
+            |index| {
+                level_facts(
+                    abstract_nums,
+                    level_overrides,
+                    &self.num_to_abstract,
+                    num_id,
+                    index,
+                )
+            },
+        )
     }
 
     /// Resolve the display text for a counter value in the given level.
@@ -554,515 +516,85 @@ impl NumberingMap {
     /// its start, so an ancestor that is never itself advanced (e.g. a list
     /// whose level 0 only exists to prefix subsection numbers with a fixed
     /// `start`) still resolves to its start value.
-    pub fn resolve_text(&self, num_id: u32, level: u32, counter: u32) -> String {
-        let Some(lvl) = self.get_level(num_id, level) else {
-            return format!("{}.", counter);
-        };
-        let key = self.counter_key(num_id);
-
-        let mut text = lvl.text.clone();
-        // Replace from the deepest placeholder down so "%1" can never partially
-        // match a two-digit "%1N" (Word caps lists at 9 levels, so this is
-        // belt-and-braces — but cheap).
-        for k in (0..=level).rev() {
-            let val = if k == level {
-                counter
-            } else {
-                self.counters
-                    .get(&key)
-                    .and_then(|m| m.get(&k))
+    pub fn resolve_text(
+        &self,
+        num_id: u32,
+        level: u32,
+        counter: u32,
+    ) -> Result<String, CounterError> {
+        let identity = counter_identity(&self.num_to_abstract, num_id);
+        self.counters.resolve_text(
+            identity,
+            level,
+            counter,
+            |index| {
+                self.num_overrides
+                    .get(&num_id)
+                    .and_then(|levels| levels.get(&index))
                     .copied()
-                    .unwrap_or_else(|| self.get_start(num_id, k))
-            };
-            // 17.9.4 applies to this marker's entire displayed level text,
-            // including its own placeholder. Keep authored formats intact so
-            // other markers continue to use their own definitions. MS-OE376
-            // 2.1.280(b) documents Word retaining `none`; this path follows the
-            // normative decimal rule, without a format-specific exception.
-            let fmt = if lvl.legal {
-                "decimal"
-            } else {
-                self.get_level(num_id, k)
-                    .map(|l| l.format.as_str())
-                    .unwrap_or(lvl.format.as_str())
-            };
-            text = text.replace(&format!("%{}", k + 1), &format_counter(val, fmt));
-        }
-        text
+                    .or_else(|| self.get_level(num_id, index).map(|facts| facts.start))
+                    .unwrap_or(1)
+            },
+            |index| {
+                level_facts(
+                    &self.abstract_nums,
+                    &self.num_level_overrides,
+                    &self.num_to_abstract,
+                    num_id,
+                    index,
+                )
+            },
+        )
     }
-}
 
-// ── ST_NumberFormat rendering (ECMA-376 §17.18.59) ──────────────────────────
-// This is the RUST twin of `packages/core/src/text/number-format.ts`
-// (`formatOrdinalNumber`). List markers resolve to a final string at PARSE time
-// (`resolve_text` composes `%1.%2` here in Rust), so the same numbering systems
-// must be implemented on both sides and produce BYTE-IDENTICAL output. When you
-// touch a format here, mirror it there (and vice versa); the TS unit tests are
-// the reference values. `bullet` is a list-only concern (no §17.18.59 numeric
-// meaning) and stays Rust-only.
-fn format_counter(n: u32, format: &str) -> String {
-    // ECMA-376 17.18.59: `none` suppresses the number, including start=0.
-    // Mirror the shared TS field formatter instead of using decimal fallback.
-    if format == "none" {
-        return String::new();
+    pub fn record_counter_error(&self, error: CounterError) {
+        if self.counter_error.get().is_none() {
+            self.counter_error.set(Some(error));
+        }
     }
-    if format == "bullet" {
-        return "•".to_string();
-    }
-    // The numeric systems are 1-based; a level with start=0 (rare) or an
-    // underflow falls back to the decimal string, matching the TS `n >= 1` gate.
-    if n == 0 {
-        return n.to_string();
-    }
-    match format {
-        "decimal" | "decimalHalfWidth" => n.to_string(),
-        // Roman.
-        "lowerRoman" => to_roman(n).to_lowercase(),
-        "upperRoman" => to_roman(n),
-        // Latin + non-Latin repeat-letter alphabets (§17.18.59).
-        "lowerLetter" => repeat_alphabet(n, &latin_upper()).to_lowercase(),
-        "upperLetter" => repeat_alphabet(n, &latin_upper()),
-        "arabicAlpha" => repeat_alphabet(n, ARABIC_ALPHA),
-        "arabicAbjad" => repeat_alphabet(n, ARABIC_ABJAD),
-        "russianLower" => repeat_alphabet(n, RUSSIAN_LOWER),
-        "russianUpper" => repeat_alphabet(n, RUSSIAN_UPPER),
-        "thaiLetters" => repeat_alphabet(n, THAI_LETTERS),
-        "chosung" => repeat_alphabet(n, KOREAN_CHOSUNG),
-        "ganada" => repeat_alphabet(n, KOREAN_GANADA),
-        "hindiVowels" => repeat_alphabet(n, HINDI_VOWELS),
-        "hindiConsonants" => repeat_alphabet(n, HINDI_CONSONANTS),
-        // Katakana a-i-u-e-o sequences (repeat scheme, like the letter alphabets).
-        "aiueoFullWidth" => repeat_alphabet(n, KATAKANA_FULLWIDTH),
-        "aiueo" => repeat_alphabet(n, KATAKANA_HALFWIDTH),
-        // Enclosed decimals (bounded set → decimal fallback past the range).
-        "decimalEnclosedCircle" => to_enclosed_circle(n),
-        // Hebrew: positional gematria / alphabet-with-ת-suffix (NOT repeat).
-        "hebrew1" => to_hebrew_gematria(n),
-        "hebrew2" => to_hebrew2(n),
-        // Other algorithmic systems (§17.18.59 hex / numberInDash / decimalZero).
-        "hex" => format!("{:X}", n),
-        "numberInDash" => format!("- {} -", n),
-        "decimalZero" => {
-            if n <= 9 {
-                format!("0{}", n)
-            } else {
-                n.to_string()
+
+    pub fn check_counter_error(&self) -> Result<(), String> {
+        match self.counter_error.get() {
+            None => Ok(()),
+            Some(CounterError::InvalidLevel) => Err("unsupported numbering level".to_string()),
+            Some(CounterError::Overflow) => Err("numbering counter overflow".to_string()),
+            Some(CounterError::OutputTooLarge) => {
+                Err("numbering marker output too large".to_string())
             }
         }
-        // Positional digit substitution.
-        "decimalFullWidth" => to_positional_digits(n, DIGITS_FULLWIDTH),
-        "thaiNumbers" => to_positional_digits(n, DIGITS_THAI),
-        "hindiNumbers" => to_positional_digits(n, DIGITS_HINDI),
-        "ideographDigital" | "japaneseDigitalTenThousand" => {
-            to_positional_digits(n, DIGITS_IDEOGRAPH)
-        }
-        "koreanDigital" => to_positional_digits(n, DIGITS_KOREAN),
-        "koreanDigital2" => to_positional_digits(n, DIGITS_KOREAN2),
-        "taiwaneseDigital" => to_positional_digits(n, DIGITS_TAIWANESE),
-        // 十-prefix positional.
-        "chineseCounting" => to_chinese_counting(n, DIGITS_IDEOGRAPH),
-        "taiwaneseCounting" => to_chinese_counting(n, DIGITS_TAIWANESE),
-        // Grouped counting / legal CJK.
-        "japaneseCounting" => to_myriad_grouped(n, &MYRIAD_JAPANESE),
-        "chineseCountingThousand" => to_myriad_grouped(n, &MYRIAD_CHINESE),
-        "taiwaneseCountingThousand" => to_myriad_grouped(n, &MYRIAD_CHINESE),
-        "chineseLegalSimplified" => to_myriad_grouped(n, &MYRIAD_CHINESE_LEGAL),
-        "ideographLegalTraditional" => to_myriad_grouped(n, &MYRIAD_TRAD_LEGAL),
-        "japaneseLegal" => to_myriad_grouped(n, &MYRIAD_JAPANESE_LEGAL),
-        "koreanCounting" => to_myriad_grouped(n, &MYRIAD_KOREAN),
-        "koreanLegal" => to_korean_legal(n),
-        // Documented residual (language spell-outs / unimplemented) → decimal.
-        _ => n.to_string(),
     }
 }
 
-// §17.18.59 koreanLegal — native-Korean tens-word + ones-word, tabled for 1–99
-// (≥100 undefined by the spec → decimal fallback). Mirrors TS `toKoreanLegal`.
-const KOREAN_LEGAL_ONES: &[&str] = &[
-    "", "하나", "둘", "셋", "넷", "다섯", "여섯", "일곱", "여덟", "아홉",
-];
-const KOREAN_LEGAL_TENS: &[&str] = &[
-    "", "열", "스물", "서른", "마흔", "쉰", "예순", "일흔", "여든", "아흔",
-];
-
-fn to_korean_legal(n: u32) -> String {
-    if n >= 100 {
-        return n.to_string();
-    }
-    let tens = n / 10;
-    let ones = n % 10;
-    format!(
-        "{}{}",
-        KOREAN_LEGAL_TENS[tens as usize], KOREAN_LEGAL_ONES[ones as usize]
-    )
+fn counter_identity(aliases: &HashMap<u32, u32>, num_id: u32) -> CounterIdentity<u32, u32> {
+    aliases
+        .get(&num_id)
+        .copied()
+        .map_or(CounterIdentity::Orphan(num_id), CounterIdentity::Shared)
 }
 
-fn to_roman(n: u32) -> String {
-    let vals = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    let mut n = n;
-    let mut s = String::new();
-    for (v, r) in &vals {
-        while n >= *v {
-            s.push_str(r);
-            n -= v;
-        }
-    }
-    s
-}
-
-// A–Z, built for the Latin letter converters (repeat scheme, not base-26).
-fn latin_upper() -> Vec<&'static str> {
-    const A: [&str; 26] = [
-        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
-        "S", "T", "U", "V", "W", "X", "Y", "Z",
-    ];
-    A.to_vec()
-}
-
-// §17.18.59 arabicAlpha "Arabic Alphabet" — positions 1–28.
-const ARABIC_ALPHA: &[&str] = &[
-    "أ", "ب", "ت", "ث", "ج", "ح", "خ", "د", "ذ", "ر", "ز", "س", "ش", "ص", "ض", "ط", "ظ", "ع", "غ",
-    "ف", "ق", "ك", "ل", "م", "ن", "ه", "و", "ي",
-];
-// §17.18.59 arabicAbjad "Arabic Abjad Numerals" — positions 1–28.
-const ARABIC_ABJAD: &[&str] = &[
-    "أ", "ب", "ج", "د", "ه", "و", "ز", "ح", "ط", "ي", "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق",
-    "ر", "ش", "ت", "ث", "خ", "ذ", "ض", "غ", "ظ",
-];
-// §17.18.59 hebrew2 "Hebrew Alphabet" — positions 1–22.
-const HEBREW_ALPHABET: &[&str] = &[
-    "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ", "ק",
-    "ר", "ש", "ת",
-];
-// §17.18.59 russianLower/Upper — positions 1–29 (alphabet minus ё, й, ъ, ь).
-const RUSSIAN_LOWER: &[&str] = &[
-    "а", "б", "в", "г", "д", "е", "ж", "з", "и", "к", "л", "м", "н", "о", "п", "р", "с", "т", "у",
-    "ф", "х", "ц", "ч", "ш", "щ", "ы", "э", "ю", "я",
-];
-const RUSSIAN_UPPER: &[&str] = &[
-    "А", "Б", "В", "Г", "Д", "Е", "Ж", "З", "И", "К", "Л", "М", "Н", "О", "П", "Р", "С", "Т", "У",
-    "Ф", "Х", "Ц", "Ч", "Ш", "Щ", "Ы", "Э", "Ю", "Я",
-];
-// §17.18.59 thaiLetters — positions 1–41 (U+0E01, U+0E02, U+0E04, U+0E07–U+0E23,
-// U+0E25, U+0E27–U+0E2E).
-const THAI_LETTERS: &[&str] = &[
-    "ก", "ข", "ค", "ง", "จ", "ฉ", "ช", "ซ", "ฌ", "ญ", "ฎ", "ฏ", "ฐ", "ฑ", "ฒ", "ณ", "ด", "ต", "ถ",
-    "ท", "ธ", "น", "บ", "ป", "ผ", "ฝ", "พ", "ฟ", "ภ", "ม", "ย", "ร", "ล", "ว", "ศ", "ษ", "ส", "ห",
-    "ฬ", "อ", "ฮ",
-];
-// §17.18.59 chosung "Korean Chosung" — positions 1–14.
-const KOREAN_CHOSUNG: &[&str] = &[
-    "ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
-];
-// §17.18.59 ganada "Korean Ganada" — positions 1–14.
-const KOREAN_GANADA: &[&str] = &[
-    "가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타", "파", "하",
-];
-// §17.18.59 hindiVowels — positions 1–37 = U+0915–U+0939 (contiguous).
-const HINDI_VOWELS: &[&str] = &[
-    "क", "ख", "ग", "घ", "ङ", "च", "छ", "ज", "झ", "ञ", "ट", "ठ", "ड", "ढ", "ण", "त", "थ", "द", "ध",
-    "न", "ऩ", "प", "फ", "ब", "भ", "म", "य", "र", "ऱ", "ल", "ळ", "ऴ", "व", "श", "ष", "स", "ह",
-];
-// §17.18.59 hindiConsonants — positions 1–18 = U+0905–U+0914 then अं / अः.
-const HINDI_CONSONANTS: &[&str] = &[
-    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ", "ऌ", "ऍ", "ऎ", "ए", "ऐ", "ऑ", "ऒ", "ओ", "औ", "अं", "अः",
-];
-
-/// §17.18.59 repeat-letter alphabets: map 1..N into the set; for n>N repeat the
-/// SAME glyph once per full N subtracted (not base-N). Mirrors the TS
-/// `repeatAlphabet`.
-fn repeat_alphabet(n: u32, glyphs: &[&str]) -> String {
-    let size = glyphs.len() as u32;
-    let repeats = (n - 1) / size + 1;
-    let glyph = glyphs[((n - 1) % size) as usize];
-    glyph.repeat(repeats as usize)
-}
-
-// §17.18.59 aiueoFullWidth "AIUEO Order Full-Width Katakana" — the full-width
-// katakana in a-i-u-e-o order, using the SAME repeat scheme as the letter
-// alphabets. §17.18.59 ENUMERATES these 48 code points (incl. the archaic ヰ
-// U+30F0 and ヱ U+30F1, so wo/n land at 47/48). The section's "positions 1–46"
-// prose is a copy/paste artifact from the half-width `aiueo` entry; we follow the
-// explicit enumerated character list. Katakana (not hiragana) is also what Word
-// emits: [MS-OE376] §2.1.580 note (b) records that where the (1st-edition Part 4)
-// standard said "hiragana characters", Word uses katakana — matching the
-// 5th-edition code-point list implemented here. Mirrors TS `KATAKANA_FULLWIDTH`.
-const KATAKANA_FULLWIDTH: &[&str] = &[
-    "\u{30A2}", "\u{30A4}", "\u{30A6}", "\u{30A8}", "\u{30AA}", "\u{30AB}", "\u{30AD}", "\u{30AF}",
-    "\u{30B1}", "\u{30B3}", "\u{30B5}", "\u{30B7}", "\u{30B9}", "\u{30BB}", "\u{30BD}", "\u{30BF}",
-    "\u{30C1}", "\u{30C4}", "\u{30C6}", "\u{30C8}", "\u{30CA}", "\u{30CB}", "\u{30CC}", "\u{30CD}",
-    "\u{30CE}", "\u{30CF}", "\u{30D2}", "\u{30D5}", "\u{30D8}", "\u{30DB}", "\u{30DE}", "\u{30DF}",
-    "\u{30E0}", "\u{30E1}", "\u{30E2}", "\u{30E4}", "\u{30E6}", "\u{30E8}", "\u{30E9}", "\u{30EA}",
-    "\u{30EB}", "\u{30EC}", "\u{30ED}", "\u{30EF}", "\u{30F0}", "\u{30F1}", "\u{30F2}", "\u{30F3}",
-];
-
-// §17.18.59 aiueo "AIUEO Order Half-Width Katakana" — positions 1–46 =
-// U+FF71–U+FF9C (ｱ..ﾜ), then U+FF66 (ｦ), then U+FF9D (ﾝ). No archaic ヰ/ヱ (no
-// half-width forms). Katakana per [MS-OE376] §2.1.580 note (b) — see
-// `KATAKANA_FULLWIDTH` above. Mirrors TS `KATAKANA_HALFWIDTH`.
-const KATAKANA_HALFWIDTH: &[&str] = &[
-    "\u{FF71}", "\u{FF72}", "\u{FF73}", "\u{FF74}", "\u{FF75}", "\u{FF76}", "\u{FF77}", "\u{FF78}",
-    "\u{FF79}", "\u{FF7A}", "\u{FF7B}", "\u{FF7C}", "\u{FF7D}", "\u{FF7E}", "\u{FF7F}", "\u{FF80}",
-    "\u{FF81}", "\u{FF82}", "\u{FF83}", "\u{FF84}", "\u{FF85}", "\u{FF86}", "\u{FF87}", "\u{FF88}",
-    "\u{FF89}", "\u{FF8A}", "\u{FF8B}", "\u{FF8C}", "\u{FF8D}", "\u{FF8E}", "\u{FF8F}", "\u{FF90}",
-    "\u{FF91}", "\u{FF92}", "\u{FF93}", "\u{FF94}", "\u{FF95}", "\u{FF96}", "\u{FF97}", "\u{FF98}",
-    "\u{FF99}", "\u{FF9A}", "\u{FF9B}", "\u{FF9C}", "\u{FF66}", "\u{FF9D}",
-];
-
-/// §17.18.59 decimalEnclosedCircle: the spec tables 1–20 → U+2460–U+2473 (①..⑳)
-/// and states that "for values greater than the size of the set, the items fall
-/// back to the decimal format" (its example: …, ⑲, ⑳, 21, …). Unicode does carry
-/// follow-on enclosed-number blocks (㉑..㉟ U+3251–U+325F, ㊱..㊿ U+32B1–U+32BF),
-/// but neither §17.18.59 nor the Word implementation notes ([MS-OE376] §2.1.580,
-/// which records this section's sibling deviations in detail) documents Word
-/// continuing the circled sequence past 20 — so we stay with the specified
-/// decimal fallback at 21+ until primary evidence (real Word output or an
-/// implementation note) shows otherwise. Mirrors TS `toEnclosedCircle`. Caller
-/// guarantees n ≥ 1 (n = 0 is handled by the early return in `format_counter`).
-fn to_enclosed_circle(n: u32) -> String {
-    match n {
-        1..=20 => char::from_u32(0x2460 + (n - 1))
-            .map(String::from)
-            .unwrap_or_else(|| n.to_string()),
-        _ => n.to_string(), // 21+ : §17.18.59 decimal fallback.
-    }
-}
-
-// Positional digit sets, index 0 = zero glyph … index 9 (§17.18.59).
-const DIGITS_FULLWIDTH: &[&str] = &["０", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
-const DIGITS_THAI: &[&str] = &["๐", "๑", "๒", "๓", "๔", "๕", "๖", "๗", "๘", "๙"];
-const DIGITS_HINDI: &[&str] = &["०", "१", "२", "३", "४", "५", "६", "७", "८", "९"];
-const DIGITS_IDEOGRAPH: &[&str] = &["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-const DIGITS_KOREAN: &[&str] = &["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
-const DIGITS_KOREAN2: &[&str] = &["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-const DIGITS_TAIWANESE: &[&str] = &["○", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-
-/// §17.18.59 base-10 positional digit substitution. Mirrors TS `toPositionalDigits`.
-fn to_positional_digits(n: u32, digits: &[&str]) -> String {
-    n.to_string()
-        .bytes()
-        .map(|b| digits[(b - b'0') as usize])
-        .collect()
-}
-
-/// §17.18.59 chineseCounting / taiwaneseCounting: base-10 positional with the 十
-/// tens-word for 2-digit values only (10 → 十, 20 → 二十, 99 → 九十九), pure
-/// positional at ≥ 100 (100 → 一〇〇). Mirrors TS `toChineseCounting`.
-fn to_chinese_counting(n: u32, digits: &[&str]) -> String {
-    if n < 10 {
-        return digits[n as usize].to_string();
-    }
-    if n < 100 {
-        let tens = n / 10;
-        let ones = n % 10;
-        let head = if tens == 1 {
-            "十".to_string()
-        } else {
-            format!("{}十", digits[tens as usize])
-        };
-        return if ones == 0 {
-            head
-        } else {
-            format!("{}{}", head, digits[ones as usize])
-        };
-    }
-    to_positional_digits(n, digits)
-}
-
-// ── Grouped CJK counting / legal (myriad grouping) ──────────────────────────
-// Mirrors the TS `MyriadTable` + `toMyriadGrouped`.
-struct MyriadTable {
-    digits: &'static [&'static str], // index 0 = 零/〇 zero-fill glyph … 9
-    ten: &'static str,
-    hundred: &'static str,
-    thousand: &'static str,
-    myriad: &'static str,
-    elide_one: bool,   // Japanese/Korean elide the "1" before 十/百/千.
-    insert_zero: bool, // Chinese counting/legal fill an interior gap with 零.
-}
-
-const CJK_DIGITS: &[&str] = DIGITS_KOREAN2; // 零 一 二 … 九
-const MYRIAD_JAPANESE: MyriadTable = MyriadTable {
-    digits: CJK_DIGITS,
-    ten: "十",
-    hundred: "百",
-    thousand: "千",
-    myriad: "万",
-    elide_one: true,
-    insert_zero: false,
-};
-const MYRIAD_CHINESE: MyriadTable = MyriadTable {
-    elide_one: false,
-    insert_zero: true,
-    ..MYRIAD_JAPANESE
-};
-const MYRIAD_KOREAN: MyriadTable = MyriadTable {
-    digits: &["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"],
-    ten: "십",
-    hundred: "백",
-    thousand: "천",
-    myriad: "만",
-    elide_one: true,
-    insert_zero: false,
-};
-const MYRIAD_CHINESE_LEGAL: MyriadTable = MyriadTable {
-    digits: &["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"],
-    ten: "拾",
-    hundred: "佰",
-    thousand: "仟",
-    myriad: "万",
-    elide_one: false,
-    insert_zero: true,
-};
-const MYRIAD_JAPANESE_LEGAL: MyriadTable = MyriadTable {
-    digits: &["零", "壱", "弐", "参", "四", "伍", "六", "七", "八", "九"],
-    ten: "拾",
-    hundred: "百",
-    thousand: "阡",
-    myriad: "萬",
-    elide_one: false,
-    insert_zero: false,
-};
-const MYRIAD_TRAD_LEGAL: MyriadTable = MyriadTable {
-    digits: &["零", "壹", "貳", "參", "肆", "伍", "陸", "柒", "捌", "玖"],
-    ten: "拾",
-    hundred: "佰",
-    thousand: "仟",
-    myriad: "萬",
-    elide_one: false,
-    insert_zero: false,
-};
-
-/// Render one 4-digit myriad group (0–9999). Mirrors TS `renderMyriadGroup`.
-fn render_myriad_group(group: u32, t: &MyriadTable) -> String {
-    let thousands = group / 1000 % 10;
-    let hundreds = group / 100 % 10;
-    let tens = group / 10 % 10;
-    let ones = group % 10;
-    let places = [
-        (thousands, t.thousand),
-        (hundreds, t.hundred),
-        (tens, t.ten),
-        (ones, ""),
-    ];
-    let mut out = String::new();
-    let mut saw_non_zero = false;
-    let mut pending_zero = false;
-    for (digit, unit) in places {
-        if digit == 0 {
-            if saw_non_zero {
-                pending_zero = true;
-            }
-            continue;
-        }
-        if pending_zero {
-            if t.insert_zero {
-                out.push_str(t.digits[0]);
-            }
-            pending_zero = false;
-        }
-        if t.elide_one && digit == 1 && !unit.is_empty() {
-            out.push_str(unit);
-        } else {
-            out.push_str(t.digits[digit as usize]);
-            out.push_str(unit);
-        }
-        saw_non_zero = true;
-    }
-    out
-}
-
-/// East-Asian myriad-grouped counting/legal formatter. Mirrors TS
-/// `toMyriadGrouped` (values ≥ 10^8 recurse through 億).
-fn to_myriad_grouped(n: u32, t: &MyriadTable) -> String {
-    if n >= 100_000_000 {
-        let upper = n / 100_000_000;
-        let lower = n % 100_000_000;
-        let head = format!("{}億", to_myriad_grouped(upper, t));
-        if lower == 0 {
-            return head;
-        }
-        let gap = if t.insert_zero && lower < 10_000_000 {
-            t.digits[0]
-        } else {
-            ""
-        };
-        return format!("{}{}{}", head, gap, to_myriad_grouped(lower, t));
-    }
-    let upper_group = n / 10000;
-    let lower_group = n % 10000;
-    let mut out = String::new();
-    if upper_group > 0 {
-        out.push_str(&render_myriad_group(upper_group, t));
-        out.push_str(t.myriad);
-    }
-    if lower_group > 0 {
-        if t.insert_zero && upper_group > 0 && lower_group < 1000 {
-            out.push_str(t.digits[0]);
-        }
-        out.push_str(&render_myriad_group(lower_group, t));
-    }
-    out
-}
-
-// §17.18.59 hebrew1 gematria. Mirrors TS `toHebrewGematria`.
-const HEBREW_ONES: &[&str] = &["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
-const HEBREW_TENS: &[&str] = &["", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"];
-const HEBREW_HUNDREDS: &[&str] = &["", "ק", "ר", "ש", "ת", "ך", "ם", "ן", "ף", "ץ"];
-
-fn to_hebrew_gematria(n: u32) -> String {
-    let mut out = String::new();
-    let mut rem = n;
-    let thousands = rem / 1000;
-    rem %= 1000;
-    let hundreds = rem / 100;
-    rem %= 100;
-    if thousands > 0 {
-        out.push_str(HEBREW_ONES[(thousands % 10) as usize]);
-    }
-    out.push_str(HEBREW_HUNDREDS[hundreds as usize]);
-    if rem == 15 {
-        out.push_str("טו");
-        return out;
-    }
-    if rem == 16 {
-        out.push_str("טז");
-        return out;
-    }
-    let tens = rem / 10;
-    let ones = rem % 10;
-    out.push_str(HEBREW_TENS[tens as usize]);
-    out.push_str(HEBREW_ONES[ones as usize]);
-    out
-}
-
-/// §17.18.59 hebrew2 — NOT the repeat-letter scheme: subtract 22 until the
-/// result is ≤ 22, write THAT glyph once, then append ת once per subtraction
-/// (23 → את, 24 → בת; §17.16.4.3.1 field example 123 → מ + 5×ת). Mirrors TS
-/// `toHebrew2`.
-fn to_hebrew2(n: u32) -> String {
-    let size = HEBREW_ALPHABET.len() as u32; // 22
-    let subtractions = (n - 1) / size;
-    let remainder = n - size * subtractions; // 1..=22
-    format!(
-        "{}{}",
-        HEBREW_ALPHABET[(remainder - 1) as usize],
-        "ת".repeat(subtractions as usize)
-    )
+fn level_facts<'a>(
+    abstracts: &'a HashMap<u32, Vec<LevelDef>>,
+    overrides: &'a HashMap<u32, HashMap<u32, LevelDef>>,
+    aliases: &HashMap<u32, u32>,
+    num_id: u32,
+    level: u32,
+) -> Option<LevelFacts<'a>> {
+    let definition = overrides
+        .get(&num_id)
+        .and_then(|levels| levels.get(&level))
+        .or_else(|| {
+            aliases
+                .get(&num_id)
+                .and_then(|id| abstracts.get(id))
+                .and_then(|levels| levels.get(level as usize))
+        })?;
+    Some(LevelFacts {
+        start: definition.start,
+        restart: definition.restart,
+        format: &definition.format,
+        text: &definition.text,
+        legal: definition.legal,
+    })
 }
 
 #[cfg(test)]
@@ -1242,12 +774,12 @@ mod tests {
                  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
                </w:abstractNum>
                <w:num w:numId="5"><w:abstractNumId w:val="5"/></w:num>"#);
-        let c1 = m.advance(5, 1);
-        assert_eq!(m.resolve_text(5, 1, c1), "3.1");
-        let c2 = m.advance(5, 1);
-        assert_eq!(m.resolve_text(5, 1, c2), "3.2");
-        let c3 = m.advance(5, 1);
-        assert_eq!(m.resolve_text(5, 1, c3), "3.3");
+        let c1 = m.advance(5, 1).unwrap();
+        assert_eq!(m.resolve_text(5, 1, c1).unwrap(), "3.1");
+        let c2 = m.advance(5, 1).unwrap();
+        assert_eq!(m.resolve_text(5, 1, c2).unwrap(), "3.2");
+        let c3 = m.advance(5, 1).unwrap();
+        assert_eq!(m.resolve_text(5, 1, c3).unwrap(), "3.3");
     }
 
     /// Parent counter is tracked live and resets deeper levels: 1, 1.1, 1.2,
@@ -1259,16 +791,16 @@ mod tests {
                  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
                </w:abstractNum>
                <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#);
-        let a = m.advance(1, 0);
-        assert_eq!(m.resolve_text(1, 0, a), "1.");
-        let b = m.advance(1, 1);
-        assert_eq!(m.resolve_text(1, 1, b), "1.1");
-        let c = m.advance(1, 1);
-        assert_eq!(m.resolve_text(1, 1, c), "1.2");
-        let d = m.advance(1, 0);
-        assert_eq!(m.resolve_text(1, 0, d), "2.");
-        let e = m.advance(1, 1);
-        assert_eq!(m.resolve_text(1, 1, e), "2.1"); // deeper level reset on parent advance
+        let a = m.advance(1, 0).unwrap();
+        assert_eq!(m.resolve_text(1, 0, a).unwrap(), "1.");
+        let b = m.advance(1, 1).unwrap();
+        assert_eq!(m.resolve_text(1, 1, b).unwrap(), "1.1");
+        let c = m.advance(1, 1).unwrap();
+        assert_eq!(m.resolve_text(1, 1, c).unwrap(), "1.2");
+        let d = m.advance(1, 0).unwrap();
+        assert_eq!(m.resolve_text(1, 0, d).unwrap(), "2.");
+        let e = m.advance(1, 1).unwrap();
+        assert_eq!(m.resolve_text(1, 1, e).unwrap(), "2.1"); // deeper level reset on parent advance
     }
 
     /// Each level's `%N` is formatted with its OWN numFmt (§17.9.11): an
@@ -1280,9 +812,9 @@ mod tests {
                  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
                </w:abstractNum>
                <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>"#);
-        m.advance(2, 0);
-        let c = m.advance(2, 1);
-        assert_eq!(m.resolve_text(2, 1, c), "A.1");
+        m.advance(2, 0).unwrap();
+        let c = m.advance(2, 1).unwrap();
+        assert_eq!(m.resolve_text(2, 1, c).unwrap(), "A.1");
     }
 
     /// ECMA-376 §17.9.26 demonstrates that two numIds referencing one abstractNum
@@ -1299,16 +831,16 @@ mod tests {
                </w:num>"#);
         // Article body (numId=6): 1, 2, 3, 4.
         for expected in ["1.", "2.", "3.", "4."] {
-            let c = m.advance(6, 0);
-            assert_eq!(m.resolve_text(6, 0, c), expected);
+            let c = m.advance(6, 0).unwrap();
+            assert_eq!(m.resolve_text(6, 0, c).unwrap(), expected);
         }
         // Masthead heading restarts the shared abstract counter to 1 (numId=30).
-        let c = m.advance(30, 0);
-        assert_eq!(m.resolve_text(30, 0, c), "1.");
+        let c = m.advance(30, 0).unwrap();
+        assert_eq!(m.resolve_text(30, 0, c).unwrap(), "1.");
         // Body resumes with numId=6 — continues the restarted count: 2, 3, 4.
         for expected in ["2.", "3.", "4."] {
-            let c = m.advance(6, 0);
-            assert_eq!(m.resolve_text(6, 0, c), expected);
+            let c = m.advance(6, 0).unwrap();
+            assert_eq!(m.resolve_text(6, 0, c).unwrap(), expected);
         }
     }
 
@@ -1321,12 +853,12 @@ mod tests {
                </w:abstractNum>
                <w:num w:numId="1"><w:abstractNumId w:val="7"/></w:num>
                <w:num w:numId="2"><w:abstractNumId w:val="7"/></w:num>"#);
-        let a = m.advance(1, 0);
-        assert_eq!(m.resolve_text(1, 0, a), "1.");
-        let b = m.advance(2, 0); // different numId, same abstract ⇒ continues
-        assert_eq!(m.resolve_text(2, 0, b), "2.");
-        let c = m.advance(1, 0);
-        assert_eq!(m.resolve_text(1, 0, c), "3.");
+        let a = m.advance(1, 0).unwrap();
+        assert_eq!(m.resolve_text(1, 0, a).unwrap(), "1.");
+        let b = m.advance(2, 0).unwrap(); // different numId, same abstract ⇒ continues
+        assert_eq!(m.resolve_text(2, 0, b).unwrap(), "2.");
+        let c = m.advance(1, 0).unwrap();
+        assert_eq!(m.resolve_text(1, 0, c).unwrap(), "3.");
     }
 
     /// A dangling numId (no `<w:num>`) whose value equals a live abstractNumId
@@ -1339,12 +871,12 @@ mod tests {
                  <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
                </w:abstractNum>
                <w:num w:numId="5"><w:abstractNumId w:val="4"/></w:num>"#);
-        let a = m.advance(5, 0);
-        assert_eq!(m.resolve_text(5, 0, a), "1.");
+        let a = m.advance(5, 0).unwrap();
+        assert_eq!(m.resolve_text(5, 0, a).unwrap(), "1.");
         // numId 4 has no <w:num>; it must start its own count at 1, not read
         // abstractNumId 4's counter (which would yield 2).
-        let b = m.advance(4, 0);
-        assert_eq!(m.resolve_text(4, 0, b), "1.");
+        let b = m.advance(4, 0).unwrap();
+        assert_eq!(m.resolve_text(4, 0, b).unwrap(), "1.");
     }
 
     /// ECMA-376 §17.18.59 — the Rust `format_counter` MUST match the core TS
@@ -1547,9 +1079,26 @@ mod tests {
                  <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="ideographDigital"/><w:lvlText w:val="%1."/></w:lvl>
                </w:abstractNum>
                <w:num w:numId="9"><w:abstractNumId w:val="9"/></w:num>"#);
-        let a = m.advance(9, 0);
-        assert_eq!(m.resolve_text(9, 0, a), "一."); // 1 → 一
-        let b = m.advance(9, 0);
-        assert_eq!(m.resolve_text(9, 0, b), "二."); // 2 → 二
+        let a = m.advance(9, 0).unwrap();
+        assert_eq!(m.resolve_text(9, 0, a).unwrap(), "一."); // 1 → 一
+        let b = m.advance(9, 0).unwrap();
+        assert_eq!(m.resolve_text(9, 0, b).unwrap(), "二."); // 2 → 二
+    }
+
+    #[test]
+    fn clones_share_first_failure_but_keep_independent_counter_state() {
+        let mut original = map(
+            r#"<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>"#,
+        );
+        let mut cloned = original.clone();
+        assert_eq!(original.advance(1, 0), Ok(1));
+        assert_eq!(cloned.advance(1, 0), Ok(1));
+        original.record_counter_error(CounterError::Overflow);
+        cloned.record_counter_error(CounterError::InvalidLevel);
+        assert_eq!(
+            original.check_counter_error(),
+            Err("numbering counter overflow".to_string())
+        );
+        assert_eq!(cloned.check_counter_error(), original.check_counter_error());
     }
 }

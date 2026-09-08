@@ -37,13 +37,13 @@ fn legal_numbering_uses_common_boolean_semantics_in_both_namespaces() {
         ] {
             let map = map(ns, property, None);
             assert_eq!(
-                map.resolve_text(2, 2, 5),
+                map.resolve_text(2, 2, 5).unwrap(),
                 if legal { "3.4.5" } else { "III.d.05" },
                 "{ns}: {property}"
             );
             // This flag changes only this marker, not its ancestor definitions.
-            assert_eq!(map.resolve_text(2, 0, 3), "III");
-            assert_eq!(map.resolve_text(2, 1, 4), "III.d");
+            assert_eq!(map.resolve_text(2, 0, 3).unwrap(), "III");
+            assert_eq!(map.resolve_text(2, 1, 4).unwrap(), "III.d");
             assert_eq!(map.get_level(2, 2).unwrap().format, "decimalZero");
         }
     }
@@ -57,7 +57,9 @@ fn complete_replacement_can_enable_disable_or_omit_legal_numbering() {
         ("<w:isLgl/>", "", "III.d.05"),
     ] {
         assert_eq!(
-            map(TRANSITIONAL, base, Some(replacement)).resolve_text(2, 2, 5),
+            map(TRANSITIONAL, base, Some(replacement))
+                .resolve_text(2, 2, 5)
+                .unwrap(),
             expected
         );
     }
@@ -68,11 +70,14 @@ fn legal_numbering_preserves_counter_progression_and_literal_text() {
     let mut legal = map(TRANSITIONAL, "<w:isLgl/>", None);
     let mut regular = map(TRANSITIONAL, "", None);
     for level in [0, 1, 2, 2, 1, 2, 0, 1, 2] {
-        assert_eq!(legal.advance(2, level), regular.advance(2, level));
+        assert_eq!(
+            legal.advance(2, level).unwrap(),
+            regular.advance(2, level).unwrap()
+        );
     }
     let definition = &mut legal.abstract_nums.get_mut(&1).unwrap()[2];
     definition.text = "Section %1 / %1 - %3!".into();
-    assert_eq!(legal.resolve_text(2, 2, 5), "Section 4 / 4 - 5!");
+    assert_eq!(legal.resolve_text(2, 2, 5).unwrap(), "Section 4 / 4 - 5!");
 }
 
 #[test]
@@ -82,8 +87,8 @@ fn legal_numbering_uses_normative_decimal_even_for_none_and_zero() {
     // inferred here. A zero counter remains zero, not the first positive value.
     let mut legal = map(TRANSITIONAL, "<w:isLgl/>", None);
     legal.abstract_nums.get_mut(&1).unwrap()[0].format = "none".into();
-    assert_eq!(legal.resolve_text(2, 2, 0), "3.4.0");
-    assert_eq!(legal.resolve_text(2, 0, 3), "");
+    assert_eq!(legal.resolve_text(2, 2, 0).unwrap(), "3.4.0");
+    assert_eq!(legal.resolve_text(2, 0, 3).unwrap(), "");
 }
 
 #[test]
