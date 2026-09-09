@@ -17,7 +17,19 @@ struct Style<'a> {
     kind: u16,
     chpx: &'a [u8],
     papx: &'a [u8],
+    #[allow(dead_code)] // Acquired now; consumed by the subsequent table-style resolution slice.
+    table: Option<TableStylePropertySets<'a>>,
     language_compatibility: StyleLanguageCompatibility,
+}
+
+/// Raw, ordered MS-DOC 2.9.270 StkTableGRLPUPX members. Acquisition is
+/// deliberately lossless: interpretation and inheritance are separate slices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Acquired now; consumed by the subsequent table-style resolution slice.
+struct TableStylePropertySets<'a> {
+    tapx: &'a [u8],
+    papx: &'a [u8],
+    chpx: &'a [u8],
 }
 
 /// Raw MS-DOC 2.9.112 GRFSTD language-compatibility facts. Interpretation is
@@ -610,6 +622,11 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
         let kind_and_base = u16_at(std, 2)?;
         let kind = kind_and_base & 15;
         let count = (u16_at(std, 4)? & 15) as usize;
+        // MS-DOC 2.9.260 StdfBase requires exactly the three ordered
+        // StkTableGRLPUPX members for a non-revision-marked table style.
+        if kind == 3 && count != 3 {
+            return Err(unsupported("invalid Word table style property set count"));
+        }
         // MS-DOC 2.9.260 StdfBase: GRFSTD follows the two-byte bchUpe
         // at offset 6, in both accepted STD header sizes.
         let grfstd = u16_at(std, 8)?;
@@ -625,6 +642,7 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
         p += 2;
         let mut chpx = &[][..];
         let mut papx = &[][..];
+        let mut table_sets = [None; 3];
         for i in 0..count {
             let n = u16_at(std, p)? as usize;
             p += 2;
@@ -641,13 +659,22 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
                     .get(2..)
                     .ok_or_else(|| unsupported("missing Word style paragraph index"))?;
             }
+            if kind == 3 {
+                table_sets[i] = Some(upx);
+            }
             p += n + n % 2;
         }
+        let table = (kind == 3).then(|| TableStylePropertySets {
+            tapx: table_sets[0].expect("validated table style property set count"),
+            papx: table_sets[1].expect("validated table style property set count"),
+            chpx: table_sets[2].expect("validated table style property set count"),
+        });
         styles.push(Some(Style {
             base: (kind_and_base >> 4) as usize,
             kind,
             chpx,
             papx,
+            table,
             language_compatibility,
         }));
     }
@@ -751,6 +778,122 @@ mod tests {
             bytes.extend(0u16.to_le_bytes());
         }
         bytes
+    }
+
+    fn stylesheet_with_property_sets(base_size: u16, kind: u16, sets: &[&[u8]]) -> Vec<u8> {
+        let mut header = vec![0; 18];
+        header[0..2].copy_from_slice(&15u16.to_le_bytes());
+        header[2..4].copy_from_slice(&base_size.to_le_bytes());
+        let mut std = vec![0; usize::from(base_size) + 4];
+        std[2..4].copy_from_slice(&((0x0fff << 4) | kind).to_le_bytes());
+        std[4..6].copy_from_slice(&(sets.len() as u16).to_le_bytes());
+        for set in sets {
+            std.extend((set.len() as u16).to_le_bytes());
+            std.extend(*set);
+            if set.len() % 2 != 0 {
+                std.push(0);
+            }
+        }
+        let std_size = std.len() as u16;
+        std[6..8].copy_from_slice(&std_size.to_le_bytes());
+
+        let mut bytes = Vec::new();
+        bytes.extend((header.len() as u16).to_le_bytes());
+        bytes.extend(header);
+        bytes.extend(std_size.to_le_bytes());
+        bytes.extend(std);
+        for _ in 1..15 {
+            bytes.extend(0u16.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn retains_table_style_property_sets_in_specified_order() {
+        for base_size in [10, 18] {
+            let bytes = stylesheet_with_property_sets(
+                base_size,
+                3,
+                &[
+                    &[0x04, 0x34, 1],
+                    &[0x0b, 0, 0x41, 0x24, 1],
+                    &[0x35, 0x08, 1],
+                ],
+            );
+            let (_, styles) = read_styles(&bytes).unwrap();
+            let style = styles[0].as_ref().unwrap();
+            assert_eq!(style.kind, 3);
+            assert_eq!(style.base, 0x0fff);
+            let table = style.table.as_ref().unwrap();
+            assert_eq!(table.tapx, [0x04, 0x34, 1]);
+            assert_eq!(table.papx, [0x0b, 0, 0x41, 0x24, 1]);
+            assert_eq!(table.chpx, [0x35, 0x08, 1]);
+            assert!(style.papx.is_empty());
+            assert!(style.chpx.is_empty());
+        }
+    }
+
+    #[test]
+    fn retains_empty_table_style_property_sets_without_consuming_padding() {
+        let bytes = stylesheet_with_property_sets(10, 3, &[&[], &[0, 0], &[]]);
+        let (_, styles) = read_styles(&bytes).unwrap();
+        let style = styles[0].as_ref().unwrap();
+        let table = style.table.as_ref().unwrap();
+        assert!(table.tapx.is_empty());
+        assert_eq!(table.papx, [0, 0]);
+        assert!(table.chpx.is_empty());
+    }
+
+    #[test]
+    fn retains_short_table_style_papx_losslessly_and_rejects_truncated_lpupx() {
+        for papx in [&[][..], &[0x01][..]] {
+            let bytes = stylesheet_with_property_sets(10, 3, &[&[0x11], papx, &[0x31]]);
+            let (_, styles) = read_styles(&bytes).unwrap();
+            assert_eq!(
+                styles[0].as_ref().unwrap().table.as_ref().unwrap().papx,
+                papx
+            );
+        }
+
+        let mut bytes = stylesheet_with_property_sets(10, 3, &[&[0x11], &[0, 0], &[0x31]]);
+        let papx_length = 22 + 10 + 4 + 2 + 1 + 1;
+        bytes[papx_length..papx_length + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+        let error = read_styles(&bytes)
+            .err()
+            .expect("truncated LPUpxPapx must fail");
+        assert!(error.contains("truncated Word style properties"), "{error}");
+    }
+
+    #[test]
+    fn enforces_only_the_table_style_property_set_count() {
+        for count in [0, 1, 2, 4] {
+            let sets = vec![&[][..]; count];
+            let bytes = stylesheet_with_property_sets(10, 3, &sets);
+            let error = read_styles(&bytes)
+                .err()
+                .expect("invalid table cupx must fail");
+            assert!(error.contains("table style property set count"), "{error}");
+        }
+
+        assert!(read_styles(&stylesheet_with_property_sets(10, 1, &[&[0, 0], &[], &[]],)).is_ok());
+        assert!(read_styles(&stylesheet_with_property_sets(18, 2, &[&[], &[]])).is_ok());
+    }
+
+    #[test]
+    fn paragraph_and_character_style_acquisition_remains_unchanged() {
+        let paragraph = stylesheet_with_property_sets(10, 1, &[&[0x34, 0x12, 0x21], &[0x31]]);
+        let (_, styles) = read_styles(&paragraph).unwrap();
+        let style = styles[0].as_ref().unwrap();
+        assert!(style.table.is_none());
+        assert_eq!(style.papx, [0x21]);
+        assert_eq!(style.chpx, [0x31]);
+
+        let character = stylesheet_with_property_sets(18, 2, &[&[0x41]]);
+        let (_, styles) = read_styles(&character).unwrap();
+        let style = styles[0].as_ref().unwrap();
+        assert!(style.table.is_none());
+        assert!(style.papx.is_empty());
+        assert_eq!(style.chpx, [0x41]);
     }
 
     #[test]
@@ -1045,6 +1188,7 @@ mod tests {
                 base: 0xfff,
                 chpx: direct,
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             })];
             let xml = formatting.run_xml(0, 0, 0, &[]).unwrap();
@@ -1278,6 +1422,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x43, 0x4a, 24, 0, 0x35, 8, 1],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1285,6 +1430,7 @@ mod tests {
                 base: 0,
                 chpx: &[0x43, 0x4a, 32, 0],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1292,6 +1438,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x36, 8, 1],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
@@ -1318,6 +1465,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x43, 0x4a, 24, 0, 0x4f, 0x4a, 0, 0, 0x35, 8, 1],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1325,6 +1473,7 @@ mod tests {
                 base: 0,
                 chpx: &[0x50, 0x4a, 1, 0, 0x51, 0x4a, 2, 0, 0x5e, 0x4a, 3, 0],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1332,6 +1481,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x36, 8, 1],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
@@ -1483,6 +1633,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x6f, 0x28, 1], // eastAsia
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1490,6 +1641,7 @@ mod tests {
                 base: 0,
                 chpx: &[0x6f, 0x28, 0], // inherited eastAsia -> default
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1497,6 +1649,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x6f, 0x28, 0], // must not replace a pre-CIstd hint
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
@@ -1559,6 +1712,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[0x35, 0x08, 0x81],
                 papx: &[],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             })];
             f.numbering = numbering::Tables {
@@ -1625,6 +1779,7 @@ mod tests {
                     base: 0xfff,
                     chpx: &[0x6f, 0x28, 1], // paragraph inherits eastAsia
                     papx: &[],
+                    table: None,
                     language_compatibility: StyleLanguageCompatibility::default(),
                 }),
                 Some(Style {
@@ -1632,6 +1787,7 @@ mod tests {
                     base: 0,
                     chpx: &[0x6f, 0x28, 0xff], // linked marker style: no guidance
                     papx: &[],
+                    table: None,
                     language_compatibility: StyleLanguageCompatibility::default(),
                 }),
             ];
@@ -1695,6 +1851,7 @@ mod tests {
                 base: 0xfff,
                 chpx: &[],
                 papx: &[0x24, 0x64, 8, 1, 2, 0, 0x26, 0x64, 8, 1, 2, 0],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
             Some(Style {
@@ -1702,6 +1859,7 @@ mod tests {
                 base: 0,
                 chpx: &[],
                 papx: &[0x50, 0xc6, 8, 0xff, 0, 0, 0, 16, 3, 0, 0],
+                table: None,
                 language_compatibility: StyleLanguageCompatibility::default(),
             }),
         ];
@@ -1725,6 +1883,7 @@ mod tests {
             base: 0,
             chpx: &[],
             papx: &[],
+            table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
         assert!(f.run_xml(0, 0, 0, &[]).unwrap_err().contains("cyclic"));
@@ -1741,6 +1900,7 @@ mod tests {
             chpx: &[],
             // Two tabs: 720 left/dotted, 1440 right/no leader.
             papx: &[0x0d, 0xc6, 8, 0, 2, 0xd0, 2, 0xa0, 5, 8, 2],
+            table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
         let original = f.paragraph_xml(0, 0, 0, &[]).unwrap();
@@ -1762,6 +1922,7 @@ mod tests {
             base: 0xfff,
             chpx: &[],
             papx: &[0x12, 0x64, 0xd4, 0xfe, 0, 0, 0x13, 0xa4, 240, 0],
+            table: None,
             language_compatibility: StyleLanguageCompatibility::default(),
         })];
         let xml = f
