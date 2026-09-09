@@ -1,7 +1,7 @@
 //! Assemble MS-DOC 2.4.3 table/cell/row marks into ECMA-376 17.4 tables.
 //! Row grids share the union of explicit cell edges, without fitted widths.
 use super::{
-    table::Properties,
+    table::{PreferredWidth, Properties},
     table_structure::{Assembler, Event, LogicalTable, Payload},
     unsupported,
 };
@@ -100,16 +100,33 @@ fn margins(xml: &mut String, values: [u16; 4]) {
     }
 }
 
+fn preferred(xml: &mut String, name: &str, value: Option<PreferredWidth>) {
+    if let Some(value) = value {
+        xml.push_str(&format!(
+            "<w:{name} w:w=\"{}\" w:type=\"{}\"/>",
+            value.value(),
+            value.kind()
+        ));
+    }
+}
+
 fn serialize(table: LogicalTable<Xml>, xml: &mut String, limit: usize) -> Result<(), String> {
     let first = &table.rows[0].source;
     let grid = &table.grid;
     let origin = table.origin;
-    let total = table.total;
     let (jc, physical) = first.alignment;
     let jc = if physical && first.bidi { 2 - jc } else { jc };
     xml.push_str("<w:tbl><w:tblPr>");
     xml.push_str(&first.position.xml());
-    xml.push_str(&format!("<w:bidiVisual w:val=\"{}\"/><w:tblW w:w=\"{total}\" w:type=\"dxa\"/><w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/>",u8::from(first.bidi),["left","center","right"][jc as usize]));
+    xml.push_str(&format!(
+        "<w:bidiVisual w:val=\"{}\"/>",
+        u8::from(first.bidi)
+    ));
+    preferred(xml, "tblW", first.preferred_width);
+    xml.push_str(&format!(
+        "<w:jc w:val=\"{}\"/><w:tblInd w:w=\"{origin}\" w:type=\"dxa\"/>",
+        ["left", "center", "right"][jc as usize]
+    ));
     if let Some(shading) = &first.shading {
         xml.push_str(&shading.xml());
     }
@@ -126,14 +143,25 @@ fn serialize(table: LogicalTable<Xml>, xml: &mut String, limit: usize) -> Result
     for (row_index, planned) in table.rows.iter().enumerate() {
         let row = &planned.source;
         xml.push_str("<w:tr>");
-        if row.shading != first.shading {
+        if row.shading != first.shading || row.preferred_width != first.preferred_width {
             // ECMA-376 17.4.30: table-level exceptions belong to the row;
             // changing shading must not split the table's shared grid.
             xml.push_str("<w:tblPrEx>");
-            if let Some(shading) = &row.shading {
-                xml.push_str(&shading.xml());
-            } else {
-                xml.push_str("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
+            if row.shading != first.shading {
+                if let Some(shading) = &row.shading {
+                    xml.push_str(&shading.xml());
+                } else {
+                    xml.push_str("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
+                }
+            }
+            if row.preferred_width != first.preferred_width {
+                // An omitted tblW in tblPrEx inherits tblPr/tblW. MS-DOC ftsNil
+                // instead clears the row preference, represented by ECMA auto.
+                preferred(
+                    xml,
+                    "tblW",
+                    Some(row.preferred_width.unwrap_or(PreferredWidth::Auto)),
+                );
             }
             xml.push_str("</w:tblPrEx>");
         }
@@ -170,11 +198,9 @@ fn serialize(table: LogicalTable<Xml>, xml: &mut String, limit: usize) -> Result
             let c = &planned_cell.source;
             let i = planned_cell.source_index;
             let end_cell = planned_cell.source_end;
-            let width = planned_cell.width;
             let span = planned_cell.grid_span;
-            xml.push_str(&format!(
-                "<w:tc><w:tcPr><w:tcW w:w=\"{width}\" w:type=\"dxa\"/>"
-            ));
+            xml.push_str("<w:tc><w:tcPr>");
+            preferred(xml, "tcW", c.preferred);
             if span > 1 {
                 xml.push_str(&format!("<w:gridSpan w:val=\"{span}\"/>"));
             }
@@ -387,6 +413,37 @@ mod tests {
         let xml = w.finish().unwrap();
         assert_eq!(xml.matches("<w:gridCol w:w=\"0\"/>").count(), 2);
         assert_eq!(xml.matches("<w:tc>").count(), 3);
+    }
+    #[test]
+    fn preferred_widths_are_distinct_from_grid_and_row_resets_use_exceptions() {
+        let mut w = Writer::new(100000);
+        for (table_width, cell_width) in [
+            (
+                Some(PreferredWidth::Dxa(2400)),
+                Some(PreferredWidth::Percent(2500)),
+            ),
+            (None, None),
+            (
+                Some(PreferredWidth::Percent(5000)),
+                Some(PreferredWidth::Auto),
+            ),
+        ] {
+            let mut r = row(1, &[1000]);
+            r.row.preferred_width = table_width;
+            r.row.cells[0].preferred = cell_width;
+            w.push(cell(1, false), '\u{7}', "<w:p/>".into()).unwrap();
+            w.push(r, '\u{7}', String::new()).unwrap();
+        }
+        let xml = w.finish().unwrap();
+        assert_eq!(xml.matches("<w:tbl>").count(), 1);
+        assert!(xml.contains("<w:tblW w:w=\"2400\" w:type=\"dxa\"/>"));
+        assert!(xml.contains("<w:tblPrEx><w:tblW w:w=\"0\" w:type=\"auto\"/></w:tblPrEx>"));
+        assert!(xml.contains("<w:tblPrEx><w:tblW w:w=\"5000\" w:type=\"pct\"/></w:tblPrEx>"));
+        assert!(xml.contains("<w:tcW w:w=\"2500\" w:type=\"pct\"/>"));
+        assert!(xml.contains("<w:tcW w:w=\"0\" w:type=\"auto\"/>"));
+        assert_eq!(xml.matches("<w:tcW ").count(), 2);
+        assert!(xml.contains("<w:gridCol w:w=\"1000\"/>"));
+        assert!(!xml.contains("<w:shd "));
     }
     #[test]
     fn rejects_unclosed_rows_and_output_expansion_before_success() {

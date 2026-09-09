@@ -7,13 +7,15 @@ pub(in crate::doc) use shading::Shading;
 pub(in crate::doc) use shading::{Color, DirectShadingFacts};
 mod position;
 pub(in crate::doc) use position::Position;
+mod width;
+pub(crate) use width::PreferredWidth;
 
 #[derive(Clone, Default)]
 pub struct Cell {
     pub shading: Option<Shading>,
     pub width: i32,
     pub flags: u16,
-    pub preferred: u16,
+    pub preferred: Option<PreferredWidth>,
     pub margins: [Option<u16>; 4],
     pub borders: [Option<Border>; 6],
 }
@@ -45,6 +47,7 @@ pub struct Row {
     pub bidi: bool,
     pub alignment: (u16, bool),
     pub borders: [Option<Border>; 6],
+    pub preferred_width: Option<PreferredWidth>,
 }
 
 impl Default for Row {
@@ -65,6 +68,7 @@ impl Default for Row {
             bidi: false,
             alignment: (0, false),
             borders: Default::default(),
+            preferred_width: None,
         }
     }
 }
@@ -261,7 +265,7 @@ impl Row {
                     };
                     if let Some(tc) = b.get(end + i * 20..end + (i + 1) * 20) {
                         cell.flags = u16_at(tc, 0)?;
-                        cell.preferred = u16_at(tc, 2)?;
+                        cell.preferred = PreferredWidth::tc80(cell.flags, u16_at(tc, 2)?)?;
                         for s in 0..4 {
                             cell.borders[s] = Some(Border::read(&tc[4 + s * 4..], true)?);
                         }
@@ -269,6 +273,17 @@ impl Row {
                     cells.push(cell);
                 }
                 self.cells = cells;
+            }
+            0xf614 => self.preferred_width = PreferredWidth::table(b)?,
+            0xd635 => {
+                if b.len() != 6 || b[0] != 5 {
+                    return Err(unsupported("invalid Word cell width operand length"));
+                }
+                let cells = range(&b[1..], self.cells.len())?;
+                let preferred = PreferredWidth::part(&b[3..])?;
+                for cell in &mut self.cells[cells] {
+                    cell.preferred = preferred;
+                }
             }
             0x7621 => {
                 let first = b[0] as usize;
@@ -561,6 +576,76 @@ mod tests {
         );
         assert!(row.apply(0x5622, &[0, 3]).is_err());
         assert!(row.apply(0x7621, &[0, 64, 1, 0]).is_err());
+    }
+    #[test]
+    fn preferred_widths_follow_prl_order_without_changing_physical_edges() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 0xa0, 5]).unwrap();
+        let physical = row.cells.iter().map(|c| c.width).collect::<Vec<_>>();
+        row.apply(0xf614, &[2, 0xc4, 9]).unwrap(); // 50% table width.
+        row.apply(0xd635, &[5, 0, 2, 3, 0xd0, 2]).unwrap();
+        assert_eq!(row.preferred_width, Some(PreferredWidth::Percent(2500)));
+        assert_eq!(
+            row.cells.iter().map(|c| c.preferred).collect::<Vec<_>>(),
+            [
+                Some(PreferredWidth::Dxa(720)),
+                Some(PreferredWidth::Dxa(720)),
+                None
+            ]
+        );
+        assert_eq!(
+            row.cells.iter().map(|c| c.width).collect::<Vec<_>>(),
+            physical
+        );
+
+        // A later insertion carries no preference; delete/range operations address
+        // the then-current cells, and a later TDefTable replaces earlier facts.
+        row.apply(0x7621, &[1, 1, 100, 0]).unwrap();
+        assert_eq!(row.cells[1].preferred, None);
+        row.apply(0xd635, &[5, 1, 3, 2, 0x88, 0x13]).unwrap();
+        assert_eq!(row.cells[1].preferred, Some(PreferredWidth::Percent(5000)));
+        assert_eq!(row.cells[2].preferred, Some(PreferredWidth::Percent(5000)));
+        row.apply(0x5622, &[1, 3]).unwrap();
+        assert_eq!(row.cells.len(), 2);
+        row.apply(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3]).unwrap();
+        assert_eq!(row.cells[0].preferred, None);
+    }
+
+    #[test]
+    fn cell_width_operand_rejects_bad_lengths_ranges_and_units_atomically() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 2, 100, 0]).unwrap();
+        for operand in [
+            &[4, 0, 1, 3, 100][..],
+            &[5, 0, 3, 3, 100, 0],
+            &[5, 1, 0, 3, 100, 0],
+            &[5, 0, 1, 2, 0x89, 0x13],
+            &[5, 0, 1, 1, 1, 0],
+        ] {
+            assert!(row.apply(0xd635, operand).is_err());
+            assert!(row.cells.iter().all(|c| c.preferred.is_none()));
+        }
+        // TablePart nil ignores its payload and clears a prior preference.
+        row.apply(0xd635, &[5, 0, 2, 3, 100, 0]).unwrap();
+        row.apply(0xd635, &[5, 0, 2, 0, 0xff, 0xff]).unwrap();
+        assert!(row.cells.iter().all(|c| c.preferred.is_none()));
+    }
+
+    #[test]
+    fn tc80_width_unit_is_typed_independently_of_grid_width() {
+        // One physical 1000-twip cell and a TC80 dxa preference above the
+        // tighter 31,680-twip FtsWWidth_TablePart maximum.
+        let mut operand = vec![26, 0, 1, 0, 0, 0xe8, 3];
+        operand.extend((3u16 << 9).to_le_bytes());
+        operand.extend((i16::MAX as u16).to_le_bytes());
+        operand.resize(27, 0);
+        let mut row = Row::default();
+        row.apply(0xd608, &operand).unwrap();
+        assert_eq!(row.cells[0].width, 1000);
+        assert_eq!(
+            row.cells[0].preferred,
+            Some(PreferredWidth::Dxa(i16::MAX as u16))
+        );
     }
     #[test]
     fn depth_is_direct_and_bounded() {

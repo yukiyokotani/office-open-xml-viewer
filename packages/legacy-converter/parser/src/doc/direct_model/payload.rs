@@ -53,6 +53,22 @@ pub(super) fn table(value: &docx_model::DocTable) -> Result<usize, String> {
             total.option_string(&width.kind)?;
             total.option_string(&width.value)?;
         }
+        if let Some(exception) = &row.table_row_layout.exception {
+            if let Some(width) = &exception.preferred_width {
+                total.table_width(width)?;
+            }
+            if exception.layout.is_some()
+                || exception.justification.is_some()
+                || exception.indent.is_some()
+                || exception.borders.is_some()
+                || exception.cell_margins.is_some()
+                || exception.cell_spacing.is_some()
+            {
+                return Err(unsupported(
+                    "unaccounted direct DOC table exception payload",
+                ));
+            }
+        }
         for cell in &row.cells {
             total.string(&cell.v_align)?;
             total.option_string(&cell.background)?;
@@ -516,6 +532,33 @@ mod tests {
         let mut total = Total::default();
         total.font_facts(&facts).unwrap();
         assert_eq!(total.0, 53);
+    }
+
+    #[test]
+    fn counts_row_preferred_width_exception_strings() {
+        let mut table_value = docx_model::DocTable::default();
+        let before = table(&table_value).unwrap();
+        table_value.rows.push(docx_model::DocTableRow {
+            table_row_layout: docx_model::TableRowLayoutAcquisitionWire {
+                exception: Some(docx_model::TablePropertyExceptionAcquisitionWire {
+                    preferred_width: Some(docx_model::TableWidthAcquisitionWire {
+                        kind: Some(allocated("auto", 17)),
+                        value: Some(allocated("0", 23)),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(table(&table_value).unwrap() - before, 40);
+        table_value.rows[0]
+            .table_row_layout
+            .exception
+            .as_mut()
+            .unwrap()
+            .justification = Some("left".into());
+        assert!(table(&table_value).unwrap_err().starts_with("UNSUPPORTED:"));
     }
 
     #[test]

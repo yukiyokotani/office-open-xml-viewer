@@ -2,16 +2,16 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{Color, Properties},
+    table::{Color, PreferredWidth, Properties},
     table_structure::{Assembler, Event, LogicalTable, Payload},
     unsupported,
 };
 use docx_model::{
-    CellBorders, CellElement, DocParagraph, DocTable, DocTableCell, DocTableRow,
-    TableBorders, TableCellLayoutAcquisitionWire, TableGridAcquisitionWire,
-    TableGridColumnAcquisitionWire, TableLayoutAcquisitionWire, TableLayoutKindAcquisitionWire,
-    TableMarginAcquisitionWire, TablePropertyExceptionAcquisitionWire,
-    TableRowHeightAcquisitionWire, TableRowLayoutAcquisitionWire, TableWidthAcquisitionWire,
+    CellBorders, CellElement, DocParagraph, DocTable, DocTableCell, DocTableRow, TableBorders,
+    TableCellLayoutAcquisitionWire, TableGridAcquisitionWire, TableGridColumnAcquisitionWire,
+    TableLayoutAcquisitionWire, TableLayoutKindAcquisitionWire, TableMarginAcquisitionWire,
+    TablePropertyExceptionAcquisitionWire, TableRowHeightAcquisitionWire,
+    TableRowLayoutAcquisitionWire, TableWidthAcquisitionWire,
 };
 
 pub(super) enum Block {
@@ -121,6 +121,7 @@ fn project_table(
     let first_bidi = first.bidi;
     let first_autofit = first.autofit;
     let margins = first.margins;
+    let table_preferred = first.preferred_width;
     let alignment = if physical && first_bidi {
         2 - alignment
     } else {
@@ -240,14 +241,20 @@ fn project_table(
                 },
                 background,
                 v_align: ["top", "center", "bottom"][align as usize].into(),
-                width_pt: Some(f64::from(cell.width) / 20.0),
-                width_pct: None,
+                width_pt: source.preferred.and_then(|w| match w {
+                    PreferredWidth::Dxa(value) => Some(f64::from(value) / 20.0),
+                    _ => None,
+                }),
+                width_pct: source.preferred.and_then(|w| match w {
+                    PreferredWidth::Percent(value) => Some(f64::from(value)),
+                    _ => None,
+                }),
                 margin_top: Some(f64::from(margins[0]) / 20.0),
                 margin_left: Some(f64::from(margins[1]) / 20.0),
                 margin_bottom: Some(f64::from(margins[2]) / 20.0),
                 margin_right: Some(f64::from(margins[3]) / 20.0),
                 table_cell_layout: TableCellLayoutAcquisitionWire {
-                    preferred_width: Some(width(cell.width)),
+                    preferred_width: source.preferred.map(width),
                     margins: Some(margin_wire(margins)),
                 },
             });
@@ -274,13 +281,26 @@ fn project_table(
                     rule: if height < 0 { "exact" } else { "atLeast" }.into(),
                     rule_authored: true,
                 }),
-                before_width: (planned.grid_before != 0).then(|| width(planned.width_before)),
-                after_width: (planned.grid_after != 0).then(|| width(planned.width_after)),
+                before_width: (planned.grid_before != 0)
+                    .then(|| physical_width(planned.width_before)),
+                after_width: (planned.grid_after != 0).then(|| physical_width(planned.width_after)),
                 justification: None,
                 cell_spacing: None,
                 style_cell_spacing: None,
                 style_cell_margins: None,
-                exception: None::<TablePropertyExceptionAcquisitionWire>,
+                exception: (planned.source.preferred_width != table_preferred).then(|| {
+                    TablePropertyExceptionAcquisitionWire {
+                        // None must actively clear an inherited table preference;
+                        // absence in tblPrEx would inherit it instead.
+                        preferred_width: Some(width(
+                            planned
+                                .source
+                                .preferred_width
+                                .unwrap_or(PreferredWidth::Auto),
+                        )),
+                        ..Default::default()
+                    }
+                }),
             },
         });
     }
@@ -306,8 +326,14 @@ fn project_table(
         jc: ["left", "center", "right"][alignment as usize].into(),
         tbl_ind: Some(f64::from(plan.origin) / 20.0),
         layout: Some(if first_autofit { "autofit" } else { "fixed" }.into()),
-        width_pt: (plan.total > 0).then(|| f64::from(plan.total) / 20.0),
-        width_pct: None,
+        width_pt: table_preferred.and_then(|w| match w {
+            PreferredWidth::Dxa(value) if value > 0 => Some(f64::from(value) / 20.0),
+            _ => None,
+        }),
+        width_pct: table_preferred.and_then(|w| match w {
+            PreferredWidth::Percent(value) if value > 0 => Some(f64::from(value)),
+            _ => None,
+        }),
         bidi_visual: Some(first_bidi),
         tblp_pr,
         overlap,
@@ -322,7 +348,7 @@ fn project_table(
                 columns: grid_columns,
                 required_column_count: (plan.grid.len() - 1) as u32,
             },
-            preferred_width: Some(width(plan.total)),
+            preferred_width: table_preferred.map(width),
             layout: Some(TableLayoutKindAcquisitionWire {
                 kind: Some(if first_autofit { "autofit" } else { "fixed" }.into()),
             }),
@@ -337,18 +363,24 @@ fn project_table(
     Ok(table)
 }
 
-fn width(value: i32) -> TableWidthAcquisitionWire {
+fn physical_width(value: i32) -> TableWidthAcquisitionWire {
     TableWidthAcquisitionWire {
         kind: Some("dxa".into()),
         value: Some(value.to_string()),
     }
 }
+fn width(value: PreferredWidth) -> TableWidthAcquisitionWire {
+    TableWidthAcquisitionWire {
+        kind: Some(value.kind().into()),
+        value: Some(value.value().to_string()),
+    }
+}
 fn margin_wire(v: [u16; 4]) -> TableMarginAcquisitionWire {
     TableMarginAcquisitionWire {
-        top: Some(width(v[0].into())),
-        left: Some(width(v[1].into())),
-        bottom: Some(width(v[2].into())),
-        right: Some(width(v[3].into())),
+        top: Some(physical_width(v[0].into())),
+        left: Some(physical_width(v[1].into())),
+        bottom: Some(physical_width(v[2].into())),
+        right: Some(physical_width(v[3].into())),
         start: None,
         end: None,
     }
@@ -386,6 +418,8 @@ fn reserve<T, A: FnMut(usize) -> Result<(), String>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
     fn cell(depth: u32) -> Properties {
         let mut p = Properties::default();
         p.apply(0x6649, &depth.to_le_bytes()).unwrap();
@@ -467,7 +501,203 @@ mod tests {
             .unwrap();
         assert!(writer
             .finish(&mut budget)
-            .err().unwrap()
+            .err()
+            .unwrap()
             .contains("classify positioned"));
+    }
+
+    #[test]
+    fn preferred_widths_project_without_replacing_physical_grid_geometry() {
+        let mut end = row(1, &[1000, 2000]);
+        end.row.preferred_width = Some(PreferredWidth::Percent(2500));
+        end.row.cells[0].preferred = Some(PreferredWidth::Dxa(720));
+        end.row.cells[1].preferred = Some(PreferredWidth::Percent(1250));
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer
+            .push(cell(1), '\u{7}', paragraph("a"), &mut budget)
+            .unwrap();
+        writer
+            .push(cell(1), '\u{7}', paragraph("b"), &mut budget)
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        assert_eq!(table.col_widths, [50.0, 100.0]);
+        assert_eq!(table.width_pt, None);
+        assert_eq!(table.width_pct, Some(2500.0));
+        assert_eq!(
+            table
+                .table_layout
+                .preferred_width
+                .as_ref()
+                .unwrap()
+                .kind
+                .as_deref(),
+            Some("pct")
+        );
+        assert_eq!(table.rows[0].cells[0].width_pt, Some(36.0));
+        assert_eq!(table.rows[0].cells[0].width_pct, None);
+        assert_eq!(table.rows[0].cells[1].width_pt, None);
+        assert_eq!(table.rows[0].cells[1].width_pct, Some(1250.0));
+    }
+
+    #[test]
+    fn row_nil_preference_projects_an_auto_exception_to_clear_table_width() {
+        let mut first = row(1, &[1000]);
+        first.row.preferred_width = Some(PreferredWidth::Dxa(2000));
+        let second = row(1, &[1000]);
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        for end in [first, second] {
+            writer
+                .push(cell(1), '\u{7}', paragraph("x"), &mut budget)
+                .unwrap();
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+        }
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        let reset = table.rows[1]
+            .table_row_layout
+            .exception
+            .as_ref()
+            .unwrap()
+            .preferred_width
+            .as_ref()
+            .unwrap();
+        assert_eq!(reset.kind.as_deref(), Some("auto"));
+        assert_eq!(reset.value.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn zero_table_preference_is_lexical_only_but_zero_cell_preference_is_public() {
+        for preferred in [PreferredWidth::Dxa(0), PreferredWidth::Percent(0)] {
+            let mut end = row(1, &[1000]);
+            end.row.preferred_width = Some(preferred);
+            end.row.cells[0].preferred = Some(preferred);
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            writer
+                .push(cell(1), '\u{7}', paragraph("x"), &mut budget)
+                .unwrap();
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = &body.0[0] else {
+                panic!()
+            };
+            assert_eq!((table.width_pt, table.width_pct), (None, None));
+            assert_eq!(
+                table
+                    .table_layout
+                    .preferred_width
+                    .as_ref()
+                    .unwrap()
+                    .value
+                    .as_deref(),
+                Some("0")
+            );
+            let cell = &table.rows[0].cells[0];
+            match preferred {
+                PreferredWidth::Dxa(_) => {
+                    assert_eq!((cell.width_pt, cell.width_pct), (Some(0.0), None))
+                }
+                PreferredWidth::Percent(_) => {
+                    assert_eq!((cell.width_pt, cell.width_pct), (None, Some(0.0)))
+                }
+                PreferredWidth::Auto => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn direct_preferred_width_fields_match_the_byte_route_docx_parser() {
+        fn configured_row() -> Properties {
+            let mut end = row(1, &[1000, 2000]);
+            end.row.preferred_width = Some(PreferredWidth::Percent(2500));
+            end.row.cells[0].preferred = Some(PreferredWidth::Dxa(720));
+            end.row.cells[0].flags = (end.row.cells[0].flags & !3) | 2;
+            end.row.cells[1].preferred = Some(PreferredWidth::Percent(1250));
+            end.row.cells[1].flags = (end.row.cells[1].flags & !3) | 1;
+            end
+        }
+
+        let mut xml_writer = crate::doc::table_output::Writer::new(100_000);
+        xml_writer.push(cell(1), '\u{7}', "<w:p/>".into()).unwrap();
+        xml_writer.push(cell(1), '\u{7}', "<w:p/>".into()).unwrap();
+        xml_writer
+            .push(configured_row(), '\u{7}', String::new())
+            .unwrap();
+        let document_xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
+            xml_writer.finish().unwrap()
+        );
+        // MS-DOC 2.9.317: the leader's formatting extends across the merged
+        // set. The continuation's conflicting preference is not serialized.
+        assert_eq!(document_xml.matches("<w:tcW ").count(), 1);
+        assert!(document_xml.contains("<w:tcW w:w=\"720\" w:type=\"dxa\"/>"));
+        assert!(document_xml.contains("<w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"2000\"/>"));
+        let mut package = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(Cursor::new(&mut package));
+            archive
+                .start_file("word/document.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(document_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&docx_parser::parse_docx_native(&package).unwrap()).unwrap();
+        let byte_table = &parsed["body"][0];
+
+        let mut sequence = 0;
+        let mut direct_writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        direct_writer
+            .push(cell(1), '\u{7}', paragraph(""), &mut budget)
+            .unwrap();
+        direct_writer
+            .push(cell(1), '\u{7}', paragraph(""), &mut budget)
+            .unwrap();
+        direct_writer
+            .push(configured_row(), '\u{7}', Blocks::default(), &mut budget)
+            .unwrap();
+        let direct = direct_writer.finish(&mut budget).unwrap();
+        let Block::Table(direct_table) = &direct.0[0] else {
+            panic!()
+        };
+        let direct_table = serde_json::to_value(direct_table).unwrap();
+        for pointer in [
+            "/widthPt",
+            "/widthPct",
+            "/__tableLayout/preferredWidth",
+            "/rows/0/cells/0/widthPt",
+            "/rows/0/cells/0/widthPct",
+            "/rows/0/cells/0/__tableCellLayout/preferredWidth",
+            "/rows/0/cells/0/colSpan",
+        ] {
+            assert_eq!(
+                direct_table.pointer(pointer),
+                byte_table.pointer(pointer),
+                "{pointer}"
+            );
+        }
+        assert_eq!(direct_table["colWidths"], serde_json::json!([50.0, 100.0]));
+        assert_eq!(
+            direct_table["rows"][0]["cells"].as_array().unwrap().len(),
+            1
+        );
     }
 }
