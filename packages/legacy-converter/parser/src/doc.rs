@@ -32,6 +32,7 @@ mod sections;
 mod settings;
 mod sprm;
 mod table;
+mod table_context;
 mod table_output;
 mod table_structure;
 mod tabs;
