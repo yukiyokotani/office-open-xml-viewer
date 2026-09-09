@@ -29,6 +29,8 @@ pub(super) struct RowContext {
     pub(super) ttp_id: usize,
     pub(super) source_cell_count: usize,
     pub(super) header: bool,
+    /// Number of preceding rows that are neither the actual top row nor headers.
+    pub(super) preceding_body_rows: usize,
 }
 
 #[allow(dead_code)] // Wired into story projection by the subsequent style-resolution slice.
@@ -147,6 +149,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
     for raw_table in raw_tables {
         let table_id = tables.len();
         let mut rows = Vec::new();
+        let mut header_skipped_rows = 0usize;
         reserve_additional(&mut rows, raw_table.rows.len(), admit)?;
         for (row_index, raw_row) in raw_table.rows.into_iter().enumerate() {
             let ttp_id = raw_row
@@ -180,10 +183,18 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
                     )?;
                 }
             }
+            let header = raw_row.source.borrow().header;
+            let preceding_body_rows = header_skipped_rows;
+            if row_index != 0 && !header {
+                header_skipped_rows = header_skipped_rows
+                    .checked_add(1)
+                    .ok_or("OUTPUT_TOO_LARGE")?;
+            }
             rows.push(RowContext {
                 ttp_id,
                 source_cell_count,
-                header: raw_row.source.borrow().header,
+                header,
+                preceding_body_rows,
             });
         }
         reserve_additional(tables, 1, admit)?;
@@ -303,11 +314,13 @@ mod tests {
                     ttp_id: 2,
                     source_cell_count: 2,
                     header: true,
+                    preceding_body_rows: 0,
                 },
                 RowContext {
                     ttp_id: 5,
                     source_cell_count: 2,
                     header: false,
+                    preceding_body_rows: 0,
                 },
             ]
         );

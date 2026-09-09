@@ -34,6 +34,7 @@ mod sprm;
 mod table;
 mod table_context;
 mod table_output;
+mod table_style_condition;
 mod table_structure;
 mod tabs;
 
