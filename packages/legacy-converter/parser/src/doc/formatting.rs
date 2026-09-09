@@ -845,6 +845,83 @@ mod tests {
     }
 
     #[test]
+    fn table_chpx_color_inheritance_composes_base_to_derived() {
+        // Controlled DOC files rendered by Word isolate table-style CHPX color:
+        // base red, child blue, empty child red, grandchild green, and a red
+        // child overriding a green base. This records the observed composition
+        // direction despite the "prepend" wording in MS-DOC 2.4.6.5. It does
+        // not establish TAPX, PAPX, size, toggle, or conditional-style behavior.
+        const RED: &[u8] = &[0x70, 0x68, 0xff, 0x00, 0x00, 0x00];
+        const BLUE: &[u8] = &[0x70, 0x68, 0x00, 0x00, 0xff, 0x00];
+        const GREEN: &[u8] = &[0x70, 0x68, 0x00, 0x80, 0x00, 0x00];
+        const ORDINARY_POISON: &[u8] = &[0xff];
+
+        fn table_style(base: usize, chpx: &'static [u8]) -> Option<Style<'static>> {
+            Some(Style {
+                base,
+                kind: 3,
+                // Deliberately distinguish ordinary CHPX from StkTableGRLPUPX
+                // CHPX so this test cannot pass through the legacy alias.
+                chpx: ORDINARY_POISON,
+                papx: &[],
+                table: Some(TableStylePropertySets {
+                    tapx: &[],
+                    papx: &[],
+                    chpx,
+                }),
+                language_compatibility: StyleLanguageCompatibility::default(),
+            })
+        }
+
+        let mut formatting = empty();
+        formatting.styles = vec![
+            table_style(0xfff, RED),   // 0: base
+            table_style(0, BLUE),      // 1: derived conflict
+            table_style(0, &[]),       // 2: derived missing CHPX
+            table_style(1, GREEN),     // 3: grandchild conflict
+            table_style(0xfff, GREEN), // 4: reverse-value base
+            table_style(4, RED),       // 5: reverse-value child
+        ];
+
+        assert_eq!(formatting.chain(0, 3).unwrap(), [0]);
+        assert_eq!(formatting.chain(1, 3).unwrap(), [0, 1]);
+        assert_eq!(formatting.chain(2, 3).unwrap(), [0, 2]);
+        assert_eq!(formatting.chain(3, 3).unwrap(), [0, 1, 3]);
+        assert_eq!(formatting.chain(5, 3).unwrap(), [4, 5]);
+
+        for (id, expected) in [
+            (0, "FF0000"),
+            (1, "0000FF"),
+            (2, "FF0000"),
+            (3, "008000"),
+            (5, "FF0000"),
+        ] {
+            let mut properties = Properties::default();
+            for style_id in formatting.chain(id, 3).unwrap() {
+                let baseline = properties.clone();
+                let raw = formatting.styles[style_id]
+                    .as_ref()
+                    .unwrap()
+                    .table
+                    .as_ref()
+                    .unwrap()
+                    .chpx;
+                let mut sprms = Sprms::new(raw);
+                while let Some((code, operand)) = sprms.next(&mut formatting.budget).unwrap() {
+                    assert!(properties.apply(code, operand, &baseline).unwrap());
+                }
+            }
+            assert!(
+                properties
+                    .xml(&[])
+                    .unwrap()
+                    .contains(&format!("<w:color w:val=\"{expected}\"/>")),
+                "style {id} did not resolve to {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn retains_short_table_style_papx_losslessly_and_rejects_truncated_lpupx() {
         for papx in [&[][..], &[0x01][..]] {
             let bytes = stylesheet_with_property_sets(10, 3, &[&[0x11], papx, &[0x31]]);
