@@ -1,13 +1,15 @@
 //! Compact paragraph-to-table context acquired from the shared DOC table grammar.
 //! [MS-DOC] 2.4.3 and 2.4.6.6. This module does not apply table styles. Pre-existing
-//! [`Properties`] allocations must be admitted by the caller; they are consumed and dropped here,
-//! while the index accounts for its own additional fixed-size storage.
+//! [`Properties`] allocations must be admitted by the caller. Owned rows are consumed;
+//! borrowed rows remain with the caller. The index retains neither and accounts for
+//! its own additional storage.
 
 use super::{
     table::Properties,
     table_structure::{Assembler, Payload, RawEvent},
     unsupported, MAX_STORY_CONTROLS,
 };
+use std::borrow::Borrow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ParagraphContext {
@@ -37,13 +39,14 @@ pub(super) struct Index {
 
 #[allow(dead_code)] // Wired into story projection by the subsequent style-resolution slice.
 impl Index {
-    pub(super) fn build<I, A>(
+    pub(super) fn build<I, A, R>(
         paragraph_count: usize,
         paragraphs: I,
         admit: &mut A,
     ) -> Result<Self, String>
     where
-        I: IntoIterator<Item = (Properties, char)>,
+        I: IntoIterator<Item = (Properties<R>, char)>,
+        R: Borrow<super::table::Row>,
         A: FnMut(usize) -> Result<(), String>,
     {
         if paragraph_count > MAX_STORY_CONTROLS + 1 {
@@ -51,7 +54,7 @@ impl Index {
         }
         let mut contexts = allocate_none(paragraph_count, admit)?;
         let mut tables = Vec::new();
-        let mut assembler = Assembler::<Ids>::new();
+        let mut assembler = Assembler::<Ids, R>::new();
         let mut actual = 0usize;
 
         for (properties, mark) in paragraphs {
@@ -134,8 +137,8 @@ impl Payload for Ids {
     }
 }
 
-fn index_event<A: FnMut(usize) -> Result<(), String>>(
-    RawEvent(raw_tables): RawEvent<Ids>,
+fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Row>>(
+    RawEvent(raw_tables): RawEvent<Ids, R>,
     contexts: &mut [Option<ParagraphContext>],
     tables: &mut Vec<TableContext>,
     admit: &mut A,
@@ -159,7 +162,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>>(
                     ttp_id,
                 },
             )?;
-            let source_cell_count = raw_row.source.cells.len();
+            let source_cell_count = raw_row.source.borrow().cells.len();
             if raw_row.cells.len() != source_cell_count {
                 return Err(unsupported("Word table context cell count mismatch"));
             }
@@ -180,7 +183,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>>(
             rows.push(RowContext {
                 ttp_id,
                 source_cell_count,
-                header: raw_row.source.header,
+                header: raw_row.source.borrow().header,
             });
         }
         reserve_additional(tables, 1, admit)?;
@@ -371,6 +374,67 @@ mod tests {
         assert_eq!(index.paragraph(2).unwrap().unwrap().ttp_id, 3);
     }
 
+    fn borrowed_fixture() -> Vec<(Properties, char)> {
+        let mut inner_cell = properties(2, false, vec![]);
+        inner_cell.inner_cell = true;
+        let mut inner_row = properties(2, false, vec![cell(10, 0)]);
+        inner_row.inner_row = true;
+        inner_row.row.header = true;
+        let mut outer_row = properties(1, true, vec![cell(10, 2), cell(10, 1)]);
+        outer_row
+            .row
+            .identity
+            .insert(0x563a, 7u16.to_le_bytes().to_vec());
+        vec![
+            (inner_cell, '\r'),
+            (inner_row, '\r'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (outer_row, '\u{7}'),
+        ]
+    }
+
+    #[test]
+    fn borrowed_and_owned_rows_produce_identical_context_without_moving_source_heaps() {
+        let source = borrowed_fixture();
+        let cell_pointer = source[4].0.row.cells.as_ptr();
+        let identity_pointer = source[4].0.row.identity[&0x563a].as_ptr();
+        let borrowed = Index::build(
+            source.len(),
+            source
+                .iter()
+                .map(|(properties, mark)| (properties.borrowed(), *mark)),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(source[4].0.row.cells.as_ptr(), cell_pointer);
+        assert_eq!(source[4].0.row.identity[&0x563a].as_ptr(), identity_pointer);
+
+        let owned = Index::build(source.len(), source, &mut |_| Ok(())).unwrap();
+        assert_eq!(borrowed.tables(), owned.tables());
+        for id in 0..5 {
+            assert_eq!(borrowed.paragraph(id), owned.paragraph(id));
+        }
+    }
+
+    #[test]
+    fn borrowed_depth_errors_leave_source_reusable() {
+        let mut source = properties(33, false, vec![cell(10, 0)]);
+        source.row.header = true;
+        let pointer = source.row.cells.as_ptr();
+        let error = Index::build(
+            1,
+            std::iter::once((source.borrowed(), '\u{7}')),
+            &mut |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("nesting budget"), "{error}");
+        assert_eq!(source.row.cells.as_ptr(), pointer);
+        assert!(source.row.header);
+        assert!(source.borrowed().depth().is_err());
+    }
+
     #[test]
     fn source_merge_continuations_keep_distinct_paragraph_contexts() {
         let index = build(vec![
@@ -414,7 +478,7 @@ mod tests {
 
     #[test]
     fn empty_and_non_table_stories_have_no_contexts() {
-        let empty = Index::build(0, Vec::new(), &mut |_| Ok(())).unwrap();
+        let empty = Index::build(0, Vec::<(Properties, char)>::new(), &mut |_| Ok(())).unwrap();
         assert!(empty.tables().is_empty());
         assert!(empty.paragraph(0).is_err());
         let plain = build(vec![(Properties::default(), '\r')]);
@@ -471,14 +535,14 @@ mod tests {
             Some("denied")
         );
         assert_eq!(consumed.get(), 0);
-        assert!(
-            Index::build(MAX_STORY_CONTROLS + 2, Vec::new(), &mut |_| panic!(
-                "budget must be rejected before allocation"
-            ))
-            .err()
-            .unwrap()
-            .contains("paragraph budget")
-        );
+        assert!(Index::build(
+            MAX_STORY_CONTROLS + 2,
+            Vec::<(Properties, char)>::new(),
+            &mut |_| panic!("budget must be rejected before allocation"),
+        )
+        .err()
+        .unwrap()
+        .contains("paragraph budget"));
     }
 
     fn nested(depth: u32) -> Vec<(Properties, char)> {
@@ -545,7 +609,7 @@ mod tests {
         let mut contexts = Vec::new();
         let mut tables = Vec::new();
         let payload = index_event(
-            RawEvent(Vec::new()),
+            RawEvent::<Ids, Row>(Vec::new()),
             &mut contexts,
             &mut tables,
             &mut |_| Ok(()),

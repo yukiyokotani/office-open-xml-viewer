@@ -4,6 +4,8 @@
 //! the single owner of that nesting grammar and of the union-grid construction
 //! used by both the legacy DOCX serializer and the direct model producer.
 
+use std::borrow::Borrow;
+
 use super::{
     table::{Cell, Properties, Row},
     unsupported,
@@ -18,15 +20,24 @@ pub(super) trait Payload: Default {
     fn is_empty(&self) -> bool;
 }
 
-#[derive(Default)]
-struct Pending<P> {
-    rows: Vec<RawRow<P>>,
+struct Pending<P, R> {
+    rows: Vec<RawRow<P, R>>,
     cells: Vec<P>,
     cell: P,
 }
 
-pub(super) struct Assembler<P> {
-    stack: Vec<Pending<P>>,
+impl<P: Default, R> Default for Pending<P, R> {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            cells: Vec::new(),
+            cell: P::default(),
+        }
+    }
+}
+
+pub(super) struct Assembler<P, R = Row> {
+    stack: Vec<Pending<P, R>>,
     body: P,
     rows: usize,
 }
@@ -36,14 +47,14 @@ pub(super) struct Event<P>(pub(super) Vec<LogicalTable<P>>);
 /// Grammar-complete logical tables before union-grid planning and merge
 /// projection. Ownership lets a raw consumer avoid geometry planning entirely;
 /// planned consumers move the same rows onward without cloning them.
-pub(super) struct RawEvent<P>(pub(super) Vec<RawTable<P>>);
+pub(super) struct RawEvent<P, R = Row>(pub(super) Vec<RawTable<P, R>>);
 
-pub(super) struct RawTable<P> {
-    pub(super) rows: Vec<RawRow<P>>,
+pub(super) struct RawTable<P, R = Row> {
+    pub(super) rows: Vec<RawRow<P, R>>,
 }
 
-pub(super) struct RawRow<P> {
-    pub(super) source: Row,
+pub(super) struct RawRow<P, R = Row> {
+    pub(super) source: R,
     pub(super) cells: Vec<P>,
     #[allow(dead_code)] // Consumed by the subsequent table-context indexing slice.
     pub(super) ttp_id: Option<usize>,
@@ -77,7 +88,7 @@ pub(super) struct PlannedCell<P> {
     pub(super) content: P,
 }
 
-impl<P: Payload> Assembler<P> {
+impl<P: Payload, R: Borrow<Row>> Assembler<P, R> {
     pub(super) fn new() -> Self {
         Self {
             stack: Vec::new(),
@@ -86,40 +97,18 @@ impl<P: Payload> Assembler<P> {
         }
     }
 
-    pub(super) fn push<F, A>(
+    pub(super) fn push_raw<E, A>(
         &mut self,
-        props: Properties,
-        mark: char,
-        paragraph: P,
-        mut emit: F,
-        admit: &mut A,
-    ) -> Result<bool, String>
-    where
-        F: FnMut(Event<P>) -> Result<P, String>,
-        A: FnMut(usize) -> Result<(), String>,
-    {
-        self.push_raw(
-            props,
-            mark,
-            paragraph,
-            None,
-            |raw, admit| emit(plan_event(raw, admit)?),
-            admit,
-        )
-    }
-
-    pub(super) fn push_raw<R, A>(
-        &mut self,
-        props: Properties,
+        props: Properties<R>,
         mark: char,
         paragraph: P,
         // Retained only when this paragraph is the row's TTP mark.
         source_id: Option<usize>,
-        mut emit: R,
+        mut emit: E,
         admit: &mut A,
     ) -> Result<bool, String>
     where
-        R: FnMut(RawEvent<P>, &mut A) -> Result<P, String>,
+        E: FnMut(RawEvent<P, R>, &mut A) -> Result<P, String>,
         A: FnMut(usize) -> Result<(), String>,
     {
         let depth = props.depth()?;
@@ -151,7 +140,7 @@ impl<P: Payload> Assembler<P> {
                 return Err(unsupported("Word table row budget exceeded"));
             }
             if !current.cell.is_empty()
-                || current.cells.len() != props.row.cells.len()
+                || current.cells.len() != props.row.borrow().cells.len()
                 || current.cells.is_empty()
             {
                 return Err(unsupported("Word row definition does not match cell marks"));
@@ -175,9 +164,9 @@ impl<P: Payload> Assembler<P> {
         Ok(!row_end)
     }
 
-    fn close<R, A>(&mut self, emit: &mut R, admit: &mut A) -> Result<(), String>
+    fn close<E, A>(&mut self, emit: &mut E, admit: &mut A) -> Result<(), String>
     where
-        R: FnMut(RawEvent<P>, &mut A) -> Result<P, String>,
+        E: FnMut(RawEvent<P, R>, &mut A) -> Result<P, String>,
         A: FnMut(usize) -> Result<(), String>,
     {
         let pending = self.stack.pop().expect("open table");
@@ -187,12 +176,13 @@ impl<P: Payload> Assembler<P> {
         let mut tables = Vec::new();
         let mut rows = pending.rows.into_iter().peekable();
         while let Some(first) = rows.next() {
-            let bidi = first.source.bidi;
+            let bidi = first.source.borrow().bidi;
             let mut group = Vec::new();
             reserve_one(&mut group, admit)?;
             group.push(first);
             while rows.peek().is_some_and(|row| {
-                row.source.bidi == bidi && row.source.identity == group[0].source.identity
+                row.source.borrow().bidi == bidi
+                    && row.source.borrow().identity == group[0].source.borrow().identity
             }) {
                 reserve_one(&mut group, admit)?;
                 group.push(rows.next().expect("peeked row"));
@@ -209,17 +199,9 @@ impl<P: Payload> Assembler<P> {
         Ok(())
     }
 
-    pub(super) fn finish<F, A>(self, mut emit: F, admit: &mut A) -> Result<P, String>
+    pub(super) fn finish_raw<E, A>(mut self, mut emit: E, admit: &mut A) -> Result<P, String>
     where
-        F: FnMut(Event<P>) -> Result<P, String>,
-        A: FnMut(usize) -> Result<(), String>,
-    {
-        self.finish_raw(|raw, admit| emit(plan_event(raw, admit)?), admit)
-    }
-
-    pub(super) fn finish_raw<R, A>(mut self, mut emit: R, admit: &mut A) -> Result<P, String>
-    where
-        R: FnMut(RawEvent<P>, &mut A) -> Result<P, String>,
+        E: FnMut(RawEvent<P, R>, &mut A) -> Result<P, String>,
         A: FnMut(usize) -> Result<(), String>,
     {
         while !self.stack.is_empty() {
@@ -231,6 +213,38 @@ impl<P: Payload> Assembler<P> {
     #[cfg(test)]
     pub(super) fn set_row_count(&mut self, rows: usize) {
         self.rows = rows;
+    }
+}
+
+impl<P: Payload> Assembler<P> {
+    pub(super) fn push<F, A>(
+        &mut self,
+        props: Properties,
+        mark: char,
+        paragraph: P,
+        mut emit: F,
+        admit: &mut A,
+    ) -> Result<bool, String>
+    where
+        F: FnMut(Event<P>) -> Result<P, String>,
+        A: FnMut(usize) -> Result<(), String>,
+    {
+        self.push_raw(
+            props,
+            mark,
+            paragraph,
+            None,
+            |raw, admit| emit(plan_event(raw, admit)?),
+            admit,
+        )
+    }
+
+    pub(super) fn finish<F, A>(self, mut emit: F, admit: &mut A) -> Result<P, String>
+    where
+        F: FnMut(Event<P>) -> Result<P, String>,
+        A: FnMut(usize) -> Result<(), String>,
+    {
+        self.finish_raw(|raw, admit| emit(plan_event(raw, admit)?), admit)
     }
 }
 

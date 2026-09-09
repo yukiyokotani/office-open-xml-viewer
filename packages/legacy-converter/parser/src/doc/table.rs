@@ -20,14 +20,26 @@ pub struct Cell {
     pub borders: [Option<Border>; 6],
 }
 
-#[derive(Default)]
-pub struct Properties {
+pub struct Properties<R = Row> {
     pub in_table: bool,
     depth: Option<i32>,
     pub row_end: bool,
     pub inner_cell: bool,
     pub inner_row: bool,
-    pub row: Row,
+    pub row: R,
+}
+
+impl Default for Properties {
+    fn default() -> Self {
+        Self {
+            in_table: false,
+            depth: None,
+            row_end: false,
+            inner_cell: false,
+            inner_row: false,
+            row: Row::default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -113,7 +125,7 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
     Some([a, b, (prm >> 8) as u8])
 }
 
-impl Properties {
+impl<R> Properties<R> {
     pub fn depth(&self) -> Result<usize, String> {
         let n = self.depth.unwrap_or(i32::from(self.in_table));
         // Resource policy independent of the file's representable table depth.
@@ -121,6 +133,19 @@ impl Properties {
             return Err(unsupported("Word table nesting budget exceeded"));
         }
         Ok(n as usize)
+    }
+}
+
+impl Properties {
+    pub(super) fn borrowed(&self) -> Properties<&Row> {
+        Properties {
+            in_table: self.in_table,
+            depth: self.depth,
+            row_end: self.row_end,
+            inner_cell: self.inner_cell,
+            inner_row: self.inner_row,
+            row: &self.row,
+        }
     }
 
     pub fn apply(&mut self, code: u16, b: &[u8]) -> Result<bool, String> {
