@@ -18,7 +18,7 @@ describe('v0.87 regional CJK fallback announcement', () => {
     expect(announcement).toMatchObject({
       label: 'Release note',
       version: 'v0.87.0',
-      date: '2026-09-12',
+      date: '2026-09-13',
     });
     expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
     expect(announcement?.sections.at(-1)?.title).toBe('Upgrading');

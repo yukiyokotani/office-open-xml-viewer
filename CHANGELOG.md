@@ -7,21 +7,23 @@ the corresponding minor release.
 
 ## Unreleased
 
-## 0.87.0 — 2026-09-12
+## 0.87.0 — 2026-09-13
 
-Compatible minor release making CJK fallback selection and optional webfont
-delivery more predictable, while tightening several loading and navigation
-edge cases.
+Compatible minor release making CJK fallback selection and Google Fonts mirror
+routing more predictable, while tightening several loading and navigation edge
+cases.
 
 - **regional CJK fallback:** DOCX, XLSX and PPTX loads can select SC, TC, HK,
   JP or KR fallback forms explicitly, or derive them once from the host
   language. Authored font regions and document language evidence retain
   priority, and only ambiguous Han text uses the selected fallback.
-- **self-hosted font CSS:** applications that opt into Google Fonts-compatible
-  loading can point the existing stylesheet requests at an HTTP(S) mirror or
-  internal service. Redirected and relative font asset URLs resolve against the
-  returned stylesheet, and failures stay on the system-font fallback without
-  contacting the public service.
+- **Google Fonts-compatible mirrors:** applications that opt into the built-in
+  Google Fonts integration can point its existing stylesheet requests at an
+  HTTP(S) mirror or internal proxy. This is origin routing for the built-in
+  Google Fonts request shape, not a general webfont-provider interface.
+  Redirected and relative font asset URLs resolve against the returned
+  stylesheet, and failures stay on the system-font fallback without contacting
+  the public service.
 - **consistent progressive completion:** DOCX and PPTX progressive loads now
   call `onLayoutComplete` exactly once after every successful load, including
   small files that finish before `load()` returns. Pre-publication failures

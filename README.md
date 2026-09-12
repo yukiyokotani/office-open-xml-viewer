@@ -217,11 +217,13 @@ await DocxDocument.load(data, {
 Supply an HTTP(S) origin only, without a path, query, fragment, or credentials.
 Built-in stylesheet paths and family queries are preserved. Relative font-file
 URLs in the returned CSS resolve against the stylesheet's final URL, including
-after redirects. A fully internal deployment must therefore host or proxy the
-font files as well as the CSS and return URLs reachable by the browser. Configure
-CORS and your application's `connect-src` and `font-src` CSP directives for the
-selected CSS and font hosts. Failures retain the existing system-font fallback
-and do not retry the public Google Fonts service.
+after redirects. This is not a general-purpose webfont resolver: it only moves
+the built-in Google Fonts stylesheet requests to a compatible service. A fully
+internal deployment must therefore host or proxy the font files as well as the
+CSS and return URLs reachable by the browser. Configure CORS and your
+application's `connect-src` and `font-src` CSP directives for the selected CSS
+and font hosts. Failures retain the existing system-font fallback and do not
+retry the public Google Fonts service.
 
 ### Optional rendering modules
 

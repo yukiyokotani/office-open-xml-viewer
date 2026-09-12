@@ -37,18 +37,18 @@ export interface Announcement {
 export const announcements: readonly Announcement[] = [
   {
     slug: 'v087-regional-cjk-fallbacks',
-    date: '2026-09-12',
+    date: '2026-09-13',
     label: 'Release note',
     version: 'v0.87.0',
-    title: 'Regional CJK fallbacks and more deployment control in v0.87.0',
-    summary: 'v0.87.0 lets applications choose regional CJK fallback forms, route optional webfont CSS through an internal service, and picks up several reliability fixes for loading and navigation.',
-    audience: 'Applications that display CJK documents, self-host optional webfonts, use progressive DOCX or PPTX loading, or need consistent programmatic navigation. Existing integrations can upgrade without API changes.',
+    title: 'Regional CJK fallbacks and Google Fonts mirror control in v0.87.0',
+    summary: 'v0.87.0 lets applications choose regional CJK fallback forms, route opt-in Google Fonts CSS requests through a compatible mirror, and picks up several reliability fixes for loading and navigation.',
+    audience: 'Applications that display CJK documents, use a Google Fonts-compatible regional mirror or internal proxy, use progressive DOCX or PPTX loading, or need consistent programmatic navigation. Existing integrations can upgrade without API changes.',
     sections: [
       {
         title: 'In short',
         kind: 'summary',
         paragraphs: [
-          'This release focuses on predictable multilingual display and deployment rather than a large new viewing feature. Word, Excel and PowerPoint content can use the appropriate regional fallback for ambiguous Han characters, while applications that enable webfonts have more control over where those fonts are requested.',
+          'This release focuses on predictable multilingual display and deployment rather than a large new viewing feature. Word, Excel and PowerPoint content can use the appropriate regional fallback for ambiguous Han characters, while applications that enable the built-in Google Fonts integration can send its CSS requests to a compatible mirror or internal proxy.',
         ],
         bullets: [
           'Choose Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback forms.',
@@ -74,10 +74,10 @@ export const announcements: readonly Announcement[] = [
         ],
       },
       {
-        title: 'Optional webfonts from your own service',
+        title: 'Google Fonts-compatible mirrors',
         modules: ['DOCX', 'XLSX', 'PPTX'],
         paragraphs: [
-          'Applications that already opt into webfont loading can set googleFontsCssOrigin to an HTTP(S) origin for a compatible mirror or internal CSS service. The existing stylesheet paths and font-family queries are preserved, and font-file links in the returned CSS resolve relative to its final URL, including redirects.',
+          'Applications that already opt into the built-in Google Fonts integration can set googleFontsCssOrigin to an HTTP(S) origin for a compatible mirror or internal proxy. This is a narrow routing option rather than a general webfont-provider interface: the existing Google Fonts stylesheet paths and font-family queries are preserved, and font-file links in the returned CSS resolve relative to its final URL, including redirects.',
           'The configured service must provide or proxy the font files as well as the CSS. If it fails, viewing continues with system fonts and does not retry the public Google Fonts endpoint. Webfont loading remains off by default.',
         ],
       },
