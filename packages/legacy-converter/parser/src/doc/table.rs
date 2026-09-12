@@ -47,6 +47,9 @@ pub struct Row {
     pub position: Position,
     pub shading: Option<Shading>,
     pub identity: std::collections::BTreeMap<u16, Vec<u8>>,
+    /// Last directly selected table style. Resolution against STSH is deferred
+    /// until the row-owning TTP is known ([MS-DOC] 2.4.6.6 Part 1, step 6).
+    pub table_style: Option<usize>,
     pub cells: Vec<Cell>,
     pub left: i32,
     pub gap: i32,
@@ -68,6 +71,7 @@ impl Default for Row {
             position: Position::default(),
             shading: None,
             identity: Default::default(),
+            table_style: None,
             cells: vec![],
             left: 0,
             gap: 0,
@@ -148,6 +152,47 @@ impl Properties {
         }
     }
 
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn retained_heap_bytes(&self) -> Result<usize, String> {
+        let mut bytes = self
+            .row
+            .cells
+            .capacity()
+            .checked_mul(std::mem::size_of::<Cell>())
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        // BTreeMap exposes neither node layout nor allocation capacity. Charge
+        // the retained key/value payload and each owned operand's capacity.
+        // Allocator-internal node overhead is not exact byte-accounted; the
+        // entry count is bounded by the fixed identity-code set in Row::apply.
+        let identity_entry = std::mem::size_of::<(u16, Vec<u8>)>();
+        bytes = bytes
+            .checked_add(
+                self.row
+                    .identity
+                    .len()
+                    .checked_mul(identity_entry)
+                    .ok_or("OUTPUT_TOO_LARGE")?,
+            )
+            .ok_or("OUTPUT_TOO_LARGE")?;
+        for operand in self.row.identity.values() {
+            bytes = bytes
+                .checked_add(operand.capacity())
+                .ok_or("OUTPUT_TOO_LARGE")?;
+        }
+        for border in self
+            .row
+            .borders
+            .iter()
+            .chain(self.row.cells.iter().flat_map(|cell| cell.borders.iter()))
+            .flatten()
+        {
+            bytes = bytes
+                .checked_add(border.retained_bytes()?)
+                .ok_or("OUTPUT_TOO_LARGE")?;
+        }
+        Ok(bytes)
+    }
+
     pub fn apply(&mut self, code: u16, b: &[u8]) -> Result<bool, String> {
         match code {
             0x2416 => self.in_table = boolean(b[0])?,
@@ -194,6 +239,14 @@ impl Row {
             );
         }
         match code {
+            0x563a => {
+                // [MS-DOC] 2.6.3 sprmTIstd: each application selects a table
+                // style and resets the previous selection. Retain last-wins
+                // state here. Returning false keeps the existing unsupported
+                // output gate until table TAPX/PAPX/CHPX are projected.
+                self.table_style = Some(usize::from(u16_at(b, 0)?));
+                return Ok(false);
+            }
             0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f | 0x3465 => {
                 return self.position.apply(code, b);
             }
@@ -476,6 +529,17 @@ mod tests {
         assert_eq!(a.position.xml(), b.position.xml());
         b.apply(0x360d, &[0x60]).unwrap();
         assert_ne!(a.identity, b.identity);
+    }
+
+    #[test]
+    fn tistd_retains_the_last_selected_table_style_without_claiming_projection() {
+        let mut row = Row::default();
+        assert_eq!(row.table_style, None);
+        assert!(!row.apply(0x563a, &7u16.to_le_bytes()).unwrap());
+        assert_eq!(row.table_style, Some(7));
+        assert!(!row.apply(0x563a, &8u16.to_le_bytes()).unwrap());
+        assert_eq!(row.table_style, Some(8));
+        assert_eq!(row.identity[&0x563a], 8u16.to_le_bytes());
     }
     fn shade(pattern: u16) -> Vec<u8> {
         let mut b = vec![10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0];

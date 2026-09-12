@@ -167,6 +167,22 @@ impl<'a> Formatting<'a> {
         fkp::paragraph_style(&self.paragraphs, end_fc)
     }
 
+    pub(in crate::doc) fn resolve_table_style_id(&self, selected: Option<usize>) -> Option<usize> {
+        let selected = selected?;
+        // [MS-DOC] 2.6.3 sprmTIstd: an empty, missing, or wrong-kind style is
+        // equivalent to applying istd 0x000B. Absence remains distinct because
+        // 2.4.6.6 Part 1 step 6.3 skips table-style formatting when TIstd was
+        // never applied. Validation of style 0x000B itself belongs to the later
+        // style-property application slice.
+        Some(
+            self.styles
+                .get(selected)
+                .and_then(Option::as_ref)
+                .filter(|style| style.kind == 3)
+                .map_or(0x000b, |_| selected),
+        )
+    }
+
     pub fn paragraph_xml(
         &mut self,
         style: usize,
@@ -842,6 +858,38 @@ mod tests {
         assert!(table.tapx.is_empty());
         assert_eq!(table.papx, [0, 0]);
         assert!(table.chpx.is_empty());
+    }
+
+    #[test]
+    fn tistd_selection_uses_default_table_style_for_invalid_slots() {
+        fn style(kind: u16) -> Option<Style<'static>> {
+            Some(Style {
+                base: 0xfff,
+                kind,
+                chpx: &[],
+                papx: &[],
+                table: (kind == 3).then_some(TableStylePropertySets {
+                    tapx: &[],
+                    papx: &[],
+                    chpx: &[],
+                }),
+                language_compatibility: StyleLanguageCompatibility::default(),
+            })
+        }
+
+        let mut formatting = empty();
+        formatting.styles.resize_with(15, || None);
+        formatting.styles[3] = style(3);
+        formatting.styles[4] = style(1);
+        formatting.styles[11] = style(3);
+
+        assert_eq!(formatting.resolve_table_style_id(None), None);
+        assert_eq!(formatting.resolve_table_style_id(Some(3)), Some(3));
+        assert_eq!(formatting.resolve_table_style_id(Some(4)), Some(11));
+        assert_eq!(formatting.resolve_table_style_id(Some(5)), Some(11));
+        assert_eq!(formatting.resolve_table_style_id(Some(99)), Some(11));
+        formatting.styles[11] = None;
+        assert_eq!(formatting.resolve_table_style_id(Some(5)), Some(11));
     }
 
     #[test]

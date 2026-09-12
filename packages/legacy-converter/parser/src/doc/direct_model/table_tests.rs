@@ -26,6 +26,16 @@ fn row(width: u16) -> Vec<u8> {
     ]
     .concat()
 }
+fn large_row() -> Vec<u8> {
+    [
+        sprm(0x2416, &[1], false),
+        sprm(0x2417, &[1], false),
+        sprm(0x7621, &[0, 63, 1, 0], false),
+        sprm(0x5622, &[1, 63], false),
+        sprm(0x2416, &[1], false),
+    ]
+    .concat()
+}
 fn depth(value: u32) -> Vec<u8> {
     sprm(0x6649, &value.to_le_bytes(), false)
 }
@@ -132,6 +142,25 @@ fn full_cfb_body_table_retains_cell_local_page_and_column_break_runs() {
 }
 
 #[test]
+fn retained_tistd_does_not_bypass_the_existing_style_projection_gate() {
+    let text = "x\u{7}\u{7}\r";
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut row = row(1000);
+    row.extend(sprm(0x563a, &7u16.to_le_bytes(), false));
+    let bytes = with_papx(&source, &[(0, 2, cell()), (2, 3, row), (3, 4, Vec::new())]);
+    let error =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
+    assert!(error.contains("unsupported formatting"), "{error}");
+}
+
+#[test]
 fn full_cfb_table_budget_is_atomic_and_image_resource_outlives_input() {
     let bytes = with_picture_data(&body_table_source("\u{1}\u{7}\u{7}\r"), false);
     let result = {
@@ -168,6 +197,45 @@ fn full_cfb_table_budget_is_atomic_and_image_resource_outlives_input() {
         .unwrap_err(),
         "OUTPUT_TOO_LARGE"
     );
+}
+
+#[test]
+fn large_prepared_table_properties_are_admitted_before_paragraph_and_resource_projection() {
+    let text = "\u{1}\u{7}\u{7}\r";
+    let compact_bytes = with_picture_data(&body_table_source(text), false);
+    let compact =
+        super::super::direct_model(&CompoundFile::open(&compact_bytes).unwrap(), 32 * 1024)
+            .unwrap();
+    assert_eq!(compact.resources.len(), 1);
+
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let bytes = with_picture_data(
+        &with_papx(
+            &source,
+            &[(0, 2, cell()), (2, 3, large_row()), (3, 4, Vec::new())],
+        ),
+        false,
+    );
+
+    assert_eq!(
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 32 * 1024).unwrap_err(),
+        "OUTPUT_TOO_LARGE"
+    );
+
+    let result =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap();
+    let BodyElement::Table(table) = &result.document.body[0] else {
+        panic!("table")
+    };
+    assert_eq!(table.rows[0].cells.len(), 1);
+    assert_eq!(result.resources.len(), 1);
 }
 
 #[test]

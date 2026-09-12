@@ -17,6 +17,7 @@ pub(super) struct ParagraphContext {
     pub(super) row_index: usize,
     pub(super) source_cell_index: Option<usize>,
     pub(super) ttp_id: usize,
+    pub(super) table_style: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,19 +28,19 @@ pub(super) struct TableContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RowContext {
     pub(super) ttp_id: usize,
+    /// Effective sprmTIstd selection resolved from this row's TTP mark.
+    pub(super) table_style: Option<usize>,
     pub(super) source_cell_count: usize,
     pub(super) header: bool,
     /// Number of preceding rows that are neither the actual top row nor headers.
     pub(super) preceding_body_rows: usize,
 }
 
-#[allow(dead_code)] // Wired into story projection by the subsequent style-resolution slice.
 pub(super) struct Index {
     paragraphs: Vec<Option<ParagraphContext>>,
     tables: Vec<TableContext>,
 }
 
-#[allow(dead_code)] // Wired into story projection by the subsequent style-resolution slice.
 impl Index {
     pub(super) fn build<I, A, R>(
         paragraph_count: usize,
@@ -49,6 +50,26 @@ impl Index {
     where
         I: IntoIterator<Item = (Properties<R>, char)>,
         R: Borrow<super::table::Row>,
+        A: FnMut(usize) -> Result<(), String>,
+    {
+        Self::build_with_styles(
+            paragraph_count,
+            paragraphs,
+            &mut |selected| Ok(selected),
+            admit,
+        )
+    }
+
+    pub(super) fn build_with_styles<I, S, A, R>(
+        paragraph_count: usize,
+        paragraphs: I,
+        resolve_style: &mut S,
+        admit: &mut A,
+    ) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = (Properties<R>, char)>,
+        R: Borrow<super::table::Row>,
+        S: FnMut(Option<usize>) -> Result<Option<usize>, String>,
         A: FnMut(usize) -> Result<(), String>,
     {
         if paragraph_count > MAX_STORY_CONTROLS + 1 {
@@ -74,7 +95,7 @@ impl Index {
                 mark,
                 payload,
                 Some(actual),
-                |event, admit| index_event(event, &mut contexts, &mut tables, admit),
+                |event, admit| index_event(event, &mut contexts, &mut tables, resolve_style, admit),
                 admit,
             )?;
             actual += 1;
@@ -83,7 +104,7 @@ impl Index {
             return Err(unsupported("Word table context paragraph count mismatch"));
         }
         let _ = assembler.finish_raw(
-            |event, admit| index_event(event, &mut contexts, &mut tables, admit),
+            |event, admit| index_event(event, &mut contexts, &mut tables, resolve_style, admit),
             admit,
         )?;
         Ok(Self {
@@ -139,10 +160,15 @@ impl Payload for Ids {
     }
 }
 
-fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Row>>(
+fn index_event<
+    S: FnMut(Option<usize>) -> Result<Option<usize>, String>,
+    A: FnMut(usize) -> Result<(), String>,
+    R: Borrow<super::table::Row>,
+>(
     RawEvent(raw_tables): RawEvent<Ids, R>,
     contexts: &mut [Option<ParagraphContext>],
     tables: &mut Vec<TableContext>,
+    resolve_style: &mut S,
     admit: &mut A,
 ) -> Result<Ids, String> {
     let has_tables = !raw_tables.is_empty();
@@ -155,6 +181,9 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
             let ttp_id = raw_row
                 .ttp_id
                 .ok_or_else(|| unsupported("Word table row lacks source paragraph"))?;
+            // Resolve from the TTP-owned row before assigning the same compact
+            // selection to its paragraph contexts.
+            let table_style = resolve_style(raw_row.source.borrow().table_style)?;
             set_innermost(
                 contexts,
                 ttp_id,
@@ -163,6 +192,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
                     row_index,
                     source_cell_index: None,
                     ttp_id,
+                    table_style,
                 },
             )?;
             let source_cell_count = raw_row.source.borrow().cells.len();
@@ -179,6 +209,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
                             row_index,
                             source_cell_index: Some(source_cell_index),
                             ttp_id,
+                            table_style,
                         },
                     )?;
                 }
@@ -192,6 +223,7 @@ fn index_event<A: FnMut(usize) -> Result<(), String>, R: Borrow<super::table::Ro
             }
             rows.push(RowContext {
                 ttp_id,
+                table_style,
                 source_cell_count,
                 header,
                 preceding_body_rows,
@@ -312,12 +344,14 @@ mod tests {
             vec![
                 RowContext {
                     ttp_id: 2,
+                    table_style: None,
                     source_cell_count: 2,
                     header: true,
                     preceding_body_rows: 0,
                 },
                 RowContext {
                     ttp_id: 5,
+                    table_style: None,
                     source_cell_count: 2,
                     header: false,
                     preceding_body_rows: 0,
@@ -339,6 +373,7 @@ mod tests {
                     row_index: row,
                     source_cell_index: cell,
                     ttp_id: if row == 0 { 2 } else { 5 },
+                    table_style: None,
                 })
             );
         }
@@ -428,6 +463,29 @@ mod tests {
         for id in 0..5 {
             assert_eq!(borrowed.paragraph(id), owned.paragraph(id));
         }
+    }
+
+    #[test]
+    fn resolved_table_style_is_selected_from_the_row_owning_ttp() {
+        let mut cell_properties = properties(1, false, vec![]);
+        cell_properties.row.table_style = Some(99);
+        let mut row_properties = properties(1, true, vec![cell(10, 0)]);
+        row_properties.row.table_style = Some(7);
+        let source = vec![(cell_properties, '\u{7}'), (row_properties, '\u{7}')];
+
+        let index = Index::build_with_styles(
+            source.len(),
+            source
+                .iter()
+                .map(|(properties, mark)| (properties.borrowed(), *mark)),
+            &mut |selected| Ok(selected.map(|id| if id == 7 { 3 } else { 11 })),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(index.paragraph(0).unwrap().unwrap().table_style, Some(3));
+        assert_eq!(index.paragraph(1).unwrap().unwrap().table_style, Some(3));
+        assert_eq!(index.tables()[0].rows[0].table_style, Some(3));
     }
 
     #[test]
@@ -625,6 +683,7 @@ mod tests {
             RawEvent::<Ids, Row>(Vec::new()),
             &mut contexts,
             &mut tables,
+            &mut |selected| Ok(selected),
             &mut |_| Ok(()),
         )
         .unwrap();
@@ -648,7 +707,14 @@ mod tests {
         }]);
         let mut contexts = vec![None; 2];
         let mut tables = Vec::new();
-        let payload = index_event(raw, &mut contexts, &mut tables, &mut |_| Ok(())).unwrap();
+        let payload = index_event(
+            raw,
+            &mut contexts,
+            &mut tables,
+            &mut |selected| Ok(selected),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
         assert!(payload.own.is_empty());
         assert!(payload.nested);
         assert!(contexts.into_iter().all(|context| context.is_some()));
@@ -661,6 +727,7 @@ mod tests {
             row_index: 0,
             source_cell_index: Some(0),
             ttp_id: 1,
+            table_style: None,
         };
         let mut contexts = vec![Some(context)];
         let error = set_innermost(&mut contexts, 0, context).unwrap_err();

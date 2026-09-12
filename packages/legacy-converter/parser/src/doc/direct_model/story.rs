@@ -7,7 +7,10 @@ use super::{
     tables::{Block, Blocks, Writer},
     ModelBudget, ParaPiece,
 };
-use crate::doc::{floating, formatting, numbering, pictures, unsupported, Paragraph, Story, Token};
+use crate::doc::{
+    floating, formatting, numbering, pictures, table, table_context, unsupported, Paragraph, Story,
+    Token,
+};
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
@@ -24,12 +27,11 @@ pub(super) fn project(
     table_sequence: &mut usize,
 ) -> Result<(), String> {
     let paragraph_count = paragraphs.len();
-    let mut tables = Writer::new(table_sequence);
+    let mut prepared = Vec::new();
     for (paragraph_index, source) in paragraphs.into_iter().enumerate() {
         let (_, mark_fc, mark_piece) = story
             .position(source.end_cp)
             .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
-        let style = formatting.paragraph_style(mark_fc)?;
         let table_properties = formatting.table_properties(mark_fc, mark_piece.prm, &story.prcs)?;
         let table_depth = table_properties.depth()?;
         if source.mark == '\u{7}' && table_depth == 0 {
@@ -38,7 +40,51 @@ pub(super) fn project(
         if ending_kind.is_some() && paragraph_index + 1 == paragraph_count && table_depth != 0 {
             return Err(unsupported("Word section break inside table"));
         }
-        let direct = formatting.direct_paragraph(style, mark_fc, mark_piece.prm, &story.prcs)?;
+        // This vector is additional retained state compared with the streaming
+        // producer. ModelBudget::push charges the complete outer entry,
+        // including Properties<Row>; separately charge its heap-owned cells,
+        // identity operands and decoded border payload before retaining it.
+        budget.charge(table_properties.retained_heap_bytes()?)?;
+        budget.push(
+            &mut prepared,
+            PreparedParagraph {
+                source,
+                mark_fc,
+                mark_prm: mark_piece.prm,
+                table_properties,
+            },
+        )?;
+    }
+
+    let table_context = table_context::Index::build_with_styles(
+        paragraph_count,
+        prepared
+            .iter()
+            .map(|value| (value.table_properties.borrowed(), value.source.mark)),
+        &mut |selected| Ok(formatting.resolve_table_style_id(selected)),
+        &mut |bytes| budget.charge(bytes),
+    )?;
+    let mut tables = Writer::new(table_sequence);
+    for (paragraph_index, prepared) in prepared.into_iter().enumerate() {
+        let PreparedParagraph {
+            source,
+            mark_fc,
+            mark_prm,
+            table_properties,
+        } = prepared;
+        let style = formatting.paragraph_style(mark_fc)?;
+        let table_depth = table_properties.depth()?;
+        let context = table_context.paragraph(paragraph_index)?;
+        if context.is_some() != (table_depth != 0) {
+            return Err(unsupported(
+                "Word table context disagrees with paragraph depth",
+            ));
+        }
+        // Read the resolved row-owned selection from the production index.
+        // TIstd still trips the unsupported-formatting gate, so the selection
+        // cannot affect the returned document until style projection exists.
+        let _table_style = context.and_then(|value| value.table_style);
+        let direct = formatting.direct_paragraph(style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
@@ -243,6 +289,13 @@ pub(super) fn project(
         budget.push(body, element)?;
     }
     Ok(())
+}
+
+struct PreparedParagraph {
+    source: Paragraph,
+    mark_fc: usize,
+    mark_prm: u16,
+    table_properties: table::Properties,
 }
 
 fn push_control_text(

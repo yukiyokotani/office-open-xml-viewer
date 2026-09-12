@@ -22,6 +22,18 @@ struct BorderFacts {
     frame: Option<bool>,
 }
 impl Border {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn retained_bytes(&self) -> Result<usize, String> {
+        let Some(facts) = &self.facts else {
+            return Ok(0);
+        };
+        facts
+            .style
+            .capacity()
+            .checked_add(facts.color.as_ref().map_or(0, String::capacity))
+            .ok_or_else(|| "OUTPUT_TOO_LARGE".to_string())
+    }
+
     /// Paragraph Brc80/Brc values, including the documented no-border sentinel.
     /// `side` is top/logical-left/bottom/logical-right/between, before bidi.
     pub fn paragraph(bytes: &[u8], old: bool, side: usize) -> Result<Self, String> {
