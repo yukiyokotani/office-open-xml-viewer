@@ -201,12 +201,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
         embedded.aliases,
       ).filter((name): name is string => !!name && !loadedGoogleFonts.has(name));
       for (const name of requested) loadedGoogleFonts.add(name);
-      if (requested.length) await preloadGoogleFonts(
-        requested,
-        PPTX_GOOGLE_FONTS,
-        undefined,
-        request.googleFontsCssOrigin,
-      );
+      if (requested.length) await preloadGoogleFonts(requested, PPTX_GOOGLE_FONTS);
     };
     for (let index = 0; index < bootstrap.slideCount; index += 1) {
       await slides.withSlide(index, () => undefined);
@@ -248,8 +243,6 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
       const substitutes = await preloadGoogleFonts(
         excludeEmbeddedFontFamilies(preflight.fontPreloadNames, embedded.aliases),
         PPTX_GOOGLE_FONTS,
-        undefined,
-        request.googleFontsCssOrigin,
       );
       return [...embedded.faces, ...substitutes];
     })();

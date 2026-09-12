@@ -24,45 +24,6 @@
  */
 import { retainFace, releaseFaces } from './font-registry.js';
 
-/** Existing public Google Fonts CSS endpoint used when no override is supplied. */
-export const DEFAULT_GOOGLE_FONTS_CSS_ORIGIN = 'https://fonts.googleapis.com';
-
-/**
- * Validate and canonicalize the caller-configured Google Fonts-compatible CSS
- * origin. Keeping this as an origin (rather than an arbitrary base URL) means
- * the library can preserve every built-in stylesheet path and family query.
- */
-export function normalizeGoogleFontsCssOrigin(
-  value: string = DEFAULT_GOOGLE_FONTS_CSS_ORIGIN,
-): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new TypeError('googleFontsCssOrigin must be an HTTP(S) origin');
-  }
-  if (
-    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-    parsed.username !== '' ||
-    parsed.password !== '' ||
-    parsed.pathname !== '/' ||
-    parsed.search !== '' ||
-    parsed.hash !== ''
-  ) {
-    throw new TypeError('googleFontsCssOrigin must be an HTTP(S) origin');
-  }
-  return parsed.origin;
-}
-
-function stylesheetUrlAtOrigin(url: string, cssOrigin: string): string {
-  const builtIn = new URL(url);
-  // `preloadGoogleFonts` is a public low-level helper whose caller-supplied map
-  // historically allowed arbitrary stylesheet URLs. Only relocate entries from
-  // the built-in Google CSS service; preserve an application's custom map.
-  if (builtIn.origin !== DEFAULT_GOOGLE_FONTS_CSS_ORIGIN) return builtIn.href;
-  return `${cssOrigin}${builtIn.pathname}${builtIn.search}${builtIn.hash}`;
-}
-
 export interface FontPreloadEntry {
   /** Google Fonts CSS URL — `display=swap` recommended. */
   url: string;
@@ -200,11 +161,9 @@ export async function preloadGoogleFonts(
   fontNames: Iterable<string | null | undefined>,
   map: Record<string, FontPreloadEntry>,
   targetFontSet: FontFaceSet | null = activeFontSet(),
-  googleFontsCssOrigin: string = DEFAULT_GOOGLE_FONTS_CSS_ORIGIN,
 ): Promise<FontFace[]> {
   const fonts = targetFontSet;
   if (!fonts || typeof FontFace === 'undefined' || typeof fetch === 'undefined') return [];
-  const cssOrigin = normalizeGoogleFontsCssOrigin(googleFontsCssOrigin);
 
   const seen = new Set<string>();
   const targetFamilies = new Set<string>();
@@ -230,7 +189,7 @@ export async function preloadGoogleFonts(
     seen.add(key);
     const entry = map[key];
     if (!entry) continue;
-    const cssUrl = stylesheetUrlAtOrigin(entry.url, cssOrigin);
+    const cssUrl = entry.url;
     cssUrls.add(cssUrl);
     const family = (entry.loadFamily ?? requestedName).toLowerCase();
     targetFamilies.add(family);

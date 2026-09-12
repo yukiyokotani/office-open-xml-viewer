@@ -137,8 +137,6 @@ export {
 } from './crypto';
 export { readCfbStream } from './errors/cfb-read';
 export {
-  DEFAULT_GOOGLE_FONTS_CSS_ORIGIN,
-  normalizeGoogleFontsCssOrigin,
   preloadGoogleFonts,
   unloadGoogleFonts,
   type FontPreloadEntry,

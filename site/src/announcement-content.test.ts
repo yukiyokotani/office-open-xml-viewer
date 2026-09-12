@@ -11,6 +11,37 @@ const siteFooter = readFileSync(new URL('./components/SiteFooter.astro', import.
 const capabilities = readFileSync(new URL('./components/Capabilities.astro', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
 
+describe('v0.87 regional CJK fallback announcement', () => {
+  const announcement = announcements.find((item) => item.slug === 'v087-regional-cjk-fallbacks');
+
+  it('leads with the user-visible outcome and upgrade guidance', () => {
+    expect(announcement).toMatchObject({
+      label: 'Release note',
+      version: 'v0.87.0',
+      date: '2026-09-13',
+    });
+    expect(announcement?.sections[0]).toMatchObject({ title: 'In short', kind: 'summary' });
+    expect(announcement?.sections.at(-1)?.title).toBe('Upgrading');
+    expect(announcement?.title).toContain('Regional CJK fallbacks');
+  });
+
+  it('documents the new controls and the intentional auto-mode behavior', () => {
+    const text = announcement?.sections.flatMap((section) => [
+      ...section.paragraphs,
+      ...(section.bullets ?? []),
+      ...(section.examples?.map(({ code }) => code) ?? []),
+    ]).join(' ') ?? '';
+
+    expect(text).toContain('cjkFallback');
+    expect(text).toContain('Set cjkFallback explicitly');
+    expect(text).toContain('does not install or download fonts');
+    expect(text).toContain('pixel-identical output');
+    expect(text).toContain('Kana or Hangul');
+    expect(text).toContain('onLayoutComplete');
+    expect(text).not.toMatch(/private\/|sample-\d+/i);
+  });
+});
+
 describe('v0.86 presentation-text and CSV announcement', () => {
   const announcement = announcements.find((item) => item.slug === 'v086-presentation-text-and-csv-previews');
 
@@ -249,13 +280,13 @@ describe('v0.81 ChartEx migration guide', () => {
 
 describe('stable documentation boundaries', () => {
   it('keeps the current bundle measurements on one stable page', () => {
-    expect(bundleSizePage).toContain('Current production assets for v0.86.1');
+    expect(bundleSizePage).toContain('Current production assets for v0.87.0');
     expect(bundleSizePage).toContain('DOCX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,979 KiB<\/td>\s*<td>482 KiB<\/td>/);
+    expect(bundleSizePage).toMatch(/<td>1,984 KiB<\/td>\s*<td>483 KiB<\/td>/);
     expect(bundleSizePage).toContain('XLSX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,292 KiB<\/td>\s*<td>309 KiB<\/td>/);
+    expect(bundleSizePage).toMatch(/<td>1,296 KiB<\/td>\s*<td>310 KiB<\/td>/);
     expect(bundleSizePage).toContain('PPTX static JavaScript');
-    expect(bundleSizePage).toMatch(/<td>1,335 KiB<\/td>\s*<td>312 KiB<\/td>/);
+    expect(bundleSizePage).toMatch(/<td>1,340 KiB<\/td>\s*<td>314 KiB<\/td>/);
     expect(bundleSizePage).toContain('<tr><th>DOCX parser WASM</th><td>1,794 KiB</td><td>746 KiB</td></tr>');
     expect(bundleSizePage).toContain('<tr><th>XLSX parser WASM</th><td>1,581 KiB</td><td>651 KiB</td></tr>');
     expect(bundleSizePage).toContain('<tr><th>PPTX parser WASM</th><td>1,678 KiB</td><td>659 KiB</td></tr>');

@@ -83,21 +83,13 @@ describe('XlsxWorkbook resource-policy wiring', () => {
         ): Promise<void>;
         getWorksheet(index: number): Promise<unknown>;
       }
-    )._load(new ArrayBuffer(1), {
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-    }, policy, onUsage);
+    )._load(new ArrayBuffer(1), {}, policy, onUsage);
     await (
       instance as unknown as { getWorksheet(index: number): Promise<unknown> }
     ).getWorksheet(0);
 
     expect(requests).toHaveLength(4);
-    expect(requests[0]).toMatchObject({
-      type: 'parse',
-      resourcePolicy: policy,
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-    });
+    expect(requests[0]).toMatchObject({ type: 'parse', resourcePolicy: policy });
     expect(requests[1]).toMatchObject({ type: 'openSheetSession', sheetIndex: 0 });
     expect(requests[1]).not.toHaveProperty('resourcePolicy');
     expect(requests[1]).not.toHaveProperty('maxZipEntryBytes');

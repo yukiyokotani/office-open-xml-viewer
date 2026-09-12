@@ -235,8 +235,6 @@ self.onmessage = async (e: MessageEvent<
           ? preloadGoogleFonts(
               xlsxFontPreloadNames(parsed.workbook, cjkFallback),
               XLSX_GOOGLE_FONTS,
-              undefined,
-              req.googleFontsCssOrigin,
             )
           : Promise.resolve();
         const worksheetJson = new TextEncoder()
@@ -279,8 +277,6 @@ self.onmessage = async (e: MessageEvent<
         fontsLoaded = preloadGoogleFonts(
           xlsxFontPreloadNames(workbook, cjkFallback),
           XLSX_GOOGLE_FONTS,
-          undefined,
-          req.googleFontsCssOrigin,
         );
       }
       post({ type: 'parsed', id, workbook, usage: bootstrap.usage });

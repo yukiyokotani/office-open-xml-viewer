@@ -85,10 +85,7 @@ afterEach(() => {
 describe('XlsxSheetViewer delimited-text workbook bridge', () => {
   it('loads CSV off the main thread without initializing XLSX WASM', async () => {
     const source = new TextEncoder().encode('id,name\n00123,Ada').buffer as ArrayBuffer;
-    const workbook = await XlsxWorkbook[loadXlsxSheetSource](source, {
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example',
-    }, {
+    const workbook = await XlsxWorkbook[loadXlsxSheetSource](source, {}, {
       format: 'csv',
       sheetName: 'Import',
     });
@@ -97,8 +94,6 @@ describe('XlsxSheetViewer delimited-text workbook bridge', () => {
     expect(worker.messages).toHaveLength(1);
     expect(worker.messages[0]).toMatchObject({
       type: 'parseDelimitedText',
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example',
       options: { delimiter: ',', encoding: 'utf-8', sheetName: 'Import' },
     });
     expect(worker.messages[0]).not.toMatchObject({ type: 'init' });

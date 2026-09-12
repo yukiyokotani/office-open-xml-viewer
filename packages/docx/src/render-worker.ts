@@ -257,8 +257,6 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         googleFaces = await preloadGoogleFonts(
           docxFontPreloadNames(model, req.cjkFallback),
           DOCX_GOOGLE_FONTS,
-          undefined,
-          req.googleFontsCssOrigin,
         );
       }
       googleFontFaces = googleFaces;

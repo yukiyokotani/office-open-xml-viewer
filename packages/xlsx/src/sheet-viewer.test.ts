@@ -1484,22 +1484,14 @@ describe('XlsxSheetViewer canvas mount', () => {
     });
 
     const canvas = makeEl('canvas');
-    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, {
-      password: 'secret',
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-    });
+    const viewer = new XlsxSheetViewer(canvas as unknown as HTMLCanvasElement, { password: 'secret' });
     const engine = (viewer as unknown as { engine: { showSheet(index: number): Promise<void> } }).engine;
     vi.spyOn(engine, 'showSheet').mockResolvedValue(undefined);
 
     await viewer.load(new ArrayBuffer(0));
     expect(loadSpy).toHaveBeenCalledWith(
       expect.any(ArrayBuffer),
-      expect.objectContaining({
-        password: 'secret',
-        useGoogleFonts: true,
-        googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-      }),
+      expect.objectContaining({ password: 'secret' }),
     );
     viewer.destroy();
 

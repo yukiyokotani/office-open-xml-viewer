@@ -8,7 +8,6 @@ export type DelimitedTextParseRequest = {
   readonly data: ArrayBuffer;
   readonly options: ResolvedDelimitedTextOptions;
   readonly useGoogleFonts?: boolean;
-  readonly googleFontsCssOrigin?: string;
   readonly cjkFallback?: import('@silurus/ooxml-core').CjkLang;
   readonly renderers?: WorkerRendererDescriptors;
 };

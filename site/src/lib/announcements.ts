@@ -36,6 +36,60 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v087-regional-cjk-fallbacks',
+    date: '2026-09-13',
+    label: 'Release note',
+    version: 'v0.87.0',
+    title: 'Regional CJK fallbacks and steadier loading in v0.87.0',
+    summary: 'v0.87.0 lets applications choose regional CJK fallback forms and picks up several reliability fixes for progressive loading, navigation, and file opening.',
+    audience: 'Applications that display CJK documents, use progressive DOCX or PPTX loading, or need consistent programmatic navigation. Existing integrations can upgrade without API changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release focuses on predictable multilingual display rather than a large new viewing feature. Word, Excel and PowerPoint content can use the appropriate regional fallback for ambiguous Han characters, alongside reliability fixes for loading, navigation and file opening.',
+        ],
+        bullets: [
+          'Choose Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback forms.',
+          'Use the host language automatically, or choose one fallback region independently of the host locale.',
+          'Keep fast progressive loads and programmatic page or slide navigation consistent.',
+        ],
+      },
+      {
+        title: 'Regional CJK fallback',
+        modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
+        paragraphs: [
+          'The same Unicode Han character can have different regional glyph shapes. The new cjkFallback option chooses which Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback family is tried first when the document does not already identify a region. Choose sc, tc, hk, jp or kr explicitly, or leave the default auto mode to resolve the host language once when loading starts.',
+          'The document\'s requested font remains first. Recognized regional CJK font names, an East Asian run language where the format provides one, and unambiguous Kana or Hangul can determine the region before cjkFallback is consulted. Text without Han keeps its existing font route.',
+          'cjkFallback changes the fallback preference; it does not install or download fonts. An explicit value makes that regional choice independent of the host locale, but pixel-identical output across hosts still requires the same fonts. Applications can provide those fonts themselves or separately opt into useGoogleFonts.',
+        ],
+        examples: [
+          {
+            title: 'Choose a fallback region independently of the host locale',
+            code: `const viewer = new DocxViewer(canvas, {
+  cjkFallback: 'sc',
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Steadier completion, navigation and file opening',
+        paragraphs: [
+          'Progressive DOCX and PPTX loads now deliver one successful onLayoutComplete notification even when a small file finishes before load() returns. Programmatic page and slide navigation also stays on the requested item when a browser rounds a fractional scroll position.',
+          'The shared package reader accepts otherwise consistent Office files whose duplicated ZIP headers differ only in legacy timestamp metadata. Word intrinsic-width measurement also handles empty anchored runs without failing the document layout.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No option or method is removed or renamed, and most applications can upgrade without changes. The auto CJK fallback can intentionally choose different regional Han glyphs when the host language provides that preference. Set cjkFallback explicitly when the fallback region must not depend on the browser locale, server or Node host. This stabilizes the regional choice; exact visual output still depends on the fonts available in each environment.',
+          'Applications that observe progressive onLayoutComplete should allow the callback after every successful progressive load. It is still called exactly once; failures before any layout is published continue to reject load() directly.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v086-presentation-text-and-csv-previews',
     date: '2026-09-05',
     label: 'Release note',

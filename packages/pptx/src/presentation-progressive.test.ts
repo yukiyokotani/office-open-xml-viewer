@@ -92,13 +92,7 @@ describe('PptxPresentation progressive layout lifecycle', () => {
       ) => {
         const request = build(41);
         if (request.kind === 'parse') {
-          expect(request).toMatchObject({
-            kind: 'parse',
-            id: 41,
-            progressiveLayout: true,
-            useGoogleFonts: true,
-            googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-          });
+          expect(request).toMatchObject({ kind: 'parse', id: 41, progressiveLayout: true });
           requestOptions = options;
           return finalResponse.promise;
         }
@@ -147,18 +141,8 @@ describe('PptxPresentation progressive layout lifecycle', () => {
         onUsage: undefined,
         renderers: undefined,
         progressive: typeof lifecycle,
-        googleFontsCssOrigin?: string,
       ): Promise<void>;
-    })._parse(
-      new ArrayBuffer(4),
-      policy,
-      true,
-      500,
-      undefined,
-      undefined,
-      lifecycle,
-      'https://fonts.internal.example:8443',
-    );
+    })._parse(new ArrayBuffer(4), policy, false, 500, undefined, undefined, lifecycle);
     await Promise.resolve();
     expect(requestOptions).toEqual({ timeoutMs: false });
 

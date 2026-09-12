@@ -3,7 +3,6 @@ import {
   preloadGoogleFonts,
   unloadGoogleFonts,
   parseFontFaceRules,
-  normalizeGoogleFontsCssOrigin,
   _resetCssCacheForTests,
   type FontPreloadEntry,
 } from './preload.js';
@@ -76,28 +75,6 @@ describe('parseFontFaceRules', () => {
   });
 });
 
-describe('normalizeGoogleFontsCssOrigin', () => {
-  it('accepts HTTP(S) origins with ports and removes a trailing slash', () => {
-    expect(normalizeGoogleFontsCssOrigin('http://fonts.internal.example:8080/')).toBe(
-      'http://fonts.internal.example:8080',
-    );
-  });
-
-  it.each([
-    '',
-    'file:///fonts',
-    'ftp://fonts.internal.example',
-    'https://user@fonts.internal.example',
-    'https://user:pass@fonts.internal.example',
-    'https://fonts.internal.example/css',
-    'https://fonts.internal.example?tenant=a',
-    'https://fonts.internal.example#fragment',
-    'not a URL',
-  ])('rejects a value that is not an HTTP(S) origin: %s', (value) => {
-    expect(() => normalizeGoogleFontsCssOrigin(value)).toThrow(TypeError);
-  });
-});
-
 interface FakeFace {
   family: string;
   source: string;
@@ -138,23 +115,6 @@ const MAP: Record<string, FontPreloadEntry> = {
 };
 
 describe('preloadGoogleFonts', () => {
-  it('preserves the built-in path and query on a custom CSS origin', async () => {
-    const { set } = installFakes();
-    G.document = { fonts: set };
-    delete G.self;
-
-    await preloadGoogleFonts(
-      ['Calibri'],
-      MAP,
-      set as unknown as FontFaceSet,
-      'https://fonts.googleapis.cn',
-    );
-
-    expect(G.fetch).toHaveBeenCalledWith(
-      'https://fonts.googleapis.cn/css2?family=Carlito',
-    );
-  });
-
   it('preserves a caller-supplied non-Google stylesheet map', async () => {
     const { set } = installFakes();
     G.document = { fonts: set };
@@ -166,48 +126,11 @@ describe('preloadGoogleFonts', () => {
       },
     };
 
-    await preloadGoogleFonts(
-      ['Calibri'],
-      customMap,
-      set as unknown as FontFaceSet,
-      'https://fonts.override.example',
-    );
+    await preloadGoogleFonts(['Calibri'], customMap, set as unknown as FontFaceSet);
 
     expect(G.fetch).toHaveBeenCalledWith(
       'https://existing.internal.example/fonts/carlito.css?version=1',
     );
-  });
-
-  it('keeps concurrent stylesheet fetches independent across CSS origins', async () => {
-    const { set } = installFakes();
-    G.document = { fonts: set };
-    delete G.self;
-
-    const [publicFaces, internalFaces, internalFacesAgain] = await Promise.all([
-      preloadGoogleFonts(['Calibri'], MAP, set as unknown as FontFaceSet),
-      preloadGoogleFonts(
-        ['Calibri'],
-        MAP,
-        set as unknown as FontFaceSet,
-        'https://fonts.internal.example:8443',
-      ),
-      preloadGoogleFonts(
-        ['Calibri'],
-        MAP,
-        set as unknown as FontFaceSet,
-        'https://fonts.internal.example:8443/',
-      ),
-    ]);
-
-    expect(G.fetch).toHaveBeenCalledTimes(2);
-    expect(G.fetch).toHaveBeenCalledWith(
-      'https://fonts.googleapis.com/css2?family=Carlito',
-    );
-    expect(G.fetch).toHaveBeenCalledWith(
-      'https://fonts.internal.example:8443/css2?family=Carlito',
-    );
-    expect(publicFaces[0]).not.toBe(internalFaces[0]);
-    expect(internalFacesAgain[0]).toBe(internalFaces[0]);
   });
 
   it('uses the redirected stylesheet URL as the base for relative font files', async () => {
@@ -221,12 +144,7 @@ describe('preloadGoogleFonts', () => {
         "@font-face { font-family: 'Carlito'; src: url(../fonts/carlito.woff2) format('woff2'); }",
     }));
 
-    await preloadGoogleFonts(
-      ['Calibri'],
-      MAP,
-      set as unknown as FontFaceSet,
-      'https://fonts.internal.example',
-    );
+    await preloadGoogleFonts(['Calibri'], MAP, set as unknown as FontFaceSet);
 
     expect(added[0].source).toContain(
       'url("https://assets.internal.example/fonts/carlito.woff2")',
@@ -243,35 +161,10 @@ describe('preloadGoogleFonts', () => {
         '@font-face { font-family: Carlito; src: local("Carlito"), url(/fonts/carlito.woff2) format("woff2"); }',
     }));
 
-    await preloadGoogleFonts(
-      ['Calibri'],
-      MAP,
-      set as unknown as FontFaceSet,
-      'https://fonts.internal.example',
-    );
+    await preloadGoogleFonts(['Calibri'], MAP, set as unknown as FontFaceSet);
 
     expect(added[0].source).toBe(
-      'local("Carlito"), url("https://fonts.internal.example/fonts/carlito.woff2") format("woff2")',
-    );
-  });
-
-  it('does not retry the public service when a custom CSS service fails', async () => {
-    const { set } = installFakes();
-    G.document = { fonts: set };
-    delete G.self;
-    G.fetch = vi.fn(async () => ({ ok: false, status: 503, text: async () => '' }));
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    await preloadGoogleFonts(
-      ['Calibri'],
-      MAP,
-      set as unknown as FontFaceSet,
-      'https://fonts.internal.example',
-    );
-
-    expect(G.fetch).toHaveBeenCalledTimes(1);
-    expect(G.fetch).toHaveBeenCalledWith(
-      'https://fonts.internal.example/css2?family=Carlito',
+      'local("Carlito"), url("https://fonts.googleapis.com/fonts/carlito.woff2") format("woff2")',
     );
   });
 
