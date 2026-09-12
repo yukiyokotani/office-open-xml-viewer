@@ -52,7 +52,7 @@ export const announcements: readonly Announcement[] = [
         ],
         bullets: [
           'Choose Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback forms.',
-          'Use the host language automatically, or set one region for reproducible output.',
+          'Use the host language automatically, or choose one fallback region independently of the host locale.',
           'Keep fast progressive loads and programmatic page or slide navigation consistent.',
         ],
       },
@@ -60,12 +60,13 @@ export const announcements: readonly Announcement[] = [
         title: 'Regional CJK fallback',
         modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
         paragraphs: [
-          'The new cjkFallback option controls the regional fallback used only when Han text does not already identify an authored or document-derived region. Choose sc, tc, hk, jp or kr explicitly, or leave the default auto mode to resolve the host language once when loading starts.',
-          'Authored regional fonts and stronger language evidence still win. Latin text, digits, bullets and symbols keep their existing font route, so the setting is limited to the ambiguous Han text it is intended to disambiguate.',
+          'The same Unicode Han character can have different regional glyph shapes. The new cjkFallback option chooses which Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback family is tried first when the document does not already identify a region. Choose sc, tc, hk, jp or kr explicitly, or leave the default auto mode to resolve the host language once when loading starts.',
+          'The document\'s requested font remains first. Recognized regional CJK font names, an East Asian run language where the format provides one, and unambiguous Kana or Hangul can determine the region before cjkFallback is consulted. Text without Han keeps its existing font route.',
+          'cjkFallback changes the fallback preference; it does not install or download fonts. An explicit value makes that regional choice independent of the host locale, but pixel-identical output across hosts still requires the same fonts. Applications can provide those fonts themselves or separately opt into useGoogleFonts.',
         ],
         examples: [
           {
-            title: 'Keep output reproducible across hosts',
+            title: 'Choose a fallback region independently of the host locale',
             code: `const viewer = new DocxViewer(canvas, {
   cjkFallback: 'sc',
 });`,
@@ -82,7 +83,7 @@ export const announcements: readonly Announcement[] = [
       {
         title: 'Upgrading',
         paragraphs: [
-          'No option or method is removed or renamed, and most applications can upgrade without changes. The auto CJK fallback can intentionally choose different regional Han glyphs when the host language provides that preference. Set cjkFallback explicitly when output must remain identical across browser locales, servers or Node hosts.',
+          'No option or method is removed or renamed, and most applications can upgrade without changes. The auto CJK fallback can intentionally choose different regional Han glyphs when the host language provides that preference. Set cjkFallback explicitly when the fallback region must not depend on the browser locale, server or Node host. This stabilizes the regional choice; exact visual output still depends on the fonts available in each environment.',
           'Applications that observe progressive onLayoutComplete should allow the callback after every successful progressive load. It is still called exactly once; failures before any layout is published continue to reject load() directly.',
         ],
       },

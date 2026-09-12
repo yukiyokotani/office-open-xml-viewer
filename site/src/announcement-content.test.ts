@@ -34,6 +34,9 @@ describe('v0.87 regional CJK fallback announcement', () => {
 
     expect(text).toContain('cjkFallback');
     expect(text).toContain('Set cjkFallback explicitly');
+    expect(text).toContain('does not install or download fonts');
+    expect(text).toContain('pixel-identical output');
+    expect(text).toContain('Kana or Hangul');
     expect(text).toContain('onLayoutComplete');
     expect(text).not.toMatch(/private\/|sample-\d+/i);
   });

@@ -68,11 +68,17 @@ export interface LoadOptions {
    */
   useGoogleFonts?: boolean;
   /**
-   * Region for ambiguous CJK font fallback. Authored fonts and recognized
-   * document font regions retain priority. `auto` (also the omitted default)
-   * snapshots HTML lang, then navigator.languages / navigator.language;
-   * without a usable CJK language it uses `jp`. Bare `zh` uses `sc`.
-   * Set an explicit region for reproducible output. Does not enable webfonts.
+   * Regional preference used when Han text reaches font fallback and the
+   * document has not already identified a region. The requested font remains
+   * first; recognized regional CJK font names, an East Asian run language where
+   * available, and unambiguous Kana or Hangul take priority. Text without Han
+   * keeps its existing font route.
+   *
+   * `auto` (also the omitted default) snapshots HTML lang, then
+   * navigator.languages / navigator.language; without a usable CJK language it
+   * uses `jp`. Bare `zh` uses `sc`. An explicit value makes the regional choice
+   * independent of the host locale, but does not enable webfonts or by itself
+   * guarantee pixel-identical output across different font environments.
    */
   cjkFallback?: CjkFallback;
   /**

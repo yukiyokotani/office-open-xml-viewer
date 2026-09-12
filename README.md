@@ -579,8 +579,10 @@ headless engines (`mode`, `useGoogleFonts`, `cjkFallback`, `resourceLimits`, the
 ### CJK fallback region
 
 All document engines and viewers accept `cjkFallback: 'auto' | 'sc' | 'tc' | 'hk' | 'jp' | 'kr'`.
-It chooses the regional fallback for ambiguous Han text; authored fonts and
-recognized document font regions retain priority.
+The same Unicode Han character can have different regional glyph shapes. This
+option chooses which regional fallback family is tried first when Han text
+reaches font fallback and the document has not already identified a region. It
+does not replace the document's requested font.
 
 ```ts
 const viewer = new DocxViewer(canvas, { cjkFallback: 'sc' });
@@ -594,10 +596,20 @@ explicit script, HK/MO maps to HK and TW maps to TC. Bare `zh` maps to SC.
 Japanese and Korean map to JP and KR.
 The resolved preference is shared with workers and remains fixed for that load.
 
-No migration is required. Ambiguous Han text can now use different regional
-glyphs according to the host language. Set an explicit region for reproducible
-output, including in Node. This option does not enable Google Fonts; use
-`useGoogleFonts: true` or provide local/self-hosted fallback fonts as usual.
+The requested font remains first. Recognized regional CJK font names, an East
+Asian run language where the format provides one, and unambiguous Kana or
+Hangul can determine the region before `cjkFallback` is consulted. Text without
+Han keeps its existing font route. For example, `cjkFallback: 'sc'` selects SC
+for otherwise unqualified Han text, but a Meiryo run or text containing Kana
+continues to select JP.
+
+No migration is required. Set an explicit region when the fallback choice must
+not depend on the browser locale, server, or Node host. This makes the regional
+choice deterministic; it does not by itself guarantee pixel-identical output
+across machines because the available fonts still matter. `cjkFallback` does
+not download fonts. Use `useGoogleFonts: true` or provide local/self-hosted
+fallback fonts when the same fallback faces must be available everywhere.
+
 HK retains the existing sans-only webfont support. This option covers document
 text, spreadsheet cells/shapes, and slide text; embedded chart and equation
 renderers retain their own font policies. XLSX automatic script inference uses
