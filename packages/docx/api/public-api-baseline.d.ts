@@ -1592,7 +1592,6 @@ export interface LoadOptions extends LoadOptions__emitterCollision1 {
 interface LoadOptions__emitterCollision1 {
     useGoogleFonts?: boolean;
     cjkFallback?: CjkFallback;
-    googleFontsCssOrigin?: string;
     password?: string;
     wasmUrl?: string | URL;
     maxZipEntryBytes?: number;

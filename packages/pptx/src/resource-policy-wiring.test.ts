@@ -52,27 +52,11 @@ describe('PptxPresentation resource-policy wiring', () => {
           onUsage: (usage: unknown) => void,
           renderers?: unknown,
           progressive?: unknown,
-          googleFontsCssOrigin?: string,
         ): Promise<void>;
       }
-    )._parse(
-      new ArrayBuffer(1),
-      policy,
-      true,
-      30_000,
-      onUsage,
-      undefined,
-      undefined,
-      'https://fonts.internal.example:8443',
-    );
+    )._parse(new ArrayBuffer(1), policy, false, 30_000, onUsage);
 
-    expect(request).toMatchObject({
-      kind: 'parse',
-      id: 3,
-      resourcePolicy: policy,
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example:8443',
-    });
+    expect(request).toMatchObject({ kind: 'parse', id: 3, resourcePolicy: policy });
     expect(request).not.toHaveProperty('maxZipEntryBytes');
     expect(request).not.toHaveProperty('parserResourceLimits');
     expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({

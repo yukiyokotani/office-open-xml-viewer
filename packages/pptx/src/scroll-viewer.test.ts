@@ -1427,8 +1427,6 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
     const v = new PptxScrollViewer(container as unknown as HTMLElement, {
       gap: 10,
       password: 'secret',
-      useGoogleFonts: true,
-      googleFontsCssOrigin: 'https://fonts.internal.example:8443',
       tiff,
     });
     const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
@@ -1440,8 +1438,6 @@ describe('PptxScrollViewer — self-load path (T7 story)', () => {
       'sample.pptx',
       expect.objectContaining({
         password: 'secret',
-        useGoogleFonts: true,
-        googleFontsCssOrigin: 'https://fonts.internal.example:8443',
         tiff,
       }),
     );

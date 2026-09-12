@@ -3,7 +3,6 @@ import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
-  normalizeGoogleFontsCssOrigin,
   releaseOwnedBitmap,
   unloadGoogleFonts,
   unregisterEmbeddedFonts,
@@ -440,9 +439,6 @@ export class DocxDocument {
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
     const cjkFallback = resolveCjkFallback(opts.cjkFallback);
     const resourceOptions = normalizeLoadResourceOptions(opts);
-    const googleFontsCssOrigin = opts.useGoogleFonts
-      ? normalizeGoogleFontsCssOrigin(opts.googleFontsCssOrigin)
-      : undefined;
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
     const metrics = new OoxmlResourceMetricsSession({
@@ -520,7 +516,6 @@ export class DocxDocument {
               settled: false,
             }
           : undefined,
-        googleFontsCssOrigin,
       );
       if (mode === 'worker' && doc._mode === 'main') {
         metrics.setMode('main');
@@ -561,8 +556,6 @@ export class DocxDocument {
         doc._googleFontFaces = await preloadGoogleFonts(
           docxFontPreloadNames(doc._document, cjkFallback),
           DOCX_GOOGLE_FONTS,
-          undefined,
-          googleFontsCssOrigin,
         );
       }
       // ECMA-376 §17.8.1 / §17.8.3 — register the document's embedded fonts (via
@@ -803,7 +796,6 @@ export class DocxDocument {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
     progressive?: WorkerProgressiveLoad,
-    googleFontsCssOrigin?: string,
   ): Promise<void> {
     if (progressive) {
       await this._parseProgressively(
@@ -814,14 +806,13 @@ export class DocxDocument {
         onUsage,
         renderers,
         progressive,
-        googleFontsCssOrigin,
       );
       return;
     }
     const res = await this._bridge.request(
       (id) =>
         this._mode === 'worker'
-          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, googleFontsCssOrigin, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
+          ? ({ type: 'parse', id, data: buffer, resourcePolicy, useGoogleFonts, cjkFallback: this._cjkFallback, defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs, ...this._parseViewFields(), renderers } satisfies RenderWorkerRequest)
           : ({ type: 'parse', id, data: buffer, resourcePolicy } satisfies WorkerRequest),
       [buffer],
       { timeoutMs },
@@ -1110,7 +1101,6 @@ export class DocxDocument {
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
     progressive: WorkerProgressiveLoad,
-    googleFontsCssOrigin: string | undefined,
   ): Promise<void> {
     this._progressive = progressive;
     this._layoutAbort = progressive.abort;
@@ -1124,7 +1114,6 @@ export class DocxDocument {
           data: buffer,
           resourcePolicy,
           useGoogleFonts,
-          googleFontsCssOrigin,
           cjkFallback: this._cjkFallback,
           defaultCurrentDateMs: documentLayoutRuntimeOf(this).defaultCurrentDateMs,
           ...this._parseViewFields(),

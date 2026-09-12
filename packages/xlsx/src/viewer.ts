@@ -1213,7 +1213,6 @@ class XlsxViewerEngine implements ZoomableViewer {
       const wb = await this.acquisition.replace(() => XlsxWorkbook[loadXlsxSheetSource](source, {
           password: this.opts.password,
           useGoogleFonts: this.opts.useGoogleFonts,
-          googleFontsCssOrigin: this.opts.googleFontsCssOrigin,
           cjkFallback: this.opts.cjkFallback,
           maxZipEntryBytes: this.opts.maxZipEntryBytes,
           resourceLimits: this.opts.resourceLimits,

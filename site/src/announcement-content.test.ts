@@ -33,8 +33,6 @@ describe('v0.87 regional CJK fallback announcement', () => {
     ]).join(' ') ?? '';
 
     expect(text).toContain('cjkFallback');
-    expect(text).toContain('googleFontsCssOrigin');
-    expect(text).toContain('Webfont loading remains off by default');
     expect(text).toContain('Set cjkFallback explicitly');
     expect(text).toContain('onLayoutComplete');
     expect(text).not.toMatch(/private\/|sample-\d+/i);
