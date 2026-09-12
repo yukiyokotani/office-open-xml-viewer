@@ -7,6 +7,35 @@ the corresponding minor release.
 
 ## Unreleased
 
+## 0.87.0 — 2026-09-12
+
+Compatible minor release making CJK fallback selection and optional webfont
+delivery more predictable, while tightening several loading and navigation
+edge cases.
+
+- **regional CJK fallback:** DOCX, XLSX and PPTX loads can select SC, TC, HK,
+  JP or KR fallback forms explicitly, or derive them once from the host
+  language. Authored font regions and document language evidence retain
+  priority, and only ambiguous Han text uses the selected fallback.
+- **self-hosted font CSS:** applications that opt into Google Fonts-compatible
+  loading can point the existing stylesheet requests at an HTTP(S) mirror or
+  internal service. Redirected and relative font asset URLs resolve against the
+  returned stylesheet, and failures stay on the system-font fallback without
+  contacting the public service.
+- **consistent progressive completion:** DOCX and PPTX progressive loads now
+  call `onLayoutComplete` exactly once after every successful load, including
+  small files that finish before `load()` returns. Pre-publication failures
+  still reject `load()` directly.
+- **steadier viewing and opening:** programmatic DOCX/PPTX navigation remains on
+  the requested page or slide when the browser rounds a fractional scroll
+  position; otherwise valid OOXML packages can open when duplicate ZIP headers
+  differ only in DOS timestamp metadata; and an empty anchored DOCX run no
+  longer fails intrinsic-width measurement.
+- **compatibility:** no option or method is removed or renamed. Existing
+  applications require no migration. For deterministic ambiguous-Han glyphs
+  across browsers, locales and Node hosts, set `cjkFallback` explicitly rather
+  than relying on the new `auto` default.
+
 ## 0.86.1 — 2026-09-06
 
 Compatible patch release improving older PowerPoint compatibility, curved-text

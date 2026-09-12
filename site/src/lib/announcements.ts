@@ -36,6 +36,68 @@ export interface Announcement {
 
 export const announcements: readonly Announcement[] = [
   {
+    slug: 'v087-regional-cjk-fallbacks',
+    date: '2026-09-12',
+    label: 'Release note',
+    version: 'v0.87.0',
+    title: 'Regional CJK fallbacks and more deployment control in v0.87.0',
+    summary: 'v0.87.0 lets applications choose regional CJK fallback forms, route optional webfont CSS through an internal service, and picks up several reliability fixes for loading and navigation.',
+    audience: 'Applications that display CJK documents, self-host optional webfonts, use progressive DOCX or PPTX loading, or need consistent programmatic navigation. Existing integrations can upgrade without API changes.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release focuses on predictable multilingual display and deployment rather than a large new viewing feature. Word, Excel and PowerPoint content can use the appropriate regional fallback for ambiguous Han characters, while applications that enable webfonts have more control over where those fonts are requested.',
+        ],
+        bullets: [
+          'Choose Simplified Chinese, Traditional Chinese, Hong Kong, Japanese or Korean fallback forms.',
+          'Use the host language automatically, or set one region for reproducible output.',
+          'Route opt-in Google Fonts-compatible CSS through a regional mirror or internal service.',
+          'Keep fast progressive loads and programmatic page or slide navigation consistent.',
+        ],
+      },
+      {
+        title: 'Regional CJK fallback',
+        modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
+        paragraphs: [
+          'The new cjkFallback option controls the regional fallback used only when Han text does not already identify an authored or document-derived region. Choose sc, tc, hk, jp or kr explicitly, or leave the default auto mode to resolve the host language once when loading starts.',
+          'Authored regional fonts and stronger language evidence still win. Latin text, digits, bullets and symbols keep their existing font route, so the setting is limited to the ambiguous Han text it is intended to disambiguate.',
+        ],
+        examples: [
+          {
+            title: 'Keep output reproducible across hosts',
+            code: `const viewer = new DocxViewer(canvas, {
+  cjkFallback: 'sc',
+});`,
+          },
+        ],
+      },
+      {
+        title: 'Optional webfonts from your own service',
+        modules: ['DOCX', 'XLSX', 'PPTX'],
+        paragraphs: [
+          'Applications that already opt into webfont loading can set googleFontsCssOrigin to an HTTP(S) origin for a compatible mirror or internal CSS service. The existing stylesheet paths and font-family queries are preserved, and font-file links in the returned CSS resolve relative to its final URL, including redirects.',
+          'The configured service must provide or proxy the font files as well as the CSS. If it fails, viewing continues with system fonts and does not retry the public Google Fonts endpoint. Webfont loading remains off by default.',
+        ],
+      },
+      {
+        title: 'Steadier completion, navigation and file opening',
+        paragraphs: [
+          'Progressive DOCX and PPTX loads now deliver one successful onLayoutComplete notification even when a small file finishes before load() returns. Programmatic page and slide navigation also stays on the requested item when a browser rounds a fractional scroll position.',
+          'The shared package reader accepts otherwise consistent Office files whose duplicated ZIP headers differ only in legacy timestamp metadata. Word intrinsic-width measurement also handles empty anchored runs without failing the document layout.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'No option or method is removed or renamed, and most applications can upgrade without changes. The auto CJK fallback can intentionally choose different regional Han glyphs when the host language provides that preference. Set cjkFallback explicitly when output must remain identical across browser locales, servers or Node hosts.',
+          'Applications that observe progressive onLayoutComplete should allow the callback after every successful progressive load. It is still called exactly once; failures before any layout is published continue to reject load() directly.',
+        ],
+      },
+    ],
+  },
+  {
     slug: 'v086-presentation-text-and-csv-previews',
     date: '2026-09-05',
     label: 'Release note',
