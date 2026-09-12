@@ -229,6 +229,25 @@ describe('measureParagraph', () => {
     expect(measureParagraphIntrinsicWidth(doc, context, 25, measurer, environment())).toBe(25);
   });
 
+  it('fingerprints anchor-host segments whose shaping script slot is unset', () => {
+    // anchorHost runs acquire as metric-only empty segments (line-layout.ts),
+    // which never pass through the shaping service, so their optional
+    // LayoutTextSeg.script stays undefined. The intrinsic-merge fingerprint
+    // must tolerate that instead of throwing "Cannot fingerprint undefined".
+    const doc = paragraph({
+      spaceBefore: 0,
+      spaceAfter: 0,
+      runs: [
+        { type: 'anchorHost', fontSize: 10 },
+        { type: 'text', ...textRun('abc') },
+      ],
+    });
+    const context = layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 });
+
+    expect(measureParagraphIntrinsicWidth(doc, context, 200, measurer, environment()))
+      .toBe(15);
+  });
+
   it('includes paragraph indents, hanging numbering space, tabs, bidi, and inline resources', () => {
     const indented = layoutContext({
       spaceBeforePt: 0, spaceAfterPt: 0,
