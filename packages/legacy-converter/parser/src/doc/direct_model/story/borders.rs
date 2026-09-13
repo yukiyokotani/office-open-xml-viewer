@@ -5,6 +5,13 @@ use crate::doc::{formatting, table, table_context, table_style_condition, unsupp
 
 type BorderSides = [Option<table::PreparedBorder>; 6];
 
+const EDGE_CONDITIONS: [(u16, u16); 4] = [
+    (table_style_condition::FIRST_COLUMN, 1 << 7),
+    (table_style_condition::LAST_COLUMN, 1 << 8),
+    (table_style_condition::FIRST_ROW, 1 << 5),
+    (table_style_condition::LAST_ROW, 1 << 6),
+];
+
 struct ActiveConditional {
     style: usize,
     options: u16,
@@ -73,17 +80,11 @@ fn active_conditional(
             formatting.unsupported_table_properties = true;
             return Ok(None);
         }
-        let conditions = [
-            (table_style_condition::FIRST_COLUMN, 1 << 7),
-            (table_style_condition::LAST_COLUMN, 1 << 8),
-            (table_style_condition::FIRST_ROW, 1 << 5),
-            (table_style_condition::LAST_ROW, 1 << 6),
-        ];
-        let active_edges = conditions
+        let active_edges = EDGE_CONDITIONS
             .into_iter()
             .filter(|(condition, flag)| presence & condition != 0 && options & flag != 0)
             .fold(0, |mask, (condition, _)| mask | condition);
-        let active_borders = conditions
+        let active_borders = EDGE_CONDITIONS
             .into_iter()
             .enumerate()
             .filter(|(slot, (_, flag))| borders.present & (1 << slot) != 0 && options & flag != 0)
@@ -97,34 +98,24 @@ fn active_conditional(
         if active_borders == 0 {
             continue;
         }
-        if active_borders.count_ones() > 1
-            && active_borders
-                != table_style_condition::FIRST_COLUMN | table_style_condition::FIRST_ROW
-        {
-            // Native multi-condition controls currently cover one first-column
-            // plus one first-row condition. Other family combinations remain
-            // behind the admission gate.
+        if !supported_edge_combination(active_borders) {
+            // The bounded mapper composes at most one column condition and one
+            // row condition. Same-family and three-or-more-condition cascades
+            // remain behind the admission gate.
             formatting.unsupported_table_properties = true;
             return Ok(None);
         }
-        let patches = [
-            (borders.present & 1 != 0 && options & (1 << 7) != 0)
-                .then_some((table_style_condition::FIRST_COLUMN, borders.sides[0])),
-            (borders.present & (1 << 2) != 0 && options & (1 << 5) != 0)
-                .then_some((table_style_condition::FIRST_ROW, borders.sides[2])),
-        ];
-        if active_borders.count_ones() == 1 {
-            let patch = conditions
-                .into_iter()
-                .enumerate()
-                .find(|(slot, (_, flag))| borders.present & (1 << slot) != 0 && options & flag != 0)
-                .map(|(slot, (condition, _))| (condition, borders.sides[slot]));
-            return Ok(Some(ActiveConditional {
-                style,
-                options,
-                patches: [patch, None],
-                presence,
-            }));
+        let mut patches = [None; 2];
+        for (target, condition) in selected_edge_conditions(active_borders)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let slot = EDGE_CONDITIONS
+                .iter()
+                .position(|(candidate, _)| *candidate == condition)
+                .expect("selected edge condition");
+            patches[target] = Some((condition, borders.sides[slot]));
         }
         return Ok(Some(ActiveConditional {
             style,
@@ -134,6 +125,27 @@ fn active_conditional(
         }));
     }
     Ok(None)
+}
+
+fn supported_edge_combination(mask: u16) -> bool {
+    let columns = mask & (table_style_condition::FIRST_COLUMN | table_style_condition::LAST_COLUMN);
+    let rows = mask & (table_style_condition::FIRST_ROW | table_style_condition::LAST_ROW);
+    mask.count_ones() <= 1
+        || (mask.count_ones() == 2 && columns.count_ones() == 1 && rows.count_ones() == 1)
+}
+
+fn selected_edge_conditions(mask: u16) -> [Option<u16>; 2] {
+    let mut selected = [None; 2];
+    let mut target = 0;
+    // [MS-DOC] 2.4.6.6 applies first/last column before first/last row,
+    // independent of the serialized order of their sprmTCnf records.
+    for (condition, _) in EDGE_CONDITIONS {
+        if mask & condition != 0 {
+            selected[target] = Some(condition);
+            target += 1;
+        }
+    }
+    selected
 }
 
 fn supported_conditional_shape(

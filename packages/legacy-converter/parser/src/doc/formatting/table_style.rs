@@ -541,15 +541,11 @@ impl Formatting<'_> {
         #[cfg(feature = "direct-doc")]
         if inherited {
             let borders = profile.conditional_table_borders;
-            let unsupported_inherited_border = borders.present & !0b0101 != 0
-                || borders.sides[0]
-                    .iter()
-                    .enumerate()
-                    .any(|(side, value)| side != 1 && value.is_some());
+            let unsupported_inherited_border = borders.present & !0b0101 != 0;
             if unsupported_inherited_border {
-                // Inherited native controls cover complete FIRST_ROW patches
-                // and FIRST_COLUMN logical-left only. Keep other inherited
-                // edge conditions and first-column sides gated.
+                // Inherited native controls cover complete FIRST_ROW and
+                // FIRST_COLUMN patches with per-side child replacement. Keep
+                // other inherited edge conditions gated.
                 profile.unsupported_table = true;
                 profile.conditional_table_borders = ConditionalTableBorders::default();
             }

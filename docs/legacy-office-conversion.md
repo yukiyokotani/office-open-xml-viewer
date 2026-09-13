@@ -1452,7 +1452,7 @@ architecture and browser/visual acceptance remain outstanding.
 | Item | Scope | Status |
 | --- | --- | --- |
 | DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | Reviewed against the official version/count tables and product notes. The documented C0/C2 exceptions do not establish C3 support; corpus occurrence and another reader's numeric clustering are insufficient. Explicit rejection remains |
-| DOC-55 | Resolve native Word Raw-Nil compatibility shading | Further native isolation shows D609 alone is ignored and exposes style shading, whereas D612 supplies the fill with Raw ShdNil, even when D609 appears later. This distinguishes the two records but does not resolve all segments, ranges, versions or reset interactions; retain the compatibility gate |
+| DOC-55 | Resolve native Word Raw-Nil compatibility shading | Bounded clear-RGB modern compatibility fallback before explicit Raw ShdNil now reaches the actual story; native controls cover replacement, all three segments, D609 order and Raw Auto/concrete precedence. Reverse ordering, patterns, ranges and broader style interactions remain gated; full admission is incomplete |
 | DOC-56 | Resolve authored Nil cell-margin precedence | Bounded prerequisite resolved with DOC-46: native D632 and direct D634 Nil controls match explicit Dxa zero, while omission exposes the applicable style value; authored style D634 Nil masks inherited Dxa. Retain authored state until resolution. This does not establish conditional CSSA or mixed D63E/D634 style-chain composition |
 | DOC-57 | Recover a usable native oracle for ordinary ipatNil | A new ordinary-ipatNil control with valid Auto COLORREFs still causes a native Word display-update error. No PDF oracle was obtained. This trial family is paused to avoid repeated Word errors; specification-based no-fill remains separately tested |
 | DOC-58 | Avoid resources orphaned by merged-cell projection | Fixed within DOC-52: horizontal/vertical continuation regressions fail before live-resource finalization and pass afterward. Retained nested/body/header/footer/section references remain deduplicated; traversal scratch is budgeted and image-free documents bypass the pass |
@@ -1505,7 +1505,7 @@ selection are recorded without automatically extending the batch.
 | Item | Scope | Status |
 | --- | --- | --- |
 | DOC-84 | Resolve native inline no-overlap grouping | A matched current-Word control keeps an inline middle row in the same table even with no-overlap true; its PDF matches omission and its saved DOCX keeps the three-row table. The existing normative true identity distinction is not thereby disproved for positioned tables. Isolate inline versus positioned behavior before changing that rule |
-| DOC-85 | Integrate cross-family border condition matching | Review found that a last-row/column border could bypass an enabled competing first-edge character condition. A conservative cached-presence gate and regression tests now prevent that partial projection; broader mixed-family border matching still needs shared-selector and native acceptance work |
+| DOC-85 | Integrate cross-family border condition matching | Bounded row/column border pairs now cover all four combinations in native controls and actual story tests. Competing nonborder edge conditions, eligible corners, wider cascades and merged/irregular shapes remain conservatively gated |
 
 The follow-up batch implements the bounded probe-validation, current-Word
 row-split policy, false no-overlap identity, numbering regressions and final-edge
@@ -1593,3 +1593,83 @@ Unconditional row fallback and cell-side borders retain their existing model
 roles. Renderer, worker protocol, shared models, public opt-in options and the
 independent XLS/PPT paths are unchanged. This scoped acceptance does not replace
 the outstanding review of the full feature branch.
+
+### Selected admission-prerequisite batch: 30 items
+
+This user-authorized batch selects parent items DOC-25, DOC-26, DOC-55,
+DOC-80, DOC-81 and DOC-85, plus the twenty-four bounded slices below.
+Previously blocked font, FIB-version and ordinary-ipatNil investigations are not
+repeated without new evidence. Scope is finite; newly found issues are recorded
+without automatically starting another batch. Parent admission requires actual
+runtime and native Office acceptance, not only helper tests.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-104 | Verify empty compatibility-shading replacement | Verified: empty replacement removes the modern compatibility prefix before a later Raw array |
+| DOC-105 | Verify shading representation ordering | Verified: D612 colors survive either D609 serialization order |
+| DOC-106 | Verify Raw concrete/Auto shading precedence | Verified: later Raw Auto clears and concrete Raw colors replace the compatibility fallback |
+| DOC-107 | Verify the second compatibility-shading segment | Verified: the second segment starts at source cell 23 with adjacent-cell countercontrols |
+| DOC-108 | Verify the third compatibility-shading segment | Verified: the third segment starts at source cell 45 with adjacent-cell countercontrols |
+| DOC-109 | Define the bounded native shading policy | Implemented within a bounded clear-RGB fallback policy; unsupported orders and patterns remain gated |
+| DOC-110 | Preserve compatibility shading through cell edits | Implemented: compatibility state follows source-cell insertion, deletion and redefinition |
+| DOC-111 | Exercise shading through actual container acquisition | Verified actual CFB-to-story fallback; full-document TIstd/TTlp admission remains blocked |
+| DOC-112 | Anchor margin controls to explicit cell edges | Corrected: explicit native borders now anchor each pilot independently; initial eight borderless controls excluded |
+| DOC-113 | Verify conditional style-margin sides | Partial: bordered left-side effect observed; other sides and composition require new isolated controls |
+| DOC-114 | Verify disabled conditional-margin flags | Observed: disabling FIRST_ROW moves the grid and removes its relative left offset; general cascade unresolved |
+| DOC-115 | Verify direct margins with paired geometry | Blocked: original unanchored pair cannot establish Dxa/Nil/omitted precedence |
+| DOC-116 | Cache accepted conditional-margin patches | Blocked by native geometry/composition evidence; no conditional-margin cache added |
+| DOC-117 | Project accepted conditional margins in the story | Blocked by DOC-113 through DOC-115; no conditional-margin projection added |
+| DOC-118 | Bound conditional-margin retention and work | Deferred with the unimplemented margin cache/projector; existing fixed gate retained |
+| DOC-119 | Reassess conditional-margin admission | Reviewed: every physical D63E side remains gated; unconditional defaults remain independently available |
+| DOC-120 | Verify additional row/column border pairs | Implemented: all four one-row/one-column pairs; native exterior/interior serialization controls agree |
+| DOC-121 | Verify inherited first-column borders | Implemented: inherited FIRST_COLUMN six-side profile with a partial child override and visible insideH |
+| DOC-122 | Verify mixed-family edge-condition selection | Verified in actual story models: column-before-row order and source-owned exterior/interior edges |
+| DOC-123 | Resolve conditional boundaries from explicit merges | Blocked: collapsed horizontal owners need source-end borders; vertical spans need cross-row owners |
+| DOC-124 | Bound conditional-border geometry work | Reviewed: current unmerged geometry remains bounded; merged source-owner work is still required |
+| DOC-125 | Reassess the bounded border projection gates | Reviewed: exactly one row plus one column supported; wider cascades, merges, irregular grids and other gates retained |
+| DOC-126 | Compare final isolated model results | Verified: 257/259 exact results; two expected D660 rejection-message changes, no admission or streamed-model change |
+| DOC-127 | Review final changes and parent admission | Scoped review complete; required bounded checks pass and unresolved parent admission remains explicit |
+
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-128 | Reset row-level D660 shading at TIstd | Normative preceding-D660 reset implemented from the TIstd preservation list; native trio is inconclusive because none visibly paints the expected fill. Reverse order remains gated |
+| DOC-129 | Resolve preferred cell width at TIstd | Review found D635 cell preferred-width state survives the current reset path. Distinguish explicit cell-definition geometry from nonpreserved preferred-width state with native controls before changing behavior |
+| DOC-130 | Verify visible anchors in margin controls | Corrected controls contain visible borders. Review also corrected use of one PDF's border coordinate for another: measure each grid independently. Margin origin and D634/D63E composition remain unresolved |
+| DOC-131 | Resolve compatibility shading after authored Raw Nil | Review found stale fallback risk when a later empty or shorter compatibility array replaces an already-resolved Raw Nil segment. The entire replaced segment is gated; require native order/countercontrols before implementing this direction |
+
+
+### Admission-prerequisite batch acceptance
+
+The thirty selected items were reviewed to the bounded scope above. Conditional
+border projection now composes every one-row/one-column edge pair and retains
+all supported inherited FIRST_COLUMN sides. Modern compatibility shading now
+supplies clear RGB fills to a later explicit Raw ShdNil in all three source-cell
+segments. These facts reach the actual CFB-to-story path; independent TIstd and
+TTlp admission gates remain.
+
+Native Word produced 38 binary-input PDF controls and diagnostic DOCX exports.
+Only controls with independently verified visible geometry or fills support the
+implementation. Eight initial borderless margin controls do not prove relative
+margins, and the D660 trio does not establish native shading precedence. The
+corrected margin pilots expose grid-origin movement and leave composition
+unresolved. Additional findings are recorded as DOC-128 through DOC-131.
+
+Fresh verification passed 861 Rust unit tests and nine integration tests, with
+six existing ignores; feature-off compilation, 34 probe tests, nine PAPX tests,
+33 unchanged renderer border tests, static layout boundaries, scoped formatting
+and diff checks also passed. Independent release WASM builds over 259 identical
+inputs produced 257 exact matches. The remaining two controls stay rejected:
+resetting preceding D660 or gating following D660 changes only which unsupported
+formatting diagnostic is reported. No admitted stream or admission status
+changed. Four of 59 private inputs remain admitted; this is not a fidelity or
+full-table-style completion claim.
+
+Adversarial review corrected empty-segment slicing and gated reverse-order
+compatibility replacements across their entire source segment. Per-cell state
+uses existing size-based accounting and fixed record/cell bounds. Border
+composition retains at most two inline patches, chooses source-owned sides in
+specified order, and introduces no geometry inference. Renderer, shared model,
+worker and independent XLS/PPT paths are unchanged. Merged boundary ownership,
+conditional-margin composition and whole-branch architecture/browser/visual
+acceptance remain outstanding. This finite batch does not start further work.

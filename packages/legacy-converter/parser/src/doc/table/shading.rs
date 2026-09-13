@@ -89,6 +89,10 @@ fn pattern(ipat: u16) -> Result<Option<&'static str>, String> {
 }
 
 impl Shading {
+    pub(in crate::doc) fn is_clear_rgb_background(&self) -> bool {
+        self.pattern == "clear" && matches!(self.background, Color::Rgb(_))
+    }
+
     pub fn read(bytes: &[u8], old: bool) -> Result<Option<Self>, String> {
         if bytes.len() != if old { 2 } else { 10 } {
             return Err(unsupported("invalid Word shading length"));

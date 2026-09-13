@@ -99,6 +99,8 @@ pub(in crate::doc) enum StyleAwareBorderApply {
 pub struct Cell {
     pub shading: Option<Shading>,
     pub(in crate::doc) prepared_shading: Option<PreparedCellShading>,
+    pub(in crate::doc) compatibility_shading: Option<PreparedCellShading>,
+    pub(in crate::doc) raw_nil_authored: bool,
     pub width: i32,
     pub flags: u16,
     pub preferred: Option<PreferredWidth>,
@@ -539,8 +541,9 @@ impl Row {
     /// interpreted. [MS-DOC] 2.6.3 and 2.9.53 require nFib > 0x00D9 readers
     /// that interpret table styles to ignore the compatibility arrays and use
     /// the Raw arrays. Raw ShdNil and omitted entries defer to the style;
-    /// ShdAuto is an explicit no-fill value. Compatibility-array precedence
-    /// in Word remains gated because observed Raw ShdNil can retain it.
+    /// ShdAuto is an explicit no-fill value. The bounded current-Word fallback
+    /// retains clear RGB modern arrays only when a later explicit Raw ShdNil
+    /// exposes them; unsupported forms and reverse ordering stay gated.
     pub(in crate::doc) fn apply_style_aware_shading(
         &mut self,
         code: u16,
@@ -551,13 +554,72 @@ impl Row {
             return Ok(StyleAwareShadingApply::Unhandled);
         }
         match code {
-            // Compatibility arrays and range shading are ignored under the
-            // normative policy ([MS-DOC] 2.6.3 sprmTDefTableShd*, sprmTSetShd,
-            // and sprmTSetShdOdd). Keep the table gated because Word's
-            // interaction between these arrays and Raw ShdNil is unresolved.
-            0xd609 | 0xd612 | 0xd616 | 0xd60c | 0xd62d | 0xd62e => {
-                Ok(StyleAwareShadingApply::HandledUnsupported)
+            // Current Word ignores the old two-byte representation. A later
+            // D609 also leaves an authored modern compatibility array intact.
+            0xd609 => Ok(StyleAwareShadingApply::Handled),
+            // Despite the normative style-capable ignore rule, current Word
+            // retains post-TIstd modern arrays as a fallback for explicit Raw
+            // ShdNil. Native controls cover replacement and all three segment
+            // boundaries; keep this fallback separate from the Raw value.
+            0xd612 | 0xd616 | 0xd60c => {
+                if self.table_style.is_none() {
+                    return Ok(StyleAwareShadingApply::HandledUnsupported);
+                }
+                let start = match code {
+                    0xd616 => 22,
+                    0xd60c => 44,
+                    _ => 0,
+                };
+                let max = if code == 0xd60c { 19 } else { 22 };
+                let cb = usize::from(
+                    *b.first()
+                        .ok_or_else(|| unsupported("short Word compatibility shading array"))?,
+                );
+                if b.len() != cb + 1
+                    || cb % 10 != 0
+                    || cb / 10 > max
+                    || (cb > 0 && start + cb / 10 > self.cells.len())
+                {
+                    return Err(unsupported("invalid Word compatibility cell shading array"));
+                }
+                let end = (start + max).min(self.cells.len());
+                if self.cells[start.min(end)..end]
+                    .iter()
+                    .any(|cell| cell.raw_nil_authored)
+                {
+                    return Ok(StyleAwareShadingApply::HandledUnsupported);
+                }
+                for cell in &mut self.cells[start.min(end)..end] {
+                    cell.compatibility_shading = None;
+                }
+                let mut supported = true;
+                if cb > 0 {
+                    for (cell, bytes) in self.cells[start..start + cb / 10]
+                        .iter_mut()
+                        .zip(b[1..].chunks_exact(10))
+                    {
+                        cell.compatibility_shading = match Shading::read(bytes, false)? {
+                            Some(value) if value.is_clear_rgb_background() => {
+                                Some(PreparedCellShading::Explicit(value))
+                            }
+                            Some(_) | None => {
+                                supported = false;
+                                Some(PreparedCellShading::Unsupported)
+                            }
+                        };
+                    }
+                }
+                Ok(if supported {
+                    StyleAwareShadingApply::Handled
+                } else {
+                    StyleAwareShadingApply::HandledUnsupported
+                })
             }
+            0xd62d | 0xd62e => Ok(StyleAwareShadingApply::HandledUnsupported),
+            // TIstd followed by D660 is not admitted. The native control trio
+            // produced no verified fill oracle, so do not project a guessed
+            // result for any D660 pattern or table-style state.
+            0xd660 if self.table_style.is_some() => Ok(StyleAwareShadingApply::HandledUnsupported),
             0xd670 | 0xd671 | 0xd672 => {
                 let start = match code {
                     0xd671 => 22,
@@ -579,17 +641,20 @@ impl Row {
 
                 let mut values = Vec::with_capacity(cb / 10);
                 let mut supported = true;
-                for bytes in b[1..].chunks_exact(10) {
+                for (index, bytes) in b[1..].chunks_exact(10).enumerate() {
                     let shd_nil = Shading::is_shd_nil(bytes);
                     let value = match Shading::read(bytes, false)? {
-                        Some(_) if shd_nil => PreparedCellShading::StyleDeferred,
+                        Some(_) if shd_nil => self.cells[start + index]
+                            .compatibility_shading
+                            .clone()
+                            .unwrap_or(PreparedCellShading::StyleDeferred),
                         Some(value) => PreparedCellShading::Explicit(value),
                         None => {
                             supported = false;
                             PreparedCellShading::Unsupported
                         }
                     };
-                    values.push(value);
+                    values.push((value, shd_nil));
                 }
 
                 // The omitted tail has the Raw-array default: table-style
@@ -597,13 +662,15 @@ impl Row {
                 let end = (start + max).min(self.cells.len());
                 for cell in &mut self.cells[start.min(end)..end] {
                     cell.prepared_shading = Some(PreparedCellShading::StyleDeferred);
+                    cell.raw_nil_authored = false;
                 }
                 if !values.is_empty() {
-                    for (cell, value) in self.cells[start..start + values.len()]
+                    for (cell, (value, raw_nil)) in self.cells[start..start + values.len()]
                         .iter_mut()
                         .zip(values)
                     {
                         cell.prepared_shading = Some(value);
+                        cell.raw_nil_authored = raw_nil;
                     }
                 }
                 Ok(if supported {
@@ -642,7 +709,10 @@ impl Row {
                 // shading is not on that list; geometry remains independent.
                 for cell in &mut self.cells {
                     cell.prepared_shading = None;
+                    cell.compatibility_shading = None;
+                    cell.raw_nil_authored = false;
                 }
+                self.shading = None;
                 self.table_style = Some(table_style);
                 return Ok(false);
             }
@@ -1436,6 +1506,36 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_shading_follows_source_cells_across_edits() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 100, 0]).unwrap();
+        row.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        row.apply_style_aware_shading(0xd612, &raw_array(raw_shade(0), 3), style_aware_policy())
+            .unwrap();
+        let original: Vec<_> = row
+            .cells
+            .iter()
+            .map(|cell| cell.compatibility_shading.clone())
+            .collect();
+        row.apply(0x7621, &[1, 1, 100, 0]).unwrap();
+        assert_eq!(row.cells[0].compatibility_shading, original[0]);
+        assert_eq!(row.cells[1].compatibility_shading, None);
+        assert_eq!(row.cells[2].compatibility_shading, original[1]);
+        assert_eq!(row.cells[3].compatibility_shading, original[2]);
+        row.apply(0x5622, &[0, 2]).unwrap();
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.compatibility_shading.clone())
+                .collect::<Vec<_>>(),
+            original[1..]
+        );
+        row.apply(0xd608, &[6, 0, 1, 0, 0, 100, 0]).unwrap();
+        assert_eq!(row.cells.len(), 1);
+        assert_eq!(row.cells[0].compatibility_shading, None);
+    }
+
+    #[test]
     fn style_aware_raw_arrays_cover_all_three_bounded_segments() {
         let mut row = Row::default();
         row.apply(0x7621, &[0, 63, 1, 0]).unwrap();
@@ -1567,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn modern_compatibility_shading_keeps_no_style_and_raw_nil_tables_gated() {
+    fn modern_compatibility_shading_requires_a_style_and_supplies_raw_nil_fallback() {
         let mut no_style = Row::default();
         no_style.apply(0x7621, &[0, 1, 1, 0]).unwrap();
         assert_eq!(no_style.table_style, None);
@@ -1585,7 +1685,7 @@ mod tests {
             raw_nil
                 .apply_style_aware_shading(0xd612, &shade(0), style_aware_policy())
                 .unwrap(),
-            StyleAwareShadingApply::HandledUnsupported
+            StyleAwareShadingApply::Handled
         );
         let nil = [255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
         assert_eq!(
@@ -1596,8 +1696,189 @@ mod tests {
         );
         assert!(matches!(
             raw_nil.cells[0].prepared_shading,
+            Some(PreparedCellShading::Explicit(ref shading))
+                if shading.xml().contains("w:fill=\"123456\"")
+        ));
+    }
+
+    #[test]
+    fn modern_compatibility_shading_replaces_segments_and_raw_values_override_it() {
+        let new_row = || {
+            let mut row = Row::default();
+            row.apply(0x7621, &[0, 46, 1, 0]).unwrap();
+            row.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+            row
+        };
+        let nil = [255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
+        let auto = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0];
+
+        for (compat, raw, start) in [
+            (0xd612, 0xd670, 0),
+            (0xd616, 0xd671, 22),
+            (0xd60c, 0xd672, 44),
+        ] {
+            let mut row = new_row();
+            row.apply_style_aware_shading(
+                compat,
+                &raw_array(raw_shade(0), 2),
+                style_aware_policy(),
+            )
+            .unwrap();
+            row.apply_style_aware_shading(raw, &raw_array(nil, 2), style_aware_policy())
+                .unwrap();
+            assert!(row.cells[start..start + 2].iter().all(|cell| matches!(
+                &cell.prepared_shading,
+                Some(PreparedCellShading::Explicit(shading)) if shading.xml().contains("w:fill=\"123456\"")
+            )));
+            let mut empty = new_row();
+            empty
+                .apply_style_aware_shading(
+                    compat,
+                    &raw_array(raw_shade(0), 2),
+                    style_aware_policy(),
+                )
+                .unwrap();
+            empty
+                .apply_style_aware_shading(compat, &[0], style_aware_policy())
+                .unwrap();
+            empty
+                .apply_style_aware_shading(raw, &raw_array(nil, 2), style_aware_policy())
+                .unwrap();
+            assert!(empty.cells[start..start + 2].iter().all(|cell| matches!(
+                cell.prepared_shading,
+                Some(PreparedCellShading::StyleDeferred)
+            )));
+            let mut override_row = new_row();
+            override_row
+                .apply_style_aware_shading(
+                    compat,
+                    &raw_array(raw_shade(0), 2),
+                    style_aware_policy(),
+                )
+                .unwrap();
+            override_row
+                .apply_style_aware_shading(raw, &raw_array(auto, 1), style_aware_policy())
+                .unwrap();
+            assert!(matches!(
+                override_row.cells[start].prepared_shading,
+                Some(PreparedCellShading::Explicit(_))
+            ));
+            assert!(matches!(
+                override_row.cells[start + 1].prepared_shading,
+                Some(PreparedCellShading::StyleDeferred)
+            ));
+        }
+
+        let mut row = new_row();
+        row.apply_style_aware_shading(0xd612, &raw_array(raw_shade(0), 1), style_aware_policy())
+            .unwrap();
+        row.apply(0x563a, &2u16.to_le_bytes()).unwrap();
+        row.apply_style_aware_shading(0xd670, &raw_array(nil, 1), style_aware_policy())
+            .unwrap();
+        assert!(matches!(
+            row.cells[0].prepared_shading,
             Some(PreparedCellShading::StyleDeferred)
         ));
+
+        let mut reverse = Row::default();
+        reverse.apply(0x7621, &[0, 1, 1, 0]).unwrap();
+        reverse.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        reverse
+            .apply_style_aware_shading(0xd670, &raw_array(nil, 1), style_aware_policy())
+            .unwrap();
+        assert_eq!(
+            reverse
+                .apply_style_aware_shading(
+                    0xd612,
+                    &raw_array(raw_shade(0), 1),
+                    style_aware_policy(),
+                )
+                .unwrap(),
+            StyleAwareShadingApply::HandledUnsupported
+        );
+        for replacement in [vec![0], raw_array(raw_shade(0), 1)] {
+            let mut reverse_tail = Row::default();
+            reverse_tail.apply(0x7621, &[0, 2, 1, 0]).unwrap();
+            reverse_tail.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+            reverse_tail
+                .apply_style_aware_shading(0xd670, &raw_array(nil, 2), style_aware_policy())
+                .unwrap();
+            assert_eq!(
+                reverse_tail
+                    .apply_style_aware_shading(0xd612, &replacement, style_aware_policy())
+                    .unwrap(),
+                StyleAwareShadingApply::HandledUnsupported
+            );
+        }
+
+        for (size, code) in [(0, 0xd616), (1, 0xd616), (22, 0xd616), (44, 0xd60c)] {
+            let mut short = Row::default();
+            if size > 0 {
+                short.apply(0x7621, &[0, size as u8, 1, 0]).unwrap();
+            }
+            short.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+            assert_eq!(
+                short
+                    .apply_style_aware_shading(code, &[0], style_aware_policy())
+                    .unwrap(),
+                StyleAwareShadingApply::Handled
+            );
+            assert!(short
+                .apply_style_aware_shading(
+                    code,
+                    &[10, 0, 0, 0, 255, 1, 2, 3, 0, 0, 0],
+                    style_aware_policy()
+                )
+                .is_err());
+        }
+
+        let ordinary_nil = raw_shade(0xffff);
+        assert_eq!(
+            row.apply_style_aware_shading(
+                0xd612,
+                &raw_array(ordinary_nil, 1),
+                style_aware_policy(),
+            )
+            .unwrap(),
+            StyleAwareShadingApply::HandledUnsupported
+        );
+    }
+
+    #[test]
+    fn native_tistd_resets_preceding_whole_table_shading_and_gates_the_reverse_order() {
+        let whole = shade(0);
+
+        let mut before = Row::default();
+        assert_eq!(
+            before
+                .apply_style_aware_shading(0xd660, &whole, style_aware_policy())
+                .unwrap(),
+            StyleAwareShadingApply::Unhandled
+        );
+        assert!(before.apply(0xd660, &whole).unwrap());
+        assert!(before.shading.is_some());
+        before.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        assert!(before.shading.is_none());
+
+        let mut after = Row::default();
+        after.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        assert_eq!(
+            after
+                .apply_style_aware_shading(0xd660, &whole, style_aware_policy())
+                .unwrap(),
+            StyleAwareShadingApply::HandledUnsupported
+        );
+        assert!(after.shading.is_none());
+
+        let mut no_style = Row::default();
+        assert_eq!(
+            no_style
+                .apply_style_aware_shading(0xd660, &whole, style_aware_policy())
+                .unwrap(),
+            StyleAwareShadingApply::Unhandled
+        );
+        assert!(no_style.apply(0xd660, &whole).unwrap());
+        assert!(no_style.shading.is_some());
     }
 
     #[test]

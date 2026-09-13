@@ -1,9 +1,9 @@
 //! Gate regressions for conditional table-style margins.
 //!
-//! Word 16.112.4 DOC93-DOC95 controls establish the isolated serialization
-//! facts below, but absolute PDF offsets also move with table indentation in
-//! the direct-D632 control. Keep conditional margins out of the projected
-//! profile until a separate batch isolates that geometry.
+//! Word 16.112.4 DOC93-DOC95 controls establish isolated serialization, while
+//! DOC113 bordered controls expose a FIRST_ROW left offset but also move the
+//! disabled table grid and do not visibly retain the D634 baseline. Keep
+//! conditional margins out of the profile until origin and cascade are isolated.
 
 use super::*;
 
@@ -88,13 +88,19 @@ fn conditional_d634_stays_gated_in_both_record_orders() {
 }
 
 #[test]
-fn conditional_d63e_does_not_create_a_partial_margin_patch() {
-    let conditional = first_row(&[margin(0xd63e, 0x01, 216), margin(0xd63e, 0x02, 288)].concat());
-    let mut value = formatting(&conditional);
+fn conditional_d63e_keeps_every_physical_side_behind_the_gate() {
+    for (side, width) in [(0x01, 216), (0x02, 288), (0x04, 360), (0x08, 432)] {
+        let unconditional = margin(0xd634, 0x0f, 72);
+        let conditional = first_row(&margin(0xd63e, side, width));
+        let tapx = [unconditional.as_slice(), conditional.as_slice()].concat();
+        let mut value = formatting(&tapx);
 
-    let (defaults, cells) = value.table_cell_margins(Some(0)).unwrap();
+        let (defaults, cells) = value.table_cell_margins(Some(0)).unwrap();
 
-    assert_eq!(defaults, table::MarginPatch::default());
-    assert_eq!(cells, table::MarginPatch::default());
-    assert!(value.unsupported_table_properties);
+        let mut expected = table::MarginPatch::default();
+        expected.apply_style(0xd634, &unconditional[2..]).unwrap();
+        assert_eq!(defaults, expected);
+        assert_eq!(cells, table::MarginPatch::default());
+        assert!(value.unsupported_table_properties);
+    }
 }

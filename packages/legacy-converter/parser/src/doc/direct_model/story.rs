@@ -498,6 +498,7 @@ mod tests {
         repeated_conditional_borders: u8,
         inherited_conditional_borders: bool,
         inherited_partial_conditional_borders: bool,
+        inherited_first_column_borders: bool,
         distinct_multi_condition_order: u8,
         shading: ShadingFixture,
         margins: MarginFixture,
@@ -698,6 +699,17 @@ mod tests {
                 .collect::<Vec<_>>();
             append_table_style(&mut bytes, 2, [&child, &[], &[]]);
             let parent = conditional_borders(1);
+            append_table_style(&mut bytes, 0xfff, [&parent, &[], &[]]);
+            for _ in 3..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
+
+        if fixture.inherited_first_column_borders {
+            let child = conditional_border_side(4, 0xd681, [0, 0, 0], 40);
+            append_table_style(&mut bytes, 2, [&child, &[], &[]]);
+            let parent = conditional_borders(4);
             append_table_style(&mut bytes, 0xfff, [&parent, &[], &[]]);
             for _ in 3..15 {
                 bytes.extend(0u16.to_le_bytes());
@@ -930,6 +942,21 @@ mod tests {
             sprm(0x2416, &[1]),
         ]
         .concat()
+    }
+
+    fn row_cells_with_compatibility_and_raw(
+        options: u16,
+        count: u8,
+        compatibility: &[u8],
+        raw: &[u8],
+    ) -> Vec<u8> {
+        let mut row = row_cells(options, count);
+        row.extend(sprm(0xd612, compatibility));
+        row.extend(sprm(0xd670, raw));
+        if row.len() % 2 == 0 {
+            row.extend(cell());
+        }
+        row
     }
 
     fn offset_merged_row_with_overrides(
@@ -1747,6 +1774,144 @@ mod tests {
     }
 
     #[test]
+    fn remaining_row_column_border_pairs_project_exact_region_edges_in_both_orders() {
+        for (row_condition, row_option, column_condition, column_option, corner) in [
+            (
+                table_style_condition::FIRST_ROW,
+                1 << 5,
+                table_style_condition::LAST_COLUMN,
+                1 << 8,
+                2,
+            ),
+            (
+                table_style_condition::LAST_ROW,
+                1 << 6,
+                table_style_condition::FIRST_COLUMN,
+                1 << 7,
+                6,
+            ),
+            (
+                table_style_condition::LAST_ROW,
+                1 << 6,
+                table_style_condition::LAST_COLUMN,
+                1 << 8,
+                8,
+            ),
+        ] {
+            let rows = std::array::from_fn(|_| row_cells(row_option | column_option, 3));
+            let row_then_column = conditional_border_grid_with_rows(
+                StyleFixture {
+                    conditional_borders: row_condition,
+                    conditional_borders_second: column_condition,
+                    ..StyleFixture::default()
+                },
+                rows.clone(),
+            );
+            let column_then_row = conditional_border_grid_with_rows(
+                StyleFixture {
+                    conditional_borders: column_condition,
+                    conditional_borders_second: row_condition,
+                    ..StyleFixture::default()
+                },
+                rows,
+            );
+            assert_eq!(row_then_column.borders, column_then_row.borders);
+            assert_eq!(
+                row_then_column.borders[corner],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some((
+                        if column_condition == table_style_condition::FIRST_COLUMN {
+                            "008000"
+                        } else {
+                            "00ffff"
+                        }
+                        .into(),
+                        4.0,
+                    )),
+                    Some(("0000ff".into(), 4.0)),
+                    Some((
+                        if column_condition == table_style_condition::LAST_COLUMN {
+                            "ffff00"
+                        } else {
+                            "00ffff"
+                        }
+                        .into(),
+                        4.0,
+                    )),
+                ]
+            );
+            let row_inside_v = if row_condition == table_style_condition::FIRST_ROW {
+                0
+            } else {
+                6
+            };
+            assert_eq!(
+                row_then_column.borders[row_inside_v][3],
+                Some(("00ffff".into(), 4.0))
+            );
+            let column = if column_condition == table_style_condition::FIRST_COLUMN {
+                0
+            } else {
+                2
+            };
+            let column_inside_h = if row_condition == table_style_condition::FIRST_ROW {
+                3 + column
+            } else {
+                column
+            };
+            assert_eq!(
+                row_then_column.borders[column_inside_h][2],
+                Some(("ff00ff".into(), 4.0))
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_first_column_borders_replace_per_side_on_the_full_region() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                inherited_first_column_borders: true,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(1 << 7, 3)),
+        );
+        assert_eq!(
+            [
+                projected.borders[0].clone(),
+                projected.borders[3].clone(),
+                projected.borders[6].clone()
+            ],
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("000000".into(), 5.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("000000".into(), 5.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("000000".into(), 5.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+            ]
+        );
+        assert!(projected
+            .borders
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 3 != 0)
+            .all(|(_, sides)| sides.iter().all(Option::is_none)));
+    }
+
+    #[test]
     fn inherited_conditional_borders_project_without_ungating_conditional_shading() {
         let projected = conditional_border_grid_with_rows(
             StyleFixture {
@@ -2090,6 +2255,33 @@ mod tests {
                 Some("008000".into()),
             ]
         );
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_uses_modern_compatibility_shading_only_for_explicit_raw_nil() {
+        let compatibility = cell_shading([0, 0, 0xff]);
+        let raw_nil = [10, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (
+                    2,
+                    3,
+                    row_cells_with_compatibility_and_raw(0, 1, &compatibility, &raw_nil),
+                ),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture {
+                shading: ShadingFixture::Unconditional,
+                ..StyleFixture::default()
+            },
+        );
+
+        assert_eq!(projected.backgrounds, [Some("0000ff".into())]);
+        // TIstd and TTlp remain independently gated; this assertion verifies
+        // the actual CFB-to-story shading path without claiming admission.
         assert!(projected.unsupported_table);
     }
 
