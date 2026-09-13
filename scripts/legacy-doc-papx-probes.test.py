@@ -363,7 +363,10 @@ class PapxProbeTests(unittest.TestCase):
                 probes.importlib, "import_module", return_value=fake_module
             ) as imported:
                 result = probes.load_document(path)
-            imported.assert_called_once_with("olefile")
+                with self.assertRaisesRegex(probes.ProbeError, "aggregate streams"):
+                    probes.load_document(path, max_aggregate_bytes=6)
+            self.assertEqual(imported.call_count, 2)
+            self.assertTrue(all(call.args == ("olefile",) for call in imported.call_args_list))
             with patch.object(probes, "MAX_PLAN_BYTES", 1):
                 with self.assertRaisesRegex(probes.ProbeError, "plan exceeds"):
                     probes._load_plan(path)
