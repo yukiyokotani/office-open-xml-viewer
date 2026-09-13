@@ -1309,3 +1309,29 @@ corpus representative of the documents being ingested. A custom local or remote
 adapter remains supported for applications that need a broader conversion
 engine; the library still supplies no remote endpoint and never silently uploads
 document bytes.
+
+## Direct DOC implementation backlog
+
+Work proceeds in explicitly selected batches; completing one item does not
+start the next automatically. The direct binary-to-model reader is the target
+architecture. Established behavior is represented by implementation and focused
+tests, with specification or bounded Office-observation comments beside them.
+Temporary experiment inputs, exports, diagnostics and builds belong under
+`outputs/` and are removed after their verification work is finished.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-00 | Recover or repeat the table-style inheritance controls | Repeated for unconditional color and LTR alignment |
+| DOC-01 | Focused PAPX alignment regression tests | Implemented |
+| DOC-02 | Row-owned TIstd selection and paragraph context | Connected; table admission remains gated |
+| DOC-03 | Observed unconditional CHPX color in direct projection | Connected; table admission remains gated |
+| DOC-04 | Observed unconditional LTR PAPX alignment in direct projection | Connected; table admission remains gated |
+| DOC-05 | Checked logical-column context for irregular rows | Partial: LTR row-local source order; explicit horizontal/vertical merge state and RTL remain unresolved |
+| DOC-06 | Conditional formatting in the production cascade | Not started; requires DOC-05 and verification of band/edge interactions |
+| DOC-07 | Further TAPX/PAPX/CHPX precedence | Not started; select one property group at a time |
+| DOC-08 | Evaluate removal of specific admission gates | Not started; requires end-to-end corpus and Office-reference evidence |
+
+The current formatting tests exercise the typed projection methods; they do not
+establish full-document admission or visual compatibility. The complete branch
+still requires its outstanding architecture and visual-regression review before
+merge or release. XLS and PPT follow separate backlogs and are outside this batch.

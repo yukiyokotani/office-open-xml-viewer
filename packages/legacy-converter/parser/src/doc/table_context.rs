@@ -11,6 +11,11 @@ use super::{
 };
 use std::borrow::Borrow;
 
+// TC80 carries horizontal and vertical merge state in these fields; see
+// [MS-DOC] 2.9.317 and 2.9.342.
+const HORIZONTAL_MERGE_MASK: u16 = 0b11;
+const VERTICAL_MERGE_MASK: u16 = 0b11 << 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ParagraphContext {
     pub(super) table_id: usize,
@@ -18,6 +23,12 @@ pub(super) struct ParagraphContext {
     pub(super) source_cell_index: Option<usize>,
     pub(super) ttp_id: usize,
     pub(super) table_style: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct LogicalColumn {
+    pub(super) ordinal: usize,
+    pub(super) count: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +42,8 @@ pub(super) struct RowContext {
     /// Effective sprmTIstd selection resolved from this row's TTP mark.
     pub(super) table_style: Option<usize>,
     pub(super) source_cell_count: usize,
+    /// Whether source-cell order cannot yet be mapped to logical columns.
+    pub(super) column_context_unsupported: bool,
     pub(super) header: bool,
     /// Number of preceding rows that are neither the actual top row nor headers.
     pub(super) preceding_body_rows: usize,
@@ -120,6 +133,42 @@ impl Index {
             .ok_or_else(|| unsupported("Word table context paragraph outside index"))
     }
 
+    /// Returns the paragraph's row-local source-cell ordinal and count. TDefTable
+    /// carries this cell sequence independently for each row ([MS-DOC] 2.4.3,
+    /// 2.4.4, and 2.6.3). Controlled Word 16.112.4 direct-DOC tests distinguish
+    /// source order from a union grid for LTR wide, ragged, and serialized
+    /// collapsed cells. The specification does not settle every irregular
+    /// conditional-style case, so rows with explicit merge state or bidi layout
+    /// remain unsupported until their logical-column semantics are established.
+    pub(super) fn logical_column(&self, id: usize) -> Result<Option<LogicalColumn>, String> {
+        let Some(context) = self.paragraph(id)? else {
+            return Ok(None);
+        };
+        let Some(ordinal) = context.source_cell_index else {
+            return Ok(None);
+        };
+        let table = self
+            .tables
+            .get(context.table_id)
+            .ok_or_else(|| unsupported("Word table column table outside context index"))?;
+        let row = table
+            .rows
+            .get(context.row_index)
+            .ok_or_else(|| unsupported("Word table column row outside context index"))?;
+        if row.column_context_unsupported {
+            return Err(unsupported(
+                "Word table logical column context is unresolved",
+            ));
+        }
+        if row.source_cell_count == 0 || ordinal >= row.source_cell_count {
+            return Err(unsupported("invalid Word table source column position"));
+        }
+        Ok(Some(LogicalColumn {
+            ordinal,
+            count: row.source_cell_count,
+        }))
+    }
+
     pub(super) fn tables(&self) -> &[TableContext] {
         &self.tables
     }
@@ -183,7 +232,18 @@ fn index_event<
                 .ok_or_else(|| unsupported("Word table row lacks source paragraph"))?;
             // Resolve from the TTP-owned row before assigning the same compact
             // selection to its paragraph contexts.
-            let table_style = resolve_style(raw_row.source.borrow().table_style)?;
+            let (table_style, source_cell_count, column_context_unsupported, header) = {
+                let source = raw_row.source.borrow();
+                (
+                    resolve_style(source.table_style)?,
+                    source.cells.len(),
+                    source.bidi
+                        || source.cells.iter().any(|cell| {
+                            cell.flags & (HORIZONTAL_MERGE_MASK | VERTICAL_MERGE_MASK) != 0
+                        }),
+                    source.header,
+                )
+            };
             set_innermost(
                 contexts,
                 ttp_id,
@@ -195,7 +255,6 @@ fn index_event<
                     table_style,
                 },
             )?;
-            let source_cell_count = raw_row.source.borrow().cells.len();
             if raw_row.cells.len() != source_cell_count {
                 return Err(unsupported("Word table context cell count mismatch"));
             }
@@ -214,7 +273,6 @@ fn index_event<
                     )?;
                 }
             }
-            let header = raw_row.source.borrow().header;
             let preceding_body_rows = header_skipped_rows;
             if row_index != 0 && !header {
                 header_skipped_rows = header_skipped_rows
@@ -225,6 +283,7 @@ fn index_event<
                 ttp_id,
                 table_style,
                 source_cell_count,
+                column_context_unsupported,
                 header,
                 preceding_body_rows,
             });
@@ -346,6 +405,7 @@ mod tests {
                     ttp_id: 2,
                     table_style: None,
                     source_cell_count: 2,
+                    column_context_unsupported: false,
                     header: true,
                     preceding_body_rows: 0,
                 },
@@ -353,6 +413,7 @@ mod tests {
                     ttp_id: 5,
                     table_style: None,
                     source_cell_count: 2,
+                    column_context_unsupported: false,
                     header: false,
                     preceding_body_rows: 0,
                 },
@@ -522,6 +583,143 @@ mod tests {
             Some(1)
         );
         assert_eq!(index.tables()[0].rows[0].source_cell_count, 2);
+    }
+
+    #[test]
+    fn logical_columns_use_each_rows_source_cell_sequence() {
+        let mut first_row = properties(1, true, vec![cell(2_400, 0), cell(300, 0), cell(900, 0)]);
+        first_row.row.left = 1_800;
+        let second_row = properties(1, true, vec![cell(750, 0), cell(2_250, 0)]);
+        let index = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (first_row, '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (second_row, '\u{7}'),
+        ]);
+
+        assert_eq!(
+            index.logical_column(0).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 0,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            index.logical_column(2).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 2,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            index.logical_column(4).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 0,
+                count: 2,
+            })
+        );
+        assert_eq!(
+            index.logical_column(5).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 1,
+                count: 2,
+            })
+        );
+        assert_eq!(index.logical_column(3).unwrap(), None);
+        assert_eq!(index.logical_column(6).unwrap(), None);
+    }
+
+    #[test]
+    fn nested_paragraph_logical_column_uses_innermost_table() {
+        let mut inner_cell = properties(2, false, vec![]);
+        inner_cell.inner_cell = true;
+        let mut inner_row = properties(2, false, vec![cell(2_400, 0)]);
+        inner_row.inner_row = true;
+        let index = build(vec![
+            (inner_cell, '\r'),
+            (inner_row, '\r'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, true, vec![cell(3_000, 0)]), '\u{7}'),
+        ]);
+
+        assert_eq!(
+            index.logical_column(0).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 0,
+                count: 1,
+            })
+        );
+        assert_eq!(index.logical_column(1).unwrap(), None);
+        assert_eq!(
+            index.logical_column(2).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 0,
+                count: 1,
+            })
+        );
+        assert_eq!(index.logical_column(3).unwrap(), None);
+    }
+
+    #[test]
+    fn logical_column_rejects_explicit_horizontal_and_vertical_merge_state() {
+        for flags in [1, 2, 3, 1 << 5, 2 << 5, 3 << 5] {
+            let index = build(vec![
+                (properties(1, false, vec![]), '\u{7}'),
+                (properties(1, true, vec![cell(1_000, flags)]), '\u{7}'),
+            ]);
+            let error = index.logical_column(0).unwrap_err();
+            assert!(
+                error.contains("logical column context is unresolved"),
+                "{error}"
+            );
+            assert_eq!(index.logical_column(1).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn logical_column_rejects_bidi_rows() {
+        let mut row = properties(1, true, vec![cell(1_000, 0)]);
+        row.row.bidi = true;
+        let index = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (row, '\u{7}'),
+        ]);
+
+        let error = index.logical_column(0).unwrap_err();
+        assert!(
+            error.contains("logical column context is unresolved"),
+            "{error}"
+        );
+        assert_eq!(index.logical_column(1).unwrap(), None);
+    }
+
+    #[test]
+    fn logical_column_checks_paragraph_table_row_and_source_ids() {
+        let mut index = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, true, vec![cell(1_000, 0)]), '\u{7}'),
+        ]);
+        assert!(index.logical_column(2).is_err());
+
+        let valid = index.paragraphs[0].unwrap();
+        index.paragraphs[0] = Some(ParagraphContext {
+            table_id: 1,
+            ..valid
+        });
+        assert!(index.logical_column(0).is_err());
+        index.paragraphs[0] = Some(ParagraphContext {
+            row_index: 1,
+            ..valid
+        });
+        assert!(index.logical_column(0).is_err());
+        index.paragraphs[0] = Some(ParagraphContext {
+            source_cell_index: Some(1),
+            ..valid
+        });
+        assert!(index.logical_column(0).is_err());
     }
 
     #[test]

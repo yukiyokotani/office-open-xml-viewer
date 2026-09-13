@@ -3,6 +3,7 @@
 //! differs from the OOXML conditional-style order. It neither resolves complete
 //! styles nor replays historical table auto-formatting.
 
+pub(super) use super::table_context::LogicalColumn;
 use super::{table_context::Index, unsupported};
 
 pub(super) const HORIZONTAL_ODD: u16 = 0x0040;
@@ -59,16 +60,11 @@ fn validate_band(value: Option<u8>) -> Result<(), String> {
     Ok(())
 }
 
-/// Logical position resolved by the caller. Source-cell indices are not logical
-/// grid positions for merged or ragged rows and MUST NOT be substituted here.
-#[derive(Clone, Copy)]
-pub(super) struct LogicalColumn {
-    pub(super) ordinal: usize,
-    pub(super) count: usize,
-}
-
 /// Matching CNFC values in MS-DOC's required application order: horizontal
-/// band, vertical band, column, row, then corner. Selection allocates nothing.
+/// band, vertical band, column, row, then corner. The checked table-context
+/// lookup supplies source-cell ordinals for supported LTR, unmerged rows,
+/// including ragged rows and rows whose cell widths differ. Selection allocates
+/// nothing.
 pub(super) fn select(
     index: &Index,
     table_id: usize,
