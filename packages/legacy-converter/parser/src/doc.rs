@@ -95,7 +95,9 @@ struct StoryParts {
 }
 
 pub fn convert(cfb: &CompoundFile<'_>, max_output_bytes: usize) -> Result<DocConversion, String> {
-    with_acquired_doc(cfb, |facts| build_conversion(max_output_bytes, facts))
+    with_acquired_doc(cfb, false, |facts| {
+        build_conversion(max_output_bytes, facts)
+    })
 }
 
 #[cfg(feature = "direct-doc")]
@@ -103,11 +105,14 @@ pub(crate) fn direct_model(
     cfb: &CompoundFile<'_>,
     max_model_bytes: usize,
 ) -> Result<direct_model::DirectDocResult, String> {
-    with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
+    with_acquired_doc(cfb, true, |facts| {
+        direct_model::build(facts, max_model_bytes)
+    })
 }
 
 fn with_acquired_doc<T>(
     cfb: &CompoundFile<'_>,
+    interpret_table_styles: bool,
     visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     let word = cfb.stream("WordDocument").map_err(unsupported)?;
@@ -120,7 +125,8 @@ fn with_acquired_doc<T>(
         ));
     }
     fib::validate_fixed_prefix(&word)?;
-    if fib::effective_version(&word)? < FIB_WORD_97 {
+    let effective_nfib = fib::effective_version(&word)?;
+    if effective_nfib < FIB_WORD_97 {
         return Err(unsupported(
             "only Word 97-2003 binary documents are supported",
         ));
@@ -163,6 +169,7 @@ fn with_acquired_doc<T>(
         Vec::new()
     };
     let mut formatting = formatting::Formatting::read(&word, &table, &data)?;
+    formatting.configure_table_styles(effective_nfib, interpret_table_styles);
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
     let floating = floating::Store::read(&word, &table, ccp_text)?;
@@ -1114,7 +1121,7 @@ mod tests {
     fn acquisition_error(word: Vec<u8>) -> String {
         let bytes = build_cfb(&[("WordDocument", word)]);
         let cfb = CompoundFile::open(&bytes).unwrap();
-        super::with_acquired_doc(&cfb, |_| Ok(())).unwrap_err()
+        super::with_acquired_doc(&cfb, false, |_| Ok(())).unwrap_err()
     }
 
     #[test]

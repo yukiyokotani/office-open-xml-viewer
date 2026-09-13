@@ -1496,7 +1496,7 @@ mod tests {
         let bytes = source("Visible\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
         for case in 0..8 {
-            let result = super::super::with_acquired_doc(&cfb, |mut facts| {
+            let result = super::super::with_acquired_doc(&cfb, true, |mut facts| {
                 match case {
                     0 => facts.sections.clear(),
                     1 => facts

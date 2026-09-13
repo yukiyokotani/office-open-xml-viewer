@@ -1330,7 +1330,7 @@ worktree's test executable.
 | DOC-03 | Observed unconditional CHPX color in direct projection | Connected; table admission remains gated |
 | DOC-04 | Observed unconditional LTR PAPX alignment in direct projection | Connected; table admission remains gated |
 | DOC-05 | Checked logical-column context for irregular rows | Implemented: checked source-cell order, including horizontal/vertical merge slots and RTL; varied direct-DOC Office controls verified |
-| DOC-06 | Conditional formatting in the production cascade | Bounded character color/absolute size and logical paragraph alignment are connected through story projection; conditional inheritance, conditional fonts, physical table alignment and TAPX remain gated |
+| DOC-06 | Conditional formatting in the production cascade | Bounded character color/absolute size and logical paragraph alignment are connected through story projection; conditional fonts, physical table alignment and unsupported TAPX remain gated; bounded inherited color/size/PJc are covered by DOC-51 |
 | DOC-07 | Further TAPX/PAPX/CHPX precedence | Selected PAPX and CHPX work split into DOC-17 through DOC-22; remaining properties stay gated |
 | DOC-08 | Evaluate removal of specific admission gates | DOC-23 evaluates the bounded table-style subset; broader admission still requires the remaining table-property/shading work and end-to-end Office evidence |
 | DOC-09 | Validate PrcData property-array limits | Implemented: enforce the MS-DOC cbGrpprl maximum with exact boundary tests; strict FKP framing tracked separately |
@@ -1349,7 +1349,7 @@ worktree's test executable.
 | DOC-22 | Verify combined paragraph/character conditional precedence | Implemented: actual 3x3 story projection reproduces the observed color/size/PJc ordering with independent unconditional ASCII/high-ANSI fonts; focused tests cover direct overrides and paragraph marks |
 | DOC-23 | Evaluate bounded table-style admission | Evaluation complete for this batch: retain admission gates. DOC-25 and DOC-26 remain prerequisites for general table styles; DOC-27/28 cover the new Office counterexamples. Verified internal projection does not establish full-document admission |
 | DOC-24 | Make table-style Office probes reproducible after cleanup | Implemented: deterministic generator and exact mutation validation passed native Word end-to-end controls; source-cell U+0007 ownership is verified separately from the TTP. Generated files remain disposable under outputs |
-| DOC-25 | Resolve table-style-aware direct cell shading | Preparation slices DOC-36 through DOC-40 implemented; runtime acquisition and style-baseline resolution under DOC-41/45 remain pending. TIstd admission remains gated |
+| DOC-25 | Resolve table-style-aware direct cell shading | Native Raw acquisition and bounded style-baseline resolution are connected under DOC-41/45. Parent admission remains blocked by DOC-55 compatibility shading and the remaining TIstd work |
 | DOC-26 | Apply TIstd table properties with specified preservation | Pending: DOC-42 through DOC-47 cover preservation, reset and supported property projection; native controls must establish the unresolved ordering before admission |
 | DOC-27 | Resolve conditional font-table references | New follow-up: native Word controls render different fonts for identical font-table operands in unconditional CHPX and CCnf; retain the conditional-font gate until the remapping or compatibility rule is established without guessing |
 | DOC-28 | Resolve table-style physical alignment compatibility | New follow-up: native Word controls ignore standalone PJc80 center/right in both unconditional and conditional table PAPX, and retain PJc when both occur; preserve a table-style PJc80 admission gate until version-specific behavior is established |
@@ -1376,17 +1376,17 @@ outside this selection are recorded without starting another automatic batch.
 | DOC-38 | Apply Raw shading replacement order | Preparation implemented; runtime remains under DOC-41: Later nil or omitted entries remove stale earlier direct shading in the addressed segment|
 | DOC-39 | Preserve shading ownership across cell edits | Preparation implemented; runtime remains under DOC-41: Insert/delete/redefine operations move or discard only the corresponding source-cell facts|
 | DOC-40 | Select compatibility shading by version and capability | Preparation implemented; runtime remains under DOC-41: Preserve the legacy path; ignore compatibility arrays/ranges only under the documented style-capable rule|
-| DOC-41 | Connect style-aware shading to native acquisition | Use the effective FIB version and a resolved style baseline; validate actual story/model output before enabling |
+| DOC-41 | Connect style-aware shading to native acquisition | Connected for native projection: effective FIB policy is configured before profile caching; actual-story tests resolve source-cell Raw values against the selected style. XML conversion keeps its previous path and unresolved compatibility arrays remain gated |
 | DOC-42 | Preserve table positioning at TIstd application | Verify the exact anchor, position and wrapping-distance preservation list with native controls |
 | DOC-43 | Preserve dimensions and style options at TIstd application | Verify gap, height, preferred width, autofit, bidi and grfatl while retaining unsupported revision semantics |
 | DOC-44 | Reset remaining row properties at TIstd application | Establish the reset/default boundary and later direct-property order without discarding cell geometry |
-| DOC-45 | Project unconditional TAPX cell shading | Resolve TCellShdStyle and its sentinels against direct Raw facts; verify Office controls |
-| DOC-46 | Project default and style cell margins | Apply the specified side/range/unit constraints and inheritance/direct precedence |
-| DOC-47 | Project unconditional TAPX table borders | Preserve exact border facts and their precedence over cell defaults, with supported-model limits |
-| DOC-48 | Connect conditional table shading and presence | Add TCnf to cross-family condition presence and the established condition order |
+| DOC-45 | Project unconditional TAPX cell shading | Connected for bounded D687 shading: native controls verify child/empty/grandchild precedence, authored Nil versus omission, Auto and direct Raw ordering. Ordinary ipatNil remains no-fill; unresolved compatibility behavior stays gated |
+| DOC-46 | Project default and style cell margins | Native D63E/D634/D632 controls are acquired and reviewed; implementation must preserve separate default, style and direct-cell margins, including explicit zero |
+| DOC-47 | Project unconditional TAPX table borders | Native unconditional border inheritance controls are acquired and reviewed; direct-cell border precedence, model integration and boundary coverage remain pending |
+| DOC-48 | Connect conditional table shading and presence | Connected for single-style D687 conditions and cross-family presence. Native absent/empty/Nil/Auto/concrete controls verify singleton precedence; inherited TCnf and unsupported shading patterns remain gated |
 | DOC-49 | Project conditional cell borders | Resolve physical/logical edge ownership and interior borders without visual-column guesses |
-| DOC-50 | Establish TAPX inheritance precedence | Use varied native controls and counterexamples; do not generalize from CHPX color |
-| DOC-51 | Establish conditional PAPX/CHPX inheritance | Verify matching and nonmatching inherited conditions, empty children and direct overrides |
+| DOC-50 | Establish TAPX inheritance precedence | Bounded D687 inheritance verified with native child, empty-child, grandchild, reverse-value and Nil/Auto controls. Unconditional border and margin controls are available; other TAPX inheritance and direct-order rules remain pending |
+| DOC-51 | Establish conditional PAPX/CHPX inheritance | Implemented for supported color, absolute CHps and logical PJc: varied native controls verify matching/nonmatching conditions, empty and partial children, parent conditional versus child unconditional values and direct overrides. An actual-story child-style test covers cache/context selection; conditional fonts, PJc80 and unsupported properties remain gated |
 | DOC-52 | Exercise combined table properties through story projection | Cover source paragraph IDs, irregular/merged cells, numbering/resource order and bounded cache ownership |
 | DOC-53 | Re-evaluate bounded full-document admission | Fresh isolated WASM/corpus comparison, native Office evidence and adversarial review; retain every unresolved gate |
 
@@ -1397,8 +1397,9 @@ versions were compared on 59 DOC inputs: admission remained four inputs, and
 from unsupported notes to an undocumented FIB version (DOC-54); this is an
 intentional specification-based rejection, not a visual difference. The
 comparison is not an Office-fidelity or renderer-regression result. Prepared
-Raw shading is not yet called by native row acquisition and does not enable
-additional table-style display support.
+Raw shading was not yet called by native row acquisition at that checkpoint.
+The subsequent DOC-41/45 implementation connects that path while retaining
+unresolved admission gates.
 
 DOC-24 native acceptance subsequently verified 16 marker locations in the
 negative and style-connected controls. Removing the selected flattened direct
@@ -1410,11 +1411,28 @@ probe tests passed. This establishes the probe workflow and its selected
 unconditional character/paragraph controls; it does not establish TAPX or
 conditional inheritance compatibility.
 
+The subsequent native shading and conditional-inheritance checkpoint passed
+796 Rust unit tests and nine integration tests, with six existing ignores.
+Fresh isolated WASM builds compared 59 private inputs and 43 controls with no
+result differences. Four private inputs remain admitted; all 43 controls remain
+admission-gated. Actual-story tests separately verify Raw/style shading,
+ordinary ipatNil no-fill and inherited conditional color/size/alignment; equal
+rejection results do not establish display fidelity.
+
+Adversarial review found and fixed a newly reachable projection defect that
+used an ordinary ipatNil background color as a fill. A focused actual-story
+test failed before the fix and passed afterward. Review also confirmed bounded
+profile caches and condition sets, source-cell ownership without row clones,
+unchanged XML compatibility handling and explicit gates for unresolved Native
+Word behavior. No renderer or cross-format public API was changed. Whole-branch
+architecture and browser/visual acceptance remain outstanding.
+
 ### Additional findings outside the selected batch
 
 | Item | Scope | Status |
 | --- | --- | --- |
 | DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | A corpus input uses FibBase 0x00C1 with extension version 0x00C3. Current MS-DOC does not define that effective version; preserve an explicit rejection until its layout and applicable compatibility rules are established. Do not infer table-style capabilities from its numeric order |
+| DOC-55 | Resolve native Word Raw-Nil compatibility shading | Native Word controls with effective nFib 0x0112 retain compatibility D609/D612 shading when the later Raw D670 value is ShdNil. Changing the compatibility color changes the result; removing those compatibility properties restores table-style shading. This differs from the documented ignore rule. Keep the unresolved acquisition path gated; do not infer a renderer fallback or generalize beyond the tested version |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch

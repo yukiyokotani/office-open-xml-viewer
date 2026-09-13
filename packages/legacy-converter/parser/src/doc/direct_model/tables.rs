@@ -156,9 +156,10 @@ fn project_table(
             let facts = source.shading.as_ref().map(|s| s.direct_facts());
             let background = match facts {
                 None => None,
-                Some(f) if matches!(f.pattern, "clear" | "nil") => {
+                Some(f) if f.pattern == "clear" => {
                     source.shading.as_ref().and_then(|s| s.direct_background())
                 }
+                Some(f) if f.pattern == "nil" => None,
                 Some(f) if f.pattern == "solid" => match f.foreground {
                     Color::Rgb([r, g, b]) => Some(format!("{r:02x}{g:02x}{b:02x}")),
                     Color::Auto => {

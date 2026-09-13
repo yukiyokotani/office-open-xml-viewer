@@ -32,7 +32,8 @@ pub(super) fn project(
         let (_, mark_fc, mark_piece) = story
             .position(source.end_cp)
             .ok_or_else(|| unsupported("Word paragraph mark outside piece table"))?;
-        let table_properties = formatting.table_properties(mark_fc, mark_piece.prm, &story.prcs)?;
+        let table_properties =
+            formatting.table_properties_native(mark_fc, mark_piece.prm, &story.prcs)?;
         let table_depth = table_properties.depth()?;
         if source.mark == '\u{7}' && table_depth == 0 {
             return Err(unsupported("Word table cell mark outside table"));
@@ -64,6 +65,9 @@ pub(super) fn project(
         &mut |selected| Ok(formatting.resolve_table_style_id(selected)),
         &mut |bytes| budget.charge(bytes),
     )?;
+    if formatting.use_raw_table_shading() {
+        resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
+    }
     let mut tables = Writer::new(table_sequence);
     for (paragraph_index, prepared) in prepared.into_iter().enumerate() {
         let PreparedParagraph {
@@ -342,6 +346,67 @@ pub(super) fn project(
     Ok(())
 }
 
+fn resolve_table_cell_shading(
+    prepared: &mut [PreparedParagraph],
+    index: &table_context::Index,
+    formatting: &mut formatting::Formatting<'_>,
+) -> Result<(), String> {
+    for (table_id, table_context) in index.tables().iter().enumerate() {
+        for (row_index, row_context) in table_context.rows.iter().enumerate() {
+            let options = if let (Some(table_style), Some(flags)) =
+                (row_context.table_style, row_context.table_style_options)
+            {
+                let (horizontal, vertical, presence) =
+                    formatting.table_style_selector_profile(Some(table_style))?;
+                Some(table_style_condition::Options::new(
+                    flags, horizontal, vertical, presence,
+                )?)
+            } else {
+                None
+            };
+            let row = &mut prepared
+                .get_mut(row_context.ttp_id)
+                .ok_or_else(|| unsupported("Word table shading TTP outside story"))?
+                .table_properties
+                .row;
+            if row.cells.len() != row_context.source_cell_count {
+                return Err(unsupported("Word table shading cell count mismatch"));
+            }
+            for (ordinal, cell) in row.cells.iter_mut().enumerate() {
+                let matches = if let Some(options) = options {
+                    table_style_condition::select(
+                        index,
+                        table_id,
+                        row_index,
+                        table_style_condition::LogicalColumn {
+                            ordinal,
+                            count: row_context.source_cell_count,
+                        },
+                        options,
+                    )?
+                } else {
+                    [None; 5]
+                };
+                let key = formatting.table_formatting_key(
+                    row_context.table_style,
+                    row_context.table_style_options,
+                    matches,
+                )?;
+                let style = formatting.table_cell_shading(key)?;
+                cell.shading = match cell.prepared_shading.take() {
+                    None | Some(table::PreparedCellShading::StyleDeferred) => style,
+                    Some(table::PreparedCellShading::Explicit(value)) => Some(value),
+                    Some(table::PreparedCellShading::Unsupported) => {
+                        formatting.unsupported_table_properties = true;
+                        None
+                    }
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
 struct PreparedParagraph {
     source: Paragraph,
     mark_fc: usize,
@@ -393,6 +458,17 @@ mod tests {
         first_row_size: bool,
         first_row_alignment: bool,
         combined: bool,
+        modern_raw: bool,
+        inherited_conditions: bool,
+        shading: ShadingFixture,
+    }
+
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum ShadingFixture {
+        #[default]
+        None,
+        Unconditional,
+        Conditional,
     }
 
     struct ProjectedTable {
@@ -401,6 +477,7 @@ mod tests {
         ascii_fonts: Vec<Option<String>>,
         high_ansi_fonts: Vec<Option<String>>,
         alignments: Vec<String>,
+        backgrounds: Vec<Option<String>>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -412,6 +489,27 @@ mod tests {
         value.extend(condition.to_le_bytes());
         value.extend(properties);
         value
+    }
+
+    fn cell_shading(color: [u8; 3]) -> Vec<u8> {
+        vec![10, 0, 0, 0, 255, color[0], color[1], color[2], 0, 0, 0]
+    }
+
+    fn append_table_style(bytes: &mut Vec<u8>, base: u16, sets: [&[u8]; 3]) {
+        let mut style = vec![0; 14];
+        style[2..4].copy_from_slice(&((base << 4) | 3).to_le_bytes());
+        style[4..6].copy_from_slice(&3u16.to_le_bytes());
+        for set in sets {
+            style.extend((set.len() as u16).to_le_bytes());
+            style.extend(set);
+            if set.len() % 2 != 0 {
+                style.push(0);
+            }
+        }
+        let size = style.len() as u16;
+        style[6..8].copy_from_slice(&size.to_le_bytes());
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(style);
     }
 
     fn table_style_sheet(fixture: StyleFixture) -> Vec<u8> {
@@ -426,6 +524,26 @@ mod tests {
         normal[2..4].copy_from_slice(&0xfff1u16.to_le_bytes());
         bytes.extend((normal.len() as u16).to_le_bytes());
         bytes.extend(normal);
+
+        if fixture.inherited_conditions {
+            let mut base_paragraph = vec![1, 0, 0x61, 0x24, 0];
+            base_paragraph.extend(cnf(0xc666, 1, &[0x61, 0x24, 1]));
+            let mut base_character = vec![0x42, 0x2a, 1];
+            base_character.extend(cnf(
+                0xca85,
+                1,
+                &[0x70, 0x68, 0xff, 0, 0, 0, 0x43, 0x4a, 28, 0],
+            ));
+            append_table_style(&mut bytes, 0xfff, [&[], &base_paragraph, &base_character]);
+
+            let child_paragraph = [2, 0];
+            let child_character = cnf(0xca85, 1, &[0x70, 0x68, 0, 0, 0xff, 0]);
+            append_table_style(&mut bytes, 1, [&[], &child_paragraph, &child_character]);
+            for _ in 3..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
 
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
@@ -472,16 +590,32 @@ mod tests {
                 combined_character.extend(cnf(0xca85, condition, properties));
             }
         }
-        let (tapx, paragraph, character) = if fixture.combined {
+        let (mut tapx, paragraph, character) = if fixture.combined {
             (
-                &[][..],
+                Vec::new(),
                 combined_paragraph.as_slice(),
                 combined_character.as_slice(),
             )
         } else {
-            (&[0x88, 0x34, 1][..], paragraph, character.as_slice())
+            (vec![0x88, 0x34, 1], paragraph, character.as_slice())
         };
-        for set in [tapx, paragraph, character] {
+        match fixture.shading {
+            ShadingFixture::None => {}
+            ShadingFixture::Unconditional => {
+                tapx.extend(sprm(0xd687, &cell_shading([0x00, 0x80, 0x00])));
+            }
+            ShadingFixture::Conditional => {
+                tapx.extend(sprm(0xd687, &cell_shading([0x00, 0x00, 0x00])));
+                for (condition, color) in [
+                    (1, [0xff, 0x00, 0x00]),
+                    (4, [0x00, 0x00, 0xff]),
+                    (0x200, [0x00, 0x80, 0x00]),
+                ] {
+                    tapx.extend(cnf(0xd66a, condition, &sprm(0xd687, &cell_shading(color))));
+                }
+            }
+        }
+        for set in [tapx.as_slice(), paragraph, character] {
             style.extend((set.len() as u16).to_le_bytes());
             style.extend(set);
             if set.len() % 2 != 0 {
@@ -503,6 +637,11 @@ mod tests {
         let mut word = cfb.stream("WordDocument").unwrap();
         let mut table = cfb.stream("0Table").unwrap();
         let stylesheet = table_style_sheet(fixture);
+        if fixture.modern_raw || fixture.shading != ShadingFixture::None {
+            // Activate the post-Word-2000 Raw shading rules in the native-only
+            // acquisition path without changing the fixture's stream layout.
+            word[2..4].copy_from_slice(&0x0101u16.to_le_bytes());
+        }
         word[0xa2..0xa6].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0xa6..0xaa].copy_from_slice(&(stylesheet.len() as u32).to_le_bytes());
         table.extend(stylesheet);
@@ -537,12 +676,44 @@ mod tests {
     }
 
     fn row_cells(options: u16, count: u8) -> Vec<u8> {
+        row_cells_with_style(options, count, 1)
+    }
+
+    fn row_cells_with_style(options: u16, count: u8, style: u16) -> Vec<u8> {
         [
             sprm(0x2416, &[1]),
             sprm(0x2417, &[1]),
             sprm(0x7621, &[0, count, 0xe8, 3]),
-            sprm(0x563a, &1u16.to_le_bytes()),
+            sprm(0x563a, &style.to_le_bytes()),
             sprm(0x740a, &[0, 0, options as u8, (options >> 8) as u8]),
+            sprm(0x2416, &[1]),
+        ]
+        .concat()
+    }
+
+    fn row_cells_with_raw(options: u16, count: u8, raw: &[u8]) -> Vec<u8> {
+        [
+            row_cells(options, count),
+            sprm(0xd670, raw),
+            sprm(0x2416, &[1]),
+        ]
+        .concat()
+    }
+
+    fn unstyled_row_with_raw(raw: &[u8]) -> Vec<u8> {
+        [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0x7621, &[0, 1, 0xe8, 3]),
+            sprm(0xd670, raw),
+        ]
+        .concat()
+    }
+
+    fn row_cells_with_compatibility_shading(options: u16, count: u8, shading: &[u8]) -> Vec<u8> {
+        [
+            row_cells(options, count),
+            sprm(0xd612, shading),
             sprm(0x2416, &[1]),
         ]
         .concat()
@@ -569,7 +740,7 @@ mod tests {
         let source = with_table_style(&source, fixture);
         let source = with_papx(&source, runs);
         let cfb = CompoundFile::open(&source).unwrap();
-        with_acquired_doc(&cfb, |mut facts| {
+        with_acquired_doc(&cfb, true, |mut facts| {
             let paragraphs = crate::doc::tokenize_with_fields(
                 &facts.story.text,
                 &mut Fields::default(),
@@ -602,15 +773,17 @@ mod tests {
             let mut ascii_fonts = Vec::new();
             let mut high_ansi_fonts = Vec::new();
             let mut alignments = Vec::new();
+            let mut backgrounds = Vec::new();
             for row in &table.rows {
                 for cell in &row.cells {
+                    backgrounds.push(cell.background.clone());
                     let CellElement::Paragraph(paragraph) = &cell.content[0] else {
                         panic!("paragraph")
                     };
                     let DocRun::Text(run) = &paragraph.runs[0] else {
                         panic!("text")
                     };
-                    colors.push(run.color.clone().unwrap());
+                    colors.push(run.color.clone().unwrap_or_default());
                     sizes.push(run.font_size);
                     ascii_fonts.push(run.font_family.clone());
                     high_ansi_fonts.push(run.font_family_high_ansi.clone());
@@ -623,6 +796,7 @@ mod tests {
                 ascii_fonts,
                 high_ansi_fonts,
                 alignments,
+                backgrounds,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -648,6 +822,115 @@ mod tests {
             ],
             fixture,
         )
+    }
+
+    #[test]
+    fn native_story_resolves_raw_nil_auto_explicit_and_omitted_cell_shading() {
+        let mut raw = vec![30];
+        raw.extend([255, 255, 255, 255, 255, 255, 255, 255, 0, 0]);
+        raw.extend([0, 0, 0, 255, 0, 0, 0, 255, 0, 0]);
+        raw.extend(&cell_shading([0xff, 0x00, 0x00])[1..]);
+        let projected = project_table(
+            "a\u{7}b\u{7}c\u{7}d\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 8, cell()),
+                (8, 9, row_cells_with_raw(0, 4, &raw)),
+                (9, 10, Vec::new()),
+            ],
+            StyleFixture {
+                shading: ShadingFixture::Unconditional,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.backgrounds,
+            [
+                Some("008000".into()),
+                None,
+                Some("ff0000".into()),
+                Some("008000".into()),
+            ]
+        );
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_treats_raw_ipat_nil_as_no_fill_without_conflating_shd_nil() {
+        let raw = [
+            10, // one Shd
+            0, 0, 0, 255, // automatic foreground
+            0x12, 0x34, 0x56, 0, // RGB background
+            0xff, 0xff, // ordinary ipatNil, not the ShdNil sentinel
+        ];
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, unstyled_row_with_raw(&raw)),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture {
+                modern_raw: true,
+                ..StyleFixture::default()
+            },
+        );
+
+        assert_eq!(projected.backgrounds, [None]);
+        assert!(!projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn native_story_keeps_older_version_compatibility_cell_shading() {
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (
+                    2,
+                    3,
+                    row_cells_with_compatibility_shading(0, 1, &cell_shading([0x12, 0x34, 0x56])),
+                ),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture::default(),
+        );
+        assert_eq!(projected.backgrounds, [Some("123456".into())]);
+    }
+
+    #[test]
+    fn native_story_layers_conditional_cell_shading_in_doc_order() {
+        let options = (1 << 5) | (1 << 7);
+        let projected = project_table(
+            "a\u{7}b\u{7}\u{7}c\u{7}d\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 5, row_cells(options, 2)),
+                (5, 7, cell()),
+                (7, 9, cell()),
+                (9, 10, row_cells(options, 2)),
+                (10, 11, Vec::new()),
+            ],
+            StyleFixture {
+                shading: ShadingFixture::Conditional,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.backgrounds,
+            [
+                Some("008000".into()),
+                Some("ff0000".into()),
+                Some("0000ff".into()),
+                Some("000000".into()),
+            ]
+        );
+        assert!(projected.unsupported_table);
     }
 
     #[test]
@@ -698,6 +981,31 @@ mod tests {
         // presence, excluding that row from the horizontal color bands.
         assert_eq!(projected.colors, ["000000", "ff0000", "0000ff", "000000"]);
         assert_eq!(projected.sizes, [14.0, 10.0, 10.0, 10.0]);
+        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn project_inherits_conditional_fields_through_selected_child_table_style() {
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells_with_style(1 << 5, 1, 2)),
+                (3, 5, cell()),
+                (5, 6, row_cells_with_style(1 << 5, 1, 2)),
+                (6, 7, Vec::new()),
+            ],
+            StyleFixture {
+                inherited_conditions: true,
+                ..StyleFixture::default()
+            },
+        );
+
+        assert_eq!(projected.colors, ["0000ff", "000000"]);
+        assert_eq!(projected.sizes, [14.0, 10.0]);
+        assert_eq!(projected.alignments, ["center", "left"]);
         assert!(projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);

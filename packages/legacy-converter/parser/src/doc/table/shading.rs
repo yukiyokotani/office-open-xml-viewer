@@ -143,7 +143,7 @@ impl Shading {
 
     /// The ShdNil sentinel is narrower than an ordinary Shd whose pattern is
     /// ipatNil. Its containing property determines the sentinel's effect.
-    pub(super) fn is_shd_nil(bytes: &[u8]) -> bool {
+    pub(in crate::doc) fn is_shd_nil(bytes: &[u8]) -> bool {
         bytes.len() == 10 && bytes[..8].iter().all(|b| *b == 255) && bytes[8..] == [0, 0]
     }
 

@@ -120,6 +120,8 @@ pub struct Formatting<'a> {
     paragraph_layout_cache:
         BTreeMap<(usize, Option<TableFormattingKey>), CachedParagraphProperties>,
     table_style_cache: BTreeMap<usize, Rc<table_style::Profile>>,
+    effective_nfib: u16,
+    interpret_table_styles: bool,
     data: &'a [u8],
     budget: Budget,
     numbering: numbering::Tables<'a>,
@@ -167,6 +169,8 @@ impl<'a> Formatting<'a> {
             paragraph_marker_styles: BTreeMap::new(),
             paragraph_layout_cache: BTreeMap::new(),
             table_style_cache: BTreeMap::new(),
+            effective_nfib: 0x00c1,
+            interpret_table_styles: false,
             data,
             budget: Budget::default(),
             numbering: numbering::Tables::read(word, table)?,
@@ -184,6 +188,21 @@ impl<'a> Formatting<'a> {
             return Err(unsupported("Word paragraph mark outside formatting ranges"));
         }
         fkp::paragraph_style(&self.paragraphs, end_fc)
+    }
+
+    pub(in crate::doc) fn configure_table_styles(
+        &mut self,
+        effective_nfib: u16,
+        interpret_table_styles: bool,
+    ) {
+        debug_assert!(self.table_style_cache.is_empty());
+        self.effective_nfib = effective_nfib;
+        self.interpret_table_styles = interpret_table_styles;
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn use_raw_table_shading(&self) -> bool {
+        self.effective_nfib > 0x00d9 && self.interpret_table_styles
     }
 
     pub(in crate::doc) fn resolve_table_style_id(&self, selected: Option<usize>) -> Option<usize> {
@@ -472,6 +491,31 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<table::Properties, String> {
+        self.table_properties_with_policy(fc, prm, prcs, false)
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_properties_native(
+        &mut self,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<table::Properties, String> {
+        if !self.interpret_table_styles {
+            return Err(unsupported(
+                "native Word table-style acquisition is not enabled",
+            ));
+        }
+        self.table_properties_with_policy(fc, prm, prcs, true)
+    }
+
+    fn table_properties_with_policy(
+        &mut self,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+        interpret_table_styles: bool,
+    ) -> Result<table::Properties, String> {
         let mut properties = table::Properties::default();
         // MS-DOC 2.4.3: structural flags are direct, never inherited from STSH.
         let direct = self
@@ -490,8 +534,23 @@ impl<'a> Formatting<'a> {
         } else {
             &[]
         };
+        let shading_policy = table::TableShadingPolicy {
+            effective_nfib: self.effective_nfib,
+            interpret_table_styles,
+        };
         for bytes in [direct, piece] {
             sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
+                match properties
+                    .row
+                    .apply_style_aware_shading(code, operand, shading_policy)?
+                {
+                    table::StyleAwareShadingApply::Handled => return Ok(()),
+                    table::StyleAwareShadingApply::HandledUnsupported => {
+                        self.unsupported_table_properties = true;
+                        return Ok(());
+                    }
+                    table::StyleAwareShadingApply::Unhandled => {}
+                }
                 if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
                     self.unsupported_table_properties = true;
                 }
@@ -886,6 +945,8 @@ mod tests {
             paragraph_marker_styles: BTreeMap::new(),
             paragraph_layout_cache: BTreeMap::new(),
             table_style_cache: BTreeMap::new(),
+            effective_nfib: 0x00c1,
+            interpret_table_styles: false,
             data: &[],
             budget: Budget::default(),
             numbering: numbering::Tables::default(),
@@ -1181,18 +1242,65 @@ mod tests {
         assert!(complex_script.unsupported_character_properties);
     }
 
+    #[cfg(feature = "direct-doc")]
     #[test]
-    fn inherited_conditional_size_remains_gated() {
+    fn inherited_conditional_character_fields_compose_by_property() {
         let mut formatting = observed_table_style_formatting();
+        let base = ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x70, 0x68, 0xff, 0, 0, 0, 0x43, 0x4a, 28, 0],
+        );
         formatting.styles[0]
             .as_mut()
             .unwrap()
             .table
             .as_mut()
             .unwrap()
-            .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &[0x43, 0x4a, 28, 0]));
-        formatting.table_style_selector_profile(Some(1)).unwrap();
-        assert!(formatting.unsupported_character_properties);
+            .chpx = leaked(base);
+        formatting.styles[1]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x70, 0x68, 0, 0, 0xff, 0],
+        ));
+        let key = TableFormattingKey {
+            selected_style: 1,
+            matches: [
+                None,
+                None,
+                None,
+                Some(table_style_condition::FIRST_ROW),
+                None,
+            ],
+        };
+        let run = formatting
+            .direct_text_run(7, Some(key), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.color.as_deref(), Some("0000ff"));
+        assert_eq!(run.font_size, 14.0);
+
+        let inherited = TableFormattingKey {
+            selected_style: 2,
+            matches: [
+                None,
+                None,
+                None,
+                Some(table_style_condition::FIRST_ROW),
+                None,
+            ],
+        };
+        let run = formatting
+            .direct_text_run(7, Some(inherited), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.color.as_deref(), Some("ff0000"));
+        assert_eq!(run.font_size, 14.0);
+        assert!(!formatting.unsupported_character_properties);
     }
 
     #[cfg(feature = "direct-doc")]
@@ -1408,6 +1516,25 @@ mod tests {
         cnf(0xca85, condition, properties)
     }
 
+    #[cfg(feature = "direct-doc")]
+    fn table_style_shading(background: [u8; 3], pattern: u16) -> Vec<u8> {
+        let mut bytes = vec![0x87, 0xd6, 10, 0, 0, 0, 255];
+        bytes.extend(background);
+        bytes.push(0);
+        bytes.extend(pattern.to_le_bytes());
+        bytes
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn table_style_shading_auto() -> Vec<u8> {
+        vec![0x87, 0xd6, 10, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0]
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn table_style_shading_nil() -> Vec<u8> {
+        [vec![0x87, 0xd6, 10], vec![255; 8], vec![0, 0]].concat()
+    }
+
     fn conditional_color_formatting() -> Formatting<'static> {
         const RED: &[u8] = &[0x42, 0x2a, 6];
         const BLUE: &[u8] = &[0x70, 0x68, 0x00, 0x00, 0xff, 0x00];
@@ -1436,6 +1563,227 @@ mod tests {
         sets.tapx = &[0x88, 0x34, 1, 0x89, 0x34, 1];
         sets.chpx = leaked(chpx);
         formatting
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_style_shading_layers_unconditional_and_ordered_conditions() {
+        let red = table_style_shading([255, 0, 0], 0);
+        let blue = table_style_shading([0, 0, 255], 0);
+        let green = table_style_shading([0, 128, 0], 0);
+        let mut tapx = red;
+        tapx.extend(cnf(0xd66a, table_style_condition::HORIZONTAL_ODD, &blue));
+        tapx.extend(cnf(0xd66a, table_style_condition::FIRST_ROW, &green));
+
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(tapx);
+        assert_eq!(
+            formatting.table_style_selector_profile(Some(0)).unwrap().2,
+            table_style_condition::HORIZONTAL_ODD | table_style_condition::FIRST_ROW
+        );
+        let key = TableFormattingKey {
+            selected_style: 0,
+            matches: [
+                Some(table_style_condition::HORIZONTAL_ODD),
+                None,
+                None,
+                Some(table_style_condition::FIRST_ROW),
+                None,
+            ],
+        };
+        assert!(formatting
+            .table_cell_shading(Some(key))
+            .unwrap()
+            .unwrap()
+            .xml()
+            .contains("w:fill=\"008000\""));
+        assert!(!formatting.unsupported_table_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_style_shading_distinguishes_empty_nil_and_auto_descendants() {
+        let cases = [
+            (
+                Some(table_style_shading([0, 0, 255], 0)),
+                Some("0000FF"),
+                true,
+                false,
+            ),
+            (None, Some("FF0000"), true, false),
+            (Some(table_style_shading_nil()), None, false, false),
+            (Some(table_style_shading_auto()), None, true, false),
+        ];
+        for (child, expected_fill, expected_value, expected_gate) in cases {
+            let mut formatting = observed_table_style_formatting();
+            formatting.configure_table_styles(0x0112, true);
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(table_style_shading([255, 0, 0], 0));
+            formatting.styles[1]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = child.map_or(&[], leaked);
+
+            let shading = formatting.table_cell_shading(table_key(1)).unwrap();
+            match expected_fill {
+                Some(fill) => assert!(shading
+                    .unwrap()
+                    .xml()
+                    .contains(&format!("w:fill=\"{fill}\""))),
+                None => {
+                    assert_eq!(shading.is_some(), expected_value);
+                    if let Some(shading) = shading {
+                        assert_eq!(shading.direct_background(), None);
+                    }
+                }
+            }
+            assert_eq!(formatting.unsupported_table_properties, expected_gate);
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_style_shading_keeps_xml_gated_and_applies_conditional_nil_as_noop() {
+        let mut xml = observed_table_style_formatting();
+        xml.styles[0].as_mut().unwrap().table.as_mut().unwrap().tapx =
+            leaked(table_style_shading([255, 0, 0], 0));
+        xml.table_style_selector_profile(Some(0)).unwrap();
+        assert!(xml.unsupported_table_properties);
+
+        let mut conditional_nil = observed_table_style_formatting();
+        conditional_nil.configure_table_styles(0x0112, true);
+        let mut tapx = table_style_shading([255, 0, 0], 0);
+        tapx.extend(cnf(
+            0xd66a,
+            table_style_condition::FIRST_ROW,
+            &table_style_shading_nil(),
+        ));
+        conditional_nil.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(tapx);
+        assert_eq!(
+            conditional_nil
+                .table_style_selector_profile(Some(0))
+                .unwrap()
+                .2,
+            table_style_condition::FIRST_ROW
+        );
+        let key = TableFormattingKey {
+            selected_style: 0,
+            matches: [
+                None,
+                None,
+                None,
+                Some(table_style_condition::FIRST_ROW),
+                None,
+            ],
+        };
+        assert!(conditional_nil
+            .table_cell_shading(Some(key))
+            .unwrap()
+            .unwrap()
+            .xml()
+            .contains("w:fill=\"FF0000\""));
+        assert!(!conditional_nil.unsupported_table_properties);
+
+        let mut unmapped = observed_table_style_formatting();
+        unmapped.configure_table_styles(0x0112, true);
+        unmapped.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(table_style_shading([255, 0, 0], 0x23));
+        assert!(unmapped.table_cell_shading(table_key(0)).unwrap().is_none());
+        assert!(unmapped.unsupported_table_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn empty_table_condition_does_not_compete_with_present_nil_across_property_families() {
+        const BLACK: &[u8] = &[0x70, 0x68, 0, 0, 0, 0];
+        const GREEN: &[u8] = &[0x70, 0x68, 0, 0x80, 0, 0];
+        let first_row = table_style_condition::FIRST_ROW;
+        let last_row = table_style_condition::LAST_ROW;
+
+        for (first_row_tapx, expected_presence, expected_row, expected_fill, expected_text) in [
+            (None, last_row, last_row, "0000FF", "008000"),
+            (Some(Vec::new()), last_row, last_row, "0000FF", "008000"),
+            (
+                Some(table_style_shading_nil()),
+                first_row | last_row,
+                first_row,
+                "FF0000",
+                "000000",
+            ),
+        ] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.configure_table_styles(0x0112, true);
+
+            let mut tapx = table_style_shading([255, 0, 0], 0);
+            tapx.extend(cnf(0xd66a, last_row, &table_style_shading([0, 0, 255], 0)));
+            if let Some(first_row_tapx) = first_row_tapx {
+                tapx.extend(cnf(0xd66a, first_row, &first_row_tapx));
+            }
+            let mut chpx = BLACK.to_vec();
+            chpx.extend(ccnf(last_row, GREEN));
+            let sets = formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap();
+            sets.tapx = leaked(tapx);
+            sets.chpx = leaked(chpx);
+
+            let (_, _, presence) = formatting.table_style_selector_profile(Some(0)).unwrap();
+            assert_eq!(presence, expected_presence);
+            assert_eq!(presence & first_row, expected_presence & first_row);
+
+            // A singleton row with both TTlp edge flags selects the first
+            // supported row condition. Empty TCnf contributes no presence;
+            // authored ShdNil does, even though its shading application is a
+            // no-op. Exercise the resulting key across TAPX and CHPX.
+            let matches = [None, None, None, Some(expected_row), None];
+            let key = formatting
+                .table_formatting_key(Some(0), Some(96), matches)
+                .unwrap()
+                .unwrap();
+            assert_eq!(key.matches, matches);
+            assert!(formatting
+                .table_cell_shading(Some(key))
+                .unwrap()
+                .unwrap()
+                .xml()
+                .contains(&format!("w:fill=\"{expected_fill}\"")));
+            let run = formatting
+                .direct_text_run(7, Some(key), 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.color.as_deref(), Some(expected_text));
+            assert!(!formatting.unsupported_table_properties);
+            assert!(!formatting.unsupported_character_properties);
+        }
     }
 
     #[cfg(feature = "direct-doc")]
@@ -1656,6 +2004,7 @@ mod tests {
         for invalid in [
             vec![0x35, 0x08, 1],
             vec![0x60, 0xd6, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0x87, 0xd6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         ] {
             let mut formatting = observed_table_style_formatting();
             let mut bytes = vec![0x88, 0x34, 3];
@@ -1684,12 +2033,30 @@ mod tests {
     }
 
     #[test]
-    fn unevidenced_conditional_inheritance_and_conflicting_bands_remain_gated() {
-        // Unconditional parent/child color controls do not establish CNF
-        // inheritance or priority between conflicting inherited band widths.
+    fn supported_conditional_inheritance_and_conflicting_bands_are_independent() {
+        // Office controls establish inherited supported CCnf composition.
+        // Conflicting inherited band widths remain a separate unsupported
+        // TAPX property.
         let mut conditional = conditional_color_formatting();
         conditional.table_style_selector_profile(Some(1)).unwrap();
-        assert!(conditional.unsupported_character_properties);
+        let mut properties = Properties::default();
+        conditional
+            .apply_table_character_style(
+                &mut properties,
+                Some(TableFormattingKey {
+                    selected_style: 1,
+                    matches: [
+                        None,
+                        None,
+                        None,
+                        Some(table_style_condition::FIRST_ROW),
+                        None,
+                    ],
+                }),
+            )
+            .unwrap();
+        assert!(properties.xml(&[]).unwrap().contains("w:val=\"00FFFF\""));
+        assert!(!conditional.unsupported_character_properties);
 
         for (child_width, unsupported) in [(1, false), (2, true)] {
             let mut formatting = observed_table_style_formatting();
@@ -1858,13 +2225,13 @@ mod tests {
     }
 
     #[test]
-    fn inherited_conditional_pjc_remains_gated() {
+    fn inherited_conditional_pjc_overrides_child_unconditional_alignment() {
         let mut formatting = observed_table_style_formatting();
         let mut papx = vec![0, 0];
         papx.extend(cnf(
             0xc666,
             table_style_condition::FIRST_ROW,
-            &[0x61, 0x24, 1],
+            &[0x61, 0x24, 2],
         ));
         formatting.styles[0]
             .as_mut()
@@ -1873,8 +2240,24 @@ mod tests {
             .as_mut()
             .unwrap()
             .papx = leaked(papx);
-        formatting.table_style_selector_profile(Some(1)).unwrap();
-        assert!(formatting.unsupported_paragraph_properties);
+        let key = TableFormattingKey {
+            selected_style: 1,
+            matches: [
+                None,
+                None,
+                None,
+                Some(table_style_condition::FIRST_ROW),
+                None,
+            ],
+        };
+        let resolved = formatting
+            .resolve_paragraph_with_table(7, Some(key), 0, 0, &[])
+            .unwrap();
+        assert!(resolved
+            .properties
+            .xml()
+            .contains("<w:jc w:val=\"right\"/>"));
+        assert!(!formatting.unsupported_paragraph_properties);
     }
 
     #[test]
@@ -3316,6 +3699,35 @@ mod tests {
         assert_eq!(neighbor.row.table_style_options, Some(0x40));
         assert!(neighbor.row.header);
         assert!(!formatting.table_properties(120, 0, &[]).unwrap().in_table);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_table_acquisition_enables_raw_shading_only_after_word_2000() {
+        let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
+        let raw = test_prl(0xd670, &[10, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0]);
+        let papx = [vec![0, 0], definition, raw].concat();
+
+        let mut native = with_direct_paragraph(&papx);
+        native.configure_table_styles(0x00da, true);
+        let properties = native.table_properties_native(109, 0, &[]).unwrap();
+        assert!(matches!(
+            properties.row.cells[0].prepared_shading,
+            Some(table::PreparedCellShading::Explicit(_))
+        ));
+        assert!(!native.unsupported_table_properties);
+
+        let mut old_native = with_direct_paragraph(&papx);
+        old_native.configure_table_styles(0x00d9, true);
+        let properties = old_native.table_properties_native(109, 0, &[]).unwrap();
+        assert!(properties.row.cells[0].prepared_shading.is_none());
+        assert!(old_native.unsupported_table_properties);
+
+        let mut xml = with_direct_paragraph(&papx);
+        xml.configure_table_styles(0x00da, false);
+        let properties = xml.table_properties(109, 0, &[]).unwrap();
+        assert!(properties.row.cells[0].prepared_shading.is_none());
+        assert!(xml.unsupported_table_properties);
     }
 
     #[test]
