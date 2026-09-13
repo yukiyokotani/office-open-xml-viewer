@@ -516,6 +516,20 @@ def _papx_run_at(runs, fc):
     return selected[0]
 
 
+def _top_level_cell_mark(characters, pap_run, trace):
+    if ((_active(trace, P_ITAP) or {}).get("operand") != "01000000"
+            or (_active(trace, PF_TTP) or {}).get("operand") == "01"):
+        raise ProbeError("probe marker PAPX is not a top-level table cell")
+    # MS-DOC 2.4.3: a depth-one cell ends in U+0007. The following depth-one
+    # row mark is a separate U+0007 carrying sprmPFTtp=1.
+    cell_marks = [item for item in characters
+                  if pap_run["fc_start"] <= item["fc"] < pap_run["fc_end"]
+                  and item["character"] == "\x07"]
+    if len(cell_marks) != 1:
+        raise ProbeError("probe marker PAPX must own exactly one cell mark")
+    return cell_marks[0]
+
+
 def _probe_layout(loaded):
     papx = _papx_module()
     streams, fib, papx_runs, _prcs, pieces = papx._document_parts(loaded)
@@ -575,26 +589,26 @@ def _probe_layout(loaded):
         if any(not (pap_run["fc_start"] <= characters[position]["fc"] < pap_run["fc_end"])
                for position in range(start, end)):
             raise ProbeError("probe marker crosses PAPX runs")
-        paragraph_marks = [item for item in characters
-                           if pap_run["fc_start"] <= item["fc"] < pap_run["fc_end"]
-                           and item["character"] == "\r"]
-        if len(paragraph_marks) != 1:
-            raise ProbeError("probe marker PAPX must own exactly one paragraph mark")
-        mark_run = chpx_at(paragraph_marks[0]["fc"])
-        mark_chpx = None
-        mark_chpx_run = None
+        trace_id = pap_run.get("direct_trace_id")
+        cell_trace = [] if trace_id is None else traces[trace_id]["entries"]
+        cell_mark = _top_level_cell_mark(characters, pap_run, cell_trace)
+        mark_run = chpx_at(cell_mark["fc"])
+        cell_mark_chpx = None
+        cell_mark_chpx_run = None
         if mark_run.offset is not None:
-            mark_chpx = (mark_run.header_offset, mark_run.offset,
-                         mark_run.end, mark_run.encoding)
-            mark_chpx_run = (mark_run.fc_start, mark_run.fc_end, mark_run.header_offset,
-                             mark_run.offset, mark_run.end, mark_run.encoding)
+            cell_mark_chpx = (mark_run.header_offset, mark_run.offset,
+                              mark_run.end, mark_run.encoding)
+            cell_mark_chpx_run = (
+                mark_run.fc_start, mark_run.fc_end, mark_run.header_offset,
+                mark_run.offset, mark_run.end, mark_run.encoding,
+            )
         marker_targets.append({
             "ordinal": ordinal,
             "span": (start, end),
             "chpx": tuple(sorted(selected_chpx)),
             "chpx_runs": tuple(sorted(selected_chpx_runs)),
-            "mark_chpx": mark_chpx,
-            "mark_chpx_run": mark_chpx_run,
+            "cell_mark_chpx": cell_mark_chpx,
+            "cell_mark_chpx_run": cell_mark_chpx_run,
             "papx": pap_run["papx"],
             "papx_run": (pap_run["fc_start"], pap_run["fc_end"]),
             "preserve_direct": ordinal == DIRECT_COLOR_TABLE,
@@ -756,12 +770,12 @@ def _normalization_edits(layout):
     selected_chpx = {}
     selected_papx = {}
     for marker in layout["markers"]:
-        if (marker["preserve_direct"] and marker["mark_chpx_run"] is not None
-                and marker["mark_chpx_run"] in marker["chpx_runs"]):
-            raise ProbeError("T06 visible body shares its CHPX run with the paragraph mark")
+        if (marker["preserve_direct"] and marker["cell_mark_chpx_run"] is not None
+                and marker["cell_mark_chpx_run"] in marker["chpx_runs"]):
+            raise ProbeError("T06 visible body shares its CHPX run with the cell mark")
         chpx_targets = [] if marker["preserve_direct"] else list(marker["chpx_runs"])
-        if marker["mark_chpx_run"] is not None:
-            chpx_targets.append(marker["mark_chpx_run"])
+        if marker["cell_mark_chpx_run"] is not None:
+            chpx_targets.append(marker["cell_mark_chpx_run"])
         for owner in chpx_targets:
             descriptor = {
                 "stream": "WordDocument", "header_offset": owner[2],
@@ -1047,7 +1061,7 @@ def build_recipe_variant(loaded, recipe):
         candidate_layout = _probe_layout(candidate)
         for marker in candidate_layout["markers"]:
             if _mark_direct_codes(candidate_layout, marker):
-                raise ProbeError("direct formatting remains on a marker paragraph mark")
+                raise ProbeError("direct formatting remains on a marker cell mark")
             if not marker["preserve_direct"] and any(_direct_codes(candidate_layout, marker)):
                 raise ProbeError("direct formatting remains on a control marker")
     plan = {
@@ -1173,7 +1187,7 @@ def _direct_codes(layout, marker):
 
 
 def _mark_direct_codes(layout, marker):
-    raw = marker["mark_chpx"]
+    raw = marker["cell_mark_chpx"]
     if raw is None:
         return set()
     return {
@@ -1211,7 +1225,7 @@ def validate_variant(before, after_streams, plan):
     for marker in layout["markers"]:
         chpx, papx_codes = _direct_codes(layout, marker)
         if _mark_direct_codes(layout, marker):
-            raise ProbeError("flattened direct formatting remains on a paragraph mark")
+            raise ProbeError("flattened direct formatting remains on a cell mark")
         if marker["preserve_direct"]:
             if not ((chpx & {CI_CO, C_CV}) and {0x4A43, 0x4A4F, 0x4A51} <= chpx
                     and P_JC in papx_codes):

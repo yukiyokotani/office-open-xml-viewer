@@ -1348,7 +1348,7 @@ worktree's test executable.
 | DOC-21 | Project table-style font selection | Implemented within the verified subset: unconditional ASCII/high-ANSI selection, inheritance, direct overrides and existing font-index validation. Conditional font references remain gated under DOC-27 |
 | DOC-22 | Verify combined paragraph/character conditional precedence | Implemented: actual 3x3 story projection reproduces the observed color/size/PJc ordering with independent unconditional ASCII/high-ANSI fonts; focused tests cover direct overrides and paragraph marks |
 | DOC-23 | Evaluate bounded table-style admission | Evaluation complete for this batch: retain admission gates. DOC-25 and DOC-26 remain prerequisites for general table styles; DOC-27/28 cover the new Office counterexamples. Verified internal projection does not establish full-document admission |
-| DOC-24 | Make table-style Office probes reproducible after cleanup | Reusable generator and mutation/validation tooling implemented; native Word end-to-end acceptance remains pending. Generated files remain disposable under outputs |
+| DOC-24 | Make table-style Office probes reproducible after cleanup | Implemented: deterministic generator and exact mutation validation passed native Word end-to-end controls; source-cell U+0007 ownership is verified separately from the TTP. Generated files remain disposable under outputs |
 | DOC-25 | Resolve table-style-aware direct cell shading | Preparation slices DOC-36 through DOC-40 implemented; runtime acquisition and style-baseline resolution under DOC-41/45 remain pending. TIstd admission remains gated |
 | DOC-26 | Apply TIstd table properties with specified preservation | Pending: DOC-42 through DOC-47 cover preservation, reset and supported property projection; native controls must establish the unresolved ordering before admission |
 | DOC-27 | Resolve conditional font-table references | New follow-up: native Word controls render different fonts for identical font-table operands in unconditional CHPX and CCnf; retain the conditional-font gate until the remapping or compatibility rule is established without guessing |
@@ -1399,6 +1399,16 @@ intentional specification-based rejection, not a visual difference. The
 comparison is not an Office-fidelity or renderer-regression result. Prepared
 Raw shading is not yet called by native row acquisition and does not enable
 additional table-style display support.
+
+DOC-24 native acceptance subsequently verified 16 marker locations in the
+negative and style-connected controls. Removing the selected flattened direct
+properties restored the negative controls to default formatting, while the
+style-connected document matched the original native-DOC Word PDF exactly at
+150 dpi. The validator now distinguishes depth-one cell marks (U+0007) from
+separate row marks carrying PFTtp, as required by MS-DOC 2.4.3. Nineteen focused
+probe tests passed. This establishes the probe workflow and its selected
+unconditional character/paragraph controls; it does not establish TAPX or
+conditional inheritance compatibility.
 
 ### Additional findings outside the selected batch
 

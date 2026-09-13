@@ -60,6 +60,25 @@ class TableStyleProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(probes.ProbeError, "character policy"):
             probes._main_characters({"WordDocument": b""}, fib, ())
 
+    def test_depth_one_cell_uses_cell_mark_and_rejects_ttp_ownership(self):
+        characters = [
+            {"fc": 10, "character": "x"},
+            {"fc": 11, "character": "\x07"},
+            {"fc": 12, "character": "\x07"},
+        ]
+        run = {"fc_start": 10, "fc_end": 12}
+        depth = [{"kind": "prl", "applied": True, "code": "6649",
+                  "operand": "01000000"}]
+        self.assertEqual(
+            probes._top_level_cell_mark(characters, run, depth)["fc"], 11
+        )
+        ttp = depth + [{"kind": "prl", "applied": True, "code": "2417",
+                        "operand": "01"}]
+        with self.assertRaisesRegex(probes.ProbeError, "not a top-level table cell"):
+            probes._top_level_cell_mark(characters, run, ttp)
+        with self.assertRaisesRegex(probes.ProbeError, "exactly one cell mark"):
+            probes._top_level_cell_mark(characters, {"fc_start": 10, "fc_end": 13}, depth)
+
     def test_probe_loader_requests_the_small_cfb_policy(self):
         papx = probes._papx_module()
         sentinel = object()
@@ -141,7 +160,7 @@ class TableStyleProbeTests(unittest.TestCase):
     def test_normalization_rejects_t06_body_and_mark_in_one_run(self):
         owner = (10, 20, 100, 101, 106, "character")
         layout = {"markers": [{
-            "preserve_direct": True, "mark_chpx_run": owner,
+            "preserve_direct": True, "cell_mark_chpx_run": owner,
             "chpx_runs": (owner,),
         }]}
         with self.assertRaisesRegex(probes.ProbeError, "T06 visible body"):
@@ -154,7 +173,7 @@ class TableStyleProbeTests(unittest.TestCase):
         layout = {
             "streams": {"WordDocument": bytes(300)},
             "markers": [{
-                "preserve_direct": False, "mark_chpx_run": chpx_owner,
+                "preserve_direct": False, "cell_mark_chpx_run": chpx_owner,
                 "chpx_runs": (chpx_owner,), "papx": papx,
                 "papx_run": (30, 40),
             }],
@@ -183,7 +202,7 @@ class TableStyleProbeTests(unittest.TestCase):
         layout = {
             "streams": {"WordDocument": bytes(300)},
             "markers": [{
-                "preserve_direct": False, "mark_chpx_run": owner,
+                "preserve_direct": False, "cell_mark_chpx_run": owner,
                 "chpx_runs": (owner,), "papx": papx, "papx_run": (30, 40),
             }],
             "chpx_runs": (probes.FormattingRun(*owner),),
