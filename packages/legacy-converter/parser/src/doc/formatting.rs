@@ -540,6 +540,12 @@ impl<'a> Formatting<'a> {
         };
         for bytes in [direct, piece] {
             sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles
+                    && properties.row.apply_style_aware_margins(code, operand)?
+                {
+                    return Ok(());
+                }
                 match properties
                     .row
                     .apply_style_aware_shading(code, operand, shading_policy)?
@@ -1533,6 +1539,106 @@ mod tests {
     #[cfg(feature = "direct-doc")]
     fn table_style_shading_nil() -> Vec<u8> {
         [vec![0x87, 0xd6, 10], vec![255; 8], vec![0, 0]].concat()
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn table_style_margin(code: u16, sides: u8, unit: u8, width: u16) -> Vec<u8> {
+        let [lo, hi] = width.to_le_bytes();
+        test_prl(code, &[6, 0, 1, sides, unit, lo, hi])
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_style_margin_overlap_is_gated_but_disjoint_sides_resolve() {
+        for (style_side, expected_gate) in [(0x02, true), (0x08, false)] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.configure_table_styles(0x0112, true);
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(table_style_margin(0xd634, 0x02, 3, 360));
+            formatting.styles[1]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(table_style_margin(0xd63e, style_side, 3, 720));
+
+            let (defaults, cells) = formatting.table_cell_margins(Some(1)).unwrap();
+            let mut row = table::Row::default();
+            row.apply(0x7621, &[0, 1, 0xe8, 3]).unwrap();
+            row.resolve_style_aware_margins(defaults, cells);
+            if expected_gate {
+                assert_eq!(row.cells[0].margins[1], Some(720));
+                assert_eq!(row.cells[0].margins[3], Some(108));
+            } else {
+                assert_eq!(row.cells[0].margins[1], Some(360));
+                assert_eq!(row.cells[0].margins[3], Some(720));
+            }
+            assert_eq!(formatting.unsupported_table_properties, expected_gate);
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn conditional_table_style_margin_remains_gated_and_does_not_project() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(cnf(
+            0xd66a,
+            table_style_condition::FIRST_ROW,
+            &table_style_margin(0xd63e, 0x02, 3, 360),
+        ));
+
+        let (defaults, cells) = formatting.table_cell_margins(Some(0)).unwrap();
+        let mut row = table::Row::default();
+        row.apply(0x7621, &[0, 1, 0xe8, 3]).unwrap();
+        row.resolve_style_aware_margins(defaults, cells);
+        assert_eq!(row.cells[0].margins[1], Some(108));
+        assert!(formatting.unsupported_table_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_style_margin_profile_checks_range_unit_and_width_boundary() {
+        for (code, operand) in [
+            (0xd634, [6, 0, 2, 0x02, 3, 0, 0]),
+            (0xd63e, [6, 0, 1, 0x02, 0, 0, 0]),
+            (0xd63e, [6, 0, 1, 0x02, 3, 0xc1, 0x7b]),
+        ] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.configure_table_styles(0x0112, true);
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(test_prl(code, &operand));
+            assert!(formatting.table_cell_margins(Some(0)).is_err());
+        }
+
+        let mut boundary = observed_table_style_formatting();
+        boundary.configure_table_styles(0x0112, true);
+        boundary.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(table_style_margin(0xd63e, 0x02, 3, 31_680));
+        assert!(boundary.table_cell_margins(Some(0)).is_ok());
+        assert!(!boundary.unsupported_table_properties);
     }
 
     fn conditional_color_formatting() -> Formatting<'static> {
@@ -3728,6 +3834,34 @@ mod tests {
         let properties = xml.table_properties(109, 0, &[]).unwrap();
         assert!(properties.row.cells[0].prepared_shading.is_none());
         assert!(xml.unsupported_table_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_tistd_resets_preceding_cell_margins_without_changing_xml_mode() {
+        let papx = [
+            vec![0, 0],
+            test_prl(0x7621, &[0, 1, 0xe8, 3]),
+            test_prl(0xd632, &[6, 0, 1, 0x02, 3, 0xd0, 2]),
+            test_prl(0x563a, &1u16.to_le_bytes()),
+        ]
+        .concat();
+
+        let mut native = with_direct_paragraph(&papx);
+        native.configure_table_styles(0x00da, true);
+        let mut properties = native.table_properties_native(109, 0, &[]).unwrap();
+        properties.row.resolve_style_aware_margins(
+            table::MarginPatch::default(),
+            table::MarginPatch::default(),
+        );
+        assert_eq!(properties.row.cells[0].margins[1], Some(108));
+        assert_eq!(properties.row.cells[0].width, 1000);
+
+        let mut xml = with_direct_paragraph(&papx);
+        xml.configure_table_styles(0x00da, false);
+        let properties = xml.table_properties(109, 0, &[]).unwrap();
+        assert_eq!(properties.row.cells[0].margins[1], Some(720));
+        assert_eq!(properties.row.cells[0].width, 1000);
     }
 
     #[test]

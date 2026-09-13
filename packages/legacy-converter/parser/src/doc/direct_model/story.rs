@@ -65,6 +65,7 @@ pub(super) fn project(
         &mut |selected| Ok(formatting.resolve_table_style_id(selected)),
         &mut |bytes| budget.charge(bytes),
     )?;
+    resolve_table_cell_margins(&mut prepared, &table_context, formatting)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
@@ -346,6 +347,28 @@ pub(super) fn project(
     Ok(())
 }
 
+fn resolve_table_cell_margins(
+    prepared: &mut [PreparedParagraph],
+    index: &table_context::Index,
+    formatting: &mut formatting::Formatting<'_>,
+) -> Result<(), String> {
+    for table_context in index.tables() {
+        for row_context in &table_context.rows {
+            let row = &mut prepared
+                .get_mut(row_context.ttp_id)
+                .ok_or_else(|| unsupported("Word table margin TTP outside story"))?
+                .table_properties
+                .row;
+            if row.cells.len() != row_context.source_cell_count {
+                return Err(unsupported("Word table margin cell count mismatch"));
+            }
+            let (defaults, cells) = formatting.table_cell_margins(row_context.table_style)?;
+            row.resolve_style_aware_margins(defaults, cells);
+        }
+    }
+    Ok(())
+}
+
 fn resolve_table_cell_shading(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -460,7 +483,9 @@ mod tests {
         combined: bool,
         modern_raw: bool,
         inherited_conditions: bool,
+        inherited_margins: bool,
         shading: ShadingFixture,
+        margins: MarginFixture,
     }
 
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -471,6 +496,14 @@ mod tests {
         Conditional,
     }
 
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum MarginFixture {
+        #[default]
+        None,
+        D63e,
+        D634,
+    }
+
     struct ProjectedTable {
         colors: Vec<String>,
         sizes: Vec<f64>,
@@ -478,6 +511,8 @@ mod tests {
         high_ansi_fonts: Vec<Option<String>>,
         alignments: Vec<String>,
         backgrounds: Vec<Option<String>>,
+        margins: Vec<[f64; 4]>,
+        margin_wires: Vec<[String; 4]>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -493,6 +528,11 @@ mod tests {
 
     fn cell_shading(color: [u8; 3]) -> Vec<u8> {
         vec![10, 0, 0, 0, 255, color[0], color[1], color[2], 0, 0, 0]
+    }
+
+    fn cell_margin(code: u16, sides: u8, unit: u8, width: u16) -> Vec<u8> {
+        let [lo, hi] = width.to_le_bytes();
+        sprm(code, &[6, 0, 1, sides, unit, lo, hi])
     }
 
     fn append_table_style(bytes: &mut Vec<u8>, base: u16, sets: [&[u8]; 3]) {
@@ -524,6 +564,18 @@ mod tests {
         normal[2..4].copy_from_slice(&0xfff1u16.to_le_bytes());
         bytes.extend((normal.len() as u16).to_le_bytes());
         bytes.extend(normal);
+
+        if fixture.inherited_margins {
+            let base = cell_margin(0xd634, 0x02, 3, 720);
+            append_table_style(&mut bytes, 0xfff, [&base, &[], &[]]);
+            let child = cell_margin(0xd634, 0x02, 0, 0);
+            append_table_style(&mut bytes, 1, [&child, &[], &[]]);
+            append_table_style(&mut bytes, 1, [&[], &[], &[]]);
+            for _ in 4..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
 
         if fixture.inherited_conditions {
             let mut base_paragraph = vec![1, 0, 0x61, 0x24, 0];
@@ -599,6 +651,11 @@ mod tests {
         } else {
             (vec![0x88, 0x34, 1], paragraph, character.as_slice())
         };
+        match fixture.margins {
+            MarginFixture::None => {}
+            MarginFixture::D63e => tapx.extend(cell_margin(0xd63e, 0x02, 3, 360)),
+            MarginFixture::D634 => tapx.extend(cell_margin(0xd634, 0x02, 3, 360)),
+        }
         match fixture.shading {
             ShadingFixture::None => {}
             ShadingFixture::Unconditional => {
@@ -700,6 +757,18 @@ mod tests {
         .concat()
     }
 
+    fn row_cells_with_margins(style: u16, margins: &[Vec<u8>]) -> Vec<u8> {
+        let mut row = row_cells_with_style(0, 1, style);
+        for margin in margins {
+            row.extend(margin);
+        }
+        // The synthetic PAPX builder stores an odd number of bytes including
+        // its two-byte style prefix. Keep the direct margin PRLs followed by a
+        // harmless in-cell assertion so that framing invariant still holds.
+        row.extend(sprm(0x2416, &[1]));
+        row
+    }
+
     fn unstyled_row_with_raw(raw: &[u8]) -> Vec<u8> {
         [
             sprm(0x2416, &[1]),
@@ -765,31 +834,49 @@ mod tests {
                 &mut table_sequence,
             )?;
 
-            let BodyElement::Table(table) = &body[0] else {
-                panic!("table")
-            };
             let mut colors = Vec::new();
             let mut sizes = Vec::new();
             let mut ascii_fonts = Vec::new();
             let mut high_ansi_fonts = Vec::new();
             let mut alignments = Vec::new();
             let mut backgrounds = Vec::new();
-            for row in &table.rows {
-                for cell in &row.cells {
-                    backgrounds.push(cell.background.clone());
-                    let CellElement::Paragraph(paragraph) = &cell.content[0] else {
-                        panic!("paragraph")
-                    };
-                    let DocRun::Text(run) = &paragraph.runs[0] else {
-                        panic!("text")
-                    };
-                    colors.push(run.color.clone().unwrap_or_default());
-                    sizes.push(run.font_size);
-                    ascii_fonts.push(run.font_family.clone());
-                    high_ansi_fonts.push(run.font_family_high_ansi.clone());
-                    alignments.push(paragraph.alignment.clone());
+            let mut margins = Vec::new();
+            let mut margin_wires = Vec::new();
+            for element in &body {
+                let BodyElement::Table(table) = element else {
+                    continue;
+                };
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        backgrounds.push(cell.background.clone());
+                        margins.push([
+                            cell.margin_top.unwrap(),
+                            cell.margin_left.unwrap(),
+                            cell.margin_bottom.unwrap(),
+                            cell.margin_right.unwrap(),
+                        ]);
+                        let wire = cell.table_cell_layout.margins.as_ref().unwrap();
+                        margin_wires.push([
+                            wire.top.as_ref().unwrap().value.clone().unwrap(),
+                            wire.left.as_ref().unwrap().value.clone().unwrap(),
+                            wire.bottom.as_ref().unwrap().value.clone().unwrap(),
+                            wire.right.as_ref().unwrap().value.clone().unwrap(),
+                        ]);
+                        let CellElement::Paragraph(paragraph) = &cell.content[0] else {
+                            panic!("paragraph")
+                        };
+                        let DocRun::Text(run) = &paragraph.runs[0] else {
+                            panic!("text")
+                        };
+                        colors.push(run.color.clone().unwrap_or_default());
+                        sizes.push(run.font_size);
+                        ascii_fonts.push(run.font_family.clone());
+                        high_ansi_fonts.push(run.font_family_high_ansi.clone());
+                        alignments.push(paragraph.alignment.clone());
+                    }
                 }
             }
+            assert!(!margins.is_empty(), "table");
             Ok(ProjectedTable {
                 colors,
                 sizes,
@@ -797,6 +884,8 @@ mod tests {
                 high_ansi_fonts,
                 alignments,
                 backgrounds,
+                margins,
+                margin_wires,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -822,6 +911,109 @@ mod tests {
             ],
             fixture,
         )
+    }
+
+    #[test]
+    fn native_story_resolves_d632_above_d63e_and_d63e_above_direct_d634() {
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (
+                    2,
+                    3,
+                    row_cells_with_margins(1, &[cell_margin(0xd634, 0x0f, 0, 0)]),
+                ),
+                (3, 5, cell()),
+                (
+                    5,
+                    6,
+                    row_cells_with_margins(1, &[cell_margin(0xd632, 0x02, 0, 0)]),
+                ),
+                (6, 8, cell()),
+                (
+                    8,
+                    9,
+                    row_cells_with_margins(1, &[cell_margin(0xd632, 0x02, 3, 720)]),
+                ),
+                (9, 10, Vec::new()),
+            ],
+            StyleFixture {
+                margins: MarginFixture::D63e,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.margins,
+            [
+                [0.0, 18.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 5.4],
+                [0.0, 36.0, 0.0, 5.4],
+            ]
+        );
+        assert_eq!(
+            projected.margin_wires,
+            [
+                ["0", "360", "0", "0"],
+                ["0", "0", "0", "108"],
+                ["0", "720", "0", "108"],
+            ]
+        );
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_keeps_d634_nil_distinct_from_omission_in_style_inheritance() {
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells_with_style(0, 1, 2)),
+                (3, 5, cell()),
+                (5, 6, row_cells_with_style(0, 1, 3)),
+                (6, 7, Vec::new()),
+            ],
+            StyleFixture {
+                inherited_margins: true,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(projected.margins[0][1], 0.0);
+        assert_eq!(projected.margins[1][1], 36.0);
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_distinguishes_direct_d634_nil_dxa_zero_and_omission() {
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells_with_style(0, 1, 1)),
+                (3, 5, cell()),
+                (
+                    5,
+                    6,
+                    row_cells_with_margins(1, &[cell_margin(0xd634, 0x02, 0, 0)]),
+                ),
+                (6, 8, cell()),
+                (
+                    8,
+                    9,
+                    row_cells_with_margins(1, &[cell_margin(0xd634, 0x02, 3, 0)]),
+                ),
+                (9, 10, Vec::new()),
+            ],
+            StyleFixture {
+                margins: MarginFixture::D634,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.margins.iter().map(|m| m[1]).collect::<Vec<_>>(),
+            [18.0, 0.0, 0.0]
+        );
+        assert!(projected.unsupported_table);
     }
 
     #[test]

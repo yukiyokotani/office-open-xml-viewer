@@ -47,6 +47,8 @@ pub(super) struct Profile {
     bands: Bands,
     pub(super) paragraph_alignment: Option<paragraph::AlignmentPatch>,
     table_shading: Option<TableStyleShading>,
+    table_default_margins: table::MarginPatch,
+    table_style_margins: table::MarginPatch,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
     unsupported_character: bool,
@@ -64,6 +66,8 @@ impl Default for Profile {
             bands: Bands::default(),
             paragraph_alignment: None,
             table_shading: None,
+            table_default_margins: table::MarginPatch::default(),
+            table_style_margins: table::MarginPatch::default(),
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
             unsupported_character: false,
@@ -159,6 +163,18 @@ impl Formatting<'_> {
         Ok(shading)
     }
 
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_cell_margins(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<(table::MarginPatch, table::MarginPatch), String> {
+        let Some(selected_style) = selected_style else {
+            return Ok(Default::default());
+        };
+        let profile = self.table_style_profile(selected_style)?;
+        Ok((profile.table_default_margins, profile.table_style_margins))
+    }
+
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
         let profile = if let Some(profile) = self.table_style_cache.get(&id) {
             Rc::clone(profile)
@@ -196,6 +212,8 @@ impl Formatting<'_> {
         let mut horizontal_source = None;
         let mut vertical_source = None;
         let mut has_conditional_table = false;
+        let mut default_margin_sides = 0u8;
+        let mut style_margin_sides = 0u8;
         let interpret_table_styles = self.interpret_table_styles;
         for style_id in chain {
             let sets = *self.styles[style_id]
@@ -211,6 +229,34 @@ impl Formatting<'_> {
                 &mut self.budget,
                 |scope, code, operand, _| {
                     match code {
+                        0xd634 | 0xd63e => {
+                            if scope != tapx::Scope::Unconditional {
+                                return Ok(false);
+                            }
+                            let (patch, own_sides, other_sides) = if code == 0xd634 {
+                                (
+                                    &mut profile.table_default_margins,
+                                    &mut default_margin_sides,
+                                    style_margin_sides,
+                                )
+                            } else {
+                                (
+                                    &mut profile.table_style_margins,
+                                    &mut style_margin_sides,
+                                    default_margin_sides,
+                                )
+                            };
+                            let sides = patch.apply_style(code, operand)?;
+                            // The controls establish D63E above direct D634,
+                            // and each property independently through basedOn.
+                            // They do not establish cross-property composition
+                            // within one style chain on the same side.
+                            if sides & other_sides != 0 {
+                                profile.unsupported_table = true;
+                            }
+                            *own_sides |= sides;
+                            Ok(interpret_table_styles)
+                        }
                         0xd687 => {
                             if operand.len() != 11 || operand[0] != 10 {
                                 return Err(unsupported(

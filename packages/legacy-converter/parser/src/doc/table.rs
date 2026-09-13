@@ -1,6 +1,8 @@
 //! Binary table properties, [MS-DOC] 2.4.3, 2.6.3, TDefTableOperand/TC80.
 //! A row's definition belongs to its TTP mark, not its first text paragraph.
 use super::{border::Border, u16_at, u32_at, unsupported};
+mod margin;
+pub(in crate::doc) use margin::Patch as MarginPatch;
 mod shading;
 pub(in crate::doc) use shading::Shading;
 #[cfg(feature = "direct-doc")]
@@ -47,6 +49,8 @@ pub struct Cell {
     pub flags: u16,
     pub preferred: Option<PreferredWidth>,
     pub margins: [Option<u16>; 4],
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) margin_nil: u8,
     pub borders: [Option<Border>; 6],
 }
 
@@ -89,6 +93,10 @@ pub struct Row {
     left_is_edge: bool,
     pub height: i32,
     pub margins: [u16; 4],
+    #[cfg(feature = "direct-doc")]
+    margin_authored: u8,
+    #[cfg(feature = "direct-doc")]
+    margin_nil: u8,
     pub autofit: bool,
     pub header: bool,
     pub cant_split: bool,
@@ -111,7 +119,11 @@ impl Default for Row {
             gap: 0,
             left_is_edge: false,
             height: 0,
-            margins: [0, 108, 0, 108],
+            margins: margin::DEFAULTS,
+            #[cfg(feature = "direct-doc")]
+            margin_authored: 0,
+            #[cfg(feature = "direct-doc")]
+            margin_nil: 0,
             autofit: false,
             header: false,
             cant_split: false,
@@ -256,6 +268,109 @@ impl Row {
             self.left
         } else {
             self.left - self.gap
+        }
+    }
+
+    /// Retains native D632/D634 authored state until the selected table style
+    /// is known. Nil is distinct from omission and resolves to zero in the
+    /// bounded Office controls. A later TIstd discards these non-preserved
+    /// table properties without disturbing cell geometry ([MS-DOC] 2.6.3).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn apply_style_aware_margins(
+        &mut self,
+        code: u16,
+        bytes: &[u8],
+    ) -> Result<bool, String> {
+        if code == 0x563a {
+            self.margins = margin::DEFAULTS;
+            self.margin_authored = 0;
+            self.margin_nil = 0;
+            for cell in &mut self.cells {
+                cell.margins = [None; 4];
+                cell.margin_nil = 0;
+            }
+            return Ok(false);
+        }
+        if !matches!(code, 0xd632 | 0xd634) {
+            return Ok(false);
+        }
+        let cssa = margin::read(bytes)?;
+        if code == 0xd634 {
+            if (cssa.first, cssa.limit) != (0, 1) {
+                return Err(unsupported("invalid Word default margin range"));
+            }
+            for side in 0..4 {
+                let bit = 1 << side;
+                if cssa.sides & bit == 0 {
+                    continue;
+                }
+                self.margin_authored |= bit;
+                match cssa.value {
+                    margin::Value::Nil => {
+                        self.margin_nil |= bit;
+                        self.margins[side] = 0;
+                    }
+                    margin::Value::Dxa(value) => {
+                        self.margin_nil &= !bit;
+                        self.margins[side] = value;
+                    }
+                }
+            }
+        } else {
+            let cells = range(&bytes[1..], self.cells.len())?;
+            for cell in &mut self.cells[cells] {
+                for side in 0..4 {
+                    let bit = 1 << side;
+                    if cssa.sides & bit == 0 {
+                        continue;
+                    }
+                    match cssa.value {
+                        margin::Value::Nil => {
+                            cell.margin_nil |= bit;
+                            cell.margins[side] = None;
+                        }
+                        margin::Value::Dxa(value) => {
+                            cell.margin_nil &= !bit;
+                            cell.margins[side] = Some(value);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn resolve_style_aware_margins(
+        &mut self,
+        style_defaults: MarginPatch,
+        style_cells: MarginPatch,
+    ) {
+        for side in 0..4 {
+            let bit = 1 << side;
+            let default = if self.margin_authored & bit != 0 {
+                if self.margin_nil & bit != 0 {
+                    0
+                } else {
+                    self.margins[side]
+                }
+            } else {
+                style_defaults
+                    .get(side)
+                    .map_or(margin::DEFAULTS[side], margin::Value::resolved)
+            };
+            self.margins[side] = default;
+            for cell in &mut self.cells {
+                cell.margins[side] = Some(if cell.margin_nil & bit != 0 {
+                    0
+                } else if let Some(value) = cell.margins[side] {
+                    value
+                } else {
+                    style_cells
+                        .get(side)
+                        .map_or(default, margin::Value::resolved)
+                });
+            }
         }
     }
 
@@ -695,6 +810,143 @@ mod tests {
         assert_eq!(row.cells[0].prepared_shading, None);
         assert_eq!(row.cells[0].width, 720);
         assert_eq!(row.identity[&0x563a], 8u16.to_le_bytes());
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn margin_cssa(first: u8, limit: u8, sides: u8, unit: u8, width: u16) -> [u8; 7] {
+        let [lo, hi] = width.to_le_bytes();
+        [6, first, limit, sides, unit, lo, hi]
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_margins_keep_nil_dxa_and_omission_distinct_until_resolution() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 100, 0]).unwrap();
+        assert!(row
+            .apply_style_aware_margins(0xd634, &margin_cssa(0, 1, 0x0f, 0, 0))
+            .unwrap());
+        assert!(row
+            .apply_style_aware_margins(0xd632, &margin_cssa(0, 1, 0x02, 0, 0))
+            .unwrap());
+        assert!(row
+            .apply_style_aware_margins(0xd632, &margin_cssa(1, 2, 0x02, 3, 720))
+            .unwrap());
+        assert_eq!(row.margin_authored, 0x0f);
+        assert_eq!(row.margin_nil, 0x0f);
+        assert_eq!(row.cells[0].margins[1], None);
+        assert_eq!(row.cells[0].margin_nil, 0x02);
+        assert_eq!(row.cells[1].margins[1], Some(720));
+        assert_eq!(row.cells[1].margin_nil, 0);
+        assert_eq!(row.cells[2].margins[1], None);
+        assert_eq!(row.cells[2].margin_nil, 0);
+
+        let mut defaults = MarginPatch::default();
+        defaults
+            .apply_style(0xd634, &margin_cssa(0, 1, 0x02, 3, 360))
+            .unwrap();
+        let mut cells = MarginPatch::default();
+        cells
+            .apply_style(0xd63e, &margin_cssa(0, 1, 0x02, 3, 180))
+            .unwrap();
+        row.resolve_style_aware_margins(defaults, cells);
+        assert_eq!(row.margins, [0; 4]);
+        assert_eq!(row.cells[0].margins, [Some(0); 4]);
+        assert_eq!(row.cells[1].margins[1], Some(720));
+        assert_eq!(row.cells[2].margins[1], Some(180));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_style_d634_nil_masks_inherited_dxa_and_resolves_zero() {
+        let mut defaults = MarginPatch::default();
+        defaults
+            .apply_style(0xd634, &margin_cssa(0, 1, 0x02, 3, 720))
+            .unwrap();
+        defaults
+            .apply_style(0xd634, &margin_cssa(0, 1, 0x02, 0, 0))
+            .unwrap();
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 1, 100, 0]).unwrap();
+        row.resolve_style_aware_margins(defaults, MarginPatch::default());
+        assert_eq!(row.margins[1], 0);
+        assert_eq!(row.cells[0].margins[1], Some(0));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_tistd_resets_only_prepared_margins_and_preserves_geometry() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 1, 0xd0, 2]).unwrap();
+        row.apply_style_aware_margins(0xd634, &margin_cssa(0, 1, 0x02, 3, 360))
+            .unwrap();
+        row.apply_style_aware_margins(0xd632, &margin_cssa(0, 1, 0x02, 3, 540))
+            .unwrap();
+        assert!(!row
+            .apply_style_aware_margins(0x563a, &7u16.to_le_bytes())
+            .unwrap());
+        row.apply(0x563a, &7u16.to_le_bytes()).unwrap();
+        assert_eq!(row.cells.len(), 1);
+        assert_eq!(row.cells[0].width, 720);
+        assert_eq!(row.margins, margin::DEFAULTS);
+        assert_eq!(row.margin_authored, 0);
+        assert_eq!(row.margin_nil, 0);
+        assert_eq!(row.cells[0].margins, [None; 4]);
+        assert_eq!(row.cells[0].margin_nil, 0);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn prepared_cell_margins_follow_insert_delete_and_definition_ownership() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 100, 0]).unwrap();
+        for (cell, value) in [(0, 100), (1, 200), (2, 300)] {
+            row.apply_style_aware_margins(0xd632, &margin_cssa(cell, cell + 1, 0x02, 3, value))
+                .unwrap();
+        }
+        row.apply(0x7621, &[1, 1, 100, 0]).unwrap();
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.margins[1])
+                .collect::<Vec<_>>(),
+            [Some(100), None, Some(200), Some(300)]
+        );
+        row.apply(0x5622, &[0, 2]).unwrap();
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.margins[1])
+                .collect::<Vec<_>>(),
+            [Some(200), Some(300)]
+        );
+        row.apply(0xd608, &[6, 0, 1, 0, 0, 100, 0]).unwrap();
+        assert_eq!(row.cells.len(), 1);
+        assert_eq!(row.cells[0].margins, [None; 4]);
+        assert_eq!(row.cells[0].margin_nil, 0);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_margin_ranges_and_last_authored_state_are_checked() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 1, 100, 0]).unwrap();
+        assert!(row
+            .apply_style_aware_margins(0xd632, &margin_cssa(0, 2, 0x02, 3, 10))
+            .is_err());
+        assert!(row
+            .apply_style_aware_margins(0xd634, &margin_cssa(0, 2, 0x02, 3, 10))
+            .is_err());
+        row.apply_style_aware_margins(0xd632, &margin_cssa(0, 1, 0x02, 3, 10))
+            .unwrap();
+        row.apply_style_aware_margins(0xd632, &margin_cssa(0, 1, 0x02, 0, 0))
+            .unwrap();
+        assert_eq!(row.cells[0].margins[1], None);
+        assert_eq!(row.cells[0].margin_nil, 0x02);
+        row.apply_style_aware_margins(0xd632, &margin_cssa(0, 1, 0x02, 3, 20))
+            .unwrap();
+        assert_eq!(row.cells[0].margins[1], Some(20));
+        assert_eq!(row.cells[0].margin_nil, 0);
     }
 
     #[test]
