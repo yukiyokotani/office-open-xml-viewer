@@ -29,11 +29,13 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_anchor_host_metrics(
         &mut self,
         paragraph_style: usize,
+        table_style: Option<usize>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<Option<AnchorHostMetrics>, String> {
-        let properties = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        let properties =
+            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
         if !properties.picture.passive_special() {
             return Err(super::super::unsupported(
                 "floating picture character is not passive-special",
@@ -64,16 +66,17 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_paragraph(
         &mut self,
         style: usize,
+        table_style: Option<usize>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<DirectResolvedParagraph, String> {
-        let mut resolved = self.resolve_paragraph(style, fc, prm, prcs)?;
+        let mut resolved = self.resolve_paragraph_with_table(style, table_style, fc, prm, prcs)?;
         // Numbered resolution already acquired the unmodified paragraph mark;
         // plain paragraphs acquire it once here through the same run cascade.
         let mark = match resolved.paragraph_mark.take() {
             Some(mark) => mark,
-            None => self.run_properties(style, fc, prm, prcs)?,
+            None => self.run_properties_with_table(style, table_style, fc, prm, prcs)?,
         };
         let mut paragraph = resolved.properties.direct_paragraph();
         paragraph.mark_vanish = mark.direct_vanish();
@@ -92,12 +95,13 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_text_run(
         &mut self,
         paragraph_style: usize,
+        table_style: Option<usize>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
         text: String,
     ) -> Result<Option<TextRun>, String> {
-        self.run_properties(paragraph_style, fc, prm, prcs)?
+        self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
             .direct_text_run(text, &self.fonts)
     }
 
@@ -107,11 +111,13 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_inline_picture_facts(
         &mut self,
         paragraph_style: usize,
+        table_style: Option<usize>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<DirectInlinePictureFacts, String> {
-        let properties = self.run_properties(paragraph_style, fc, prm, prcs)?;
+        let properties =
+            self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?;
         Ok(DirectInlinePictureFacts {
             location: properties.picture.inline_location()?,
             vanish: properties.direct_vanish(),

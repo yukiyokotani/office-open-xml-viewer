@@ -12,12 +12,16 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "direct-doc")]
 mod direct;
 
+/// Table-aware caches trade recomputation for a fixed retained-entry bound.
+/// A document can otherwise present the Cartesian product of paragraph and
+/// table style IDs even though each individual style table is bounded.
+const MAX_TABLE_AWARE_CACHE_ENTRIES: usize = 256;
+
 struct Style<'a> {
     base: usize,
     kind: u16,
     chpx: &'a [u8],
     papx: &'a [u8],
-    #[allow(dead_code)] // Acquired now; consumed by the subsequent table-style resolution slice.
     table: Option<TableStylePropertySets<'a>>,
     language_compatibility: StyleLanguageCompatibility,
 }
@@ -25,11 +29,18 @@ struct Style<'a> {
 /// Raw, ordered MS-DOC 2.9.270 StkTableGRLPUPX members. Acquisition is
 /// deliberately lossless: interpretation and inheritance are separate slices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Acquired now; consumed by the subsequent table-style resolution slice.
 struct TableStylePropertySets<'a> {
     tapx: &'a [u8],
     papx: &'a [u8],
     chpx: &'a [u8],
+}
+
+#[derive(Clone)]
+struct CachedParagraphProperties {
+    properties: paragraph::Properties,
+    /// True only while the effective alignment still comes from the table
+    /// style. A later paragraph-style/direct/list write clears this marker.
+    table_alignment: bool,
 }
 
 /// Raw MS-DOC 2.9.112 GRFSTD language-compatibility facts. Interpretation is
@@ -99,9 +110,9 @@ pub struct Formatting<'a> {
     fonts: Vec<String>,
     defaults: Properties,
     styles: Vec<Option<Style<'a>>>,
-    paragraph_cache: BTreeMap<usize, Properties>,
+    paragraph_cache: BTreeMap<(usize, Option<usize>), Properties>,
     paragraph_marker_styles: BTreeMap<usize, Properties>,
-    paragraph_layout_cache: BTreeMap<usize, paragraph::Properties>,
+    paragraph_layout_cache: BTreeMap<(usize, Option<usize>), CachedParagraphProperties>,
     data: &'a [u8],
     budget: Budget,
     numbering: numbering::Tables<'a>,
@@ -213,17 +224,41 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<ResolvedParagraph, String> {
-        let mut props = if let Some(props) = self.paragraph_layout_cache.get(&style) {
-            props.clone()
+        self.resolve_paragraph_with_table(style, None, fc, prm, prcs)
+    }
+
+    fn resolve_paragraph_with_table(
+        &mut self,
+        style: usize,
+        table_style: Option<usize>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<ResolvedParagraph, String> {
+        let key = (style, table_style);
+        let cached = if let Some(cached) = self.paragraph_layout_cache.get(&key) {
+            cached.clone()
         } else {
             let mut props = paragraph::Properties::default();
+            let mut table_alignment = self.apply_table_paragraph_style(&mut props, table_style)?;
             for id in self.chain(style, 1)? {
                 let bytes = self.styles[id].as_ref().expect("validated style").papx;
-                let _ = self.apply_paragraph(&mut props, bytes)?;
+                if self.apply_paragraph(&mut props, bytes)?.alignment.is_some() {
+                    table_alignment = false;
+                }
             }
-            self.paragraph_layout_cache.insert(style, props.clone());
-            props
+            let cached = CachedParagraphProperties {
+                properties: props,
+                table_alignment,
+            };
+            if self.paragraph_layout_cache.len() >= MAX_TABLE_AWARE_CACHE_ENTRIES {
+                self.paragraph_layout_cache.clear();
+            }
+            self.paragraph_layout_cache.insert(key, cached.clone());
+            cached
         };
+        let mut props = cached.properties;
+        let mut table_alignment = cached.table_alignment;
         let direct = self
             .paragraphs
             .at(fc)
@@ -241,6 +276,9 @@ impl<'a> Formatting<'a> {
         } else if let Some(bytes) = paragraph::prm0(prm) {
             direct_properties.overlay(self.apply_paragraph(&mut props, &bytes)?);
         }
+        if direct_properties.alignment.is_some() {
+            table_alignment = false;
+        }
         if let Some(reference) = numbering::Reference::new(props.ilfo, props.ilvl)? {
             let selected = self.numbering.resolve(reference)?;
             let level = *selected.level;
@@ -252,10 +290,18 @@ impl<'a> Formatting<'a> {
             if linked != 0xfff {
                 for id in self.chain(usize::from(linked), 1)? {
                     let bytes = self.styles[id].as_ref().expect("validated style").papx;
-                    let _ = self.apply_paragraph(&mut props, bytes)?;
+                    if self.apply_paragraph(&mut props, bytes)?.alignment.is_some() {
+                        table_alignment = false;
+                    }
                 }
             }
-            let _ = self.apply_paragraph(&mut props, level.papx)?;
+            if self
+                .apply_paragraph(&mut props, level.papx)?
+                .alignment
+                .is_some()
+            {
+                table_alignment = false;
+            }
             // MS-DOC 2.4.6.3 describes applying list properties after the
             // paragraph's style/direct properties. Word-produced evidence
             // establishes narrower precedence exceptions for explicitly
@@ -268,6 +314,7 @@ impl<'a> Formatting<'a> {
             if let Some((code, value)) = direct_properties.alignment {
                 // Reuse the paragraph property's enum/range validation.
                 props.apply(code, &[value])?;
+                table_alignment = false;
             }
             // Replay only explicitly direct absolute twip indents, after the
             // list and after final direct bidi restoration. The fixed-size
@@ -284,13 +331,24 @@ impl<'a> Formatting<'a> {
                 props.preserve_list_indent(&original);
             }
 
+            if table_alignment && props.is_bidi() {
+                // The Office controls establish unconditional table PAPX
+                // alignment only for LTR paragraphs. Keep RTL behavior on the
+                // pre-existing paragraph/list cascade until separately proven,
+                // and keep it behind the admission gate when TIstd support is
+                // broadened later.
+                self.unsupported_paragraph_properties = true;
+                props.clear_alignment();
+            }
+
             #[cfg(feature = "direct-doc")]
-            let paragraph_mark = self.run_properties(style, fc, prm, prcs)?;
+            let paragraph_mark =
+                self.run_properties_with_table(style, table_style, fc, prm, prcs)?;
             #[cfg(feature = "direct-doc")]
             let mut marker = paragraph_mark.clone();
             #[cfg(not(feature = "direct-doc"))]
             let mut marker = self.run_properties(style, fc, prm, prcs)?;
-            let mut baseline = self.paragraph_base(style)?;
+            let mut baseline = self.paragraph_base_with_table(style, table_style)?;
             if linked != 0xfff {
                 // Resolve the linked style's toggles against its own base
                 // chain once, then overlay its explicit visible properties.
@@ -317,12 +375,83 @@ impl<'a> Formatting<'a> {
                 paragraph_mark: Some(paragraph_mark),
             });
         }
+        if table_alignment && props.is_bidi() {
+            // See the bounded LTR compatibility note in the numbered branch.
+            self.unsupported_paragraph_properties = true;
+            props.clear_alignment();
+        }
         Ok(ResolvedParagraph {
             properties: props,
             numbering: None,
             #[cfg(feature = "direct-doc")]
             paragraph_mark: None,
         })
+    }
+
+    /// Apply only the unconditional table-style PAPX property established by
+    /// the Office controls. This is intentionally narrower than a general
+    /// interpretation of the basedOn array wording in MS-DOC 2.4.6.5.
+    fn apply_table_paragraph_style(
+        &mut self,
+        props: &mut paragraph::Properties,
+        table_style: Option<usize>,
+    ) -> Result<bool, String> {
+        let Some(table_style) = table_style else {
+            return Ok(false);
+        };
+        if self
+            .styles
+            .get(table_style)
+            .and_then(Option::as_ref)
+            .filter(|style| style.kind == 3)
+            .is_none()
+        {
+            // sprmTIstd falls back to style 0x000B for an invalid selection.
+            // If that slot is itself unavailable, retain the existing table
+            // formatting gate instead of failing before its generic result.
+            self.unsupported_table_properties = true;
+            return Ok(false);
+        }
+        let mut alignment = false;
+        for id in self.chain(table_style, 3)? {
+            let sets = self.styles[id]
+                .as_ref()
+                .expect("validated style")
+                .table
+                .as_ref()
+                .expect("validated table style");
+            if !sets.tapx.is_empty() {
+                self.unsupported_table_properties = true;
+            }
+            if sets.papx.is_empty() {
+                continue;
+            }
+            let embedded_style = usize::from(u16_at(sets.papx, 0)?);
+            if embedded_style != id {
+                // MS-DOC 2.9.338 UpxPapx requires this optional istd, when
+                // present, to equal the current style.
+                return Err(unsupported(
+                    "Word table style PAPX has mismatched style index",
+                ));
+            }
+            sprm::paragraph_properties(
+                &sets.papx[2..],
+                self.data,
+                &mut self.budget,
+                |code, operand| {
+                    if matches!(code, 0x2403 | 0x2461) {
+                        props.apply(code, operand)?;
+                        alignment = true;
+                    } else {
+                        // Conditional PCnf and all other table PAPX properties
+                        // remain behind the existing admission gate.
+                        self.unsupported_paragraph_properties = true;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(alignment)
     }
 
     fn apply_paragraph<'b>(
@@ -437,13 +566,74 @@ impl<'a> Formatting<'a> {
     }
 
     fn paragraph_base(&mut self, id: usize) -> Result<Properties, String> {
-        if let Some(value) = self.paragraph_cache.get(&id) {
+        self.paragraph_base_with_table(id, None)
+    }
+
+    fn paragraph_base_with_table(
+        &mut self,
+        id: usize,
+        table_style: Option<usize>,
+    ) -> Result<Properties, String> {
+        let key = (id, table_style);
+        if let Some(value) = self.paragraph_cache.get(&key) {
             return Ok(value.clone());
         }
         let mut props = self.defaults.clone();
+        self.apply_table_run_style(&mut props, table_style)?;
         self.apply_style(&mut props, id, 1)?;
-        self.paragraph_cache.insert(id, props.clone());
+        if self.paragraph_cache.len() >= MAX_TABLE_AWARE_CACHE_ENTRIES {
+            self.paragraph_cache.clear();
+        }
+        self.paragraph_cache.insert(key, props.clone());
         Ok(props)
+    }
+
+    /// Apply the observed unconditional color subset of a table style's CHPX.
+    /// Base-to-derived priority here is backed by the controlled Word outputs;
+    /// it makes no claim about other table-style character properties.
+    fn apply_table_run_style(
+        &mut self,
+        props: &mut Properties,
+        table_style: Option<usize>,
+    ) -> Result<(), String> {
+        let Some(table_style) = table_style else {
+            return Ok(());
+        };
+        if self
+            .styles
+            .get(table_style)
+            .and_then(Option::as_ref)
+            .filter(|style| style.kind == 3)
+            .is_none()
+        {
+            // See apply_table_paragraph_style: absence of the fallback slot
+            // remains an explicitly gated unsupported table-style case.
+            self.unsupported_table_properties = true;
+            return Ok(());
+        }
+        for id in self.chain(table_style, 3)? {
+            let sets = self.styles[id]
+                .as_ref()
+                .expect("validated style")
+                .table
+                .as_ref()
+                .expect("validated table style");
+            if !sets.tapx.is_empty() {
+                self.unsupported_table_properties = true;
+            }
+            let baseline = props.clone();
+            let mut sprms = Sprms::new(sets.chpx);
+            while let Some((code, operand)) = sprms.next(&mut self.budget)? {
+                if matches!(code, 0x2a42 | 0x6870) {
+                    props.apply(code, operand, &baseline)?;
+                } else {
+                    // Conditional CCnf and all other table CHPX properties
+                    // remain behind the existing admission gate.
+                    self.unsupported_character_properties = true;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// A caller caches this result for a consecutive (paragraph style, CHPX,
@@ -499,7 +689,18 @@ impl<'a> Formatting<'a> {
         prm: u16,
         prcs: &[&[u8]],
     ) -> Result<Properties, String> {
-        let paragraph = self.paragraph_base(paragraph_style)?;
+        self.run_properties_with_table(paragraph_style, None, fc, prm, prcs)
+    }
+
+    fn run_properties_with_table(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<usize>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Properties, String> {
+        let paragraph = self.paragraph_base_with_table(paragraph_style, table_style)?;
         let mut props = paragraph.clone();
         let mut style = paragraph.clone();
         let direct = match self.characters.at(fc) {
@@ -967,6 +1168,250 @@ mod tests {
                 "style {id} did not resolve to {expected}"
             );
         }
+    }
+
+    fn observed_table_style(
+        base: usize,
+        papx: &'static [u8],
+        chpx: &'static [u8],
+    ) -> Option<Style<'static>> {
+        Some(Style {
+            base,
+            kind: 3,
+            // These ordinary aliases are deliberately malformed: table-style
+            // projection must read only the StkTableGRLPUPX members.
+            chpx: &[0xff],
+            papx: &[0xff],
+            table: Some(TableStylePropertySets {
+                tapx: &[],
+                papx,
+                chpx,
+            }),
+            language_compatibility: StyleLanguageCompatibility::default(),
+        })
+    }
+
+    fn observed_table_style_formatting() -> Formatting<'static> {
+        const RED: &[u8] = &[0x42, 0x2a, 6];
+        const BLUE: &[u8] = &[0x70, 0x68, 0x00, 0x00, 0xff, 0x00];
+        const GREEN: &[u8] = &[0x70, 0x68, 0x00, 0x80, 0x00, 0x00];
+        const BASE_LEFT: &[u8] = &[0, 0, 0x03, 0x24, 0];
+        const CHILD_CENTER: &[u8] = &[1, 0, 0x03, 0x24, 1];
+        const EMPTY_CHILD: &[u8] = &[2, 0];
+        const GRANDCHILD_RIGHT: &[u8] = &[3, 0, 0x61, 0x24, 2];
+        const REVERSE_BASE_RIGHT: &[u8] = &[4, 0, 0x03, 0x24, 2];
+        const REVERSE_CHILD_LEFT: &[u8] = &[5, 0, 0x61, 0x24, 0];
+        const NONDEFAULT_EMPTY_CHILD: &[u8] = &[6, 0];
+
+        let mut formatting = empty();
+        formatting.styles = vec![
+            observed_table_style(0xfff, BASE_LEFT, RED),
+            observed_table_style(0, CHILD_CENTER, BLUE),
+            observed_table_style(0, EMPTY_CHILD, &[]),
+            observed_table_style(1, GRANDCHILD_RIGHT, GREEN),
+            observed_table_style(0xfff, REVERSE_BASE_RIGHT, GREEN),
+            observed_table_style(4, REVERSE_CHILD_LEFT, RED),
+            observed_table_style(4, NONDEFAULT_EMPTY_CHILD, &[]),
+            Some(Style {
+                base: 0xfff,
+                kind: 1,
+                chpx: &[],
+                papx: &[],
+                table: None,
+                language_compatibility: StyleLanguageCompatibility::default(),
+            }),
+            Some(Style {
+                base: 0xfff,
+                kind: 2,
+                chpx: BLUE,
+                papx: &[],
+                table: None,
+                language_compatibility: StyleLanguageCompatibility::default(),
+            }),
+        ];
+        formatting
+    }
+
+    #[test]
+    fn table_papx_alignment_uses_embedded_style_index_and_observed_descendant_priority() {
+        // Word-produced LTR controls establish these base/child/grandchild and
+        // reverse-value results. The test is deliberately limited to PJc80 and
+        // PJc and does not generalize the 2.4.6.5 array wording to other PAPX.
+        let mut formatting = observed_table_style_formatting();
+        for (table_style, expected) in [
+            (0, "left"),
+            (1, "center"),
+            (2, "left"),
+            (3, "right"),
+            (4, "right"),
+            (5, "left"),
+            (6, "right"),
+        ] {
+            let resolved = formatting
+                .resolve_paragraph_with_table(7, Some(table_style), 0, 0, &[])
+                .unwrap();
+            assert!(
+                resolved
+                    .properties
+                    .xml()
+                    .contains(&format!("<w:jc w:val=\"{expected}\"/>")),
+                "table style {table_style} did not resolve to {expected}"
+            );
+        }
+
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = &[1, 0, 0x03, 0x24, 0];
+        formatting.paragraph_layout_cache.clear();
+        let error = match formatting.resolve_paragraph_with_table(7, Some(0), 0, 0, &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("mismatched embedded table style index must fail"),
+        };
+        assert!(error.contains("mismatched style index"), "{error}");
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn direct_projection_layers_observed_table_color_and_ltr_alignment_before_higher_sources() {
+        let mut formatting = observed_table_style_formatting();
+
+        // Resolve two table identities through the same paragraph style. This
+        // exercises both table-aware caches through the typed projection seam.
+        let base = formatting
+            .direct_paragraph(7, Some(0), 0, 0, &[])
+            .unwrap()
+            .paragraph;
+        assert_eq!(base.alignment, "left");
+        assert_eq!(base.paragraph_mark_color.as_deref(), Some("ff0000"));
+        let child = formatting
+            .direct_paragraph(7, Some(1), 0, 0, &[])
+            .unwrap()
+            .paragraph;
+        assert_eq!(child.alignment, "center");
+        assert_eq!(child.paragraph_mark_color.as_deref(), Some("0000ff"));
+        let empty_child = formatting
+            .direct_text_run(7, Some(2), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty_child.color.as_deref(), Some("ff0000"));
+        let grandchild = formatting
+            .direct_text_run(7, Some(3), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(grandchild.color.as_deref(), Some("008000"));
+        let nondefault_empty_child = formatting
+            .direct_text_run(7, Some(6), 0, 0, &[], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(nondefault_empty_child.color.as_deref(), Some("008000"));
+
+        // MS-DOC 2.4.6.6 places direct CHPX after the table and paragraph
+        // styles. This direct black Ccv is the only direct override established
+        // by the Office control; no direct-alignment claim is made from it.
+        let black = [0x70, 0x68, 0, 0, 0, 0];
+        let direct = formatting
+            .direct_text_run(7, Some(1), 0, 1, &[&black], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.color.as_deref(), Some("000000"));
+
+        // Character styles sit above the table contribution; CPlain then
+        // returns to the table-aware paragraph baseline, preserving red.
+        let select_blue_then_plain = [0x30, 0x4a, 8, 0, 0x33, 0x2a, 0];
+        let reset = formatting
+            .direct_text_run(7, Some(0), 0, 1, &[&select_blue_then_plain], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.color.as_deref(), Some("ff0000"));
+
+        // Table PAPX alignment is currently bounded to the observed LTR case.
+        let rtl = [0x41, 0x24, 1];
+        let paragraph = formatting
+            .direct_paragraph(7, Some(4), 0, 1, &[&rtl])
+            .unwrap()
+            .paragraph;
+        assert_eq!(paragraph.alignment, "left");
+        assert!(formatting.unsupported_paragraph_properties);
+
+        // The ordinary paragraph style and direct PAPX retain their normative
+        // positions above the table contribution.
+        formatting.styles[7].as_mut().unwrap().chpx = &[0x70, 0x68, 0x80, 0x00, 0x80, 0x00];
+        formatting.styles[7].as_mut().unwrap().papx = &[0x03, 0x24, 1];
+        formatting.paragraph_cache.clear();
+        formatting.paragraph_layout_cache.clear();
+        let styled = formatting
+            .direct_paragraph(7, Some(4), 0, 0, &[])
+            .unwrap()
+            .paragraph;
+        assert_eq!(styled.alignment, "center");
+        assert_eq!(styled.paragraph_mark_color.as_deref(), Some("800080"));
+        let direct_left = [0x03, 0x24, 0];
+        let direct = formatting
+            .direct_paragraph(7, Some(1), 0, 1, &[&direct_left])
+            .unwrap()
+            .paragraph;
+        assert_eq!(direct.alignment, "left");
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn unsupported_table_style_properties_keep_the_admission_gates_closed() {
+        let mut formatting = observed_table_style_formatting();
+        let sets = formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap();
+        sets.tapx = &[1];
+        sets.papx = &[0, 0, 0x41, 0x24, 1];
+        sets.chpx = &[0x35, 0x08, 1];
+
+        let _ = formatting.direct_paragraph(7, Some(0), 0, 0, &[]).unwrap();
+        assert!(formatting.unsupported_table_properties);
+        assert!(formatting.unsupported_paragraph_properties);
+        assert!(formatting.unsupported_character_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_aware_formatting_caches_have_a_fixed_entry_bound() {
+        let mut formatting = empty();
+        for id in 0..=MAX_TABLE_AWARE_CACHE_ENTRIES {
+            let embedded_style = Box::leak(
+                u16::try_from(id)
+                    .unwrap()
+                    .to_le_bytes()
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+            formatting
+                .styles
+                .push(observed_table_style(0xfff, embedded_style, &[]));
+        }
+        let paragraph_style = formatting.styles.len();
+        formatting.styles.push(Some(Style {
+            base: 0xfff,
+            kind: 1,
+            chpx: &[],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        }));
+
+        for table_style in 0..=MAX_TABLE_AWARE_CACHE_ENTRIES {
+            let paragraph = formatting
+                .direct_paragraph(paragraph_style, Some(table_style), 0, 0, &[])
+                .unwrap()
+                .paragraph;
+            assert_eq!(paragraph.alignment, "left");
+        }
+        assert!(formatting.paragraph_cache.len() <= MAX_TABLE_AWARE_CACHE_ENTRIES);
+        assert!(formatting.paragraph_layout_cache.len() <= MAX_TABLE_AWARE_CACHE_ENTRIES);
     }
 
     #[test]
@@ -1624,14 +2069,14 @@ mod tests {
         let expected = parse_direct_fixture(&ppr, &rpr, &rpr);
 
         let direct_run = f
-            .direct_text_run(1, 0, 1, &[&piece], "x".into())
+            .direct_text_run(1, None, 0, 1, &[&piece], "x".into())
             .unwrap()
             .unwrap();
         let mut expected_run = expected["runs"][0].clone();
         expected_run.as_object_mut().unwrap().remove("type");
         assert_eq!(serde_json::to_value(direct_run).unwrap(), expected_run);
 
-        let direct = f.direct_paragraph(1, 0, 1, &[&piece]).unwrap();
+        let direct = f.direct_paragraph(1, None, 0, 1, &[&piece]).unwrap();
         let mut expected_paragraph = expected;
         let object = expected_paragraph.as_object_mut().unwrap();
         object.remove("type");
@@ -1654,8 +2099,10 @@ mod tests {
             .defaults
             .apply(0x4a4f, &1u16.to_le_bytes(), &base)
             .unwrap());
-        assert!(f.direct_paragraph(0, 0, 0, &[]).is_err());
-        assert!(f.direct_text_run(0, 0, 0, &[], "hidden".into()).is_err());
+        assert!(f.direct_paragraph(0, None, 0, 0, &[]).is_err());
+        assert!(f
+            .direct_text_run(0, None, 0, 0, &[], "hidden".into())
+            .is_err());
     }
 
     #[cfg(feature = "direct-doc")]
@@ -1675,13 +2122,13 @@ mod tests {
         page[511] = 1;
         let mut f = Formatting::read(&word, &table, &[]).unwrap();
         assert!(
-            f.direct_text_run(0, 100, 0, &[], "x".into())
+            f.direct_text_run(0, None, 100, 0, &[], "x".into())
                 .unwrap()
                 .unwrap()
                 .bold
         );
         assert!(
-            f.direct_paragraph(0, 109, 0, &[])
+            f.direct_paragraph(0, None, 109, 0, &[])
                 .unwrap()
                 .paragraph
                 .paragraph_mark_font_facts
@@ -1690,36 +2137,38 @@ mod tests {
         );
         let clear = [0x35, 0x08, 0];
         assert!(
-            !f.direct_text_run(0, 100, 1, &[&clear], "x".into())
+            !f.direct_text_run(0, None, 100, 1, &[&clear], "x".into())
                 .unwrap()
                 .unwrap()
                 .bold
         );
-        assert!(f.direct_text_run(0, 110, 0, &[], "outside".into()).is_err());
+        assert!(f
+            .direct_text_run(0, None, 110, 0, &[], "outside".into())
+            .is_err());
         let hidden = [0x3c, 0x08, 1];
         assert!(f
-            .direct_text_run(0, 100, 1, &[&hidden], "hidden".into())
+            .direct_text_run(0, None, 100, 1, &[&hidden], "hidden".into())
             .unwrap()
             .is_none());
         let picture = [0x55, 0x08, 1, 0x03, 0x6a, 123, 0, 0, 0, 0x3c, 0x08, 1];
         let facts = f
-            .direct_inline_picture_facts(0, 100, 1, &[&picture])
+            .direct_inline_picture_facts(0, None, 100, 1, &[&picture])
             .unwrap();
         assert_eq!(facts.location, Some(123));
         assert!(facts.vanish);
         let special = [0x55, 0x08, 1];
         let host = f
-            .direct_anchor_host_metrics(0, 100, 1, &[&special])
+            .direct_anchor_host_metrics(0, None, 100, 1, &[&special])
             .unwrap()
             .unwrap();
         assert_eq!(host.font_size, 10.0);
         assert!(f
-            .direct_anchor_host_metrics(0, 100, 1, &[&picture])
+            .direct_anchor_host_metrics(0, None, 100, 1, &[&picture])
             .unwrap()
             .is_none());
-        assert!(f.direct_anchor_host_metrics(0, 100, 0, &[]).is_err());
+        assert!(f.direct_anchor_host_metrics(0, None, 100, 0, &[]).is_err());
         assert!(
-            f.direct_paragraph(0, 109, 1, &[&hidden])
+            f.direct_paragraph(0, None, 109, 1, &[&hidden])
                 .unwrap()
                 .paragraph
                 .mark_vanish
@@ -1733,7 +2182,7 @@ mod tests {
         f.numbering = level_bidi_formatting(1);
         f.numbering.lists[0].levels[0].chpx = &[0x35, 8, 1];
         let piece = [0x0b, 0x46, 1, 0];
-        let direct = f.direct_paragraph(0, 0, 1, &[&piece]).unwrap();
+        let direct = f.direct_paragraph(0, None, 0, 1, &[&piece]).unwrap();
         let (reference, marker) = direct.numbering.expect("resolved numbering");
         assert_eq!(reference.level, 0);
         assert!(

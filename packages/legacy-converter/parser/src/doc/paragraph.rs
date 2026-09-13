@@ -82,6 +82,14 @@ impl Properties {
         self.flags.insert("bidi", value);
     }
 
+    pub(super) fn is_bidi(&self) -> bool {
+        self.flags.get("bidi") == Some(&true)
+    }
+
+    pub(super) fn clear_alignment(&mut self) {
+        self.alignment = (0, false);
+    }
+
     pub fn apply(&mut self, code: u16, operand: &[u8]) -> Result<bool, String> {
         let flag = match code {
             0x2405 => Some("keepLines"),

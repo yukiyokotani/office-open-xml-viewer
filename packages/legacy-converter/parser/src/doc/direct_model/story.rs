@@ -81,10 +81,11 @@ pub(super) fn project(
             ));
         }
         // Read the resolved row-owned selection from the production index.
-        // TIstd still trips the unsupported-formatting gate, so the selection
-        // cannot affect the returned document until style projection exists.
-        let _table_style = context.and_then(|value| value.table_style);
-        let direct = formatting.direct_paragraph(style, mark_fc, mark_prm, &story.prcs)?;
+        // The supported style subset is projected here, while TIstd continues
+        // to trip the broader table-format admission gate.
+        let table_style = context.and_then(|value| value.table_style);
+        let direct =
+            formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
         if let Some((reference, marker)) = direct.numbering {
             paragraph.numbering = Some(Box::new(
@@ -102,7 +103,14 @@ pub(super) fn project(
                         story,
                         &mut Some(&mut *formatting),
                         |formatting, fc, prm| {
-                            formatting.direct_text_run(style, fc, prm, &story.prcs, String::new())
+                            formatting.direct_text_run(
+                                style,
+                                table_style,
+                                fc,
+                                prm,
+                                &story.prcs,
+                                String::new(),
+                            )
                         },
                         |part, run| {
                             if let Some(mut run) = run.flatten() {
@@ -113,7 +121,16 @@ pub(super) fn project(
                     )?;
                 }
                 Token::Tab => {
-                    push_control_text(&mut paragraph, story, formatting, style, cp, "\t", budget)?;
+                    push_control_text(
+                        &mut paragraph,
+                        story,
+                        formatting,
+                        style,
+                        table_style,
+                        cp,
+                        "\t",
+                        budget,
+                    )?;
                 }
                 Token::LineBreak => budget.push(
                     &mut paragraph.runs,
@@ -137,6 +154,7 @@ pub(super) fn project(
                         .ok_or_else(|| unsupported("Word picture outside piece table"))?;
                     let facts = formatting.direct_inline_picture_facts(
                         style,
+                        table_style,
                         fc,
                         piece.prm,
                         &story.prcs,
@@ -195,8 +213,13 @@ pub(super) fn project(
                     let (_, fc, piece) = story
                         .position(cp)
                         .ok_or_else(|| unsupported("Word floating picture outside piece table"))?;
-                    let Some(mut host) =
-                        formatting.direct_anchor_host_metrics(style, fc, piece.prm, &story.prcs)?
+                    let Some(mut host) = formatting.direct_anchor_host_metrics(
+                        style,
+                        table_style,
+                        fc,
+                        piece.prm,
+                        &story.prcs,
+                    )?
                     else {
                         continue;
                     };
@@ -303,6 +326,7 @@ fn push_control_text(
     story: &Story<'_>,
     formatting: &mut formatting::Formatting<'_>,
     style: usize,
+    table_style: Option<usize>,
     cp: usize,
     text: &str,
     budget: &mut ModelBudget,
@@ -310,9 +334,14 @@ fn push_control_text(
     let (_, fc, piece) = story
         .position(cp)
         .ok_or_else(|| unsupported("Word control outside piece table"))?;
-    if let Some(mut run) =
-        formatting.direct_text_run(style, fc, piece.prm, &story.prcs, String::new())?
-    {
+    if let Some(mut run) = formatting.direct_text_run(
+        style,
+        table_style,
+        fc,
+        piece.prm,
+        &story.prcs,
+        String::new(),
+    )? {
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
