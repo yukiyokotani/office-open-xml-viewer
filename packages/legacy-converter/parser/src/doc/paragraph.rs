@@ -7,6 +7,32 @@ use std::collections::BTreeMap;
 #[cfg(feature = "direct-doc")]
 mod direct;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AlignmentPatch {
+    code: u16,
+    value: u8,
+}
+
+impl AlignmentPatch {
+    pub(super) fn from_sprm(code: u16, operand: &[u8]) -> Result<Option<Self>, String> {
+        if !matches!(code, 0x2403 | 0x2461) {
+            return Ok(None);
+        }
+        let value = *operand
+            .first()
+            .ok_or_else(|| unsupported("truncated Word paragraph alignment"))?;
+        let maximum = if code == 0x2403 { 5 } else { 9 };
+        if value > maximum {
+            return Err(unsupported("invalid Word paragraph alignment"));
+        }
+        Ok(Some(Self { code, value }))
+    }
+
+    pub(super) fn apply(self, properties: &mut Properties) {
+        properties.alignment = (self.value, self.code == 0x2403);
+    }
+}
+
 #[derive(Clone)]
 pub struct Properties {
     pub ilfo: i16,
@@ -209,11 +235,9 @@ impl Properties {
                 self.chars[index] = Some(u16_at(operand, 0)? as i16);
             }
             0x2403 | 0x2461 => {
-                let maximum = if code == 0x2403 { 5 } else { 9 };
-                if operand[0] > maximum {
-                    return Err(unsupported("invalid Word paragraph alignment"));
-                }
-                self.alignment = (operand[0], code == 0x2403);
+                AlignmentPatch::from_sprm(code, operand)?
+                    .expect("alignment code")
+                    .apply(self);
             }
             0x4439 => {
                 self.text_alignment = Some(match u16_at(operand, 0)? {

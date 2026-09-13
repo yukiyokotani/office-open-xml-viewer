@@ -2,14 +2,11 @@
 //! 2.9.41 define conditional order and CNFOperand framing; 2.9.340 requires
 //! sprmTIstd inside UpxTapx to be ignored.
 
+use super::cnf;
 use super::{Formatting, Properties, Sprms, MAX_TABLE_AWARE_CACHE_ENTRIES};
-use crate::doc::{u16_at, unsupported};
+use crate::doc::{paragraph, sprm, u16_at, unsupported};
 use std::collections::BTreeMap;
 use std::rc::Rc;
-
-const CONDITIONS: [u16; 12] = [
-    0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040, 0x0080, 0x0100, 0x0200, 0x0400, 0x0800,
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::doc) struct TableFormattingKey {
@@ -39,7 +36,9 @@ pub(super) struct Profile {
     conditional: BTreeMap<u16, Properties>,
     condition_presence: u16,
     bands: Bands,
+    pub(super) paragraph_alignment: Option<paragraph::AlignmentPatch>,
     unsupported_character: bool,
+    unsupported_paragraph: bool,
     unsupported_table: bool,
 }
 
@@ -50,7 +49,9 @@ impl Default for Profile {
             conditional: BTreeMap::new(),
             condition_presence: 0,
             bands: Bands::default(),
+            paragraph_alignment: None,
             unsupported_character: false,
+            unsupported_paragraph: false,
             unsupported_table: false,
         }
     }
@@ -88,7 +89,7 @@ impl Formatting<'_> {
             ));
         }
         for condition in matches.into_iter().flatten() {
-            if !CONDITIONS.contains(&condition) {
+            if !cnf::CONDITIONS.contains(&condition) {
                 return Err(unsupported("invalid Word table style condition key"));
             }
         }
@@ -128,6 +129,7 @@ impl Formatting<'_> {
             profile
         };
         self.unsupported_character_properties |= profile.unsupported_character;
+        self.unsupported_paragraph_properties |= profile.unsupported_paragraph;
         self.unsupported_table_properties |= profile.unsupported_table;
         Ok(profile)
     }
@@ -206,6 +208,35 @@ impl Formatting<'_> {
                     _ => profile.unsupported_character = true,
                 }
             }
+
+            if !sets.papx.is_empty() {
+                let embedded_style = usize::from(u16_at(sets.papx, 0)?);
+                if embedded_style != style_id {
+                    // MS-DOC 2.9.338 UpxPapx requires this optional istd,
+                    // when present, to equal the current style.
+                    return Err(unsupported(
+                        "Word table style PAPX has mismatched style index",
+                    ));
+                }
+                sprm::paragraph_properties(
+                    &sets.papx[2..],
+                    self.data,
+                    &mut self.budget,
+                    |code, operand| {
+                        if let Some(alignment) =
+                            paragraph::AlignmentPatch::from_sprm(code, operand)?
+                        {
+                            profile.paragraph_alignment = Some(alignment);
+                        } else {
+                            if code == 0xc666 {
+                                let _ = cnf::parse(operand)?;
+                            }
+                            profile.unsupported_paragraph = true;
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
         }
         if inherited && has_conditional {
             // Conditional inheritance priority is not established by the
@@ -221,20 +252,15 @@ fn parse_conditional(
     operand: &[u8],
     budget: &mut super::Budget,
 ) -> Result<(), String> {
-    if operand.len() < 3 || usize::from(operand[0]) + 1 != operand.len() {
-        return Err(unsupported("invalid Word conditional formatting operand"));
-    }
-    let condition = u16_at(operand, 1)?;
-    if !CONDITIONS.contains(&condition) {
-        return Err(unsupported("invalid Word table style condition"));
-    }
+    let operand = cnf::parse(operand)?;
+    let condition = operand.condition;
     let mut patch = profile
         .conditional
         .get(&condition)
         .cloned()
         .unwrap_or_else(Properties::sparse);
     let mut has_supported_color = false;
-    let mut nested = Sprms::new(&operand[3..]);
+    let mut nested = Sprms::new(operand.grpprl);
     while let Some((code, value)) = nested.next(budget)? {
         if matches!(code, 0x2a42 | 0x6870) {
             let baseline = patch.clone();

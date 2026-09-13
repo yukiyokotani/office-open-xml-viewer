@@ -1331,16 +1331,26 @@ worktree's test executable.
 | DOC-04 | Observed unconditional LTR PAPX alignment in direct projection | Connected; table admission remains gated |
 | DOC-05 | Checked logical-column context for irregular rows | Implemented: checked source-cell order, including horizontal/vertical merge slots and RTL; varied direct-DOC Office controls verified |
 | DOC-06 | Conditional formatting in the production cascade | Partially connected and tested through story projection: conditional character color; conditional inheritance, PAPX and TAPX remain gated |
-| DOC-07 | Further TAPX/PAPX/CHPX precedence | Not started; select one property group at a time |
-| DOC-08 | Evaluate removal of specific admission gates | Not started; requires end-to-end corpus and Office-reference evidence |
+| DOC-07 | Further TAPX/PAPX/CHPX precedence | Selected PAPX and CHPX work split into DOC-17 through DOC-22; remaining properties stay gated |
+| DOC-08 | Evaluate removal of specific admission gates | Bounded table-style evaluation selected as DOC-23; requires end-to-end corpus and Office-reference evidence |
 | DOC-09 | Validate PrcData property-array limits | Implemented: enforce the MS-DOC cbGrpprl maximum with exact boundary tests; strict FKP framing tracked separately |
 | DOC-10 | Exercise FKP-to-Data table-property acquisition | Implemented: actual FKP acquisition tests cover PTableProps, mixed chains, ignored tails, later PCD overrides, physical ranges and failures |
 | DOC-11 | Validate the effective mutation target in Office probes | Implemented: reusable read-only inspector and exact-edit validator follow FKP, Data and later PCD properties; bounded TIstd/TTlp assertions require an actual top-level TTP |
 | DOC-12 | Reject reserved TC80 vertical-merge values | Implemented: reject used TC80 value 2; retain valid 0/1/3, wholly omitted defaults and ignored excess descriptors |
 | DOC-13 | Resolve conditional-region presence across property families | Bounded color presence connected: empty/absent edges, singleton priority, eligible corners and disabled corner flags verified with varied Word controls; noncolor CHPX, PAPX and TAPX still require separate property support |
-| DOC-14 | Validate PHugePapx ownership constraints in FKP | Newly identified: GrpPrlAndIstd must contain only PHugePapx with istd zero; validate at the FKP boundary, not after discarding istd |
-| DOC-15 | Validate partial TC80 array records | Newly identified: TDefTable currently treats an incomplete used TC80 as omitted; preserve valid omitted cells and ignored excess entries when tightening framing |
-| DOC-16 | Enforce isolated build caches in the comparison harness | Newly identified: shared Cargo output reused a baseline test executable; this batch was reverified with separate targets, and future comparison tooling must enforce that isolation |
+| DOC-14 | Validate PHugePapx ownership constraints in FKP | Implemented: validate the sole PHugePapx PRL and zero istd at the bounded FKP acquisition boundary; generic Data traversal is unchanged |
+| DOC-15 | Validate partial TC80 array records | Implemented: reject incomplete 20-byte array records while preserving whole omitted defaults and ignored complete excess entries |
+| DOC-16 | Enforce isolated build caches in the comparison harness | Implemented: bounded exact-model comparison with independent build targets, source/input fingerprints and ownership-checked cleanup; live comparison of 59 DOC inputs preserved admission, errors and streamed models |
+| DOC-17 | Share bounded conditional-property operand parsing | Implemented: shared borrowed CNF framing and condition validation for character and paragraph properties; no recursive expansion or newly admitted paragraph properties |
+| DOC-18 | Cache the supported table paragraph-style profile | Implemented: the bounded shared profile retains one validated alignment patch and unsupported-property state; different paragraph contexts reuse it without rescanning the table style |
+| DOC-19 | Project conditional table paragraph alignment | Pending native Office evidence: verify LTR alignment and cross-family region presence before wiring supported PCnf alignment into the production cascade |
+| DOC-20 | Project table-style character size | Pending native Office evidence: verify absolute size inheritance, conditional size and direct overrides; other size operations and complex-script behavior remain outside the observed scope |
+| DOC-21 | Project table-style font selection | Pending native Office evidence: verify explicit font-table selection and overrides for the supported text axes; preserve font-table validation and avoid guessed fallback |
+| DOC-22 | Verify combined paragraph/character conditional precedence | Pending DOC-19 through DOC-21: exercise mixed supported property families, region presence, table-aware caches and direct-formatting overrides in real story projection |
+| DOC-23 | Evaluate bounded table-style admission | Preliminary assessment: general table-style admission requires DOC-25 and DOC-26; gates retained. Corpus comparison passed, but end-to-end Office controls and final evaluation remain pending |
+| DOC-24 | Make table-style Office probes reproducible after cleanup | New follow-up: retain a reusable passive source generator and reviewed style-mutation plans as code, while keeping generated DOC/PDF inputs disposable under outputs |
+| DOC-25 | Resolve table-style-aware direct cell shading | New admission prerequisite: for nFib greater than 0x00D9, compatibility TDefTableShd arrays must be ignored when table styles are supported, while ShdRaw can defer to the style; current row parsing applies compatibility shading and cannot justify removing TIstd gates wholesale |
+| DOC-26 | Apply TIstd table properties with specified preservation | New admission prerequisite: row parsing currently records the selected style without applying its TAPX at that point; implement the MS-DOC 2.6.3 preservation list and direct-property ordering before admitting general table styles |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch

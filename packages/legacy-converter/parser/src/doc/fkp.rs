@@ -1,6 +1,7 @@
 //! Physical text offsets, not logical piece order, select FKP properties.
 //! [MS-DOC] 2.4.6.1/2, ChpxFkp, PapxFkp, PapxInFkp and PlcBteChpx/Papx.
 
+use super::sprm::{Budget, Sprms};
 use super::{u16_at, u32_at, unsupported};
 
 #[derive(Clone, Copy)]
@@ -38,6 +39,7 @@ impl<'a> Index<'a> {
             return Err(unsupported("Word formatting page budget exceeded"));
         }
         let mut runs = Vec::new();
+        let mut paragraph_sprm_budget = Budget::default();
         for i in 0..count {
             let lower = u32_at(plc, i * 4)? as usize;
             let upper = u32_at(plc, i * 4 + 4)? as usize;
@@ -92,6 +94,9 @@ impl<'a> Index<'a> {
                     if matches!(kind, Kind::Paragraph) && bytes.len() < 2 {
                         return Err(unsupported("missing Word paragraph style index"));
                     }
+                    if matches!(kind, Kind::Paragraph) {
+                        validate_paragraph_owner(bytes, &mut paragraph_sprm_budget)?;
+                    }
                     bytes
                 };
                 runs.push(Run {
@@ -116,6 +121,24 @@ impl<'a> Index<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// [MS-DOC] 2.6.2: an FKP GrpPrlAndIstd containing sprmPHugePapx
+/// owns no other Prl and uses istd zero. Data-stream PrcData arrays are not
+/// GrpPrlAndIstd and retain their separate first-only processing rules.
+fn validate_paragraph_owner(bytes: &[u8], budget: &mut Budget) -> Result<(), String> {
+    let istd = u16_at(bytes, 0)?;
+    let mut sprms = Sprms::new(&bytes[2..]);
+    let mut count = 0usize;
+    let mut has_huge_papx = false;
+    while let Some((code, _)) = sprms.next(budget)? {
+        count += 1;
+        has_huge_papx |= code == 0x6646;
+    }
+    if has_huge_papx && (istd != 0 || count != 1) {
+        return Err(unsupported("invalid Word FKP huge paragraph ownership"));
+    }
+    Ok(())
 }
 
 pub fn table_part<'a>(word: &[u8], table: &'a [u8], field: usize) -> Result<&'a [u8], String> {
@@ -176,7 +199,9 @@ mod tests {
     #[test]
     fn supports_both_paragraph_payload_length_encodings() {
         let (mut word, table) = fixture(Kind::Paragraph);
-        word[552..556].copy_from_slice(&[2, 7, 0, 0]);
+        // A non-extended payload is odd-sized. Include one complete Bool8 PRL
+        // after istd rather than leaving an unframed padding byte.
+        word[552..558].copy_from_slice(&[3, 7, 0, 0x16, 0x24, 0]);
         assert_eq!(
             paragraph_style(&Index::read(&word, &table, Kind::Paragraph).unwrap(), 109).unwrap(),
             7
@@ -186,6 +211,38 @@ mod tests {
             paragraph_style(&Index::read(&word, &table, Kind::Paragraph).unwrap(), 109).unwrap(),
             9
         );
+    }
+
+    fn extended_paragraph_payload(word: &mut [u8], properties: &[u8]) {
+        assert_eq!(properties.len() % 2, 0);
+        word[552] = 0;
+        word[553] = u8::try_from(properties.len() / 2).unwrap();
+        word[554..554 + properties.len()].copy_from_slice(properties);
+    }
+
+    #[test]
+    fn paragraph_fkp_accepts_only_zero_style_first_only_huge_papx() {
+        let (mut word, table) = fixture(Kind::Paragraph);
+        let properties = [0, 0, 0x46, 0x66, 0, 0, 0, 0];
+        extended_paragraph_payload(&mut word, &properties);
+
+        let index = Index::read(&word, &table, Kind::Paragraph).unwrap();
+        assert_eq!(index.at(109).unwrap().1.properties, properties);
+    }
+
+    #[test]
+    fn paragraph_fkp_rejects_huge_papx_owned_by_style_or_sibling_prls() {
+        let fixed_paragraph_prl = [0, 0x46, 0, 0];
+        let huge_papx = [0x46, 0x66, 0, 0, 0, 0];
+        for properties in [
+            [[1, 0].as_slice(), &huge_papx].concat(),
+            [[0, 0].as_slice(), &fixed_paragraph_prl, &huge_papx].concat(),
+            [[0, 0].as_slice(), &huge_papx, &fixed_paragraph_prl].concat(),
+        ] {
+            let (mut word, table) = fixture(Kind::Paragraph);
+            extended_paragraph_payload(&mut word, &properties);
+            assert!(Index::read(&word, &table, Kind::Paragraph).is_err());
+        }
     }
 
     #[test]

@@ -64,6 +64,10 @@ impl Budget {
     pub fn take(&mut self) -> Result<(), String> {
         self.take_many(1)
     }
+    #[cfg(test)]
+    pub(super) fn remaining(&self) -> usize {
+        self.0
+    }
     fn take_many(&mut self, amount: usize) -> Result<(), String> {
         self.0 = self
             .0

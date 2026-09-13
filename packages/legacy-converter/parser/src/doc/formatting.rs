@@ -10,6 +10,7 @@ use super::{numbering, paragraph, table, u16_at, unsupported};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+mod cnf;
 #[cfg(feature = "direct-doc")]
 mod direct;
 mod table_style;
@@ -406,7 +407,7 @@ impl<'a> Formatting<'a> {
             return Ok(false);
         };
         let table_style = table_style.selected_style;
-        let _ = self.table_style_profile(table_style)?;
+        let profile = self.table_style_profile(table_style)?;
         if self
             .styles
             .get(table_style)
@@ -420,43 +421,12 @@ impl<'a> Formatting<'a> {
             self.unsupported_table_properties = true;
             return Ok(false);
         }
-        let mut alignment = false;
-        for id in self.chain(table_style, 3)? {
-            let sets = self.styles[id]
-                .as_ref()
-                .expect("validated style")
-                .table
-                .as_ref()
-                .expect("validated table style");
-            if sets.papx.is_empty() {
-                continue;
-            }
-            let embedded_style = usize::from(u16_at(sets.papx, 0)?);
-            if embedded_style != id {
-                // MS-DOC 2.9.338 UpxPapx requires this optional istd, when
-                // present, to equal the current style.
-                return Err(unsupported(
-                    "Word table style PAPX has mismatched style index",
-                ));
-            }
-            sprm::paragraph_properties(
-                &sets.papx[2..],
-                self.data,
-                &mut self.budget,
-                |code, operand| {
-                    if matches!(code, 0x2403 | 0x2461) {
-                        props.apply(code, operand)?;
-                        alignment = true;
-                    } else {
-                        // Conditional PCnf and all other table PAPX properties
-                        // remain behind the existing admission gate.
-                        self.unsupported_paragraph_properties = true;
-                    }
-                    Ok(())
-                },
-            )?;
+        if let Some(alignment) = profile.paragraph_alignment {
+            alignment.apply(props);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(alignment)
     }
 
     fn apply_paragraph<'b>(
@@ -1379,6 +1349,18 @@ mod tests {
             .chpx = &[0x85, 0xca, 2, 0, 0];
         assert!(invalid.table_style_selector_profile(Some(0)).is_err());
 
+        let mut invalid_paragraph = observed_table_style_formatting();
+        invalid_paragraph.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = &[0, 0, 0x66, 0xc6, 2, 3, 0];
+        assert!(invalid_paragraph
+            .resolve_paragraph_with_table(7, table_key(0), 0, 0, &[])
+            .is_err());
+
         let mut unsupported = observed_table_style_formatting();
         let mut chpx = ccnf(table_style_condition::FIRST_COLUMN, &[0x35, 0x08, 1]);
         chpx.extend(ccnf(
@@ -1505,11 +1487,42 @@ mod tests {
             .unwrap()
             .papx = &[1, 0, 0x03, 0x24, 0];
         formatting.paragraph_layout_cache.clear();
+        formatting.table_style_cache.clear();
         let error = match formatting.resolve_paragraph_with_table(7, table_key(0), 0, 0, &[]) {
             Err(error) => error,
             Ok(_) => panic!("mismatched embedded table style index must fail"),
         };
         assert!(error.contains("mismatched style index"), "{error}");
+    }
+
+    #[test]
+    fn cached_table_alignment_profile_is_reused_across_paragraph_contexts() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.styles.push(Some(Style {
+            base: 0xfff,
+            kind: 1,
+            chpx: &[],
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        }));
+
+        formatting
+            .resolve_paragraph_with_table(7, table_key(1), 0, 0, &[])
+            .unwrap();
+        let before = formatting.budget.remaining();
+        let resolved = formatting
+            .resolve_paragraph_with_table(9, table_key(1), 0, 0, &[])
+            .unwrap();
+        let after = formatting.budget.remaining();
+
+        // Only the new ordinary paragraph-style chain consumes one operation;
+        // the cached table chain and its PAPX/UPX are not scanned again.
+        assert_eq!(before - after, 1);
+        assert!(resolved
+            .properties
+            .xml()
+            .contains("<w:jc w:val=\"center\"/>"));
     }
 
     #[cfg(feature = "direct-doc")]

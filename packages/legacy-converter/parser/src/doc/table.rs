@@ -344,6 +344,12 @@ impl Row {
                 let boundaries = b
                     .get(3..end)
                     .ok_or_else(|| unsupported("short Word table boundaries"))?;
+                // [MS-DOC] 2.9.321 defines rgTc80 as an array of complete
+                // 20-byte TC80 structures. Whole entries may be omitted or
+                // exceed NumberOfColumns, but a partial entry is malformed.
+                if b[end..].len() % 20 != 0 {
+                    return Err(unsupported("partial Word TC80 table definition"));
+                }
                 self.left = signed(boundaries)?;
                 self.left_is_edge = true;
                 let mut cells = Vec::with_capacity(n);
@@ -808,6 +814,16 @@ mod tests {
         omitted.apply(0xd608, &definition(&[])).unwrap();
         assert_eq!(omitted.cells[0].flags, 0);
         assert_eq!(omitted.cells[0].preferred, None);
+
+        // rgTc80 is an array of complete 20-byte TC80 structures. A partial
+        // descriptor for a used column is malformed rather than omitted.
+        for partial in 1..20 {
+            let mut definition = definition(&[]);
+            definition.resize(definition.len() + partial, 0);
+            let cb = (definition.len() - 1) as u16;
+            definition[..2].copy_from_slice(&cb.to_le_bytes());
+            assert!(Row::default().apply(0xd608, &definition).is_err());
+        }
     }
     #[test]
     fn depth_is_direct_and_bounded() {
