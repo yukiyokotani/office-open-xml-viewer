@@ -40,7 +40,9 @@ fn active_conditional(
         let Some(style) = row.table_style else {
             continue;
         };
-        let Some((condition, sides)) = formatting.conditional_table_borders(Some(style))? else {
+        let Some((condition, sides, presence)) =
+            formatting.conditional_table_borders(Some(style))?
+        else {
             continue;
         };
         let Some(options) = row.table_style_options else {
@@ -48,10 +50,28 @@ fn active_conditional(
         };
         let enabled = match condition {
             table_style_condition::FIRST_ROW => options & (1 << 5) != 0,
+            table_style_condition::LAST_ROW => options & (1 << 6) != 0,
             table_style_condition::FIRST_COLUMN => options & (1 << 7) != 0,
+            table_style_condition::LAST_COLUMN => options & (1 << 8) != 0,
             _ => false,
         };
         if enabled {
+            let active_edges = [
+                (table_style_condition::FIRST_ROW, 1 << 5),
+                (table_style_condition::LAST_ROW, 1 << 6),
+                (table_style_condition::FIRST_COLUMN, 1 << 7),
+                (table_style_condition::LAST_COLUMN, 1 << 8),
+            ]
+            .into_iter()
+            .filter(|(candidate, flag)| presence & candidate != 0 && options & flag != 0)
+            .fold(0, |mask, (candidate, _)| mask | candidate);
+            if active_edges != condition {
+                // Multiple active edge conditions can exclude one another on a
+                // singleton and have an ordered overlap elsewhere. That cascade
+                // is resolved only by the shared condition selector.
+                formatting.unsupported_table_properties = true;
+                return Ok(None);
+            }
             return Ok(Some((style, options, condition, sides)));
         }
     }
@@ -186,8 +206,8 @@ fn apply_conditional_region(
     budget: &mut ModelBudget,
 ) -> Result<(), String> {
     // MS-DOC 2.6.3 defines the six border properties allowed in a TCnf. Word
-    // 16.112.4 controls establish their region boundaries here: first-row
-    // left/right and insideV, first-column top/bottom and insideH, with no
+    // 16.112.4 controls establish their region boundaries here: first/last-row
+    // left/right and insideV, first/last-column top/bottom and insideH, with no
     // inside edge for a singleton. This mapper is limited to the rectangular,
     // unmerged LTR shape checked above; it is not a general per-cell rule.
     let rows = context.rows.len();
@@ -197,28 +217,38 @@ fn apply_conditional_region(
         .ok_or_else(|| unsupported("Word conditional border table has no rows"))?
         .source_cell_count;
     match condition {
-        table_style_condition::FIRST_ROW => {
+        table_style_condition::FIRST_ROW | table_style_condition::LAST_ROW => {
+            let row = if condition == table_style_condition::FIRST_ROW {
+                0
+            } else {
+                rows - 1
+            };
             for column in 0..columns {
-                set(prepared, context, 0, column, 0, sides[0], budget)?;
-                set(prepared, context, 0, column, 2, sides[2], budget)?;
+                set(prepared, context, row, column, 0, sides[0], budget)?;
+                set(prepared, context, row, column, 2, sides[2], budget)?;
             }
-            set(prepared, context, 0, 0, 1, sides[1], budget)?;
-            set(prepared, context, 0, columns - 1, 3, sides[3], budget)?;
+            set(prepared, context, row, 0, 1, sides[1], budget)?;
+            set(prepared, context, row, columns - 1, 3, sides[3], budget)?;
             for column in 0..columns.saturating_sub(1) {
-                set(prepared, context, 0, column, 3, sides[5], budget)?;
-                set(prepared, context, 0, column + 1, 1, sides[5], budget)?;
+                set(prepared, context, row, column, 3, sides[5], budget)?;
+                set(prepared, context, row, column + 1, 1, sides[5], budget)?;
             }
         }
-        table_style_condition::FIRST_COLUMN => {
+        table_style_condition::FIRST_COLUMN | table_style_condition::LAST_COLUMN => {
+            let column = if condition == table_style_condition::FIRST_COLUMN {
+                0
+            } else {
+                columns - 1
+            };
             for row in 0..rows {
-                set(prepared, context, row, 0, 1, sides[1], budget)?;
-                set(prepared, context, row, 0, 3, sides[3], budget)?;
+                set(prepared, context, row, column, 1, sides[1], budget)?;
+                set(prepared, context, row, column, 3, sides[3], budget)?;
             }
-            set(prepared, context, 0, 0, 0, sides[0], budget)?;
-            set(prepared, context, rows - 1, 0, 2, sides[2], budget)?;
+            set(prepared, context, 0, column, 0, sides[0], budget)?;
+            set(prepared, context, rows - 1, column, 2, sides[2], budget)?;
             for row in 0..rows.saturating_sub(1) {
-                set(prepared, context, row, 0, 2, sides[4], budget)?;
-                set(prepared, context, row + 1, 0, 0, sides[4], budget)?;
+                set(prepared, context, row, column, 2, sides[4], budget)?;
+                set(prepared, context, row + 1, column, 0, sides[4], budget)?;
             }
         }
         _ => return Err(unsupported("unsupported Word conditional border region")),

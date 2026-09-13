@@ -481,6 +481,7 @@ mod tests {
     #[derive(Clone, Copy, Default)]
     struct StyleFixture {
         first_row_color: bool,
+        first_column_color: bool,
         first_row_size: bool,
         first_row_alignment: bool,
         combined: bool,
@@ -693,8 +694,10 @@ mod tests {
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
         style[4..6].copy_from_slice(&3u16.to_le_bytes());
-        let first_row = if fixture.first_row_color {
+        let edge_character = if fixture.first_row_color {
             &[0x85, 0xca, 8, 1, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
+        } else if fixture.first_column_color {
+            &[0x85, 0xca, 8, 4, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
         } else if fixture.first_row_size {
             &[0x85, 0xca, 6, 1, 0, 0x43, 0x4a, 28, 0][..]
         } else {
@@ -706,7 +709,7 @@ mod tests {
             0x85, 0xca, 5, 0x40, 0, 0x42, 0x2a, 6, // odd row red
             0x85, 0xca, 5, 0x80, 0, 0x42, 0x2a, 2, // even row blue
         ];
-        character.extend(first_row);
+        character.extend(edge_character);
         let paragraph = if fixture.first_row_alignment {
             &[
                 1, 0, // embedded table style istd
@@ -1322,19 +1325,106 @@ mod tests {
     }
 
     #[test]
+    fn native_story_maps_last_row_conditional_borders_to_region_edges() {
+        let projected = conditional_border_grid(table_style_condition::LAST_ROW, 1 << 6);
+        assert!(
+            projected.unsupported_table,
+            "the global TIstd gate remains active"
+        );
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none,
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn native_story_maps_last_column_conditional_borders_to_region_edges() {
+        let projected = conditional_border_grid(table_style_condition::LAST_COLUMN, 1 << 8);
+        assert!(
+            projected.unsupported_table,
+            "the global TIstd gate remains active"
+        );
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                none.clone(),
+                none.clone(),
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none,
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+            ]
+        );
+    }
+
+    #[test]
     fn disabled_conditional_borders_do_not_change_cells() {
-        let projected = conditional_border_grid(table_style_condition::FIRST_ROW, 0);
-        assert!(projected
-            .borders
-            .iter()
-            .all(|sides| sides.iter().all(Option::is_none)));
+        for condition in [
+            table_style_condition::FIRST_ROW,
+            table_style_condition::LAST_ROW,
+            table_style_condition::FIRST_COLUMN,
+            table_style_condition::LAST_COLUMN,
+        ] {
+            let projected = conditional_border_grid(condition, 0);
+            assert!(projected
+                .borders
+                .iter()
+                .all(|sides| sides.iter().all(Option::is_none)));
+        }
     }
 
     #[test]
     fn singleton_conditional_border_regions_have_no_inside_edges() {
         for (condition, options) in [
             (table_style_condition::FIRST_ROW, 1 << 5),
+            (table_style_condition::LAST_ROW, 1 << 6),
             (table_style_condition::FIRST_COLUMN, 1 << 7),
+            (table_style_condition::LAST_COLUMN, 1 << 8),
         ] {
             let projected = project_table(
                 "a\u{7}\u{7}\r",
@@ -1357,6 +1447,41 @@ mod tests {
                     Some(("ffff00".into(), 4.0)),
                 ]]
             );
+        }
+    }
+
+    #[test]
+    fn competing_cross_family_edge_conditions_gate_singleton_borders() {
+        for (fixture, options) in [
+            (
+                StyleFixture {
+                    first_row_color: true,
+                    conditional_borders: table_style_condition::LAST_ROW,
+                    ..StyleFixture::default()
+                },
+                (1 << 5) | (1 << 6),
+            ),
+            (
+                StyleFixture {
+                    first_column_color: true,
+                    conditional_borders: table_style_condition::LAST_COLUMN,
+                    ..StyleFixture::default()
+                },
+                (1 << 7) | (1 << 8),
+            ),
+        ] {
+            let projected = project_table(
+                "a\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell()),
+                    (2, 3, row_cells(options, 1)),
+                    (3, 4, Vec::new()),
+                ],
+                fixture,
+            );
+            assert!(projected.unsupported_table);
+            assert_eq!(projected.colors, ["008000"]);
+            assert!(projected.borders[0].iter().all(Option::is_none));
         }
     }
 

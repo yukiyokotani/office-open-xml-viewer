@@ -205,14 +205,14 @@ impl Formatting<'_> {
     pub(in crate::doc) fn conditional_table_borders(
         &mut self,
         selected_style: Option<usize>,
-    ) -> Result<Option<(u16, [Option<table::PreparedBorder>; 6])>, String> {
+    ) -> Result<Option<(u16, [Option<table::PreparedBorder>; 6], u16)>, String> {
         let Some(selected_style) = selected_style else {
             return Ok(None);
         };
-        Ok(self
-            .table_style_profile(selected_style)?
+        let profile = self.table_style_profile(selected_style)?;
+        Ok(profile
             .conditional_table_borders
-            .map(|patch| (patch.condition, patch.sides)))
+            .map(|patch| (patch.condition, patch.sides, profile.condition_presence)))
     }
 
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
@@ -286,7 +286,9 @@ impl Formatting<'_> {
                                 || !matches!(
                                     condition,
                                     crate::doc::table_style_condition::FIRST_ROW
+                                        | crate::doc::table_style_condition::LAST_ROW
                                         | crate::doc::table_style_condition::FIRST_COLUMN
+                                        | crate::doc::table_style_condition::LAST_COLUMN
                                 )
                             {
                                 conditional_border_rejected = true;
@@ -588,6 +590,12 @@ fn parse_conditional(
             let baseline = patch.clone();
             patch.apply(code, value, &baseline)?;
             has_supported_character = true;
+        } else if matches!(code, 0x4a4f | 0x4a50 | 0x4a51 | 0x4a5e) {
+            // Word 16.112.4 controls with seven reordered FFN records leave
+            // conditional font markers fixed while unconditional CRgFtc values
+            // follow the reordered records. That rules out treating these as a
+            // simple local font-table index, but does not establish a remap.
+            profile.unsupported_character = true;
         } else {
             // This includes nested CNF records. They are parsed only as one
             // bounded operand and are never recursively expanded.
