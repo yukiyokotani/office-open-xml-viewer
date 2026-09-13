@@ -97,15 +97,14 @@ class LoadedDocument:
         object.__setattr__(self, "source_sha256", sha256(source).hexdigest())
 
 
-def load_document(path):
-    """Load every CFB stream without making olefile an import-time dependency."""
-    path = Path(path)
-    if path.stat().st_size > MAX_INPUT_BYTES:
-        raise ProbeError("source exceeds the size policy")
-    with path.open("rb") as source_file:
-        source = source_file.read(MAX_INPUT_BYTES + 1)
+def load_document_bytes(source, max_aggregate_bytes=MAX_AGGREGATE_STREAM_BYTES):
+    """Load bounded CFB streams from already bounded serialized bytes."""
+    source = bytes(source)
     if len(source) > MAX_INPUT_BYTES:
         raise ProbeError("source exceeds the size policy")
+    if (type(max_aggregate_bytes) is not int or max_aggregate_bytes < 1
+            or max_aggregate_bytes > MAX_AGGREGATE_STREAM_BYTES):
+        raise ProbeError("invalid aggregate stream size policy")
     try:
         olefile = importlib.import_module("olefile")
     except ImportError as error:
@@ -119,10 +118,10 @@ def load_document(path):
             if name in streams:
                 raise ProbeError(f"duplicate CFB stream {name}")
             size = handle.get_size(parts)
-            if size < 0 or size > MAX_STREAM_BYTES:
+            if size < 0 or size > min(MAX_STREAM_BYTES, max_aggregate_bytes):
                 raise ProbeError(f"stream {name} exceeds the size policy")
             total += size
-            if total > MAX_AGGREGATE_STREAM_BYTES:
+            if total > max_aggregate_bytes:
                 raise ProbeError("aggregate streams exceed the size policy")
             value = handle.openstream(parts).read(size + 1)
             if len(value) != size:
@@ -131,6 +130,21 @@ def load_document(path):
     finally:
         handle.close()
     return LoadedDocument(streams, source)
+
+
+def load_document(path, max_bytes=MAX_INPUT_BYTES,
+                  max_aggregate_bytes=MAX_AGGREGATE_STREAM_BYTES):
+    """Load every CFB stream without making olefile an import-time dependency."""
+    if type(max_bytes) is not int or max_bytes < 1 or max_bytes > MAX_INPUT_BYTES:
+        raise ProbeError("invalid source size policy")
+    path = Path(path)
+    if path.stat().st_size > max_bytes:
+        raise ProbeError("source exceeds the size policy")
+    with path.open("rb") as source_file:
+        source = source_file.read(max_bytes + 1)
+    if len(source) > max_bytes:
+        raise ProbeError("source exceeds the size policy")
+    return load_document_bytes(source, max_aggregate_bytes=max_aggregate_bytes)
 
 
 def _streams(value):
