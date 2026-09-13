@@ -623,7 +623,7 @@ mod tests {
         with_numbering(&source(text))
     }
 
-    fn with_numbering(source: &[u8]) -> Vec<u8> {
+    pub(super) fn with_numbering(source: &[u8]) -> Vec<u8> {
         let cfb = CompoundFile::open(&source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let mut table = cfb.stream("0Table").unwrap();

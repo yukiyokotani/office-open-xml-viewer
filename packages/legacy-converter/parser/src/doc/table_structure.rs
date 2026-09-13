@@ -718,6 +718,61 @@ mod tests {
     }
 
     #[test]
+    fn raw_grouping_treats_explicit_overlap_false_as_omitted_default() {
+        let mut assembler = Assembler::<Vec<usize>>::new();
+        fn admit(_: usize) -> Result<(), String> {
+            Ok(())
+        }
+        for (id, overlap, cant_split) in [
+            (1, None, false),
+            (2, Some(false), true),
+            (3, Some(true), false),
+        ] {
+            assembler
+                .push_raw(
+                    properties(1, false, vec![]),
+                    '\u{7}',
+                    vec![id],
+                    None,
+                    |_, _| unreachable!(),
+                    &mut admit,
+                )
+                .unwrap();
+            let mut end = properties(1, true, vec![cell(10)]);
+            if let Some(value) = overlap {
+                end.row.apply(0x3465, &[u8::from(value)]).unwrap();
+            }
+            if cant_split {
+                end.row.apply(0x3466, &[1]).unwrap();
+            }
+            assembler
+                .push_raw(
+                    end,
+                    '\u{7}',
+                    vec![],
+                    Some(id),
+                    |_, _| unreachable!(),
+                    &mut admit,
+                )
+                .unwrap();
+        }
+        assembler
+            .finish_raw(
+                |RawEvent(tables), _| {
+                    assert_eq!(tables.len(), 2);
+                    assert_eq!(tables[0].rows.len(), 2);
+                    assert_eq!(tables[0].rows[0].ttp_id, Some(1));
+                    assert_eq!(tables[0].rows[1].ttp_id, Some(2));
+                    assert_eq!(tables[1].rows.len(), 1);
+                    assert_eq!(tables[1].rows[0].ttp_id, Some(3));
+                    Ok(vec![])
+                },
+                &mut admit,
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn raw_path_preserves_row_grammar_errors() {
         let mut assembler = Assembler::<Vec<usize>>::new();
         let error = assembler

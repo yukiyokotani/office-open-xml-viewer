@@ -546,6 +546,12 @@ impl<'a> Formatting<'a> {
                 }
                 #[cfg(feature = "direct-doc")]
                 if interpret_table_styles
+                    && properties.row.apply_native_cant_split(code, operand)?
+                {
+                    return Ok(());
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles
                     && properties.row.apply_style_aware_margins(code, operand)?
                 {
                     return Ok(());
@@ -4057,6 +4063,73 @@ mod tests {
         assert!(!properties.row.header);
         assert!(!properties.row.cant_split);
         assert!(!properties.row.position.xml().contains("tblOverlap"));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_current_word_cant_split_policy_is_ordered_and_not_selected_by_nfib() {
+        fn native_value(papx: &[u8], effective_nfib: u16) -> bool {
+            let mut formatting = with_direct_paragraph(papx);
+            formatting.configure_table_styles(effective_nfib, true);
+            formatting
+                .table_properties_native(109, 0, &[])
+                .unwrap()
+                .row
+                .cant_split
+        }
+
+        let modern_then_legacy =
+            [vec![0, 0], test_prl(0x3466, &[1]), test_prl(0x3403, &[0])].concat();
+        assert!(native_value(&modern_then_legacy, 0x00d9));
+        assert!(native_value(&modern_then_legacy, 0x0112));
+
+        let mut xml = with_direct_paragraph(&modern_then_legacy);
+        xml.configure_table_styles(0x0112, false);
+        assert!(!xml.table_properties(109, 0, &[]).unwrap().row.cant_split);
+
+        let repeated_reset = [
+            vec![0, 0],
+            test_prl(0x3466, &[1]),
+            test_prl(0x563a, &1u16.to_le_bytes()),
+            test_prl(0x3403, &[1]),
+            test_prl(0x3466, &[1]),
+            test_prl(0x563a, &2u16.to_le_bytes()),
+            test_prl(0x3403, &[1]),
+        ]
+        .concat();
+        assert!(!native_value(&repeated_reset, 0x0112));
+
+        let modern_after_reset = [repeated_reset, test_prl(0x3466, &[1])].concat();
+        assert!(native_value(&modern_after_reset, 0x0112));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_acquisition_normalizes_explicit_overlap_false_to_omission() {
+        fn acquired(overlap: Option<u8>, native: bool) -> (bool, bool) {
+            let mut papx = vec![0, 0];
+            if let Some(value) = overlap {
+                papx.extend(test_prl(0x3465, &[value]));
+            }
+            let mut formatting = with_direct_paragraph(&papx);
+            formatting.configure_table_styles(0x0112, native);
+            let properties = if native {
+                formatting.table_properties_native(109, 0, &[])
+            } else {
+                formatting.table_properties(109, 0, &[])
+            }
+            .unwrap();
+            (
+                properties.row.identity.contains_key(&0x3465),
+                properties.row.position.xml().contains("tblOverlap"),
+            )
+        }
+
+        for native in [false, true] {
+            assert_eq!(acquired(None, native), (false, false));
+            assert_eq!(acquired(Some(0), native), (false, false));
+            assert_eq!(acquired(Some(1), native), (true, true));
+        }
     }
 
     #[test]

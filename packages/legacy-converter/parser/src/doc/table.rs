@@ -343,6 +343,31 @@ impl Row {
         }
     }
 
+    /// Applies the cant-split records using the current-Word native policy.
+    ///
+    /// [MS-DOC] 2.6.3 notes 150/152/153 describe reader-version behavior:
+    /// current Word ignores the legacy sprmTFCantSplit90 and evaluates the
+    /// modern sprmTFCantSplit. This policy is selected by the native reader;
+    /// it is not inferred from the document's FIB version.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn apply_native_cant_split(
+        &mut self,
+        code: u16,
+        b: &[u8],
+    ) -> Result<bool, String> {
+        if !matches!(code, 0x3403 | 0x3466) {
+            return Ok(false);
+        }
+        let value = boolean(
+            *b.first()
+                .ok_or_else(|| unsupported("short Word table boolean"))?,
+        )?;
+        if code == 0x3466 {
+            self.cant_split = value;
+        }
+        Ok(true)
+    }
+
     pub fn origin(&self) -> i32 {
         // TDefTable boundaries already include all outer cell spacing. TDxaLeft
         // instead defines the origin before TDxaGapHalf is subtracted.
@@ -594,7 +619,7 @@ impl Row {
     pub fn apply(&mut self, code: u16, b: &[u8]) -> Result<bool, String> {
         if matches!(
             code,
-            0x7469 | 0x563a | 0x360d | 0x3465 | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f
+            0x7469 | 0x563a | 0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f
         ) {
             self.identity.insert(
                 code,
@@ -632,7 +657,24 @@ impl Row {
                 self.table_style_options = Some(u16_at(b, 2)?);
                 return Ok(false);
             }
-            0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f | 0x3465 => {
+            0x3465 => {
+                let value = boolean(
+                    *b.first()
+                        .ok_or_else(|| unsupported("short Word table boolean"))?,
+                )?;
+                self.position.apply(code, b)?;
+                // [MS-DOC] 2.4.3 groups rows by nondefault positioning and
+                // wrapping properties. Explicit false has the default overlap
+                // semantics from 2.6.3 and therefore has the same row identity
+                // as omission.
+                if value {
+                    self.identity.insert(code, vec![1]);
+                } else {
+                    self.identity.remove(&code);
+                }
+                return Ok(true);
+            }
+            0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f => {
                 return self.position.apply(code, b);
             }
             // MS-DOC 2.6.3: use the compatibility shading arrays while table
@@ -930,6 +972,53 @@ mod tests {
         assert_eq!(a.position.xml(), b.position.xml());
         b.apply(0x360d, &[0x60]).unwrap();
         assert_ne!(a.identity, b.identity);
+    }
+
+    #[test]
+    fn no_overlap_identity_uses_semantic_default_and_invalid_values_are_atomic() {
+        let omitted = Row::default();
+        let mut explicit_false = Row::default();
+        explicit_false.apply(0x3465, &[0]).unwrap();
+        assert_eq!(explicit_false.identity, omitted.identity);
+        assert_eq!(explicit_false.position.xml(), omitted.position.xml());
+
+        let mut row = Row::default();
+        row.apply(0x3465, &[1]).unwrap();
+        assert_eq!(row.identity[&0x3465], vec![1]);
+        assert!(row.position.xml().contains("tblOverlap"));
+        let before = row.identity.clone();
+        let before_xml = row.position.xml();
+        assert!(row.apply(0x3465, &[2]).is_err());
+        assert!(row.apply(0x3465, &[]).is_err());
+        assert_eq!(row.identity, before);
+        assert_eq!(row.position.xml(), before_xml);
+
+        row.apply(0x3465, &[0]).unwrap();
+        assert_eq!(row.identity, omitted.identity);
+        assert_eq!(row.position.xml(), omitted.position.xml());
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_current_word_ignores_legacy_cant_split_and_orders_modern_records() {
+        let mut row = Row::default();
+        assert!(!row.apply_native_cant_split(0x3404, &[1]).unwrap());
+        assert!(row.apply_native_cant_split(0x3403, &[1]).unwrap());
+        assert!(!row.cant_split);
+
+        assert!(row.apply_native_cant_split(0x3466, &[1]).unwrap());
+        assert!(row.cant_split);
+        assert!(row.apply_native_cant_split(0x3403, &[0]).unwrap());
+        assert!(row.cant_split);
+        assert!(row.apply_native_cant_split(0x3466, &[0]).unwrap());
+        assert!(!row.cant_split);
+
+        row.apply_native_cant_split(0x3466, &[1]).unwrap();
+        assert!(row.apply_native_cant_split(0x3403, &[2]).is_err());
+        assert!(row.apply_native_cant_split(0x3466, &[]).is_err());
+        assert!(row.cant_split);
+        row.reset_row_properties_at_tistd(0x563a);
+        assert!(!row.cant_split);
     }
 
     #[test]

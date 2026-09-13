@@ -1,6 +1,6 @@
 //! Full-container acceptance fixtures for direct binary table projection.
 
-use super::tests::{source_with_typography, with_picture_data};
+use super::tests::{source_with_typography, with_numbering, with_picture_data};
 use crate::cfb::{test_support::build_cfb, CompoundFile};
 use crate::doc::table_structure::Payload;
 use docx_model::{BodyElement, CellElement, DocRun};
@@ -299,6 +299,151 @@ fn vertical_merge_continuation_does_not_retain_an_orphan_picture_resource() {
             CellElement::Table(_) => true,
         }));
     assert!(result.resources.is_empty());
+}
+
+#[test]
+fn merged_continuations_advance_numbering_before_their_content_is_suppressed() {
+    fn numbered_cell() -> Vec<u8> {
+        [
+            cell(),
+            sprm(0x2417, &[0], false),
+            sprm(0x260a, &[0], false),
+            sprm(0x460b, &1u16.to_le_bytes(), false),
+        ]
+        .concat()
+    }
+    fn numbered_body() -> Vec<u8> {
+        [
+            sprm(0x260a, &[0], false),
+            sprm(0x460b, &1u16.to_le_bytes(), false),
+        ]
+        .concat()
+    }
+    fn row_with_cells(count: u8, merge: Option<(u16, Vec<u8>, bool)>) -> Vec<u8> {
+        let mut properties = [
+            sprm(0x2416, &[1], false),
+            sprm(0x2417, &[1], false),
+            sprm(0x7621, &[0, count, 0xe8, 3], false),
+            sprm(0x2416, &[1], false),
+        ]
+        .concat();
+        if let Some((code, operand, variable)) = merge {
+            properties.extend(sprm(code, &operand, variable));
+            // Keep the PAPX word-sized after adding a variable-length vertical
+            // merge record; this repeated in-table value is semantically inert.
+            if variable {
+                properties.extend(sprm(0x2416, &[1], false));
+            }
+        }
+        properties
+    }
+    fn marker(cell: &docx_model::DocTableCell) -> Option<&str> {
+        cell.content.iter().find_map(|element| match element {
+            CellElement::Paragraph(paragraph) => paragraph
+                .numbering
+                .as_ref()
+                .map(|value| value.text.as_str()),
+            CellElement::Table(_) => None,
+        })
+    }
+    fn trailing_marker(document: &docx_model::Document) -> &str {
+        let BodyElement::Paragraph(paragraph) = &document.body[1] else {
+            panic!("trailing numbered paragraph")
+        };
+        paragraph.numbering.as_ref().unwrap().text.as_str()
+    }
+
+    let horizontal_text = "a\u{7}b\u{7}c\u{7}\u{7}d\r";
+    for (range, expected) in [([0, 2], ["1.", "3."]), ([1, 3], ["1.", "2."])] {
+        let source = with_numbering(&source_with_typography(
+            horizontal_text,
+            &[(
+                horizontal_text.encode_utf16().count(),
+                2,
+                12240,
+                15840,
+                1,
+                720,
+            )],
+            None,
+            None,
+            None,
+            None,
+        ));
+        let row = row_with_cells(3, Some((0x5624, range.to_vec(), false)));
+        let bytes = with_papx(
+            &source,
+            &[
+                (0, 2, numbered_cell()),
+                (2, 4, numbered_cell()),
+                (4, 6, numbered_cell()),
+                (6, 7, row),
+                (7, 9, numbered_body()),
+            ],
+        );
+        let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+            .unwrap()
+            .document;
+        let BodyElement::Table(table) = &document.body[0] else {
+            panic!("horizontal table")
+        };
+        assert_eq!(table.rows[0].cells.len(), 2);
+        assert_eq!(
+            table.rows[0]
+                .cells
+                .iter()
+                .filter_map(marker)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(trailing_marker(&document), "4.");
+    }
+
+    let vertical_text = "a\u{7}b\u{7}\u{7}c\u{7}d\u{7}\u{7}e\r";
+    let source = with_numbering(&source_with_typography(
+        vertical_text,
+        &[(
+            vertical_text.encode_utf16().count(),
+            2,
+            12240,
+            15840,
+            1,
+            720,
+        )],
+        None,
+        None,
+        None,
+        None,
+    ));
+    let bytes = with_papx(
+        &source,
+        &[
+            (0, 2, numbered_cell()),
+            (2, 4, numbered_cell()),
+            (4, 5, row_with_cells(2, Some((0xd62b, vec![0, 3], true)))),
+            (5, 7, numbered_cell()),
+            (7, 9, numbered_cell()),
+            (9, 10, row_with_cells(2, Some((0xd62b, vec![0, 1], true)))),
+            (10, 12, numbered_body()),
+        ],
+    );
+    let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("vertical table")
+    };
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(
+        table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .filter_map(marker)
+            .collect::<Vec<_>>(),
+        ["1.", "2.", "4."]
+    );
+    assert_eq!(trailing_marker(&document), "5.");
 }
 
 #[test]
