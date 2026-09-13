@@ -481,6 +481,7 @@ mod tests {
     #[derive(Clone, Copy, Default)]
     struct StyleFixture {
         first_row_color: bool,
+        top_left_color: bool,
         first_column_color: bool,
         first_row_size: bool,
         first_row_alignment: bool,
@@ -494,7 +495,10 @@ mod tests {
         conditional_borders_second: u16,
         conditional_border_nil: bool,
         conditional_border_malformed: bool,
+        repeated_conditional_borders: u8,
         inherited_conditional_borders: bool,
+        inherited_partial_conditional_borders: bool,
+        distinct_multi_condition_order: u8,
         shading: ShadingFixture,
         margins: MarginFixture,
     }
@@ -597,6 +601,12 @@ mod tests {
         cnf(0xd66a, condition, &properties)
     }
 
+    fn conditional_border_side(condition: u16, code: u16, color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![8];
+        operand.extend(border_bytes(color, width));
+        cnf(0xd66a, condition, &sprm(code, &operand))
+    }
+
     fn conditional_border_nil(condition: u16) -> Vec<u8> {
         let mut operand = vec![8];
         operand.extend([0xff; 8]);
@@ -681,6 +691,20 @@ mod tests {
             return bytes;
         }
 
+        if fixture.inherited_partial_conditional_borders {
+            let child = conditional_border_side(1, 0xd47f, [0, 0, 0], 40)
+                .into_iter()
+                .chain(conditional_border_side(1, 0xd684, [0xff, 0x80, 0], 32))
+                .collect::<Vec<_>>();
+            append_table_style(&mut bytes, 2, [&child, &[], &[]]);
+            let parent = conditional_borders(1);
+            append_table_style(&mut bytes, 0xfff, [&parent, &[], &[]]);
+            for _ in 3..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
+
         if fixture.inherited_conditional_borders {
             append_table_style(&mut bytes, 2, [&[], &[], &[]]);
             let parent = conditional_borders(fixture.conditional_borders);
@@ -694,7 +718,9 @@ mod tests {
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
         style[4..6].copy_from_slice(&3u16.to_le_bytes());
-        let edge_character = if fixture.first_row_color {
+        let edge_character = if fixture.top_left_color {
+            &[0x85, 0xca, 8, 0x00, 0x02, 0x70, 0x68, 0, 0x80, 0, 0][..]
+        } else if fixture.first_row_color {
             &[0x85, 0xca, 8, 1, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
         } else if fixture.first_column_color {
             &[0x85, 0xca, 8, 4, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
@@ -766,6 +792,30 @@ mod tests {
         }
         if fixture.conditional_border_malformed {
             tapx.extend(malformed_conditional_border(fixture.conditional_borders));
+        }
+        match fixture.repeated_conditional_borders {
+            1 => {
+                tapx.extend(conditional_border_side(1, 0xd47f, [0xff, 0, 0], 24));
+                tapx.extend(conditional_border_side(1, 0xd680, [0, 0, 0xff], 16));
+            }
+            2 => {
+                tapx.extend(conditional_border_side(1, 0xd47f, [0xff, 0, 0], 24));
+                tapx.extend(conditional_border_side(1, 0xd47f, [0, 0, 0xff], 16));
+            }
+            _ => {}
+        }
+        let row_left = conditional_border_side(1, 0xd681, [0xff, 0, 0xff], 32);
+        let column_left = conditional_border_side(4, 0xd681, [0, 0x80, 0], 24);
+        match fixture.distinct_multi_condition_order {
+            1 => {
+                tapx.extend(row_left);
+                tapx.extend(column_left);
+            }
+            2 => {
+                tapx.extend(column_left);
+                tapx.extend(row_left);
+            }
+            _ => {}
         }
         match fixture.shading {
             ShadingFixture::None => {}
@@ -1486,6 +1536,28 @@ mod tests {
     }
 
     #[test]
+    fn eligible_corner_condition_gates_conditional_border_projection() {
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells((1 << 5) | (1 << 6) | (1 << 7), 1)),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture {
+                conditional_borders: table_style_condition::LAST_ROW,
+                top_left_color: true,
+                ..StyleFixture::default()
+            },
+        );
+        assert!(projected.unsupported_table);
+        assert!(projected
+            .borders
+            .iter()
+            .all(|sides| sides.iter().all(Option::is_none)));
+    }
+
+    #[test]
     fn conditional_borders_override_only_the_active_style_region() {
         let projected = conditional_border_grid_with_rows(
             StyleFixture {
@@ -1590,24 +1662,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_conditional_border_cascades_do_not_project_partial_patches() {
-        for fixture in [
-            StyleFixture {
-                conditional_borders: table_style_condition::FIRST_ROW,
-                conditional_borders_second: table_style_condition::FIRST_COLUMN,
-                ..StyleFixture::default()
-            },
-            StyleFixture {
-                conditional_borders: table_style_condition::FIRST_ROW,
-                conditional_border_nil: true,
-                ..StyleFixture::default()
-            },
-            StyleFixture {
-                conditional_borders: table_style_condition::FIRST_ROW,
-                inherited_conditional_borders: true,
-                ..StyleFixture::default()
-            },
-        ] {
+    fn unsupported_conditional_border_nil_does_not_project_partial_patches() {
+        for fixture in [StyleFixture {
+            conditional_borders: table_style_condition::FIRST_ROW,
+            conditional_border_nil: true,
+            ..StyleFixture::default()
+        }] {
             let projected = conditional_border_grid_with_rows(
                 fixture,
                 std::array::from_fn(|_| row_cells(1 << 5, 3)),
@@ -1617,6 +1677,166 @@ mod tests {
                 .borders
                 .iter()
                 .all(|sides| sides.iter().all(Option::is_none)));
+        }
+    }
+
+    #[test]
+    fn first_column_and_first_row_conditional_borders_project_in_specified_order() {
+        let rows = std::array::from_fn(|_| row_cells((1 << 5) | (1 << 7), 3));
+        let row_then_column = conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                conditional_borders_second: table_style_condition::FIRST_COLUMN,
+                ..StyleFixture::default()
+            },
+            rows.clone(),
+        );
+        let column_then_row = conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_COLUMN,
+                conditional_borders_second: table_style_condition::FIRST_ROW,
+                ..StyleFixture::default()
+            },
+            rows,
+        );
+        assert_eq!(row_then_column.borders, column_then_row.borders);
+        assert!(
+            row_then_column.unsupported_table,
+            "global TIstd gate remains"
+        );
+        let none = [None, None, None, None];
+        assert_eq!(
+            row_then_column.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none,
+            ]
+        );
+    }
+
+    #[test]
+    fn inherited_conditional_borders_project_without_ungating_conditional_shading() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                inherited_partial_conditional_borders: true,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(1 << 5, 3)),
+        );
+        assert!(projected.unsupported_table, "global TIstd gate remains");
+        assert_eq!(
+            projected.borders[..3],
+            [
+                [
+                    Some(("000000".into(), 5.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ff8000".into(), 4.0)),
+                ],
+                [
+                    Some(("000000".into(), 5.0)),
+                    Some(("ff8000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ff8000".into(), 4.0)),
+                ],
+                [
+                    Some(("000000".into(), 5.0)),
+                    Some(("ff8000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+            ]
+        );
+        assert!(projected.borders[3..]
+            .iter()
+            .all(|sides| sides.iter().all(Option::is_none)));
+    }
+
+    #[test]
+    fn first_row_left_overrides_first_column_left_in_both_record_orders() {
+        let rows = std::array::from_fn(|_| row_cells((1 << 5) | (1 << 7), 3));
+        for order in [1, 2] {
+            let projected = conditional_border_grid_with_rows(
+                StyleFixture {
+                    distinct_multi_condition_order: order,
+                    ..StyleFixture::default()
+                },
+                rows.clone(),
+            );
+            assert_eq!(projected.borders[0][1], Some(("ff00ff".into(), 4.0)));
+            assert_eq!(projected.borders[3][1], Some(("008000".into(), 3.0)));
+            assert!(projected.borders[1][1].is_none());
+        }
+    }
+
+    #[test]
+    fn repeated_first_row_records_compose_disjoint_sides() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                repeated_conditional_borders: 1,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(1 << 5, 3)),
+        );
+        assert_eq!(
+            projected.borders[0],
+            [
+                Some(("ff0000".into(), 3.0)),
+                None,
+                Some(("0000ff".into(), 2.0)),
+                None,
+            ]
+        );
+        assert!(projected.borders[3..]
+            .iter()
+            .all(|sides| sides.iter().all(Option::is_none)));
+    }
+
+    #[test]
+    fn repeated_first_row_side_uses_later_serialized_value() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                repeated_conditional_borders: 2,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(1 << 5, 3)),
+        );
+        for cell in &projected.borders[..3] {
+            assert_eq!(cell[0], Some(("0000ff".into(), 2.0)));
+            assert!(cell[1..].iter().all(Option::is_none));
         }
     }
 

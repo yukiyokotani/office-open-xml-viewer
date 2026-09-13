@@ -773,6 +773,76 @@ mod tests {
     }
 
     #[test]
+    fn raw_grouping_distinguishes_true_no_overlap_for_identically_positioned_rows() {
+        fn grouped_ttp_ids(middle_no_overlap: Option<bool>) -> Vec<Vec<usize>> {
+            let mut assembler = Assembler::<Vec<usize>>::new();
+            let mut grouped = Vec::new();
+            fn admit(_: usize) -> Result<(), String> {
+                Ok(())
+            }
+            for id in 1..=3 {
+                assembler
+                    .push_raw(
+                        properties(1, false, vec![]),
+                        '\u{7}',
+                        vec![id],
+                        None,
+                        |_, _| unreachable!(),
+                        &mut admit,
+                    )
+                    .unwrap();
+                let mut end = properties(1, true, vec![cell(10)]);
+                // MS-DOC 2.4.3 makes table position/wrapping part of adjacent
+                // row identity. Matched native DOC96 controls give every row
+                // the same active text/page anchors and +720-twip X/Y
+                // coordinates; only the middle row varies
+                // sprmTFNoAllowOverlap authorship.
+                end.row.apply(0x360d, &[0x10]).unwrap();
+                end.row.apply(0x940e, &721i16.to_le_bytes()).unwrap();
+                end.row.apply(0x940f, &721i16.to_le_bytes()).unwrap();
+                if id == 2 {
+                    if let Some(value) = middle_no_overlap {
+                        end.row.apply(0x3465, &[u8::from(value)]).unwrap();
+                    }
+                }
+                assembler
+                    .push_raw(
+                        end,
+                        '\u{7}',
+                        vec![],
+                        Some(id),
+                        |_, _| unreachable!(),
+                        &mut admit,
+                    )
+                    .unwrap();
+            }
+            assembler
+                .finish_raw(
+                    |RawEvent(tables), _| {
+                        grouped = tables
+                            .into_iter()
+                            .map(|table| {
+                                table
+                                    .rows
+                                    .into_iter()
+                                    .map(|row| row.ttp_id.unwrap())
+                                    .collect()
+                            })
+                            .collect();
+                        Ok(vec![])
+                    },
+                    &mut admit,
+                )
+                .unwrap();
+            grouped
+        }
+
+        assert_eq!(grouped_ttp_ids(None), vec![vec![1, 2, 3]]);
+        assert_eq!(grouped_ttp_ids(Some(false)), vec![vec![1, 2, 3]]);
+        assert_eq!(grouped_ttp_ids(Some(true)), vec![vec![1], vec![2], vec![3]]);
+    }
+
+    #[test]
     fn raw_path_preserves_row_grammar_errors() {
         let mut assembler = Assembler::<Vec<usize>>::new();
         let error = assembler

@@ -31,10 +31,25 @@ pub(super) struct Bands {
 }
 
 #[cfg(feature = "direct-doc")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::doc) struct ConditionalTableBorders {
-    pub(in crate::doc) condition: u16,
-    pub(in crate::doc) sides: [Option<table::PreparedBorder>; 6],
+    /// Fixed slots in [MS-DOC] 2.4.6.6 application order: first column,
+    /// last column, first row, last row. Keeping these inline makes the table
+    /// style cache independent of the number and serialization order of TCnf
+    /// records.
+    pub(in crate::doc) sides: [[Option<table::PreparedBorder>; 6]; 4],
+    pub(in crate::doc) present: u8,
+}
+
+#[cfg(feature = "direct-doc")]
+fn conditional_border_index(condition: u16) -> Option<usize> {
+    match condition {
+        crate::doc::table_style_condition::FIRST_COLUMN => Some(0),
+        crate::doc::table_style_condition::LAST_COLUMN => Some(1),
+        crate::doc::table_style_condition::FIRST_ROW => Some(2),
+        crate::doc::table_style_condition::LAST_ROW => Some(3),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -59,7 +74,7 @@ pub(super) struct Profile {
     #[cfg(feature = "direct-doc")]
     table_borders: [Option<table::PreparedBorder>; 6],
     #[cfg(feature = "direct-doc")]
-    conditional_table_borders: Option<ConditionalTableBorders>,
+    conditional_table_borders: ConditionalTableBorders,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
     unsupported_character: bool,
@@ -82,7 +97,7 @@ impl Default for Profile {
             #[cfg(feature = "direct-doc")]
             table_borders: [None; 6],
             #[cfg(feature = "direct-doc")]
-            conditional_table_borders: None,
+            conditional_table_borders: ConditionalTableBorders::default(),
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
             unsupported_character: false,
@@ -205,14 +220,15 @@ impl Formatting<'_> {
     pub(in crate::doc) fn conditional_table_borders(
         &mut self,
         selected_style: Option<usize>,
-    ) -> Result<Option<(u16, [Option<table::PreparedBorder>; 6], u16)>, String> {
+    ) -> Result<Option<(ConditionalTableBorders, u16)>, String> {
         let Some(selected_style) = selected_style else {
             return Ok(None);
         };
         let profile = self.table_style_profile(selected_style)?;
-        Ok(profile
-            .conditional_table_borders
-            .map(|patch| (patch.condition, patch.sides, profile.condition_presence)))
+        Ok((profile.conditional_table_borders.present != 0).then_some((
+            profile.conditional_table_borders,
+            profile.condition_presence,
+        )))
     }
 
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
@@ -251,7 +267,7 @@ impl Formatting<'_> {
         let mut profile = Profile::default();
         let mut horizontal_source = None;
         let mut vertical_source = None;
-        let mut has_conditional_table = false;
+        let mut has_inherited_conditional_shading = false;
         #[cfg(feature = "direct-doc")]
         let mut conditional_border_rejected = false;
         let mut default_margin_sides = 0u8;
@@ -292,7 +308,8 @@ impl Formatting<'_> {
                                 )
                             {
                                 conditional_border_rejected = true;
-                                profile.conditional_table_borders = None;
+                                profile.conditional_table_borders =
+                                    ConditionalTableBorders::default();
                                 return Ok(false);
                             }
                             let side = match code {
@@ -307,22 +324,11 @@ impl Formatting<'_> {
                             if conditional_border_rejected {
                                 return Ok(false);
                             }
-                            let mut patch = match profile.conditional_table_borders {
-                                Some(patch) if patch.condition != condition => {
-                                    conditional_border_rejected = true;
-                                    profile.conditional_table_borders = None;
-                                    return Ok(false);
-                                }
-                                Some(patch) => patch,
-                                None => ConditionalTableBorders {
-                                    condition,
-                                    sides: [None; 6],
-                                },
-                            };
-                            patch.sides[side] = Some(value);
-                            profile.conditional_table_borders = Some(patch);
+                            let slot = conditional_border_index(condition)
+                                .expect("validated edge condition");
+                            profile.conditional_table_borders.sides[slot][side] = Some(value);
+                            profile.conditional_table_borders.present |= 1 << slot;
                             profile.condition_presence |= condition;
-                            has_conditional_table = true;
                             Ok(interpret_table_styles)
                         }
                         #[cfg(feature = "direct-doc")]
@@ -409,7 +415,7 @@ impl Formatting<'_> {
                                         profile.condition_presence |= condition;
                                         profile.conditional_table_shading.remove(&condition);
                                         profile.conditional_table_shading_nil.insert(condition);
-                                        has_conditional_table = true;
+                                        has_inherited_conditional_shading = true;
                                         return Ok(interpret_table_styles);
                                     }
                                 }
@@ -422,7 +428,7 @@ impl Formatting<'_> {
                                     profile.table_shading = Some(TableStyleShading::Value(shading));
                                 }
                                 tapx::Scope::Conditional(condition) => {
-                                    has_conditional_table = true;
+                                    has_inherited_conditional_shading = true;
                                     profile.condition_presence |= condition;
                                     profile.conditional_table_shading_nil.remove(&condition);
                                     profile.conditional_table_shading.insert(condition, shading);
@@ -522,13 +528,30 @@ impl Formatting<'_> {
         // including empty and nonmatching children and direct overrides. The
         // selected conditions still apply after unconditional properties. This
         // evidence does not cover conditional fonts, PJc80 or other properties.
-        if inherited && has_conditional_table {
-            // Native controls have not yet established inherited TCnf
-            // composition or priority. Keep it visible to the admission gate.
+        if inherited && has_inherited_conditional_shading {
+            // Native controls have not yet established inherited conditional
+            // shading composition. Conditional borders are composed per side
+            // by the fixed slots above and have separate Word controls.
             profile.unsupported_table = true;
             #[cfg(feature = "direct-doc")]
             {
-                profile.conditional_table_borders = None;
+                profile.conditional_table_borders = ConditionalTableBorders::default();
+            }
+        }
+        #[cfg(feature = "direct-doc")]
+        if inherited {
+            let borders = profile.conditional_table_borders;
+            let unsupported_inherited_border = borders.present & !0b0101 != 0
+                || borders.sides[0]
+                    .iter()
+                    .enumerate()
+                    .any(|(side, value)| side != 1 && value.is_some());
+            if unsupported_inherited_border {
+                // Inherited native controls cover complete FIRST_ROW patches
+                // and FIRST_COLUMN logical-left only. Keep other inherited
+                // edge conditions and first-column sides gated.
+                profile.unsupported_table = true;
+                profile.conditional_table_borders = ConditionalTableBorders::default();
             }
         }
         Ok(profile)
@@ -611,3 +634,7 @@ fn parse_conditional(
     }
     Ok(())
 }
+
+#[cfg(all(test, feature = "direct-doc"))]
+#[path = "table_style_margin_tests.rs"]
+mod margin_tests;

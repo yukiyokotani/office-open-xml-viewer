@@ -3,17 +3,29 @@
 use super::{ModelBudget, PreparedParagraph};
 use crate::doc::{formatting, table, table_context, table_style_condition, unsupported};
 
+type BorderSides = [Option<table::PreparedBorder>; 6];
+
+struct ActiveConditional {
+    style: usize,
+    options: u16,
+    /// Column then row is the edge-condition portion of the required
+    /// [MS-DOC] 2.4.6.6 order. The bounded admission below permits at most one
+    /// of each family.
+    patches: [Option<(u16, BorderSides)>; 2],
+    presence: u16,
+}
+
 pub(super) fn resolve(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
     formatting: &mut formatting::Formatting<'_>,
     budget: &mut ModelBudget,
 ) -> Result<(), String> {
-    for context in index.tables() {
+    for (table_id, context) in index.tables().iter().enumerate() {
         let conditional = active_conditional(context, formatting)?;
-        let conditional = if let Some((style, options, condition, sides)) = conditional {
-            if supported_conditional_shape(prepared, context, style, options)? {
-                Some((condition, sides))
+        let conditional = if let Some(active) = conditional {
+            if supported_conditional_shape(prepared, context, active.style, active.options)? {
+                Some(active)
             } else {
                 formatting.unsupported_table_properties = true;
                 None
@@ -22,11 +34,11 @@ pub(super) fn resolve(
             None
         };
 
+        if let Some(active) = conditional {
+            apply_conditional_regions(prepared, index, table_id, context, active, formatting)?;
+        }
         for row_context in &context.rows {
             resolve_row(prepared, row_context, formatting, budget)?;
-        }
-        if let Some((condition, sides)) = conditional {
-            apply_conditional_region(prepared, context, condition, sides, budget)?;
         }
     }
     Ok(())
@@ -35,45 +47,91 @@ pub(super) fn resolve(
 fn active_conditional(
     context: &table_context::TableContext,
     formatting: &mut formatting::Formatting<'_>,
-) -> Result<Option<(usize, u16, u16, [Option<table::PreparedBorder>; 6])>, String> {
+) -> Result<Option<ActiveConditional>, String> {
     for row in &context.rows {
         let Some(style) = row.table_style else {
             continue;
         };
-        let Some((condition, sides, presence)) =
-            formatting.conditional_table_borders(Some(style))?
-        else {
+        let Some((borders, presence)) = formatting.conditional_table_borders(Some(style))? else {
             continue;
         };
         let Some(options) = row.table_style_options else {
             continue;
         };
-        let enabled = match condition {
-            table_style_condition::FIRST_ROW => options & (1 << 5) != 0,
-            table_style_condition::LAST_ROW => options & (1 << 6) != 0,
-            table_style_condition::FIRST_COLUMN => options & (1 << 7) != 0,
-            table_style_condition::LAST_COLUMN => options & (1 << 8) != 0,
-            _ => false,
-        };
-        if enabled {
-            let active_edges = [
-                (table_style_condition::FIRST_ROW, 1 << 5),
-                (table_style_condition::LAST_ROW, 1 << 6),
-                (table_style_condition::FIRST_COLUMN, 1 << 7),
-                (table_style_condition::LAST_COLUMN, 1 << 8),
-            ]
-            .into_iter()
-            .filter(|(candidate, flag)| presence & candidate != 0 && options & flag != 0)
-            .fold(0, |mask, (candidate, _)| mask | candidate);
-            if active_edges != condition {
-                // Multiple active edge conditions can exclude one another on a
-                // singleton and have an ordered overlap elsewhere. That cascade
-                // is resolved only by the shared condition selector.
-                formatting.unsupported_table_properties = true;
-                return Ok(None);
-            }
-            return Ok(Some((style, options, condition, sides)));
+        let eligible_corners = [
+            (table_style_condition::TOP_LEFT, (1 << 5) | (1 << 7)),
+            (table_style_condition::TOP_RIGHT, (1 << 5) | (1 << 8)),
+            (table_style_condition::BOTTOM_LEFT, (1 << 6) | (1 << 7)),
+            (table_style_condition::BOTTOM_RIGHT, (1 << 6) | (1 << 8)),
+        ]
+        .into_iter()
+        .any(|(condition, flags)| presence & condition != 0 && options & flags == flags);
+        if eligible_corners {
+            // A corner condition changes adjacent edge eligibility in the
+            // shared selector. Native border controls do not yet cover that
+            // cascade, so no partial edge patch may escape it.
+            formatting.unsupported_table_properties = true;
+            return Ok(None);
         }
+        let conditions = [
+            (table_style_condition::FIRST_COLUMN, 1 << 7),
+            (table_style_condition::LAST_COLUMN, 1 << 8),
+            (table_style_condition::FIRST_ROW, 1 << 5),
+            (table_style_condition::LAST_ROW, 1 << 6),
+        ];
+        let active_edges = conditions
+            .into_iter()
+            .filter(|(condition, flag)| presence & condition != 0 && options & flag != 0)
+            .fold(0, |mask, (condition, _)| mask | condition);
+        let active_borders = conditions
+            .into_iter()
+            .enumerate()
+            .filter(|(slot, (_, flag))| borders.present & (1 << slot) != 0 && options & flag != 0)
+            .fold(0, |mask, (_, (condition, _))| mask | condition);
+        if active_edges != active_borders {
+            // DOC85: a selected condition from another property family must
+            // not be silently dropped by the border-only path.
+            formatting.unsupported_table_properties = true;
+            return Ok(None);
+        }
+        if active_borders == 0 {
+            continue;
+        }
+        if active_borders.count_ones() > 1
+            && active_borders
+                != table_style_condition::FIRST_COLUMN | table_style_condition::FIRST_ROW
+        {
+            // Native multi-condition controls currently cover one first-column
+            // plus one first-row condition. Other family combinations remain
+            // behind the admission gate.
+            formatting.unsupported_table_properties = true;
+            return Ok(None);
+        }
+        let patches = [
+            (borders.present & 1 != 0 && options & (1 << 7) != 0)
+                .then_some((table_style_condition::FIRST_COLUMN, borders.sides[0])),
+            (borders.present & (1 << 2) != 0 && options & (1 << 5) != 0)
+                .then_some((table_style_condition::FIRST_ROW, borders.sides[2])),
+        ];
+        if active_borders.count_ones() == 1 {
+            let patch = conditions
+                .into_iter()
+                .enumerate()
+                .find(|(slot, (_, flag))| borders.present & (1 << slot) != 0 && options & flag != 0)
+                .map(|(slot, (condition, _))| (condition, borders.sides[slot]));
+            return Ok(Some(ActiveConditional {
+                style,
+                options,
+                patches: [patch, None],
+                presence,
+            }));
+        }
+        return Ok(Some(ActiveConditional {
+            style,
+            options,
+            patches,
+            presence,
+        }));
     }
     Ok(None)
 }
@@ -198,12 +256,13 @@ fn resolve_row(
     Ok(())
 }
 
-fn apply_conditional_region(
+fn apply_conditional_regions(
     prepared: &mut [PreparedParagraph],
+    index: &table_context::Index,
+    table_id: usize,
     context: &table_context::TableContext,
-    condition: u16,
-    sides: [Option<table::PreparedBorder>; 6],
-    budget: &mut ModelBudget,
+    active: ActiveConditional,
+    formatting: &mut formatting::Formatting<'_>,
 ) -> Result<(), String> {
     // MS-DOC 2.6.3 defines the six border properties allowed in a TCnf. Word
     // 16.112.4 controls establish their region boundaries here: first/last-row
@@ -216,44 +275,127 @@ fn apply_conditional_region(
         .first()
         .ok_or_else(|| unsupported("Word conditional border table has no rows"))?
         .source_cell_count;
-    match condition {
-        table_style_condition::FIRST_ROW | table_style_condition::LAST_ROW => {
-            let row = if condition == table_style_condition::FIRST_ROW {
-                0
-            } else {
-                rows - 1
-            };
-            for column in 0..columns {
-                set(prepared, context, row, column, 0, sides[0], budget)?;
-                set(prepared, context, row, column, 2, sides[2], budget)?;
+    let (horizontal, vertical, presence) =
+        formatting.table_style_selector_profile(Some(active.style))?;
+    debug_assert_eq!(presence, active.presence);
+    let options =
+        table_style_condition::Options::new(active.options, horizontal, vertical, presence)?;
+    for (condition, sides) in active.patches.into_iter().flatten() {
+        match condition {
+            table_style_condition::FIRST_ROW | table_style_condition::LAST_ROW => {
+                let row = if condition == table_style_condition::FIRST_ROW {
+                    0
+                } else {
+                    rows - 1
+                };
+                for column in 0..columns {
+                    if matches_condition(index, table_id, row, column, columns, options, condition)?
+                    {
+                        set(prepared, context, row, column, 0, sides[0])?;
+                        set(prepared, context, row, column, 2, sides[2])?;
+                    }
+                }
+                if matches_condition(index, table_id, row, 0, columns, options, condition)? {
+                    set(prepared, context, row, 0, 1, sides[1])?;
+                }
+                if matches_condition(
+                    index,
+                    table_id,
+                    row,
+                    columns - 1,
+                    columns,
+                    options,
+                    condition,
+                )? {
+                    set(prepared, context, row, columns - 1, 3, sides[3])?;
+                }
+                for column in 0..columns.saturating_sub(1) {
+                    if matches_condition(index, table_id, row, column, columns, options, condition)?
+                        && matches_condition(
+                            index,
+                            table_id,
+                            row,
+                            column + 1,
+                            columns,
+                            options,
+                            condition,
+                        )?
+                    {
+                        set(prepared, context, row, column, 3, sides[5])?;
+                        set(prepared, context, row, column + 1, 1, sides[5])?;
+                    }
+                }
             }
-            set(prepared, context, row, 0, 1, sides[1], budget)?;
-            set(prepared, context, row, columns - 1, 3, sides[3], budget)?;
-            for column in 0..columns.saturating_sub(1) {
-                set(prepared, context, row, column, 3, sides[5], budget)?;
-                set(prepared, context, row, column + 1, 1, sides[5], budget)?;
+            table_style_condition::FIRST_COLUMN | table_style_condition::LAST_COLUMN => {
+                let column = if condition == table_style_condition::FIRST_COLUMN {
+                    0
+                } else {
+                    columns - 1
+                };
+                for row in 0..rows {
+                    if matches_condition(index, table_id, row, column, columns, options, condition)?
+                    {
+                        set(prepared, context, row, column, 1, sides[1])?;
+                        set(prepared, context, row, column, 3, sides[3])?;
+                    }
+                }
+                if matches_condition(index, table_id, 0, column, columns, options, condition)? {
+                    set(prepared, context, 0, column, 0, sides[0])?;
+                }
+                if matches_condition(
+                    index,
+                    table_id,
+                    rows - 1,
+                    column,
+                    columns,
+                    options,
+                    condition,
+                )? {
+                    set(prepared, context, rows - 1, column, 2, sides[2])?;
+                }
+                for row in 0..rows.saturating_sub(1) {
+                    if matches_condition(index, table_id, row, column, columns, options, condition)?
+                        && matches_condition(
+                            index,
+                            table_id,
+                            row + 1,
+                            column,
+                            columns,
+                            options,
+                            condition,
+                        )?
+                    {
+                        set(prepared, context, row, column, 2, sides[4])?;
+                        set(prepared, context, row + 1, column, 0, sides[4])?;
+                    }
+                }
             }
+            _ => return Err(unsupported("unsupported Word conditional border region")),
         }
-        table_style_condition::FIRST_COLUMN | table_style_condition::LAST_COLUMN => {
-            let column = if condition == table_style_condition::FIRST_COLUMN {
-                0
-            } else {
-                columns - 1
-            };
-            for row in 0..rows {
-                set(prepared, context, row, column, 1, sides[1], budget)?;
-                set(prepared, context, row, column, 3, sides[3], budget)?;
-            }
-            set(prepared, context, 0, column, 0, sides[0], budget)?;
-            set(prepared, context, rows - 1, column, 2, sides[2], budget)?;
-            for row in 0..rows.saturating_sub(1) {
-                set(prepared, context, row, column, 2, sides[4], budget)?;
-                set(prepared, context, row + 1, column, 0, sides[4], budget)?;
-            }
-        }
-        _ => return Err(unsupported("unsupported Word conditional border region")),
     }
     Ok(())
+}
+
+fn matches_condition(
+    index: &table_context::Index,
+    table_id: usize,
+    row: usize,
+    column: usize,
+    count: usize,
+    options: table_style_condition::Options,
+    condition: u16,
+) -> Result<bool, String> {
+    Ok(table_style_condition::select(
+        index,
+        table_id,
+        row,
+        table_style_condition::LogicalColumn {
+            ordinal: column,
+            count,
+        },
+        options,
+    )?
+    .contains(&Some(condition)))
 }
 
 fn set(
@@ -263,7 +405,6 @@ fn set(
     column: usize,
     side: usize,
     value: Option<table::PreparedBorder>,
-    budget: &mut ModelBudget,
 ) -> Result<(), String> {
     let Some(value) = value else {
         return Ok(());
@@ -276,7 +417,9 @@ fn set(
         .cells
         .get_mut(column)
         .ok_or_else(|| unsupported("Word conditional border cell outside row"))?;
-    cell.borders[side] = Some(materialize_border(value, budget)?);
+    // The ordered conditional cascade retains its final raw winner here.
+    // resolve_row decodes and charges each retained border only once.
+    cell.prepared_borders[side] = Some(value);
     Ok(())
 }
 
