@@ -1348,11 +1348,63 @@ worktree's test executable.
 | DOC-21 | Project table-style font selection | Implemented within the verified subset: unconditional ASCII/high-ANSI selection, inheritance, direct overrides and existing font-index validation. Conditional font references remain gated under DOC-27 |
 | DOC-22 | Verify combined paragraph/character conditional precedence | Implemented: actual 3x3 story projection reproduces the observed color/size/PJc ordering with independent unconditional ASCII/high-ANSI fonts; focused tests cover direct overrides and paragraph marks |
 | DOC-23 | Evaluate bounded table-style admission | Evaluation complete for this batch: retain admission gates. DOC-25 and DOC-26 remain prerequisites for general table styles; DOC-27/28 cover the new Office counterexamples. Verified internal projection does not establish full-document admission |
-| DOC-24 | Make table-style Office probes reproducible after cleanup | New follow-up: retain a reusable passive source generator and reviewed style-mutation plans as code, while keeping generated DOC/PDF inputs disposable under outputs |
-| DOC-25 | Resolve table-style-aware direct cell shading | New admission prerequisite: for nFib greater than 0x00D9, compatibility TDefTableShd arrays must be ignored when table styles are supported, while ShdRaw can defer to the style; current row parsing applies compatibility shading and cannot justify removing TIstd gates wholesale |
-| DOC-26 | Apply TIstd table properties with specified preservation | New admission prerequisite: row parsing currently records the selected style without applying its TAPX at that point; implement the MS-DOC 2.6.3 preservation list and direct-property ordering before admitting general table styles |
+| DOC-24 | Make table-style Office probes reproducible after cleanup | Reusable generator and mutation/validation tooling implemented; native Word end-to-end acceptance remains pending. Generated files remain disposable under outputs |
+| DOC-25 | Resolve table-style-aware direct cell shading | Preparation slices DOC-36 through DOC-40 implemented; runtime acquisition and style-baseline resolution under DOC-41/45 remain pending. TIstd admission remains gated |
+| DOC-26 | Apply TIstd table properties with specified preservation | Pending: DOC-42 through DOC-47 cover preservation, reset and supported property projection; native controls must establish the unresolved ordering before admission |
 | DOC-27 | Resolve conditional font-table references | New follow-up: native Word controls render different fonts for identical font-table operands in unconditional CHPX and CCnf; retain the conditional-font gate until the remapping or compatibility rule is established without guessing |
 | DOC-28 | Resolve table-style physical alignment compatibility | New follow-up: native Word controls ignore standalone PJc80 center/right in both unconditional and conditional table PAPX, and retain PJc when both occur; preserve a table-style PJc80 admission gate until version-specific behavior is established |
+
+### Selected batch: DOC-24 through DOC-53
+
+This batch contains 30 tracked items, including the existing prerequisite
+items and their separately reviewable implementation slices. Parent items
+DOC-25/26 are complete only after their runtime and Office acceptance work;
+completing a parser helper does not complete those parent items. New findings
+outside this selection are recorded without starting another automatic batch.
+
+| Item | Scope | Acceptance / current state |
+| --- | --- | --- |
+| DOC-29 | Acquire the effective FIB version | Implemented: Read counted arrays and nFibNew using MS-DOC 2.5.14-15; reject truncated/unknown effective versions in native acquisition|
+| DOC-30 | Validate the TAPX property category | Implemented: Only table SPRMs are permitted; valid unsupported table properties retain an explicit gate|
+| DOC-31 | Validate prohibited and TIstd-preserved TAPX properties | Implemented: Enforce the explicit exclusion list and preservation rules without treating unsupported valid properties as malformed|
+| DOC-32 | Validate the default table-style width-before exception | Implemented: Require the specified zero dxa default and reject it in other styles|
+| DOC-33 | Validate TCnf framing and bounded nesting | Implemented: Use the shared borrowed CNF parser and work budget; reject recursive TCnf|
+| DOC-34 | Validate conditional TAPX property scope | Implemented: Admit the documented conditional border exceptions only in the proper scope; ignore embedded TIstd|
+| DOC-35 | Integrate TAPX validation with the cached profile | Implemented: Validate and collect supported facts in one bounded pass; exercise production lookup and malformed inputs|
+| DOC-36 | Prepare Raw shading segment boundaries | Preparation implemented; runtime remains under DOC-41: Validate the 22/22/19 cell segments, incomplete operands and empty short rows|
+| DOC-37 | Distinguish style-deferred shading from explicit no-fill | Preparation implemented; runtime remains under DOC-41: Preserve Raw ShdNil, ShdAuto, concrete values and unsupported patterns without a guessed background fallback|
+| DOC-38 | Apply Raw shading replacement order | Preparation implemented; runtime remains under DOC-41: Later nil or omitted entries remove stale earlier direct shading in the addressed segment|
+| DOC-39 | Preserve shading ownership across cell edits | Preparation implemented; runtime remains under DOC-41: Insert/delete/redefine operations move or discard only the corresponding source-cell facts|
+| DOC-40 | Select compatibility shading by version and capability | Preparation implemented; runtime remains under DOC-41: Preserve the legacy path; ignore compatibility arrays/ranges only under the documented style-capable rule|
+| DOC-41 | Connect style-aware shading to native acquisition | Use the effective FIB version and a resolved style baseline; validate actual story/model output before enabling |
+| DOC-42 | Preserve table positioning at TIstd application | Verify the exact anchor, position and wrapping-distance preservation list with native controls |
+| DOC-43 | Preserve dimensions and style options at TIstd application | Verify gap, height, preferred width, autofit, bidi and grfatl while retaining unsupported revision semantics |
+| DOC-44 | Reset remaining row properties at TIstd application | Establish the reset/default boundary and later direct-property order without discarding cell geometry |
+| DOC-45 | Project unconditional TAPX cell shading | Resolve TCellShdStyle and its sentinels against direct Raw facts; verify Office controls |
+| DOC-46 | Project default and style cell margins | Apply the specified side/range/unit constraints and inheritance/direct precedence |
+| DOC-47 | Project unconditional TAPX table borders | Preserve exact border facts and their precedence over cell defaults, with supported-model limits |
+| DOC-48 | Connect conditional table shading and presence | Add TCnf to cross-family condition presence and the established condition order |
+| DOC-49 | Project conditional cell borders | Resolve physical/logical edge ownership and interior borders without visual-column guesses |
+| DOC-50 | Establish TAPX inheritance precedence | Use varied native controls and counterexamples; do not generalize from CHPX color |
+| DOC-51 | Establish conditional PAPX/CHPX inheritance | Verify matching and nonmatching inherited conditions, empty children and direct overrides |
+| DOC-52 | Exercise combined table properties through story projection | Cover source paragraph IDs, irregular/merged cells, numbering/resource order and bounded cache ownership |
+| DOC-53 | Re-evaluate bounded full-document admission | Fresh isolated WASM/corpus comparison, native Office evidence and adversarial review; retain every unresolved gate |
+
+The DOC-29 through DOC-40 checkpoint passed 785 Rust unit tests and nine
+integration tests, with six existing ignores. Fresh, separately built WASM
+versions were compared on 59 DOC inputs: admission remained four inputs, and
+58 complete results matched. One previously rejected input changed its error
+from unsupported notes to an undocumented FIB version (DOC-54); this is an
+intentional specification-based rejection, not a visual difference. The
+comparison is not an Office-fidelity or renderer-regression result. Prepared
+Raw shading is not yet called by native row acquisition and does not enable
+additional table-style display support.
+
+### Additional findings outside the selected batch
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | A corpus input uses FibBase 0x00C1 with extension version 0x00C3. Current MS-DOC does not define that effective version; preserve an explicit rejection until its layout and applicable compatibility rules are established. Do not infer table-style capabilities from its numeric order |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch

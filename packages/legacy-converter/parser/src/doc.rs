@@ -18,6 +18,7 @@ mod character;
 mod direct_model;
 #[cfg(feature = "direct-doc")]
 pub(crate) mod direct_cursor;
+mod fib;
 mod fkp;
 mod floating;
 mod formatting;
@@ -113,7 +114,13 @@ fn with_acquired_doc<T>(
     if word.len() < LCB_CLX_OFFSET + 4 {
         return Err(unsupported("truncated Word FIB"));
     }
-    if u16_at(&word, 0)? != FIB_IDENT || u16_at(&word, 2)? < FIB_WORD_97 {
+    if u16_at(&word, 0)? != FIB_IDENT {
+        return Err(unsupported(
+            "only Word 97-2003 binary documents are supported",
+        ));
+    }
+    fib::validate_fixed_prefix(&word)?;
+    if fib::effective_version(&word)? < FIB_WORD_97 {
         return Err(unsupported(
             "only Word 97-2003 binary documents are supported",
         ));
@@ -1095,8 +1102,30 @@ fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
 }
 
 #[cfg(test)]
+pub(crate) fn write_minimal_word97_test_header(word: &mut [u8]) {
+    fib::write_minimal_word97_header(word);
+}
+
+#[cfg(test)]
 mod tests {
     use super::{decode_piece_table, tokenize_story, Token};
+    use crate::cfb::{test_support::build_cfb, CompoundFile};
+
+    fn acquisition_error(word: Vec<u8>) -> String {
+        let bytes = build_cfb(&[("WordDocument", word)]);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        super::with_acquired_doc(&cfb, |_| Ok(())).unwrap_err()
+    }
+
+    #[test]
+    fn native_acquisition_rejects_shifted_and_short_fib_prefixes() {
+        for (offset, value) in [(32, 15u16), (62, 23), (152, 0x005c)] {
+            let mut word = vec![0; 900];
+            super::write_minimal_word97_test_header(&mut word);
+            word[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            assert!(acquisition_error(word).contains("Word FIB"));
+        }
+    }
 
     fn formatted_fixture(
         pieces: &[(&str, usize, bool)],

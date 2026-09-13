@@ -14,6 +14,7 @@ mod cnf;
 #[cfg(feature = "direct-doc")]
 mod direct;
 mod table_style;
+mod tapx;
 pub(in crate::doc) use table_style::TableFormattingKey;
 
 /// Table-aware caches trade recomputation for a fixed retained-entry bound.
@@ -1622,7 +1623,7 @@ mod tests {
         assert!(paragraph.unsupported_paragraph_properties);
 
         let mut table = observed_table_style_formatting();
-        let table_shading = [0x60, 0xd6, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let table_shading = [0x87, 0xd6, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         table.styles[0]
             .as_mut()
             .unwrap()
@@ -1646,6 +1647,40 @@ mod tests {
             .unwrap()
             .tapx = &[0x88, 0x34, 0];
         assert!(invalid_band.table_style_selector_profile(Some(0)).is_err());
+    }
+
+    #[test]
+    fn invalid_table_tapx_never_publishes_a_partial_profile() {
+        // A valid band before an invalid property must not survive a failed
+        // build in the bounded profile cache.
+        for invalid in [
+            vec![0x35, 0x08, 1],
+            vec![0x60, 0xd6, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            let mut formatting = observed_table_style_formatting();
+            let mut bytes = vec![0x88, 0x34, 3];
+            bytes.extend(invalid);
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(bytes);
+            assert!(formatting.table_style_selector_profile(Some(0)).is_err());
+            assert!(formatting.table_style_cache.is_empty());
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = &[0x88, 0x34, 1];
+            assert_eq!(
+                formatting.table_style_selector_profile(Some(0)).unwrap(),
+                (Some(1), None, 0)
+            );
+        }
     }
 
     #[test]
@@ -1999,6 +2034,15 @@ mod tests {
             formatting
                 .styles
                 .push(observed_table_style(0xfff, embedded_style, &[]));
+            if id == 0x000b {
+                formatting.styles[id]
+                    .as_mut()
+                    .unwrap()
+                    .table
+                    .as_mut()
+                    .unwrap()
+                    .tapx = &[0x17, 0xf6, 3, 0, 0];
+            }
         }
         let paragraph_style = formatting.styles.len();
         formatting.styles.push(Some(Style {

@@ -2,7 +2,7 @@
 //! 2.4.6.6 and 2.9.41 define conditional order and CNFOperand framing;
 //! 2.9.340 requires sprmTIstd inside UpxTapx to be ignored.
 
-use super::cnf;
+use super::{cnf, tapx};
 use super::{Formatting, Properties, Sprms, MAX_TABLE_AWARE_CACHE_ENTRIES};
 use crate::doc::{paragraph, sprm, u16_at, unsupported};
 use std::collections::BTreeMap;
@@ -165,37 +165,48 @@ impl Formatting<'_> {
                 .as_ref()
                 .expect("validated table style");
 
-            let mut tapx = Sprms::new(sets.tapx);
-            while let Some((code, operand)) = tapx.next(&mut self.budget)? {
-                match code {
-                    0x3488 | 0x3489 => {
-                        let value = *operand
-                            .first()
-                            .ok_or_else(|| unsupported("short Word table style band size"))?;
-                        if !(1..=3).contains(&value) {
-                            return Err(unsupported("invalid Word table style band size"));
-                        }
-                        let (slot, source) = if code == 0x3488 {
-                            (&mut profile.bands.horizontal, &mut horizontal_source)
-                        } else {
-                            (&mut profile.bands.vertical, &mut vertical_source)
-                        };
-                        if slot.is_some_and(|prior| prior != value)
-                            && source.is_some_and(|prior| prior != style_id)
-                        {
-                            // UpxTapx inheritance order is not inferred from
-                            // unconditional CHPX evidence.
-                            profile.unsupported_table = true;
-                        }
-                        *slot = Some(value);
-                        *source = Some(style_id);
+            let report = tapx::validate(
+                style_id,
+                sets.tapx,
+                &mut self.budget,
+                |scope, code, operand, _| {
+                    if scope != tapx::Scope::Unconditional {
+                        // TCnf facts are validated, but table/cell projection is
+                        // not yet connected. No condition presence is inferred.
+                        return Ok(false);
                     }
-                    0x563a => {
-                        // Required ignored value inside UpxTapx, MS-DOC 2.9.340.
+                    match code {
+                        0x3488 | 0x3489 => {
+                            let value = *operand
+                                .first()
+                                .ok_or_else(|| unsupported("short Word table style band size"))?;
+                            if !(1..=3).contains(&value) {
+                                return Err(unsupported("invalid Word table style band size"));
+                            }
+                            let (slot, source) = if code == 0x3488 {
+                                (&mut profile.bands.horizontal, &mut horizontal_source)
+                            } else {
+                                (&mut profile.bands.vertical, &mut vertical_source)
+                            };
+                            if slot.is_some_and(|prior| prior != value)
+                                && source.is_some_and(|prior| prior != style_id)
+                            {
+                                // UpxTapx inheritance order is not inferred from
+                                // unconditional CHPX evidence.
+                                profile.unsupported_table = true;
+                            }
+                            *slot = Some(value);
+                            *source = Some(style_id);
+                            Ok(true)
+                        }
+                        // The validator permits only the required zero dxa value
+                        // in default style 0x000B. It introduces no leading indent.
+                        0xf617 => Ok(true),
+                        _ => Ok(false),
                     }
-                    _ => profile.unsupported_table = true,
-                }
-            }
+                },
+            )?;
+            profile.unsupported_table |= report.unsupported;
 
             let mut chpx = Sprms::new(sets.chpx);
             while let Some((code, operand)) = chpx.next(&mut self.budget)? {

@@ -10,9 +10,39 @@ pub(in crate::doc) use position::Position;
 mod width;
 pub(crate) use width::PreferredWidth;
 
+/// Cell shading prepared for the table-style-aware cascade. This stays
+/// separate from the compatibility projection in `Cell::shading` until the
+/// table style has been resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::doc) enum PreparedCellShading {
+    StyleDeferred,
+    Explicit(Shading),
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) struct TableShadingPolicy {
+    pub effective_nfib: u16,
+    pub interpret_table_styles: bool,
+}
+
+impl TableShadingPolicy {
+    fn enabled(self) -> bool {
+        self.effective_nfib > 0x00d9 && self.interpret_table_styles
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) enum StyleAwareShadingApply {
+    Unhandled,
+    Handled,
+    HandledUnsupported,
+}
+
 #[derive(Clone, Default)]
 pub struct Cell {
     pub shading: Option<Shading>,
+    pub(in crate::doc) prepared_shading: Option<PreparedCellShading>,
     pub width: i32,
     pub flags: u16,
     pub preferred: Option<PreferredWidth>,
@@ -228,6 +258,86 @@ impl Row {
             self.left - self.gap
         }
     }
+
+    /// Applies the shading Sprms whose meaning changes when table styles are
+    /// interpreted. [MS-DOC] 2.6.3 and 2.9.53 require nFib > 0x00D9 readers
+    /// that interpret table styles to ignore the compatibility arrays and use
+    /// the Raw arrays. Raw ShdNil and omitted entries defer to the style;
+    /// ShdAuto is an explicit no-fill value.
+    pub(in crate::doc) fn apply_style_aware_shading(
+        &mut self,
+        code: u16,
+        b: &[u8],
+        policy: TableShadingPolicy,
+    ) -> Result<StyleAwareShadingApply, String> {
+        if !policy.enabled() {
+            return Ok(StyleAwareShadingApply::Unhandled);
+        }
+        match code {
+            // Compatibility arrays and range shading are ignored under the
+            // enabled policy ([MS-DOC] 2.6.3 sprmTDefTableShd*, sprmTSetShd,
+            // and sprmTSetShdOdd).
+            0xd609 | 0xd612 | 0xd616 | 0xd60c | 0xd62d | 0xd62e => {
+                Ok(StyleAwareShadingApply::Handled)
+            }
+            0xd670 | 0xd671 | 0xd672 => {
+                let start = match code {
+                    0xd671 => 22,
+                    0xd672 => 44,
+                    _ => 0,
+                };
+                let max = if code == 0xd672 { 19 } else { 22 };
+                let cb = usize::from(
+                    *b.first()
+                        .ok_or_else(|| unsupported("short Word raw shading array"))?,
+                );
+                if b.len() != cb + 1
+                    || cb % 10 != 0
+                    || cb / 10 > max
+                    || (cb > 0 && start + cb / 10 > self.cells.len())
+                {
+                    return Err(unsupported("invalid Word raw cell shading array"));
+                }
+
+                let mut values = Vec::with_capacity(cb / 10);
+                let mut supported = true;
+                for bytes in b[1..].chunks_exact(10) {
+                    let shd_nil = Shading::is_shd_nil(bytes);
+                    let value = match Shading::read(bytes, false)? {
+                        Some(_) if shd_nil => PreparedCellShading::StyleDeferred,
+                        Some(value) => PreparedCellShading::Explicit(value),
+                        None => {
+                            supported = false;
+                            PreparedCellShading::Unsupported
+                        }
+                    };
+                    values.push(value);
+                }
+
+                // The omitted tail has the Raw-array default: table-style
+                // shading. This is a replacement, not a sparse update.
+                let end = (start + max).min(self.cells.len());
+                for cell in &mut self.cells[start.min(end)..end] {
+                    cell.prepared_shading = Some(PreparedCellShading::StyleDeferred);
+                }
+                if !values.is_empty() {
+                    for (cell, value) in self.cells[start..start + values.len()]
+                        .iter_mut()
+                        .zip(values)
+                    {
+                        cell.prepared_shading = Some(value);
+                    }
+                }
+                Ok(if supported {
+                    StyleAwareShadingApply::Handled
+                } else {
+                    StyleAwareShadingApply::HandledUnsupported
+                })
+            }
+            _ => Ok(StyleAwareShadingApply::Unhandled),
+        }
+    }
+
     pub fn apply(&mut self, code: u16, b: &[u8]) -> Result<bool, String> {
         if matches!(
             code,
@@ -590,6 +700,283 @@ mod tests {
         let mut b = vec![10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0];
         b.extend(pattern.to_le_bytes());
         b
+    }
+    fn raw_shade(pattern: u16) -> [u8; 10] {
+        shade(pattern)[1..].try_into().unwrap()
+    }
+    fn raw_array(value: [u8; 10], count: usize) -> Vec<u8> {
+        let mut operand = Vec::with_capacity(1 + count * 10);
+        operand.push((count * 10) as u8);
+        for _ in 0..count {
+            operand.extend(value);
+        }
+        operand
+    }
+    fn style_aware_policy() -> TableShadingPolicy {
+        TableShadingPolicy {
+            effective_nfib: 0x00da,
+            interpret_table_styles: true,
+        }
+    }
+
+    #[test]
+    fn empty_raw_segments_are_safe_on_short_rows_and_reset_only_their_cells() {
+        for size in [0, 1, 21, 22, 23, 43, 44, 45, 63] {
+            for (code, start, max) in [(0xd670, 0, 22), (0xd671, 22, 22), (0xd672, 44, 19)] {
+                let mut row = Row {
+                    cells: vec![
+                        Cell {
+                            prepared_shading: Some(PreparedCellShading::Unsupported),
+                            ..Cell::default()
+                        };
+                        size
+                    ],
+                    ..Row::default()
+                };
+                assert_eq!(
+                    row.apply_style_aware_shading(code, &[0], style_aware_policy())
+                        .unwrap(),
+                    StyleAwareShadingApply::Handled
+                );
+                for (index, cell) in row.cells.iter().enumerate() {
+                    assert_eq!(
+                        cell.prepared_shading,
+                        Some(if (start..start + max).contains(&index) {
+                            PreparedCellShading::StyleDeferred
+                        } else {
+                            PreparedCellShading::Unsupported
+                        }),
+                        "size {size}, code {code:#x}, cell {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_shading_follows_source_cells_across_insert_delete_and_redefinition() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 100, 0]).unwrap();
+        let mut operand = vec![30];
+        for pattern in [0, 1, 2] {
+            operand.extend(raw_shade(pattern));
+        }
+        row.apply_style_aware_shading(0xd670, &operand, style_aware_policy())
+            .unwrap();
+        let original: Vec<_> = row
+            .cells
+            .iter()
+            .map(|cell| cell.prepared_shading.clone())
+            .collect();
+        row.apply(0x7621, &[1, 1, 100, 0]).unwrap();
+        assert_eq!(row.cells.len(), 4);
+        assert_eq!(row.cells[0].prepared_shading, original[0]);
+        assert_eq!(row.cells[1].prepared_shading, None);
+        assert_eq!(row.cells[2].prepared_shading, original[1]);
+        assert_eq!(row.cells[3].prepared_shading, original[2]);
+        row.apply(0x5622, &[0, 2]).unwrap();
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.prepared_shading.clone())
+                .collect::<Vec<_>>(),
+            original[1..]
+        );
+        row.apply(0xd608, &[6, 0, 1, 0, 0, 100, 0]).unwrap();
+        assert_eq!(row.cells.len(), 1);
+        assert_eq!(row.cells[0].prepared_shading, None);
+    }
+
+    #[test]
+    fn style_aware_raw_arrays_cover_all_three_bounded_segments() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 63, 1, 0]).unwrap();
+        for (code, start, count) in [(0xd670, 0, 22), (0xd671, 22, 22), (0xd672, 44, 19)] {
+            assert_eq!(
+                row.apply_style_aware_shading(
+                    code,
+                    &raw_array(raw_shade(0), count),
+                    style_aware_policy(),
+                )
+                .unwrap(),
+                StyleAwareShadingApply::Handled
+            );
+            assert!(row.cells[start..start + count].iter().all(|cell| {
+                matches!(
+                    &cell.prepared_shading,
+                    Some(PreparedCellShading::Explicit(shading))
+                        if shading.xml().contains("w:fill=\"123456\"")
+                )
+            }));
+        }
+    }
+
+    #[test]
+    fn style_aware_raw_nil_and_omitted_entries_defer_but_auto_clears() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 24, 1, 0]).unwrap();
+        row.apply_style_aware_shading(0xd670, &raw_array(raw_shade(0), 22), style_aware_policy())
+            .unwrap();
+        row.apply_style_aware_shading(0xd671, &raw_array(raw_shade(0), 2), style_aware_policy())
+            .unwrap();
+
+        let nil = [255, 255, 255, 255, 255, 255, 255, 255, 0, 0];
+        assert_eq!(
+            row.apply_style_aware_shading(0xd670, &raw_array(nil, 1), style_aware_policy(),)
+                .unwrap(),
+            StyleAwareShadingApply::Handled
+        );
+        assert!(row.cells[..22].iter().all(|cell| matches!(
+            cell.prepared_shading,
+            Some(PreparedCellShading::StyleDeferred)
+        )));
+        assert!(matches!(
+            row.cells[22].prepared_shading,
+            Some(PreparedCellShading::Explicit(_))
+        ));
+
+        let auto = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0];
+        row.apply_style_aware_shading(0xd671, &raw_array(auto, 1), style_aware_policy())
+            .unwrap();
+        let Some(PreparedCellShading::Explicit(auto)) = &row.cells[22].prepared_shading else {
+            panic!("ShdAuto must remain an explicit cell value");
+        };
+        assert_eq!(
+            auto.xml(),
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>"
+        );
+        assert!(matches!(
+            row.cells[23].prepared_shading,
+            Some(PreparedCellShading::StyleDeferred)
+        ));
+    }
+
+    #[test]
+    fn style_aware_shading_ignores_compatibility_ranges_and_preserves_raw_order() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 2, 1, 0]).unwrap();
+        let mut direct = vec![12, 0, 1];
+        direct.extend(raw_shade(0));
+
+        row.apply_style_aware_shading(0xd670, &raw_array(raw_shade(0), 1), style_aware_policy())
+            .unwrap();
+        assert_eq!(
+            row.apply_style_aware_shading(0xd62d, &direct, style_aware_policy())
+                .unwrap(),
+            StyleAwareShadingApply::Handled
+        );
+        assert!(matches!(
+            &row.cells[0].prepared_shading,
+            Some(PreparedCellShading::Explicit(shading))
+                if shading.xml().contains("w:fill=\"123456\"")
+        ));
+
+        row.apply_style_aware_shading(
+            0xd670,
+            &raw_array([255, 255, 255, 255, 255, 255, 255, 255, 0, 0], 1),
+            style_aware_policy(),
+        )
+        .unwrap();
+        assert!(row.cells.iter().all(|cell| matches!(
+            cell.prepared_shading,
+            Some(PreparedCellShading::StyleDeferred)
+        )));
+    }
+
+    #[test]
+    fn style_aware_policy_is_explicit_and_leaves_legacy_application_unchanged() {
+        for policy in [
+            TableShadingPolicy {
+                effective_nfib: 0x00d9,
+                interpret_table_styles: true,
+            },
+            TableShadingPolicy {
+                effective_nfib: 0x00da,
+                interpret_table_styles: false,
+            },
+        ] {
+            let mut row = Row::default();
+            row.apply(0x7621, &[0, 1, 1, 0]).unwrap();
+            assert_eq!(
+                row.apply_style_aware_shading(0xd612, &shade(0), policy)
+                    .unwrap(),
+                StyleAwareShadingApply::Unhandled
+            );
+            assert!(row.apply(0xd612, &shade(0)).unwrap());
+            assert!(row.cells[0].shading.is_some());
+            assert!(row.cells[0].prepared_shading.is_none());
+        }
+
+        let mut enabled = Row::default();
+        enabled.apply(0x7621, &[0, 1, 1, 0]).unwrap();
+        assert_eq!(
+            enabled
+                .apply_style_aware_shading(0xd612, &[1, 0], style_aware_policy())
+                .unwrap(),
+            StyleAwareShadingApply::Handled
+        );
+        assert!(enabled.cells[0].shading.is_none());
+    }
+
+    #[test]
+    fn style_aware_raw_arrays_reject_malformed_and_bound_unsupported_patterns() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 63, 1, 0]).unwrap();
+        for code in [0xd670, 0xd671, 0xd672] {
+            assert!(row
+                .apply_style_aware_shading(code, &[], style_aware_policy())
+                .is_err());
+            assert!(row
+                .apply_style_aware_shading(code, &[1, 0], style_aware_policy())
+                .is_err());
+        }
+        assert!(row
+            .apply_style_aware_shading(0xd670, &raw_array(raw_shade(0), 23), style_aware_policy(),)
+            .is_err());
+        assert!(row
+            .apply_style_aware_shading(0xd672, &raw_array(raw_shade(0), 20), style_aware_policy(),)
+            .is_err());
+
+        assert_eq!(
+            row.apply_style_aware_shading(
+                0xd670,
+                &raw_array(raw_shade(0x23), 1),
+                style_aware_policy(),
+            )
+            .unwrap(),
+            StyleAwareShadingApply::HandledUnsupported
+        );
+        assert!(matches!(
+            row.cells[0].prepared_shading,
+            Some(PreparedCellShading::Unsupported)
+        ));
+        assert_eq!(
+            row.apply_style_aware_shading(
+                0xd670,
+                &raw_array(raw_shade(0xffff), 1),
+                style_aware_policy(),
+            )
+            .unwrap(),
+            StyleAwareShadingApply::Handled
+        );
+        assert!(matches!(
+            row.cells[0].prepared_shading,
+            Some(PreparedCellShading::Explicit(_))
+        ));
+        assert!(
+            row.apply_style_aware_shading(
+                0xd670,
+                &raw_array(raw_shade(0x3e), 1),
+                style_aware_policy(),
+            )
+            .is_err()
+        );
+
+        let mut one = Row::default();
+        one.apply(0x7621, &[0, 1, 1, 0]).unwrap();
+        assert!(one
+            .apply_style_aware_shading(0xd671, &raw_array(raw_shade(0), 1), style_aware_policy(),)
+            .is_err());
     }
     #[test]
     fn shading_arrays_cover_three_segments_and_clear_omitted_segment_tails() {

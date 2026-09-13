@@ -313,8 +313,7 @@ mod tests {
         let units: Vec<u16> = text.encode_utf16().collect();
         let text_offset = 0x400usize;
         let mut word = vec![0u8; text_offset + units.len() * 2];
-        word[0..2].copy_from_slice(&0xa5ecu16.to_le_bytes());
-        word[2..4].copy_from_slice(&0x00c1u16.to_le_bytes());
+        crate::doc::write_minimal_word97_test_header(&mut word);
         word[0x4c..0x50].copy_from_slice(&(units.len() as u32).to_le_bytes());
         word[0x1a2..0x1a6].copy_from_slice(&0u32.to_le_bytes());
         word[0x1a6..0x1aa].copy_from_slice(&21u32.to_le_bytes());
@@ -501,9 +500,8 @@ mod tests {
 
     #[test]
     fn rejects_encrypted_legacy_office_inputs() {
-        let mut word = vec![0u8; 0x01aa];
-        word[0..2].copy_from_slice(&0xa5ecu16.to_le_bytes());
-        word[2..4].copy_from_slice(&0x00c1u16.to_le_bytes());
+        let mut word = vec![0u8; 900];
+        crate::doc::write_minimal_word97_test_header(&mut word);
         word[0x0a..0x0c].copy_from_slice(&0x0100u16.to_le_bytes());
         let doc = build_cfb(&[("WordDocument", word)]);
         assert!(convert_native(&doc, LegacyFormat::Doc, 1024)

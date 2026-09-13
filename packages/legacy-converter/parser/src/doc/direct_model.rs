@@ -333,8 +333,7 @@ mod tests {
         let units: Vec<u16> = text.encode_utf16().chain(header.encode_utf16()).collect();
         let text_offset = 0x400usize;
         let mut word = vec![0u8; text_offset + units.len() * 2];
-        word[0..2].copy_from_slice(&0xa5ecu16.to_le_bytes());
-        word[2..4].copy_from_slice(&0x00c1u16.to_le_bytes());
+        super::super::write_minimal_word97_test_header(&mut word);
         word[6..8].copy_from_slice(&1033u16.to_le_bytes());
         word[0x4c..0x50].copy_from_slice(&(main_units as u32).to_le_bytes());
         word[0x54..0x58].copy_from_slice(&(header.encode_utf16().count() as u32).to_le_bytes());

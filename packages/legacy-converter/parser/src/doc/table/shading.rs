@@ -116,9 +116,9 @@ impl Shading {
             (bits >> 10, palette(bits & 31)?, palette((bits >> 5) & 31)?)
         } else {
             // ShdNil is a distinct sentinel (both COLORREFs all ones, ipatAuto),
-            // not a literal white foreground/background. Raw style inheritance
-            // operands are deliberately not handled by the fallback reader.
-            if bytes[..8].iter().all(|b| *b == 255) && u16_at(bytes, 8)? == 0 {
+            // not a literal white foreground/background. Its inheritance
+            // effect depends on the containing operand.
+            if Self::is_shd_nil(bytes) {
                 return Ok(Some(Self {
                     pattern: "nil",
                     foreground: Color::Auto,
@@ -139,6 +139,12 @@ impl Shading {
             "<w:shd w:val=\"{}\" w:color=\"{}\" w:fill=\"{}\"/>",
             self.pattern, self.foreground, self.background
         )
+    }
+
+    /// The ShdNil sentinel is narrower than an ordinary Shd whose pattern is
+    /// ipatNil. Its containing property determines the sentinel's effect.
+    pub(super) fn is_shd_nil(bytes: &[u8]) -> bool {
+        bytes.len() == 10 && bytes[..8].iter().all(|b| *b == 255) && bytes[8..] == [0, 0]
     }
 
     /// Exact decoded DOC shading facts. The current table-cell renderer model
