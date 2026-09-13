@@ -287,6 +287,207 @@ class TableStyleProbeTests(unittest.TestCase):
                 streams, "1Table", style, {"chpx": paragraph_property.hex()}
             )
 
+    def test_positive_upx_accepts_exact_conditional_border_and_reports_unchecked_values(self):
+        border = (0xD47F).to_bytes(2, "little") + b"\x08" + bytes(8)
+        conditional = (0xD66A).to_bytes(2, "little") + bytes((2 + len(border),)) \
+            + b"\x01\x00" + border
+        validation = probes._RecipeValidation("strict-positive")
+        probes._validate_style_upx("tapx", conditional, 17, validation, True)
+        color = probes.CI_CO.to_bytes(2, "little") + b"\x06"
+        probes._validate_style_upx("chpx", color, 17, validation, True)
+        report = validation.report()
+        self.assertEqual(report["status"], "framing-accepted-with-unchecked-properties")
+        self.assertEqual(report["property_sets"], 2)
+        self.assertIn(
+            {"kind": "chpx", "code": "2a42"}, report["unchecked_properties"]
+        )
+
+    def test_diagonal_borders_are_valid_only_inside_tcnf(self):
+        for code in probes.OTHER_CONDITIONAL_BORDERS:
+            border = code.to_bytes(2, "little") + b"\x08" + bytes(8)
+            conditional = (0xD66A).to_bytes(2, "little") \
+                + bytes((2 + len(border),)) + b"\x01\x00" + border
+            probes._validate_style_upx("tapx", conditional, 17)
+            with self.assertRaisesRegex(probes.ProbeError, "prohibited.*UpxTapx"):
+                probes._validate_style_upx("tapx", border, 17)
+
+    def test_cell_no_wrap_style_is_not_valid_inside_tcnf(self):
+        no_wrap = (0x347D).to_bytes(2, "little") + b"\x01"
+        conditional = (0xD66A).to_bytes(2, "little") \
+            + bytes((2 + len(no_wrap),)) + b"\x01\x00" + no_wrap
+        with self.assertRaisesRegex(probes.ProbeError, "prohibited.*UpxTapx"):
+            probes._validate_style_upx("tapx", conditional, 17)
+        probes._validate_style_upx("tapx", no_wrap, 17)
+
+    def test_default_table_style_requires_unconditional_zero_width_before(self):
+        width_before = (0xF617).to_bytes(2, "little") + b"\x03\x00\x00"
+        conditional = (0xD66A).to_bytes(2, "little") \
+            + bytes((2 + len(width_before),)) + b"\x01\x00" + width_before
+        with self.assertRaisesRegex(probes.ProbeError, "lacks required"):
+            probes._validate_style_upx("tapx", b"", 0x000B)
+        with self.assertRaisesRegex(probes.ProbeError, "lacks required"):
+            probes._validate_style_upx("tapx", conditional, 0x000B)
+        probes._validate_style_upx("tapx", conditional + width_before, 0x000B)
+
+        negative = probes._RecipeValidation("spec-invalid-negative-control")
+        probes._validate_style_upx("tapx", b"", 0x000B, negative, True)
+        self.assertIn(
+            {"kind": "tapx", "code": "f617"},
+            negative.report()["spec_invalid"],
+        )
+
+        # Untouched Word-produced property sets are not recertified by this
+        # replacement validator.
+        probes._validate_style_upx("tapx", b"", 0x000B, deep=False)
+
+    def test_positive_upx_rejects_bad_condition_and_nested_condition(self):
+        wrapper = (0xCA85).to_bytes(2, "little")
+        bad_condition = wrapper + b"\x02\x03\x00"
+        with self.assertRaisesRegex(probes.ProbeError, "CNF condition"):
+            probes._validate_style_upx("chpx", bad_condition, 17)
+        nested = wrapper + b"\x07\x01\x00" + wrapper + b"\x02\x01\x00"
+        with self.assertRaisesRegex(probes.ProbeError, "nested CNF"):
+            probes._validate_style_upx("chpx", nested, 17)
+
+    def test_all_twelve_cnf_conditions_use_exact_nested_category(self):
+        color = probes.CI_CO.to_bytes(2, "little") + b"\x06"
+        for condition in probes.CNF_CONDITIONS:
+            wrapper = (0xCA85).to_bytes(2, "little") \
+                + bytes((2 + len(color),)) + condition.to_bytes(2, "little") + color
+            probes._validate_style_upx("chpx", wrapper, 17)
+        wrong = (0xCA85).to_bytes(2, "little") + b"\x05\x01\x00" \
+            + probes.P_JC.to_bytes(2, "little") + b"\x01"
+        with self.assertRaisesRegex(probes.ProbeError, "wrong SPRM class"):
+            probes._validate_style_upx("chpx", wrong, 17)
+
+    def test_conditional_border_requires_exact_brc_operand(self):
+        border = (0xD47F).to_bytes(2, "little") + b"\x07" + bytes(7)
+        conditional = (0xD66A).to_bytes(2, "little") + bytes((2 + len(border),)) \
+            + b"\x01\x00" + border
+        with self.assertRaisesRegex(probes.ProbeError, "BrcOperand cb must be 8"):
+            probes._validate_style_upx("tapx", conditional, 17)
+        invalid_type = (0xD47F).to_bytes(2, "little") + b"\x08" \
+            + bytes(5) + b"\x02" + bytes(2)
+        wrapped = (0xD66A).to_bytes(2, "little") + bytes((2 + len(invalid_type),)) \
+            + b"\x01\x00" + invalid_type
+        with self.assertRaisesRegex(probes.ProbeError, "invalid table border type"):
+            probes._validate_style_upx("tapx", wrapped, 17)
+        nil_border = (0xD47F).to_bytes(2, "little") + b"\x08" \
+            + bytes(4) + b"\xff" * 4
+        nil_wrapped = (0xD66A).to_bytes(2, "little") \
+            + bytes((2 + len(nil_border),)) + b"\x01\x00" + nil_border
+        with self.assertRaisesRegex(probes.ProbeError, "not a normative BrcOperand"):
+            probes._validate_style_upx("tapx", nil_wrapped, 17)
+        negative = probes._RecipeValidation("spec-invalid-negative-control")
+        probes._validate_style_upx("tapx", nil_wrapped, 17, negative, True)
+        self.assertIn(
+            {"kind": "tapx", "code": "d47f"},
+            negative.report()["spec_invalid"],
+        )
+
+    def test_cssa_requires_exact_size_range_sides_and_units(self):
+        valid = (0xD63E).to_bytes(2, "little") + b"\x06\x00\x01\x0f\x03\x6c\x00"
+        probes._validate_style_upx("tapx", valid, 17)
+        for code, operand, message in (
+            (0xD63E, b"\x05" + bytes(5), "CSSAOperand cb must be 6"),
+            (0xD63E, b"\x06\x02\x01\x0f\x03\x00\x00", "CSSA cell range"),
+            (0xD63E, b"\x06\x00\x01\x10\x03\x00\x00", "CSSA side mask"),
+            (0xD634, b"\x06\x00\x01\x0f\x00\x01\x00", "ftsNil width"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(probes.ProbeError, message):
+                probes._validate_style_upx(
+                    "tapx", code.to_bytes(2, "little") + operand, 17
+                )
+        at_limit = b"\x06\x00\x01\x0f\x03" + (31_680).to_bytes(2, "little")
+        probes._validate_style_upx(
+            "tapx", (0xD634).to_bytes(2, "little") + at_limit, 17
+        )
+        above = at_limit[:-2] + (31_681).to_bytes(2, "little")
+        with self.assertRaisesRegex(probes.ProbeError, "width exceeds"):
+            probes._validate_style_upx(
+                "tapx", (0xD634).to_bytes(2, "little") + above, 17
+            )
+
+    def test_raw_shading_is_bounded_and_requires_explicit_negative_mode(self):
+        raw = (0xD670).to_bytes(2, "little") + b"\x0a" + bytes(10)
+        with self.assertRaisesRegex(probes.ProbeError, "prohibited.*UpxTapx"):
+            probes._validate_style_upx("tapx", raw, 17)
+        negative = probes._RecipeValidation("spec-invalid-negative-control")
+        probes._validate_style_upx("tapx", raw, 17, negative, True)
+        self.assertEqual(negative.report()["status"], "spec-invalid-negative-control")
+        malformed = (0xD670).to_bytes(2, "little") + b"\x0b" + bytes(11)
+        with self.assertRaisesRegex(probes.ProbeError, "RawShd.*multiple of 10"):
+            probes._validate_style_upx("tapx", malformed, 17, negative, True)
+        for code, size in ((0xD670, 220), (0xD672, 190)):
+            probes._validate_style_upx(
+                "tapx", code.to_bytes(2, "little") + bytes((size,)) + bytes(size),
+                17, probes._RecipeValidation("spec-invalid-negative-control"), True,
+            )
+        too_many = (0xD672).to_bytes(2, "little") + b"\xc8" + bytes(200)
+        with self.assertRaisesRegex(probes.ProbeError, "cell limit"):
+            probes._validate_style_upx(
+                "tapx", too_many, 17,
+                probes._RecipeValidation("spec-invalid-negative-control"), True,
+            )
+
+    def test_recipe_validation_budget_is_shared_across_property_sets(self):
+        color = probes.CI_CO.to_bytes(2, "little") + b"\x06"
+        validation = probes._RecipeValidation("strict-positive", byte_limit=5)
+        probes._validate_style_upx("chpx", color, 17, validation, True)
+        with self.assertRaisesRegex(probes.ProbeError, "recipe validation byte budget"):
+            probes._validate_style_upx("chpx", color, 17, validation, True)
+
+    def test_recipe_validation_bounds_records_before_a_second_prl(self):
+        color = probes.CI_CO.to_bytes(2, "little") + b"\x06"
+        validation = probes._RecipeValidation("strict-positive", prl_limit=1)
+        with self.assertRaisesRegex(probes.ProbeError, "recipe validation SPRM budget"):
+            probes._validate_style_upx("chpx", color + color, 17, validation, True)
+
+    def test_papx_owner_and_indirection_are_validated_for_replacements(self):
+        with self.assertRaisesRegex(probes.ProbeError, "own istd"):
+            probes._validate_style_upx("papx", b"\x12\x00", 17)
+        indirect = b"\x11\x00" + (0x646B).to_bytes(2, "little") + bytes(4)
+        with self.assertRaisesRegex(probes.ProbeError, "indirect SPRM"):
+            probes._validate_style_upx("papx", indirect, 17)
+
+    def test_negative_mode_does_not_admit_malformed_nested_operands(self):
+        border = (0xD47F).to_bytes(2, "little") + b"\x07" + bytes(7)
+        conditional = (0xD66A).to_bytes(2, "little") + bytes((2 + len(border),)) \
+            + b"\x01\x00" + border
+        validation = probes._RecipeValidation("spec-invalid-negative-control")
+        with self.assertRaisesRegex(probes.ProbeError, "BrcOperand"):
+            probes._validate_style_upx("tapx", conditional, 17, validation, True)
+
+    def test_recipe_rejects_an_unnamed_validation_mode_before_inspection(self):
+        with self.assertRaisesRegex(probes.ProbeError, "validation mode"):
+            probes.build_recipe_variant(None, {
+                "schema": probes.RECIPE_SCHEMA,
+                "validation_mode": "relaxed",
+            })
+
+    def test_historical_recipe_plan_replays_with_new_validation_unrecorded(self):
+        papx = probes._papx_module()
+        source = papx.LoadedDocument({"WordDocument": b"source"}, b"source")
+        candidate = {"WordDocument": b"result"}
+        historical = {
+            "schema": probes.SCHEMA,
+            "mode": "recipe",
+            "recipe": {"schema": probes.RECIPE_SCHEMA},
+            "source_sha256": source.source_sha256,
+            "edits": [],
+            "targets": [],
+        }
+        rebuilt = dict(historical)
+        rebuilt["recipe_validation"] = {
+            "status": "framing-accepted-with-unchecked-properties"
+        }
+        with mock.patch.object(
+                probes, "build_recipe_variant", return_value=(candidate, rebuilt)):
+            result = probes.validate_recipe_variant(source, candidate, historical)
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["recipe_validation_recorded"])
+        self.assertEqual(result["recipe_validation"], rebuilt["recipe_validation"])
+
     def test_style_rewrite_rejects_property_sets_larger_than_name_reserve(self):
         streams, style = self._reserved_style(name_units=4)
         color = probes.CI_CO.to_bytes(2, "little") + b"\x06"

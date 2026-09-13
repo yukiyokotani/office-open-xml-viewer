@@ -8,7 +8,10 @@ alignment/font/size properties, and emits reviewed same-length
 connected/negative counterfactuals. ``mutate`` additionally accepts a bounded
 ``legacy-doc-table-style-recipe/v1`` JSON object: full TAPX/PAPX/CHPX payload
 hex by logical style name, optional TIstd connection, and TTlp flags by T01-T08.
-PAPX recipe payloads include the embedded istd. The tool never starts Office
+PAPX recipe payloads include the embedded istd. Replacement UPX values use
+strict positive validation by default. Deliberate specification-placement
+counterexamples require ``validation_mode: spec-invalid-negative-control``;
+that mode never admits malformed operand framing. The tool never starts Office
 or changes filesystem modes.
 
 This is a compatibility probe, not a general DOC editor.  It intentionally
@@ -39,6 +42,8 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_REWRITE_BYTES = 1024 * 1024
 MAX_PROBE_CFB_BYTES = 16 * 1024 * 1024
 MAX_PROBE_STORY_UNITS = 4096
+MAX_RECIPE_VALIDATION_BYTES = 1024 * 1024
+MAX_RECIPE_VALIDATION_PRLS = 4096
 TABLE_COUNT = 8
 DIRECT_COLOR_TABLE = 6
 
@@ -80,6 +85,38 @@ P_JC = 0x2461
 TI_STD = 0x563A
 P_ITAP = 0x6649
 PF_TTP = 0x2417
+VALIDATION_MODES = frozenset(("strict-positive", "spec-invalid-negative-control"))
+CNF_CODES = {"chpx": 0xCA85, "papx": 0xC666, "tapx": 0xD66A}
+CNF_CONDITIONS = frozenset(
+    (0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020,
+     0x0040, 0x0080, 0x0100, 0x0200, 0x0400, 0x0800)
+)
+CONDITIONAL_BORDERS = frozenset(
+    (0xD47F, 0xD680, 0xD681, 0xD682, 0xD683, 0xD684)
+)
+OTHER_CONDITIONAL_BORDERS = frozenset((0xD685, 0xD686))
+CSSA_CODES = frozenset((0xD632, 0xD633, 0xD634, 0xD63E))
+RAW_SHADING_CODES = frozenset((0xD670, 0xD671, 0xD672))
+
+# [MS-DOC] 2.9.340. This fixed-probe validator applies the list only to
+# replacement UpxTapx values. It does not recertify untouched Word-produced
+# property sets as a general DOC validator.
+PROHIBITED_TAPX = frozenset((
+    0x9601, 0xD608, 0xD609, 0xD60C, 0xD612, 0xD616, 0xF618, 0x3619,
+    0xD61A, 0xD61B, 0xD61C, 0xD61D, 0xD620, 0x7621, 0x5622, 0x7623,
+    0x5624, 0x5625, 0x7629, 0xD62B, 0xD62C, 0xD62F, 0xD632, 0xD635,
+    0xF636, 0xD639, 0xD642, 0xD660, 0xD662, 0x5664, 0x3465, 0x7469,
+    0xD670, 0xD671, 0xD672, 0xD47F, 0xD680, 0xD681, 0xD682, 0xD683,
+    0xD684,
+))
+# These are the concrete encodings already exercised by the fixed probe for
+# properties that [MS-DOC] 2.6.3 preserves across sprmTIstd. The prose defines
+# semantic properties and gives examples; this is not an exhaustive encoding
+# list for every equivalent property.
+PRESERVED_TAPX_EXAMPLE_CODES = frozenset((
+    0x3668, 0xD667, 0x560B, 0x7479, 0x360D, 0x940E, 0x940F, 0x9410,
+    0x9411, 0x941E, 0x941F, 0x9602, 0x9407, 0xF614, 0x3615, 0x740A,
+))
 SUPPORTED_CHPX = frozenset((CI_CO, C_CV, 0x4A43, 0x4A4F, 0x4A51))
 SUPPORTED_PAPX = frozenset((P_JC_80, P_JC))
 
@@ -887,8 +924,209 @@ def _hex_field(value, label):
     return result
 
 
-def _validate_style_upx(kind, value, istd):
+class _RecipeValidation:
+    """Shared bounded work and narrow semantic coverage for one recipe."""
+
+    work = None
+
+    def __init__(self, mode, byte_limit=MAX_RECIPE_VALIDATION_BYTES,
+                 prl_limit=MAX_RECIPE_VALIDATION_PRLS):
+        if mode not in VALIDATION_MODES:
+            raise ProbeError("unsupported recipe validation mode")
+        self.mode = mode
+        self.byte_limit = byte_limit
+        self.prl_limit = prl_limit
+        self.bytes = 0
+        self.prls = 0
+        self.property_sets = 0
+        self.deep_property_sets = 0
+        self.unchecked = set()
+        self.spec_invalid = set()
+
+    def array(self, size):
+        self.bytes += size
+        if self.bytes > self.byte_limit:
+            raise ProbeError("recipe validation byte budget exceeded")
+
+    def prl(self):
+        self.prls += 1
+        if self.prls > self.prl_limit:
+            raise ProbeError("recipe validation SPRM budget exceeded")
+
+    def property_set(self, deep):
+        self.property_sets += 1
+        self.deep_property_sets += int(deep)
+
+    def unsupported_property(self, kind, code):
+        self.unchecked.add((kind, code))
+
+    def invalid_context(self, kind, code, message):
+        if self.mode == "strict-positive":
+            raise ProbeError(message)
+        self.spec_invalid.add((kind, code))
+
+    def report(self):
+        if self.mode == "spec-invalid-negative-control":
+            status = self.mode
+        elif self.unchecked:
+            status = "framing-accepted-with-unchecked-properties"
+        else:
+            status = "recognized-operand-checks-passed"
+        return {
+            "mode": self.mode,
+            "status": status,
+            "coverage": (
+                "UPX category/framing; replacement CNF framing/condition/nesting, exact "
+                "BrcOperand size and non-Nil BrcType, documented CSSA constraints, and "
+                "RawShd segment framing/limits; remaining fields and native validity unchecked"
+            ),
+            "malformed_operands_allowed": False,
+            "bytes": self.bytes,
+            "prls": self.prls,
+            "property_sets": self.property_sets,
+            "deep_property_sets": self.deep_property_sets,
+            "unchecked_properties": [
+                {"kind": kind, "code": f"{code:04x}"}
+                for kind, code in sorted(self.unchecked)
+            ],
+            "spec_invalid": [
+                {"kind": kind, "code": f"{code:04x}"}
+                for kind, code in sorted(self.spec_invalid)
+            ],
+        }
+
+
+def _style_prls(group, validation):
+    """Read one bounded property array without retaining a second full trace."""
     papx = _papx_module()
+    validation.array(len(group))
+    position = 0
+    while position < len(group):
+        item, position, code, operand = papx._read_prl(
+            group, position, len(group), "UPX", validation
+        )
+        yield item, code, operand
+
+
+def _validate_brc_operand(operand):
+    # [MS-DOC] 2.9.21: cb is exactly eight and owns one complete BRC.
+    if len(operand) != 9 or operand[0] != 8:
+        raise ProbeError("BrcOperand cb must be 8 with exactly eight BRC bytes")
+    # BrcOperand names BRC, not BrcMayBeNil. Return the recognizable sentinel
+    # separately so positive mode can reject its placement while an explicit
+    # specification-invalid counterexample can retain it.
+    if operand[5:9] == b"\xff\xff\xff\xff":
+        return True
+    brc_type = operand[6]
+    if brc_type not in (0x00, 0x01, 0x03, *range(0x05, 0x1C)):
+        raise ProbeError("BrcOperand contains an invalid table border type")
+    return False
+
+
+def _validate_cssa_operand(code, operand):
+    # [MS-DOC] 2.9.45-46 and the individual table SPRM restrictions.
+    if len(operand) != 7 or operand[0] != 6:
+        raise ProbeError("CSSAOperand cb must be 6 with exactly six CSSA bytes")
+    first, limit, sides, units = operand[1:5]
+    width = int.from_bytes(operand[5:7], "little")
+    if first > limit or limit > 63:
+        raise ProbeError("CSSA cell range is invalid")
+    if sides & 0xF0:
+        raise ProbeError("CSSA side mask uses reserved bits")
+    allowed_units = {
+        0xD632: (0x00, 0x03),
+        0xD633: (0x00, 0x03, 0x13),
+        0xD634: (0x00, 0x03),
+        0xD63E: (0x03,),
+    }[code]
+    if units not in allowed_units:
+        raise ProbeError("CSSA width units are invalid for this SPRM")
+    if units == 0 and width:
+        raise ProbeError("CSSA ftsNil width must be zero")
+    maximum = 15_840 if code == 0xD633 else 31_680
+    if width > maximum:
+        raise ProbeError("CSSA width exceeds the SPRM limit")
+    if code in (0xD633, 0xD634, 0xD63E) and (first, limit) != (0, 1):
+        raise ProbeError("CSSA style/default cell range must be 0 through 1")
+    if code == 0xD633 and sides != 0x0F:
+        raise ProbeError("CSSA cell spacing must select all four sides")
+
+
+def _validate_raw_shading_operand(code, operand):
+    # [MS-DOC] 2.9.53; sprmTDefTableShdRaw3rd covers at most 19 cells.
+    maximum = 190 if code == 0xD672 else 220
+    if not operand or len(operand) != operand[0] + 1:
+        raise ProbeError("RawShd operand length does not match cb")
+    if operand[0] % 10:
+        raise ProbeError("RawShd cb must be a multiple of 10")
+    if operand[0] > maximum:
+        raise ProbeError("RawShd segment exceeds its cell limit")
+
+
+def _validate_context(kind, code, operand, conditional, istd, validation):
+    if kind == "papx" and code in (0x6646, 0x646B):
+        validation.invalid_context(
+            kind, code, f"indirect SPRM 0x{code:04X} is prohibited in table-style UpxPapx"
+        )
+        return
+    if kind != "tapx":
+        return
+    prohibited = code in PRESERVED_TAPX_EXAMPLE_CODES or code in PROHIBITED_TAPX
+    if conditional and code in CONDITIONAL_BORDERS:
+        prohibited = False
+    if not conditional and code in CONDITIONAL_BORDERS | OTHER_CONDITIONAL_BORDERS:
+        prohibited = True
+    # [MS-DOC] 2.6.3 defines the two diagonal border SPRMs as CNF-only even
+    # though 2.9.340's six explicit exceptions do not enumerate them.
+    if conditional and code == 0x347D:
+        # sprmTCellNoWrapStyle belongs directly to UpxTapx, not to a TCnf
+        # nested property group.
+        prohibited = True
+    if code == 0xF617:
+        prohibited = istd != 0x000B or operand != b"\x03\x00\x00"
+    if prohibited:
+        validation.invalid_context(
+            kind, code, f"prohibited SPRM 0x{code:04X} in table-style UpxTapx"
+        )
+
+
+def _validate_semantic_operand(kind, code, operand, conditional, istd, validation):
+    if code in CONDITIONAL_BORDERS | OTHER_CONDITIONAL_BORDERS:
+        if _validate_brc_operand(operand):
+            validation.invalid_context(
+                kind, code,
+                f"NilBrc sentinel is not a normative BrcOperand for SPRM 0x{code:04X}",
+            )
+    elif code in CSSA_CODES:
+        _validate_cssa_operand(code, operand)
+    elif code in RAW_SHADING_CODES:
+        _validate_raw_shading_operand(code, operand)
+    else:
+        validation.unsupported_property(kind, code)
+    _validate_context(kind, code, operand, conditional, istd, validation)
+
+
+def _validate_conditional(kind, operand, istd, validation):
+    # [MS-DOC] 2.9.41: cb owns exactly cnfc plus one non-recursive grpprl.
+    if len(operand) < 3 or operand[0] != len(operand) - 1:
+        raise ProbeError("CNF operand length does not match cb")
+    condition = int.from_bytes(operand[1:3], "little")
+    if condition not in CNF_CONDITIONS:
+        raise ProbeError("CNF condition is not one of the twelve defined values")
+    nested = operand[3:]
+    expected_sgc = {"papx": 1, "chpx": 2, "tapx": 5}[kind]
+    for _item, code, value in _style_prls(nested, validation):
+        if code in CNF_CODES.values():
+            raise ProbeError("nested CNF operands are not supported by this fixed probe")
+        if ((code >> 10) & 7) != expected_sgc:
+            raise ProbeError(f"table-style {kind.upper()} CNF contains the wrong SPRM class")
+        _validate_semantic_operand(kind, code, value, True, istd, validation)
+
+
+def _validate_style_upx(kind, value, istd, validation=None, deep=True):
+    if validation is None:
+        validation = _RecipeValidation("strict-positive")
+    validation.property_set(deep)
     if kind == "papx":
         if len(value) < 2 or int.from_bytes(value[:2], "little") != istd:
             raise ProbeError("table-style PAPX must begin with its own istd")
@@ -897,12 +1135,28 @@ def _validate_style_upx(kind, value, istd):
     else:
         group = value
         expected_sgc = 5 if kind == "tapx" else 2
-    trace = papx.trace_properties({"UPX": group}, "UPX", 0, len(group))
-    if any(item.get("kind") != "prl" or item.get("followed") for item in trace):
-        raise ProbeError(f"table-style {kind.upper()} cannot contain indirection")
-    for item in trace:
-        if ((int(item["code"], 16) >> 10) & 7) != expected_sgc:
+    has_default_width_before = False
+    for _item, code, operand in _style_prls(group, validation):
+        if ((code >> 10) & 7) != expected_sgc:
             raise ProbeError(f"table-style {kind.upper()} contains the wrong SPRM class")
+        if kind == "papx" and code in (0x6646, 0x646B):
+            raise ProbeError(f"table-style PAPX cannot contain indirect SPRM 0x{code:04X}")
+        if not deep:
+            continue
+        if kind == "tapx" and code == 0xF617:
+            has_default_width_before = True
+        if code == CNF_CODES[kind]:
+            _validate_conditional(kind, operand, istd, validation)
+        elif code in CNF_CODES.values():
+            raise ProbeError(f"table-style {kind.upper()} contains the wrong CNF wrapper")
+        else:
+            _validate_semantic_operand(kind, code, operand, False, istd, validation)
+    if deep and kind == "tapx" and istd == 0x000B and not has_default_width_before:
+        validation.invalid_context(
+            kind, 0xF617,
+            "default Word table-style UpxTapx lacks required zero dxa width-before",
+        )
+    return validation
 
 
 def _padded_name(original, units, property_bytes):
@@ -918,7 +1172,7 @@ def _padded_name(original, units, property_bytes):
     return value + "_" * (units - len(value))
 
 
-def _rewrite_style(streams, table_stream, record, replacement):
+def _rewrite_style(streams, table_stream, record, replacement, validation=None):
     if not isinstance(replacement, Mapping) or not replacement:
         raise ProbeError(f"style {record.name} replacement must be a nonempty object")
     unknown = set(replacement) - {"tapx", "papx", "chpx"}
@@ -927,11 +1181,15 @@ def _rewrite_style(streams, table_stream, record, replacement):
     table = streams[table_stream]
     old_record = table[record.start:record.end]
     original_values = [table[left:right] for left, right in record.property_ranges]
+    if validation is None:
+        validation = _RecipeValidation("strict-positive")
     values = []
     for index, kind in enumerate(("tapx", "papx", "chpx")):
         value = (original_values[index] if kind not in replacement
                  else _hex_field(replacement[kind], f"style {record.name} {kind}"))
-        _validate_style_upx(kind, value, record.istd)
+        _validate_style_upx(
+            kind, value, record.istd, validation, kind in replacement
+        )
         values.append(value)
     lp_upxes = b"".join(
         len(value).to_bytes(2, "little") + value + bytes(len(value) % 2)
@@ -1005,13 +1263,18 @@ def build_recipe_variant(loaded, recipe):
     """Apply one bounded declarative recipe without serializing a CFB file."""
     if not isinstance(recipe, Mapping) or recipe.get("schema") != RECIPE_SCHEMA:
         raise ProbeError("unsupported table-style recipe")
-    allowed = {"schema", "strip_direct", "connect_styles", "styles", "table_options"}
+    allowed = {
+        "schema", "validation_mode", "strip_direct", "connect_styles",
+        "styles", "table_options",
+    }
     if set(recipe) - allowed:
         raise ProbeError("recipe contains unknown fields")
     if type(recipe.get("strip_direct", False)) is not bool:
         raise ProbeError("strip_direct must be boolean")
     if type(recipe.get("connect_styles", False)) is not bool:
         raise ProbeError("connect_styles must be boolean")
+    validation_mode = recipe.get("validation_mode", "strict-positive")
+    validation = _RecipeValidation(validation_mode)
     layout = _probe_layout(loaded)
     table_stream, styles, stylesheet_range = probe_styles(loaded)
     edits = []
@@ -1029,7 +1292,9 @@ def build_recipe_variant(loaded, recipe):
         raise ProbeError("recipe styles must select named probe styles")
     style_changes = []
     for name in sorted(replacements):
-        edit = _rewrite_style(layout["streams"], table_stream, styles[name], replacements[name])
+        edit = _rewrite_style(
+            layout["streams"], table_stream, styles[name], replacements[name], validation
+        )
         edits.append((edit[0], edit[1], edit[2], edit[3], ("STD", name)))
         style_changes.append(edit[4])
     option_edits, option_targets = _table_option_edits(
@@ -1075,6 +1340,7 @@ def build_recipe_variant(loaded, recipe):
             table_stream, styles, stylesheet_range, layout["streams"]
         ),
         "style_changes": style_changes,
+        "recipe_validation": validation.report(),
         "removed_direct": removed,
         "recipe": recipe,
         "edits": _diff_edits(loaded.streams, candidate),
@@ -1099,8 +1365,13 @@ def validate_recipe_variant(before, after_streams, plan):
                   "style_changes", "removed_direct", "edits", "targets"):
         if plan.get(field) != rebuilt_plan.get(field):
             raise ProbeError(f"plan {field} does not match the reviewed recipe")
+    recorded_validation = "recipe_validation" in plan
+    if recorded_validation and plan["recipe_validation"] != rebuilt_plan["recipe_validation"]:
+        raise ProbeError("plan recipe_validation does not match the reviewed recipe")
     return {"valid": True, "mode": "recipe", "source_sha256": before.source_sha256,
-            "edits": len(plan["edits"]), "targets": len(plan["targets"])}
+            "edits": len(plan["edits"]), "targets": len(plan["targets"]),
+            "recipe_validation_recorded": recorded_validation,
+            "recipe_validation": rebuilt_plan["recipe_validation"]}
 
 
 def _plan(loaded, mode, streams, styles_manifest, layout, removed, targets):
@@ -1360,7 +1631,8 @@ def _command_mutate(args):
         raise
     print(json.dumps({"source_sha256": source.source_sha256,
                       "output": str(Path(args.output)), "plan": str(Path(args.plan)),
-                      "edits": len(plan["edits"]), "targets": len(plan["targets"])}))
+                      "edits": len(plan["edits"]), "targets": len(plan["targets"]),
+                      "recipe_validation": plan["recipe_validation"]}))
 
 
 def _command_generate(args):
