@@ -14,6 +14,8 @@ use crate::doc::{
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
+mod borders;
+
 pub(super) fn project(
     story: &Story<'_>,
     paragraphs: Vec<Paragraph>,
@@ -66,7 +68,7 @@ pub(super) fn project(
         &mut |bytes| budget.charge(bytes),
     )?;
     resolve_table_cell_margins(&mut prepared, &table_context, formatting)?;
-    resolve_table_borders(&mut prepared, &table_context, formatting, budget)?;
+    borders::resolve(&mut prepared, &table_context, formatting, budget)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
@@ -348,109 +350,6 @@ pub(super) fn project(
     Ok(())
 }
 
-fn resolve_table_borders(
-    prepared: &mut [PreparedParagraph],
-    index: &table_context::Index,
-    formatting: &mut formatting::Formatting<'_>,
-    budget: &mut ModelBudget,
-) -> Result<(), String> {
-    for table_context in index.tables() {
-        for row_context in &table_context.rows {
-            let style = formatting.table_borders(row_context.table_style)?;
-            let row = &mut prepared
-                .get_mut(row_context.ttp_id)
-                .ok_or_else(|| unsupported("Word table border TTP outside story"))?
-                .table_properties
-                .row;
-            if row.cells.len() != row_context.source_cell_count {
-                return Err(unsupported("Word table border cell count mismatch"));
-            }
-
-            let has_style = style.iter().any(Option::is_some);
-            let has_direct = row.prepared_borders.iter().any(Option::is_some)
-                || row
-                    .cells
-                    .iter()
-                    .any(|cell| cell.prepared_borders.iter().any(Option::is_some));
-            let has_old_direct = row
-                .prepared_borders
-                .iter()
-                .chain(
-                    row.cells
-                        .iter()
-                        .flat_map(|cell| cell.prepared_borders.iter()),
-                )
-                .flatten()
-                .copied()
-                .any(table::PreparedBorder::is_old);
-            let has_nil_direct = row
-                .prepared_borders
-                .iter()
-                .chain(
-                    row.cells
-                        .iter()
-                        .flat_map(|cell| cell.prepared_borders.iter()),
-                )
-                .flatten()
-                .copied()
-                .any(table::PreparedBorder::is_nil);
-            let has_diagonal_direct = row.cells.iter().any(|cell| {
-                cell.prepared_borders[4].is_some() || cell.prepared_borders[5].is_some()
-            });
-            let has_tc80 = row
-                .cells
-                .iter()
-                .any(|cell| cell.borders.iter().any(Option::is_some));
-            let selected = row_context.table_style.is_some();
-            let border_style_interaction = has_style || row.border_tistd_count > 0;
-            if border_style_interaction
-                && (has_tc80
-                    || has_old_direct
-                    || has_nil_direct
-                    || has_diagonal_direct
-                    || ((has_style || has_direct) && row.bidi)
-                    || ((has_style || has_direct) && row.border_tistd_count > 1))
-            {
-                // Native controls establish modern LTR D613/D62F around one
-                // TIstd. TC80 ownership, compatibility borders, RTL side
-                // mapping and repeated resets remain explicit admission gates.
-                formatting.unsupported_table_properties = true;
-                continue;
-            }
-
-            for side in 0..6 {
-                if let Some(value) = row.prepared_borders[side].or(style[side]) {
-                    row.borders[side] = Some(materialize_border(value, budget)?);
-                } else if selected {
-                    row.borders[side] = None;
-                }
-            }
-            row.prepared_borders = [None; 6];
-            for cell in &mut row.cells {
-                for side in 0..6 {
-                    if let Some(value) = cell.prepared_borders[side] {
-                        cell.borders[side] = Some(materialize_border(value, budget)?);
-                    }
-                }
-                cell.prepared_borders = [None; 6];
-            }
-        }
-    }
-    Ok(())
-}
-
-fn materialize_border(
-    value: table::PreparedBorder,
-    budget: &mut ModelBudget,
-) -> Result<crate::doc::border::Border, String> {
-    let border = value.decode()?;
-    // This allocation happens after Properties::retained_heap_bytes. Charge
-    // its actual retained String capacities before it enters the prepared
-    // story; an error drops this local value and then the whole model.
-    budget.charge(border.retained_bytes()?)?;
-    Ok(border)
-}
-
 fn resolve_table_cell_margins(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -590,6 +489,11 @@ mod tests {
         inherited_margins: bool,
         table_borders: bool,
         default_table_style: bool,
+        conditional_borders: u16,
+        conditional_borders_second: u16,
+        conditional_border_nil: bool,
+        conditional_border_malformed: bool,
+        inherited_conditional_borders: bool,
         shading: ShadingFixture,
         margins: MarginFixture,
     }
@@ -675,6 +579,33 @@ mod tests {
         sprm(0xd62f, &operand)
     }
 
+    fn conditional_borders(condition: u16) -> Vec<u8> {
+        let mut properties = Vec::new();
+        for (code, color) in [
+            (0xd47f, [0xff, 0, 0]),
+            (0xd680, [0, 0, 0xff]),
+            (0xd681, [0, 0x80, 0]),
+            (0xd682, [0xff, 0xff, 0]),
+            (0xd683, [0xff, 0, 0xff]),
+            (0xd684, [0, 0xff, 0xff]),
+        ] {
+            let mut operand = vec![8];
+            operand.extend(border_bytes(color, 32));
+            properties.extend(sprm(code, &operand));
+        }
+        cnf(0xd66a, condition, &properties)
+    }
+
+    fn conditional_border_nil(condition: u16) -> Vec<u8> {
+        let mut operand = vec![8];
+        operand.extend([0xff; 8]);
+        cnf(0xd66a, condition, &sprm(0xd47f, &operand))
+    }
+
+    fn malformed_conditional_border(condition: u16) -> Vec<u8> {
+        cnf(0xd66a, condition, &sprm(0xd47f, &[7, 0, 0, 0, 0, 0, 0, 0]))
+    }
+
     fn append_table_style(bytes: &mut Vec<u8>, base: u16, sets: [&[u8]; 3]) {
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&((base << 4) | 3).to_le_bytes());
@@ -749,6 +680,16 @@ mod tests {
             return bytes;
         }
 
+        if fixture.inherited_conditional_borders {
+            append_table_style(&mut bytes, 2, [&[], &[], &[]]);
+            let parent = conditional_borders(fixture.conditional_borders);
+            append_table_style(&mut bytes, 0xfff, [&parent, &[], &[]]);
+            for _ in 3..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
+
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
         style[4..6].copy_from_slice(&3u16.to_le_bytes());
@@ -810,6 +751,18 @@ mod tests {
         }
         if fixture.table_borders {
             tapx.extend(table_borders([0xff, 0, 0], 8));
+        }
+        if fixture.conditional_borders != 0 {
+            tapx.extend(conditional_borders(fixture.conditional_borders));
+        }
+        if fixture.conditional_borders_second != 0 {
+            tapx.extend(conditional_borders(fixture.conditional_borders_second));
+        }
+        if fixture.conditional_border_nil {
+            tapx.extend(conditional_border_nil(fixture.conditional_borders));
+        }
+        if fixture.conditional_border_malformed {
+            tapx.extend(malformed_conditional_border(fixture.conditional_borders));
         }
         match fixture.shading {
             ShadingFixture::None => {}
@@ -892,15 +845,29 @@ mod tests {
     }
 
     fn row_cells_with_style(options: u16, count: u8, style: u16) -> Vec<u8> {
+        row_cells_with_width(options, count, style, 1000)
+    }
+
+    fn row_cells_with_width(options: u16, count: u8, style: u16, width: u16) -> Vec<u8> {
+        let [width_lo, width_hi] = width.to_le_bytes();
         [
             sprm(0x2416, &[1]),
             sprm(0x2417, &[1]),
-            sprm(0x7621, &[0, count, 0xe8, 3]),
+            sprm(0x7621, &[0, count, width_lo, width_hi]),
             sprm(0x563a, &style.to_le_bytes()),
             sprm(0x740a, &[0, 0, options as u8, (options >> 8) as u8]),
             sprm(0x2416, &[1]),
         ]
         .concat()
+    }
+
+    fn row_cells_with_extra(options: u16, count: u8, extra: &[u8]) -> Vec<u8> {
+        let mut row = row_cells(options, count);
+        row.extend(extra);
+        if row.len() % 2 == 0 {
+            row.extend(cell());
+        }
+        row
     }
 
     fn row_cells_with_raw(options: u16, count: u8, raw: &[u8]) -> Vec<u8> {
@@ -1040,11 +1007,11 @@ mod tests {
         .concat()
     }
 
-    fn project_table(
+    fn try_project_table(
         text: &str,
         runs: &[(usize, usize, Vec<u8>)],
         fixture: StyleFixture,
-    ) -> ProjectedTable {
+    ) -> Result<ProjectedTable, String> {
         let source = super::super::tests::source_with_typography(
             text,
             &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
@@ -1179,7 +1146,14 @@ mod tests {
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
             })
         })
-        .unwrap()
+    }
+
+    fn project_table(
+        text: &str,
+        runs: &[(usize, usize, Vec<u8>)],
+        fixture: StyleFixture,
+    ) -> ProjectedTable {
+        try_project_table(text, runs, fixture).unwrap()
     }
 
     fn projected_table(fixture: StyleFixture) -> ProjectedTable {
@@ -1234,17 +1208,324 @@ mod tests {
         assert!(projected.unsupported_table);
     }
 
+    fn conditional_border_grid_with_rows(
+        fixture: StyleFixture,
+        rows: [Vec<u8>; 3],
+    ) -> ProjectedTable {
+        project_table(
+            "a\u{7}b\u{7}c\u{7}\u{7}d\u{7}e\u{7}f\u{7}\u{7}g\u{7}h\u{7}i\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 7, rows[0].clone()),
+                (7, 9, cell()),
+                (9, 11, cell()),
+                (11, 13, cell()),
+                (13, 14, rows[1].clone()),
+                (14, 16, cell()),
+                (16, 18, cell()),
+                (18, 20, cell()),
+                (20, 21, rows[2].clone()),
+                (21, 22, Vec::new()),
+            ],
+            fixture,
+        )
+    }
+
+    fn conditional_border_grid(condition: u16, options: u16) -> ProjectedTable {
+        conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: condition,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(options, 3)),
+        )
+    }
+
+    #[test]
+    fn native_story_maps_first_row_conditional_borders_to_region_edges() {
+        let projected = conditional_border_grid(table_style_condition::FIRST_ROW, 1 << 5);
+        assert!(
+            projected.unsupported_table,
+            "the global TIstd gate remains active"
+        );
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none,
+            ]
+        );
+    }
+
+    #[test]
+    fn native_story_maps_first_column_conditional_borders_to_region_edges() {
+        let projected = conditional_border_grid(table_style_condition::FIRST_COLUMN, 1 << 7);
+        assert!(
+            projected.unsupported_table,
+            "the global TIstd gate remains active"
+        );
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                [
+                    Some(("ff00ff".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none,
+            ]
+        );
+    }
+
+    #[test]
+    fn disabled_conditional_borders_do_not_change_cells() {
+        let projected = conditional_border_grid(table_style_condition::FIRST_ROW, 0);
+        assert!(projected
+            .borders
+            .iter()
+            .all(|sides| sides.iter().all(Option::is_none)));
+    }
+
+    #[test]
+    fn singleton_conditional_border_regions_have_no_inside_edges() {
+        for (condition, options) in [
+            (table_style_condition::FIRST_ROW, 1 << 5),
+            (table_style_condition::FIRST_COLUMN, 1 << 7),
+        ] {
+            let projected = project_table(
+                "a\u{7}\u{7}\r",
+                &[
+                    (0, 2, cell()),
+                    (2, 3, row_cells(options, 1)),
+                    (3, 4, Vec::new()),
+                ],
+                StyleFixture {
+                    conditional_borders: condition,
+                    ..StyleFixture::default()
+                },
+            );
+            assert_eq!(
+                projected.borders,
+                [[
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ]]
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_borders_override_only_the_active_style_region() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                table_borders: true,
+                conditional_borders: table_style_condition::FIRST_ROW,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells(1 << 5, 3)),
+        );
+        let red = Some(("ff0000".into(), 1.0));
+        assert_eq!(
+            projected.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                std::array::from_fn(|_| red.clone()),
+                std::array::from_fn(|_| red.clone()),
+                std::array::from_fn(|_| red.clone()),
+                std::array::from_fn(|_| red.clone()),
+                std::array::from_fn(|_| red.clone()),
+                std::array::from_fn(|_| red.clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_border_projection_gates_unverified_table_shapes_and_direct_layers() {
+        let condition = table_style_condition::FIRST_ROW;
+        let options = 1 << 5;
+        for rows in [
+            [
+                row_cells(options, 3),
+                row_cells_with_width(options, 3, 1, 900),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells(options, 3),
+                row_cells_with_extra(options, 3, &sprm(0x9601, &120i16.to_le_bytes())),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells(options, 3),
+                row_cells_with_extra(options, 3, &sprm(0x3404, &[1])),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells(options, 3),
+                row_cells(0, 3),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells_with_extra(options, 3, &sprm(0x560b, &1u16.to_le_bytes())),
+                row_cells(options, 3),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells_with_extra(options, 3, &sprm(0x5624, &[0, 2])),
+                row_cells(options, 3),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells_with_extra(options, 3, &cell_borders(0, 1, [0, 0, 0xff], 16)),
+                row_cells(options, 3),
+                row_cells(options, 3),
+            ],
+            [
+                row_cells_with_extra(options, 3, &table_borders([0, 0x80, 0], 24)),
+                row_cells(options, 3),
+                row_cells(options, 3),
+            ],
+        ] {
+            let projected = conditional_border_grid_with_rows(
+                StyleFixture {
+                    conditional_borders: condition,
+                    ..StyleFixture::default()
+                },
+                rows,
+            );
+            assert!(projected.unsupported_table);
+            assert_ne!(
+                projected.borders[0][0],
+                Some(("ff0000".into(), 4.0)),
+                "conditional top border must remain gated"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_conditional_border_cascades_do_not_project_partial_patches() {
+        for fixture in [
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                conditional_borders_second: table_style_condition::FIRST_COLUMN,
+                ..StyleFixture::default()
+            },
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                conditional_border_nil: true,
+                ..StyleFixture::default()
+            },
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                inherited_conditional_borders: true,
+                ..StyleFixture::default()
+            },
+        ] {
+            let projected = conditional_border_grid_with_rows(
+                fixture,
+                std::array::from_fn(|_| row_cells(1 << 5, 3)),
+            );
+            assert!(projected.unsupported_table);
+            assert!(projected
+                .borders
+                .iter()
+                .all(|sides| sides.iter().all(Option::is_none)));
+        }
+    }
+
+    #[test]
+    fn malformed_conditional_border_operand_is_rejected() {
+        let text = "a\u{7}\u{7}\r";
+        let error = try_project_table(
+            text,
+            &[(0, 2, cell()), (2, 3, row(1 << 5)), (3, 4, Vec::new())],
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                conditional_border_malformed: true,
+                ..StyleFixture::default()
+            },
+        )
+        .err()
+        .expect("malformed border must fail");
+        assert_eq!(
+            error,
+            "UNSUPPORTED:invalid Word conditional table-style border"
+        );
+    }
+
     #[test]
     fn late_border_payload_obeys_model_budget_before_retention() {
         let value = table::PreparedBorder::read(&border_bytes([0xff, 0, 0], 8), false).unwrap();
         let mut insufficient = ModelBudget::new(0);
         assert!(matches!(
-            materialize_border(value, &mut insufficient),
+            borders::materialize_border(value, &mut insufficient),
             Err(message) if message == "OUTPUT_TOO_LARGE"
         ));
 
         let mut adequate = ModelBudget::new(1024);
-        let border = materialize_border(value, &mut adequate).unwrap();
+        let border = borders::materialize_border(value, &mut adequate).unwrap();
         let spec = border.direct_spec();
         assert_eq!(spec.color.as_deref(), Some("ff0000"));
         assert_eq!(spec.width, 1.0);

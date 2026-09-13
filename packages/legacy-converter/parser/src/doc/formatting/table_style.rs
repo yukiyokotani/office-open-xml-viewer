@@ -30,6 +30,13 @@ pub(super) struct Bands {
     pub(super) vertical: Option<u8>,
 }
 
+#[cfg(feature = "direct-doc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) struct ConditionalTableBorders {
+    pub(in crate::doc) condition: u16,
+    pub(in crate::doc) sides: [Option<table::PreparedBorder>; 6],
+}
+
 #[derive(Clone)]
 enum TableStyleShading {
     /// Authored ShdNil is retained as property presence even though its value
@@ -51,6 +58,8 @@ pub(super) struct Profile {
     table_style_margins: table::MarginPatch,
     #[cfg(feature = "direct-doc")]
     table_borders: [Option<table::PreparedBorder>; 6],
+    #[cfg(feature = "direct-doc")]
+    conditional_table_borders: Option<ConditionalTableBorders>,
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
     unsupported_character: bool,
@@ -72,6 +81,8 @@ impl Default for Profile {
             table_style_margins: table::MarginPatch::default(),
             #[cfg(feature = "direct-doc")]
             table_borders: [None; 6],
+            #[cfg(feature = "direct-doc")]
+            conditional_table_borders: None,
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
             unsupported_character: false,
@@ -190,6 +201,20 @@ impl Formatting<'_> {
         Ok(self.table_style_profile(selected_style)?.table_borders)
     }
 
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn conditional_table_borders(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<Option<(u16, [Option<table::PreparedBorder>; 6])>, String> {
+        let Some(selected_style) = selected_style else {
+            return Ok(None);
+        };
+        Ok(self
+            .table_style_profile(selected_style)?
+            .conditional_table_borders
+            .map(|patch| (patch.condition, patch.sides)))
+    }
+
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
         let profile = if let Some(profile) = self.table_style_cache.get(&id) {
             Rc::clone(profile)
@@ -227,6 +252,8 @@ impl Formatting<'_> {
         let mut horizontal_source = None;
         let mut vertical_source = None;
         let mut has_conditional_table = false;
+        #[cfg(feature = "direct-doc")]
+        let mut conditional_border_rejected = false;
         let mut default_margin_sides = 0u8;
         let mut style_margin_sides = 0u8;
         let interpret_table_styles = self.interpret_table_styles;
@@ -244,6 +271,58 @@ impl Formatting<'_> {
                 &mut self.budget,
                 |scope, code, operand, _| {
                     match code {
+                        #[cfg(feature = "direct-doc")]
+                        0xd47f | 0xd680 | 0xd681 | 0xd682 | 0xd683 | 0xd684 => {
+                            let tapx::Scope::Conditional(condition) = scope else {
+                                return Ok(false);
+                            };
+                            if operand.len() != 9 || operand[0] != 8 {
+                                return Err(unsupported(
+                                    "invalid Word conditional table-style border",
+                                ));
+                            }
+                            let value = table::PreparedBorder::read(&operand[1..], false)?;
+                            if value.is_nil()
+                                || !matches!(
+                                    condition,
+                                    crate::doc::table_style_condition::FIRST_ROW
+                                        | crate::doc::table_style_condition::FIRST_COLUMN
+                                )
+                            {
+                                conditional_border_rejected = true;
+                                profile.conditional_table_borders = None;
+                                return Ok(false);
+                            }
+                            let side = match code {
+                                0xd47f => 0,
+                                0xd680 => 2,
+                                0xd681 => 1,
+                                0xd682 => 3,
+                                0xd683 => 4,
+                                0xd684 => 5,
+                                _ => unreachable!(),
+                            };
+                            if conditional_border_rejected {
+                                return Ok(false);
+                            }
+                            let mut patch = match profile.conditional_table_borders {
+                                Some(patch) if patch.condition != condition => {
+                                    conditional_border_rejected = true;
+                                    profile.conditional_table_borders = None;
+                                    return Ok(false);
+                                }
+                                Some(patch) => patch,
+                                None => ConditionalTableBorders {
+                                    condition,
+                                    sides: [None; 6],
+                                },
+                            };
+                            patch.sides[side] = Some(value);
+                            profile.conditional_table_borders = Some(patch);
+                            profile.condition_presence |= condition;
+                            has_conditional_table = true;
+                            Ok(interpret_table_styles)
+                        }
                         #[cfg(feature = "direct-doc")]
                         0xd613 => {
                             if scope != tapx::Scope::Unconditional {
@@ -445,6 +524,10 @@ impl Formatting<'_> {
             // Native controls have not yet established inherited TCnf
             // composition or priority. Keep it visible to the admission gate.
             profile.unsupported_table = true;
+            #[cfg(feature = "direct-doc")]
+            {
+                profile.conditional_table_borders = None;
+            }
         }
         Ok(profile)
     }

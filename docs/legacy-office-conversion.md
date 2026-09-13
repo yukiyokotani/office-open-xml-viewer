@@ -1382,13 +1382,13 @@ outside this selection are recorded without starting another automatic batch.
 | DOC-44 | Reset remaining row properties at TIstd application | Connected bounded reset of row alignment, header, modern cantSplit and no-overlap, with later direct overrides and repeated TIstd acquisition tests. Cell geometry and TDxaLeft survive. This does not resolve the full TAPX replacement cascade or legacy cantSplit compatibility |
 | DOC-45 | Project unconditional TAPX cell shading | Connected for bounded D687 shading: native controls verify child/empty/grandchild precedence, authored Nil versus omission, Auto and direct Raw ordering. Ordinary ipatNil remains no-fill; unresolved compatibility behavior stays gated |
 | DOC-46 | Project default and style cell margins | Connected for bounded unconditional D63E/D634 inheritance and post-TIstd D632/D634 overrides. Authored Nil, Dxa zero and omission remain distinct; actual-story tests use the existing effective cell-margin model. Conditional CSSA and overlapping D63E/D634 style chains remain gated |
-| DOC-47 | Project unconditional TAPX table borders | Connected modern LTR D613 inheritance and post-TIstd D613/D62F source-cell overrides, with actual-story tests and budgeted late border payloads. Unstyled compatibility behavior is preserved. TC80/style interaction, old/Nil borders with styles, repeated reset interactions, RTL and conditional borders remain separately gated |
+| DOC-47 | Project unconditional TAPX table borders | Connected modern LTR D613 inheritance and post-TIstd D613/D62F source-cell overrides, with actual-story tests and budgeted late border payloads. Unstyled compatibility behavior is preserved. TC80/style interaction, old/Nil borders with styles, repeated reset interactions, RTL and broader conditional borders remain separately gated |
 | DOC-48 | Connect conditional table shading and presence | Connected for single-style D687 conditions and cross-family presence. Native absent/empty/Nil/Auto/concrete controls verify singleton precedence; inherited TCnf and unsupported shading patterns remain gated |
-| DOC-49 | Project conditional cell borders | Resolve physical/logical edge ownership and interior borders without visual-column guesses |
+| DOC-49 | Project conditional cell borders | Connected for one non-inherited FIRST_ROW or FIRST_COLUMN border condition on rectangular unmerged LTR tables. Native controls establish exterior/interior region edges and singleton behavior. Actual-story tests cover six sides and unconditional-border coexistence; multiple conditions, later headers, irregular geometry and conditional/direct-border interactions remain gated |
 | DOC-50 | Establish TAPX inheritance precedence | Connected bounded unconditional D687, D613 and independent D63E/D634 inheritance with native child, empty-child, grandchild, reverse-value and direct-override controls. Nil rules are property-specific; inherited TCnf, mixed margin-family chains and other TAPX properties remain gated |
 | DOC-51 | Establish conditional PAPX/CHPX inheritance | Implemented for supported color, absolute CHps and logical PJc: varied native controls verify matching/nonmatching conditions, empty and partial children, parent conditional versus child unconditional values and direct overrides. An actual-story child-style test covers cache/context selection; conditional fonts, PJc80 and unsupported properties remain gated |
 | DOC-52 | Exercise combined table properties through story projection | Actual-story regression covers source paragraph IDs, ragged/merged cells, conditional color/size/alignment, shading, margins and direct overrides. Live-resource finalization removes merged-continuation orphans without changing projection order. Numbering through discarded continuations remains under DOC-59; no generalized merged-style fidelity claim |
-| DOC-53 | Re-evaluate bounded full-document admission | Fresh isolated WASM/corpus comparison, native Office evidence and adversarial review; retain every unresolved gate |
+| DOC-53 | Re-evaluate bounded full-document admission | Evaluation retains the unresolved gates: fresh isolated release WASMs agree on 143 inputs (59 private and 84 controls), with four private inputs admitted. Native controls and actual-story tests support only the documented subsets; DOC-25/26 and conditional-font/physical-alignment compatibility remain incomplete |
 
 The DOC-29 through DOC-40 checkpoint passed 785 Rust unit tests and nine
 integration tests, with six existing ignores. Fresh, separately built WASM
@@ -1400,6 +1400,26 @@ comparison is not an Office-fidelity or renderer-regression result. Prepared
 Raw shading was not yet called by native row acquisition at that checkpoint.
 The subsequent DOC-41/45 implementation connects that path while retaining
 unresolved admission gates.
+
+The margin, border, row-reset and combined-resource checkpoint passed 837 Rust
+unit tests and nine integration tests, with six existing ignores; the
+no-default-features build also passed. Typechecking and package-build checks
+passed after rebuilding all required WASM assets. The final static layout
+boundary check and its 95 tests passed, along with 17 compatibility-checker
+tests and 26 public-API-checker tests. Fresh isolated release WASMs agree on
+all 143 compared inputs, including admission, errors and exact streamed models.
+Four of 59 private inputs remain admitted; all 84 controls remain gated.
+Equality of rejected results is not a display-fidelity result. Additional
+native first-column boundary controls independently confirm the lower and
+vertical exterior edges used by the bounded conditional-border projection.
+
+Scoped adversarial review checked exact nested border framing, effective row
+origins, source-cell ownership, unchanged unstyled border order, fixed profile
+storage, late payload accounting and live-resource finalization. Unsupported
+conditional cascades do not expose a partial border patch. No renderer or
+shared-model change was needed for this checkpoint; XLS/PPT conversion paths
+remain separate. Full-branch architecture and browser/visual acceptance remain
+outstanding before integration.
 
 DOC-24 native acceptance subsequently verified 16 marker locations in the
 negative and style-connected controls. Removing the selected flattened direct
@@ -1441,6 +1461,7 @@ architecture and browser/visual acceptance remain outstanding.
 | DOC-61 | Audit border-origin projection beyond the bounded subset | Row/style fallback borders currently become effective cell borders. The bounded native counterexample retains a thin direct-cell border but displays the thicker neighboring style border, agreeing with current conflict weighting; a direct border does not always win. Preserve this result and review other layers before claiming general equivalence or changing origin semantics |
 | DOC-62 | Resolve native TFBiDi90 compatibility | Native 560B true-then-false is LTR, and 560B true plus 5664 false remains RTL across TIstd. With 560B false plus 5664 true, native PDF remains LTR; saved DOCX direction differs before/after TIstd. Retain the compatibility gate and distinguish displayed behavior from save-time normalization |
 | DOC-63 | Distinguish legacy and modern cantSplit compatibility | Modern Word controls ignore 3403 on both sides of TIstd but preserve post-TIstd 3466. MS-DOC product notes distinguish the legacy encoding from modern cantSplit. Review version-aware acquisition before treating the existing shared boolean handling as native compatibility |
+| DOC-64 | Audit table identity for explicit default values | Review question: row grouping compares retained identity operands, while an explicit false no-overlap operand and an omitted default have the same resolved flag but different identity maps. Establish a focused structural/native control before changing normalization; TIstd reset now removes its stale no-overlap identity entry |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch
