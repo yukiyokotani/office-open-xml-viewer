@@ -1326,10 +1326,15 @@ Temporary experiment inputs, exports, diagnostics and builds belong under
 | DOC-02 | Row-owned TIstd selection and paragraph context | Connected; table admission remains gated |
 | DOC-03 | Observed unconditional CHPX color in direct projection | Connected; table admission remains gated |
 | DOC-04 | Observed unconditional LTR PAPX alignment in direct projection | Connected; table admission remains gated |
-| DOC-05 | Checked logical-column context for irregular rows | Partial: LTR row-local source order; explicit horizontal/vertical merge state and RTL remain unresolved |
-| DOC-06 | Conditional formatting in the production cascade | Not started; requires DOC-05 and verification of band/edge interactions |
+| DOC-05 | Checked logical-column context for irregular rows | Implemented: checked source-cell order, including horizontal/vertical merge slots and RTL; varied direct-DOC Office controls verified |
+| DOC-06 | Conditional formatting in the production cascade | Partially connected and tested through story projection: conditional character color; unresolved region presence, conditional inheritance, PAPX and TAPX remain gated |
 | DOC-07 | Further TAPX/PAPX/CHPX precedence | Not started; select one property group at a time |
 | DOC-08 | Evaluate removal of specific admission gates | Not started; requires end-to-end corpus and Office-reference evidence |
+| DOC-09 | Validate PrcData property-array limits | Newly identified: reject cbGrpprl above the MS-DOC maximum; review strict PHugePapx framing separately |
+| DOC-10 | Exercise FKP-to-Data table-property acquisition | Newly identified: real FKP tests for PTableProps, mixed chains, ignored tails, and later PCD overrides |
+| DOC-11 | Validate the effective mutation target in Office probes | Method verified in this batch: trace Data indirection and later overrides; reusable enforcement remains pending |
+| DOC-12 | Reject reserved TC80 vertical-merge values | Newly identified: value 2 survives TDefTable parsing and falls through to unmerged model output; validate against MS-DOC 2.9.342 |
+| DOC-13 | Resolve conditional-region presence across property families | Office controls distinguish empty CNF from nonempty CHPX/PAPX; extend bounded evidence before relaxing band/edge gates |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch

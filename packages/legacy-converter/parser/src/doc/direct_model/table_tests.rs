@@ -52,7 +52,7 @@ fn nested_row(width: u16) -> Vec<u8> {
 }
 
 /// Replace the fixture's default PAP FKP with exact CP-addressed PAPX runs.
-fn with_papx(source: &[u8], runs: &[(usize, usize, Vec<u8>)]) -> Vec<u8> {
+pub(super) fn with_papx(source: &[u8], runs: &[(usize, usize, Vec<u8>)]) -> Vec<u8> {
     let cfb = CompoundFile::open(source).unwrap();
     let mut word = cfb.stream("WordDocument").unwrap();
     let table = cfb.stream("0Table").unwrap();

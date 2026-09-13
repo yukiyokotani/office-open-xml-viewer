@@ -11,11 +11,6 @@ use super::{
 };
 use std::borrow::Borrow;
 
-// TC80 carries horizontal and vertical merge state in these fields; see
-// [MS-DOC] 2.9.317 and 2.9.342.
-const HORIZONTAL_MERGE_MASK: u16 = 0b11;
-const VERTICAL_MERGE_MASK: u16 = 0b11 << 5;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ParagraphContext {
     pub(super) table_id: usize,
@@ -23,6 +18,8 @@ pub(super) struct ParagraphContext {
     pub(super) source_cell_index: Option<usize>,
     pub(super) ttp_id: usize,
     pub(super) table_style: Option<usize>,
+    /// Optional table-style flags from the same source TTP.
+    pub(super) table_style_options: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,9 +38,9 @@ pub(super) struct RowContext {
     pub(super) ttp_id: usize,
     /// Effective sprmTIstd selection resolved from this row's TTP mark.
     pub(super) table_style: Option<usize>,
+    /// Optional table-style flags from the same source TTP.
+    pub(super) table_style_options: Option<u16>,
     pub(super) source_cell_count: usize,
-    /// Whether source-cell order cannot yet be mapped to logical columns.
-    pub(super) column_context_unsupported: bool,
     pub(super) header: bool,
     /// Number of preceding rows that are neither the actual top row nor headers.
     pub(super) preceding_body_rows: usize,
@@ -133,13 +130,14 @@ impl Index {
             .ok_or_else(|| unsupported("Word table context paragraph outside index"))
     }
 
-    /// Returns the paragraph's row-local source-cell ordinal and count. TDefTable
-    /// carries this cell sequence independently for each row ([MS-DOC] 2.4.3,
-    /// 2.4.4, and 2.6.3). Controlled Word 16.112.4 direct-DOC tests distinguish
-    /// source order from a union grid for LTR wide, ragged, and serialized
-    /// collapsed cells. The specification does not settle every irregular
-    /// conditional-style case, so rows with explicit merge state or bidi layout
-    /// remain unsupported until their logical-column semantics are established.
+    /// Returns the paragraph's row-local source-cell ordinal and count. Row cell
+    /// definitions and cell marks retain the source sequence independently for
+    /// each row ([MS-DOC] 2.4.3 and 2.4.4); VertMergeOperand also counts every
+    /// source cell, including merged cells ([MS-DOC] 2.9.343). Controlled Word
+    /// 16.112.4 direct-DOC tests use the same ordinal/count for wide and ragged
+    /// rows, horizontal and vertical merge slots, and RTL rows without reversal.
+    /// sprmTMerge and VerticalMergeFlag continuation-content suppression are
+    /// separate from this source indexing.
     pub(super) fn logical_column(&self, id: usize) -> Result<Option<LogicalColumn>, String> {
         let Some(context) = self.paragraph(id)? else {
             return Ok(None);
@@ -155,11 +153,6 @@ impl Index {
             .rows
             .get(context.row_index)
             .ok_or_else(|| unsupported("Word table column row outside context index"))?;
-        if row.column_context_unsupported {
-            return Err(unsupported(
-                "Word table logical column context is unresolved",
-            ));
-        }
         if row.source_cell_count == 0 || ordinal >= row.source_cell_count {
             return Err(unsupported("invalid Word table source column position"));
         }
@@ -232,15 +225,12 @@ fn index_event<
                 .ok_or_else(|| unsupported("Word table row lacks source paragraph"))?;
             // Resolve from the TTP-owned row before assigning the same compact
             // selection to its paragraph contexts.
-            let (table_style, source_cell_count, column_context_unsupported, header) = {
+            let (table_style, table_style_options, source_cell_count, header) = {
                 let source = raw_row.source.borrow();
                 (
                     resolve_style(source.table_style)?,
+                    source.table_style_options,
                     source.cells.len(),
-                    source.bidi
-                        || source.cells.iter().any(|cell| {
-                            cell.flags & (HORIZONTAL_MERGE_MASK | VERTICAL_MERGE_MASK) != 0
-                        }),
                     source.header,
                 )
             };
@@ -253,6 +243,7 @@ fn index_event<
                     source_cell_index: None,
                     ttp_id,
                     table_style,
+                    table_style_options,
                 },
             )?;
             if raw_row.cells.len() != source_cell_count {
@@ -269,6 +260,7 @@ fn index_event<
                             source_cell_index: Some(source_cell_index),
                             ttp_id,
                             table_style,
+                            table_style_options,
                         },
                     )?;
                 }
@@ -282,8 +274,8 @@ fn index_event<
             rows.push(RowContext {
                 ttp_id,
                 table_style,
+                table_style_options,
                 source_cell_count,
-                column_context_unsupported,
                 header,
                 preceding_body_rows,
             });
@@ -404,16 +396,16 @@ mod tests {
                 RowContext {
                     ttp_id: 2,
                     table_style: None,
+                    table_style_options: None,
                     source_cell_count: 2,
-                    column_context_unsupported: false,
                     header: true,
                     preceding_body_rows: 0,
                 },
                 RowContext {
                     ttp_id: 5,
                     table_style: None,
+                    table_style_options: None,
                     source_cell_count: 2,
-                    column_context_unsupported: false,
                     header: false,
                     preceding_body_rows: 0,
                 },
@@ -435,6 +427,7 @@ mod tests {
                     source_cell_index: cell,
                     ttp_id: if row == 0 { 2 } else { 5 },
                     table_style: None,
+                    table_style_options: None,
                 })
             );
         }
@@ -547,6 +540,57 @@ mod tests {
         assert_eq!(index.paragraph(0).unwrap().unwrap().table_style, Some(3));
         assert_eq!(index.paragraph(1).unwrap().unwrap().table_style, Some(3));
         assert_eq!(index.tables()[0].rows[0].table_style, Some(3));
+    }
+
+    #[test]
+    fn table_style_options_follow_each_ttp_without_nested_or_absent_leakage() {
+        let inner_options = 0x0120;
+        let outer_options = 0x0340;
+        let mut inner_cell = properties(2, false, vec![]);
+        inner_cell.inner_cell = true;
+        let mut inner_row = properties(2, false, vec![cell(1_000, 0)]);
+        inner_row.inner_row = true;
+        inner_row.row.table_style_options = Some(inner_options);
+        let mut outer_row = properties(1, true, vec![cell(2_000, 0)]);
+        outer_row.row.table_style_options = Some(outer_options);
+        let index = build(vec![
+            (inner_cell, '\r'),
+            (inner_row, '\r'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (outer_row, '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, true, vec![cell(2_000, 0)]), '\u{7}'),
+        ]);
+
+        for (id, table_id, row_index, source_cell_index, ttp_id, options) in [
+            (0, 0, 0, Some(0), 1, Some(inner_options)),
+            (1, 0, 0, None, 1, Some(inner_options)),
+            (2, 1, 0, Some(0), 3, Some(outer_options)),
+            (3, 1, 0, None, 3, Some(outer_options)),
+            (4, 1, 1, Some(0), 5, None),
+            (5, 1, 1, None, 5, None),
+        ] {
+            assert_eq!(
+                index.paragraph(id).unwrap(),
+                Some(ParagraphContext {
+                    table_id,
+                    row_index,
+                    source_cell_index,
+                    ttp_id,
+                    table_style: None,
+                    table_style_options: options,
+                })
+            );
+        }
+        assert_eq!(
+            index.tables()[0].rows[0].table_style_options,
+            Some(inner_options)
+        );
+        assert_eq!(
+            index.tables()[1].rows[0].table_style_options,
+            Some(outer_options)
+        );
+        assert_eq!(index.tables()[1].rows[1].table_style_options, None);
     }
 
     #[test]
@@ -664,36 +708,173 @@ mod tests {
     }
 
     #[test]
-    fn logical_column_rejects_explicit_horizontal_and_vertical_merge_state() {
-        for flags in [1, 2, 3, 1 << 5, 2 << 5, 3 << 5] {
-            let index = build(vec![
+    fn horizontal_merge_slots_keep_source_ordinals_and_full_row_count() {
+        let merged_first = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (
+                properties(
+                    1,
+                    true,
+                    vec![cell(1_000, 2), cell(1_000, 1), cell(1_000, 0)],
+                ),
+                '\u{7}',
+            ),
+        ]);
+        assert_eq!(
+            merged_first.logical_column(2).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 2,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            merged_first.logical_column(1).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 1,
+                count: 3,
+            })
+        );
+
+        let merged_last = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (
+                properties(
+                    1,
+                    true,
+                    vec![cell(1_000, 0), cell(1_000, 2), cell(1_000, 1)],
+                ),
+                '\u{7}',
+            ),
+        ]);
+        assert_eq!(
+            merged_last.logical_column(1).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 1,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            merged_last.logical_column(2).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 2,
+                count: 3,
+            })
+        );
+
+        let merged_all = build(vec![
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (
+                properties(
+                    1,
+                    true,
+                    vec![cell(1_000, 2), cell(1_000, 1), cell(1_000, 1)],
+                ),
+                '\u{7}',
+            ),
+        ]);
+        assert_eq!(
+            merged_all.logical_column(0).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 0,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            merged_all.logical_column(1).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 1,
+                count: 3,
+            })
+        );
+        assert_eq!(
+            merged_all.logical_column(2).unwrap(),
+            Some(LogicalColumn {
+                ordinal: 2,
+                count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn vertical_merge_slots_keep_source_ordinals_and_full_row_count() {
+        let mut paragraphs = Vec::new();
+        for vertical in [3, 1, 1] {
+            paragraphs.extend([
                 (properties(1, false, vec![]), '\u{7}'),
-                (properties(1, true, vec![cell(1_000, flags)]), '\u{7}'),
+                (properties(1, false, vec![]), '\u{7}'),
+                (properties(1, false, vec![]), '\u{7}'),
+                (
+                    properties(
+                        1,
+                        true,
+                        vec![cell(1_000, 0), cell(1_000, vertical << 5), cell(1_000, 0)],
+                    ),
+                    '\u{7}',
+                ),
             ]);
-            let error = index.logical_column(0).unwrap_err();
-            assert!(
-                error.contains("logical column context is unresolved"),
-                "{error}"
+        }
+        let index = build(paragraphs);
+
+        for id in [1, 5, 9] {
+            assert_eq!(
+                index.logical_column(id).unwrap(),
+                Some(LogicalColumn {
+                    ordinal: 1,
+                    count: 3,
+                })
             );
-            assert_eq!(index.logical_column(1).unwrap(), None);
+        }
+        for (id, ordinal) in [(0, 0), (2, 2), (4, 0), (6, 2), (8, 0), (10, 2)] {
+            assert_eq!(
+                index.logical_column(id).unwrap(),
+                Some(LogicalColumn { ordinal, count: 3 })
+            );
+        }
+        for ttp in [3, 7, 11] {
+            assert_eq!(index.logical_column(ttp).unwrap(), None);
         }
     }
 
     #[test]
-    fn logical_column_rejects_bidi_rows() {
-        let mut row = properties(1, true, vec![cell(1_000, 0)]);
-        row.row.bidi = true;
+    fn bidi_rows_keep_source_order_without_reversal() {
+        let mut ordinary = properties(
+            1,
+            true,
+            vec![cell(1_000, 0), cell(1_000, 0), cell(1_000, 0)],
+        );
+        ordinary.row.bidi = true;
+        let mut merged = properties(
+            1,
+            true,
+            vec![cell(1_000, 0), cell(1_000, 2), cell(1_000, 1)],
+        );
+        merged.row.bidi = true;
         let index = build(vec![
             (properties(1, false, vec![]), '\u{7}'),
-            (row, '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (ordinary, '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (properties(1, false, vec![]), '\u{7}'),
+            (merged, '\u{7}'),
         ]);
 
-        let error = index.logical_column(0).unwrap_err();
-        assert!(
-            error.contains("logical column context is unresolved"),
-            "{error}"
-        );
-        assert_eq!(index.logical_column(1).unwrap(), None);
+        for start in [0, 4] {
+            for ordinal in 0..3 {
+                assert_eq!(
+                    index.logical_column(start + ordinal).unwrap(),
+                    Some(LogicalColumn { ordinal, count: 3 })
+                );
+            }
+            assert_eq!(index.logical_column(start + 3).unwrap(), None);
+        }
     }
 
     #[test]
@@ -926,6 +1107,7 @@ mod tests {
             source_cell_index: Some(0),
             ttp_id: 1,
             table_style: None,
+            table_style_options: None,
         };
         let mut contexts = vec![Some(context)];
         let error = set_innermost(&mut contexts, 0, context).unwrap_err();

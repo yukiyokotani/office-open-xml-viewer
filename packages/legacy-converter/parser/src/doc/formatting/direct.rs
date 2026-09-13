@@ -1,7 +1,7 @@
 //! Direct model assembly from the same resolved DOC formatting cascade used by
 //! the legacy WordprocessingML adapter. Numbering remains deferred to its owner.
 
-use super::{numbering, Formatting, Properties};
+use super::{numbering, Formatting, Properties, TableFormattingKey};
 use docx_model::AnchorHostMetrics;
 use docx_model::{DocParagraph, NumberingInfo, TextRun};
 
@@ -29,7 +29,7 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_anchor_host_metrics(
         &mut self,
         paragraph_style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
@@ -66,7 +66,7 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_paragraph(
         &mut self,
         style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
@@ -95,7 +95,7 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_text_run(
         &mut self,
         paragraph_style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
@@ -111,7 +111,7 @@ impl Formatting<'_> {
     pub(in crate::doc) fn direct_inline_picture_facts(
         &mut self,
         paragraph_style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],

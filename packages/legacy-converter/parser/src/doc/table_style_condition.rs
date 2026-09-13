@@ -62,9 +62,8 @@ fn validate_band(value: Option<u8>) -> Result<(), String> {
 
 /// Matching CNFC values in MS-DOC's required application order: horizontal
 /// band, vertical band, column, row, then corner. The checked table-context
-/// lookup supplies source-cell ordinals for supported LTR, unmerged rows,
-/// including ragged rows and rows whose cell widths differ. Selection allocates
-/// nothing.
+/// lookup supplies row-local source-cell ordinals, including merge slots and
+/// RTL rows. Selection allocates nothing.
 pub(super) fn select(
     index: &Index,
     table_id: usize,

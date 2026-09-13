@@ -50,6 +50,9 @@ pub struct Row {
     /// Last directly selected table style. Resolution against STSH is deferred
     /// until the row-owning TTP is known ([MS-DOC] 2.4.6.6 Part 1, step 6).
     pub table_style: Option<usize>,
+    /// Live optional-style flags from the last sprmTTlp on this row. The TLP
+    /// itl field is historical auto-format metadata and is not live formatting.
+    pub table_style_options: Option<u16>,
     pub cells: Vec<Cell>,
     pub left: i32,
     pub gap: i32,
@@ -72,6 +75,7 @@ impl Default for Row {
             shading: None,
             identity: Default::default(),
             table_style: None,
+            table_style_options: None,
             cells: vec![],
             left: 0,
             gap: 0,
@@ -245,6 +249,17 @@ impl Row {
                 // state here. Returning false keeps the existing unsupported
                 // output gate until table TAPX/PAPX/CHPX are projected.
                 self.table_style = Some(usize::from(u16_at(b, 0)?));
+                return Ok(false);
+            }
+            0x740a => {
+                // MS-DOC 2.9.326 TLP: ignore the historical itl and retain
+                // only the live grfatl options. Returning false keeps TTlp
+                // itself behind the existing table-format admission gate.
+                if b.len() != 4 {
+                    return Err(unsupported("invalid Word table style options"));
+                }
+                let _ = u16_at(b, 0)? as i16;
+                self.table_style_options = Some(u16_at(b, 2)?);
                 return Ok(false);
             }
             0x360d | 0x940e | 0x940f | 0x9410 | 0x9411 | 0x941e | 0x941f | 0x3465 => {
@@ -541,6 +556,25 @@ mod tests {
         assert_eq!(row.table_style, Some(8));
         assert_eq!(row.identity[&0x563a], 8u16.to_le_bytes());
     }
+
+    #[test]
+    fn ttlp_retains_only_live_options_and_stays_behind_the_table_gate() {
+        let mut row = Row::default();
+        assert_eq!(row.table_style_options, None);
+        assert!(!row.apply(0x740a, &[7, 0, 0x20, 0x03]).unwrap());
+        assert_eq!(row.table_style_options, Some(0x0320));
+
+        // TTlp is row-local and absent from the exhaustive adjacent-row table
+        // identity in MS-DOC 2.4.3. Neither its historical itl nor its live
+        // grfatl splits the logical table used for row/column conditions.
+        let mut other = Row::default();
+        other.apply(0x740a, &[0xff, 0xff, 0x40, 0]).unwrap();
+        assert_eq!(row.identity, other.identity);
+        assert!(!row.apply(0x740a, &[0xff, 0xff, 0x20, 0x03]).unwrap());
+        assert!(row.apply(0x740a, &[0, 0, 0]).is_err());
+        assert!(row.apply(0x740a, &[0, 0, 0, 0, 0]).is_err());
+    }
+
     fn shade(pattern: u16) -> Vec<u8> {
         let mut b = vec![10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0];
         b.extend(pattern.to_le_bytes());

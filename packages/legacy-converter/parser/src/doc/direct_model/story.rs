@@ -8,8 +8,8 @@ use super::{
     ModelBudget, ParaPiece,
 };
 use crate::doc::{
-    floating, formatting, numbering, pictures, table, table_context, unsupported, Paragraph, Story,
-    Token,
+    floating, formatting, numbering, pictures, table, table_context, table_style_condition,
+    unsupported, Paragraph, Story, Token,
 };
 use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
@@ -80,10 +80,36 @@ pub(super) fn project(
                 "Word table context disagrees with paragraph depth",
             ));
         }
-        // Read the resolved row-owned selection from the production index.
-        // The supported style subset is projected here, while TIstd continues
-        // to trip the broader table-format admission gate.
-        let table_style = context.and_then(|value| value.table_style);
+        // Resolve the row-owned style and cell conditions once per original
+        // paragraph. Every paragraph mark, run, control, and picture host then
+        // shares the same compact formatting identity.
+        let table_style = if let Some(context) = context {
+            let matches = if let (Some(_), Some(options)) =
+                (context.source_cell_index, context.table_style_options)
+            {
+                let (horizontal, vertical) = formatting.table_style_bands(context.table_style)?;
+                let options = table_style_condition::Options::new(options, horizontal, vertical)?;
+                let column = table_context
+                    .logical_column(paragraph_index)?
+                    .ok_or_else(|| unsupported("Word table cell lacks source column context"))?;
+                table_style_condition::select(
+                    &table_context,
+                    context.table_id,
+                    context.row_index,
+                    column,
+                    options,
+                )?
+            } else {
+                [None; 5]
+            };
+            formatting.table_formatting_key(
+                context.table_style,
+                context.source_cell_index.and(context.table_style_options),
+                matches,
+            )?
+        } else {
+            None
+        };
         let direct =
             formatting.direct_paragraph(style, table_style, mark_fc, mark_prm, &story.prcs)?;
         let mut paragraph = direct.paragraph;
@@ -326,7 +352,7 @@ fn push_control_text(
     story: &Story<'_>,
     formatting: &mut formatting::Formatting<'_>,
     style: usize,
-    table_style: Option<usize>,
+    table_style: Option<formatting::TableFormattingKey>,
     cp: usize,
     text: &str,
     budget: &mut ModelBudget,
@@ -345,4 +371,160 @@ fn push_control_text(
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::table_tests::with_papx;
+    use super::*;
+    use crate::cfb::{test_support::build_cfb, CompoundFile};
+    use crate::doc::{with_acquired_doc, Fields};
+    use docx_model::CellElement;
+
+    fn sprm(code: u16, operand: &[u8]) -> Vec<u8> {
+        [code.to_le_bytes().as_slice(), operand].concat()
+    }
+
+    fn table_style_sheet() -> Vec<u8> {
+        let mut header = vec![0; 18];
+        header[0..2].copy_from_slice(&15u16.to_le_bytes());
+        header[2..4].copy_from_slice(&10u16.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend(18u16.to_le_bytes());
+        bytes.extend(header);
+
+        let mut normal = vec![0; 14];
+        normal[2..4].copy_from_slice(&0xfff1u16.to_le_bytes());
+        bytes.extend((normal.len() as u16).to_le_bytes());
+        bytes.extend(normal);
+
+        let mut style = vec![0; 14];
+        style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
+        style[4..6].copy_from_slice(&3u16.to_le_bytes());
+        for set in [
+            &[0x88, 0x34, 1][..],
+            &[1, 0][..],
+            &[
+                0x42, 0x2a, 1, // unconditional black
+                0x85, 0xca, 5, 0x40, 0, 0x42, 0x2a, 6, // odd row red
+                0x85, 0xca, 5, 0x80, 0, 0x42, 0x2a, 2, // even row blue
+            ][..],
+        ] {
+            style.extend((set.len() as u16).to_le_bytes());
+            style.extend(set);
+            if set.len() % 2 != 0 {
+                style.push(0);
+            }
+        }
+        let size = style.len() as u16;
+        style[6..8].copy_from_slice(&size.to_le_bytes());
+        bytes.extend(size.to_le_bytes());
+        bytes.extend(style);
+        for _ in 2..15 {
+            bytes.extend(0u16.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn with_table_style(source: &[u8]) -> Vec<u8> {
+        let cfb = CompoundFile::open(source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let stylesheet = table_style_sheet();
+        word[0xa2..0xa6].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        word[0xa6..0xaa].copy_from_slice(&(stylesheet.len() as u32).to_le_bytes());
+        table.extend(stylesheet);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    fn cell() -> Vec<u8> {
+        sprm(0x2416, &[1])
+    }
+
+    fn row(options: u16) -> Vec<u8> {
+        [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0x7621, &[0, 1, 0xe8, 3]),
+            sprm(0x563a, &1u16.to_le_bytes()),
+            sprm(0x740a, &[0, 0, options as u8, (options >> 8) as u8]),
+            sprm(0x2416, &[1]),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn project_uses_ttp_options_and_source_rows_for_conditional_color_keys() {
+        let text = "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r";
+        let source = super::super::tests::source_with_typography(
+            text,
+            &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+            None,
+            None,
+            None,
+            None,
+        );
+        let source = with_table_style(&source);
+        let source = with_papx(
+            &source,
+            &[
+                (0, 2, cell()),
+                (2, 3, row(0)),
+                (3, 5, cell()),
+                (5, 6, row(0)),
+                (6, 8, cell()),
+                (8, 9, row(1 << 9)),
+                (9, 10, Vec::new()),
+            ],
+        );
+        let cfb = CompoundFile::open(&source).unwrap();
+        with_acquired_doc(&cfb, |mut facts| {
+            let paragraphs = crate::doc::tokenize_with_fields(
+                &facts.story.text,
+                &mut Fields::default(),
+                0,
+                true,
+            );
+            let mut numbering = numbering::direct::Store::default();
+            numbering.begin_story()?;
+            let mut budget = ModelBudget::new(1_000_000);
+            let mut body = Vec::new();
+            let mut table_sequence = 0;
+            project(
+                &facts.story,
+                paragraphs,
+                &mut facts.formatting,
+                &mut numbering,
+                &mut facts.pictures,
+                Some(&mut facts.floating),
+                &mut budget,
+                &mut body,
+                None,
+                &mut table_sequence,
+            )?;
+
+            let BodyElement::Table(table) = &body[0] else {
+                panic!("table")
+            };
+            let colors: Vec<_> = table
+                .rows
+                .iter()
+                .map(|row| {
+                    let CellElement::Paragraph(paragraph) = &row.cells[0].content[0] else {
+                        panic!("paragraph")
+                    };
+                    let DocRun::Text(run) = &paragraph.runs[0] else {
+                        panic!("text")
+                    };
+                    run.color.as_deref().unwrap()
+                })
+                .collect();
+            assert_eq!(colors, ["ff0000", "0000ff", "000000"]);
+            // TIstd and TTlp remain deliberately admission-gated even though
+            // this internal projection verifies their acquired context.
+            assert!(facts.formatting.unsupported_table_properties);
+            Ok(())
+        })
+        .unwrap();
+    }
 }

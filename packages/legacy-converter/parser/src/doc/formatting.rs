@@ -1,16 +1,19 @@
-//! Resolve document fonts, paragraph-style character defaults, character
-//! styles and direct CHPX/PCD properties before serializing ordinary OOXML runs.
-//! [MS-DOC] 2.4.6, STSH/STD, SttbfFfn and FFN. Table style conditions and
-//! advanced paragraph properties remain outside this subset.
+//! Resolve the shared DOC formatting cascade for ordinary OOXML and direct-model
+//! projection. [MS-DOC] 2.4.6, STSH/STD, SttbfFfn and FFN apply. Direct-model
+//! projection includes bounded table-style conditional color; other conditional
+//! formatting and advanced paragraph properties remain gated.
 
 use super::character::{self, Properties};
 use super::fkp::{self, Index, Kind};
 use super::sprm::{self, Budget, Sprms};
 use super::{numbering, paragraph, table, u16_at, unsupported};
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 #[cfg(feature = "direct-doc")]
 mod direct;
+mod table_style;
+pub(in crate::doc) use table_style::TableFormattingKey;
 
 /// Table-aware caches trade recomputation for a fixed retained-entry bound.
 /// A document can otherwise present the Cartesian product of paragraph and
@@ -110,9 +113,11 @@ pub struct Formatting<'a> {
     fonts: Vec<String>,
     defaults: Properties,
     styles: Vec<Option<Style<'a>>>,
-    paragraph_cache: BTreeMap<(usize, Option<usize>), Properties>,
+    paragraph_cache: BTreeMap<(usize, Option<TableFormattingKey>), Properties>,
     paragraph_marker_styles: BTreeMap<usize, Properties>,
-    paragraph_layout_cache: BTreeMap<(usize, Option<usize>), CachedParagraphProperties>,
+    paragraph_layout_cache:
+        BTreeMap<(usize, Option<TableFormattingKey>), CachedParagraphProperties>,
+    table_style_cache: BTreeMap<usize, Rc<table_style::Profile>>,
     data: &'a [u8],
     budget: Budget,
     numbering: numbering::Tables<'a>,
@@ -159,6 +164,7 @@ impl<'a> Formatting<'a> {
             paragraph_cache: BTreeMap::new(),
             paragraph_marker_styles: BTreeMap::new(),
             paragraph_layout_cache: BTreeMap::new(),
+            table_style_cache: BTreeMap::new(),
             data,
             budget: Budget::default(),
             numbering: numbering::Tables::read(word, table)?,
@@ -230,7 +236,7 @@ impl<'a> Formatting<'a> {
     fn resolve_paragraph_with_table(
         &mut self,
         style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
@@ -394,11 +400,13 @@ impl<'a> Formatting<'a> {
     fn apply_table_paragraph_style(
         &mut self,
         props: &mut paragraph::Properties,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
     ) -> Result<bool, String> {
         let Some(table_style) = table_style else {
             return Ok(false);
         };
+        let table_style = table_style.selected_style;
+        let _ = self.table_style_profile(table_style)?;
         if self
             .styles
             .get(table_style)
@@ -420,9 +428,6 @@ impl<'a> Formatting<'a> {
                 .table
                 .as_ref()
                 .expect("validated table style");
-            if !sets.tapx.is_empty() {
-                self.unsupported_table_properties = true;
-            }
             if sets.papx.is_empty() {
                 continue;
             }
@@ -572,68 +577,20 @@ impl<'a> Formatting<'a> {
     fn paragraph_base_with_table(
         &mut self,
         id: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
     ) -> Result<Properties, String> {
         let key = (id, table_style);
         if let Some(value) = self.paragraph_cache.get(&key) {
             return Ok(value.clone());
         }
         let mut props = self.defaults.clone();
-        self.apply_table_run_style(&mut props, table_style)?;
+        self.apply_table_character_style(&mut props, table_style)?;
         self.apply_style(&mut props, id, 1)?;
         if self.paragraph_cache.len() >= MAX_TABLE_AWARE_CACHE_ENTRIES {
             self.paragraph_cache.clear();
         }
         self.paragraph_cache.insert(key, props.clone());
         Ok(props)
-    }
-
-    /// Apply the observed unconditional color subset of a table style's CHPX.
-    /// Base-to-derived priority here is backed by the controlled Word outputs;
-    /// it makes no claim about other table-style character properties.
-    fn apply_table_run_style(
-        &mut self,
-        props: &mut Properties,
-        table_style: Option<usize>,
-    ) -> Result<(), String> {
-        let Some(table_style) = table_style else {
-            return Ok(());
-        };
-        if self
-            .styles
-            .get(table_style)
-            .and_then(Option::as_ref)
-            .filter(|style| style.kind == 3)
-            .is_none()
-        {
-            // See apply_table_paragraph_style: absence of the fallback slot
-            // remains an explicitly gated unsupported table-style case.
-            self.unsupported_table_properties = true;
-            return Ok(());
-        }
-        for id in self.chain(table_style, 3)? {
-            let sets = self.styles[id]
-                .as_ref()
-                .expect("validated style")
-                .table
-                .as_ref()
-                .expect("validated table style");
-            if !sets.tapx.is_empty() {
-                self.unsupported_table_properties = true;
-            }
-            let baseline = props.clone();
-            let mut sprms = Sprms::new(sets.chpx);
-            while let Some((code, operand)) = sprms.next(&mut self.budget)? {
-                if matches!(code, 0x2a42 | 0x6870) {
-                    props.apply(code, operand, &baseline)?;
-                } else {
-                    // Conditional CCnf and all other table CHPX properties
-                    // remain behind the existing admission gate.
-                    self.unsupported_character_properties = true;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// A caller caches this result for a consecutive (paragraph style, CHPX,
@@ -695,7 +652,7 @@ impl<'a> Formatting<'a> {
     fn run_properties_with_table(
         &mut self,
         paragraph_style: usize,
-        table_style: Option<usize>,
+        table_style: Option<TableFormattingKey>,
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
@@ -901,6 +858,7 @@ fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::table_style_condition;
 
     #[cfg(feature = "direct-doc")]
     fn parse_direct_fixture(ppr: &str, rpr: &str, mark_rpr: &str) -> serde_json::Value {
@@ -951,6 +909,7 @@ mod tests {
             paragraph_cache: BTreeMap::new(),
             paragraph_marker_styles: BTreeMap::new(),
             paragraph_layout_cache: BTreeMap::new(),
+            table_style_cache: BTreeMap::new(),
             data: &[],
             budget: Budget::default(),
             numbering: numbering::Tables::default(),
@@ -1232,6 +1191,233 @@ mod tests {
         formatting
     }
 
+    fn table_key(id: usize) -> Option<TableFormattingKey> {
+        Some(TableFormattingKey::unconditional(id))
+    }
+
+    fn leaked(bytes: Vec<u8>) -> &'static [u8] {
+        Box::leak(bytes.into_boxed_slice())
+    }
+
+    fn ccnf(condition: u16, properties: &[u8]) -> Vec<u8> {
+        let cb = u8::try_from(2 + properties.len()).unwrap();
+        let mut bytes = vec![0x85, 0xca, cb];
+        bytes.extend(condition.to_le_bytes());
+        bytes.extend(properties);
+        bytes
+    }
+
+    fn conditional_color_formatting() -> Formatting<'static> {
+        const RED: &[u8] = &[0x42, 0x2a, 6];
+        const BLUE: &[u8] = &[0x70, 0x68, 0x00, 0x00, 0xff, 0x00];
+        const GREEN: &[u8] = &[0x70, 0x68, 0x00, 0x80, 0x00, 0x00];
+        const MAGENTA: &[u8] = &[0x70, 0x68, 0xff, 0x00, 0xff, 0x00];
+        const CYAN: &[u8] = &[0x70, 0x68, 0x00, 0xff, 0xff, 0x00];
+        const BLACK: &[u8] = &[0x70, 0x68, 0, 0, 0, 0];
+
+        let mut chpx = RED.to_vec();
+        for (condition, color) in [
+            (table_style_condition::HORIZONTAL_ODD, BLUE),
+            (table_style_condition::VERTICAL_ODD, GREEN),
+            (table_style_condition::FIRST_COLUMN, MAGENTA),
+            (table_style_condition::FIRST_ROW, CYAN),
+            (table_style_condition::TOP_LEFT, BLACK),
+        ] {
+            chpx.extend(ccnf(condition, color));
+        }
+        let mut formatting = observed_table_style_formatting();
+        let sets = formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap();
+        sets.tapx = &[0x88, 0x34, 1, 0x89, 0x34, 1];
+        sets.chpx = leaked(chpx);
+        formatting
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn conditional_color_keys_layer_in_doc_order_before_direct_formatting_and_resets() {
+        let mut formatting = conditional_color_formatting();
+        let key = |matches| TableFormattingKey {
+            selected_style: 0,
+            matches,
+        };
+        let none = key([None; 5]);
+        let horizontal = key([
+            Some(table_style_condition::HORIZONTAL_ODD),
+            None,
+            None,
+            None,
+            None,
+        ]);
+        let vertical = key([
+            None,
+            Some(table_style_condition::VERTICAL_ODD),
+            None,
+            None,
+            None,
+        ]);
+        let all = key([
+            Some(table_style_condition::HORIZONTAL_ODD),
+            Some(table_style_condition::VERTICAL_ODD),
+            Some(table_style_condition::FIRST_COLUMN),
+            Some(table_style_condition::FIRST_ROW),
+            Some(table_style_condition::TOP_LEFT),
+        ]);
+
+        for (key, expected) in [
+            (none, "ff0000"),
+            (horizontal, "0000ff"),
+            (vertical, "008000"),
+            (all, "000000"),
+        ] {
+            let run = formatting
+                .direct_text_run(7, Some(key), 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.color.as_deref(), Some(expected));
+        }
+        assert_eq!(formatting.table_style_cache.len(), 1);
+        assert_eq!(formatting.paragraph_cache.len(), 4);
+
+        // Direct CHPX remains last in MS-DOC 2.4.6.6.
+        let direct_black = [0x70, 0x68, 0, 0, 0, 0];
+        let run = formatting
+            .direct_text_run(7, Some(horizontal), 0, 1, &[&direct_black], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.color.as_deref(), Some("000000"));
+
+        // A character style can override the condition; CPlain resets to the
+        // same conditional table-aware paragraph baseline.
+        let select_blue_then_plain = [0x30, 0x4a, 8, 0, 0x33, 0x2a, 0];
+        let run = formatting
+            .direct_text_run(
+                7,
+                Some(vertical),
+                0,
+                1,
+                &[&select_blue_then_plain],
+                "x".into(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.color.as_deref(), Some("008000"));
+    }
+
+    #[test]
+    fn absent_ttlp_and_table_mark_keys_apply_only_unconditional_color() {
+        let mut formatting = conditional_color_formatting();
+        let absent = formatting
+            .table_formatting_key(Some(0), None, [None; 5])
+            .unwrap()
+            .unwrap();
+        let table_mark = formatting
+            .table_formatting_key(Some(0), None, [None; 5])
+            .unwrap()
+            .unwrap();
+        assert_eq!(absent, table_mark);
+        assert_eq!(absent.matches, [None; 5]);
+        let mut properties = Properties::default();
+        formatting
+            .apply_table_character_style(&mut properties, Some(absent))
+            .unwrap();
+        assert!(properties.xml(&[]).unwrap().contains("w:val=\"FF0000\""));
+    }
+
+    #[test]
+    fn empty_edge_ccnf_keeps_the_unresolved_region_band_interaction_gated() {
+        let mut formatting = observed_table_style_formatting();
+        let sets = formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap();
+        sets.tapx = &[0x89, 0x34, 1];
+        sets.chpx = leaked(ccnf(table_style_condition::FIRST_COLUMN, &[]));
+
+        assert_eq!(
+            formatting.table_style_bands(Some(0)).unwrap(),
+            (None, Some(1))
+        );
+        let _ = formatting
+            .table_formatting_key(Some(0), Some(1 << 7), [None; 5])
+            .unwrap();
+        assert!(formatting.unsupported_character_properties);
+    }
+
+    #[test]
+    fn invalid_and_unsupported_conditional_properties_fail_closed() {
+        let mut invalid = observed_table_style_formatting();
+        invalid.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[0x85, 0xca, 2, 0, 0];
+        assert!(invalid.table_style_bands(Some(0)).is_err());
+
+        let mut unsupported = observed_table_style_formatting();
+        let mut chpx = ccnf(table_style_condition::FIRST_COLUMN, &[0x35, 0x08, 1]);
+        chpx.extend(ccnf(
+            table_style_condition::FIRST_ROW,
+            &[0x85, 0xca, 2, 1, 0],
+        ));
+        unsupported.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(chpx);
+        let _ = unsupported.table_style_bands(Some(0)).unwrap();
+        assert!(unsupported.unsupported_character_properties);
+
+        let mut invalid_band = observed_table_style_formatting();
+        invalid_band.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = &[0x88, 0x34, 0];
+        assert!(invalid_band.table_style_bands(Some(0)).is_err());
+    }
+
+    #[test]
+    fn unevidenced_conditional_inheritance_and_conflicting_bands_remain_gated() {
+        // Unconditional parent/child color controls do not establish CNF
+        // inheritance or priority between conflicting inherited band widths.
+        let mut conditional = conditional_color_formatting();
+        conditional.table_style_bands(Some(1)).unwrap();
+        assert!(conditional.unsupported_character_properties);
+
+        for (child_width, unsupported) in [(1, false), (2, true)] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = &[0x88, 0x34, 1];
+            formatting.styles[1]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(vec![0x88, 0x34, child_width]);
+            formatting.table_style_bands(Some(1)).unwrap();
+            assert_eq!(formatting.unsupported_table_properties, unsupported);
+        }
+    }
+
     #[test]
     fn table_papx_alignment_uses_embedded_style_index_and_observed_descendant_priority() {
         // Word-produced LTR controls establish these base/child/grandchild and
@@ -1248,7 +1434,7 @@ mod tests {
             (6, "right"),
         ] {
             let resolved = formatting
-                .resolve_paragraph_with_table(7, Some(table_style), 0, 0, &[])
+                .resolve_paragraph_with_table(7, table_key(table_style), 0, 0, &[])
                 .unwrap();
             assert!(
                 resolved
@@ -1267,7 +1453,7 @@ mod tests {
             .unwrap()
             .papx = &[1, 0, 0x03, 0x24, 0];
         formatting.paragraph_layout_cache.clear();
-        let error = match formatting.resolve_paragraph_with_table(7, Some(0), 0, 0, &[]) {
+        let error = match formatting.resolve_paragraph_with_table(7, table_key(0), 0, 0, &[]) {
             Err(error) => error,
             Ok(_) => panic!("mismatched embedded table style index must fail"),
         };
@@ -1282,29 +1468,29 @@ mod tests {
         // Resolve two table identities through the same paragraph style. This
         // exercises both table-aware caches through the typed projection seam.
         let base = formatting
-            .direct_paragraph(7, Some(0), 0, 0, &[])
+            .direct_paragraph(7, table_key(0), 0, 0, &[])
             .unwrap()
             .paragraph;
         assert_eq!(base.alignment, "left");
         assert_eq!(base.paragraph_mark_color.as_deref(), Some("ff0000"));
         let child = formatting
-            .direct_paragraph(7, Some(1), 0, 0, &[])
+            .direct_paragraph(7, table_key(1), 0, 0, &[])
             .unwrap()
             .paragraph;
         assert_eq!(child.alignment, "center");
         assert_eq!(child.paragraph_mark_color.as_deref(), Some("0000ff"));
         let empty_child = formatting
-            .direct_text_run(7, Some(2), 0, 0, &[], "x".into())
+            .direct_text_run(7, table_key(2), 0, 0, &[], "x".into())
             .unwrap()
             .unwrap();
         assert_eq!(empty_child.color.as_deref(), Some("ff0000"));
         let grandchild = formatting
-            .direct_text_run(7, Some(3), 0, 0, &[], "x".into())
+            .direct_text_run(7, table_key(3), 0, 0, &[], "x".into())
             .unwrap()
             .unwrap();
         assert_eq!(grandchild.color.as_deref(), Some("008000"));
         let nondefault_empty_child = formatting
-            .direct_text_run(7, Some(6), 0, 0, &[], "x".into())
+            .direct_text_run(7, table_key(6), 0, 0, &[], "x".into())
             .unwrap()
             .unwrap();
         assert_eq!(nondefault_empty_child.color.as_deref(), Some("008000"));
@@ -1314,7 +1500,7 @@ mod tests {
         // by the Office control; no direct-alignment claim is made from it.
         let black = [0x70, 0x68, 0, 0, 0, 0];
         let direct = formatting
-            .direct_text_run(7, Some(1), 0, 1, &[&black], "x".into())
+            .direct_text_run(7, table_key(1), 0, 1, &[&black], "x".into())
             .unwrap()
             .unwrap();
         assert_eq!(direct.color.as_deref(), Some("000000"));
@@ -1323,7 +1509,14 @@ mod tests {
         // returns to the table-aware paragraph baseline, preserving red.
         let select_blue_then_plain = [0x30, 0x4a, 8, 0, 0x33, 0x2a, 0];
         let reset = formatting
-            .direct_text_run(7, Some(0), 0, 1, &[&select_blue_then_plain], "x".into())
+            .direct_text_run(
+                7,
+                table_key(0),
+                0,
+                1,
+                &[&select_blue_then_plain],
+                "x".into(),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(reset.color.as_deref(), Some("ff0000"));
@@ -1331,7 +1524,7 @@ mod tests {
         // Table PAPX alignment is currently bounded to the observed LTR case.
         let rtl = [0x41, 0x24, 1];
         let paragraph = formatting
-            .direct_paragraph(7, Some(4), 0, 1, &[&rtl])
+            .direct_paragraph(7, table_key(4), 0, 1, &[&rtl])
             .unwrap()
             .paragraph;
         assert_eq!(paragraph.alignment, "left");
@@ -1344,14 +1537,14 @@ mod tests {
         formatting.paragraph_cache.clear();
         formatting.paragraph_layout_cache.clear();
         let styled = formatting
-            .direct_paragraph(7, Some(4), 0, 0, &[])
+            .direct_paragraph(7, table_key(4), 0, 0, &[])
             .unwrap()
             .paragraph;
         assert_eq!(styled.alignment, "center");
         assert_eq!(styled.paragraph_mark_color.as_deref(), Some("800080"));
         let direct_left = [0x03, 0x24, 0];
         let direct = formatting
-            .direct_paragraph(7, Some(1), 0, 1, &[&direct_left])
+            .direct_paragraph(7, table_key(1), 0, 1, &[&direct_left])
             .unwrap()
             .paragraph;
         assert_eq!(direct.alignment, "left");
@@ -1367,11 +1560,13 @@ mod tests {
             .table
             .as_mut()
             .unwrap();
-        sets.tapx = &[1];
+        sets.tapx = &[0x04, 0x34, 1];
         sets.papx = &[0, 0, 0x41, 0x24, 1];
         sets.chpx = &[0x35, 0x08, 1];
 
-        let _ = formatting.direct_paragraph(7, Some(0), 0, 0, &[]).unwrap();
+        let _ = formatting
+            .direct_paragraph(7, table_key(0), 0, 0, &[])
+            .unwrap();
         assert!(formatting.unsupported_table_properties);
         assert!(formatting.unsupported_paragraph_properties);
         assert!(formatting.unsupported_character_properties);
@@ -1405,13 +1600,14 @@ mod tests {
 
         for table_style in 0..=MAX_TABLE_AWARE_CACHE_ENTRIES {
             let paragraph = formatting
-                .direct_paragraph(paragraph_style, Some(table_style), 0, 0, &[])
+                .direct_paragraph(paragraph_style, table_key(table_style), 0, 0, &[])
                 .unwrap()
                 .paragraph;
             assert_eq!(paragraph.alignment, "left");
         }
         assert!(formatting.paragraph_cache.len() <= MAX_TABLE_AWARE_CACHE_ENTRIES);
         assert!(formatting.paragraph_layout_cache.len() <= MAX_TABLE_AWARE_CACHE_ENTRIES);
+        assert!(formatting.table_style_cache.len() <= MAX_TABLE_AWARE_CACHE_ENTRIES);
     }
 
     #[test]
