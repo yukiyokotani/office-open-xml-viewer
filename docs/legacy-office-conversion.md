@@ -1433,6 +1433,7 @@ architecture and browser/visual acceptance remain outstanding.
 | --- | --- | --- |
 | DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | A corpus input uses FibBase 0x00C1 with extension version 0x00C3. Current MS-DOC does not define that effective version; preserve an explicit rejection until its layout and applicable compatibility rules are established. Do not infer table-style capabilities from its numeric order |
 | DOC-55 | Resolve native Word Raw-Nil compatibility shading | Native Word controls with effective nFib 0x0112 retain compatibility D609/D612 shading when the later Raw D670 value is ShdNil. Changing the compatibility color changes the result; removing those compatibility properties restores table-style shading. This differs from the documented ignore rule. Keep the unresolved acquisition path gated; do not infer a renderer fallback or generalize beyond the tested version |
+| DOC-56 | Resolve authored Nil cell-margin precedence | A retained post-TIstd D634 with ftsNil/zero suppresses D634 style margins in native Word, while removing it exposes them. MS-DOC defines the size as ignored; this does not establish that the entire authored property is absent from the cascade. Keep Nil, explicit Dxa zero and omission distinct in further controls; do not implement an inferred no-op or zero fallback |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch
