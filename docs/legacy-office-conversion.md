@@ -1493,8 +1493,8 @@ selection are recorded without automatically extending the batch.
 | DOC-75 | Exercise native acquisition and source-row grouping | Added native/generic acquisition and source-row grouping coverage, preserving source TTP IDs and separating row-local cantSplit from table identity |
 | DOC-76 | Establish last-row conditional border regions | Connected bounded LAST_ROW border regions through cached profile and actual story projection; six sides, singleton, disabled flag and existing shape gates are covered |
 | DOC-77 | Establish last-column conditional border regions | Connected bounded LAST_COLUMN border regions through cached profile and actual story projection; six sides, singleton, disabled flag and existing shape gates are covered |
-| DOC-78 | Establish overlapping conditional border precedence | Native controls confirm row-over-column overlap precedence independent of serialized TCnf order. Different-side and interior-edge interactions still need controls; multiple-condition projection remains gated |
-| DOC-79 | Establish inherited conditional TAPX border behavior | Native controls confirm empty-child/grandchild inheritance, child color replacement and coexistence of distinct conditions. Partial-side, reversed values and repeated-condition behavior remain prerequisites; inherited TCnf stays gated |
+| DOC-78 | Establish overlapping conditional border precedence | Further native different-side and interior-edge controls support the bounded FIRST_COLUMN plus FIRST_ROW cascade in either serialized order. Its production projection is connected in the next batch; other condition pairs remain gated |
+| DOC-79 | Establish inherited conditional TAPX border behavior | Further partial-side, reverse-valued and repeated-record controls support bounded per-side conditional borders. FIRST_ROW and FIRST_COLUMN logical-left inheritance are connected; other inherited border sides/regions and shading remain gated |
 | DOC-80 | Bound merged and irregular conditional border geometry | Native controls suppress swallowed horizontal/vertical interior borders and retain source edges for isolated width/origin changes. Normalized grid interactions remain unresolved; merged/irregular conditional projection stays gated |
 | DOC-81 | Establish conditional margin composition | Native counterexamples reject simple composition: conditional D63E is retained, conditional D634 disappears, and an unconditional margin interaction differs from the naive cascade. Keep the gate and isolate the families and ordering before implementation |
 | DOC-82 | Run isolated model comparison and adjudicate changes | Fresh isolated release WASMs agree on all 187 inputs (59 private and 128 controls), including errors and streamed models; four private inputs admitted. The final comparison includes the reviewed border-presence correction |
@@ -1530,3 +1530,66 @@ model or XLS/PPT behavior was added. Generic DOC-to-XML no-overlap identity now
 uses the same documented false default, while its cantSplit behavior is retained.
 The remaining investigations and DOC-84/85 prevent any general table-style
 admission or completion claim.
+
+### Selected next batch: 30 items
+
+This user-authorized batch selects DOC-27, DOC-28, DOC-54, DOC-55, DOC-57,
+DOC-61, DOC-62, DOC-78, DOC-79, DOC-80, DOC-81, DOC-84 and DOC-85,
+together with the seventeen bounded slices below. Parent investigations and
+implementation prerequisites are tracked separately; no helper or control alone
+establishes general admission. The ordinary-ipatNil trial family remains paused
+after native Word display-update errors. New findings do not extend the batch.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-86 | Verify different-side row/column border overlap | Native different-side controls preserve both row-top and column-left edges at overlap in either record order; bounded projection is connected with final review and regression tests |
+| DOC-87 | Verify conditional interior-border overlap | Native row insideV and column insideH coexist with matching PDFs in either record order; broader edge combinations remain outside this control |
+| DOC-88 | Verify repeated conditional border records | Native repeated disjoint sides compose; a repeated same-side property uses the later serialized value in both value orders |
+| DOC-89 | Verify partial inherited conditional borders | Native partial child overrides preserve omitted parent exterior sides; a separately connected three-by-three child table verifies the inherited/replaced interior vertical edges |
+| DOC-90 | Verify reversed conditional-border inheritance | Native reverse-valued child replaces the top side while retaining the parent left side; broader inherited conditions remain gated unless independently covered |
+| DOC-91 | Bound condition-indexed border profile state | Implemented fixed four-condition/six-side raw storage within the existing bounded profile cache; unsupported inheritance and Nil clear the border projection |
+| DOC-92 | Apply accepted multi-condition border precedence | Connected FIRST_COLUMN then FIRST_ROW through shared selection; raw winners are resolved before decoding and charging retained strings. Rectangular unmerged LTR and direct-layer restrictions remain |
+| DOC-93 | Isolate conditional margin property families | Native isolation confirms unconditional and FIRST_ROW D63E margins; conditional D634 does not create a row-specific PDF offset despite its saved representation |
+| DOC-94 | Verify margin serialization versus application order | Both conditional/unconditional D634 serialization orders have identical native geometry; conditional D634 stays gated |
+| DOC-95 | Verify partial conditional margins and direct overrides | Native direct D632 Dxa, authored Nil and omission remain distinct; table indentation and mixed-family baselines limit general composition acceptance |
+| DOC-96 | Compare positioned no-overlap identity | Native positioned omission/false keep one three-row table; true splits it into three one-row tables. Source-row regression preserves the corresponding TTP ownership; inline compatibility remains DOC-84 |
+| DOC-97 | Isolate compatibility shading cell ranges | Native D609 one/three-entry arrays are ignored; post-TIstd D612 affects exactly its one/three-cell prefix with later Raw Nil. Other segments and replacements remain unverified |
+| DOC-98 | Verify compatibility shading reset interactions | Native D612 before TIstd is discarded while the same values after TIstd survive later Raw Nil. Retain the specification-conflicting compatibility gate pending broader controls |
+| DOC-99 | Verify complementary merged/irregular border geometry | Native opposite horizontal and partial vertical merges suppress swallowed boundaries and retain the remaining boundary; compensating widths preserve the source exterior edge. Combined irregular merges remain gated |
+| DOC-100 | Verify opposing direct border origins | Native swapped opposing red/blue direct borders select red under the documented brightness tie-break; exterior thin-double control agrees with the existing conflict result. Spacing, Nil and full reading-order ties remain unverified |
+| DOC-101 | Compare the final isolated native models | Fresh independent release WASMs agree on 221 cases: 59 private inputs and 162 controls. Admission remains four private inputs, with controls gated; equal errors are not display-fidelity evidence |
+| DOC-102 | Review final changes and reassess admission | Scoped adversarial review corrected eligible-corner selection and retained-string accounting. Final tests passed; full-document admission and full-branch architecture/browser/visual acceptance remain outstanding |
+
+The current batch's native trials also distinguish a positioned no-overlap
+identity change from the unresolved inline case. They do not justify applying
+that distinction as a new undocumented compatibility rule. Conditional margins
+and compatibility shading retain their gates where the observed result has not
+yet isolated the complete cascade.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-103 | Respect eligible corner presence in border admission | Adversarial review identified that a character corner can activate an edge absent from ordinary border presence, suppressing an opposing singleton edge. A conservative eligibility gate and source-story regression prevent partial border projection; each mapped side also uses shared selection. Generalized corner borders remain separate work |
+
+This checkpoint adds bounded multi-condition and inherited border projection,
+plus regressions for positioned row identity and retained conditional-margin
+gates. Native Word completed 34 new control exports without a display-update
+error; the previously failing ordinary-ipatNil family was not retried. The
+compatibility investigations are not complete merely because their individual
+controls now have an observed result.
+
+Fresh verification: 855 Rust unit tests and nine integration tests passed, with
+six existing ignores. The no-default-features check, 34 probe tests, nine PAPX
+inspector tests, 33 unchanged renderer border tests, static layout-boundary
+check, targeted formatting and diff checks passed. The final isolated release
+WASM comparison covers 221 cases with unchanged admission, errors and exact
+streamed models. Four of 59 private inputs remain admitted; this checkpoint
+does not establish full table-style admission or visual compatibility.
+
+The reviewed runtime delta is confined to native DOC table-style caching and
+border projection. Its four inline condition slots reuse the existing bounded
+cache; condition evaluation allocates no collection, source rows remain owned
+by the prepared story, and only final raw side winners are decoded and charged.
+Unconditional row fallback and cell-side borders retain their existing model
+roles. Renderer, worker protocol, shared models, public opt-in options and the
+independent XLS/PPT paths are unchanged. This scoped acceptance does not replace
+the outstanding review of the full feature branch.
