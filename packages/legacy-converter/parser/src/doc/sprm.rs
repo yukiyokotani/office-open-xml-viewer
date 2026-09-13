@@ -4,6 +4,9 @@
 use super::{u16_at, u32_at, unsupported};
 use std::collections::BTreeSet;
 
+/// [MS-DOC] 2.9.210 PrcData limits cbGrpprl to this many bytes.
+const MAX_PRC_DATA_GRPPRL_BYTES: usize = 0x3fa2;
+
 /// PHugePapx/PTableProps replace the remaining property array with PrcData.
 /// Share the traversal so paragraph layout and table structure see the same data.
 pub fn paragraph_properties<'a>(
@@ -29,6 +32,9 @@ pub fn paragraph_properties<'a>(
                 let size = u16_at(record, 0)? as usize;
                 if size < 10 {
                     return Err(unsupported("short Word paragraph data record"));
+                }
+                if size > MAX_PRC_DATA_GRPPRL_BYTES {
+                    return Err(unsupported("oversized Word paragraph data record"));
                 }
                 next =
                     Some(record.get(2..2 + size).ok_or_else(|| {
@@ -142,6 +148,52 @@ impl<'a> Sprms<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_grpprl(size: usize) -> Vec<u8> {
+        let four_byte_sprms = size % 3;
+        let mut bytes = Vec::with_capacity(size);
+        for _ in 0..four_byte_sprms {
+            bytes.extend([0x00, 0x46, 0, 0]);
+        }
+        while bytes.len() < size {
+            bytes.extend([0x07, 0x24, 0]);
+        }
+        assert_eq!(bytes.len(), size);
+        bytes
+    }
+
+    fn prc_data(size: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(size + 2);
+        bytes.extend(u16::try_from(size).unwrap().to_le_bytes());
+        bytes.extend(valid_grpprl(size));
+        bytes
+    }
+
+    #[test]
+    fn prc_data_enforces_the_cb_grpprl_maximum_at_its_exact_boundary() {
+        let reference = [0x46, 0x66, 0, 0, 0, 0];
+        for size in [0x3fa1, 0x3fa2] {
+            let data = prc_data(size);
+            let mut applied = 0;
+            paragraph_properties(&reference, &data, &mut Budget::default(), |_, _| {
+                applied += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert!(applied > 0);
+        }
+
+        let data = prc_data(0x3fa3);
+        let mut applied = 0;
+        let error = paragraph_properties(&reference, &data, &mut Budget::default(), |_, _| {
+            applied += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("oversized Word paragraph data"));
+        assert_eq!(applied, 0);
+    }
+
     #[test]
     fn shading_work_is_charged_before_cell_expansion() {
         let mut budget = Budget(76); // 1 SPRM + 13 operand bytes + 63 selected cells = 77.

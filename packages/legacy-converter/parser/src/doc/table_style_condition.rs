@@ -27,6 +27,7 @@ pub(super) struct Options {
     last_column: bool,
     horizontal_band: Option<u8>,
     vertical_band: Option<u8>,
+    corners: u16,
 }
 
 impl Options {
@@ -37,18 +38,49 @@ impl Options {
         grfatl: u16,
         horizontal_band: Option<u8>,
         vertical_band: Option<u8>,
+        supported_condition_presence: u16,
     ) -> Result<Self, String> {
         validate_band(horizontal_band)?;
         validate_band(vertical_band)?;
+        let first_row_flag = grfatl & (1 << 5) != 0;
+        let last_row_flag = grfatl & (1 << 6) != 0;
+        let first_column_flag = grfatl & (1 << 7) != 0;
+        let last_column_flag = grfatl & (1 << 8) != 0;
+        // Office 16.112.4 color controls establish that a present corner is
+        // eligible only when both of its original TTlp edge flags are set.
+        // An eligible corner activates both adjacent edge regions, including
+        // their band exclusions, even when the ordinary edge CCnf is absent.
+        let mut corners = 0;
+        if first_row_flag && first_column_flag {
+            corners |= supported_condition_presence & TOP_LEFT;
+        }
+        if first_row_flag && last_column_flag {
+            corners |= supported_condition_presence & TOP_RIGHT;
+        }
+        if last_row_flag && first_column_flag {
+            corners |= supported_condition_presence & BOTTOM_LEFT;
+        }
+        if last_row_flag && last_column_flag {
+            corners |= supported_condition_presence & BOTTOM_RIGHT;
+        }
         Ok(Self {
-            first_row: grfatl & (1 << 5) != 0,
-            last_row: grfatl & (1 << 6) != 0,
-            first_column: grfatl & (1 << 7) != 0,
-            last_column: grfatl & (1 << 8) != 0,
+            first_row: first_row_flag
+                && (supported_condition_presence & FIRST_ROW != 0
+                    || corners & (TOP_LEFT | TOP_RIGHT) != 0),
+            last_row: last_row_flag
+                && (supported_condition_presence & LAST_ROW != 0
+                    || corners & (BOTTOM_LEFT | BOTTOM_RIGHT) != 0),
+            first_column: first_column_flag
+                && (supported_condition_presence & FIRST_COLUMN != 0
+                    || corners & (TOP_LEFT | BOTTOM_LEFT) != 0),
+            last_column: last_column_flag
+                && (supported_condition_presence & LAST_COLUMN != 0
+                    || corners & (TOP_RIGHT | BOTTOM_RIGHT) != 0),
             horizontal_band: (grfatl & (1 << 9) == 0)
                 .then_some(horizontal_band)
                 .flatten(),
             vertical_band: (grfatl & (1 << 10) == 0).then_some(vertical_band).flatten(),
+            corners,
         })
     }
 }
@@ -120,13 +152,13 @@ pub(super) fn select(
         .then_some(FIRST_ROW)
         .or_else(|| last_row.then_some(LAST_ROW));
 
-    let corner = if actual_top && logical_left && options.first_row && options.first_column {
+    let corner = if actual_top && logical_left && options.corners & TOP_LEFT != 0 {
         Some(TOP_LEFT)
-    } else if actual_top && logical_right && options.first_row && options.last_column {
+    } else if actual_top && logical_right && options.corners & TOP_RIGHT != 0 {
         Some(TOP_RIGHT)
-    } else if actual_bottom && logical_left && options.last_row && options.first_column {
+    } else if actual_bottom && logical_left && options.corners & BOTTOM_LEFT != 0 {
         Some(BOTTOM_LEFT)
-    } else if actual_bottom && logical_right && options.last_row && options.last_column {
+    } else if actual_bottom && logical_right && options.corners & BOTTOM_RIGHT != 0 {
         Some(BOTTOM_RIGHT)
     } else {
         None
@@ -145,6 +177,7 @@ mod tests {
     use crate::doc::table::{Cell, Properties};
 
     const ALL: u16 = 0b1111 << 5;
+    const ALL_PRESENT: u16 = 0x0fff;
 
     fn properties(row_end: bool, header: bool) -> Properties {
         let mut value = Properties::default();
@@ -176,7 +209,7 @@ mod tests {
     #[test]
     fn matches_in_doc_application_order_with_row_column_and_corner_precedence() {
         let index = index(&[false, false, true, false, true]);
-        let options = Options::new(ALL, Some(1), Some(1)).unwrap();
+        let options = Options::new(ALL, Some(1), Some(1), ALL_PRESENT).unwrap();
         assert_eq!(
             select(&index, 0, 0, column(0), options).unwrap(),
             [
@@ -231,7 +264,7 @@ mod tests {
             (2, 2, HORIZONTAL_EVEN),
             (3, 4, HORIZONTAL_EVEN),
         ] {
-            let options = Options::new(0, Some(size), Some(size)).unwrap();
+            let options = Options::new(0, Some(size), Some(size), 0).unwrap();
             assert_eq!(
                 select(&index, 0, row, column(1), options).unwrap()[0],
                 Some(expected)
@@ -242,7 +275,7 @@ mod tests {
             (2, 1, VERTICAL_ODD),
             (3, 2, VERTICAL_ODD),
         ] {
-            let options = Options::new(0, Some(size), Some(size)).unwrap();
+            let options = Options::new(0, Some(size), Some(size), 0).unwrap();
             assert_eq!(
                 select(&index, 0, 1, column(ordinal), options).unwrap()[1],
                 Some(expected)
@@ -253,7 +286,7 @@ mod tests {
     #[test]
     fn singleton_dimensions_follow_exclusions_and_corner_precedence() {
         let index = index(&[false]);
-        let options = Options::new(ALL, Some(1), Some(1)).unwrap();
+        let options = Options::new(ALL, Some(1), Some(1), ALL_PRESENT).unwrap();
         assert_eq!(
             select(
                 &index,
@@ -274,6 +307,128 @@ mod tests {
                 Some(TOP_LEFT)
             ]
         );
+    }
+
+    #[test]
+    fn supported_presence_controls_edges_bands_and_singleton_priority() {
+        let table_index = index(&[false, false, false]);
+        let absent = Options::new(ALL, Some(1), Some(1), 0).unwrap();
+        assert_eq!(
+            select(&table_index, 0, 0, column(0), absent).unwrap(),
+            [Some(HORIZONTAL_ODD), Some(VERTICAL_ODD), None, None, None]
+        );
+
+        let first = Options::new(ALL, Some(1), Some(1), FIRST_ROW | FIRST_COLUMN).unwrap();
+        assert_eq!(
+            select(&table_index, 0, 0, column(0), first).unwrap(),
+            [None, None, Some(FIRST_COLUMN), Some(FIRST_ROW), None]
+        );
+
+        let singleton = index(&[false]);
+        let last_only = Options::new(ALL, None, None, LAST_ROW | LAST_COLUMN).unwrap();
+        assert_eq!(
+            select(
+                &singleton,
+                0,
+                0,
+                LogicalColumn {
+                    ordinal: 0,
+                    count: 1,
+                },
+                last_only,
+            )
+            .unwrap(),
+            [None, None, Some(LAST_COLUMN), Some(LAST_ROW), None]
+        );
+        let both = Options::new(
+            ALL,
+            None,
+            None,
+            FIRST_ROW | LAST_ROW | FIRST_COLUMN | LAST_COLUMN,
+        )
+        .unwrap();
+        assert_eq!(
+            select(
+                &singleton,
+                0,
+                0,
+                LogicalColumn {
+                    ordinal: 0,
+                    count: 1,
+                },
+                both,
+            )
+            .unwrap(),
+            [None, None, Some(FIRST_COLUMN), Some(FIRST_ROW), None]
+        );
+    }
+
+    #[test]
+    fn present_corners_activate_adjacent_edges_and_require_both_ttlp_flags() {
+        let table_index = index(&[false, false, false]);
+        for (condition, row, column_index, row_match, column_match) in [
+            (TOP_LEFT, 0, 0, FIRST_ROW, FIRST_COLUMN),
+            (TOP_RIGHT, 0, 2, FIRST_ROW, LAST_COLUMN),
+            (BOTTOM_LEFT, 2, 0, LAST_ROW, FIRST_COLUMN),
+            (BOTTOM_RIGHT, 2, 2, LAST_ROW, LAST_COLUMN),
+        ] {
+            let options = Options::new(ALL, None, None, condition).unwrap();
+            assert_eq!(
+                select(&table_index, 0, row, column(column_index), options).unwrap(),
+                [
+                    None,
+                    None,
+                    Some(column_match),
+                    Some(row_match),
+                    Some(condition)
+                ]
+            );
+            assert_eq!(
+                select(&table_index, 0, row, column(1), options).unwrap()[3],
+                Some(row_match)
+            );
+            assert_eq!(
+                select(&table_index, 0, 1, column(column_index), options).unwrap()[2],
+                Some(column_match)
+            );
+        }
+
+        let singleton = index(&[false]);
+        for (presence, expected) in [
+            (TOP_LEFT | TOP_RIGHT | BOTTOM_LEFT | BOTTOM_RIGHT, TOP_LEFT),
+            (TOP_RIGHT | BOTTOM_LEFT | BOTTOM_RIGHT, TOP_RIGHT),
+            (BOTTOM_LEFT | BOTTOM_RIGHT, BOTTOM_LEFT),
+            (BOTTOM_RIGHT, BOTTOM_RIGHT),
+        ] {
+            let options = Options::new(ALL, None, None, presence).unwrap();
+            assert_eq!(
+                select(
+                    &singleton,
+                    0,
+                    0,
+                    LogicalColumn {
+                        ordinal: 0,
+                        count: 1,
+                    },
+                    options,
+                )
+                .unwrap()[4],
+                Some(expected)
+            );
+        }
+
+        for (condition, flags, row, column_index) in [
+            (TOP_LEFT, 1 << 5, 0, 0),
+            (TOP_LEFT, 1 << 7, 0, 0),
+            (BOTTOM_RIGHT, 1 << 6, 2, 2),
+            (BOTTOM_RIGHT, 1 << 8, 2, 2),
+        ] {
+            let options = Options::new(flags, Some(1), Some(1), condition).unwrap();
+            assert_eq!(
+                select(&table_index, 0, row, column(column_index), options).unwrap(),
+                [Some(HORIZONTAL_ODD), Some(VERTICAL_ODD), None, None, None,]
+            );
+        }
     }
 
     #[test]
@@ -310,7 +465,7 @@ mod tests {
             let index = index(&vec![false; rows]);
             for flag_bits in 0u16..16 {
                 let flags = flag_bits << 5;
-                let options = Options::new(flags, None, None).unwrap();
+                let options = Options::new(flags, None, None, ALL_PRESENT).unwrap();
                 for row in 0..rows {
                     for column in 0..columns {
                         let actual = select(
@@ -344,15 +499,15 @@ mod tests {
     #[test]
     fn disabled_or_absent_bands_do_not_match_and_padding_is_ignored() {
         let index = index(&[false, false, false]);
-        let disabled = Options::new((1 << 9) | (1 << 10), Some(1), Some(1)).unwrap();
+        let disabled = Options::new((1 << 9) | (1 << 10), Some(1), Some(1), 0).unwrap();
         assert_eq!(
             select(&index, 0, 1, column(1), disabled).unwrap(),
             [None; 5]
         );
-        let absent = Options::new(0, None, None).unwrap();
+        let absent = Options::new(0, None, None, 0).unwrap();
         assert_eq!(select(&index, 0, 1, column(1), absent).unwrap(), [None; 5]);
-        let padded = Options::new(0xf800, Some(1), Some(1)).unwrap();
-        let plain = Options::new(0, Some(1), Some(1)).unwrap();
+        let padded = Options::new(0xf800, Some(1), Some(1), 0).unwrap();
+        let plain = Options::new(0, Some(1), Some(1), 0).unwrap();
         assert_eq!(
             select(&index, 0, 1, column(1), padded).unwrap(),
             select(&index, 0, 1, column(1), plain).unwrap()
@@ -362,7 +517,7 @@ mod tests {
     #[test]
     fn header_rows_count_normally_when_first_row_formatting_is_disabled() {
         let index = index(&[true, false, true, false, true]);
-        let options = Options::new(0x001f, Some(1), None).unwrap();
+        let options = Options::new(0x001f, Some(1), None, 0).unwrap();
         let expected = [
             HORIZONTAL_ODD,
             HORIZONTAL_EVEN,
@@ -381,11 +536,11 @@ mod tests {
     #[test]
     fn rejects_invalid_band_sizes_and_context_positions() {
         for size in [0, 4, 255] {
-            assert!(Options::new(0, Some(size), None).is_err());
-            assert!(Options::new(0, None, Some(size)).is_err());
+            assert!(Options::new(0, Some(size), None, 0).is_err());
+            assert!(Options::new(0, None, Some(size), 0).is_err());
         }
         let index = index(&[false]);
-        let options = Options::new(0, None, None).unwrap();
+        let options = Options::new(0, None, None, 0).unwrap();
         assert!(select(&index, 1, 0, column(0), options).is_err());
         assert!(select(&index, 0, 1, column(0), options).is_err());
         for invalid in [

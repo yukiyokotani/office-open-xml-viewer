@@ -87,8 +87,10 @@ pub(super) fn project(
             let matches = if let (Some(_), Some(options)) =
                 (context.source_cell_index, context.table_style_options)
             {
-                let (horizontal, vertical) = formatting.table_style_bands(context.table_style)?;
-                let options = table_style_condition::Options::new(options, horizontal, vertical)?;
+                let (horizontal, vertical, presence) =
+                    formatting.table_style_selector_profile(context.table_style)?;
+                let options =
+                    table_style_condition::Options::new(options, horizontal, vertical, presence)?;
                 let column = table_context
                     .logical_column(paragraph_index)?
                     .ok_or_else(|| unsupported("Word table cell lacks source column context"))?;
@@ -385,7 +387,7 @@ mod tests {
         [code.to_le_bytes().as_slice(), operand].concat()
     }
 
-    fn table_style_sheet() -> Vec<u8> {
+    fn table_style_sheet(first_row_color: bool) -> Vec<u8> {
         let mut header = vec![0; 18];
         header[0..2].copy_from_slice(&15u16.to_le_bytes());
         header[2..4].copy_from_slice(&10u16.to_le_bytes());
@@ -401,15 +403,19 @@ mod tests {
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
         style[4..6].copy_from_slice(&3u16.to_le_bytes());
-        for set in [
-            &[0x88, 0x34, 1][..],
-            &[1, 0][..],
-            &[
-                0x42, 0x2a, 1, // unconditional black
-                0x85, 0xca, 5, 0x40, 0, 0x42, 0x2a, 6, // odd row red
-                0x85, 0xca, 5, 0x80, 0, 0x42, 0x2a, 2, // even row blue
-            ][..],
-        ] {
+        let first_row = if first_row_color {
+            &[0x85, 0xca, 8, 1, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
+        } else {
+            // An empty first-row CCnf has no supported condition presence.
+            &[0x85, 0xca, 2, 1, 0][..]
+        };
+        let mut character = vec![
+            0x42, 0x2a, 1, // unconditional black
+            0x85, 0xca, 5, 0x40, 0, 0x42, 0x2a, 6, // odd row red
+            0x85, 0xca, 5, 0x80, 0, 0x42, 0x2a, 2, // even row blue
+        ];
+        character.extend(first_row);
+        for set in [&[0x88, 0x34, 1][..], &[1, 0][..], character.as_slice()] {
             style.extend((set.len() as u16).to_le_bytes());
             style.extend(set);
             if set.len() % 2 != 0 {
@@ -426,11 +432,11 @@ mod tests {
         bytes
     }
 
-    fn with_table_style(source: &[u8]) -> Vec<u8> {
+    fn with_table_style(source: &[u8], first_row_color: bool) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let mut table = cfb.stream("0Table").unwrap();
-        let stylesheet = table_style_sheet();
+        let stylesheet = table_style_sheet(first_row_color);
         word[0xa2..0xa6].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0xa6..0xaa].copy_from_slice(&(stylesheet.len() as u32).to_le_bytes());
         table.extend(stylesheet);
@@ -453,9 +459,8 @@ mod tests {
         .concat()
     }
 
-    #[test]
-    fn project_uses_ttp_options_and_source_rows_for_conditional_color_keys() {
-        let text = "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r";
+    fn projected_table_colors(first_row_color: bool) -> (Vec<String>, bool) {
+        let text = "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}d\u{7}\u{7}\r";
         let source = super::super::tests::source_with_typography(
             text,
             &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
@@ -464,17 +469,19 @@ mod tests {
             None,
             None,
         );
-        let source = with_table_style(&source);
+        let source = with_table_style(&source, first_row_color);
         let source = with_papx(
             &source,
             &[
                 (0, 2, cell()),
-                (2, 3, row(0)),
+                (2, 3, row(1 << 5)),
                 (3, 5, cell()),
-                (5, 6, row(0)),
+                (5, 6, row(1 << 5)),
                 (6, 8, cell()),
-                (8, 9, row(1 << 9)),
-                (9, 10, Vec::new()),
+                (8, 9, row(1 << 5)),
+                (9, 11, cell()),
+                (11, 12, row(1 << 9)),
+                (12, 13, Vec::new()),
             ],
         );
         let cfb = CompoundFile::open(&source).unwrap();
@@ -506,7 +513,7 @@ mod tests {
             let BodyElement::Table(table) = &body[0] else {
                 panic!("table")
             };
-            let colors: Vec<_> = table
+            let colors = table
                 .rows
                 .iter()
                 .map(|row| {
@@ -516,15 +523,32 @@ mod tests {
                     let DocRun::Text(run) = &paragraph.runs[0] else {
                         panic!("text")
                     };
-                    run.color.as_deref().unwrap()
+                    run.color.clone().unwrap()
                 })
                 .collect();
-            assert_eq!(colors, ["ff0000", "0000ff", "000000"]);
-            // TIstd and TTlp remain deliberately admission-gated even though
-            // this internal projection verifies their acquired context.
-            assert!(facts.formatting.unsupported_table_properties);
-            Ok(())
+            Ok((colors, facts.formatting.unsupported_table_properties))
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn project_uses_ttp_options_and_source_rows_for_conditional_color_keys() {
+        let (colors, unsupported_table_properties) = projected_table_colors(true);
+        // The first three entries reproduce the Office row-first color
+        // control (green, red, blue); the fourth keeps the disabled-band
+        // row-local TTlp regression in the same acquisition path.
+        assert_eq!(colors, ["008000", "ff0000", "0000ff", "000000"]);
+        // TIstd and TTlp remain deliberately admission-gated even though
+        // this internal projection verifies their acquired context.
+        assert!(unsupported_table_properties);
+    }
+
+    #[test]
+    fn project_does_not_select_or_exclude_an_empty_first_row_condition() {
+        let (colors, unsupported_table_properties) = projected_table_colors(false);
+        // Office keeps the ordinary row bands unshifted when the enabled
+        // first-row CCnf is empty: red, blue, red.
+        assert_eq!(colors, ["ff0000", "0000ff", "ff0000", "000000"]);
+        assert!(unsupported_table_properties);
     }
 }

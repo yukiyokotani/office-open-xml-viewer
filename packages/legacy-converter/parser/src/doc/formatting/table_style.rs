@@ -3,7 +3,7 @@
 //! sprmTIstd inside UpxTapx to be ignored.
 
 use super::{Formatting, Properties, Sprms, MAX_TABLE_AWARE_CACHE_ENTRIES};
-use crate::doc::{table_style_condition, u16_at, unsupported};
+use crate::doc::{u16_at, unsupported};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -57,15 +57,19 @@ impl Default for Profile {
 }
 
 impl Formatting<'_> {
-    pub(in crate::doc) fn table_style_bands(
+    pub(in crate::doc) fn table_style_selector_profile(
         &mut self,
         selected_style: Option<usize>,
-    ) -> Result<(Option<u8>, Option<u8>), String> {
+    ) -> Result<(Option<u8>, Option<u8>, u16), String> {
         let Some(selected_style) = selected_style else {
-            return Ok((None, None));
+            return Ok((None, None, 0));
         };
-        let bands = self.table_style_profile(selected_style)?.bands;
-        Ok((bands.horizontal, bands.vertical))
+        let profile = self.table_style_profile(selected_style)?;
+        Ok((
+            profile.bands.horizontal,
+            profile.bands.vertical,
+            profile.condition_presence,
+        ))
     }
 
     pub(in crate::doc) fn table_formatting_key(
@@ -77,28 +81,8 @@ impl Formatting<'_> {
         let Some(selected_style) = selected_style else {
             return Ok(None);
         };
-        let profile = self.table_style_profile(selected_style)?;
-        if let Some(options) = table_style_options {
-            // Controlled Word output shows that an empty first-column CCnf
-            // does not shift band numbering, while the tested nonempty CCnf
-            // bold and PCnf alignment records do. Supported color CCnf is
-            // resolved here; other edge/band interactions remain gated.
-            let horizontal_enabled = options & (1 << 9) == 0 && profile.bands.horizontal.is_some();
-            let vertical_enabled = options & (1 << 10) == 0 && profile.bands.vertical.is_some();
-            let unresolved_horizontal = horizontal_enabled
-                && ((options & (1 << 5) != 0
-                    && profile.condition_presence & table_style_condition::FIRST_ROW == 0)
-                    || (options & (1 << 6) != 0
-                        && profile.condition_presence & table_style_condition::LAST_ROW == 0));
-            let unresolved_vertical = vertical_enabled
-                && ((options & (1 << 7) != 0
-                    && profile.condition_presence & table_style_condition::FIRST_COLUMN == 0)
-                    || (options & (1 << 8) != 0
-                        && profile.condition_presence & table_style_condition::LAST_COLUMN == 0));
-            if unresolved_horizontal || unresolved_vertical {
-                self.unsupported_character_properties = true;
-            }
-        } else if matches.iter().any(Option::is_some) {
+        let _ = self.table_style_profile(selected_style)?;
+        if table_style_options.is_none() && matches.iter().any(Option::is_some) {
             return Err(unsupported(
                 "Word table style conditions selected without sprmTTlp",
             ));
@@ -263,10 +247,9 @@ fn parse_conditional(
         }
     }
     if has_supported_color {
-        // Office 16.112.4 controls show that an empty first-column CCnf does
-        // not shift band numbering, while first-column PCnf alignment and
-        // CCnf bold true/false do. Those properties remain unsupported here;
-        // track only a color contribution this slice can apply and verify.
+        // Office 16.112.4 controls show that an empty CCnf has no conditional
+        // presence, while a nonempty supported color CCnf does. Unsupported
+        // property families remain gated and do not broaden this presence.
         profile.condition_presence |= condition;
         profile.conditional.insert(condition, patch);
     }

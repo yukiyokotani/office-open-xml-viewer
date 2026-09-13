@@ -358,6 +358,11 @@ impl Row {
                     };
                     if let Some(tc) = b.get(end + i * 20..end + (i + 1) * 20) {
                         cell.flags = u16_at(tc, 0)?;
+                        // [MS-DOC] 2.9.317/2.9.342: TCGRF.vertMerge is a
+                        // VerticalMergeFlag; its 2-bit value 2 is reserved.
+                        if (cell.flags >> 5) & 3 == 2 {
+                            return Err(unsupported("reserved Word TC80 vertical merge"));
+                        }
                         cell.preferred = PreferredWidth::tc80(cell.flags, u16_at(tc, 2)?)?;
                         for s in 0..4 {
                             cell.borders[s] = Some(Border::read(&tc[4 + s * 4..], true)?);
@@ -769,6 +774,40 @@ mod tests {
             row.cells[0].preferred,
             Some(PreferredWidth::Dxa(i16::MAX as u16))
         );
+    }
+    #[test]
+    fn tc80_rejects_reserved_vertical_merge_only_for_used_descriptors() {
+        fn definition(flags: &[u16]) -> Vec<u8> {
+            let mut operand = vec![0, 0, 1, 0, 0, 0xe8, 3];
+            for flags in flags {
+                operand.extend(flags.to_le_bytes());
+                operand.resize(operand.len() + 18, 0);
+            }
+            let cb = (operand.len() - 1) as u16;
+            operand[..2].copy_from_slice(&cb.to_le_bytes());
+            operand
+        }
+
+        for vertical_merge in [0, 1, 3] {
+            let mut row = Row::default();
+            row.apply(0xd608, &definition(&[vertical_merge << 5]))
+                .unwrap();
+            assert_eq!((row.cells[0].flags >> 5) & 3, vertical_merge);
+        }
+        assert!(Row::default()
+            .apply(0xd608, &definition(&[2 << 5]))
+            .is_err());
+
+        // [MS-DOC] 2.9.321 ignores TC80 entries beyond NumberOfColumns.
+        let mut excess = Row::default();
+        excess.apply(0xd608, &definition(&[0, 2 << 5])).unwrap();
+        assert_eq!(excess.cells.len(), 1);
+
+        // A wholly omitted rgTc80 uses the default TC80 formatting.
+        let mut omitted = Row::default();
+        omitted.apply(0xd608, &definition(&[])).unwrap();
+        assert_eq!(omitted.cells[0].flags, 0);
+        assert_eq!(omitted.cells[0].preferred, None);
     }
     #[test]
     fn depth_is_direct_and_bounded() {

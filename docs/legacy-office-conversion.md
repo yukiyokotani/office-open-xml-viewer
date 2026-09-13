@@ -1318,6 +1318,9 @@ architecture. Established behavior is represented by implementation and focused
 tests, with specification or bounded Office-observation comments beside them.
 Temporary experiment inputs, exports, diagnostics and builds belong under
 `outputs/` and are removed after their verification work is finished.
+Comparison worktrees must use separate `CARGO_TARGET_DIR` directories as well
+as separate WASM output directories; sharing Cargo output can reuse the other
+worktree's test executable.
 
 | Item | Scope | Status |
 | --- | --- | --- |
@@ -1327,14 +1330,17 @@ Temporary experiment inputs, exports, diagnostics and builds belong under
 | DOC-03 | Observed unconditional CHPX color in direct projection | Connected; table admission remains gated |
 | DOC-04 | Observed unconditional LTR PAPX alignment in direct projection | Connected; table admission remains gated |
 | DOC-05 | Checked logical-column context for irregular rows | Implemented: checked source-cell order, including horizontal/vertical merge slots and RTL; varied direct-DOC Office controls verified |
-| DOC-06 | Conditional formatting in the production cascade | Partially connected and tested through story projection: conditional character color; unresolved region presence, conditional inheritance, PAPX and TAPX remain gated |
+| DOC-06 | Conditional formatting in the production cascade | Partially connected and tested through story projection: conditional character color; conditional inheritance, PAPX and TAPX remain gated |
 | DOC-07 | Further TAPX/PAPX/CHPX precedence | Not started; select one property group at a time |
 | DOC-08 | Evaluate removal of specific admission gates | Not started; requires end-to-end corpus and Office-reference evidence |
-| DOC-09 | Validate PrcData property-array limits | Newly identified: reject cbGrpprl above the MS-DOC maximum; review strict PHugePapx framing separately |
-| DOC-10 | Exercise FKP-to-Data table-property acquisition | Newly identified: real FKP tests for PTableProps, mixed chains, ignored tails, and later PCD overrides |
-| DOC-11 | Validate the effective mutation target in Office probes | Method verified in this batch: trace Data indirection and later overrides; reusable enforcement remains pending |
-| DOC-12 | Reject reserved TC80 vertical-merge values | Newly identified: value 2 survives TDefTable parsing and falls through to unmerged model output; validate against MS-DOC 2.9.342 |
-| DOC-13 | Resolve conditional-region presence across property families | Office controls distinguish empty CNF from nonempty CHPX/PAPX; extend bounded evidence before relaxing band/edge gates |
+| DOC-09 | Validate PrcData property-array limits | Implemented: enforce the MS-DOC cbGrpprl maximum with exact boundary tests; strict FKP framing tracked separately |
+| DOC-10 | Exercise FKP-to-Data table-property acquisition | Implemented: actual FKP acquisition tests cover PTableProps, mixed chains, ignored tails, later PCD overrides, physical ranges and failures |
+| DOC-11 | Validate the effective mutation target in Office probes | Implemented: reusable read-only inspector and exact-edit validator follow FKP, Data and later PCD properties; bounded TIstd/TTlp assertions require an actual top-level TTP |
+| DOC-12 | Reject reserved TC80 vertical-merge values | Implemented: reject used TC80 value 2; retain valid 0/1/3, wholly omitted defaults and ignored excess descriptors |
+| DOC-13 | Resolve conditional-region presence across property families | Bounded color presence connected: empty/absent edges, singleton priority, eligible corners and disabled corner flags verified with varied Word controls; noncolor CHPX, PAPX and TAPX still require separate property support |
+| DOC-14 | Validate PHugePapx ownership constraints in FKP | Newly identified: GrpPrlAndIstd must contain only PHugePapx with istd zero; validate at the FKP boundary, not after discarding istd |
+| DOC-15 | Validate partial TC80 array records | Newly identified: TDefTable currently treats an incomplete used TC80 as omitted; preserve valid omitted cells and ignored excess entries when tightening framing |
+| DOC-16 | Enforce isolated build caches in the comparison harness | Newly identified: shared Cargo output reused a baseline test executable; this batch was reverified with separate targets, and future comparison tooling must enforce that isolation |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch

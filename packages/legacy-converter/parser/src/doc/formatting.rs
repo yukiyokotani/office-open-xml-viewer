@@ -1199,12 +1199,17 @@ mod tests {
         Box::leak(bytes.into_boxed_slice())
     }
 
-    fn ccnf(condition: u16, properties: &[u8]) -> Vec<u8> {
+    fn cnf(code: u16, condition: u16, properties: &[u8]) -> Vec<u8> {
         let cb = u8::try_from(2 + properties.len()).unwrap();
-        let mut bytes = vec![0x85, 0xca, cb];
+        let mut bytes = Vec::from(code.to_le_bytes());
+        bytes.push(cb);
         bytes.extend(condition.to_le_bytes());
         bytes.extend(properties);
         bytes
+    }
+
+    fn ccnf(condition: u16, properties: &[u8]) -> Vec<u8> {
+        cnf(0xca85, condition, properties)
     }
 
     fn conditional_color_formatting() -> Formatting<'static> {
@@ -1241,6 +1246,18 @@ mod tests {
     #[test]
     fn conditional_color_keys_layer_in_doc_order_before_direct_formatting_and_resets() {
         let mut formatting = conditional_color_formatting();
+        assert_eq!(
+            formatting.table_style_selector_profile(Some(0)).unwrap(),
+            (
+                Some(1),
+                Some(1),
+                table_style_condition::HORIZONTAL_ODD
+                    | table_style_condition::VERTICAL_ODD
+                    | table_style_condition::FIRST_COLUMN
+                    | table_style_condition::FIRST_ROW
+                    | table_style_condition::TOP_LEFT,
+            )
+        );
         let key = |matches| TableFormattingKey {
             selected_style: 0,
             matches,
@@ -1329,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_edge_ccnf_keeps_the_unresolved_region_band_interaction_gated() {
+    fn empty_edge_ccnf_has_no_supported_presence_or_missing_edge_gate() {
         let mut formatting = observed_table_style_formatting();
         let sets = formatting.styles[0]
             .as_mut()
@@ -1341,13 +1358,13 @@ mod tests {
         sets.chpx = leaked(ccnf(table_style_condition::FIRST_COLUMN, &[]));
 
         assert_eq!(
-            formatting.table_style_bands(Some(0)).unwrap(),
-            (None, Some(1))
+            formatting.table_style_selector_profile(Some(0)).unwrap(),
+            (None, Some(1), 0)
         );
         let _ = formatting
             .table_formatting_key(Some(0), Some(1 << 7), [None; 5])
             .unwrap();
-        assert!(formatting.unsupported_character_properties);
+        assert!(!formatting.unsupported_character_properties);
     }
 
     #[test]
@@ -1360,7 +1377,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .chpx = &[0x85, 0xca, 2, 0, 0];
-        assert!(invalid.table_style_bands(Some(0)).is_err());
+        assert!(invalid.table_style_selector_profile(Some(0)).is_err());
 
         let mut unsupported = observed_table_style_formatting();
         let mut chpx = ccnf(table_style_condition::FIRST_COLUMN, &[0x35, 0x08, 1]);
@@ -1375,8 +1392,43 @@ mod tests {
             .as_mut()
             .unwrap()
             .chpx = leaked(chpx);
-        let _ = unsupported.table_style_bands(Some(0)).unwrap();
+        let _ = unsupported.table_style_selector_profile(Some(0)).unwrap();
         assert!(unsupported.unsupported_character_properties);
+
+        let mut paragraph = observed_table_style_formatting();
+        let mut papx = vec![0, 0];
+        papx.extend(cnf(
+            0xc666,
+            table_style_condition::FIRST_ROW,
+            &[0x03, 0x24, 1],
+        ));
+        paragraph.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = leaked(papx);
+        paragraph
+            .resolve_paragraph_with_table(7, table_key(0), 0, 0, &[])
+            .unwrap();
+        assert!(paragraph.unsupported_paragraph_properties);
+
+        let mut table = observed_table_style_formatting();
+        let table_shading = [0x60, 0xd6, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        table.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(cnf(
+            0xd66a,
+            table_style_condition::FIRST_ROW,
+            &table_shading,
+        ));
+        let _ = table.table_style_selector_profile(Some(0)).unwrap();
+        assert!(table.unsupported_table_properties);
 
         let mut invalid_band = observed_table_style_formatting();
         invalid_band.styles[0]
@@ -1386,7 +1438,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .tapx = &[0x88, 0x34, 0];
-        assert!(invalid_band.table_style_bands(Some(0)).is_err());
+        assert!(invalid_band.table_style_selector_profile(Some(0)).is_err());
     }
 
     #[test]
@@ -1394,7 +1446,7 @@ mod tests {
         // Unconditional parent/child color controls do not establish CNF
         // inheritance or priority between conflicting inherited band widths.
         let mut conditional = conditional_color_formatting();
-        conditional.table_style_bands(Some(1)).unwrap();
+        conditional.table_style_selector_profile(Some(1)).unwrap();
         assert!(conditional.unsupported_character_properties);
 
         for (child_width, unsupported) in [(1, false), (2, true)] {
@@ -1413,7 +1465,7 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .tapx = leaked(vec![0x88, 0x34, child_width]);
-            formatting.table_style_bands(Some(1)).unwrap();
+            formatting.table_style_selector_profile(Some(1)).unwrap();
             assert_eq!(formatting.unsupported_table_properties, unsupported);
         }
     }
@@ -1725,35 +1777,71 @@ mod tests {
         }
     }
 
-    fn with_direct_paragraph(properties: &[u8]) -> Formatting<'_> {
+    fn with_direct_paragraph_runs(
+        runs: &[(u32, u32, Vec<u8>)],
+        data: Vec<u8>,
+    ) -> Formatting<'static> {
+        assert!(!runs.is_empty());
+        assert!(runs
+            .windows(2)
+            .all(|pair| pair[0].1 == pair[1].0 && pair[0].0 < pair[0].1));
+        assert!(runs.last().unwrap().0 < runs.last().unwrap().1);
         let mut word = vec![0u8; 1024];
-        let table: Vec<u8> = [100u32, 110, 1]
+        let table: Vec<u8> = [runs[0].0, runs.last().unwrap().1, 1]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
         word[0x106..0x10a].copy_from_slice(&12u32.to_le_bytes());
         let page = &mut word[512..1024];
-        page[0..4].copy_from_slice(&100u32.to_le_bytes());
-        page[4..8].copy_from_slice(&110u32.to_le_bytes());
-        if !properties.is_empty() {
-            page[8] = 32;
-            if properties.len() % 2 == 0 {
-                page[64] = 0;
-                page[65] = (properties.len() / 2) as u8;
-                page[66..66 + properties.len()].copy_from_slice(properties);
-            } else {
-                page[64] = ((properties.len() + 1) / 2) as u8;
-                page[65..65 + properties.len()].copy_from_slice(properties);
-            }
+        for (index, (start, _, _)) in runs.iter().enumerate() {
+            page[index * 4..index * 4 + 4].copy_from_slice(&start.to_le_bytes());
         }
-        page[511] = 1;
+        let count = runs.len();
+        page[count * 4..count * 4 + 4].copy_from_slice(&runs.last().unwrap().1.to_le_bytes());
+        let bx = (count + 1) * 4;
+        let mut payload = (bx + count * 13 + 1) & !1;
+        for (index, (_, _, properties)) in runs.iter().enumerate() {
+            if properties.is_empty() {
+                continue;
+            }
+            page[bx + index * 13] = (payload / 2) as u8;
+            if properties.len() % 2 == 0 {
+                page[payload] = 0;
+                page[payload + 1] = (properties.len() / 2) as u8;
+                page[payload + 2..payload + 2 + properties.len()].copy_from_slice(properties);
+                payload += 2 + properties.len();
+            } else {
+                page[payload] = properties.len().div_ceil(2) as u8;
+                page[payload + 1..payload + 1 + properties.len()].copy_from_slice(properties);
+                payload += 1 + properties.len();
+            }
+            payload = (payload + 1) & !1;
+            assert!(payload < 511);
+        }
+        page[511] = count as u8;
         // The index borrows its inputs, so leak this small test fixture.
         Formatting::read(
             Box::leak(word.into_boxed_slice()),
             Box::leak(table.into_boxed_slice()),
-            &[],
+            Box::leak(data.into_boxed_slice()),
         )
         .unwrap()
+    }
+
+    fn with_direct_paragraph(properties: &[u8]) -> Formatting<'static> {
+        with_direct_paragraph_runs(&[(100, 110, properties.to_vec())], Vec::new())
+    }
+
+    fn test_prl(code: u16, operand: &[u8]) -> Vec<u8> {
+        [code.to_le_bytes().as_slice(), operand].concat()
+    }
+
+    fn test_prc_data(grpprl: Vec<u8>) -> Vec<u8> {
+        assert!(grpprl.len() >= 10);
+        let mut data = Vec::with_capacity(2 + grpprl.len());
+        data.extend(u16::try_from(grpprl.len()).unwrap().to_le_bytes());
+        data.extend(grpprl);
+        data
     }
 
     fn level_bidi_formatting(value: u8) -> numbering::Tables<'static> {
@@ -2760,6 +2848,134 @@ mod tests {
             .apply_paragraph(&mut props, &[0x46, 0x66, 0, 0, 0, 0])
             .unwrap_err()
             .contains("cyclic"));
+    }
+
+    #[test]
+    fn table_properties_use_physical_papx_data_and_then_complex_piece_properties() {
+        let data = test_prc_data(
+            [
+                test_prl(0x2416, &[1]),
+                test_prl(0x2417, &[1]),
+                test_prl(0x7621, &[0, 1, 0xe8, 3]),
+                test_prl(0x563a, &4u16.to_le_bytes()),
+                test_prl(0x740a, &[0, 0, 0x20, 0]),
+                test_prl(0x3404, &[1]),
+            ]
+            .concat(),
+        );
+        let first_papx = [
+            vec![0, 0],
+            test_prl(0x646b, &0u32.to_le_bytes()),
+            // Compatibility TDefTable for readers that ignore PTableProps.
+            // Processing PTableProps replaces this tail per MS-DOC 2.6.2.
+            test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]),
+        ]
+        .concat();
+        let neighboring_papx = [
+            vec![0, 0],
+            test_prl(0x2416, &[1]),
+            test_prl(0x2417, &[1]),
+            test_prl(0x7621, &[0, 1, 0x90, 1]),
+            test_prl(0x563a, &7u16.to_le_bytes()),
+            test_prl(0x740a, &[0, 0, 0x40, 0]),
+            test_prl(0x3404, &[1]),
+        ]
+        .concat();
+        let mut formatting = with_direct_paragraph_runs(
+            &[(100, 110, first_papx), (110, 120, neighboring_papx)],
+            data,
+        );
+
+        let base = formatting.table_properties(109, 0, &[]).unwrap();
+        assert!(base.in_table && base.row_end && base.row.header);
+        assert_eq!(base.row.cells.len(), 1);
+        assert_eq!(base.row.cells[0].width, 1000);
+        assert_eq!(base.row.table_style, Some(4));
+        assert_eq!(base.row.table_style_options, Some(0x20));
+
+        let piece = [
+            test_prl(0x563a, &9u16.to_le_bytes()),
+            test_prl(0x740a, &[0, 0, 0x40, 3]),
+            test_prl(0x7623, &[0, 1, 0xdc, 5]),
+            test_prl(0x3404, &[0]),
+        ]
+        .concat();
+        let overridden = formatting.table_properties(109, 1, &[&piece]).unwrap();
+        assert_eq!(overridden.row.cells[0].width, 1500);
+        assert_eq!(overridden.row.table_style, Some(9));
+        assert_eq!(overridden.row.table_style_options, Some(0x0340));
+        assert!(!overridden.row.header);
+
+        let neighbor = formatting.table_properties(110, 0, &[]).unwrap();
+        assert_eq!(neighbor.row.cells[0].width, 400);
+        assert_eq!(neighbor.row.table_style, Some(7));
+        assert_eq!(neighbor.row.table_style_options, Some(0x40));
+        assert!(neighbor.row.header);
+        assert!(!formatting.table_properties(120, 0, &[]).unwrap().in_table);
+    }
+
+    #[test]
+    fn table_properties_follow_mixed_data_indirection_and_reject_bad_records() {
+        // A: apply in-table, ignore the non-first PHugePapx, then follow
+        // PTableProps to B. B: follow its first PHugePapx to C and ignore its
+        // tail. Every complete PrcData has cbGrpprl >= 10.
+        let offset_b = 17u32;
+        let offset_c = 29u32;
+        let record_a = test_prc_data(
+            [
+                test_prl(0x2416, &[1]),
+                test_prl(0x6646, &u32::MAX.to_le_bytes()),
+                test_prl(0x646b, &offset_b.to_le_bytes()),
+            ]
+            .concat(),
+        );
+        let record_b = test_prc_data(
+            [
+                test_prl(0x6646, &offset_c.to_le_bytes()),
+                test_prl(0x563a, &99u16.to_le_bytes()),
+            ]
+            .concat(),
+        );
+        let record_c = test_prc_data(
+            [
+                test_prl(0x2417, &[1]),
+                test_prl(0x7621, &[0, 1, 0xe8, 3]),
+                test_prl(0x3404, &[1]),
+            ]
+            .concat(),
+        );
+        assert_eq!(record_a.len(), offset_b as usize);
+        assert_eq!(record_a.len() + record_b.len(), offset_c as usize);
+        let data = [record_a, record_b, record_c].concat();
+        let papx = [vec![0, 0], test_prl(0x646b, &0u32.to_le_bytes())].concat();
+        let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data);
+        let properties = formatting.table_properties(109, 0, &[]).unwrap();
+        assert!(properties.in_table && properties.row_end && properties.row.header);
+        assert_eq!(properties.row.cells[0].width, 1000);
+        assert_eq!(properties.row.table_style, None);
+
+        let cycle = test_prc_data(
+            [
+                test_prl(0x646b, &0u32.to_le_bytes()),
+                test_prl(0x563a, &1u16.to_le_bytes()),
+            ]
+            .concat(),
+        );
+        let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx.clone())], cycle);
+        assert!(formatting
+            .table_properties(109, 0, &[])
+            .err()
+            .unwrap()
+            .contains("cyclic"));
+
+        let mut truncated = 10u16.to_le_bytes().to_vec();
+        truncated.extend([0u8; 9]);
+        let mut formatting = with_direct_paragraph_runs(&[(100, 110, papx)], truncated);
+        assert!(formatting
+            .table_properties(109, 0, &[])
+            .err()
+            .unwrap()
+            .contains("outside Data stream"));
     }
 
     #[test]
