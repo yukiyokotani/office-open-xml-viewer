@@ -15,6 +15,7 @@ use docx_model::paragraph_breaks::visit_para_on_page_breaks;
 use docx_model::{BodyElement, BreakType, DocRun, ImageRun};
 
 mod borders;
+mod margins;
 
 pub(super) fn project(
     story: &Story<'_>,
@@ -67,7 +68,7 @@ pub(super) fn project(
         &mut |selected| Ok(formatting.resolve_table_style_id(selected)),
         &mut |bytes| budget.charge(bytes),
     )?;
-    resolve_table_cell_margins(&mut prepared, &table_context, formatting)?;
+    margins::resolve(&mut prepared, &table_context, formatting)?;
     borders::resolve(&mut prepared, &table_context, formatting, budget)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
@@ -350,28 +351,6 @@ pub(super) fn project(
     Ok(())
 }
 
-fn resolve_table_cell_margins(
-    prepared: &mut [PreparedParagraph],
-    index: &table_context::Index,
-    formatting: &mut formatting::Formatting<'_>,
-) -> Result<(), String> {
-    for table_context in index.tables() {
-        for row_context in &table_context.rows {
-            let row = &mut prepared
-                .get_mut(row_context.ttp_id)
-                .ok_or_else(|| unsupported("Word table margin TTP outside story"))?
-                .table_properties
-                .row;
-            if row.cells.len() != row_context.source_cell_count {
-                return Err(unsupported("Word table margin cell count mismatch"));
-            }
-            let (defaults, cells) = formatting.table_cell_margins(row_context.table_style)?;
-            row.resolve_style_aware_margins(defaults, cells);
-        }
-    }
-    Ok(())
-}
-
 fn resolve_table_cell_shading(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -517,6 +496,7 @@ mod tests {
         #[default]
         None,
         D63e,
+        ConditionalD63e,
         D634,
     }
 
@@ -788,6 +768,14 @@ mod tests {
         match fixture.margins {
             MarginFixture::None => {}
             MarginFixture::D63e => tapx.extend(cell_margin(0xd63e, 0x02, 3, 360)),
+            MarginFixture::ConditionalD63e => {
+                tapx.extend(cell_margin(0xd63e, 0x0f, 3, 72));
+                tapx.extend(cnf(
+                    0xd66a,
+                    table_style_condition::FIRST_ROW,
+                    &cell_margin(0xd63e, 0x0f, 3, 288),
+                ));
+            }
             MarginFixture::D634 => tapx.extend(cell_margin(0xd634, 0x02, 3, 360)),
         }
         if fixture.table_borders {
@@ -926,6 +914,15 @@ mod tests {
         .concat()
     }
 
+    fn row_cells_with_horizontal_merge(options: u16, first: u8, limit: u8) -> Vec<u8> {
+        let mut row = row_cells(options, 3);
+        row.extend(sprm(0x5624, &[first, limit]));
+        if row.len() % 2 == 0 {
+            row.extend(cell());
+        }
+        row
+    }
+
     fn row_cells_with_extra(options: u16, count: u8, extra: &[u8]) -> Vec<u8> {
         let mut row = row_cells(options, count);
         row.extend(extra);
@@ -986,6 +983,17 @@ mod tests {
         // its two-byte style prefix. Keep the direct margin PRLs followed by a
         // harmless in-cell assertion so that framing invariant still holds.
         row.extend(sprm(0x2416, &[1]));
+        row
+    }
+
+    fn row_cells_with_options_and_margins(options: u16, count: u8, margins: &[Vec<u8>]) -> Vec<u8> {
+        let mut row = row_cells(options, count);
+        for margin in margins {
+            row.extend(margin);
+        }
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
         row
     }
 
@@ -1360,6 +1368,125 @@ mod tests {
                 none,
             ]
         );
+    }
+
+    #[test]
+    fn horizontal_merge_projects_conditional_borders_to_source_span_edges() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells_with_horizontal_merge(1 << 5, 0, 2)),
+        );
+        assert!(
+            projected.unsupported_table,
+            "horizontal merge geometry remains gated independently of border ownership"
+        );
+        assert_eq!(projected.row_cell_counts, [2, 2, 2]);
+        assert_eq!(projected.col_spans, [2, 1, 2, 1, 2, 1]);
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                none.clone(),
+                none,
+            ]
+        );
+    }
+
+    #[test]
+    fn first_row_right_merge_transfers_the_source_end_right_border() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                conditional_borders: table_style_condition::FIRST_ROW,
+                ..StyleFixture::default()
+            },
+            std::array::from_fn(|_| row_cells_with_horizontal_merge(1 << 5, 1, 3)),
+        );
+        assert!(
+            projected.unsupported_table,
+            "horizontal merge geometry remains gated independently of border ownership"
+        );
+        assert_eq!(projected.row_cell_counts, [2, 2, 2]);
+        let none = [None, None, None, None];
+        assert_eq!(
+            projected.borders,
+            [
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("008000".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                ],
+                [
+                    Some(("ff0000".into(), 4.0)),
+                    Some(("00ffff".into(), 4.0)),
+                    Some(("0000ff".into(), 4.0)),
+                    Some(("ffff00".into(), 4.0)),
+                ],
+                none.clone(),
+                none.clone(),
+                none,
+                [None, None, None, None],
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_tables_keep_unverified_conditions_gated() {
+        for (condition, option) in [
+            (table_style_condition::LAST_ROW, 1 << 6),
+            (table_style_condition::FIRST_COLUMN, 1 << 7),
+            (table_style_condition::LAST_COLUMN, 1 << 8),
+        ] {
+            let projected = conditional_border_grid_with_rows(
+                StyleFixture {
+                    conditional_borders: condition,
+                    ..StyleFixture::default()
+                },
+                std::array::from_fn(|_| row_cells_with_horizontal_merge(option, 0, 2)),
+            );
+            assert!(projected.unsupported_table);
+            assert!(projected
+                .borders
+                .iter()
+                .all(|sides| sides.iter().all(Option::is_none)));
+        }
+    }
+
+    #[test]
+    fn horizontal_merge_with_direct_start_or_end_border_remains_gated() {
+        for (first, limit) in [(0, 1), (1, 2)] {
+            let mut row = row_cells_with_horizontal_merge(1 << 5, 0, 2);
+            row.extend(cell_borders(first, limit, [0, 0, 0xff], 16));
+            if row.len() % 2 == 0 {
+                row.extend(cell());
+            }
+            let projected = conditional_border_grid_with_rows(
+                StyleFixture {
+                    conditional_borders: table_style_condition::FIRST_ROW,
+                    ..StyleFixture::default()
+                },
+                std::array::from_fn(|_| row.clone()),
+            );
+            assert!(projected.unsupported_table);
+            assert_ne!(projected.borders[0][0], Some(("ff0000".into(), 4.0)));
+        }
     }
 
     #[test]
@@ -2169,6 +2296,73 @@ mod tests {
             ]
         );
         assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn native_story_projects_bounded_first_row_d63e_and_keeps_right_gated() {
+        for (options, first) in [(1 << 5, 14.4), (0, 3.6)] {
+            let projected = conditional_border_grid_with_rows(
+                StyleFixture {
+                    margins: MarginFixture::ConditionalD63e,
+                    ..StyleFixture::default()
+                },
+                std::array::from_fn(|_| row_cells(options, 3)),
+            );
+            assert_eq!(projected.margins.len(), 9);
+            for margin in &projected.margins[..3] {
+                assert_eq!(*margin, [first, first, first, 3.6]);
+            }
+            for margin in &projected.margins[3..] {
+                assert_eq!(*margin, [3.6, 3.6, 3.6, 3.6]);
+            }
+            assert!(
+                projected.unsupported_table,
+                "the global TIstd gate remains active"
+            );
+        }
+    }
+
+    #[test]
+    fn native_story_keeps_direct_d632_dxa_nil_and_omission_above_first_row_d63e() {
+        let direct = [
+            cell_margin_range(0xd632, 0, 1, 0x02, 3, 432),
+            cell_margin_range(0xd632, 1, 2, 0x02, 0, 0),
+        ];
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                margins: MarginFixture::ConditionalD63e,
+                ..StyleFixture::default()
+            },
+            [
+                row_cells_with_options_and_margins(1 << 5, 3, &direct),
+                row_cells(1 << 5, 3),
+                row_cells(1 << 5, 3),
+            ],
+        );
+
+        assert_eq!(projected.margins[0][1], 21.6);
+        assert_eq!(projected.margins[1][1], 0.0);
+        assert_eq!(projected.margins[2][1], 14.4);
+    }
+
+    #[test]
+    fn native_story_gates_conditional_margins_for_merged_table_shape() {
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                margins: MarginFixture::ConditionalD63e,
+                ..StyleFixture::default()
+            },
+            [
+                row_cells_with_horizontal_merge(1 << 5, 0, 2),
+                row_cells(1 << 5, 3),
+                row_cells(1 << 5, 3),
+            ],
+        );
+
+        assert!(projected.unsupported_table);
+        for margin in projected.margins {
+            assert_eq!(margin, [3.6, 3.6, 3.6, 3.6]);
+        }
     }
 
     #[test]

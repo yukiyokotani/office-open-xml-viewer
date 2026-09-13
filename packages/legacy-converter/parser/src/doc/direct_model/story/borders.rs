@@ -22,6 +22,46 @@ struct ActiveConditional {
     presence: u16,
 }
 
+#[derive(Clone, Copy)]
+struct SourceSpans {
+    values: [(usize, usize); 63],
+    len: usize,
+}
+
+impl SourceSpans {
+    fn parse(row: &table::Row) -> Option<Self> {
+        if row.cells.is_empty() || row.cells.len() > 63 {
+            return None;
+        }
+        let mut values = [(0, 0); 63];
+        let mut len = 0;
+        let mut start = 0;
+        while start < row.cells.len() {
+            let flags = row.cells[start].flags & 3;
+            if flags == 1 {
+                return None;
+            }
+            let mut end = start + 1;
+            if flags >= 2 {
+                while end < row.cells.len() && row.cells[end].flags & 3 == 1 {
+                    end += 1;
+                }
+                if end == start + 1 {
+                    return None;
+                }
+            }
+            values[len] = (start, end);
+            len += 1;
+            start = end;
+        }
+        Some(Self { values, len })
+    }
+
+    fn as_slice(&self) -> &[(usize, usize)] {
+        &self.values[..self.len]
+    }
+}
+
 pub(super) fn resolve(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -31,7 +71,18 @@ pub(super) fn resolve(
     for (table_id, context) in index.tables().iter().enumerate() {
         let conditional = active_conditional(context, formatting)?;
         let conditional = if let Some(active) = conditional {
-            if supported_conditional_shape(prepared, context, active.style, active.options)? {
+            let conditions = active
+                .patches
+                .iter()
+                .flatten()
+                .fold(0, |mask, (condition, _)| mask | condition);
+            if supported_conditional_shape(
+                prepared,
+                context,
+                active.style,
+                active.options,
+                conditions,
+            )? {
                 Some(active)
             } else {
                 formatting.unsupported_table_properties = true;
@@ -42,13 +93,37 @@ pub(super) fn resolve(
         };
 
         if let Some(active) = conditional {
+            let merged_geometry = has_horizontal_merge(prepared, context)?;
             apply_conditional_regions(prepared, index, table_id, context, active, formatting)?;
+            if merged_geometry {
+                // DOC150 shows that these newly projected horizontal merged
+                // shapes require native grid redistribution. Keep the border
+                // ownership result for validation while gating this conditional
+                // projection independently of TIstd/TTlp admission.
+                formatting.unsupported_table_properties = true;
+            }
         }
         for row_context in &context.rows {
             resolve_row(prepared, row_context, formatting, budget)?;
         }
     }
     Ok(())
+}
+
+fn has_horizontal_merge(
+    prepared: &[PreparedParagraph],
+    context: &table_context::TableContext,
+) -> Result<bool, String> {
+    for row_context in &context.rows {
+        if source_row(prepared, row_context)?
+            .cells
+            .iter()
+            .any(|cell| cell.flags & 3 != 0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn active_conditional(
@@ -153,15 +228,25 @@ fn supported_conditional_shape(
     context: &table_context::TableContext,
     style: usize,
     options: u16,
+    conditions: u16,
 ) -> Result<bool, String> {
     let Some(first_context) = context.rows.first() else {
         return Ok(false);
     };
-    let first = row(prepared, first_context)?;
+    let first = source_row(prepared, first_context)?;
     if first.cells.is_empty() {
         return Ok(false);
     }
     let count = first.cells.len();
+    let Some(first_spans) = SourceSpans::parse(first) else {
+        return Ok(false);
+    };
+    // The native combined controls establish source-span ownership only for
+    // FIRST_ROW. Column conditions and other row scopes remain gated when a
+    // horizontal merge is present; their unmerged behavior is unchanged.
+    if first_spans.len < count && conditions != table_style_condition::FIRST_ROW {
+        return Ok(false);
+    }
     let origin = first.origin();
     let gap = first.gap;
 
@@ -172,7 +257,7 @@ fn supported_conditional_shape(
         {
             return Ok(false);
         }
-        let row = row(prepared, row_context)?;
+        let row = source_row(prepared, row_context)?;
         if row.bidi
             || row.border_tistd_count > 1
             || row.origin() != origin
@@ -183,9 +268,14 @@ fn supported_conditional_shape(
         {
             return Ok(false);
         }
+        let Some(spans) = SourceSpans::parse(row) else {
+            return Ok(false);
+        };
+        if spans.as_slice() != first_spans.as_slice() {
+            return Ok(false);
+        }
         for (ordinal, cell) in row.cells.iter().enumerate() {
             if cell.width != first.cells[ordinal].width
-                || cell.flags & 3 != 0
                 || (cell.flags >> 5) & 3 != 0
                 || cell.prepared_borders.iter().any(Option::is_some)
                 || cell.borders.iter().any(Option::is_some)
@@ -279,8 +369,10 @@ fn apply_conditional_regions(
     // MS-DOC 2.6.3 defines the six border properties allowed in a TCnf. Word
     // 16.112.4 controls establish their region boundaries here: first/last-row
     // left/right and insideV, first/last-column top/bottom and insideH, with no
-    // inside edge for a singleton. This mapper is limited to the rectangular,
-    // unmerged LTR shape checked above; it is not a general per-cell rule.
+    // inside edge for a singleton. Horizontal merges retain source-slot
+    // ownership: the start owns top/left/bottom, the end owns right, and
+    // insideV is emitted only between visible spans. The admission check keeps
+    // this limited to rectangular, equal-grid LTR rows.
     let rows = context.rows.len();
     let columns = context
         .rows
@@ -300,41 +392,61 @@ fn apply_conditional_regions(
                 } else {
                     rows - 1
                 };
-                for column in 0..columns {
-                    if matches_condition(index, table_id, row, column, columns, options, condition)?
+                let spans = SourceSpans::parse(source_row(prepared, &context.rows[row])?)
+                    .ok_or_else(|| unsupported("invalid Word horizontal merge spans"))?;
+                for &(start, _) in spans.as_slice() {
+                    if matches_condition(index, table_id, row, start, columns, options, condition)?
                     {
-                        set(prepared, context, row, column, 0, sides[0])?;
-                        set(prepared, context, row, column, 2, sides[2])?;
+                        set(prepared, context, row, start, 0, sides[0])?;
+                        set(prepared, context, row, start, 2, sides[2])?;
                     }
                 }
-                if matches_condition(index, table_id, row, 0, columns, options, condition)? {
-                    set(prepared, context, row, 0, 1, sides[1])?;
-                }
+                let &(first_start, _) = spans.as_slice().first().expect("nonempty spans");
                 if matches_condition(
                     index,
                     table_id,
                     row,
-                    columns - 1,
+                    first_start,
                     columns,
                     options,
                     condition,
                 )? {
-                    set(prepared, context, row, columns - 1, 3, sides[3])?;
+                    set(prepared, context, row, first_start, 1, sides[1])?;
                 }
-                for column in 0..columns.saturating_sub(1) {
-                    if matches_condition(index, table_id, row, column, columns, options, condition)?
-                        && matches_condition(
-                            index,
-                            table_id,
-                            row,
-                            column + 1,
-                            columns,
-                            options,
-                            condition,
-                        )?
-                    {
-                        set(prepared, context, row, column, 3, sides[5])?;
-                        set(prepared, context, row, column + 1, 1, sides[5])?;
+                let &(last_start, last_end) = spans.as_slice().last().expect("nonempty spans");
+                if matches_condition(
+                    index,
+                    table_id,
+                    row,
+                    last_end - 1,
+                    columns,
+                    options,
+                    condition,
+                )? {
+                    set(prepared, context, row, last_start, 3, sides[3])?;
+                }
+                for pair in spans.as_slice().windows(2) {
+                    let (left_start, left_end) = pair[0];
+                    let (right_start, _) = pair[1];
+                    if matches_condition(
+                        index,
+                        table_id,
+                        row,
+                        left_end - 1,
+                        columns,
+                        options,
+                        condition,
+                    )? && matches_condition(
+                        index,
+                        table_id,
+                        row,
+                        right_start,
+                        columns,
+                        options,
+                        condition,
+                    )? {
+                        set(prepared, context, row, left_start, 3, sides[5])?;
+                        set(prepared, context, row, right_start, 1, sides[5])?;
                     }
                 }
             }
@@ -435,7 +547,7 @@ fn set(
     Ok(())
 }
 
-fn row<'a>(
+fn source_row<'a>(
     prepared: &'a [PreparedParagraph],
     context: &table_context::RowContext,
 ) -> Result<&'a table::Row, String> {
@@ -467,4 +579,32 @@ pub(super) fn materialize_border(
     // story; an error drops this local value and then the whole model.
     budget.charge(border.retained_bytes()?)?;
     Ok(border)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_span_mapping_is_fixed_size_and_rejects_malformed_chains() {
+        let mut row = table::Row::default();
+        row.cells = vec![table::Cell::default(); 63];
+        assert_eq!(SourceSpans::parse(&row).unwrap().as_slice().len(), 63);
+
+        row.cells.push(table::Cell::default());
+        assert!(SourceSpans::parse(&row).is_none());
+
+        row.cells.truncate(3);
+        row.cells[0].flags = 2;
+        row.cells[1].flags = 1;
+        assert_eq!(
+            SourceSpans::parse(&row).unwrap().as_slice(),
+            [(0, 2), (2, 3)]
+        );
+        row.cells[0].flags = 0;
+        assert!(SourceSpans::parse(&row).is_none());
+        row.cells[0].flags = 2;
+        row.cells[1].flags = 0;
+        assert!(SourceSpans::parse(&row).is_none());
+    }
 }

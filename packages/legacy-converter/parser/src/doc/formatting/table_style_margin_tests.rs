@@ -1,9 +1,8 @@
 //! Gate regressions for conditional table-style margins.
 //!
 //! Word 16.112.4 DOC93-DOC95 controls establish isolated serialization, while
-//! DOC113 bordered controls expose a FIRST_ROW left offset but also move the
-//! disabled table grid and do not visibly retain the D634 baseline. Keep
-//! conditional margins out of the profile until origin and cascade are isolated.
+//! New138-new145 bordered controls isolate D63E from D634 and establish one
+//! bounded conditional path: a single non-inherited FIRST_ROW D63E record.
 
 use super::*;
 
@@ -88,7 +87,7 @@ fn conditional_d634_stays_gated_in_both_record_orders() {
 }
 
 #[test]
-fn conditional_d63e_keeps_every_physical_side_behind_the_gate() {
+fn conditional_d63e_with_overlapping_d634_stays_gated() {
     for (side, width) in [(0x01, 216), (0x02, 288), (0x04, 360), (0x08, 432)] {
         let unconditional = margin(0xd634, 0x0f, 72);
         let conditional = first_row(&margin(0xd63e, side, width));
@@ -103,4 +102,80 @@ fn conditional_d63e_keeps_every_physical_side_behind_the_gate() {
         assert_eq!(cells, table::MarginPatch::default());
         assert!(value.unsupported_table_properties);
     }
+}
+
+#[test]
+fn conditional_d63e_accepts_each_physical_side_over_d63e_baseline() {
+    for (side, width) in [(0x01, 216), (0x02, 288), (0x04, 360), (0x08, 432)] {
+        let unconditional = margin(0xd63e, 0x0f, 72);
+        let conditional = first_row(&margin(0xd63e, side, width));
+        let tapx = [unconditional.as_slice(), conditional.as_slice()].concat();
+        let mut value = formatting(&tapx);
+        let key = TableFormattingKey {
+            selected_style: 0,
+            matches: [
+                Some(crate::doc::table_style_condition::FIRST_ROW),
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+
+        let (_, cells) = value.table_cell_margins_for_key(Some(key)).unwrap();
+
+        let index = side.trailing_zeros() as usize;
+        if side == 0x08 {
+            assert_eq!(cells.get(index).map(|value| value.resolved()), Some(72));
+            assert!(value.unsupported_table_properties);
+        } else {
+            assert_eq!(cells.get(index).map(|value| value.resolved()), Some(width));
+            assert!(!value.unsupported_table_properties);
+        }
+    }
+}
+
+#[test]
+fn single_first_row_d63e_overlays_unconditional_d63e_per_side() {
+    let unconditional = margin(0xd63e, 0x0f, 72);
+    let conditional = first_row(&margin(0xd63e, 0x05, 288));
+    let tapx = [unconditional.as_slice(), conditional.as_slice()].concat();
+    let mut value = formatting(&tapx);
+    let key = TableFormattingKey {
+        selected_style: 0,
+        matches: [
+            Some(crate::doc::table_style_condition::FIRST_ROW),
+            None,
+            None,
+            None,
+            None,
+        ],
+    };
+
+    let (_, matched) = value.table_cell_margins_for_key(Some(key)).unwrap();
+    assert_eq!(matched.get(0).map(|value| value.resolved()), Some(288));
+    assert_eq!(matched.get(1).map(|value| value.resolved()), Some(72));
+    assert_eq!(matched.get(2).map(|value| value.resolved()), Some(288));
+    assert_eq!(matched.get(3).map(|value| value.resolved()), Some(72));
+    assert!(!value.unsupported_table_properties);
+
+    let key = TableFormattingKey::unconditional(0);
+    let (_, unmatched) = value.table_cell_margins_for_key(Some(key)).unwrap();
+    for side in 0..4 {
+        assert_eq!(unmatched.get(side).map(|value| value.resolved()), Some(72));
+    }
+}
+
+#[test]
+fn repeated_first_row_d63e_remains_gated() {
+    let tapx = [
+        first_row(&margin(0xd63e, 0x01, 216)),
+        first_row(&margin(0xd63e, 0x02, 288)),
+    ]
+    .concat();
+    let mut value = formatting(&tapx);
+
+    let _ = value.table_cell_margins(Some(0)).unwrap();
+
+    assert!(value.unsupported_table_properties);
 }

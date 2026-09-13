@@ -71,6 +71,7 @@ pub(super) struct Profile {
     table_shading: Option<TableStyleShading>,
     table_default_margins: table::MarginPatch,
     table_style_margins: table::MarginPatch,
+    conditional_first_row_margins: Option<table::MarginPatch>,
     #[cfg(feature = "direct-doc")]
     table_borders: [Option<table::PreparedBorder>; 6],
     #[cfg(feature = "direct-doc")]
@@ -94,6 +95,7 @@ impl Default for Profile {
             table_shading: None,
             table_default_margins: table::MarginPatch::default(),
             table_style_margins: table::MarginPatch::default(),
+            conditional_first_row_margins: None,
             #[cfg(feature = "direct-doc")]
             table_borders: [None; 6],
             #[cfg(feature = "direct-doc")]
@@ -206,6 +208,40 @@ impl Formatting<'_> {
     }
 
     #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_cell_margins_for_key(
+        &mut self,
+        key: Option<TableFormattingKey>,
+    ) -> Result<(table::MarginPatch, table::MarginPatch), String> {
+        let Some(key) = key else {
+            return Ok(Default::default());
+        };
+        let profile = self.table_style_profile(key.selected_style)?;
+        let mut cells = profile.table_style_margins;
+        for condition in key.matches.into_iter().flatten() {
+            if condition == crate::doc::table_style_condition::FIRST_ROW {
+                if let Some(patch) = profile.conditional_first_row_margins {
+                    cells.overlay(patch);
+                }
+            }
+        }
+        Ok((profile.table_default_margins, cells))
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn has_conditional_first_row_margins(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<bool, String> {
+        let Some(selected_style) = selected_style else {
+            return Ok(false);
+        };
+        Ok(self
+            .table_style_profile(selected_style)?
+            .conditional_first_row_margins
+            .is_some())
+    }
+
+    #[cfg(feature = "direct-doc")]
     pub(in crate::doc) fn table_borders(
         &mut self,
         selected_style: Option<usize>,
@@ -272,6 +308,7 @@ impl Formatting<'_> {
         let mut conditional_border_rejected = false;
         let mut default_margin_sides = 0u8;
         let mut style_margin_sides = 0u8;
+        let mut conditional_margin_sides = 0u8;
         let interpret_table_styles = self.interpret_table_styles;
         for style_id in chain {
             let sets = *self.styles[style_id]
@@ -360,6 +397,33 @@ impl Formatting<'_> {
                             Ok(interpret_table_styles)
                         }
                         0xd634 | 0xd63e => {
+                            if let tapx::Scope::Conditional(condition) = scope {
+                                if code != 0xd63e
+                                    || condition != crate::doc::table_style_condition::FIRST_ROW
+                                    || inherited
+                                    || profile.conditional_first_row_margins.is_some()
+                                {
+                                    profile.unsupported_table = true;
+                                    return Ok(false);
+                                }
+                                let mut patch = table::MarginPatch::default();
+                                let sides = patch.apply_style(code, operand)?;
+                                conditional_margin_sides = sides;
+                                // The left-aligned native controls do not expose
+                                // the physical-right inset. Keep that side behind
+                                // the admission gate while retaining the three
+                                // independently visible physical sides.
+                                if sides & 0x08 != 0 {
+                                    profile.unsupported_table = true;
+                                    patch.retain_sides(0x07);
+                                }
+                                if sides & 0x07 == 0 {
+                                    return Ok(false);
+                                }
+                                profile.conditional_first_row_margins = Some(patch);
+                                profile.condition_presence |= condition;
+                                return Ok(interpret_table_styles);
+                            }
                             if scope != tapx::Scope::Unconditional {
                                 return Ok(false);
                             }
@@ -522,6 +586,15 @@ impl Formatting<'_> {
                     },
                 )?;
             }
+        }
+        if conditional_margin_sides != 0
+            && (conditional_margin_sides & default_margin_sides != 0
+                || conditional_margin_sides & style_margin_sides != conditional_margin_sides)
+        {
+            // D63E-over-D63E is the only established baseline. Evaluate this
+            // after the whole TAPX so serialization order cannot bypass it.
+            profile.unsupported_table = true;
+            profile.conditional_first_row_margins = None;
         }
         // Native Word controls establish field-wise base-to-child composition
         // for supported conditional color, absolute CHps and logical PJc,

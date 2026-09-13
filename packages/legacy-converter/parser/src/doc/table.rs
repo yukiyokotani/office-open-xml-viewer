@@ -455,6 +455,28 @@ impl Row {
         style_defaults: MarginPatch,
         style_cells: MarginPatch,
     ) {
+        self.resolve_style_aware_margins_with(style_defaults, |_| style_cells);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn resolve_style_aware_margins_by_cell(
+        &mut self,
+        style_defaults: MarginPatch,
+        style_cells: &[MarginPatch],
+    ) -> Result<(), String> {
+        if style_cells.len() != self.cells.len() {
+            return Err(unsupported("Word style margin cell count mismatch"));
+        }
+        self.resolve_style_aware_margins_with(style_defaults, |cell| style_cells[cell]);
+        Ok(())
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn resolve_style_aware_margins_with(
+        &mut self,
+        style_defaults: MarginPatch,
+        mut style_cells: impl FnMut(usize) -> MarginPatch,
+    ) {
         for side in 0..4 {
             let bit = 1 << side;
             let default = if self.margin_authored & bit != 0 {
@@ -469,13 +491,13 @@ impl Row {
                     .map_or(margin::DEFAULTS[side], margin::Value::resolved)
             };
             self.margins[side] = default;
-            for cell in &mut self.cells {
+            for (cell_index, cell) in self.cells.iter_mut().enumerate() {
                 cell.margins[side] = Some(if cell.margin_nil & bit != 0 {
                     0
                 } else if let Some(value) = cell.margins[side] {
                     value
                 } else {
-                    style_cells
+                    style_cells(cell_index)
                         .get(side)
                         .map_or(default, margin::Value::resolved)
                 });
@@ -542,8 +564,8 @@ impl Row {
     /// that interpret table styles to ignore the compatibility arrays and use
     /// the Raw arrays. Raw ShdNil and omitted entries defer to the style;
     /// ShdAuto is an explicit no-fill value. The bounded current-Word fallback
-    /// retains clear RGB modern arrays only when a later explicit Raw ShdNil
-    /// exposes them; unsupported forms and reverse ordering stay gated.
+    /// retains clear RGB modern arrays as the fallback for explicit Raw ShdNil,
+    /// including when a later compatibility replacement changes that fallback.
     pub(in crate::doc) fn apply_style_aware_shading(
         &mut self,
         code: u16,
@@ -583,14 +605,11 @@ impl Row {
                     return Err(unsupported("invalid Word compatibility cell shading array"));
                 }
                 let end = (start + max).min(self.cells.len());
-                if self.cells[start.min(end)..end]
-                    .iter()
-                    .any(|cell| cell.raw_nil_authored)
-                {
-                    return Ok(StyleAwareShadingApply::HandledUnsupported);
-                }
                 for cell in &mut self.cells[start.min(end)..end] {
                     cell.compatibility_shading = None;
+                    if cell.raw_nil_authored {
+                        cell.prepared_shading = Some(PreparedCellShading::StyleDeferred);
+                    }
                 }
                 let mut supported = true;
                 if cb > 0 {
@@ -607,6 +626,13 @@ impl Row {
                                 Some(PreparedCellShading::Unsupported)
                             }
                         };
+                        if cell.raw_nil_authored {
+                            cell.prepared_shading = Some(
+                                cell.compatibility_shading
+                                    .clone()
+                                    .unwrap_or(PreparedCellShading::StyleDeferred),
+                            );
+                        }
                     }
                 }
                 Ok(if supported {
@@ -707,6 +733,10 @@ impl Row {
                 // sprmTIstd replaces table properties except for the explicit
                 // preserved list in [MS-DOC] 2.6.3. Prepared direct cell
                 // shading is not on that list; geometry remains independent.
+                // Current Word's paired saved-model controls retain authored
+                // D635 serialization across TIstd. Their identical PDFs do not
+                // establish a live layout effect; keep this bounded state fact
+                // distinct from TDefTable/TC80 geometry.
                 for cell in &mut self.cells {
                     cell.prepared_shading = None;
                     cell.compatibility_shading = None;
@@ -1794,22 +1824,41 @@ mod tests {
                     style_aware_policy(),
                 )
                 .unwrap(),
-            StyleAwareShadingApply::HandledUnsupported
+            StyleAwareShadingApply::Handled
         );
-        for replacement in [vec![0], raw_array(raw_shade(0), 1)] {
-            let mut reverse_tail = Row::default();
-            reverse_tail.apply(0x7621, &[0, 2, 1, 0]).unwrap();
-            reverse_tail.apply(0x563a, &1u16.to_le_bytes()).unwrap();
-            reverse_tail
-                .apply_style_aware_shading(0xd670, &raw_array(nil, 2), style_aware_policy())
-                .unwrap();
-            assert_eq!(
-                reverse_tail
-                    .apply_style_aware_shading(0xd612, &replacement, style_aware_policy())
-                    .unwrap(),
-                StyleAwareShadingApply::HandledUnsupported
-            );
-        }
+        assert!(matches!(
+            &reverse.cells[0].prepared_shading,
+            Some(PreparedCellShading::Explicit(shading))
+                if shading.xml().contains("w:fill=\"123456\"")
+        ));
+
+        let mut reverse_tail = Row::default();
+        reverse_tail.apply(0x7621, &[0, 3, 1, 0]).unwrap();
+        reverse_tail.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        reverse_tail
+            .apply_style_aware_shading(0xd670, &raw_array(nil, 3), style_aware_policy())
+            .unwrap();
+        reverse_tail
+            .apply_style_aware_shading(0xd612, &raw_array(raw_shade(0), 3), style_aware_policy())
+            .unwrap();
+        reverse_tail
+            .apply_style_aware_shading(0xd612, &raw_array(raw_shade(0), 1), style_aware_policy())
+            .unwrap();
+        assert!(matches!(
+            reverse_tail.cells[0].prepared_shading,
+            Some(PreparedCellShading::Explicit(_))
+        ));
+        assert!(reverse_tail.cells[1..3].iter().all(|cell| matches!(
+            cell.prepared_shading,
+            Some(PreparedCellShading::StyleDeferred)
+        )));
+        reverse_tail
+            .apply_style_aware_shading(0xd612, &[0], style_aware_policy())
+            .unwrap();
+        assert!(reverse_tail.cells.iter().all(|cell| matches!(
+            cell.prepared_shading,
+            Some(PreparedCellShading::StyleDeferred)
+        )));
 
         for (size, code) in [(0, 0xd616), (1, 0xd616), (22, 0xd616), (44, 0xd60c)] {
             let mut short = Row::default();

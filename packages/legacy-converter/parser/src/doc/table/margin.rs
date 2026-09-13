@@ -16,7 +16,7 @@ pub(in crate::doc) enum Value {
 }
 
 impl Value {
-    pub(super) fn resolved(self) -> u16 {
+    pub(in crate::doc) fn resolved(self) -> u16 {
         match self {
             Self::Nil => 0,
             Self::Dxa(value) => value,
@@ -38,8 +38,24 @@ impl Patch {
         }
     }
 
-    pub(super) fn get(self, side: usize) -> Option<Value> {
+    pub(in crate::doc) fn get(self, side: usize) -> Option<Value> {
         self.sides[side]
+    }
+
+    pub(in crate::doc) fn overlay(&mut self, patch: Self) {
+        for side in 0..4 {
+            if patch.sides[side].is_some() {
+                self.sides[side] = patch.sides[side];
+            }
+        }
+    }
+
+    pub(in crate::doc) fn retain_sides(&mut self, mask: u8) {
+        for side in 0..4 {
+            if mask & (1 << side) == 0 {
+                self.sides[side] = None;
+            }
+        }
     }
 
     pub(in crate::doc) fn apply_style(&mut self, code: u16, bytes: &[u8]) -> Result<u8, String> {

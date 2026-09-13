@@ -3967,6 +3967,108 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn native_table_acquisition_resets_authored_shading_at_each_tistd() {
+        let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
+        let tistd = |style: u16| test_prl(0x563a, &style.to_le_bytes());
+        let compatibility = test_prl(0xd612, &[10, 0, 0, 0, 255, 0x12, 0x34, 0x56, 0, 0, 0]);
+        let raw_nil = test_prl(0xd670, &[10, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0]);
+
+        let acquire = |ordered: Vec<u8>| {
+            let papx = [vec![0, 0], ordered].concat();
+            let mut formatting = with_direct_paragraph(&papx);
+            formatting.configure_table_styles(0x0112, true);
+            let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
+            (properties, formatting.unsupported_table_properties)
+        };
+
+        let (before_reset, unsupported) = acquire(
+            [
+                definition.clone(),
+                tistd(1),
+                compatibility.clone(),
+                raw_nil.clone(),
+            ]
+            .concat(),
+        );
+        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(matches!(
+            &before_reset.row.cells[0].prepared_shading,
+            Some(table::PreparedCellShading::Explicit(shading))
+                if shading.xml().contains("w:fill=\"123456\"")
+        ));
+
+        let (reversed, unsupported) = acquire(
+            [
+                definition.clone(),
+                tistd(1),
+                raw_nil.clone(),
+                compatibility.clone(),
+            ]
+            .concat(),
+        );
+        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert!(matches!(
+            &reversed.row.cells[0].prepared_shading,
+            Some(table::PreparedCellShading::Explicit(shading))
+                if shading.xml().contains("w:fill=\"123456\"")
+        ));
+
+        let (after_reset, unsupported) = acquire(
+            [
+                definition,
+                tistd(1),
+                compatibility,
+                raw_nil.clone(),
+                tistd(2),
+                raw_nil,
+            ]
+            .concat(),
+        );
+        assert!(unsupported, "the independent TIstd admission gate remains");
+        assert_eq!(after_reset.row.table_style, Some(2));
+        assert!(matches!(
+            after_reset.row.cells[0].prepared_shading,
+            Some(table::PreparedCellShading::StyleDeferred)
+        ));
+        assert_eq!(after_reset.row.cells[0].compatibility_shading, None);
+        assert!(after_reset.row.cells[0].raw_nil_authored);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_table_acquisition_retains_d635_authored_state_across_tistd() {
+        let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3]);
+        let preferred = test_prl(0xd635, &[5, 0, 1, 3, 0xa0, 5]);
+        let nil = test_prl(0xd635, &[5, 0, 1, 0, 0, 0]);
+        let tistd = |style: u16| test_prl(0x563a, &style.to_le_bytes());
+
+        let acquire = |ordered: Vec<u8>| {
+            let papx = [vec![0, 0], ordered].concat();
+            let mut formatting = with_direct_paragraph(&papx);
+            formatting.configure_table_styles(0x0112, true);
+            formatting.table_properties_native(109, 0, &[]).unwrap().row
+        };
+
+        for ordered in [
+            [definition.clone(), preferred.clone(), tistd(1)].concat(),
+            [definition.clone(), tistd(1), preferred.clone()].concat(),
+            [definition.clone(), preferred.clone(), tistd(1), tistd(2)].concat(),
+        ] {
+            let row = acquire(ordered);
+            assert_eq!(row.cells[0].width, 1000);
+            assert_eq!(
+                row.cells[0].preferred,
+                Some(table::PreferredWidth::Dxa(1440))
+            );
+        }
+
+        let row = acquire([definition, preferred, tistd(1), nil].concat());
+        assert_eq!(row.cells[0].width, 1000);
+        assert_eq!(row.cells[0].preferred, None);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn native_tistd_resets_only_independently_authored_row_properties_in_data_order() {
         let before_tistd = [
             test_prl(0x2416, &[1]),
