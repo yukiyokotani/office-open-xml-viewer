@@ -66,6 +66,7 @@ pub(super) fn project(
         &mut |bytes| budget.charge(bytes),
     )?;
     resolve_table_cell_margins(&mut prepared, &table_context, formatting)?;
+    resolve_table_borders(&mut prepared, &table_context, formatting, budget)?;
     if formatting.use_raw_table_shading() {
         resolve_table_cell_shading(&mut prepared, &table_context, formatting)?;
     }
@@ -347,6 +348,109 @@ pub(super) fn project(
     Ok(())
 }
 
+fn resolve_table_borders(
+    prepared: &mut [PreparedParagraph],
+    index: &table_context::Index,
+    formatting: &mut formatting::Formatting<'_>,
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    for table_context in index.tables() {
+        for row_context in &table_context.rows {
+            let style = formatting.table_borders(row_context.table_style)?;
+            let row = &mut prepared
+                .get_mut(row_context.ttp_id)
+                .ok_or_else(|| unsupported("Word table border TTP outside story"))?
+                .table_properties
+                .row;
+            if row.cells.len() != row_context.source_cell_count {
+                return Err(unsupported("Word table border cell count mismatch"));
+            }
+
+            let has_style = style.iter().any(Option::is_some);
+            let has_direct = row.prepared_borders.iter().any(Option::is_some)
+                || row
+                    .cells
+                    .iter()
+                    .any(|cell| cell.prepared_borders.iter().any(Option::is_some));
+            let has_old_direct = row
+                .prepared_borders
+                .iter()
+                .chain(
+                    row.cells
+                        .iter()
+                        .flat_map(|cell| cell.prepared_borders.iter()),
+                )
+                .flatten()
+                .copied()
+                .any(table::PreparedBorder::is_old);
+            let has_nil_direct = row
+                .prepared_borders
+                .iter()
+                .chain(
+                    row.cells
+                        .iter()
+                        .flat_map(|cell| cell.prepared_borders.iter()),
+                )
+                .flatten()
+                .copied()
+                .any(table::PreparedBorder::is_nil);
+            let has_diagonal_direct = row.cells.iter().any(|cell| {
+                cell.prepared_borders[4].is_some() || cell.prepared_borders[5].is_some()
+            });
+            let has_tc80 = row
+                .cells
+                .iter()
+                .any(|cell| cell.borders.iter().any(Option::is_some));
+            let selected = row_context.table_style.is_some();
+            let border_style_interaction = has_style || row.border_tistd_count > 0;
+            if border_style_interaction
+                && (has_tc80
+                    || has_old_direct
+                    || has_nil_direct
+                    || has_diagonal_direct
+                    || ((has_style || has_direct) && row.bidi)
+                    || ((has_style || has_direct) && row.border_tistd_count > 1))
+            {
+                // Native controls establish modern LTR D613/D62F around one
+                // TIstd. TC80 ownership, compatibility borders, RTL side
+                // mapping and repeated resets remain explicit admission gates.
+                formatting.unsupported_table_properties = true;
+                continue;
+            }
+
+            for side in 0..6 {
+                if let Some(value) = row.prepared_borders[side].or(style[side]) {
+                    row.borders[side] = Some(materialize_border(value, budget)?);
+                } else if selected {
+                    row.borders[side] = None;
+                }
+            }
+            row.prepared_borders = [None; 6];
+            for cell in &mut row.cells {
+                for side in 0..6 {
+                    if let Some(value) = cell.prepared_borders[side] {
+                        cell.borders[side] = Some(materialize_border(value, budget)?);
+                    }
+                }
+                cell.prepared_borders = [None; 6];
+            }
+        }
+    }
+    Ok(())
+}
+
+fn materialize_border(
+    value: table::PreparedBorder,
+    budget: &mut ModelBudget,
+) -> Result<crate::doc::border::Border, String> {
+    let border = value.decode()?;
+    // This allocation happens after Properties::retained_heap_bytes. Charge
+    // its actual retained String capacities before it enters the prepared
+    // story; an error drops this local value and then the whole model.
+    budget.charge(border.retained_bytes()?)?;
+    Ok(border)
+}
+
 fn resolve_table_cell_margins(
     prepared: &mut [PreparedParagraph],
     index: &table_context::Index,
@@ -484,6 +588,8 @@ mod tests {
         modern_raw: bool,
         inherited_conditions: bool,
         inherited_margins: bool,
+        table_borders: bool,
+        default_table_style: bool,
         shading: ShadingFixture,
         margins: MarginFixture,
     }
@@ -505,6 +611,9 @@ mod tests {
     }
 
     struct ProjectedTable {
+        markers: Vec<String>,
+        row_cell_counts: Vec<usize>,
+        col_spans: Vec<u32>,
         colors: Vec<String>,
         sizes: Vec<f64>,
         ascii_fonts: Vec<Option<String>>,
@@ -513,6 +622,8 @@ mod tests {
         backgrounds: Vec<Option<String>>,
         margins: Vec<[f64; 4]>,
         margin_wires: Vec<[String; 4]>,
+        borders: Vec<[Option<(String, f64)>; 4]>,
+        border_styles: Vec<[Option<String>; 4]>,
         unsupported_table: bool,
         unsupported_character: bool,
         unsupported_paragraph: bool,
@@ -531,8 +642,37 @@ mod tests {
     }
 
     fn cell_margin(code: u16, sides: u8, unit: u8, width: u16) -> Vec<u8> {
+        cell_margin_range(code, 0, 1, sides, unit, width)
+    }
+
+    fn cell_margin_range(
+        code: u16,
+        first: u8,
+        limit: u8,
+        sides: u8,
+        unit: u8,
+        width: u16,
+    ) -> Vec<u8> {
         let [lo, hi] = width.to_le_bytes();
-        sprm(code, &[6, 0, 1, sides, unit, lo, hi])
+        sprm(code, &[6, first, limit, sides, unit, lo, hi])
+    }
+
+    fn border_bytes(color: [u8; 3], width: u8) -> [u8; 8] {
+        [color[0], color[1], color[2], 0, width, 1, 0, 0]
+    }
+
+    fn table_borders(color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![48];
+        for _ in 0..6 {
+            operand.extend(border_bytes(color, width));
+        }
+        sprm(0xd613, &operand)
+    }
+
+    fn cell_borders(first: u8, limit: u8, color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![11, first, limit, 0x0f];
+        operand.extend(border_bytes(color, width));
+        sprm(0xd62f, &operand)
     }
 
     fn append_table_style(bytes: &mut Vec<u8>, base: u16, sets: [&[u8]; 3]) {
@@ -564,6 +704,18 @@ mod tests {
         normal[2..4].copy_from_slice(&0xfff1u16.to_le_bytes());
         bytes.extend((normal.len() as u16).to_le_bytes());
         bytes.extend(normal);
+
+        if fixture.default_table_style {
+            for _ in 1..11 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            let width_before = sprm(0xf617, &[3, 0, 0]);
+            append_table_style(&mut bytes, 0xfff, [&width_before, &[], &[]]);
+            for _ in 12..15 {
+                bytes.extend(0u16.to_le_bytes());
+            }
+            return bytes;
+        }
 
         if fixture.inherited_margins {
             let base = cell_margin(0xd634, 0x02, 3, 720);
@@ -655,6 +807,9 @@ mod tests {
             MarginFixture::None => {}
             MarginFixture::D63e => tapx.extend(cell_margin(0xd63e, 0x02, 3, 360)),
             MarginFixture::D634 => tapx.extend(cell_margin(0xd634, 0x02, 3, 360)),
+        }
+        if fixture.table_borders {
+            tapx.extend(table_borders([0xff, 0, 0], 8));
         }
         match fixture.shading {
             ShadingFixture::None => {}
@@ -757,6 +912,24 @@ mod tests {
         .concat()
     }
 
+    fn offset_merged_row_with_overrides(
+        options: u16,
+        left: i16,
+        merge: [u8; 2],
+        margin: &[u8],
+        raw: &[u8],
+    ) -> Vec<u8> {
+        let mut row = row_cells(options, 3);
+        row.extend(sprm(0x9601, &left.to_le_bytes()));
+        row.extend(sprm(0x5624, &merge));
+        row.extend(margin);
+        row.extend(sprm(0xd670, raw));
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
     fn row_cells_with_margins(style: u16, margins: &[Vec<u8>]) -> Vec<u8> {
         let mut row = row_cells_with_style(0, 1, style);
         for margin in margins {
@@ -769,6 +942,48 @@ mod tests {
         row
     }
 
+    fn row_cells_with_border(style: u16, border: &[u8], before_tistd: bool) -> Vec<u8> {
+        let mut row = [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0x7621, &[0, 1, 0xe8, 3]),
+        ]
+        .concat();
+        if before_tistd {
+            row.extend(border);
+        }
+        row.extend(sprm(0x563a, &style.to_le_bytes()));
+        row.extend(sprm(0x740a, &[0, 0, 0, 0]));
+        if !before_tistd {
+            row.extend(border);
+        }
+        row.extend(sprm(0x2416, &[1]));
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
+    fn row_cells_with_tc80(style: u16) -> Vec<u8> {
+        let mut definition = vec![26, 0, 1, 0, 0, 0xe8, 3, 0, 0, 0, 0];
+        for _ in 0..4 {
+            definition.extend([16, 1, 2, 0]); // blue Brc80, 2 pt
+        }
+        let mut row = [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0xd608, &definition),
+            sprm(0x563a, &style.to_le_bytes()),
+            sprm(0x740a, &[0, 0, 0, 0]),
+            sprm(0x2416, &[1]),
+        ]
+        .concat();
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
     fn unstyled_row_with_raw(raw: &[u8]) -> Vec<u8> {
         [
             sprm(0x2416, &[1]),
@@ -777,6 +992,43 @@ mod tests {
             sprm(0xd670, raw),
         ]
         .concat()
+    }
+
+    fn unstyled_row_with_border(border: &[u8]) -> Vec<u8> {
+        let mut row = [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0x7621, &[0, 1, 0xe8, 3]),
+            border.to_vec(),
+            sprm(0x2416, &[1]),
+        ]
+        .concat();
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
+    fn unstyled_row_with_tc80() -> Vec<u8> {
+        let mut definition = vec![26, 0, 1, 0, 0, 0xe8, 3, 0, 0, 0, 0];
+        for _ in 0..4 {
+            definition.extend([16, 1, 2, 0]); // blue Brc80, 2 pt
+        }
+        let mut row = [
+            sprm(0x2416, &[1]),
+            sprm(0x2417, &[1]),
+            sprm(0xd608, &definition),
+            sprm(0x2416, &[1]),
+        ]
+        .concat();
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1]));
+        }
+        row
+    }
+
+    fn old_cell_borders(first: u8, limit: u8, color: u8, width: u8) -> Vec<u8> {
+        sprm(0xd620, &[7, first, limit, 0x0f, width, 1, color, 0])
     }
 
     fn row_cells_with_compatibility_shading(options: u16, count: u8, shading: &[u8]) -> Vec<u8> {
@@ -835,6 +1087,9 @@ mod tests {
             )?;
 
             let mut colors = Vec::new();
+            let mut markers = Vec::new();
+            let mut row_cell_counts = Vec::new();
+            let mut col_spans = Vec::new();
             let mut sizes = Vec::new();
             let mut ascii_fonts = Vec::new();
             let mut high_ansi_fonts = Vec::new();
@@ -842,12 +1097,16 @@ mod tests {
             let mut backgrounds = Vec::new();
             let mut margins = Vec::new();
             let mut margin_wires = Vec::new();
+            let mut borders = Vec::new();
+            let mut border_styles = Vec::new();
             for element in &body {
                 let BodyElement::Table(table) = element else {
                     continue;
                 };
                 for row in &table.rows {
+                    row_cell_counts.push(row.cells.len());
                     for cell in &row.cells {
+                        col_spans.push(cell.col_span);
                         backgrounds.push(cell.background.clone());
                         margins.push([
                             cell.margin_top.unwrap(),
@@ -862,12 +1121,36 @@ mod tests {
                             wire.bottom.as_ref().unwrap().value.clone().unwrap(),
                             wire.right.as_ref().unwrap().value.clone().unwrap(),
                         ]);
+                        borders.push(std::array::from_fn(|side| {
+                            let border = match side {
+                                0 => &cell.borders.top,
+                                1 => &cell.borders.left,
+                                2 => &cell.borders.bottom,
+                                3 => &cell.borders.right,
+                                _ => unreachable!(),
+                            };
+                            border
+                                .as_ref()
+                                .map(|value| (value.color.clone().unwrap_or_default(), value.width))
+                        }));
+                        border_styles.push(std::array::from_fn(|side| {
+                            match side {
+                                0 => &cell.borders.top,
+                                1 => &cell.borders.left,
+                                2 => &cell.borders.bottom,
+                                3 => &cell.borders.right,
+                                _ => unreachable!(),
+                            }
+                            .as_ref()
+                            .map(|value| value.style.clone())
+                        }));
                         let CellElement::Paragraph(paragraph) = &cell.content[0] else {
                             panic!("paragraph")
                         };
                         let DocRun::Text(run) = &paragraph.runs[0] else {
                             panic!("text")
                         };
+                        markers.push(run.text.clone());
                         colors.push(run.color.clone().unwrap_or_default());
                         sizes.push(run.font_size);
                         ascii_fonts.push(run.font_family.clone());
@@ -878,6 +1161,9 @@ mod tests {
             }
             assert!(!margins.is_empty(), "table");
             Ok(ProjectedTable {
+                markers,
+                row_cell_counts,
+                col_spans,
                 colors,
                 sizes,
                 ascii_fonts,
@@ -886,6 +1172,8 @@ mod tests {
                 backgrounds,
                 margins,
                 margin_wires,
+                borders,
+                border_styles,
                 unsupported_table: facts.formatting.unsupported_table_properties,
                 unsupported_character: facts.formatting.unsupported_character_properties,
                 unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
@@ -911,6 +1199,136 @@ mod tests {
             ],
             fixture,
         )
+    }
+
+    #[test]
+    fn native_story_applies_style_then_post_tistd_table_and_cell_borders() {
+        let green_table = table_borders([0, 0x80, 0], 24);
+        let blue_cell = cell_borders(0, 1, [0, 0, 0xff], 16);
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells_with_border(1, &green_table, true)),
+                (3, 5, cell()),
+                (5, 6, row_cells_with_border(1, &green_table, false)),
+                (6, 8, cell()),
+                (8, 9, row_cells_with_border(1, &blue_cell, false)),
+                (9, 10, Vec::new()),
+            ],
+            StyleFixture {
+                table_borders: true,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.borders,
+            [
+                std::array::from_fn(|_| Some(("ff0000".into(), 1.0))),
+                std::array::from_fn(|_| Some(("008000".into(), 3.0))),
+                std::array::from_fn(|_| Some(("0000ff".into(), 2.0))),
+            ]
+        );
+        // The retained whole-table TIstd admission gate is independent of the
+        // now-resolved border facts.
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn late_border_payload_obeys_model_budget_before_retention() {
+        let value = table::PreparedBorder::read(&border_bytes([0xff, 0, 0], 8), false).unwrap();
+        let mut insufficient = ModelBudget::new(0);
+        assert!(matches!(
+            materialize_border(value, &mut insufficient),
+            Err(message) if message == "OUTPUT_TOO_LARGE"
+        ));
+
+        let mut adequate = ModelBudget::new(1024);
+        let border = materialize_border(value, &mut adequate).unwrap();
+        let spec = border.direct_spec();
+        assert_eq!(spec.color.as_deref(), Some("ff0000"));
+        assert_eq!(spec.width, 1.0);
+    }
+
+    #[test]
+    fn native_story_keeps_tc80_border_ownership_explicit_under_table_style() {
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, row_cells_with_tc80(1)),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture {
+                table_borders: true,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.borders,
+            [std::array::from_fn(|_| Some(("0000ff".into(), 2.0)))]
+        );
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn unstyled_native_nil_cell_border_keeps_existing_projection() {
+        let mut nil = cell_borders(0, 1, [0, 0, 0], 8);
+        nil[6..].fill(0xff);
+        let projected = project_table(
+            "a\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, unstyled_row_with_border(&nil)),
+                (3, 4, Vec::new()),
+            ],
+            StyleFixture::default(),
+        );
+        assert_eq!(
+            projected.border_styles,
+            [std::array::from_fn(|_| Some("nil".into()))]
+        );
+        assert!(!projected.unsupported_table);
+    }
+
+    #[test]
+    fn unused_default_table_style_does_not_gate_unstyled_native_borders() {
+        let mut nil = cell_borders(0, 1, [0, 0, 0], 8);
+        nil[6..].fill(0xff);
+        let old = old_cell_borders(0, 1, 5, 16);
+        let projected = project_table(
+            "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 3, unstyled_row_with_tc80()),
+                (3, 5, cell()),
+                (5, 6, unstyled_row_with_border(&old)),
+                (6, 8, cell()),
+                (8, 9, unstyled_row_with_border(&nil)),
+                (9, 10, Vec::new()),
+            ],
+            StyleFixture {
+                default_table_style: true,
+                ..StyleFixture::default()
+            },
+        );
+        assert_eq!(
+            projected.borders,
+            [
+                std::array::from_fn(|_| Some(("0000ff".into(), 2.0))),
+                std::array::from_fn(|_| Some(("ff00ff".into(), 2.0))),
+                std::array::from_fn(|_| Some((String::new(), 0.5))),
+            ]
+        );
+        assert_eq!(
+            projected.border_styles,
+            [
+                std::array::from_fn(|_| Some("single".into())),
+                std::array::from_fn(|_| Some("single".into())),
+                std::array::from_fn(|_| Some("nil".into())),
+            ]
+        );
+        assert!(!projected.unsupported_table);
     }
 
     #[test]
@@ -1255,6 +1673,93 @@ mod tests {
             .all(|font| font.as_deref() == Some("Courier New")));
         // TIstd and TTlp remain admission-gated independently of the verified
         // internal formatting projection.
+        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn actual_story_keeps_source_conditions_across_ragged_horizontal_merge_and_direct_overrides() {
+        let mut raw = vec![30];
+        raw.extend([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0]);
+        raw.extend([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0]);
+        raw.extend(&cell_shading([0xff, 0xff, 0])[1..]);
+        let projected = project_table(
+            "A\u{7}B\u{7}C\u{7}\u{7}D\u{7}E\u{7}F\u{7}\u{7}\r",
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 7, row_cells((1 << 5) | (1 << 7), 3)),
+                (7, 9, cell()),
+                (9, 11, cell()),
+                (11, 13, cell()),
+                (
+                    13,
+                    14,
+                    offset_merged_row_with_overrides(
+                        1 << 7,
+                        1800,
+                        [0, 2],
+                        &cell_margin_range(0xd632, 2, 3, 0x02, 3, 720),
+                        &raw,
+                    ),
+                ),
+                (14, 15, Vec::new()),
+            ],
+            StyleFixture {
+                combined: true,
+                shading: ShadingFixture::Conditional,
+                margins: MarginFixture::D63e,
+                ..StyleFixture::default()
+            },
+        );
+
+        assert_eq!(projected.markers, ["A", "B", "C", "D", "F"]);
+        assert_eq!(projected.row_cell_counts, [3, 2]);
+        assert_eq!(projected.col_spans, [1, 2, 2, 4, 1]);
+        assert_eq!(
+            projected.colors,
+            ["008000", "ff0000", "ff0000", "0000ff", "000000"]
+        );
+        assert_eq!(projected.sizes, [16.0, 14.0, 14.0, 12.0, 10.0]);
+        assert_eq!(
+            projected.alignments,
+            ["left", "center", "center", "right", "left"]
+        );
+        assert!(projected
+            .ascii_fonts
+            .iter()
+            .all(|font| font.as_deref() == Some("Times New Roman")));
+        assert!(projected
+            .high_ansi_fonts
+            .iter()
+            .all(|font| font.as_deref() == Some("Courier New")));
+        assert_eq!(
+            projected.backgrounds,
+            [
+                Some("008000".into()),
+                Some("ff0000".into()),
+                Some("ff0000".into()),
+                Some("0000ff".into()),
+                Some("ffff00".into()),
+            ]
+        );
+        // The merged output routes both paragraph conditions and retained cell
+        // facts through its first source cell. This guards that routing without
+        // generalizing other merged-style precedence.
+        assert_eq!(
+            projected.margins.iter().map(|m| m[1]).collect::<Vec<_>>(),
+            [18.0, 18.0, 18.0, 18.0, 36.0]
+        );
+        assert_eq!(
+            projected
+                .margin_wires
+                .iter()
+                .map(|m| m[1].as_str())
+                .collect::<Vec<_>>(),
+            ["360", "360", "360", "360", "720"]
+        );
         assert!(projected.unsupported_table);
         assert!(!projected.unsupported_character);
         assert!(!projected.unsupported_paragraph);

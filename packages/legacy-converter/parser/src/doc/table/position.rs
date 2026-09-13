@@ -13,6 +13,11 @@ pub struct Position {
 }
 
 impl Position {
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn reset_no_overlap_at_tistd(&mut self) {
+        self.no_overlap = false;
+    }
+
     pub fn apply(&mut self, code: u16, b: &[u8]) -> Result<bool, String> {
         match code {
             // Padding MUST be ignored (MS-DOC 2.9.208).

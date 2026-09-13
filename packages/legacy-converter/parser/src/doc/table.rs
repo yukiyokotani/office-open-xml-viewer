@@ -41,6 +41,60 @@ pub(in crate::doc) enum StyleAwareShadingApply {
     HandledUnsupported,
 }
 
+/// A validated border operand retained without decoded `String` payload until
+/// the native table-style cascade is known. Keeping this separate from
+/// `Cell::borders` preserves the TC80 definition layer across sprmTIstd.
+#[cfg(feature = "direct-doc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) enum PreparedBorder {
+    Old([u8; 4]),
+    Modern([u8; 8]),
+}
+
+#[cfg(feature = "direct-doc")]
+impl PreparedBorder {
+    pub(in crate::doc) fn read(bytes: &[u8], old: bool) -> Result<Self, String> {
+        let size = if old { 4 } else { 8 };
+        let bytes = bytes
+            .get(..size)
+            .ok_or_else(|| unsupported("short Word prepared border"))?;
+        // Validate now so malformed input fails during acquisition rather than
+        // after the row has entered the prepared story.
+        let _ = Border::read(bytes, old)?;
+        Ok(if old {
+            Self::Old(bytes.try_into().expect("four-byte slice"))
+        } else {
+            Self::Modern(bytes.try_into().expect("eight-byte slice"))
+        })
+    }
+
+    pub(in crate::doc) fn decode(self) -> Result<Border, String> {
+        match self {
+            Self::Old(bytes) => Border::read(&bytes, true),
+            Self::Modern(bytes) => Border::read(&bytes, false),
+        }
+    }
+
+    pub(in crate::doc) fn is_old(self) -> bool {
+        matches!(self, Self::Old(_))
+    }
+
+    pub(in crate::doc) fn is_nil(self) -> bool {
+        match self {
+            Self::Old(bytes) => bytes == [0xff; 4],
+            Self::Modern(bytes) => bytes[4..] == [0xff; 4],
+        }
+    }
+}
+
+#[cfg(feature = "direct-doc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::doc) enum StyleAwareBorderApply {
+    Unhandled,
+    Handled,
+    HandledUnsupported,
+}
+
 #[derive(Clone, Default)]
 pub struct Cell {
     pub shading: Option<Shading>,
@@ -52,6 +106,8 @@ pub struct Cell {
     #[cfg(feature = "direct-doc")]
     pub(in crate::doc) margin_nil: u8,
     pub borders: [Option<Border>; 6],
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) prepared_borders: [Option<PreparedBorder>; 6],
 }
 
 pub struct Properties<R = Row> {
@@ -101,8 +157,14 @@ pub struct Row {
     pub header: bool,
     pub cant_split: bool,
     pub bidi: bool,
+    bidi_560b: bool,
+    bidi_5664: bool,
     pub alignment: (u16, bool),
     pub borders: [Option<Border>; 6],
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) prepared_borders: [Option<PreparedBorder>; 6],
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) border_tistd_count: u8,
     pub preferred_width: Option<PreferredWidth>,
 }
 
@@ -128,8 +190,14 @@ impl Default for Row {
             header: false,
             cant_split: false,
             bidi: false,
+            bidi_560b: false,
+            bidi_5664: false,
             alignment: (0, false),
             borders: Default::default(),
+            #[cfg(feature = "direct-doc")]
+            prepared_borders: [None; 6],
+            #[cfg(feature = "direct-doc")]
+            border_tistd_count: 0,
             preferred_width: None,
         }
     }
@@ -261,6 +329,20 @@ impl Properties {
 }
 
 impl Row {
+    /// Resets the independently authored row properties for which native Word
+    /// controls establish sprmTIstd replacement. Positioning and table/cell
+    /// geometry remain separate preserved semantic properties ([MS-DOC] 2.6.3).
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn reset_row_properties_at_tistd(&mut self, code: u16) {
+        if code == 0x563a {
+            self.alignment = (0, false);
+            self.header = false;
+            self.cant_split = false;
+            self.position.reset_no_overlap_at_tistd();
+            self.identity.remove(&0x3465);
+        }
+    }
+
     pub fn origin(&self) -> i32 {
         // TDefTable boundaries already include all outer cell spacing. TDxaLeft
         // instead defines the origin before TDxaGapHalf is subtracted.
@@ -372,6 +454,60 @@ impl Row {
                 });
             }
         }
+    }
+
+    /// Retains resettable direct table/cell border operands separately from
+    /// TC80 cell-definition borders. [MS-DOC] 2.6.3 does not list borders
+    /// among the properties preserved when sprmTIstd applies.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn apply_style_aware_borders(
+        &mut self,
+        code: u16,
+        bytes: &[u8],
+    ) -> Result<StyleAwareBorderApply, String> {
+        if code == 0x563a {
+            self.prepared_borders = [None; 6];
+            for cell in &mut self.cells {
+                cell.prepared_borders = [None; 6];
+            }
+            self.border_tistd_count = self.border_tistd_count.saturating_add(1);
+            return Ok(StyleAwareBorderApply::Unhandled);
+        }
+        if matches!(code, 0xd605 | 0xd613) {
+            let old = code == 0xd605;
+            let size = if old { 4 } else { 8 };
+            if bytes.len() != 1 + 6 * size || usize::from(bytes[0]) != 6 * size {
+                return Err(unsupported("invalid Word table border array"));
+            }
+            let mut values = [None; 6];
+            for (side, slot) in values.iter_mut().enumerate() {
+                *slot = Some(PreparedBorder::read(&bytes[1 + side * size..], old)?);
+            }
+            self.prepared_borders = values;
+            return Ok(StyleAwareBorderApply::Handled);
+        }
+        if matches!(code, 0xd620 | 0xd62f) {
+            let old = code == 0xd620;
+            let cb = if old { 7 } else { 11 };
+            if bytes.len() != cb + 1 || usize::from(bytes[0]) != cb {
+                return Err(unsupported("invalid Word cell border operand length"));
+            }
+            let sides = bytes[3];
+            if sides & !if old { 0x0f } else { 0x3f } != 0 {
+                return Ok(StyleAwareBorderApply::HandledUnsupported);
+            }
+            let cells = range(&bytes[1..], self.cells.len())?;
+            let value = PreparedBorder::read(&bytes[4..], old)?;
+            for cell in &mut self.cells[cells] {
+                for side in 0..if old { 4 } else { 6 } {
+                    if sides & (1 << side) != 0 {
+                        cell.prepared_borders[side] = Some(value);
+                    }
+                }
+            }
+            return Ok(StyleAwareBorderApply::Handled);
+        }
+        Ok(StyleAwareBorderApply::Unhandled)
     }
 
     /// Applies the shading Sprms whose meaning changes when table styles are
@@ -733,7 +869,12 @@ impl Row {
                 if value > 1 {
                     return Err(unsupported("invalid Word table direction"));
                 }
-                self.bidi |= value != 0;
+                if code == 0x560b {
+                    self.bidi_560b = value != 0;
+                } else {
+                    self.bidi_5664 = value != 0;
+                }
+                self.bidi = self.bidi_560b || self.bidi_5664;
             }
             0x5400 | 0x548a => {
                 let value = u16_at(b, 0)?;
@@ -816,6 +957,132 @@ mod tests {
     fn margin_cssa(first: u8, limit: u8, sides: u8, unit: u8, width: u16) -> [u8; 7] {
         let [lo, hi] = width.to_le_bytes();
         [6, first, limit, sides, unit, lo, hi]
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn modern_border(color: [u8; 3], width: u8) -> [u8; 8] {
+        [color[0], color[1], color[2], 0, width, 1, 0, 0]
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn modern_table_borders(color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![48];
+        for _ in 0..6 {
+            operand.extend(modern_border(color, width));
+        }
+        operand
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn modern_cell_border(first: u8, limit: u8, sides: u8, color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![11, first, limit, sides];
+        operand.extend(modern_border(color, width));
+        operand
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_tistd_resets_preceding_direct_borders_but_keeps_tc80_layer() {
+        let mut definition = vec![26, 0, 1, 0, 0, 0xe8, 3, 0, 0, 0, 0];
+        for _ in 0..4 {
+            definition.extend([8, 1, 6, 0]);
+        }
+        let mut row = Row::default();
+        row.apply(0xd608, &definition).unwrap();
+        assert!(row.cells[0].borders[0].is_some());
+
+        assert_eq!(
+            row.apply_style_aware_borders(0xd613, &modern_table_borders([0xff, 0x00, 0xff], 32),)
+                .unwrap(),
+            StyleAwareBorderApply::Handled
+        );
+        assert_eq!(
+            row.apply_style_aware_borders(
+                0xd62f,
+                &modern_cell_border(0, 1, 0x0f, [0xff, 0x80, 0x00], 24),
+            )
+            .unwrap(),
+            StyleAwareBorderApply::Handled
+        );
+        assert!(row.prepared_borders.iter().all(Option::is_some));
+        assert!(row.cells[0].prepared_borders[..4]
+            .iter()
+            .all(Option::is_some));
+
+        assert_eq!(
+            row.apply_style_aware_borders(0x563a, &1u16.to_le_bytes())
+                .unwrap(),
+            StyleAwareBorderApply::Unhandled
+        );
+        row.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        assert!(row.prepared_borders.iter().all(Option::is_none));
+        assert!(row.cells[0].prepared_borders.iter().all(Option::is_none));
+        assert!(
+            row.cells[0].borders[0].is_some(),
+            "TC80 survives separately"
+        );
+        assert_eq!(row.border_tistd_count, 1);
+
+        row.apply_style_aware_borders(
+            0xd62f,
+            &modern_cell_border(0, 1, 0x0f, [0x00, 0xff, 0xff], 16),
+        )
+        .unwrap();
+        assert!(row.cells[0].prepared_borders[..4]
+            .iter()
+            .all(Option::is_some));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn prepared_cell_borders_follow_source_cell_edits_and_redefinition() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 3, 100, 0]).unwrap();
+        row.apply_style_aware_borders(
+            0xd62f,
+            &modern_cell_border(1, 2, 0x0f, [0xff, 0x00, 0xff], 32),
+        )
+        .unwrap();
+        row.apply(0x7621, &[0, 1, 100, 0]).unwrap();
+        assert!(row.cells[2].prepared_borders[0].is_some());
+        assert!(row.cells[0].prepared_borders[0].is_none());
+        row.apply(0x5622, &[1, 2]).unwrap();
+        assert!(row.cells[1].prepared_borders[0].is_some());
+
+        row.apply(0xd608, &[6, 0, 1, 0, 0, 100, 0]).unwrap();
+        assert_eq!(row.cells.len(), 1);
+        assert!(row.cells[0].prepared_borders.iter().all(Option::is_none));
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_nil_diagonal_and_malformed_borders_retain_prior_unstyled_semantics() {
+        let mut row = Row::default();
+        row.apply(0x7621, &[0, 1, 100, 0]).unwrap();
+        let mut nil = modern_cell_border(0, 1, 0x0f, [0, 0, 0], 8);
+        nil[4..].fill(0xff);
+        assert_eq!(
+            row.apply_style_aware_borders(0xd62f, &nil).unwrap(),
+            StyleAwareBorderApply::Handled
+        );
+        assert!(row.cells[0].prepared_borders[..4]
+            .iter()
+            .flatten()
+            .copied()
+            .all(PreparedBorder::is_nil));
+        assert_eq!(
+            row.apply_style_aware_borders(
+                0xd62f,
+                &modern_cell_border(0, 1, 0x10, [0xff, 0, 0], 8),
+            )
+            .unwrap(),
+            StyleAwareBorderApply::Handled
+        );
+        assert!(row.cells[0].prepared_borders[4].is_some());
+        assert!(row.apply_style_aware_borders(0xd613, &[48, 0]).is_err());
+        assert!(row
+            .apply_style_aware_borders(0xd62f, &modern_cell_border(0, 2, 0x0f, [0xff, 0, 0], 8),)
+            .is_err());
     }
 
     #[cfg(feature = "direct-doc")]
@@ -965,6 +1232,27 @@ mod tests {
         assert!(!row.apply(0x740a, &[0xff, 0xff, 0x20, 0x03]).unwrap());
         assert!(row.apply(0x740a, &[0, 0, 0]).is_err());
         assert!(row.apply(0x740a, &[0, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn table_direction_components_follow_their_own_last_boolean_values() {
+        let mut row = Row::default();
+        row.apply(0x560b, &1u16.to_le_bytes()).unwrap();
+        row.apply(0x560b, &0u16.to_le_bytes()).unwrap();
+        assert!(!row.bidi);
+
+        row.apply(0x5664, &1u16.to_le_bytes()).unwrap();
+        row.apply(0x5664, &0u16.to_le_bytes()).unwrap();
+        assert!(!row.bidi);
+
+        row.apply(0x560b, &1u16.to_le_bytes()).unwrap();
+        row.apply(0x5664, &0u16.to_le_bytes()).unwrap();
+        assert!(row.bidi);
+        row.apply(0x5664, &1u16.to_le_bytes()).unwrap();
+        row.apply(0x560b, &0u16.to_le_bytes()).unwrap();
+        assert!(row.bidi);
+        row.apply(0x5664, &0u16.to_le_bytes()).unwrap();
+        assert!(!row.bidi);
     }
 
     fn shade(pattern: u16) -> Vec<u8> {

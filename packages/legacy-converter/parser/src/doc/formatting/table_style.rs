@@ -49,6 +49,8 @@ pub(super) struct Profile {
     table_shading: Option<TableStyleShading>,
     table_default_margins: table::MarginPatch,
     table_style_margins: table::MarginPatch,
+    #[cfg(feature = "direct-doc")]
+    table_borders: [Option<table::PreparedBorder>; 6],
     conditional_table_shading: BTreeMap<u16, table::Shading>,
     conditional_table_shading_nil: BTreeSet<u16>,
     unsupported_character: bool,
@@ -68,6 +70,8 @@ impl Default for Profile {
             table_shading: None,
             table_default_margins: table::MarginPatch::default(),
             table_style_margins: table::MarginPatch::default(),
+            #[cfg(feature = "direct-doc")]
+            table_borders: [None; 6],
             conditional_table_shading: BTreeMap::new(),
             conditional_table_shading_nil: BTreeSet::new(),
             unsupported_character: false,
@@ -175,6 +179,17 @@ impl Formatting<'_> {
         Ok((profile.table_default_margins, profile.table_style_margins))
     }
 
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn table_borders(
+        &mut self,
+        selected_style: Option<usize>,
+    ) -> Result<[Option<table::PreparedBorder>; 6], String> {
+        let Some(selected_style) = selected_style else {
+            return Ok([None; 6]);
+        };
+        Ok(self.table_style_profile(selected_style)?.table_borders)
+    }
+
     pub(super) fn table_style_profile(&mut self, id: usize) -> Result<Rc<Profile>, String> {
         let profile = if let Some(profile) = self.table_style_cache.get(&id) {
             Rc::clone(profile)
@@ -229,6 +244,34 @@ impl Formatting<'_> {
                 &mut self.budget,
                 |scope, code, operand, _| {
                     match code {
+                        #[cfg(feature = "direct-doc")]
+                        0xd613 => {
+                            if scope != tapx::Scope::Unconditional {
+                                return Ok(false);
+                            }
+                            if operand.len() != 49 || operand[0] != 48 {
+                                return Err(unsupported("invalid Word table-style border array"));
+                            }
+                            let mut borders = [None; 6];
+                            for (side, slot) in borders.iter_mut().enumerate() {
+                                *slot = Some(table::PreparedBorder::read(
+                                    &operand[1 + side * 8..],
+                                    false,
+                                )?);
+                            }
+                            if borders
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .any(table::PreparedBorder::is_nil)
+                            {
+                                // NilBrc has not been established for the
+                                // inherited native table-border cascade.
+                                return Ok(false);
+                            }
+                            profile.table_borders = borders;
+                            Ok(interpret_table_styles)
+                        }
                         0xd634 | 0xd63e => {
                             if scope != tapx::Scope::Unconditional {
                                 return Ok(false);

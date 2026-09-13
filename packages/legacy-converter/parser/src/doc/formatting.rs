@@ -541,10 +541,25 @@ impl<'a> Formatting<'a> {
         for bytes in [direct, piece] {
             sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
                 #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    properties.row.reset_row_properties_at_tistd(code);
+                }
+                #[cfg(feature = "direct-doc")]
                 if interpret_table_styles
                     && properties.row.apply_style_aware_margins(code, operand)?
                 {
                     return Ok(());
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    match properties.row.apply_style_aware_borders(code, operand)? {
+                        table::StyleAwareBorderApply::Handled => return Ok(()),
+                        table::StyleAwareBorderApply::HandledUnsupported => {
+                            self.unsupported_table_properties = true;
+                            return Ok(());
+                        }
+                        table::StyleAwareBorderApply::Unhandled => {}
+                    }
                 }
                 match properties
                     .row
@@ -1545,6 +1560,86 @@ mod tests {
     fn table_style_margin(code: u16, sides: u8, unit: u8, width: u16) -> Vec<u8> {
         let [lo, hi] = width.to_le_bytes();
         test_prl(code, &[6, 0, 1, sides, unit, lo, hi])
+    }
+
+    #[cfg(feature = "direct-doc")]
+    fn table_style_borders(color: [u8; 3], width: u8) -> Vec<u8> {
+        let mut operand = vec![48];
+        for _ in 0..6 {
+            operand.extend([color[0], color[1], color[2], 0, width, 1, 0, 0]);
+        }
+        test_prl(0xd613, &operand)
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn unconditional_table_borders_compose_base_to_child_and_empty_inherits() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.configure_table_styles(0x0112, true);
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(table_style_borders([0xff, 0, 0], 8));
+        formatting.styles[1]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(table_style_borders([0, 0, 0xff], 16));
+
+        for (style, color, width) in [(0, "ff0000", 1.0), (1, "0000ff", 2.0), (2, "ff0000", 1.0)] {
+            let borders = formatting.table_borders(Some(style)).unwrap();
+            for value in borders {
+                let spec = value.unwrap().decode().unwrap().direct_spec();
+                assert_eq!(spec.color.as_deref(), Some(color));
+                assert_eq!(spec.width, width);
+                assert_eq!(spec.style, "single");
+            }
+        }
+        assert!(!formatting.unsupported_table_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn conditional_and_nil_table_style_borders_stay_behind_admission_gate() {
+        let mut conditional = observed_table_style_formatting();
+        conditional.configure_table_styles(0x0112, true);
+        conditional.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .tapx = leaked(cnf(
+            0xd66a,
+            table_style_condition::FIRST_ROW,
+            &table_style_borders([0xff, 0, 0], 8),
+        ));
+        assert!(conditional
+            .table_borders(Some(0))
+            .unwrap()
+            .iter()
+            .all(Option::is_none));
+        assert!(conditional.unsupported_table_properties);
+
+        let mut nil = observed_table_style_formatting();
+        nil.configure_table_styles(0x0112, true);
+        let mut operand = vec![48];
+        for _ in 0..6 {
+            operand.extend([0xff; 8]);
+        }
+        nil.styles[0].as_mut().unwrap().table.as_mut().unwrap().tapx =
+            leaked(test_prl(0xd613, &operand));
+        assert!(nil
+            .table_borders(Some(0))
+            .unwrap()
+            .iter()
+            .all(Option::is_none));
+        assert!(nil.unsupported_table_properties);
     }
 
     #[cfg(feature = "direct-doc")]
@@ -3862,6 +3957,106 @@ mod tests {
         let properties = xml.table_properties(109, 0, &[]).unwrap();
         assert_eq!(properties.row.cells[0].margins[1], Some(720));
         assert_eq!(properties.row.cells[0].width, 1000);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_tistd_resets_only_independently_authored_row_properties_in_data_order() {
+        let before_tistd = [
+            test_prl(0x2416, &[1]),
+            test_prl(0x2417, &[1]),
+            test_prl(0x7621, &[0, 1, 0xe8, 3]),
+            test_prl(0x548a, &2u16.to_le_bytes()),
+            test_prl(0x3404, &[1]),
+            test_prl(0x3466, &[1]),
+            test_prl(0x3465, &[1]),
+            test_prl(0x360d, &[0x20]),
+            test_prl(0x940e, &721u16.to_le_bytes()),
+            test_prl(0x9410, &120u16.to_le_bytes()),
+            test_prl(0x9601, &720u16.to_le_bytes()),
+            test_prl(0x9602, &180u16.to_le_bytes()),
+            test_prl(0x9407, &720u16.to_le_bytes()),
+            test_prl(0xf614, &[3, 0x70, 0x17]),
+            test_prl(0x3615, &[1]),
+            test_prl(0x740a, &[0, 0, 0x20, 0]),
+            test_prl(0x560b, &1u16.to_le_bytes()),
+            test_prl(0x5664, &0u16.to_le_bytes()),
+        ]
+        .concat();
+        let reset = test_prl(0x563a, &1u16.to_le_bytes());
+        let data = test_prc_data([before_tistd.clone(), reset.clone()].concat());
+        let papx = [vec![0, 0], test_prl(0x646b, &0u32.to_le_bytes())].concat();
+
+        let mut native = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data.clone());
+        native.configure_table_styles(0x0112, true);
+        let properties = native.table_properties_native(109, 0, &[]).unwrap();
+        assert_eq!(properties.row.alignment, (0, false));
+        assert!(!properties.row.header);
+        assert!(!properties.row.cant_split);
+        let (position, overlap) = properties.row.position.direct();
+        let position = position.unwrap();
+        assert_eq!(position.tblp_x, 36.0);
+        assert_eq!(position.left_from_text, 120.0 / 20.0);
+        assert_eq!(overlap, None);
+        assert_eq!(properties.row.left, 720);
+        assert_eq!(properties.row.gap, 180);
+        assert_eq!(properties.row.height, 720);
+        assert_eq!(
+            properties.row.preferred_width,
+            Some(table::PreferredWidth::Dxa(6000))
+        );
+        assert!(properties.row.autofit);
+        assert_eq!(properties.row.table_style_options, Some(0x20));
+        assert_eq!(properties.row.cells[0].width, 1000);
+        assert!(properties.row.bidi);
+        assert!(!properties.row.identity.contains_key(&0x3465));
+        assert!(native.unsupported_table_properties);
+
+        let mut xml = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data);
+        xml.configure_table_styles(0x0112, false);
+        let properties = xml.table_properties(109, 0, &[]).unwrap();
+        assert_eq!(properties.row.alignment, (2, false));
+        assert!(properties.row.header);
+        assert!(properties.row.cant_split);
+        assert!(properties.row.position.xml().contains("tblOverlap"));
+        assert!(properties.row.identity.contains_key(&0x3465));
+
+        let after_tistd = [
+            reset.clone(),
+            test_prl(0x548a, &1u16.to_le_bytes()),
+            test_prl(0x3404, &[1]),
+            test_prl(0x3466, &[1]),
+            test_prl(0x3465, &[1]),
+        ]
+        .concat();
+        let data = test_prc_data(after_tistd);
+        let mut native = with_direct_paragraph_runs(&[(100, 110, papx.clone())], data);
+        native.configure_table_styles(0x0112, true);
+        let properties = native.table_properties_native(109, 0, &[]).unwrap();
+        assert_eq!(properties.row.alignment, (1, false));
+        assert!(properties.row.header);
+        assert!(properties.row.cant_split);
+        assert!(properties.row.position.xml().contains("tblOverlap"));
+
+        let repeated = test_prc_data(
+            [
+                before_tistd,
+                reset.clone(),
+                test_prl(0x548a, &1u16.to_le_bytes()),
+                test_prl(0x3404, &[1]),
+                test_prl(0x3466, &[1]),
+                test_prl(0x3465, &[1]),
+                reset,
+            ]
+            .concat(),
+        );
+        let mut native = with_direct_paragraph_runs(&[(100, 110, papx)], repeated);
+        native.configure_table_styles(0x0112, true);
+        let properties = native.table_properties_native(109, 0, &[]).unwrap();
+        assert_eq!(properties.row.alignment, (0, false));
+        assert!(!properties.row.header);
+        assert!(!properties.row.cant_split);
+        assert!(!properties.row.position.xml().contains("tblOverlap"));
     }
 
     #[test]

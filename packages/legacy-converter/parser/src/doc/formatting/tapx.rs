@@ -22,9 +22,10 @@ const EXPLICITLY_PROHIBITED: [u16; 41] = [
     0xd680, 0xd681, 0xd682, 0xd683, 0xd684,
 ];
 
-// Properties sprmTIstd preserves, enumerated by [MS-DOC] 2.6.3. UpxTapx is
-// forbidden from changing these even when a code is absent from the explicit
-// exclusion list above.
+// SPRM encodings for semantic properties that [MS-DOC] 2.6.3 says sprmTIstd
+// preserves. The section describes the preserved properties and gives example
+// SPRMs; this list is the validated encoding subset used to reject UpxTapx,
+// not a claim that those examples exhaust every compatible encoding.
 const PRESERVED_BY_T_ISTD: [u16; 16] = [
     0x3668, // sprmTWall
     0xd667, // sprmTPropRMark
