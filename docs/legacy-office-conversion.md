@@ -1351,8 +1351,8 @@ worktree's test executable.
 | DOC-24 | Make table-style Office probes reproducible after cleanup | Implemented: deterministic generator and exact mutation validation passed native Word end-to-end controls; source-cell U+0007 ownership is verified separately from the TTP. Generated files remain disposable under outputs |
 | DOC-25 | Resolve table-style-aware direct cell shading | Native Raw acquisition and bounded style-baseline resolution are connected under DOC-41/45. Parent admission remains blocked by DOC-55 compatibility shading and the remaining TIstd work |
 | DOC-26 | Apply TIstd table properties with specified preservation | Pending: DOC-42 through DOC-47 cover preservation, reset and supported property projection; native controls must establish the unresolved ordering before admission |
-| DOC-27 | Resolve conditional font-table references | New follow-up: native Word controls render different fonts for identical font-table operands in unconditional CHPX and CCnf; retain the conditional-font gate until the remapping or compatibility rule is established without guessing |
-| DOC-28 | Resolve table-style physical alignment compatibility | New follow-up: native Word controls ignore standalone PJc80 center/right in both unconditional and conditional table PAPX, and retain PJc when both occur; preserve a table-style PJc80 admission gate until version-specific behavior is established |
+| DOC-27 | Resolve conditional font-table references | Investigated further: native conditional marker fonts stay unchanged when all seven FFN records are reversed or rotated, while unconditional font references follow the reordered table. Preserve the gate; neither a direct index nor a fixed remapping is established |
+| DOC-28 | Resolve table-style physical alignment compatibility | Eight additional native controls cover both property orders and opposing left/right values in unconditional and first-row PAPX. PJc determines the display in both orders; PJc80 remains gated pending a documented compatibility policy |
 
 ### Selected batch: DOC-24 through DOC-53
 
@@ -1451,19 +1451,82 @@ architecture and browser/visual acceptance remain outstanding.
 
 | Item | Scope | Status |
 | --- | --- | --- |
-| DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | A corpus input uses FibBase 0x00C1 with extension version 0x00C3. Current MS-DOC does not define that effective version; preserve an explicit rejection until its layout and applicable compatibility rules are established. Do not infer table-style capabilities from its numeric order |
-| DOC-55 | Resolve native Word Raw-Nil compatibility shading | Native Word controls with effective nFib 0x0112 retain compatibility D609/D612 shading when the later Raw D670 value is ShdNil. Changing the compatibility color changes the result; removing those compatibility properties restores table-style shading. This differs from the documented ignore rule. Keep the unresolved acquisition path gated; do not infer a renderer fallback or generalize beyond the tested version |
+| DOC-54 | Investigate the undocumented effective FIB version 0x00C3 | Reviewed against the official version/count tables and product notes. The documented C0/C2 exceptions do not establish C3 support; corpus occurrence and another reader's numeric clustering are insufficient. Explicit rejection remains |
+| DOC-55 | Resolve native Word Raw-Nil compatibility shading | Further native isolation shows D609 alone is ignored and exposes style shading, whereas D612 supplies the fill with Raw ShdNil, even when D609 appears later. This distinguishes the two records but does not resolve all segments, ranges, versions or reset interactions; retain the compatibility gate |
 | DOC-56 | Resolve authored Nil cell-margin precedence | Bounded prerequisite resolved with DOC-46: native D632 and direct D634 Nil controls match explicit Dxa zero, while omission exposes the applicable style value; authored style D634 Nil masks inherited Dxa. Retain authored state until resolution. This does not establish conditional CSSA or mixed D63E/D634 style-chain composition |
-| DOC-57 | Recover a usable native oracle for ordinary ipatNil | One bounded direct-shading control reproducibly causes a Word display-update error instead of a PDF. Preserve the specification-based no-fill rule and its focused test, but do not claim this failed export as native display evidence. Investigate the control or a separate positive oracle before broadening compatibility claims |
+| DOC-57 | Recover a usable native oracle for ordinary ipatNil | A new ordinary-ipatNil control with valid Auto COLORREFs still causes a native Word display-update error. No PDF oracle was obtained. This trial family is paused to avoid repeated Word errors; specification-based no-fill remains separately tested |
 | DOC-58 | Avoid resources orphaned by merged-cell projection | Fixed within DOC-52: horizontal/vertical continuation regressions fail before live-resource finalization and pass afterward. Retained nested/body/header/footer/section references remain deduplicated; traversal scratch is budgeted and image-free documents bypass the pass |
-| DOC-59 | Establish numbering behavior in merged continuations | Numbering currently advances before merged continuation content is suppressed. Verify the visible sequence with native Word controls before changing counters; a discarded paragraph alone does not prove that Word skips its numbering state |
-| DOC-60 | Validate nested operand framing in positive Office probes | A local conditional-border generator omitted each nested BrcOperand length byte. Those controls were invalidated and regenerated with strict nested framing checks. Add reusable recipe-level framing validation so exact byte provenance alone cannot be mistaken for a valid positive control |
-| DOC-61 | Audit border-origin projection beyond the bounded subset | Row/style fallback borders currently become effective cell borders. The bounded native counterexample retains a thin direct-cell border but displays the thicker neighboring style border, agreeing with current conflict weighting; a direct border does not always win. Preserve this result and review other layers before claiming general equivalence or changing origin semantics |
-| DOC-62 | Resolve native TFBiDi90 compatibility | Native 560B true-then-false is LTR, and 560B true plus 5664 false remains RTL across TIstd. With 560B false plus 5664 true, native PDF remains LTR; saved DOCX direction differs before/after TIstd. Retain the compatibility gate and distinguish displayed behavior from save-time normalization |
-| DOC-63 | Distinguish legacy and modern cantSplit compatibility | Modern Word controls ignore 3403 on both sides of TIstd but preserve post-TIstd 3466. MS-DOC product notes distinguish the legacy encoding from modern cantSplit. Review version-aware acquisition before treating the existing shared boolean handling as native compatibility |
-| DOC-64 | Audit table identity for explicit default values | Review question: row grouping compares retained identity operands, while an explicit false no-overlap operand and an omitted default have the same resolved flag but different identity maps. Establish a focused structural/native control before changing normalization; TIstd reset now removes its stale no-overlap identity entry |
+| DOC-59 | Establish numbering behavior in merged continuations | Bounded behavior verified: two horizontal merge ranges and a vertical continuation suppress visible paragraphs while still advancing the shared list. Actual-CFB regression tests preserve the existing counter order; no counter implementation change |
+| DOC-60 | Validate nested operand framing in positive Office probes | Implemented bounded replacement-operand checks, explicit negative placement mode and validation-coverage reporting. Historical recipe plans replay exact provenance and receive newly computed checks; malformed nested lengths cannot pass as positive evidence |
+| DOC-61 | Audit border-origin projection beyond the bounded subset | Additional native controls retain white single and thin double direct borders: black wins equal-width white ties, while the thin double wins its equal-weight style tie. Current bounded weighting is supported; opposing direct layers, spacing, Nil and RTL remain unverified |
+| DOC-62 | Resolve native TFBiDi90 compatibility | Read-only revalidation confirms independent last-value Bool16 state and the documented OR in acquisition. Current native PDF versus save-time DOCX disagreement remains unresolved; TIstd/TTlp gates still reject all eight controls regardless of the final direction |
+| DOC-63 | Distinguish legacy and modern cantSplit compatibility | Implemented an explicit current-Word native-reader policy: validate but ignore legacy 3403 and apply modern 3466. Selection does not depend on document nFib. Generic/XML behavior remains unchanged; direct acquisition and reset ordering are tested |
+| DOC-64 | Audit table identity for explicit default values | Implemented semantic false/omitted identity for no-overlap, with nonmutating invalid-value checks and actual acquisition/source-row grouping tests. Native false/omitted controls match; native inline true also stays grouped and is tracked separately as DOC-84 |
 
 The current formatting tests exercise the typed projection methods; they do not
 establish full-document admission or visual compatibility. The complete branch
 still requires its outstanding architecture and visual-regression review before
 merge or release. XLS and PPT follow separate backlogs and are outside this batch.
+
+### Selected follow-up batch: 30 items
+
+The next user-authorized batch selects the eleven unresolved items DOC-27,
+DOC-28, DOC-54, DOC-55, DOC-57, DOC-59, DOC-60, DOC-61, DOC-62, DOC-63 and
+DOC-64, plus the nineteen bounded slices below. Prior test counts remain
+historical. Investigations can establish a narrower supported behavior or
+identify a concrete remaining blocker; a retained gate is not implemented
+compatibility. DOC-25/26 remain parent acceptance items. Findings outside this
+selection are recorded without automatically extending the batch.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-65 | Validate nested conditional-border operand lengths | Implemented exact nested BrcOperand length checks; non-normative NilBrc recovery cannot certify a positive BrcOperand |
+| DOC-66 | Validate probe CNF conditions and nesting | Implemented all twelve CNFC values, exact wrapper ownership, family checks and bounded nonrecursive nesting |
+| DOC-67 | Validate probe cell-margin operand framing | Implemented exact CSSA size, cell range, side mask, units and documented width constraints for the recognized operands |
+| DOC-68 | Validate probe Raw shading segment framing | Implemented exact RawShd segment framing and 22/22/19 cell limits; individual shading values are not claimed as fully validated semantics |
+| DOC-69 | Validate positive-probe property families and PAPX prefixes | Implemented replacement UPX family and PAPX-owner checks, recognized TAPX placement restrictions and required default-style width checks; untouched property sets are not recertified semantically |
+| DOC-70 | Bound positive-probe validation work and negative-control handling | Implemented shared 1 MiB/4096-SPRM validation budgets and an explicit specification-invalid placement mode that cannot bypass malformed operand framing |
+| DOC-71 | Separate native row compatibility policy from XML conversion | Implemented explicit native-reader cantSplit policy while preserving generic/XML behavior |
+| DOC-72 | Verify ordered legacy and modern row-split properties | Implemented and tested ordered 3403/3466 handling, independent of nFib, with native-current-Word behavior distinguished from generic/XML acquisition |
+| DOC-73 | Establish semantic defaults used for row identity | Implemented only the documented false no-overlap default normalization. Other raw identity defaults remain outside this slice |
+| DOC-74 | Verify repeated TIstd row-reset interactions | Verified repeated TIstd resets and later modern cantSplit overrides through actual native acquisition; ignored legacy values cannot resurrect cleared state |
+| DOC-75 | Exercise native acquisition and source-row grouping | Added native/generic acquisition and source-row grouping coverage, preserving source TTP IDs and separating row-local cantSplit from table identity |
+| DOC-76 | Establish last-row conditional border regions | Connected bounded LAST_ROW border regions through cached profile and actual story projection; six sides, singleton, disabled flag and existing shape gates are covered |
+| DOC-77 | Establish last-column conditional border regions | Connected bounded LAST_COLUMN border regions through cached profile and actual story projection; six sides, singleton, disabled flag and existing shape gates are covered |
+| DOC-78 | Establish overlapping conditional border precedence | Native controls confirm row-over-column overlap precedence independent of serialized TCnf order. Different-side and interior-edge interactions still need controls; multiple-condition projection remains gated |
+| DOC-79 | Establish inherited conditional TAPX border behavior | Native controls confirm empty-child/grandchild inheritance, child color replacement and coexistence of distinct conditions. Partial-side, reversed values and repeated-condition behavior remain prerequisites; inherited TCnf stays gated |
+| DOC-80 | Bound merged and irregular conditional border geometry | Native controls suppress swallowed horizontal/vertical interior borders and retain source edges for isolated width/origin changes. Normalized grid interactions remain unresolved; merged/irregular conditional projection stays gated |
+| DOC-81 | Establish conditional margin composition | Native counterexamples reject simple composition: conditional D63E is retained, conditional D634 disappears, and an unconditional margin interaction differs from the naive cascade. Keep the gate and isolate the families and ordering before implementation |
+| DOC-82 | Run isolated model comparison and adjudicate changes | Fresh isolated release WASMs agree on all 187 inputs (59 private and 128 controls), including errors and streamed models; four private inputs admitted. The final comparison includes the reviewed border-presence correction |
+| DOC-83 | Review the selected batch and re-evaluate admission | Scoped adversarial review found and fixed a competing singleton condition gap: active cross-family edge conditions now gate the border patch, with actual-story regressions. Final model revalidation passed after this correction. Parent admission and full-branch architecture/browser/visual acceptance remain outstanding |
+
+### Additional finding from the follow-up batch
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-84 | Resolve native inline no-overlap grouping | A matched current-Word control keeps an inline middle row in the same table even with no-overlap true; its PDF matches omission and its saved DOCX keeps the three-row table. The existing normative true identity distinction is not thereby disproved for positioned tables. Isolate inline versus positioned behavior before changing that rule |
+| DOC-85 | Integrate cross-family border condition matching | Review found that a last-row/column border could bypass an enabled competing first-edge character condition. A conservative cached-presence gate and regression tests now prevent that partial projection; broader mixed-family border matching still needs shared-selector and native acceptance work |
+
+The follow-up batch implements the bounded probe-validation, current-Word
+row-split policy, false no-overlap identity, numbering regressions and final-edge
+border slices. Native investigations for the remaining compatibility items
+record narrower evidence and concrete next controls; they are not claims that
+all thirty selected items now provide complete format support.
+
+Final verification for this follow-up checkpoint: 846 Rust unit tests and nine
+integration tests passed, with six existing ignores; the no-default-features
+check passed. The table-style probe suite passed 34 tests, its PAPX dependency
+passed nine, and the unchanged renderer border suites passed 33. The static
+layout-boundary check and diff checks passed. Fresh isolated baseline and
+candidate release WASMs agree on 187 inputs; admission remains four of 59
+private DOCs, and all 128 controls are gated. This comparison is not visual
+fidelity or full-branch architecture acceptance.
+
+Adversarial review corrected positive-probe NilBrc certification and table-SPRM
+placement drift, preserved exact historical-plan replay with current coverage
+reporting, and added the competing-edge border gate. Runtime additions reuse
+bounded profile state and existing source-row ownership; no renderer, shared
+model or XLS/PPT behavior was added. Generic DOC-to-XML no-overlap identity now
+uses the same documented false default, while its cantSplit behavior is retained.
+The remaining investigations and DOC-84/85 prevent any general table-style
+admission or completion claim.
