@@ -403,6 +403,43 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn direct_inline_finalization_keeps_only_live_keys_and_rejects_dangling_keys() {
+        let mut data = fixture(&[(0x0104, 1)], &[raster()]);
+        data[88..92].copy_from_slice(&0xc0u32.to_le_bytes());
+
+        let mut orphan = Store::new(&data);
+        let mut budget = 4096;
+        orphan.direct_inline(0, &mut budget).unwrap().unwrap();
+        let before = budget;
+        let resources = orphan
+            .finish_referenced_direct_resources(&[], &mut budget)
+            .unwrap();
+        assert!(resources.is_empty());
+        assert_eq!(budget, before);
+
+        let dangling = || {
+            let mut store = Store::new(&data);
+            let mut budget = 4096;
+            store.direct_inline(0, &mut budget).unwrap().unwrap();
+            (store, budget)
+        };
+        for key in ["legacy-doc/image/1", "legacy-doc/image/00"] {
+            let (store, mut budget) = dangling();
+            assert!(store
+                .finish_referenced_direct_resources(&[key], &mut budget)
+                .is_err());
+        }
+
+        let (store, mut budget) = dangling();
+        let resources = store
+            .finish_referenced_direct_resources(&["legacy-doc/image/0"], &mut budget)
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, "legacy-doc/image/0");
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn direct_inline_rejects_unavailable_types_and_admits_before_metadata() {
         let unsupported_image = record(0xf01a, 0, &[]);
         let data = fixture(&[(0x0104, 1)], &[unsupported_image]);

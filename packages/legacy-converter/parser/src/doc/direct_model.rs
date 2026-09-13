@@ -3,7 +3,10 @@
 
 use super::{unsupported, AcquiredDoc, Fields};
 use docx_model::paragraph_breaks::ParaPiece;
-use docx_model::{BodyElement, DocRun, Document, DocumentSettings, DocumentTypographySettingsWire};
+use docx_model::{
+    BodyElement, CellElement, DocRun, Document, DocumentSettings, DocumentTypographySettingsWire,
+    HeadersFooters,
+};
 
 mod headers;
 mod payload;
@@ -167,12 +170,6 @@ pub(super) fn build(
         ));
     }
 
-    let mut resources = facts
-        .pictures
-        .finish_direct_resources(&mut budget.remaining_bytes)?;
-    facts
-        .floating
-        .append_direct_resources(&mut resources, &mut budget.remaining_bytes)?;
     let document = Document {
         section,
         body,
@@ -182,10 +179,143 @@ pub(super) fn build(
         document_typography_settings,
         ..Document::default()
     };
+    if !facts.pictures.has_selected_direct_resources()
+        && !facts.floating.has_selected_direct_resources()
+    {
+        return Ok(DirectDocResult {
+            document,
+            resources: Vec::new(),
+        });
+    }
+    let references = direct_picture_references(&document, &mut budget)?;
+    let mut resources = facts
+        .pictures
+        .finish_referenced_direct_resources(&references, &mut budget.remaining_bytes)?;
+    facts.floating.append_referenced_direct_resources(
+        &mut resources,
+        &references,
+        &mut budget.remaining_bytes,
+    )?;
     Ok(DirectDocResult {
         document,
         resources,
     })
+}
+
+#[derive(Clone, Copy)]
+enum RetainedBlock<'a> {
+    Body(&'a BodyElement),
+    Cell(&'a CellElement),
+}
+
+/// Collect direct-DOC picture references from the final retained model after
+/// table merge projection has discarded continuation content. This one-time
+/// pass is O(retained nodes + references log references), uses no recursion,
+/// and charges its O(retained nodes) worst-case traversal stack and reference
+/// vector to the document's cumulative model budget. Documents with no selected
+/// direct pictures bypass the pass.
+fn direct_picture_references<'a>(
+    document: &'a Document,
+    budget: &mut ModelBudget,
+) -> Result<Vec<&'a str>, String> {
+    fn push_headers<'a>(
+        headers: &'a HeadersFooters,
+        pending: &mut Vec<RetainedBlock<'a>>,
+        budget: &mut ModelBudget,
+    ) -> Result<(), String> {
+        for header in [
+            headers.default.as_ref(),
+            headers.first.as_ref(),
+            headers.even.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for block in &header.body {
+                budget.push(pending, RetainedBlock::Body(block))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn push_key<'a>(
+        key: &'a str,
+        references: &mut Vec<&'a str>,
+        budget: &mut ModelBudget,
+    ) -> Result<(), String> {
+        if !key.starts_with("legacy-doc/") {
+            return Ok(());
+        }
+        if !(key.starts_with("legacy-doc/image/") || key.starts_with("legacy-doc/float/")) {
+            return Err(unsupported("unknown direct DOC picture resource namespace"));
+        }
+        budget.push(references, key)
+    }
+
+    fn paragraph<'a>(
+        paragraph: &'a docx_model::DocParagraph,
+        references: &mut Vec<&'a str>,
+        budget: &mut ModelBudget,
+    ) -> Result<(), String> {
+        if let Some(numbering) = &paragraph.numbering {
+            if let Some(key) = &numbering.pic_bullet_image_path {
+                push_key(key, references, budget)?;
+            }
+        }
+        for run in &paragraph.runs {
+            if let DocRun::Image(image) = run {
+                push_key(&image.image_path, references, budget)?;
+                if let Some(key) = &image.svg_image_path {
+                    push_key(key, references, budget)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn table<'a>(
+        table: &'a docx_model::DocTable,
+        pending: &mut Vec<RetainedBlock<'a>>,
+        budget: &mut ModelBudget,
+    ) -> Result<(), String> {
+        for row in &table.rows {
+            for cell in &row.cells {
+                for block in &cell.content {
+                    budget.push(pending, RetainedBlock::Cell(block))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut pending = Vec::new();
+    for block in &document.body {
+        budget.push(&mut pending, RetainedBlock::Body(block))?;
+    }
+    push_headers(&document.headers, &mut pending, budget)?;
+    push_headers(&document.footers, &mut pending, budget)?;
+
+    let mut references = Vec::new();
+    while let Some(block) = pending.pop() {
+        match block {
+            RetainedBlock::Body(BodyElement::Paragraph(value))
+            | RetainedBlock::Cell(CellElement::Paragraph(value)) => {
+                paragraph(value, &mut references, budget)?
+            }
+            RetainedBlock::Body(BodyElement::Table(value))
+            | RetainedBlock::Cell(CellElement::Table(value)) => table(value, &mut pending, budget)?,
+            RetainedBlock::Body(BodyElement::SectionBreak {
+                headers, footers, ..
+            }) => {
+                push_headers(headers, &mut pending, budget)?;
+                push_headers(footers, &mut pending, budget)?;
+            }
+            RetainedBlock::Body(BodyElement::PageBreak { .. } | BodyElement::ColumnBreak) => {}
+        }
+    }
+    references.sort_unstable();
+    references.dedup();
+    Ok(references)
 }
 
 /// Cumulative admitted model storage, not serialized size or an RSS estimate.
@@ -941,10 +1071,26 @@ mod tests {
         assert!(expected["body"][0]["runs"][0].get("flipH").is_none());
         assert!(expected["body"][0]["runs"][0].get("flipV").is_none());
 
-        let sections = [(3, 2, 12_240, 15_840, 1, 720)];
-        let slots = [None, Some("\u{1}\r"), None, None, None, None];
+        let sections = [
+            (2, 0, 12_240, 15_840, 1, 720),
+            (4, 2, 12_240, 15_840, 1, 720),
+        ];
+        let slots = [
+            None,
+            Some("\u{1}\r"),
+            None,
+            Some("\u{1}\r"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
         let header_source =
-            source_with_typography("B\u{1}\r", &sections, None, None, None, Some(&slots));
+            source_with_typography("B\u{c}\u{1}\r", &sections, None, None, None, Some(&slots));
         let header_result = super::super::direct_model(
             &CompoundFile::open(&with_picture_data(&header_source, false)).unwrap(),
             1024 * 1024,
@@ -952,7 +1098,7 @@ mod tests {
         .unwrap();
         assert_eq!(header_result.resources.len(), 1);
         let body_key = image_runs(&header_result.document)[0].image_path.clone();
-        let header = header_result.document.headers.default.unwrap();
+        let header = header_result.document.headers.default.as_ref().unwrap();
         let BodyElement::Paragraph(paragraph) = &header.body[0] else {
             panic!("header paragraph")
         };
@@ -960,6 +1106,37 @@ mod tests {
             panic!("header image")
         };
         assert_eq!(body_key, header_image.image_path);
+        let footer = header_result.document.footers.default.as_ref().unwrap();
+        let BodyElement::Paragraph(paragraph) = &footer.body[0] else {
+            panic!("footer paragraph")
+        };
+        let DocRun::Image(footer_image) = &paragraph.runs[0] else {
+            panic!("footer image")
+        };
+        assert_eq!(body_key, footer_image.image_path);
+        let (break_headers, break_footers) = header_result
+            .document
+            .body
+            .iter()
+            .find_map(|block| match block {
+                BodyElement::SectionBreak {
+                    headers, footers, ..
+                } => Some((headers, footers)),
+                _ => None,
+            })
+            .expect("section break");
+        for slot in [
+            break_headers.default.as_ref().unwrap(),
+            break_footers.default.as_ref().unwrap(),
+        ] {
+            let BodyElement::Paragraph(paragraph) = &slot.body[0] else {
+                panic!("section header or footer paragraph")
+            };
+            let DocRun::Image(image) = &paragraph.runs[0] else {
+                panic!("section header or footer image")
+            };
+            assert_eq!(body_key, image.image_path);
+        }
         assert_eq!(body_key, header_result.resources[0].key);
 
         let hidden = picture_source("\u{1}\r", true);

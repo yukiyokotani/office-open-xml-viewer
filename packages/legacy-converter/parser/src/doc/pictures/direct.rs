@@ -23,6 +23,10 @@ pub(crate) struct DirectPictureResource {
 }
 
 impl Store<'_> {
+    pub(in crate::doc) fn has_selected_direct_resources(&self) -> bool {
+        !self.part_offsets.is_empty()
+    }
+
     /// Select an occurrence for one direct document result. Direct production
     /// must not call the OOXML part-scoping `begin_part`, which clears the
     /// selected-offset set used by `finish_direct_resources`.
@@ -68,20 +72,58 @@ impl Store<'_> {
         }))
     }
 
+    pub(in crate::doc) fn finish_referenced_direct_resources(
+        self,
+        references: &[&str],
+        remaining_bytes: &mut usize,
+    ) -> Result<Vec<DirectPictureResource>, String> {
+        for reference in references {
+            let Some(suffix) = reference.strip_prefix("legacy-doc/image/") else {
+                continue;
+            };
+            let offset = suffix
+                .parse::<usize>()
+                .map_err(|_| unsupported("invalid direct DOC inline picture resource key"))?;
+            if key(offset) != *reference
+                || !self.part_offsets.contains(&offset)
+                || self.cache.get(&offset).and_then(Option::as_ref).is_none()
+            {
+                return Err(unsupported("dangling direct DOC inline picture resource"));
+            }
+        }
+        self.finish_direct_resources_with(
+            |offset| {
+                let value = key(offset);
+                references.binary_search(&value.as_str()).is_ok()
+            },
+            remaining_bytes,
+        )
+    }
+
+    #[cfg(test)]
     pub(in crate::doc) fn finish_direct_resources(
         self,
+        remaining_bytes: &mut usize,
+    ) -> Result<Vec<DirectPictureResource>, String> {
+        let selected = self.part_offsets.clone();
+        self.finish_direct_resources_with(|offset| selected.contains(&offset), remaining_bytes)
+    }
+
+    fn finish_direct_resources_with(
+        self,
+        selected: impl Fn(usize) -> bool,
         remaining_bytes: &mut usize,
     ) -> Result<Vec<DirectPictureResource>, String> {
         let selected_count = self
             .cache
             .iter()
-            .filter(|(offset, picture)| self.part_offsets.contains(offset) && picture.is_some())
+            .filter(|(offset, picture)| selected(**offset) && picture.is_some())
             .count();
         let mut required = selected_count
             .checked_mul(std::mem::size_of::<DirectPictureResource>())
             .ok_or("OUTPUT_TOO_LARGE")?;
         for (offset, picture) in &self.cache {
-            if !self.part_offsets.contains(offset) || picture.is_none() {
+            if !selected(*offset) || picture.is_none() {
                 continue;
             }
             let picture = picture.as_ref().expect("filtered selected picture");
@@ -111,7 +153,7 @@ impl Store<'_> {
             .checked_sub(excess)
             .ok_or("OUTPUT_TOO_LARGE")?;
         for (offset, picture) in self.cache {
-            if !self.part_offsets.contains(&offset) {
+            if !selected(offset) {
                 continue;
             }
             let picture = picture.expect("selected direct picture was validated");

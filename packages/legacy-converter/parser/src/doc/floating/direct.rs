@@ -15,6 +15,10 @@ pub(in crate::doc) struct DirectFloatingPicture {
 }
 
 impl Store<'_> {
+    pub(in crate::doc) fn has_selected_direct_resources(&self) -> bool {
+        !self.selected_images.is_empty()
+    }
+
     pub(in crate::doc) fn direct_picture(
         &mut self,
         cp: usize,
@@ -83,12 +87,61 @@ impl Store<'_> {
         }))
     }
 
+    pub(in crate::doc) fn append_referenced_direct_resources(
+        self,
+        resources: &mut Vec<DirectPictureResource>,
+        references: &[&str],
+        remaining_bytes: &mut usize,
+    ) -> Result<(), String> {
+        for reference in references {
+            let Some(suffix) = reference.strip_prefix("legacy-doc/float/") else {
+                continue;
+            };
+            let index = suffix
+                .parse::<usize>()
+                .map_err(|_| unsupported("invalid direct DOC floating picture resource key"))?;
+            if format!("legacy-doc/float/{index}") != *reference
+                || !self.selected_images.contains(&index)
+                || self.images.get(&index).and_then(Option::as_ref).is_none()
+            {
+                return Err(unsupported("dangling direct DOC floating picture resource"));
+            }
+        }
+        self.append_direct_resources_with(
+            resources,
+            |index| {
+                let value = format!("legacy-doc/float/{index}");
+                references.binary_search(&value.as_str()).is_ok()
+            },
+            remaining_bytes,
+        )
+    }
+
+    #[cfg(test)]
     pub(in crate::doc) fn append_direct_resources(
         self,
         resources: &mut Vec<DirectPictureResource>,
         remaining_bytes: &mut usize,
     ) -> Result<(), String> {
-        let count = self.selected_images.len();
+        let selected = self.selected_images.clone();
+        self.append_direct_resources_with(
+            resources,
+            |index| selected.contains(&index),
+            remaining_bytes,
+        )
+    }
+
+    fn append_direct_resources_with(
+        self,
+        resources: &mut Vec<DirectPictureResource>,
+        selected: impl Fn(usize) -> bool,
+        remaining_bytes: &mut usize,
+    ) -> Result<(), String> {
+        let count = self
+            .selected_images
+            .iter()
+            .filter(|index| selected(**index))
+            .count();
         let old_capacity = resources.capacity();
         let minimum_capacity = resources
             .len()
@@ -98,7 +151,11 @@ impl Store<'_> {
         let mut required = minimum_added
             .checked_mul(std::mem::size_of::<DirectPictureResource>())
             .ok_or("OUTPUT_TOO_LARGE")?;
-        for index in &self.selected_images {
+        for index in self
+            .selected_images
+            .iter()
+            .filter(|index| selected(**index))
+        {
             let image = self.images[index]
                 .as_ref()
                 .expect("selected floating image");
@@ -133,7 +190,7 @@ impl Store<'_> {
             ..
         } = self;
         for (index, image) in images {
-            if !selected_images.contains(&index) {
+            if !selected_images.contains(&index) || !selected(index) {
                 continue;
             }
             let image = image.expect("selected floating image");
@@ -289,5 +346,65 @@ fn mime(extension: &str) -> Result<&'static str, String> {
         _ => Err(unsupported(
             "direct DOC model supports only PNG/JPEG floating pictures",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::officeart::raster::Image;
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    fn selected_store() -> Store<'static> {
+        Store {
+            anchors: Vec::new(),
+            shapes: BTreeMap::new(),
+            entries: Vec::new(),
+            word: &[],
+            images: BTreeMap::from([(
+                7,
+                Some(Image {
+                    bytes: Cow::Borrowed(b"png"),
+                    extension: "png",
+                }),
+            )]),
+            budget: 0,
+            remaining_bytes: 0,
+            occurrences: 0,
+            selected_images: std::collections::BTreeSet::from([7]),
+            omitted: false,
+        }
+    }
+
+    #[test]
+    fn floating_finalization_keeps_only_live_keys_and_rejects_dangling_keys() {
+        let mut resources = Vec::new();
+        let mut budget = 4096;
+        let before = budget;
+        selected_store()
+            .append_referenced_direct_resources(&mut resources, &[], &mut budget)
+            .unwrap();
+        assert!(resources.is_empty());
+        assert_eq!(budget, before);
+
+        for key in ["legacy-doc/float/8", "legacy-doc/float/07"] {
+            let mut resources = Vec::new();
+            let mut budget = 4096;
+            assert!(selected_store()
+                .append_referenced_direct_resources(&mut resources, &[key], &mut budget)
+                .is_err());
+            assert!(resources.is_empty());
+        }
+
+        let mut resources = Vec::new();
+        selected_store()
+            .append_referenced_direct_resources(
+                &mut resources,
+                &["legacy-doc/float/7"],
+                &mut budget,
+            )
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].key, "legacy-doc/float/7");
     }
 }

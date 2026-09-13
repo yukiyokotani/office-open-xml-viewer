@@ -200,6 +200,162 @@ fn full_cfb_table_budget_is_atomic_and_image_resource_outlives_input() {
 }
 
 #[test]
+fn horizontal_merge_continuation_does_not_retain_an_orphan_picture_resource() {
+    let text = "a\u{7}\u{1}\u{7}c\u{7}\u{7}\r";
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let merged_row = [
+        sprm(0x2416, &[1], false),
+        sprm(0x2417, &[1], false),
+        sprm(0x7621, &[0, 3, 0xe8, 3], false),
+        sprm(0x5624, &[0, 2], false),
+        sprm(0x2416, &[1], false),
+    ]
+    .concat();
+    let bytes = with_picture_data(
+        &with_papx(
+            &source,
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 7, merged_row),
+                (7, 8, Vec::new()),
+            ],
+        ),
+        false,
+    );
+    let result =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap();
+    let BodyElement::Table(table) = &result.document.body[0] else {
+        panic!("table")
+    };
+    assert_eq!(table.rows[0].cells.len(), 2);
+    assert!(table.rows[0].cells.iter().all(|cell| cell
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            CellElement::Paragraph(paragraph) => Some(paragraph),
+            CellElement::Table(_) => None,
+        })
+        .flat_map(|paragraph| &paragraph.runs)
+        .all(|run| !matches!(run, DocRun::Image(_)))));
+    assert!(result.resources.is_empty());
+}
+
+#[test]
+fn vertical_merge_continuation_does_not_retain_an_orphan_picture_resource() {
+    let text = "a\u{7}\u{7}\u{1}\u{7}\u{7}\r";
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let vertical_row = |flag| {
+        [
+            row(1000),
+            sprm(0xd62b, &[0, flag], true),
+            sprm(0x2416, &[1], false),
+        ]
+        .concat()
+    };
+    let bytes = with_picture_data(
+        &with_papx(
+            &source,
+            &[
+                (0, 2, cell()),
+                (2, 3, vertical_row(3)),
+                (3, 5, cell()),
+                (5, 6, vertical_row(1)),
+                (6, 7, Vec::new()),
+            ],
+        ),
+        false,
+    );
+    let result =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap();
+    let BodyElement::Table(table) = &result.document.body[0] else {
+        panic!("table")
+    };
+    assert_eq!(table.rows.len(), 2);
+    assert_eq!(table.rows[1].cells[0].v_merge, Some(false));
+    assert!(table.rows[1].cells[0]
+        .content
+        .iter()
+        .all(|block| match block {
+            CellElement::Paragraph(paragraph) => paragraph
+                .runs
+                .iter()
+                .all(|run| !matches!(run, DocRun::Image(_))),
+            CellElement::Table(_) => true,
+        }));
+    assert!(result.resources.is_empty());
+}
+
+#[test]
+fn retained_nested_table_picture_keeps_its_single_deduplicated_resource() {
+    let text = "\u{1}\r\r\u{7}\u{7}\r";
+    let source = source_with_typography(
+        text,
+        &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let bytes = with_picture_data(
+        &with_papx(
+            &source,
+            &[
+                (0, 2, nested_cell()),
+                (2, 3, nested_row(500)),
+                (3, 4, cell()),
+                (4, 5, row(1000)),
+                (5, 6, Vec::new()),
+            ],
+        ),
+        false,
+    );
+    let result =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap();
+    let BodyElement::Table(outer) = &result.document.body[0] else {
+        panic!("outer table")
+    };
+    let nested = outer.rows[0].cells[0]
+        .content
+        .iter()
+        .find_map(|block| match block {
+            CellElement::Table(table) => Some(table),
+            CellElement::Paragraph(_) => None,
+        })
+        .expect("nested table");
+    let image = nested.rows[0].cells[0]
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            CellElement::Paragraph(paragraph) => Some(paragraph),
+            CellElement::Table(_) => None,
+        })
+        .flat_map(|paragraph| &paragraph.runs)
+        .find_map(|run| match run {
+            DocRun::Image(image) => Some(image),
+            _ => None,
+        })
+        .expect("nested image");
+    assert_eq!(result.resources.len(), 1);
+    assert_eq!(image.image_path, result.resources[0].key);
+}
+
+#[test]
 fn large_prepared_table_properties_are_admitted_before_paragraph_and_resource_projection() {
     let text = "\u{1}\u{7}\u{7}\r";
     let compact_bytes = with_picture_data(&body_table_source(text), false);
