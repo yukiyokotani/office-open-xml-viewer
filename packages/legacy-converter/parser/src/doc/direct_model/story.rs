@@ -387,7 +387,34 @@ mod tests {
         [code.to_le_bytes().as_slice(), operand].concat()
     }
 
-    fn table_style_sheet(first_row_color: bool) -> Vec<u8> {
+    #[derive(Clone, Copy, Default)]
+    struct StyleFixture {
+        first_row_color: bool,
+        first_row_size: bool,
+        first_row_alignment: bool,
+        combined: bool,
+    }
+
+    struct ProjectedTable {
+        colors: Vec<String>,
+        sizes: Vec<f64>,
+        ascii_fonts: Vec<Option<String>>,
+        high_ansi_fonts: Vec<Option<String>>,
+        alignments: Vec<String>,
+        unsupported_table: bool,
+        unsupported_character: bool,
+        unsupported_paragraph: bool,
+    }
+
+    fn cnf(code: u16, condition: u16, properties: &[u8]) -> Vec<u8> {
+        let mut value = Vec::from(code.to_le_bytes());
+        value.push(u8::try_from(2 + properties.len()).unwrap());
+        value.extend(condition.to_le_bytes());
+        value.extend(properties);
+        value
+    }
+
+    fn table_style_sheet(fixture: StyleFixture) -> Vec<u8> {
         let mut header = vec![0; 18];
         header[0..2].copy_from_slice(&15u16.to_le_bytes());
         header[2..4].copy_from_slice(&10u16.to_le_bytes());
@@ -403,8 +430,10 @@ mod tests {
         let mut style = vec![0; 14];
         style[2..4].copy_from_slice(&0xfff3u16.to_le_bytes());
         style[4..6].copy_from_slice(&3u16.to_le_bytes());
-        let first_row = if first_row_color {
+        let first_row = if fixture.first_row_color {
             &[0x85, 0xca, 8, 1, 0, 0x70, 0x68, 0, 0x80, 0, 0][..]
+        } else if fixture.first_row_size {
+            &[0x85, 0xca, 6, 1, 0, 0x43, 0x4a, 28, 0][..]
         } else {
             // An empty first-row CCnf has no supported condition presence.
             &[0x85, 0xca, 2, 1, 0][..]
@@ -415,7 +444,44 @@ mod tests {
             0x85, 0xca, 5, 0x80, 0, 0x42, 0x2a, 2, // even row blue
         ];
         character.extend(first_row);
-        for set in [&[0x88, 0x34, 1][..], &[1, 0][..], character.as_slice()] {
+        let paragraph = if fixture.first_row_alignment {
+            &[
+                1, 0, // embedded table style istd
+                0x61, 0x24, 0, // unconditional logical left
+                0x66, 0xc6, 5, 1, 0, 0x61, 0x24, 1, // first-row logical center
+            ][..]
+        } else {
+            &[1, 0][..]
+        };
+        let mut combined_paragraph = vec![1, 0, 0x61, 0x24, 0];
+        let mut combined_character = vec![
+            0x42, 0x2a, 1, // black
+            0x43, 0x4a, 20, 0, // 10 pt
+            0x4f, 0x4a, 0, 0, // ASCII font 0
+            0x51, 0x4a, 1, 0, // high ANSI font 1
+        ];
+        if fixture.combined {
+            for (condition, alignment) in [(1, 1), (4, 2), (0x200, 0)] {
+                combined_paragraph.extend(cnf(0xc666, condition, &[0x61, 0x24, alignment]));
+            }
+            for (condition, properties) in [
+                (1, &[0x42, 0x2a, 6, 0x43, 0x4a, 28, 0][..]),
+                (4, &[0x42, 0x2a, 2, 0x43, 0x4a, 24, 0][..]),
+                (0x200, &[0x70, 0x68, 0, 0x80, 0, 0, 0x43, 0x4a, 32, 0][..]),
+            ] {
+                combined_character.extend(cnf(0xca85, condition, properties));
+            }
+        }
+        let (tapx, paragraph, character) = if fixture.combined {
+            (
+                &[][..],
+                combined_paragraph.as_slice(),
+                combined_character.as_slice(),
+            )
+        } else {
+            (&[0x88, 0x34, 1][..], paragraph, character.as_slice())
+        };
+        for set in [tapx, paragraph, character] {
             style.extend((set.len() as u16).to_le_bytes());
             style.extend(set);
             if set.len() % 2 != 0 {
@@ -432,14 +498,33 @@ mod tests {
         bytes
     }
 
-    fn with_table_style(source: &[u8], first_row_color: bool) -> Vec<u8> {
+    fn with_table_style(source: &[u8], fixture: StyleFixture) -> Vec<u8> {
         let cfb = CompoundFile::open(source).unwrap();
         let mut word = cfb.stream("WordDocument").unwrap();
         let mut table = cfb.stream("0Table").unwrap();
-        let stylesheet = table_style_sheet(first_row_color);
+        let stylesheet = table_style_sheet(fixture);
         word[0xa2..0xa6].copy_from_slice(&(table.len() as u32).to_le_bytes());
         word[0xa6..0xaa].copy_from_slice(&(stylesheet.len() as u32).to_le_bytes());
         table.extend(stylesheet);
+        build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    fn with_fonts(source: &[u8], names: &[&str]) -> Vec<u8> {
+        let cfb = CompoundFile::open(source).unwrap();
+        let mut word = cfb.stream("WordDocument").unwrap();
+        let mut table = cfb.stream("0Table").unwrap();
+        let mut font_table = vec![names.len() as u8, 0, 0, 0];
+        for name in names {
+            let mut font = vec![0; 39];
+            for unit in name.encode_utf16().chain(std::iter::once(0)) {
+                font.extend(unit.to_le_bytes());
+            }
+            font_table.push(font.len() as u8);
+            font_table.extend(font);
+        }
+        word[0x112..0x116].copy_from_slice(&(table.len() as u32).to_le_bytes());
+        word[0x116..0x11a].copy_from_slice(&(font_table.len() as u32).to_le_bytes());
+        table.extend(font_table);
         build_cfb(&[("WordDocument", word), ("0Table", table)])
     }
 
@@ -448,10 +533,14 @@ mod tests {
     }
 
     fn row(options: u16) -> Vec<u8> {
+        row_cells(options, 1)
+    }
+
+    fn row_cells(options: u16, count: u8) -> Vec<u8> {
         [
             sprm(0x2416, &[1]),
             sprm(0x2417, &[1]),
-            sprm(0x7621, &[0, 1, 0xe8, 3]),
+            sprm(0x7621, &[0, count, 0xe8, 3]),
             sprm(0x563a, &1u16.to_le_bytes()),
             sprm(0x740a, &[0, 0, options as u8, (options >> 8) as u8]),
             sprm(0x2416, &[1]),
@@ -459,8 +548,11 @@ mod tests {
         .concat()
     }
 
-    fn projected_table_colors(first_row_color: bool) -> (Vec<String>, bool) {
-        let text = "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}d\u{7}\u{7}\r";
+    fn project_table(
+        text: &str,
+        runs: &[(usize, usize, Vec<u8>)],
+        fixture: StyleFixture,
+    ) -> ProjectedTable {
         let source = super::super::tests::source_with_typography(
             text,
             &[(text.encode_utf16().count(), 2, 12240, 15840, 1, 720)],
@@ -469,21 +561,13 @@ mod tests {
             None,
             None,
         );
-        let source = with_table_style(&source, first_row_color);
-        let source = with_papx(
-            &source,
-            &[
-                (0, 2, cell()),
-                (2, 3, row(1 << 5)),
-                (3, 5, cell()),
-                (5, 6, row(1 << 5)),
-                (6, 8, cell()),
-                (8, 9, row(1 << 5)),
-                (9, 11, cell()),
-                (11, 12, row(1 << 9)),
-                (12, 13, Vec::new()),
-            ],
-        );
+        let source = if fixture.combined {
+            with_fonts(&source, &["Times New Roman", "Courier New"])
+        } else {
+            source
+        };
+        let source = with_table_style(&source, fixture);
+        let source = with_papx(&source, runs);
         let cfb = CompoundFile::open(&source).unwrap();
         with_acquired_doc(&cfb, |mut facts| {
             let paragraphs = crate::doc::tokenize_with_fields(
@@ -513,42 +597,166 @@ mod tests {
             let BodyElement::Table(table) = &body[0] else {
                 panic!("table")
             };
-            let colors = table
-                .rows
-                .iter()
-                .map(|row| {
-                    let CellElement::Paragraph(paragraph) = &row.cells[0].content[0] else {
+            let mut colors = Vec::new();
+            let mut sizes = Vec::new();
+            let mut ascii_fonts = Vec::new();
+            let mut high_ansi_fonts = Vec::new();
+            let mut alignments = Vec::new();
+            for row in &table.rows {
+                for cell in &row.cells {
+                    let CellElement::Paragraph(paragraph) = &cell.content[0] else {
                         panic!("paragraph")
                     };
                     let DocRun::Text(run) = &paragraph.runs[0] else {
                         panic!("text")
                     };
-                    run.color.clone().unwrap()
-                })
-                .collect();
-            Ok((colors, facts.formatting.unsupported_table_properties))
+                    colors.push(run.color.clone().unwrap());
+                    sizes.push(run.font_size);
+                    ascii_fonts.push(run.font_family.clone());
+                    high_ansi_fonts.push(run.font_family_high_ansi.clone());
+                    alignments.push(paragraph.alignment.clone());
+                }
+            }
+            Ok(ProjectedTable {
+                colors,
+                sizes,
+                ascii_fonts,
+                high_ansi_fonts,
+                alignments,
+                unsupported_table: facts.formatting.unsupported_table_properties,
+                unsupported_character: facts.formatting.unsupported_character_properties,
+                unsupported_paragraph: facts.formatting.unsupported_paragraph_properties,
+            })
         })
         .unwrap()
     }
 
+    fn projected_table(fixture: StyleFixture) -> ProjectedTable {
+        let text = "a\u{7}\u{7}b\u{7}\u{7}c\u{7}\u{7}d\u{7}\u{7}\r";
+        project_table(
+            text,
+            &[
+                (0, 2, cell()),
+                (2, 3, row(1 << 5)),
+                (3, 5, cell()),
+                (5, 6, row(1 << 5)),
+                (6, 8, cell()),
+                (8, 9, row(1 << 5)),
+                (9, 11, cell()),
+                (11, 12, row(1 << 9)),
+                (12, 13, Vec::new()),
+            ],
+            fixture,
+        )
+    }
+
     #[test]
     fn project_uses_ttp_options_and_source_rows_for_conditional_color_keys() {
-        let (colors, unsupported_table_properties) = projected_table_colors(true);
+        let projected = projected_table(StyleFixture {
+            first_row_color: true,
+            ..StyleFixture::default()
+        });
         // The first three entries reproduce the Office row-first color
         // control (green, red, blue); the fourth keeps the disabled-band
         // row-local TTlp regression in the same acquisition path.
-        assert_eq!(colors, ["008000", "ff0000", "0000ff", "000000"]);
+        assert_eq!(projected.colors, ["008000", "ff0000", "0000ff", "000000"]);
         // TIstd and TTlp remain deliberately admission-gated even though
         // this internal projection verifies their acquired context.
-        assert!(unsupported_table_properties);
+        assert!(projected.unsupported_table);
     }
 
     #[test]
     fn project_does_not_select_or_exclude_an_empty_first_row_condition() {
-        let (colors, unsupported_table_properties) = projected_table_colors(false);
+        let projected = projected_table(StyleFixture::default());
         // Office keeps the ordinary row bands unshifted when the enabled
         // first-row CCnf is empty: red, blue, red.
-        assert_eq!(colors, ["ff0000", "0000ff", "ff0000", "000000"]);
-        assert!(unsupported_table_properties);
+        assert_eq!(projected.colors, ["ff0000", "0000ff", "ff0000", "000000"]);
+        assert!(projected.unsupported_table);
+    }
+
+    #[test]
+    fn project_applies_first_row_pjc_and_uses_its_cross_family_presence() {
+        let projected = projected_table(StyleFixture {
+            first_row_alignment: true,
+            ..StyleFixture::default()
+        });
+        // Word 16.112.4 applies the first-row PCnf and excludes that row from
+        // the CHPX horizontal bands. The final row disables bands via TTlp.
+        assert_eq!(projected.colors, ["000000", "ff0000", "0000ff", "000000"]);
+        assert_eq!(projected.alignments, ["center", "left", "left", "left"]);
+        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn project_applies_first_row_size_and_uses_its_cross_family_presence() {
+        let projected = projected_table(StyleFixture {
+            first_row_size: true,
+            ..StyleFixture::default()
+        });
+        // Word 16.112.4 treats a supported size-only CCnf as first-row
+        // presence, excluding that row from the horizontal color bands.
+        assert_eq!(projected.colors, ["000000", "ff0000", "0000ff", "000000"]);
+        assert_eq!(projected.sizes, [14.0, 10.0, 10.0, 10.0]);
+        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
+    }
+
+    #[test]
+    fn project_layers_combined_supported_table_style_properties_in_observed_order() {
+        let text = "a\u{7}b\u{7}c\u{7}\u{7}d\u{7}e\u{7}f\u{7}\u{7}g\u{7}h\u{7}i\u{7}\u{7}\r";
+        let options = (1 << 5) | (1 << 7);
+        let projected = project_table(
+            text,
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 7, row_cells(options, 3)),
+                (7, 9, cell()),
+                (9, 11, cell()),
+                (11, 13, cell()),
+                (13, 14, row_cells(options, 3)),
+                (14, 16, cell()),
+                (16, 18, cell()),
+                (18, 20, cell()),
+                (20, 21, row_cells(options, 3)),
+                (21, 22, Vec::new()),
+            ],
+            StyleFixture {
+                combined: true,
+                ..StyleFixture::default()
+            },
+        );
+
+        assert_eq!(
+            projected.colors,
+            [
+                "008000", "ff0000", "ff0000", "0000ff", "000000", "000000", "0000ff", "000000",
+                "000000",
+            ]
+        );
+        assert_eq!(
+            projected.sizes,
+            [16.0, 14.0, 14.0, 12.0, 10.0, 10.0, 12.0, 10.0, 10.0]
+        );
+        assert_eq!(
+            projected.alignments,
+            ["left", "center", "center", "right", "left", "left", "right", "left", "left",]
+        );
+        assert!(projected
+            .ascii_fonts
+            .iter()
+            .all(|font| font.as_deref() == Some("Times New Roman")));
+        assert!(projected
+            .high_ansi_fonts
+            .iter()
+            .all(|font| font.as_deref() == Some("Courier New")));
+        // TIstd and TTlp remain admission-gated independently of the verified
+        // internal formatting projection.
+        assert!(projected.unsupported_table);
+        assert!(!projected.unsupported_character);
+        assert!(!projected.unsupported_paragraph);
     }
 }

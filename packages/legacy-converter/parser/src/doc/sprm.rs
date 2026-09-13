@@ -13,7 +13,7 @@ pub fn paragraph_properties<'a>(
     mut bytes: &'a [u8],
     data: &'a [u8],
     budget: &mut Budget,
-    mut apply: impl FnMut(u16, &[u8]) -> Result<(), String>,
+    mut apply: impl FnMut(u16, &[u8], &mut Budget) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut visited = BTreeSet::new();
     loop {
@@ -43,7 +43,7 @@ pub fn paragraph_properties<'a>(
                 break;
             }
             if code != 0x6646 {
-                apply(code, operand)?;
+                apply(code, operand, budget)?;
             }
             first = false;
         }
@@ -179,7 +179,7 @@ mod tests {
         for size in [0x3fa1, 0x3fa2] {
             let data = prc_data(size);
             let mut applied = 0;
-            paragraph_properties(&reference, &data, &mut Budget::default(), |_, _| {
+            paragraph_properties(&reference, &data, &mut Budget::default(), |_, _, _| {
                 applied += 1;
                 Ok(())
             })
@@ -189,7 +189,7 @@ mod tests {
 
         let data = prc_data(0x3fa3);
         let mut applied = 0;
-        let error = paragraph_properties(&reference, &data, &mut Budget::default(), |_, _| {
+        let error = paragraph_properties(&reference, &data, &mut Budget::default(), |_, _, _| {
             applied += 1;
             Ok(())
         })

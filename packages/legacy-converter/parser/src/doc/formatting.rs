@@ -395,9 +395,9 @@ impl<'a> Formatting<'a> {
         })
     }
 
-    /// Apply only the unconditional table-style PAPX property established by
-    /// the Office controls. This is intentionally narrower than a general
-    /// interpretation of the basedOn array wording in MS-DOC 2.4.6.5.
+    /// Apply the validated table-style PAPX alignment established by the
+    /// Office controls. This remains narrower than a general interpretation
+    /// of the basedOn array wording in MS-DOC 2.4.6.5.
     fn apply_table_paragraph_style(
         &mut self,
         props: &mut paragraph::Properties,
@@ -406,11 +406,10 @@ impl<'a> Formatting<'a> {
         let Some(table_style) = table_style else {
             return Ok(false);
         };
-        let table_style = table_style.selected_style;
-        let profile = self.table_style_profile(table_style)?;
+        let profile = self.table_style_profile(table_style.selected_style)?;
         if self
             .styles
-            .get(table_style)
+            .get(table_style.selected_style)
             .and_then(Option::as_ref)
             .filter(|style| style.kind == 3)
             .is_none()
@@ -421,7 +420,13 @@ impl<'a> Formatting<'a> {
             self.unsupported_table_properties = true;
             return Ok(false);
         }
-        if let Some(alignment) = profile.paragraph_alignment {
+        let mut alignment = profile.paragraph_alignment;
+        for condition in table_style.matches.into_iter().flatten() {
+            if let Some(patch) = profile.conditional_paragraph_alignment.get(&condition) {
+                alignment = Some(*patch);
+            }
+        }
+        if let Some(alignment) = alignment {
             alignment.apply(props);
             Ok(true)
         } else {
@@ -438,7 +443,7 @@ impl<'a> Formatting<'a> {
         'a: 'b,
     {
         let mut direct = DirectParagraphProperties::default();
-        sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand| {
+        sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
             if (code >> 10) & 7 == 1
                 && !matches!(code, 0x2416 | 0x2417 | 0x6649 | 0x664a | 0x244b | 0x244c)
                 && !props.apply(code, operand)?
@@ -485,7 +490,7 @@ impl<'a> Formatting<'a> {
             &[]
         };
         for bytes in [direct, piece] {
-            sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand| {
+            sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
                 if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
                     self.unsupported_table_properties = true;
                 }
@@ -1099,6 +1104,226 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_chpx_absolute_size_inherits_and_direct_size_wins_for_run_and_mark() {
+        let mut formatting = observed_table_style_formatting();
+        for (id, half_points) in [(0, 28), (1, 36), (3, 44), (4, 44), (5, 28)] {
+            formatting.styles[id]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .chpx = leaked(vec![0x43, 0x4a, half_points, 0]);
+        }
+        formatting.styles[2]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[];
+
+        for (id, expected) in [(0, 14.0), (1, 18.0), (2, 14.0), (3, 22.0), (5, 14.0)] {
+            let run = formatting
+                .direct_text_run(7, table_key(id), 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.font_size, expected, "table style {id}");
+        }
+        let paragraph = formatting
+            .direct_paragraph(7, table_key(1), 0, 0, &[])
+            .unwrap()
+            .paragraph;
+        assert_eq!(paragraph.default_font_size, Some(18.0));
+
+        let direct_size = &[0x43, 0x4a, 24, 0][..];
+        let run = formatting
+            .direct_text_run(7, table_key(3), 0, 1, &[direct_size], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.font_size, 12.0);
+        let paragraph = formatting
+            .direct_paragraph(7, table_key(3), 0, 1, &[direct_size])
+            .unwrap()
+            .paragraph;
+        assert_eq!(paragraph.default_font_size, Some(12.0));
+        assert!(!formatting.unsupported_character_properties);
+    }
+
+    #[test]
+    fn table_chpx_size_validates_bounds_and_keeps_other_size_axis_gated() {
+        for half_points in [1u16, 3277] {
+            let mut formatting = observed_table_style_formatting();
+            formatting.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .chpx = leaked([vec![0x43, 0x4a], half_points.to_le_bytes().to_vec()].concat());
+            assert!(formatting.table_style_selector_profile(Some(0)).is_err());
+        }
+
+        let mut complex_script = observed_table_style_formatting();
+        complex_script.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[0x61, 0x4a, 28, 0];
+        complex_script
+            .table_style_selector_profile(Some(0))
+            .unwrap();
+        assert!(complex_script.unsupported_character_properties);
+    }
+
+    #[test]
+    fn inherited_conditional_size_remains_gated() {
+        let mut formatting = observed_table_style_formatting();
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &[0x43, 0x4a, 28, 0]));
+        formatting.table_style_selector_profile(Some(1)).unwrap();
+        assert!(formatting.unsupported_character_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_chpx_ascii_and_high_ansi_fonts_inherit_and_direct_fonts_win() {
+        fn font_axes(index: u16) -> Vec<u8> {
+            [
+                vec![0x4f, 0x4a],
+                index.to_le_bytes().to_vec(),
+                vec![0x51, 0x4a],
+                index.to_le_bytes().to_vec(),
+            ]
+            .concat()
+        }
+
+        let mut formatting = observed_table_style_formatting();
+        formatting.fonts = vec![
+            "Times New Roman".into(),
+            "Courier New".into(),
+            "Arial".into(),
+        ];
+        for (id, index) in [(0, 0), (1, 1), (3, 2), (4, 2), (5, 0)] {
+            formatting.styles[id]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .chpx = leaked(font_axes(index));
+        }
+        formatting.styles[2]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[];
+
+        for (id, expected) in [
+            (0, "Times New Roman"),
+            (1, "Courier New"),
+            (2, "Times New Roman"),
+            (3, "Arial"),
+            (5, "Times New Roman"),
+        ] {
+            let run = formatting
+                .direct_text_run(7, table_key(id), 0, 0, &[], "x".into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.font_family.as_deref(), Some(expected));
+            assert_eq!(run.font_family_high_ansi.as_deref(), Some(expected));
+        }
+
+        let paragraph = formatting
+            .direct_paragraph(7, table_key(1), 0, 0, &[])
+            .unwrap()
+            .paragraph;
+        let mark = paragraph.paragraph_mark_font_facts.unwrap();
+        assert_eq!(mark.font_family.as_deref(), Some("Courier New"));
+        assert_eq!(mark.font_family_high_ansi.as_deref(), Some("Courier New"));
+
+        let direct_fonts = leaked(font_axes(1));
+        let run = formatting
+            .direct_text_run(7, table_key(3), 0, 1, &[direct_fonts], "x".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.font_family.as_deref(), Some("Courier New"));
+        assert_eq!(run.font_family_high_ansi.as_deref(), Some("Courier New"));
+        let paragraph = formatting
+            .direct_paragraph(7, table_key(3), 0, 1, &[direct_fonts])
+            .unwrap()
+            .paragraph;
+        let mark = paragraph.paragraph_mark_font_facts.unwrap();
+        assert_eq!(mark.font_family.as_deref(), Some("Courier New"));
+        assert_eq!(mark.font_family_high_ansi.as_deref(), Some("Courier New"));
+        assert!(!formatting.unsupported_character_properties);
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn table_chpx_fonts_validate_indices_and_keep_other_axes_and_conditions_gated() {
+        let mut negative = observed_table_style_formatting();
+        negative.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[0x4f, 0x4a, 0, 0x80];
+        assert!(negative.table_style_selector_profile(Some(0)).is_err());
+
+        let mut outside = observed_table_style_formatting();
+        outside.fonts = vec!["Times New Roman".into()];
+        outside.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = &[0x4f, 0x4a, 1, 0];
+        assert!(outside
+            .direct_text_run(7, table_key(0), 0, 0, &[], "x".into())
+            .is_err());
+
+        for code in [0x4a50u16, 0x4a5e] {
+            let mut other_axis = observed_table_style_formatting();
+            other_axis.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .chpx = leaked([code.to_le_bytes().as_slice(), &[0, 0]].concat());
+            other_axis.table_style_selector_profile(Some(0)).unwrap();
+            assert!(other_axis.unsupported_character_properties);
+        }
+
+        let mut conditional = observed_table_style_formatting();
+        conditional.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .chpx = leaked(ccnf(table_style_condition::FIRST_ROW, &[0x4f, 0x4a, 0, 0]));
+        assert_eq!(
+            conditional.table_style_selector_profile(Some(0)).unwrap().2,
+            0
+        );
+        assert!(conditional.unsupported_character_properties);
+    }
+
     fn observed_table_style(
         base: usize,
         papx: &'static [u8],
@@ -1124,11 +1349,11 @@ mod tests {
         const RED: &[u8] = &[0x42, 0x2a, 6];
         const BLUE: &[u8] = &[0x70, 0x68, 0x00, 0x00, 0xff, 0x00];
         const GREEN: &[u8] = &[0x70, 0x68, 0x00, 0x80, 0x00, 0x00];
-        const BASE_LEFT: &[u8] = &[0, 0, 0x03, 0x24, 0];
-        const CHILD_CENTER: &[u8] = &[1, 0, 0x03, 0x24, 1];
+        const BASE_LEFT: &[u8] = &[0, 0, 0x61, 0x24, 0];
+        const CHILD_CENTER: &[u8] = &[1, 0, 0x61, 0x24, 1];
         const EMPTY_CHILD: &[u8] = &[2, 0];
         const GRANDCHILD_RIGHT: &[u8] = &[3, 0, 0x61, 0x24, 2];
-        const REVERSE_BASE_RIGHT: &[u8] = &[4, 0, 0x03, 0x24, 2];
+        const REVERSE_BASE_RIGHT: &[u8] = &[4, 0, 0x61, 0x24, 2];
         const REVERSE_CHILD_LEFT: &[u8] = &[5, 0, 0x61, 0x24, 0];
         const NONDEFAULT_EMPTY_CHILD: &[u8] = &[6, 0];
 
@@ -1455,8 +1680,8 @@ mod tests {
     #[test]
     fn table_papx_alignment_uses_embedded_style_index_and_observed_descendant_priority() {
         // Word-produced LTR controls establish these base/child/grandchild and
-        // reverse-value results. The test is deliberately limited to PJc80 and
-        // PJc and does not generalize the 2.4.6.5 array wording to other PAPX.
+        // reverse-value results. The test is deliberately limited to PJc and
+        // does not generalize the 2.4.6.5 array wording to other PAPX.
         let mut formatting = observed_table_style_formatting();
         for (table_style, expected) in [
             (0, "left"),
@@ -1493,6 +1718,128 @@ mod tests {
             Ok(_) => panic!("mismatched embedded table style index must fail"),
         };
         assert!(error.contains("mismatched style index"), "{error}");
+    }
+
+    #[test]
+    fn conditional_pjc_layers_in_selector_order_and_direct_formatting_wins() {
+        let mut formatting = observed_table_style_formatting();
+        let sets = formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap();
+        let mut papx = vec![0, 0, 0x61, 0x24, 0];
+        for (condition, value) in [
+            (table_style_condition::HORIZONTAL_ODD, 1),
+            (table_style_condition::VERTICAL_ODD, 2),
+            (table_style_condition::FIRST_COLUMN, 1),
+            (table_style_condition::FIRST_ROW, 2),
+            (table_style_condition::TOP_LEFT, 1),
+        ] {
+            papx.extend(cnf(0xc666, condition, &[0x61, 0x24, value]));
+        }
+        sets.papx = leaked(papx);
+
+        assert_eq!(
+            formatting.table_style_selector_profile(Some(0)).unwrap().2,
+            table_style_condition::HORIZONTAL_ODD
+                | table_style_condition::VERTICAL_ODD
+                | table_style_condition::FIRST_COLUMN
+                | table_style_condition::FIRST_ROW
+                | table_style_condition::TOP_LEFT
+        );
+        let key = Some(TableFormattingKey {
+            selected_style: 0,
+            matches: [
+                Some(table_style_condition::HORIZONTAL_ODD),
+                Some(table_style_condition::VERTICAL_ODD),
+                Some(table_style_condition::FIRST_COLUMN),
+                Some(table_style_condition::FIRST_ROW),
+                Some(table_style_condition::TOP_LEFT),
+            ],
+        });
+        let resolved = formatting
+            .resolve_paragraph_with_table(7, key, 0, 0, &[])
+            .unwrap();
+        assert!(resolved
+            .properties
+            .xml()
+            .contains("<w:jc w:val=\"center\"/>"));
+
+        let direct_right = &[0x61, 0x24, 2][..];
+        let resolved = formatting
+            .resolve_paragraph_with_table(7, key, 0, 1, &[direct_right])
+            .unwrap();
+        assert!(resolved
+            .properties
+            .xml()
+            .contains("<w:jc w:val=\"right\"/>"));
+        assert!(!formatting.unsupported_paragraph_properties);
+
+        let direct_bidi = &[0x41, 0x24, 1][..];
+        let resolved = formatting
+            .resolve_paragraph_with_table(7, key, 0, 1, &[direct_bidi])
+            .unwrap();
+        assert!(resolved.properties.xml().contains("<w:jc w:val=\"left\"/>"));
+        assert!(formatting.unsupported_paragraph_properties);
+    }
+
+    #[test]
+    fn table_style_pjc80_is_gated_and_does_not_create_condition_presence() {
+        let mut unconditional = observed_table_style_formatting();
+        unconditional.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = &[0, 0, 0x03, 0x24, 1];
+        let resolved = unconditional
+            .resolve_paragraph_with_table(7, table_key(0), 0, 0, &[])
+            .unwrap();
+        assert!(resolved.properties.xml().contains("<w:jc w:val=\"left\"/>"));
+        assert!(unconditional.unsupported_paragraph_properties);
+
+        let mut conditional = observed_table_style_formatting();
+        conditional.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = leaked(
+            [
+                &[0, 0][..],
+                cnf(0xc666, table_style_condition::FIRST_ROW, &[0x03, 0x24, 1]).as_slice(),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            conditional.table_style_selector_profile(Some(0)).unwrap().2,
+            0
+        );
+        assert!(conditional.unsupported_paragraph_properties);
+    }
+
+    #[test]
+    fn inherited_conditional_pjc_remains_gated() {
+        let mut formatting = observed_table_style_formatting();
+        let mut papx = vec![0, 0];
+        papx.extend(cnf(
+            0xc666,
+            table_style_condition::FIRST_ROW,
+            &[0x61, 0x24, 1],
+        ));
+        formatting.styles[0]
+            .as_mut()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .papx = leaked(papx);
+        formatting.table_style_selector_profile(Some(1)).unwrap();
+        assert!(formatting.unsupported_paragraph_properties);
     }
 
     #[test]

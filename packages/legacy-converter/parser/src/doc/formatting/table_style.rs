@@ -1,6 +1,6 @@
-//! Bounded DOC table-style character formatting. [MS-DOC] 2.4.6.6 and
-//! 2.9.41 define conditional order and CNFOperand framing; 2.9.340 requires
-//! sprmTIstd inside UpxTapx to be ignored.
+//! Bounded DOC table-style character and paragraph formatting. [MS-DOC]
+//! 2.4.6.6 and 2.9.41 define conditional order and CNFOperand framing;
+//! 2.9.340 requires sprmTIstd inside UpxTapx to be ignored.
 
 use super::cnf;
 use super::{Formatting, Properties, Sprms, MAX_TABLE_AWARE_CACHE_ENTRIES};
@@ -34,6 +34,7 @@ pub(super) struct Bands {
 pub(super) struct Profile {
     unconditional: Properties,
     conditional: BTreeMap<u16, Properties>,
+    pub(super) conditional_paragraph_alignment: BTreeMap<u16, paragraph::AlignmentPatch>,
     condition_presence: u16,
     bands: Bands,
     pub(super) paragraph_alignment: Option<paragraph::AlignmentPatch>,
@@ -47,6 +48,7 @@ impl Default for Profile {
         Self {
             unconditional: Properties::sparse(),
             conditional: BTreeMap::new(),
+            conditional_paragraph_alignment: BTreeMap::new(),
             condition_presence: 0,
             bands: Bands::default(),
             paragraph_alignment: None,
@@ -153,7 +155,8 @@ impl Formatting<'_> {
         let mut profile = Profile::default();
         let mut horizontal_source = None;
         let mut vertical_source = None;
-        let mut has_conditional = false;
+        let mut has_conditional_character = false;
+        let mut has_conditional_paragraph = false;
         for style_id in chain {
             let sets = *self.styles[style_id]
                 .as_ref()
@@ -197,12 +200,12 @@ impl Formatting<'_> {
             let mut chpx = Sprms::new(sets.chpx);
             while let Some((code, operand)) = chpx.next(&mut self.budget)? {
                 match code {
-                    0x2a42 | 0x6870 => {
+                    0x2a42 | 0x4a43 | 0x4a4f | 0x4a51 | 0x6870 => {
                         let baseline = profile.unconditional.clone();
                         profile.unconditional.apply(code, operand, &baseline)?;
                     }
                     0xca85 => {
-                        has_conditional = true;
+                        has_conditional_character = true;
                         parse_conditional(&mut profile, operand, &mut self.budget)?;
                     }
                     _ => profile.unsupported_character = true,
@@ -222,15 +225,21 @@ impl Formatting<'_> {
                     &sets.papx[2..],
                     self.data,
                     &mut self.budget,
-                    |code, operand| {
-                        if let Some(alignment) =
-                            paragraph::AlignmentPatch::from_sprm(code, operand)?
-                        {
+                    |code, operand, budget| {
+                        if code == 0x2461 {
+                            let alignment = paragraph::AlignmentPatch::from_sprm(code, operand)?
+                                .expect("logical alignment code");
                             profile.paragraph_alignment = Some(alignment);
+                        } else if code == 0x2403 {
+                            let _ = paragraph::AlignmentPatch::from_sprm(code, operand)?;
+                            // Office 16.112.4 table-style controls ignore
+                            // physical PJc80. Keep direct paragraph PJc80
+                            // behavior independent and retain admission gating.
+                            profile.unsupported_paragraph = true;
+                        } else if code == 0xc666 {
+                            has_conditional_paragraph = true;
+                            parse_conditional_paragraph(&mut profile, operand, budget)?;
                         } else {
-                            if code == 0xc666 {
-                                let _ = cnf::parse(operand)?;
-                            }
                             profile.unsupported_paragraph = true;
                         }
                         Ok(())
@@ -238,13 +247,54 @@ impl Formatting<'_> {
                 )?;
             }
         }
-        if inherited && has_conditional {
+        if inherited && has_conditional_character {
             // Conditional inheritance priority is not established by the
             // unconditional table-color controls.
             profile.unsupported_character = true;
         }
+        if inherited && has_conditional_paragraph {
+            // Conditional PAPX inheritance priority has not been established
+            // by the single-style Office controls.
+            profile.unsupported_paragraph = true;
+        }
         Ok(profile)
     }
+}
+
+fn parse_conditional_paragraph(
+    profile: &mut Profile,
+    operand: &[u8],
+    budget: &mut super::Budget,
+) -> Result<(), String> {
+    let operand = cnf::parse(operand)?;
+    let condition = operand.condition;
+    let mut patch = profile
+        .conditional_paragraph_alignment
+        .get(&condition)
+        .copied();
+    let mut has_supported_alignment = false;
+    let mut nested = Sprms::new(operand.grpprl);
+    while let Some((code, value)) = nested.next(budget)? {
+        if code == 0x2461 {
+            patch = paragraph::AlignmentPatch::from_sprm(code, value)?;
+            has_supported_alignment = true;
+        } else {
+            // This includes PJc80 and nested CNF records. The bounded Office
+            // evidence establishes conditional PJc only; unsupported records
+            // do not contribute condition presence.
+            if code == 0x2403 {
+                let _ = paragraph::AlignmentPatch::from_sprm(code, value)?;
+            }
+            profile.unsupported_paragraph = true;
+        }
+    }
+    if has_supported_alignment {
+        profile.condition_presence |= condition;
+        profile
+            .conditional_paragraph_alignment
+            .insert(condition, patch.expect("supported alignment"));
+    }
+    Ok(())
 }
 
 fn parse_conditional(
@@ -259,23 +309,23 @@ fn parse_conditional(
         .get(&condition)
         .cloned()
         .unwrap_or_else(Properties::sparse);
-    let mut has_supported_color = false;
+    let mut has_supported_character = false;
     let mut nested = Sprms::new(operand.grpprl);
     while let Some((code, value)) = nested.next(budget)? {
-        if matches!(code, 0x2a42 | 0x6870) {
+        if matches!(code, 0x2a42 | 0x4a43 | 0x6870) {
             let baseline = patch.clone();
             patch.apply(code, value, &baseline)?;
-            has_supported_color = true;
+            has_supported_character = true;
         } else {
             // This includes nested CNF records. They are parsed only as one
             // bounded operand and are never recursively expanded.
             profile.unsupported_character = true;
         }
     }
-    if has_supported_color {
+    if has_supported_character {
         // Office 16.112.4 controls show that an empty CCnf has no conditional
-        // presence, while a nonempty supported color CCnf does. Unsupported
-        // property families remain gated and do not broaden this presence.
+        // presence, while a supported color or absolute-size property does.
+        // Unsupported property families remain gated and do not broaden it.
         profile.condition_presence |= condition;
         profile.conditional.insert(condition, patch);
     }
