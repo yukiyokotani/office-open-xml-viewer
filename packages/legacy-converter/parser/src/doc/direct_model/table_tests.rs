@@ -105,6 +105,10 @@ fn body_table_source(text: &str) -> Vec<u8> {
 }
 
 fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
+    with_piece_prc_and_prm(source, prc, data, 1)
+}
+
+fn with_piece_prc_and_prm(source: &[u8], prc: &[u8], data: &[u8], prm: u16) -> Vec<u8> {
     let cfb = CompoundFile::open(source).unwrap();
     let mut word = cfb.stream("WordDocument").unwrap();
     let table = cfb.stream("0Table").unwrap();
@@ -118,7 +122,7 @@ fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
     let prefix = 3 + prc.len();
     replacement.extend_from_slice(&table[clx_offset..clx_offset + clx_size]);
     replacement[replacement_offset + prefix + 19..replacement_offset + prefix + 21]
-        .copy_from_slice(&1u16.to_le_bytes());
+        .copy_from_slice(&prm.to_le_bytes());
     word[0x1a2..0x1a6].copy_from_slice(&(replacement_offset as u32).to_le_bytes());
     word[0x1a6..0x1aa].copy_from_slice(&((prefix + clx_size) as u32).to_le_bytes());
     build_cfb(&[
@@ -126,6 +130,99 @@ fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
         ("0Table", replacement),
         ("Data", data.to_vec()),
     ])
+}
+
+#[test]
+fn full_cfb_direct_table_props_replace_appended_piece_alignment_tail() {
+    let text = "a\u{7}\u{7}\r";
+    let units = text.encode_utf16().count();
+    let base = source_with_typography(
+        text,
+        &[(units, 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let table_data = [row(1000), sprm(0x2403, &[2], false)].concat();
+    let cell_offset = 2 + table_data.len();
+    let cell_data = [
+        cell(),
+        sprm(0x2403, &[2], false),
+        sprm(0x2407, &[0], false),
+        sprm(0x2407, &[0], false),
+    ]
+    .concat();
+    let mut data = Vec::new();
+    data.extend(u16::try_from(table_data.len()).unwrap().to_le_bytes());
+    data.extend(table_data);
+    data.extend(u16::try_from(cell_data.len()).unwrap().to_le_bytes());
+    data.extend(cell_data);
+    let pointer = sprm(0x646b, &0u32.to_le_bytes(), false);
+    let physical = with_papx(
+        &base,
+        &[
+            (
+                0,
+                2,
+                [
+                    sprm(0x646b, &(cell_offset as u32).to_le_bytes(), false),
+                    sprm(0x2407, &[0], false),
+                ]
+                .concat(),
+            ),
+            (2, 3, [pointer, row(1000)].concat()),
+            (3, units, Vec::new()),
+        ],
+    );
+    let simple_center_prm = (1u16 << 8) | (0x05 << 1);
+    let complex_center = sprm(0x2403, &[1], false);
+    for (prc, prm) in [(&[][..], simple_center_prm), (&complex_center[..], 1)] {
+        let bytes = with_piece_prc_and_prm(&physical, prc, &data, prm);
+        let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+            .unwrap()
+            .document;
+        let BodyElement::Table(table) = &document.body[0] else {
+            panic!("table")
+        };
+        let CellElement::Paragraph(paragraph) = &table.rows[0].cells[0].content[0] else {
+            panic!("cell paragraph")
+        };
+        assert_eq!(paragraph.alignment, "right");
+    }
+
+    let inline = with_papx(
+        &base,
+        &[
+            (
+                0,
+                2,
+                [cell(), sprm(0x2403, &[2], false), sprm(0x2407, &[0], false)].concat(),
+            ),
+            (
+                2,
+                3,
+                [
+                    row(1000),
+                    sprm(0x2403, &[2], false),
+                    sprm(0x2407, &[0], false),
+                ]
+                .concat(),
+            ),
+            (3, units, Vec::new()),
+        ],
+    );
+    let bytes = with_piece_prc(&inline, &complex_center, &[]);
+    let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("table")
+    };
+    let CellElement::Paragraph(paragraph) = &table.rows[0].cells[0].content[0] else {
+        panic!("cell paragraph")
+    };
+    assert_eq!(paragraph.alignment, "center");
 }
 
 #[test]
@@ -277,7 +374,7 @@ fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
         cell(),
         sprm(0x2417, &[1], false),
         first,
-        sprm(0xd62c, &[0, 1, 1], true),
+        sprm(0xd62c, &[1, 2, 1], true),
         middle,
         second,
         sprm(0x3615, &[0], false),
@@ -293,9 +390,76 @@ fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
             (7, units, Vec::new()),
         ],
     );
-    let error =
-        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
-    assert!(error.contains("unsupported formatting"), "{error}");
+    let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("table")
+    };
+    assert_eq!(
+        table.rows[0]
+            .cells
+            .iter()
+            .map(|cell| cell.v_align.as_str())
+            .collect::<Vec<_>>(),
+        ["top", "center", "top"]
+    );
+}
+
+#[test]
+fn full_cfb_alignment_persists_before_appended_piece_paragraph_properties() {
+    fn definition(boundaries: &[i16]) -> Vec<u8> {
+        let count = boundaries.len() - 1;
+        let mut operand = vec![0, 0, count as u8];
+        for boundary in boundaries {
+            operand.extend(boundary.to_le_bytes());
+        }
+        operand.resize(operand.len() + count * 20, 0);
+        let cb = (operand.len() - 1) as u16;
+        operand[..2].copy_from_slice(&cb.to_le_bytes());
+        sprm(0xd608, &operand, false)
+    }
+
+    let text = "a\u{7}\u{7}\r";
+    let units = text.encode_utf16().count();
+    let source = source_with_typography(
+        text,
+        &[(units, 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let row = [
+        cell(),
+        sprm(0x2417, &[1], false),
+        definition(&[0, 1000]),
+        sprm(0xd62c, &[0, 1, 1], true),
+        definition(&[0, 1500]),
+        sprm(0x3615, &[0], false),
+    ]
+    .concat();
+    let source = with_papx(
+        &source,
+        &[(0, 2, cell()), (2, 3, row), (3, units, Vec::new())],
+    );
+    let piece_alignment = sprm(0x2403, &[1], false);
+    let bytes = with_piece_prc(&source, &piece_alignment, &[]);
+    let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("table")
+    };
+    assert_eq!(table.rows[0].cells[0].v_align, "center");
+    let CellElement::Paragraph(paragraph) = &table.rows[0].cells[0].content[0] else {
+        panic!("cell paragraph")
+    };
+    assert_eq!(paragraph.alignment, "center");
+    assert!(matches!(
+        document.body.get(1),
+        Some(BodyElement::Paragraph(_))
+    ));
 }
 
 #[test]

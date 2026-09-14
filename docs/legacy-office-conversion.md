@@ -1312,6 +1312,10 @@ document bytes.
 
 ## Direct DOC implementation backlog
 
+Checkpoint entries below are historical. Settled behavior and its evidence
+boundaries are maintained beside the production implementation; the latest
+checkpoint records current task status, not a separate specification.
+
 Work proceeds in explicitly selected batches; completing one item does not
 start the next automatically. The direct binary-to-model reader is the target
 architecture. Established behavior is represented by implementation and focused
@@ -2162,10 +2166,10 @@ whole-branch architecture/visual acceptance remain incomplete.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-267 | Model explicit vertical-alignment persistence | Open: preserve the independently observed direct cell-flag cascade; vary default/reset and range conflicts before widening admission |
+| DOC-267 | Model explicit vertical-alignment persistence | Implemented for the bounded same-count, fixed horizontal LTR profile; explicit resets, overlapping ranges and TC80 descriptor conflicts are covered |
 | DOC-268 | Generalize surviving-cell width ownership | Open: test removed/reintroduced slots, range boundaries, multiple-cell edits and style omission before extending DOC-241 |
-| DOC-269 | Resolve indirect table-property application from complex PCD | Open: paragraph activation is proven, but wrapped table-property effects need further normative/Office investigation; do not infer general source precedence |
-| DOC-270 | Revisit conservative structural no-op admission | Open: existing vertical-merge and merge/split no-op invalidation is retained; any admission expansion needs independent coverage |
+| DOC-269 | Resolve indirect table-property application from complex PCD | Direct replacement suppression is resolved and implemented; the remaining reachable-PCD question is tracked by DOC-272 |
+| DOC-270 | Revisit conservative structural no-op admission | Implemented for unmerged TSplit, clearing an already-unmerged vertical cell, and empty TMerge ranges; other merge interactions remain gated |
 
 Fresh final checks passed 897 unit and nine integration tests, with six existing
 ignores; feature-off compilation, 26 PAPX-probe and 44 target-probe tests, and
@@ -2183,3 +2187,39 @@ closed. The 26 native controls provide bounded evidence for the open alignment,
 structural and source-acquisition questions. Whole-branch semantic, browser
 and visual acceptance remains open. This finite checkpoint does not complete
 table-style support or start another batch.
+
+### Concatenated property arrays and cell alignment checkpoint
+
+Native acquisition now follows the single logical PAPX-plus-Prm array required
+by MS-DOC 2.4.6.1. A direct replacement discards the appended tail, and
+PHugePapx first-position eligibility spans that boundary. The diagnostic probe
+uses the same rule for acquisition and mutation validation. This resolves the
+earlier direct-PAPX/PCD observation without inventing a precedence exception.
+The implementation and normative rationale are in `doc/sprm.rs` and
+`doc/formatting.rs`.
+
+Bounded direct alignment persistence and proven structural no-ops are
+implemented in `doc/table/geometry.rs`. Its adjacent comments distinguish the
+specification, native observations and intentionally unsupported combinations.
+Twenty-three native controls covered resets, ranges, descriptor activation,
+width-independent alignment, no-ops and structural counterexamples. Parent
+table-style and general structural support remain incomplete.
+
+The duplicated Formatting geometry matrix and its remaining malformed-merge
+case were removed. Geometry boundary tests and
+`full_cfb_variable_vertical_merge_length_keeps_the_native_gate_closed` retain
+that protection; full-CFB alignment and property-array tests cover the actual
+model path. Exploratory native matrices are not permanent regression fixtures.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-271 | Distinguish TDef count changes from explicit deletion | Open: temporarily absent slots retained widths in shrink/regrow controls, while explicit deletion/reinsertion cleared replacement widths; general structural acquisition remains gated |
+| DOC-272 | Determine reachable complex-PCD table indirection | Open: validate table properties reached from an appended PCD when no earlier direct replacement suppresses it; keep the existing admission gate |
+
+Fresh verification passed 901 unit and nine integration tests (six existing
+ignores), 72 probe tests, feature-off compilation and the layout boundary check.
+Separate release WASM builds produced identical outcomes for 96 selected inputs,
+including all 59 private inputs; private admission remains four of 59. Rejected
+inputs do not establish rendering fidelity. Final adversarial review accepted
+this bounded change; whole-branch semantic, browser and visual acceptance remain
+open.

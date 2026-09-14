@@ -78,18 +78,6 @@ struct DirectParagraphProperties {
 }
 
 impl DirectParagraphProperties {
-    fn overlay(&mut self, later: Self) {
-        if later.bidi.is_some() {
-            self.bidi = later.bidi;
-        }
-        if later.alignment.is_some() {
-            self.alignment = later.alignment;
-        }
-        for value in later.absolute_indents.into_iter().flatten() {
-            self.push_absolute_indent(value);
-        }
-    }
-
     fn push_absolute_indent(&mut self, value: (u16, i16)) {
         if let Some(index) = self
             .absolute_indents
@@ -290,12 +278,17 @@ impl<'a> Formatting<'a> {
             .paragraphs
             .at(fc)
             .map_or(&[][..], |(_, run)| run.properties);
-        let mut direct_properties = if !direct.is_empty() {
-            self.apply_paragraph(&mut props, &direct[2..])?
+        let direct = if direct.is_empty() {
+            direct
         } else {
-            DirectParagraphProperties::default()
+            &direct[2..]
         };
-        if prm & 1 != 0 {
+        let simple_piece = if prm & 1 == 0 {
+            paragraph::prm0(prm)
+        } else {
+            None
+        };
+        let appended = if prm & 1 != 0 {
             let bytes = prcs
                 .get((prm >> 1) as usize)
                 .ok_or_else(|| unsupported("Word piece property index outside CLX"))?;
@@ -304,10 +297,13 @@ impl<'a> Formatting<'a> {
             } else {
                 sprm::TopLevelFilter::All
             };
-            direct_properties.overlay(self.apply_paragraph_with_filter(&mut props, bytes, filter)?);
-        } else if let Some(bytes) = paragraph::prm0(prm) {
-            direct_properties.overlay(self.apply_paragraph(&mut props, &bytes)?);
-        }
+            Some((*bytes, filter))
+        } else if let Some(bytes) = simple_piece.as_ref() {
+            Some((&bytes[..], sprm::TopLevelFilter::All))
+        } else {
+            None
+        };
+        let direct_properties = self.apply_paragraph_sources(&mut props, direct, appended)?;
         if direct_properties.alignment.is_some() {
             table_alignment = false;
         }
@@ -479,13 +475,37 @@ impl<'a> Formatting<'a> {
     where
         'a: 'b,
     {
-        let mut direct = DirectParagraphProperties::default();
-        sprm::paragraph_properties(
-            bytes,
+        match filter {
+            sprm::TopLevelFilter::All => self.apply_paragraph_sources(props, bytes, None),
+            sprm::TopLevelFilter::Paragraph => self.apply_paragraph_sources(
+                props,
+                &[],
+                Some((bytes, sprm::TopLevelFilter::Paragraph)),
+            ),
+        }
+    }
+
+    fn apply_paragraph_sources<'b>(
+        &mut self,
+        props: &mut paragraph::Properties,
+        direct: &'b [u8],
+        appended: Option<(&'b [u8], sprm::TopLevelFilter)>,
+    ) -> Result<DirectParagraphProperties, String>
+    where
+        'a: 'b,
+    {
+        let mut direct_properties = DirectParagraphProperties::default();
+        let (appended_bytes, filter) = appended
+            .map_or((None, sprm::TopLevelFilter::All), |(bytes, filter)| {
+                (Some(bytes), filter)
+            });
+        sprm::paragraph_properties_appended(
+            direct,
+            appended_bytes,
             self.data,
             &mut self.budget,
             filter,
-            |code, operand, _| {
+            |code, operand, _, _| {
                 if (code >> 10) & 7 == 1
                     && !matches!(code, 0x2416 | 0x2417 | 0x6649 | 0x664a | 0x244b | 0x244c)
                     && !props.apply(code, operand)?
@@ -494,18 +514,18 @@ impl<'a> Formatting<'a> {
                 }
                 if code == 0x2441 {
                     // Properties::apply validated this Bool8 operand above.
-                    direct.bidi = Some(operand[0] == 1);
+                    direct_properties.bidi = Some(operand[0] == 1);
                 } else if matches!(code, 0x2403 | 0x2461) {
                     // Properties::apply validated the alignment enum above.
-                    direct.alignment = Some((code, operand[0]));
+                    direct_properties.alignment = Some((code, operand[0]));
                 } else if matches!(code, 0x840e | 0x840f | 0x845d | 0x845e | 0x8411 | 0x8460) {
                     // Properties::apply validated the signed XAS operand above.
-                    direct.push_absolute_indent((code, u16_at(operand, 0)? as i16));
+                    direct_properties.push_absolute_indent((code, u16_at(operand, 0)? as i16));
                 }
                 Ok(())
             },
         )?;
-        Ok(direct)
+        Ok(direct_properties)
     }
 
     pub fn table_properties(
@@ -550,12 +570,24 @@ impl<'a> Formatting<'a> {
         } else {
             &direct[2..]
         };
-        let piece = if prm & 1 != 0 {
-            *prcs
-                .get((prm >> 1) as usize)
-                .ok_or_else(|| unsupported("Word piece property index outside CLX"))?
+        let simple_piece = if prm & 1 == 0 { table::prm0(prm) } else { None };
+        let (piece, piece_filter) = if prm & 1 != 0 {
+            (
+                Some(
+                    *prcs
+                        .get((prm >> 1) as usize)
+                        .ok_or_else(|| unsupported("Word piece property index outside CLX"))?,
+                ),
+                if interpret_table_styles {
+                    sprm::TopLevelFilter::Paragraph
+                } else {
+                    sprm::TopLevelFilter::All
+                },
+            )
+        } else if let Some(bytes) = simple_piece.as_ref() {
+            (Some(&bytes[..]), sprm::TopLevelFilter::All)
         } else {
-            &[]
+            (None, sprm::TopLevelFilter::All)
         };
         let shading_policy = table::TableShadingPolicy {
             effective_nfib: self.effective_nfib,
@@ -563,91 +595,88 @@ impl<'a> Formatting<'a> {
         };
         #[cfg(feature = "direct-doc")]
         let mut native_geometry = table::NativeGeometry::default();
-        for (bytes, complex_piece) in [(direct, false), (piece, true)] {
-            #[cfg(feature = "direct-doc")]
-            if interpret_table_styles {
-                native_geometry.begin_source();
-            }
-            sprm::paragraph_properties(
-                bytes,
-                self.data,
-                &mut self.budget,
-                if interpret_table_styles && complex_piece {
-                    sprm::TopLevelFilter::Paragraph
-                } else {
-                    sprm::TopLevelFilter::All
-                },
-                |code, operand, _| {
-                    // MS-DOC 2.4.6.1 step 5 filters the top-level complex PCD
-                    // before first-position indirection is evaluated. Nested
-                    // PTableProps/PHugePapx data remains unfiltered.
-                    if interpret_table_styles && complex_piece && (code >> 10) & 7 == 5 {
-                        // Retain table facts reached through paragraph data,
-                        // but fail native admission until their acquisition
-                        // order relative to direct table properties is known.
-                        self.unsupported_table_properties = true;
-                    }
-                    #[cfg(feature = "direct-doc")]
-                    if interpret_table_styles {
-                        properties.row.reset_row_properties_at_tistd(code);
-                    }
-                    #[cfg(feature = "direct-doc")]
-                    if interpret_table_styles
-                        && properties.row.apply_native_cant_split(code, operand)?
-                    {
-                        return Ok(());
-                    }
-                    #[cfg(feature = "direct-doc")]
-                    if interpret_table_styles
-                        && properties.row.apply_style_aware_margins(code, operand)?
-                    {
-                        return Ok(());
-                    }
-                    #[cfg(feature = "direct-doc")]
-                    if interpret_table_styles {
-                        match properties.row.apply_style_aware_borders(code, operand)? {
-                            table::StyleAwareBorderApply::Handled => return Ok(()),
-                            table::StyleAwareBorderApply::HandledUnsupported => {
-                                self.unsupported_table_properties = true;
-                                return Ok(());
-                            }
-                            table::StyleAwareBorderApply::Unhandled => {}
-                        }
-                    }
-                    match properties
-                        .row
-                        .apply_style_aware_shading(code, operand, shading_policy)?
-                    {
-                        table::StyleAwareShadingApply::Handled => return Ok(()),
-                        table::StyleAwareShadingApply::HandledUnsupported => {
+        #[cfg(feature = "direct-doc")]
+        if interpret_table_styles {
+            native_geometry.begin_source();
+        }
+        let mut piece_started = false;
+        sprm::paragraph_properties_appended(
+            direct,
+            piece,
+            self.data,
+            &mut self.budget,
+            piece_filter,
+            |code, operand, _, from_piece| {
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles && from_piece && !piece_started {
+                    native_geometry.begin_source();
+                    piece_started = true;
+                }
+                // MS-DOC 2.4.6.1 step 5 filters the top-level complex PCD
+                // before first-position indirection is evaluated. Nested
+                // PTableProps/PHugePapx data remains unfiltered.
+                if interpret_table_styles && from_piece && (code >> 10) & 7 == 5 {
+                    // Retain table facts reached through paragraph data,
+                    // but fail native admission for this still-unverified case:
+                    // a reachable wrapped table property from a complex PCD
+                    // with no earlier direct replacement.
+                    self.unsupported_table_properties = true;
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    properties.row.reset_row_properties_at_tistd(code);
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles
+                    && properties.row.apply_native_cant_split(code, operand)?
+                {
+                    return Ok(());
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles
+                    && properties.row.apply_style_aware_margins(code, operand)?
+                {
+                    return Ok(());
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    match properties.row.apply_style_aware_borders(code, operand)? {
+                        table::StyleAwareBorderApply::Handled => return Ok(()),
+                        table::StyleAwareBorderApply::HandledUnsupported => {
                             self.unsupported_table_properties = true;
                             return Ok(());
                         }
-                        table::StyleAwareShadingApply::Unhandled => {}
+                        table::StyleAwareBorderApply::Unhandled => {}
                     }
-                    #[cfg(feature = "direct-doc")]
-                    if interpret_table_styles {
-                        match native_geometry.apply(&mut properties.row, code, operand)? {
-                            table::NativeGeometryApply::Handled => return Ok(()),
-                            table::NativeGeometryApply::HandledUnsupported => {
-                                self.unsupported_table_properties = true;
-                                return Ok(());
-                            }
-                            table::NativeGeometryApply::Unhandled => {}
-                        }
-                    }
-                    if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
+                }
+                match properties
+                    .row
+                    .apply_style_aware_shading(code, operand, shading_policy)?
+                {
+                    table::StyleAwareShadingApply::Handled => return Ok(()),
+                    table::StyleAwareShadingApply::HandledUnsupported => {
                         self.unsupported_table_properties = true;
+                        return Ok(());
                     }
-                    Ok(())
-                },
-            )?;
-        }
-        if prm & 1 == 0 {
-            if let Some([a, b, value]) = table::prm0(prm) {
-                properties.apply(u16::from_le_bytes([a, b]), &[value])?;
-            }
-        }
+                    table::StyleAwareShadingApply::Unhandled => {}
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    match native_geometry.apply(&mut properties.row, code, operand)? {
+                        table::NativeGeometryApply::Handled => return Ok(()),
+                        table::NativeGeometryApply::HandledUnsupported => {
+                            self.unsupported_table_properties = true;
+                            return Ok(());
+                        }
+                        table::NativeGeometryApply::Unhandled => {}
+                    }
+                }
+                if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
+                    self.unsupported_table_properties = true;
+                }
+                Ok(())
+            },
+        )?;
         Ok(properties)
     }
 
@@ -3952,7 +3981,7 @@ mod tests {
     }
 
     #[test]
-    fn table_properties_use_physical_papx_data_and_then_complex_piece_properties() {
+    fn direct_ptableprops_suppresses_appended_complex_piece_properties() {
         let data = test_prc_data(
             [
                 test_prl(0x2416, &[1]),
@@ -4002,10 +4031,10 @@ mod tests {
         ]
         .concat();
         let overridden = formatting.table_properties(109, 1, &[&piece]).unwrap();
-        assert_eq!(overridden.row.cells[0].width, 1500);
-        assert_eq!(overridden.row.table_style, Some(9));
-        assert_eq!(overridden.row.table_style_options, Some(0x0340));
-        assert!(!overridden.row.header);
+        assert_eq!(overridden.row.cells[0].width, 1000);
+        assert_eq!(overridden.row.table_style, Some(4));
+        assert_eq!(overridden.row.table_style_options, Some(0x20));
+        assert!(overridden.row.header);
 
         let neighbor = formatting.table_properties(110, 0, &[]).unwrap();
         assert_eq!(neighbor.row.cells[0].width, 400);
@@ -4084,8 +4113,8 @@ mod tests {
         let properties = first_huge
             .table_properties_native(109, 1, &[&nonfirst_huge])
             .unwrap();
-        assert_eq!(properties.row.cells[0].width, 1500);
-        assert!(first_huge.unsupported_table_properties);
+        assert!(properties.row.cells.is_empty());
+        assert!(!first_huge.unsupported_table_properties);
     }
 
     #[cfg(feature = "direct-doc")]
@@ -4439,96 +4468,6 @@ mod tests {
                 );
                 assert!(!formatting.unsupported_table_properties);
             }
-        }
-    }
-
-    #[cfg(feature = "direct-doc")]
-    #[test]
-    fn native_geometry_gate_tracks_only_competitors_to_persisted_widths() {
-        fn definition() -> Vec<u8> {
-            let mut operand = vec![0x46, 0, 3];
-            for boundary in [0i16, 1000, 2000, 3000] {
-                operand.extend(boundary.to_le_bytes());
-            }
-            operand.extend([0; 60]);
-            test_prl(0xd608, &operand)
-        }
-        let width = test_prl(0x7623, &[0, 1, 0xd0, 7]);
-        let merge = test_prl(0x5624, &[0, 2]);
-        let autofit = test_prl(0x3615, &[1]);
-        let bidi = test_prl(0x560b, &1u16.to_le_bytes());
-        let preferred = test_prl(0xd635, &[5, 0, 1, 3, 100, 0]);
-        let vertical_merge = test_prl(0xd62b, &[2, 0, 3]);
-        let malformed_vertical_merge = test_prl(0xd62b, &[1, 0]);
-        let vertical_center = test_prl(0xd62c, &[3, 0, 1, 1]);
-        let vertical_top = test_prl(0xd62c, &[3, 0, 1, 0]);
-        let empty_vertical_center = test_prl(0xd62c, &[3, 1, 1, 1]);
-        let malformed_vertical_alignment = test_prl(0xd62c, &[2, 0, 1]);
-        let acquire = |ordered: Vec<u8>| {
-            let papx = [vec![0, 0], ordered].concat();
-            let mut formatting = with_direct_paragraph(&papx);
-            formatting.configure_table_styles(0x0112, true);
-            formatting.table_properties_native(109, 0, &[]).unwrap();
-            formatting.unsupported_table_properties
-        };
-
-        assert!(!acquire(
-            [definition(), width.clone(), merge.clone()].concat()
-        ));
-        assert!(!acquire(
-            [definition(), preferred.clone(), definition()].concat()
-        ));
-        assert!(!acquire([definition(), vertical_merge.clone()].concat()));
-        assert!(acquire([definition(), malformed_vertical_merge].concat()));
-        assert!(!acquire(
-            [
-                definition(),
-                width.clone(),
-                vertical_top.clone(),
-                definition()
-            ]
-            .concat()
-        ));
-        assert!(!acquire(
-            [
-                definition(),
-                width.clone(),
-                empty_vertical_center,
-                definition()
-            ]
-            .concat()
-        ));
-        assert!(acquire(
-            [definition(), malformed_vertical_alignment].concat()
-        ));
-        assert!(acquire(
-            [
-                definition(),
-                vertical_center.clone(),
-                width.clone(),
-                definition(),
-            ]
-            .concat()
-        ));
-        assert!(acquire(
-            [
-                definition(),
-                width.clone(),
-                vertical_center.clone(),
-                definition(),
-            ]
-            .concat()
-        ));
-        assert!(acquire(
-            [definition(), width.clone(), preferred.clone(), definition()].concat()
-        ));
-        assert!(acquire(
-            [bidi.clone(), definition(), width.clone(), definition()].concat()
-        ));
-        for late in [merge, autofit, bidi, preferred, vertical_center] {
-            assert!(acquire(
-                [definition(), width.clone(), definition(), late].concat()
-            ));
         }
     }
 

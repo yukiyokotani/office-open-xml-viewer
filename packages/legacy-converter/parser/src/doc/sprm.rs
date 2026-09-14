@@ -16,21 +16,50 @@ pub enum TopLevelFilter {
 /// PHugePapx/PTableProps replace the remaining property array with PrcData.
 /// Share the traversal so paragraph layout and table structure see the same data.
 pub fn paragraph_properties<'a>(
-    mut bytes: &'a [u8],
+    bytes: &'a [u8],
     data: &'a [u8],
     budget: &mut Budget,
     top_level_filter: TopLevelFilter,
     mut apply: impl FnMut(u16, &[u8], &mut Budget) -> Result<(), String>,
 ) -> Result<(), String> {
+    let (direct, appended) = match top_level_filter {
+        TopLevelFilter::All => (bytes, None),
+        TopLevelFilter::Paragraph => (&[][..], Some(bytes)),
+    };
+    paragraph_properties_appended(
+        direct,
+        appended,
+        data,
+        budget,
+        top_level_filter,
+        |code, operand, budget, _| apply(code, operand, budget),
+    )
+}
+
+/// Traverse direct PAPX and appended Pcd.Prm properties as one logical array.
+///
+/// [MS-DOC] 2.4.6.1 steps 4-5 append eligible piece properties to the direct
+/// grpprl before it is applied. Consequently an earlier PTableProps or eligible
+/// PHugePapx replacement also discards the appended tail under section 2.6.2.
+pub fn paragraph_properties_appended<'a>(
+    mut bytes: &'a [u8],
+    appended: Option<&'a [u8]>,
+    data: &'a [u8],
+    budget: &mut Budget,
+    appended_filter: TopLevelFilter,
+    mut apply: impl FnMut(u16, &[u8], &mut Budget, bool) -> Result<(), String>,
+) -> Result<(), String> {
     let mut visited = BTreeSet::new();
-    let mut top_level = true;
+    let mut appended_pending = appended;
+    let mut appended_origin = false;
+    let mut filter_top_level = false;
+    let mut first = true;
     loop {
         let mut sprms = Sprms::new(bytes);
-        let mut first = true;
         let mut next = None;
         while let Some((code, operand)) = sprms.next(budget)? {
-            if matches!(top_level_filter, TopLevelFilter::Paragraph)
-                && top_level
+            if matches!(appended_filter, TopLevelFilter::Paragraph)
+                && filter_top_level
                 && (code >> 10) & 7 != 1
             {
                 continue;
@@ -57,16 +86,25 @@ pub fn paragraph_properties<'a>(
                 break;
             }
             if code != 0x6646 {
-                apply(code, operand, budget)?;
+                apply(code, operand, budget, appended_origin)?;
             }
             first = false;
         }
         match next {
             Some(value) => {
                 bytes = value;
-                top_level = false;
+                appended_pending = None;
+                filter_top_level = false;
+                first = true;
             }
-            None => return Ok(()),
+            None => match appended_pending.take() {
+                Some(value) => {
+                    bytes = value;
+                    appended_origin = true;
+                    filter_top_level = true;
+                }
+                None => return Ok(()),
+            },
         }
     }
 }
@@ -285,6 +323,68 @@ mod tests {
         )
         .unwrap_err()
         .contains("cyclic"));
+    }
+
+    #[test]
+    fn direct_and_piece_properties_share_one_replacement_array() {
+        let data = [
+            12, 0, 0x03, 0x24, 1, 0x07, 0x24, 0, 0x07, 0x24, 0, 0x07, 0x24, 0,
+        ];
+        let direct_redirect = [0x6b, 0x64, 0, 0, 0, 0];
+        let piece_alignment = [0x61, 0x24, 2];
+        let mut applied = Vec::new();
+        paragraph_properties_appended(
+            &direct_redirect,
+            Some(&piece_alignment),
+            &data,
+            &mut Budget::default(),
+            TopLevelFilter::Paragraph,
+            |code, operand, _, from_piece| {
+                applied.push((code, operand[0], from_piece));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            applied,
+            [
+                (0x2403, 1, false),
+                (0x2407, 0, false),
+                (0x2407, 0, false),
+                (0x2407, 0, false)
+            ]
+        );
+
+        applied.clear();
+        paragraph_properties_appended(
+            &[0x61, 0x24, 0],
+            Some(&piece_alignment),
+            &[],
+            &mut Budget::default(),
+            TopLevelFilter::Paragraph,
+            |code, operand, _, from_piece| {
+                applied.push((code, operand[0], from_piece));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(applied, [(0x2461, 0, false), (0x2461, 2, true)]);
+
+        applied.clear();
+        let appended_huge = [0x46, 0x66, 0, 0, 0, 0];
+        paragraph_properties_appended(
+            &[0x61, 0x24, 0],
+            Some(&appended_huge),
+            &data,
+            &mut Budget::default(),
+            TopLevelFilter::Paragraph,
+            |code, operand, _, from_piece| {
+                applied.push((code, operand[0], from_piece));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(applied, [(0x2461, 0, false)]);
     }
     #[test]
     fn extended_tabs_are_framed_without_consuming_the_following_sprm() {

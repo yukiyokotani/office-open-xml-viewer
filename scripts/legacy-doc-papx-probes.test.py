@@ -147,7 +147,7 @@ class PapxProbeTests(unittest.TestCase):
                 ]}])
             )
 
-    def test_trace_assertions_append_later_pcd_and_ignore_replaced_tail(self):
+    def test_direct_ptableprops_suppresses_appended_complex_pcd(self):
         ignored = prl(0x7623, b"\x03\0\0\0")
         indirect = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + ignored
         data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
@@ -157,10 +157,10 @@ class PapxProbeTests(unittest.TestCase):
             "fc": 105,
             "owner": "ttp",
             "properties": {
-                "7621": ["01000000", "01000000"],
+                "7621": ["01000000"],
                 "7623": [],
             },
-            "order": ["7621", "7621"],
+            "order": ["7621"],
         }
         probes.validate_trace_assertions(
             document, self.trace_manifest(document, [target])
@@ -170,15 +170,56 @@ class PapxProbeTests(unittest.TestCase):
         self.assertEqual(len(ignored_items), 1)
         self.assertIn(ignored.hex(), ignored_items[0]["bytes"])
 
+    def test_direct_redirect_suppresses_simple_prm0_and_inline_piece_applies(self):
+        data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
+        direct = b"\0\0" + prl(probes.P_TABLE_PROPS, b"\0\0\0\0")
+        simple = loaded(fixture(direct, data, prm=prm0(0x05, 2)))
+        acquired = probes.acquire_property_trace(simple, 105, "ttp")["entries"]
+        self.assertFalse(any(entry.get("code") == "2461" for entry in acquired))
+
+        # The replacement makes even a reserved simple PRM unreachable, so it
+        # is neither decoded nor rejected as part of acquisition.
+        reserved = loaded(fixture(direct, data, prm=prm0(0x01, 1)))
+        acquired = probes.acquire_property_trace(reserved, 105, "ttp")["entries"]
+        self.assertFalse(any(entry.get("source") == "simplePCD" for entry in acquired))
+
+        inline = loaded(fixture(
+            b"\0\0" + owned_top_level_row(b""),
+            data,
+            [prl(0x2461, b"\x02")],
+            prm=1,
+        ))
+        acquired = probes.acquire_property_trace(inline, 105, "ttp")["entries"]
+        self.assertEqual(
+            [entry["operand"] for entry in acquired
+             if entry.get("code") == "2461" and entry.get("applied")],
+            ["02"],
+        )
+
+    def test_first_phuge_in_appended_piece_is_not_first_after_direct_paragraph(self):
+        data = prc_data(owned_top_level_row(prl(0x2461, b"\x02")))
+        direct = b"\0\0" + owned_top_level_row(prl(0x2461, b"\x00"))
+        piece = prl(probes.PHUGE_PAPX, b"\0\0\0\0")
+        document = loaded(fixture(direct, data, [piece], prm=1))
+        acquired = probes.acquire_property_trace(document, 105, "ttp")["entries"]
+        self.assertEqual(
+            [entry["operand"] for entry in acquired
+             if entry.get("code") == "2461" and entry.get("applied")],
+            ["00"],
+        )
+        huge = next(entry for entry in acquired if entry.get("code") == "6646")
+        self.assertEqual((huge["applied"], huge["reason"]),
+                         (False, "non-first-PHugePapx"))
+
     def test_complex_pcd_filter_preserves_indirection_first_element_rules(self):
         table = prl(0x7623, b"\0\x01\xe8\x03")
         huge = prl(probes.PHUGE_PAPX, b"\0\0\0\0")
         data = prc_data(owned_top_level_row(prl(0x7621, b"\0\x01\xe8\x03")))
         streams = fixture(b"\0\0", data, [table + huge], prm=1)
         record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_piece_paragraph_properties(
+        trace = probes._trace_properties(
             streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(),
+            probes._TraceBudget(), filter_initial_paragraph=True,
         )
         self.assertEqual(
             [(entry.get("code"), entry.get("applied"), entry.get("followed"))
@@ -190,9 +231,9 @@ class PapxProbeTests(unittest.TestCase):
         paragraph = prl(0x2461, b"\x01")
         streams = fixture(b"\0\0", data, [paragraph + huge], prm=1)
         record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_piece_paragraph_properties(
+        trace = probes._trace_properties(
             streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(),
+            probes._TraceBudget(), filter_initial_paragraph=True,
         )
         self.assertFalse(any(entry["kind"] == "prc_data" for entry in trace))
         huge_entry = next(entry for entry in trace if entry.get("code") == "6646")
@@ -208,9 +249,9 @@ class PapxProbeTests(unittest.TestCase):
         pcd = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + tail
         streams = fixture(b"\0\0", data, [pcd], prm=1)
         record = probes.inspect_document(streams)["prcs"][0]
-        trace = probes._trace_piece_paragraph_properties(
+        trace = probes._trace_properties(
             streams, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(),
+            probes._TraceBudget(), filter_initial_paragraph=True,
         )
         self.assertEqual(
             [entry["operand"] for entry in trace
@@ -228,7 +269,7 @@ class PapxProbeTests(unittest.TestCase):
         record = session.prcs[0]
         key = (record["stream"], record["offset"], record["end"])
         raw = session._trace(key)
-        filtered = session._piece_trace(key)
+        filtered = session._acquired_trace(None, key)
         self.assertTrue(raw[0]["applied"])
         self.assertFalse(filtered[0]["applied"])
         self.assertEqual(len(session.trace_cache), 2)
@@ -536,16 +577,16 @@ class PapxProbeTests(unittest.TestCase):
         self.assertTrue(result["valid"])
         inspected = probes.inspect_document(before)
         record = inspected["prcs"][0]
-        raw = probes._trace_piece_paragraph_properties(
+        raw = probes._trace_properties(
             before, record["stream"], record["offset"], record["end"],
-            probes._TraceBudget(),
+            probes._TraceBudget(), filter_initial_paragraph=True,
         )[-1]
         self.assertEqual(
             (raw["code"], raw["applied"], raw["reason"]),
             ("740a", False, "non-paragraph-complex-PCD"),
         )
 
-    def test_wrapped_table_sprm_in_complex_pcd_still_shadows_paragraph_data(self):
+    def test_direct_ptableprops_suppresses_wrapped_complex_pcd_shadow(self):
         before_value = b"\0\0 \0"
         after_value = b"\0\0@\0"
         pcd_value = b"\0\0\x80\0"
@@ -565,8 +606,7 @@ class PapxProbeTests(unittest.TestCase):
             "targets": [{"fc": 105, "code": 0x740A,
                          "before": before_value.hex(), "after": after_value.hex()}],
         }
-        with self.assertRaisesRegex(probes.ProbeError, "effective target"):
-            probes.validate_plan(source, after, plan)
+        self.assertTrue(probes.validate_plan(source, after, plan)["valid"])
 
     def test_exact_diff_source_hash_and_target_schema_fail_closed(self):
         rsid = prl(0x6467, b"\x11\x22\x33\x44")

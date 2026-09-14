@@ -1,10 +1,16 @@
-//! Bounded native acquisition for explicit DOC table column widths.
+//! Bounded native acquisition for explicit DOC table cell geometry.
 //!
 //! [MS-DOC] 2.6.3 and 2.9.322 distinguish widths supplied when a cell is
 //! created from later `sprmTDxaCol` overrides. Current Word controls establish
 //! that such overrides survive a later same-count `sprmTDefTable` in the
 //! fixed, unmerged profile retained here. Other structural interactions remain
 //! admission-gated rather than being inferred from raw Prl order.
+//! Current Word controls also establish last-range-wins vertical alignment,
+//! including explicit top resets and conflicts with later same-count TC80
+//! descriptor alignments, across first/last/disjoint/overlapping three-cell
+//! ranges. Paired
+//! controls without TDxaCol establish that alignment persistence is independent
+//! of width overrides; a TC80-only control confirms the descriptor is active.
 
 use super::{nonnegative, range, u16_at, unsupported, Row};
 
@@ -19,9 +25,10 @@ pub(in crate::doc) enum NativeGeometryApply {
 
 pub(in crate::doc) struct NativeGeometry {
     overrides: [Option<i32>; MAX_CELLS],
+    alignments: [Option<u8>; MAX_CELLS],
     count: Option<usize>,
     eligible: bool,
-    unresolved_width: bool,
+    unresolved_overrides: bool,
     prior_source_overrides: bool,
     preferred_competition: bool,
     persistence_used: bool,
@@ -31,9 +38,10 @@ impl Default for NativeGeometry {
     fn default() -> Self {
         Self {
             overrides: [None; MAX_CELLS],
+            alignments: [None; MAX_CELLS],
             count: None,
             eligible: false,
-            unresolved_width: false,
+            unresolved_overrides: false,
             prior_source_overrides: false,
             preferred_competition: false,
             persistence_used: false,
@@ -43,12 +51,12 @@ impl Default for NativeGeometry {
 
 impl NativeGeometry {
     pub(in crate::doc) fn begin_source(&mut self) {
-        self.prior_source_overrides |=
-            self.overrides.iter().any(Option::is_some) || self.unresolved_width;
+        self.prior_source_overrides |= self.has_overrides() || self.unresolved_overrides;
         self.overrides.fill(None);
+        self.alignments.fill(None);
         self.count = None;
         self.eligible = false;
-        self.unresolved_width = false;
+        self.unresolved_overrides = false;
     }
 
     pub(in crate::doc) fn apply(
@@ -69,9 +77,8 @@ impl NativeGeometry {
                 Ok(NativeGeometryApply::Handled)
             }
             0xd635 => {
-                let competed = self.overrides.iter().any(Option::is_some)
-                    || self.unresolved_width
-                    || self.persistence_used;
+                let competed =
+                    self.has_overrides() || self.unresolved_overrides || self.persistence_used;
                 row.apply(code, operand)?;
                 self.preferred_competition |= competed;
                 Ok(if self.persistence_used {
@@ -81,45 +88,73 @@ impl NativeGeometry {
                 })
             }
             0xd62b => {
+                // MS-DOC 2.6.3 defines zero as unmerged. Native fixed-row
+                // controls confirm clearing an already-unmerged cell is a no-op.
+                let unchanged = operand.first() == Some(&2)
+                    && operand.get(2) == Some(&0)
+                    && row
+                        .cells
+                        .get(usize::from(operand[1]))
+                        .is_some_and(|cell| cell.flags & (3 << 5) == 0);
                 if !row.apply(code, operand)? {
                     return Ok(NativeGeometryApply::HandledUnsupported);
                 }
-                Ok(self.finish_structural_change(true))
+                Ok(self.finish_structural_change(!unchanged))
             }
             0xd62c => {
                 if operand.is_empty() {
                     return Err(unsupported("short Word cell alignment"));
                 }
-                // Current-Word controls show nondefault vertical alignment
-                // persisting before, between, and after TDxaCol/repeated TDef;
-                // explicit top matches the default. Until that separate cell-
-                // flag cascade is represented, only semantic no-ops remain in
-                // this width-persistence profile.
-                let changed = if operand.first() == Some(&3) {
-                    let cells = range(&operand[1..], row.cells.len())?;
-                    let alignment = *operand
-                        .get(3)
-                        .ok_or_else(|| unsupported("short Word cell alignment"))?;
-                    alignment <= 2
-                        && row.cells[cells]
-                            .iter()
-                            .any(|cell| (cell.flags >> 7) & 3 != u16::from(alignment))
+                if !row.apply(code, operand)? {
+                    return Ok(NativeGeometryApply::HandledUnsupported);
+                }
+                let cells = range(&operand[1..], row.cells.len())?;
+                if cells.is_empty() {
+                    return Ok(NativeGeometryApply::Handled);
+                }
+                let alignment = operand[3]; // Row::apply validated cb and VerticalAlign.
+                if row.cells.iter().any(|cell| cell.preferred.is_some()) {
+                    self.preferred_competition = true;
+                }
+                if self.count == Some(row.cells.len()) && self.eligible {
+                    for slot in &mut self.alignments[cells] {
+                        *slot = Some(alignment);
+                    }
                 } else {
-                    false
+                    self.unresolved_overrides = true;
+                }
+                Ok(if self.persistence_used && self.count.is_none() {
+                    NativeGeometryApply::HandledUnsupported
+                } else {
+                    NativeGeometryApply::Handled
+                })
+            }
+            0x5624 | 0x5625 => {
+                // MS-DOC 2.6.3 explicitly makes TSplit on unmerged cells a
+                // no-op. Native controls also confirm an empty TMerge range;
+                // other merge operations remain outside persistence support.
+                let cells = range(operand, row.cells.len())?;
+                let changed = if code == 0x5625 {
+                    row.cells[cells.clone()]
+                        .iter()
+                        .any(|cell| cell.flags & 3 != 0)
+                } else {
+                    !cells.is_empty()
                 };
                 if !row.apply(code, operand)? {
                     return Ok(NativeGeometryApply::HandledUnsupported);
                 }
                 Ok(self.finish_structural_change(changed))
             }
-            0x7621 | 0x5622 | 0x5624 | 0x5625 | 0x3615 | 0x560b | 0x5664 => {
-                let had_overrides = self.overrides.iter().any(Option::is_some);
+            0x7621 | 0x5622 | 0x3615 | 0x560b | 0x5664 => {
+                let had_overrides = self.has_overrides();
                 if !row.apply(code, operand)? {
                     return Ok(NativeGeometryApply::HandledUnsupported);
                 }
                 self.overrides.fill(None);
+                self.alignments.fill(None);
                 self.eligible = false;
-                self.unresolved_width |= had_overrides;
+                self.unresolved_overrides |= had_overrides;
                 Ok(if self.persistence_used {
                     NativeGeometryApply::HandledUnsupported
                 } else {
@@ -134,15 +169,20 @@ impl NativeGeometry {
         if !changed {
             return NativeGeometryApply::Handled;
         }
-        let had_overrides = self.overrides.iter().any(Option::is_some);
+        let had_overrides = self.has_overrides();
         self.overrides.fill(None);
+        self.alignments.fill(None);
         self.eligible = false;
-        self.unresolved_width |= had_overrides;
+        self.unresolved_overrides |= had_overrides;
         if self.persistence_used {
             NativeGeometryApply::HandledUnsupported
         } else {
             NativeGeometryApply::Handled
         }
+    }
+
+    fn has_overrides(&self) -> bool {
+        self.overrides.iter().any(Option::is_some) || self.alignments.iter().any(Option::is_some)
     }
 
     fn apply_definition(
@@ -162,17 +202,21 @@ impl NativeGeometry {
         let descriptors = operand
             .get(boundary_end..)
             .ok_or_else(|| unsupported("short Word table boundaries"))?;
-        // Native controls establish only horizontal LTR cells with default
-        // TC80 flags. Borders live outside the flag word and remain allowed;
-        // every flag-bearing TC80 category stays outside this bounded profile.
+        // The bounded profile permits only TC80 vertical-alignment bits. Other
+        // flags (merge, text flow, preferred sizing, and related categories)
+        // remain unsupported. Borders are stored outside this flag word.
         let definition_eligible = !row.autofit
             && !row.bidi
             && descriptors.len() % 20 == 0
             && descriptors.chunks_exact(20).take(count).all(|tc| {
                 let flags = u16_at(tc, 0).unwrap_or(u16::MAX);
-                flags == 0
+                flags & !(3 << 7) == 0 && (flags >> 7) & 3 <= 2
             });
-        let had_overrides = self.overrides.iter().any(Option::is_some);
+        let had_overrides = self.has_overrides();
+        // Count changes stay gated: native 3-to-2-to-3 TDef controls retained
+        // widths even on the temporarily absent slot, whereas explicit
+        // TDelete/TInsert discarded widths on replacement cells. Truncating
+        // the override array as if both operations deleted cells is unsound.
         let can_reapply = had_overrides
             && !self.prior_source_overrides
             && self.count == Some(count)
@@ -187,19 +231,25 @@ impl NativeGeometry {
                     cell.width = width;
                 }
             }
+            for (cell, alignment) in row.cells.iter_mut().zip(self.alignments.iter().copied()) {
+                if let Some(alignment) = alignment {
+                    cell.flags = (cell.flags & !(3 << 7)) | (u16::from(alignment) << 7);
+                }
+            }
             self.persistence_used = true;
         }
 
         let unsupported_competition = self.prior_source_overrides
-            || self.unresolved_width
+            || self.unresolved_overrides
             || self.preferred_competition
             || (had_overrides && !can_reapply);
         if !can_reapply {
             self.overrides.fill(None);
+            self.alignments.fill(None);
         }
         self.count = Some(count);
         self.eligible = definition_eligible;
-        self.unresolved_width = false;
+        self.unresolved_overrides = false;
         self.preferred_competition = false;
         self.prior_source_overrides = false;
         Ok(if unsupported_competition {
@@ -225,7 +275,7 @@ impl NativeGeometry {
                 *slot = Some(width);
             }
         } else {
-            self.unresolved_width = true;
+            self.unresolved_overrides = true;
         }
         Ok(if self.persistence_used && self.count.is_none() {
             NativeGeometryApply::HandledUnsupported
@@ -248,6 +298,14 @@ mod tests {
         operand.resize(operand.len() + count * 20, 0);
         let cb = (operand.len() - 1) as u16;
         operand[..2].copy_from_slice(&cb.to_le_bytes());
+        operand
+    }
+
+    fn definition_with_alignment(boundaries: &[i16], cell: usize, alignment: u8) -> Vec<u8> {
+        let mut operand = definition(boundaries);
+        let descriptor = 3 + boundaries.len() * 2 + cell * 20;
+        operand[descriptor..descriptor + 2]
+            .copy_from_slice(&(u16::from(alignment) << 7).to_le_bytes());
         operand
     }
 
@@ -348,35 +406,147 @@ mod tests {
     }
 
     #[test]
-    fn vertical_alignment_accepts_only_semantic_noops_in_the_persistence_profile() {
+    fn vertical_alignment_ranges_persist_with_last_direct_value() {
+        for (operations, expected) in [
+            (vec![(1, 2, 1), (1, 2, 0)], [0, 0, 0]),
+            (vec![(1, 2, 0), (1, 2, 1)], [0, 1, 0]),
+            (vec![(0, 2, 1), (1, 3, 2)], [1, 2, 2]),
+            (vec![(1, 3, 2), (0, 2, 1)], [1, 1, 2]),
+            (vec![(0, 1, 1), (2, 3, 2)], [1, 0, 2]),
+        ] {
+            let mut row = Row::default();
+            let mut geometry = NativeGeometry::default();
+            geometry.begin_source();
+            geometry
+                .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000, 3000]))
+                .unwrap();
+            for (first, limit, alignment) in operations {
+                geometry
+                    .apply(&mut row, 0xd62c, &[3, first, limit, alignment])
+                    .unwrap();
+            }
+            assert_eq!(
+                geometry
+                    .apply(&mut row, 0xd608, &definition(&[0, 1500, 3500, 6000]))
+                    .unwrap(),
+                NativeGeometryApply::Handled
+            );
+            assert_eq!(
+                row.cells
+                    .iter()
+                    .map(|cell| (cell.flags >> 7) & 3)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn direct_alignment_overrides_later_descriptor_alignment() {
+        for (direct, descriptor_alignment, expected) in [(1, 2, 1), (0, 1, 0)] {
+            let mut row = Row::default();
+            let mut geometry = NativeGeometry::default();
+            geometry.begin_source();
+            geometry
+                .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000, 3000]))
+                .unwrap();
+            geometry
+                .apply(&mut row, 0xd62c, &[3, 1, 2, direct])
+                .unwrap();
+            geometry
+                .apply(
+                    &mut row,
+                    0xd608,
+                    &definition_with_alignment(&[0, 1500, 3500, 6000], 1, descriptor_alignment),
+                )
+                .unwrap();
+            assert_eq!((row.cells[1].flags >> 7) & 3, expected);
+        }
+
         let mut row = Row::default();
         let mut geometry = NativeGeometry::default();
         geometry.begin_source();
         geometry
             .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000]))
             .unwrap();
-        geometry.apply(&mut row, 0x7623, &[0, 1, 0xd0, 7]).unwrap();
-
-        assert_eq!(
-            geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 0]).unwrap(),
-            NativeGeometryApply::Handled
-        );
-        assert_eq!(
-            geometry.apply(&mut row, 0xd62c, &[3, 1, 1, 1]).unwrap(),
-            NativeGeometryApply::Handled
-        );
+        geometry.apply(&mut row, 0xd62c, &[3, 1, 1, 1]).unwrap();
         assert_eq!(
             geometry
                 .apply(&mut row, 0xd608, &definition(&[0, 1500, 3000]))
                 .unwrap(),
             NativeGeometryApply::Handled
         );
-
         assert_eq!(
             geometry.apply(&mut row, 0xd62c, &[2, 0, 1]).unwrap(),
             NativeGeometryApply::HandledUnsupported
         );
         assert!(geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 3]).is_err());
+
+        let mut row = Row::default();
+        let mut geometry = NativeGeometry::default();
+        geometry.begin_source();
+        assert_eq!(
+            geometry.apply(&mut row, 0xd62c, &[3, 0, 0, 1]).unwrap(),
+            NativeGeometryApply::Handled
+        );
+
+        geometry
+            .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000]))
+            .unwrap();
+        geometry
+            .apply(&mut row, 0xd635, &[5, 0, 1, 3, 100, 0])
+            .unwrap();
+        geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 1]).unwrap();
+        assert_eq!(
+            geometry
+                .apply(&mut row, 0xd608, &definition(&[0, 1500, 3000]))
+                .unwrap(),
+            NativeGeometryApply::HandledUnsupported
+        );
+    }
+
+    #[test]
+    fn unmerged_split_and_clear_operations_do_not_invalidate_alignment() {
+        for (code, operand) in [
+            (0x5625, vec![0, 2]),
+            (0x5624, vec![1, 1]),
+            (0xd62b, vec![2, 0, 0]),
+        ] {
+            let mut row = Row::default();
+            let mut geometry = NativeGeometry::default();
+            geometry.begin_source();
+            geometry
+                .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000]))
+                .unwrap();
+            geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 1]).unwrap();
+            assert_eq!(
+                geometry.apply(&mut row, code, &operand).unwrap(),
+                NativeGeometryApply::Handled
+            );
+            assert_eq!(
+                geometry
+                    .apply(&mut row, 0xd608, &definition(&[0, 1500, 3000]))
+                    .unwrap(),
+                NativeGeometryApply::Handled
+            );
+            assert_eq!((row.cells[0].flags >> 7) & 3, 1);
+        }
+
+        let mut row = Row::default();
+        let mut geometry = NativeGeometry::default();
+        geometry.begin_source();
+        geometry
+            .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000]))
+            .unwrap();
+        geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 1]).unwrap();
+        geometry
+            .apply(&mut row, 0xd608, &definition(&[0, 1500, 3000]))
+            .unwrap();
+        assert_eq!(
+            geometry.apply(&mut row, 0x5625, &[0, 2]).unwrap(),
+            NativeGeometryApply::Handled
+        );
+        assert_eq!((row.cells[0].flags >> 7) & 3, 1);
     }
 
     #[test]

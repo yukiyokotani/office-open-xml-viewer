@@ -284,7 +284,7 @@ def _read_prl(data, position, end, stream, budget):
 
 
 def _trace_properties(streams, stream, start, end, budget,
-                      filter_initial_paragraph=False):
+                      filter_initial_paragraph=False, appended=None):
     if stream not in streams:
         raise ProbeError(f"missing stream {stream}")
     _range(streams[stream], start, end - start, "property range outside stream")
@@ -292,11 +292,12 @@ def _trace_properties(streams, stream, start, end, budget,
     current_stream, current_start, current_end = stream, start, end
     visited = set()
     filter_paragraph = filter_initial_paragraph
+    appended_pending = appended
+    first = True
     while True:
         data = streams[current_stream]
         budget.array(current_end - current_start)
         position = current_start
-        first = True
         reference = None
         while position < current_end:
             item, next_position, code, operand = _read_prl(
@@ -335,7 +336,12 @@ def _trace_properties(streams, stream, start, end, budget,
             if not filter_paragraph or is_paragraph:
                 first = False
         if reference is None:
-            return trace
+            if appended_pending is None:
+                return trace
+            current_stream, current_start, current_end, filter_paragraph = appended_pending
+            appended_pending = None
+            continue
+        appended_pending = None
         if reference in visited:
             raise ProbeError("cyclic paragraph data chain")
         if len(visited) >= MAX_TRACE_DEPTH:
@@ -364,12 +370,19 @@ def _trace_properties(streams, stream, start, end, budget,
         })
         current_stream, current_start, current_end = "Data", group_start, group_end
         filter_paragraph = False
+        first = True
 
 
-def _trace_piece_paragraph_properties(streams, stream, start, end, budget):
-    """Trace a complex Pcd.Prm1 after its normative paragraph-SPRM filter."""
+def _trace_direct_and_piece_properties(streams, direct, piece, budget):
+    """Trace direct PAPX plus eligible Pcd.Prm1 as one MS-DOC 2.4.6.1 array."""
+    if direct is None:
+        stream, start, end = piece
+        return _trace_properties(
+            streams, stream, start, end, budget, filter_initial_paragraph=True
+        )
     return _trace_properties(
-        streams, stream, start, end, budget, filter_initial_paragraph=True
+        streams, *direct, budget,
+        appended=(*piece, True) if piece is not None else None,
     )
 
 
@@ -688,12 +701,9 @@ def _effective_target(parts, fc, code, trace_budget, lookup_budget, trace_cache)
     if len(runs) != 1:
         raise ProbeError("target FC does not select exactly one PAPX run")
     papx = runs[0]["papx"]
-    trace = []
+    direct_key = None
     if papx is not None:
-        key = ("WordDocument", papx["offset"] + 2, papx["end"])
-        if key not in trace_cache:
-            trace_cache[key] = _trace_properties(streams, *key, trace_budget)
-        trace.extend(trace_cache[key])
+        direct_key = ("WordDocument", papx["offset"] + 2, papx["end"])
 
     lookup_budget.charge(len(all_pieces))
     pieces = [piece for piece in all_pieces if piece["fc_start"] <= fc < piece["fc_end"]]
@@ -709,12 +719,23 @@ def _effective_target(parts, fc, code, trace_budget, lookup_budget, trace_cache)
     index = piece["complex_index"]
     if index is not None:
         prc = prcs[index]
-        key = ("complexPCD", prc["stream"], prc["offset"], prc["end"])
+        piece_key = (prc["stream"], prc["offset"], prc["end"])
+        key = ("direct+complexPCD", direct_key, piece_key)
         if key not in trace_cache:
-            trace_cache[key] = _trace_piece_paragraph_properties(
-                streams, *key[1:], trace_budget
+            trace_cache[key] = _trace_direct_and_piece_properties(
+                streams, direct_key, piece_key, trace_budget
             )
-        trace.extend(trace_cache[key])
+        trace = trace_cache[key]
+    else:
+        key = ("direct", direct_key)
+        if key not in trace_cache:
+            trace_cache[key] = ([] if direct_key is None else
+                                _trace_properties(streams, *direct_key, trace_budget))
+        trace = list(trace_cache[key])
+        if not any(item.get("followed") for item in trace):
+            prm0_entry = _paragraph_prm0_entry(piece, trace_budget)
+            if prm0_entry is not None:
+                trace.append(prm0_entry)
 
     depth, _ = _active_operand(trace, 0x6649)
     row_end, _ = _active_operand(trace, 0x2417)
@@ -800,11 +821,11 @@ class AcquiredPropertyTraceSession:
             )
         return self.trace_cache[key]
 
-    def _piece_trace(self, key):
-        cache_key = ("complexPCD", *key)
+    def _acquired_trace(self, direct, piece):
+        cache_key = ("direct+complexPCD", direct, piece)
         if cache_key not in self.trace_cache:
-            self.trace_cache[cache_key] = _trace_piece_paragraph_properties(
-                self.streams, *key, self.trace_budget
+            self.trace_cache[cache_key] = _trace_direct_and_piece_properties(
+                self.streams, direct, piece, self.trace_budget
             )
         return self.trace_cache[cache_key]
 
@@ -822,17 +843,20 @@ class AcquiredPropertyTraceSession:
             self.streams["WordDocument"], fc, width,
             "target character outside WordDocument",
         )
-        trace = []
+        direct_key = None
         papx = run["papx"]
         if papx is not None:
-            trace.extend(self._trace(("WordDocument", papx["offset"] + 2, papx["end"])))
+            direct_key = ("WordDocument", papx["offset"] + 2, papx["end"])
         if piece["complex_index"] is not None:
             prc = self.prcs[piece["complex_index"]]
-            trace.extend(self._piece_trace((prc["stream"], prc["offset"], prc["end"])))
+            piece_key = (prc["stream"], prc["offset"], prc["end"])
+            trace = list(self._acquired_trace(direct_key, piece_key))
         else:
-            prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
-            if prm0_entry is not None:
-                trace.append(prm0_entry)
+            trace = [] if direct_key is None else list(self._trace(direct_key))
+            if not any(item.get("followed") for item in trace):
+                prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
+                if prm0_entry is not None:
+                    trace.append(prm0_entry)
         self.acquire_budget.charge(len(trace))
 
         depth, _ = _active_operand(trace, 0x6649)
