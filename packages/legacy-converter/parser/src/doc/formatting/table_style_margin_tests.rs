@@ -87,6 +87,31 @@ fn conditional_d634_stays_gated_in_both_record_orders() {
 }
 
 #[test]
+fn unconditional_d63e_overrides_d634_in_both_record_orders() {
+    for tapx in [
+        [
+            margin(0xd634, 0x02, 288).as_slice(),
+            margin(0xd63e, 0x02, 72).as_slice(),
+        ]
+        .concat(),
+        [
+            margin(0xd63e, 0x02, 72).as_slice(),
+            margin(0xd634, 0x02, 288).as_slice(),
+        ]
+        .concat(),
+    ] {
+        let mut value = formatting(&tapx);
+        let (defaults, cells) = value.table_cell_margins(Some(0)).unwrap();
+        let mut row = table::Row::default();
+        row.apply(0x7621, &[0, 1, 0xe8, 3]).unwrap();
+        row.resolve_style_aware_margins(defaults, cells);
+
+        assert_eq!(row.cells[0].margins[1], Some(72));
+        assert!(!value.unsupported_table_properties);
+    }
+}
+
+#[test]
 fn conditional_d63e_with_overlapping_d634_stays_gated() {
     for (side, width) in [(0x01, 216), (0x02, 288), (0x04, 360), (0x08, 432)] {
         let unconditional = margin(0xd634, 0x0f, 72);
@@ -125,13 +150,8 @@ fn conditional_d63e_accepts_each_physical_side_over_d63e_baseline() {
         let (_, cells) = value.table_cell_margins_for_key(Some(key)).unwrap();
 
         let index = side.trailing_zeros() as usize;
-        if side == 0x08 {
-            assert_eq!(cells.get(index).map(|value| value.resolved()), Some(72));
-            assert!(value.unsupported_table_properties);
-        } else {
-            assert_eq!(cells.get(index).map(|value| value.resolved()), Some(width));
-            assert!(!value.unsupported_table_properties);
-        }
+        assert_eq!(cells.get(index).map(|value| value.resolved()), Some(width));
+        assert!(!value.unsupported_table_properties);
     }
 }
 

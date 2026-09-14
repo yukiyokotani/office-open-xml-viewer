@@ -1072,6 +1072,42 @@ mod tests {
     }
 
     #[test]
+    fn sole_tdef_unequal_regions_project_exact_horizontal_source_spans() {
+        // Native DOC163-v3 controls: the complete row property chain contains
+        // no TInsert, TDelete, TDxaCol, or D635 competitor. TDefTable defines
+        // the three source regions 1500/4500/3000, with nil TC80 preferences.
+        let mut definition = vec![70, 0, 3];
+        for edge in [0i16, 1500, 6000, 9000] {
+            definition.extend(edge.to_le_bytes());
+        }
+        definition.resize(71, 0);
+
+        for (merge, expected) in [([0, 2], [6000, 3000]), ([1, 3], [1500, 7500])] {
+            let mut row = Row::default();
+            row.apply(0xd608, &definition).unwrap();
+            row.apply(0x3615, &[0]).unwrap();
+            row.apply(0x5624, &merge).unwrap();
+
+            let table = plan(
+                RawTable {
+                    rows: vec![raw(row, vec![(), (), ()])],
+                },
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(table.grid, vec![0, 1500, 6000, 9000]);
+            assert_eq!(
+                table.rows[0]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.width)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn expanded_duplicate_grid_still_obeys_the_65536_budget() {
         let mut row = Row::default();
         row.cells = (0..65_536).map(|_| cell(0)).collect();

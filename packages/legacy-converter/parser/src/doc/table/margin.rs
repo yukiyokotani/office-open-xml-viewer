@@ -50,14 +50,6 @@ impl Patch {
         }
     }
 
-    pub(in crate::doc) fn retain_sides(&mut self, mask: u8) {
-        for side in 0..4 {
-            if mask & (1 << side) == 0 {
-                self.sides[side] = None;
-            }
-        }
-    }
-
     pub(in crate::doc) fn apply_style(&mut self, code: u16, bytes: &[u8]) -> Result<u8, String> {
         let cssa = read(bytes)?;
         if (cssa.first, cssa.limit) != (0, 1) {

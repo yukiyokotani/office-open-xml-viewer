@@ -2299,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn native_story_projects_bounded_first_row_d63e_and_keeps_right_gated() {
+    fn native_story_projects_bounded_first_row_d63e_on_all_physical_sides() {
         for (options, first) in [(1 << 5, 14.4), (0, 3.6)] {
             let projected = conditional_border_grid_with_rows(
                 StyleFixture {
@@ -2310,7 +2310,7 @@ mod tests {
             );
             assert_eq!(projected.margins.len(), 9);
             for margin in &projected.margins[..3] {
-                assert_eq!(*margin, [first, first, first, 3.6]);
+                assert_eq!(*margin, [first, first, first, first]);
             }
             for margin in &projected.margins[3..] {
                 assert_eq!(*margin, [3.6, 3.6, 3.6, 3.6]);
@@ -2343,6 +2343,29 @@ mod tests {
         assert_eq!(projected.margins[0][1], 21.6);
         assert_eq!(projected.margins[1][1], 0.0);
         assert_eq!(projected.margins[2][1], 14.4);
+    }
+
+    #[test]
+    fn native_story_keeps_direct_right_d632_dxa_nil_and_omission_above_first_row_d63e() {
+        let direct = [
+            cell_margin_range(0xd632, 0, 1, 0x08, 3, 432),
+            cell_margin_range(0xd632, 1, 2, 0x08, 0, 0),
+        ];
+        let projected = conditional_border_grid_with_rows(
+            StyleFixture {
+                margins: MarginFixture::ConditionalD63e,
+                ..StyleFixture::default()
+            },
+            [
+                row_cells_with_options_and_margins(1 << 5, 3, &direct),
+                row_cells(1 << 5, 3),
+                row_cells(1 << 5, 3),
+            ],
+        );
+
+        assert_eq!(projected.margins[0][3], 21.6);
+        assert_eq!(projected.margins[1][3], 0.0);
+        assert_eq!(projected.margins[2][3], 14.4);
     }
 
     #[test]

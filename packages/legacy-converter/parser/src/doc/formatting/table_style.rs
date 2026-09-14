@@ -409,15 +409,7 @@ impl Formatting<'_> {
                                 let mut patch = table::MarginPatch::default();
                                 let sides = patch.apply_style(code, operand)?;
                                 conditional_margin_sides = sides;
-                                // The left-aligned native controls do not expose
-                                // the physical-right inset. Keep that side behind
-                                // the admission gate while retaining the three
-                                // independently visible physical sides.
-                                if sides & 0x08 != 0 {
-                                    profile.unsupported_table = true;
-                                    patch.retain_sides(0x07);
-                                }
-                                if sides & 0x07 == 0 {
+                                if sides == 0 {
                                     return Ok(false);
                                 }
                                 profile.conditional_first_row_margins = Some(patch);
@@ -441,11 +433,12 @@ impl Formatting<'_> {
                                 )
                             };
                             let sides = patch.apply_style(code, operand)?;
-                            // The controls establish D63E above direct D634,
-                            // and each property independently through basedOn.
-                            // They do not establish cross-property composition
-                            // within one style chain on the same side.
-                            if sides & other_sides != 0 {
+                            // [MS-DOC] 2.6.3 defines D63E as the selected table
+                            // style's margin and D634 as its fallback. Native
+                            // controls establish that precedence in both record
+                            // orders for a non-inherited style. Cross-property
+                            // composition through basedOn remains unestablished.
+                            if inherited && sides & other_sides != 0 {
                                 profile.unsupported_table = true;
                             }
                             *own_sides |= sides;

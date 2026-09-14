@@ -3967,6 +3967,66 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn native_margin_acquisition_distinguishes_style_defaults_and_later_row_overrides() {
+        // Native bordered controls isolate D634 by removing the later direct
+        // Nil that would mask it. D63E remains above row D634 even when the
+        // latter is authored after TIstd ([MS-DOC] 2.6.3).
+        let cases = [
+            (table_style_margin(0xd634, 0x02, 3, 288), vec![], 288),
+            (table_style_margin(0xd634, 0x02, 3, 0), vec![], 0),
+            (table_style_margin(0xd634, 0x02, 0, 0), vec![], 0),
+            (
+                table_style_margin(0xd634, 0x02, 3, 288),
+                table_style_margin(0xd634, 0x02, 0, 0),
+                0,
+            ),
+            (
+                table_style_margin(0xd63e, 0x02, 3, 288),
+                table_style_margin(0xd634, 0x02, 3, 72),
+                288,
+            ),
+            (
+                [
+                    table_style_margin(0xd634, 0x02, 3, 288),
+                    table_style_margin(0xd63e, 0x02, 3, 72),
+                ]
+                .concat(),
+                table_style_margin(0xd634, 0x02, 0, 0),
+                72,
+            ),
+        ];
+        for (tapx, direct, expected) in cases {
+            let papx = [
+                vec![0, 0],
+                test_prl(0x7621, &[0, 1, 0xe8, 3]),
+                test_prl(0x563a, &0u16.to_le_bytes()),
+                direct,
+            ]
+            .concat();
+            let mut native = with_direct_paragraph(&papx);
+            native.configure_table_styles(0x0112, true);
+            native.styles = observed_table_style_formatting().styles;
+            native.styles[0]
+                .as_mut()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .tapx = leaked(tapx);
+            let (defaults, cells) = native.table_cell_margins(Some(0)).unwrap();
+            assert!(!native.unsupported_table_properties);
+            let mut properties = native.table_properties_native(109, 0, &[]).unwrap();
+            properties.row.resolve_style_aware_margins(defaults, cells);
+            assert_eq!(properties.row.cells[0].margins[1], Some(expected));
+            assert_eq!(properties.row.cells[0].width, 1000);
+            // Scalar style selection still carries the independent admission
+            // prerequisite; a correct margin projection does not remove it.
+            assert!(native.unsupported_table_properties);
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn native_table_acquisition_resets_authored_shading_at_each_tistd() {
         let definition = test_prl(0xd608, &[6, 0, 1, 0, 0, 0xd0, 7]);
         let tistd = |style: u16| test_prl(0x563a, &style.to_le_bytes());

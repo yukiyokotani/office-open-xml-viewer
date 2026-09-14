@@ -1350,7 +1350,7 @@ worktree's test executable.
 | DOC-23 | Evaluate bounded table-style admission | Evaluation complete for this batch: retain admission gates. DOC-25 and DOC-26 remain prerequisites for general table styles; DOC-27/28 cover the new Office counterexamples. Verified internal projection does not establish full-document admission |
 | DOC-24 | Make table-style Office probes reproducible after cleanup | Implemented: deterministic generator and exact mutation validation passed native Word end-to-end controls; source-cell U+0007 ownership is verified separately from the TTP. Generated files remain disposable under outputs |
 | DOC-25 | Resolve table-style-aware direct cell shading | Bounded style-aware shading, including both clear-RGB compatibility/RawNil orders, reaches the actual story. General table-style admission still depends on DOC-26 and unsupported style cases |
-| DOC-26 | Apply TIstd table properties with specified preservation | Partial: acquired reset/preservation paths are covered by focused tests, including retained D635 serialization. TIstd/TTlp admission remains gated pending complete modeled-property and native geometry acceptance |
+| DOC-26 | Apply TIstd table properties with specified preservation | Partial: native margin/reset acquisition is covered; cell-edit and preferred-width composition remains unresolved. TIstd/TTlp admission stays gated |
 | DOC-27 | Resolve conditional font-table references | Investigated further: native conditional marker fonts stay unchanged when all seven FFN records are reversed or rotated, while unconditional font references follow the reordered table. Preserve the gate; neither a direct index nor a fixed remapping is established |
 | DOC-28 | Resolve table-style physical alignment compatibility | Eight additional native controls cover both property orders and opposing left/right values in unconditional and first-row PAPX. PJc determines the display in both orders; PJc80 remains gated pending a documented compatibility policy |
 
@@ -1381,7 +1381,7 @@ outside this selection are recorded without starting another automatic batch.
 | DOC-43 | Preserve dimensions and style options at TIstd application | Connected preservation of height, preferred width, autofit, gap and style options. Independent bidi properties now retain their own last boolean values and combine by the documented OR; native 5664 compatibility remains gated under DOC-62. Gap controls establish only before/after equality; revision semantics remain unsupported |
 | DOC-44 | Reset remaining row properties at TIstd application | Connected bounded reset of row alignment, header, modern cantSplit and no-overlap, with later direct overrides and repeated TIstd acquisition tests. Cell geometry and TDxaLeft survive. This does not resolve the full TAPX replacement cascade or legacy cantSplit compatibility |
 | DOC-45 | Project unconditional TAPX cell shading | Connected for bounded D687 shading: native controls verify child/empty/grandchild precedence, authored Nil versus omission, Auto and direct Raw ordering. Ordinary ipatNil remains no-fill; unresolved compatibility behavior stays gated |
-| DOC-46 | Project default and style cell margins | Connected for bounded unconditional D63E/D634 inheritance and post-TIstd D632/D634 overrides. Authored Nil, Dxa zero and omission remain distinct; actual-story tests use the existing effective cell-margin model. Conditional CSSA and overlapping D63E/D634 style chains remain gated |
+| DOC-46 | Project default and style cell margins | Connected bounded unconditional D634/D63E and direct margin precedence. Clean native controls confirm style D634 after removing masking direct Nil; noninherited same-side D63E/D634 composition is now supported |
 | DOC-47 | Project unconditional TAPX table borders | Connected modern LTR D613 inheritance and post-TIstd D613/D62F source-cell overrides, with actual-story tests and budgeted late border payloads. Unstyled compatibility behavior is preserved. TC80/style interaction, old/Nil borders with styles, repeated reset interactions, RTL and broader conditional borders remain separately gated |
 | DOC-48 | Connect conditional table shading and presence | Connected for single-style D687 conditions and cross-family presence. Native absent/empty/Nil/Auto/concrete controls verify singleton precedence; inherited TCnf and unsupported shading patterns remain gated |
 | DOC-49 | Project conditional cell borders | Connected for one non-inherited FIRST_ROW or FIRST_COLUMN border condition on rectangular unmerged LTR tables. Native controls establish exterior/interior region edges and singleton behavior. Actual-story tests cover six sides and unconditional-border coexistence; multiple conditions, later headers, irregular geometry and conditional/direct-border interactions remain gated |
@@ -1495,8 +1495,8 @@ selection are recorded without automatically extending the batch.
 | DOC-77 | Establish last-column conditional border regions | Connected bounded LAST_COLUMN border regions through cached profile and actual story projection; six sides, singleton, disabled flag and existing shape gates are covered |
 | DOC-78 | Establish overlapping conditional border precedence | Further native different-side and interior-edge controls support the bounded FIRST_COLUMN plus FIRST_ROW cascade in either serialized order. Its production projection is connected in the next batch; other condition pairs remain gated |
 | DOC-79 | Establish inherited conditional TAPX border behavior | Further partial-side, reverse-valued and repeated-record controls support bounded per-side conditional borders. FIRST_ROW and FIRST_COLUMN logical-left inheritance are connected; other inherited border sides/regions and shading remain gated |
-| DOC-80 | Bound merged and irregular conditional border geometry | Source-owner conditional projection is prepared, but native horizontal merges redistribute visible grid widths. Explicit conditional merged-geometry gate remains under DOC-150; vertical/irregular cases remain incomplete |
-| DOC-81 | Establish conditional margin composition | Implemented single non-inherited FIRST_ROW D63E top/left/bottom over a matching unconditional D63E baseline. Right, D634, other conditions and broader composition remain unresolved |
+| DOC-80 | Bound merged and irregular conditional border geometry | Clean sole-TDef horizontal source-span geometry is verified in both merge positions. Cell-edit/preferred-width combinations still differ; the conditional merged-geometry gate remains |
+| DOC-81 | Establish conditional margin composition | Implemented single non-inherited FIRST_ROW D63E on all four physical sides over a matching unconditional D63E baseline. Conditional D634 and broader/inherited composition remain gated |
 | DOC-82 | Run isolated model comparison and adjudicate changes | Fresh isolated release WASMs agree on all 187 inputs (59 private and 128 controls), including errors and streamed models; four private inputs admitted. The final comparison includes the reviewed border-presence correction |
 | DOC-83 | Review the selected batch and re-evaluate admission | Scoped adversarial review found and fixed a competing singleton condition gap: active cross-family edge conditions now gate the border patch, with actual-story regressions. Final model revalidation passed after this correction. Parent admission and full-branch architecture/browser/visual acceptance remain outstanding |
 
@@ -1614,13 +1614,13 @@ runtime and native Office acceptance, not only helper tests.
 | DOC-110 | Preserve compatibility shading through cell edits | Implemented: compatibility state follows source-cell insertion, deletion and redefinition |
 | DOC-111 | Exercise shading through actual container acquisition | Verified actual CFB-to-story fallback; full-document TIstd/TTlp admission remains blocked |
 | DOC-112 | Anchor margin controls to explicit cell edges | Corrected: explicit native borders now anchor each pilot independently; initial eight borderless controls excluded |
-| DOC-113 | Verify conditional style-margin sides | Implemented independently evidenced top/left/bottom FIRST_ROW sides; right-side evidence remains DOC-151 |
+| DOC-113 | Verify conditional style-margin sides | Implemented all four physical FIRST_ROW D63E sides after corrected direct-right, active/disabled and reversed-magnitude native controls |
 | DOC-114 | Verify disabled conditional-margin flags | Observed: disabling FIRST_ROW moves the grid and removes its relative left offset; general cascade unresolved |
-| DOC-115 | Verify direct margins with paired geometry | Verified anchored left D632 Dxa/Nil/omission plus actual per-cell precedence; other physical-side/general composition cases remain bounded |
+| DOC-115 | Verify direct margins with paired geometry | Verified direct left and right D632 Dxa/Nil/omission with visible cell borders and actual CFB story precedence. Broader composition remains bounded |
 | DOC-116 | Cache accepted conditional-margin patches | Implemented fixed optional FIRST_ROW margin patch within the existing bounded style cache, with final order-independent baseline checks |
 | DOC-117 | Project accepted conditional margins in the story | Connected bounded per-source-cell margin projection through shared condition selection before direct formatting resolution |
 | DOC-118 | Bound conditional-margin retention and work | Verified fixed 63-cell scratch storage, count validation and common precedence helper; no per-row heap allocation |
-| DOC-119 | Reassess conditional-margin admission | Reviewed: every physical D63E side remains gated; unconditional defaults remain independently available |
+| DOC-119 | Reassess conditional-margin admission | Reviewed: bounded FIRST_ROW D63E is projected on all physical sides; full TIstd/TTlp admission and other conditional margins remain gated |
 | DOC-120 | Verify additional row/column border pairs | Implemented: all four one-row/one-column pairs; native exterior/interior serialization controls agree |
 | DOC-121 | Verify inherited first-column borders | Implemented: inherited FIRST_COLUMN six-side profile with a partial child override and visible insideH |
 | DOC-122 | Verify mixed-family edge-condition selection | Verified in actual story models: column-before-row order and source-owned exterior/interior edges |
@@ -1634,7 +1634,7 @@ runtime and native Office acceptance, not only helper tests.
 | Additional item | Scope | Status |
 | --- | --- | --- |
 | DOC-128 | Reset row-level D660 shading at TIstd | Normative preceding-D660 reset implemented from the TIstd preservation list; native trio is inconclusive because none visibly paints the expected fill. Reverse order remains gated |
-| DOC-129 | Resolve preferred cell width at TIstd | Native diagnostic DOCX retains authored D635 before and after TIstd, while a Nil control returns to physical geometry. All PDFs are identical, so live width remains unproved. Existing authored-state retention is covered by acquisition tests; geometry/admission remains incomplete |
+| DOC-129 | Resolve preferred cell width at TIstd | Before/after TIstd retains D635 in diagnostics and matched native display. Interactions with cell-edit geometry are not isolated; no general preferred-width layout policy is established |
 | DOC-130 | Verify visible anchors in margin controls | Corrected controls contain visible borders. Review also corrected use of one PDF's border coordinate for another: measure each grid independently. Margin origin and D634/D63E composition remain unresolved |
 | DOC-131 | Resolve compatibility shading after authored Raw Nil | Implemented bounded clear-RGB reverse replacement after native full/empty/short countercontrols. Authored Raw Nil is updated across the entire segment; unsupported patterns/ranges/style cases remain gated |
 
@@ -1704,9 +1704,9 @@ are added to the backlog without extending this batch.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-149 | Reconcile unconditional table-style D634 with native output | New isolated style-border controls visibly apply D63E but show no D634 margins. The currently modeled unconditional D634 style default needs a separate inheritance/order investigation; do not generalize the new conditional D63E path to D634 |
-| DOC-150 | Resolve native grid redistribution after horizontal merging | New controls preserve three equal source widths but Word redistributes the two visible cells to equal widths; summing source spans does not reproduce the native grid. Preserve an explicit merged-geometry gate independently of TIstd/TTlp while retaining tested boundary-owner groundwork |
-| DOC-151 | Establish a visible conditional-right margin oracle | Table-style PAPX right alignment was overridden by paragraph formatting in the native controls. Author and validate direct marker-paragraph alignment before using border-to-text distance as evidence; conditional right margins remain gated |
+| DOC-149 | Reconcile unconditional table-style D634 with native output | Resolved the observed discrepancy: later direct D634 Nil masked the style default. Clean D634=288 controls show the margin. Noninherited same-side D63E-over-D634 composition is now supported; inherited overlap remains gated |
+| DOC-150 | Resolve native grid redistribution after horizontal merging | Refined: sole TDef source spans match native 6000/3000 and 1500/7500 merges. Competing TInsert/TDxaCol/D635 families change the result; no generic equalization rule is valid. Keep the geometry gate pending DOC-172 |
+| DOC-151 | Establish a visible conditional-right margin oracle | Verified with correctly selected, visibly bordered T07 and effective direct PJc=2. Conditional-right active/disabled/reversed and direct D632 cases support the bounded implementation; ineffective pilots are excluded |
 
 ### Source-ownership and reset batch acceptance
 
@@ -1738,3 +1738,78 @@ Both margin and span scratch storage are fixed to 63 source cells. Renderer,
 shared models, workers and independent XLS/PPT paths are unchanged. Whole-branch
 architecture/browser/visual acceptance remains outstanding. No further batch is
 started by this checkpoint.
+
+
+### Selected margin and geometry follow-up: 30 items
+
+This finite batch selects unresolved DOC-26, DOC-46, DOC-80, DOC-81,
+DOC-113, DOC-115, DOC-119, DOC-129 and DOC-149 through DOC-151, plus the
+nineteen bounded slices below. A measured counterexample or retained gate does
+not complete the parent implementation. New findings are recorded separately.
+Native exports run serially, with exact source mutation provenance. Historical
+results do not substitute for fresh acceptance of the final source.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-152 | Establish direct marker-paragraph alignment ownership | Verified effective PJc operand and selected table style, not merely opcode presence; rejected center-aligned and wrong-style pilots |
+| DOC-153 | Measure conditional-right active and disabled controls | Verified three first-row cells against their own borders and the second row, with matching disabled controls |
+| DOC-154 | Verify reversed and varied right-margin magnitudes | Verified reversed 72/288-twip right-margin values; the selected conditional value wins in either magnitude direction |
+| DOC-155 | Verify direct right D632 Dxa, Nil and omission | Verified right D632 Dxa432, Nil and omission in a bordered three-cell row; actual CFB story regression added |
+| DOC-156 | Extend the bounded conditional-margin profile if evidenced | Implemented physical right in the existing bounded four-side patch; no new allocation or cache key |
+| DOC-157 | Exercise all accepted physical sides in actual story projection | Verified actual CFB projection for enabled/disabled all-side margins and direct-right precedence |
+| DOC-158 | Isolate default-margin omission from authored D634 | Verified clean no-direct controls; later direct Nil had masked the style default in earlier pilots |
+| DOC-159 | Distinguish default-margin zero, Nil and nonzero values | Verified clean style D634 Dxa0 and Nil controls show no inset, while Dxa288 is visible; acquisition preserves the distinction from omission |
+| DOC-160 | Verify D634/D63E serialized ordering with explicit borders | Verified D63E wins over same-side D634 in both serialized orders and reversed magnitudes; inherited cross-family cases remain gated |
+| DOC-161 | Reconcile cached default margins with evidenced native scope | Implemented bounded noninherited same-side composition; retained the separate row-default and style-cell patches |
+| DOC-162 | Exercise default-margin precedence through native acquisition | Verified native acquisition for unmasked D634, masking direct Nil, and D63E above final direct D634; independent TIstd admission gate asserted |
+| DOC-163 | Isolate TC80 preferred width from horizontal source spans | Investigated matched/equal/nil TC80 preferences; competing cell-edit families prevent a general preference conclusion |
+| DOC-164 | Isolate autofit during merged-width calculation | Matched fixed/autofit controls display identically within the tested competing-property fixture; this does not establish general autofit behavior |
+| DOC-165 | Verify unequal source geometry in both merge positions | Verified clean unequal sole-TDef source spans in left and right merge positions, with no competing geometry records |
+| DOC-166 | Compare D635 order with an explicit physical-width oracle | Verified matched D635-before/after-TIstd display and retention; a general live-width rule remains unresolved because cell-edit properties coexist |
+| DOC-167 | Apply only supported width behavior and preserve explicit gates | Preserved source-span planning and the explicit conditional merge gate; no width equalization heuristic added |
+| DOC-168 | Check margin and geometry bounds and retained ownership | Reviewed unchanged fixed four-side/63-cell storage, bounded source-span planning and ownership; added raw-record-to-planner regression |
+| DOC-169 | Compare final independently built release models | Verified all 317 inputs match exactly, including admission, errors and streamed models |
+| DOC-170 | Adversarially review final scope and admission prerequisites | Scoped review and final checks complete; full TIstd/TTlp admission and whole-branch architecture/browser/visual acceptance remain outstanding |
+
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-171 | Validate the effective experimental target across property families | Add reusable probe assertions for operand values, selected style membership, and masking/competing properties across complete FKP/Data/PCD acquisition. Exact byte edits alone do not establish an effective native control; current corrected controls retain local assertions |
+| DOC-172 | Resolve cell-edit and preferred-width family precedence | Isolate TInsert/TDxaCol/D635 against a sole TDefTable and then implement only an evidenced rule. Earlier cell-edit properties can alter native merged widths despite later byte-order TDefTable; keep DOC-150 geometry admission gated |
+
+
+### Margin and geometry follow-up acceptance
+
+The selected thirty items have the explicit implementation, verification or
+unresolved statuses above. This checkpoint supersedes earlier right-margin and
+D634 discrepancy statuses; it does not complete the parent table-style or
+preferred-width admission tasks, and does not start another automatic batch.
+
+The bounded FIRST_ROW D63E path now projects all four physical sides, including
+direct right D632 Dxa/Nil/omission precedence. Noninherited unconditional D63E
+and D634 can coexist on the same side, with D63E supplying the style-cell value
+above the row default. Inherited cross-family and conditional D634 overlap
+remain gated. Native controls established both serialized orders and reversed
+magnitudes. Removing residual direct Nil showed that the earlier apparent
+missing style D634 was masking, not evidence that Word ignores the property.
+
+Clean sole-TDef controls establish horizontal source-span sums in both merge
+positions. Earlier cell edits and preferred-width properties can change native
+results; those combinations remain unresolved. The planner is unchanged, and
+the independent conditional merged-geometry gate remains. Ineffective alignment,
+wrong-style and competing-property pilots were excluded from the behavioral
+argument. Exact mutation provenance must include effective operands and selected
+style membership, not merely successful file export or opcode presence.
+
+Fresh checks passed 878 unit tests and nine integration tests, with six existing
+ignores; feature-off compilation, 34 probe tests, nine PAPX tests, 33 unchanged
+renderer-border tests, static layout boundaries, scoped formatting and diff
+checks also passed. Independently built release WASMs match exactly for all
+317 identical inputs. Four of 59 private inputs remain admitted. Equality of
+rejections is not visual fidelity, and full table-style admission is not claimed.
+
+Scoped adversarial review rejected the confounded native interpretations,
+verified the remaining admission gates, and confirmed unchanged fixed four-side
+and 63-cell storage. No renderer, shared model, worker or XLS/PPT behavior changed.
+Whole-branch architecture/browser/visual acceptance remains outstanding before
+integration. New DOC-171 and DOC-172 retain the concrete follow-up work.
