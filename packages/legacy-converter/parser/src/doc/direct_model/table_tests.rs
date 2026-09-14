@@ -105,6 +105,116 @@ fn body_table_source(text: &str) -> Vec<u8> {
 }
 
 #[test]
+fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
+    fn definition(boundaries: &[i16]) -> Vec<u8> {
+        let count = boundaries.len() - 1;
+        let mut operand = vec![0, 0, count as u8];
+        for boundary in boundaries {
+            operand.extend_from_slice(&boundary.to_le_bytes());
+        }
+        operand.resize(operand.len() + count * 20, 0);
+        let cb = (operand.len() - 1) as u16;
+        operand[..2].copy_from_slice(&cb.to_le_bytes());
+        sprm(0xd608, &operand, false)
+    }
+
+    let text = "a\u{7}b\u{7}c\u{7}\u{7}\r";
+    let units = text.encode_utf16().count();
+    let source = source_with_typography(
+        text,
+        &[(units, 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let first = definition(&[0, 1500, 6000, 9000]);
+    let second = definition(&[0, 2500, 4000, 9000]);
+    let middle = sprm(0x7623, &[1, 2, 0xb8, 0x0b], false);
+
+    for before_second_definition in [true, false] {
+        let geometry = if before_second_definition {
+            [first.clone(), middle.clone(), second.clone()].concat()
+        } else {
+            [first.clone(), second.clone(), middle.clone()].concat()
+        };
+        let row = [
+            cell(),
+            sprm(0x2417, &[1], false),
+            geometry,
+            sprm(0x3615, &[0], false),
+        ]
+        .concat();
+        assert_eq!(row.len() % 2, 1, "with_papx requires an odd grpprl");
+        let bytes = with_papx(
+            &source,
+            &[
+                (0, 2, cell()),
+                (2, 4, cell()),
+                (4, 6, cell()),
+                (6, 7, row),
+                (7, units, Vec::new()),
+            ],
+        );
+        let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)
+            .unwrap()
+            .document;
+        let BodyElement::Table(table) = &document.body[0] else {
+            panic!("table")
+        };
+        assert_eq!(table.col_widths, [125.0, 150.0, 250.0]);
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells.len(), 3);
+        let cell_text = table.rows[0]
+            .cells
+            .iter()
+            .map(|cell| {
+                cell.content
+                    .iter()
+                    .filter_map(|element| match element {
+                        CellElement::Paragraph(paragraph) => Some(paragraph),
+                        CellElement::Table(_) => None,
+                    })
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cell_text, ["a", "b", "c"]);
+        let Some(BodyElement::Paragraph(trailing)) = document.body.get(1) else {
+            panic!("trailing paragraph")
+        };
+        assert!(trailing.runs.is_empty());
+    }
+
+    let late_autofit = [
+        cell(),
+        sprm(0x2417, &[1], false),
+        first,
+        middle,
+        second,
+        sprm(0x3615, &[1], false),
+    ]
+    .concat();
+    let bytes = with_papx(
+        &source,
+        &[
+            (0, 2, cell()),
+            (2, 4, cell()),
+            (4, 6, cell()),
+            (6, 7, late_autofit),
+            (7, units, Vec::new()),
+        ],
+    );
+    let error =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
+    assert!(error.contains("unsupported formatting"), "{error}");
+}
+
+#[test]
 fn full_cfb_body_table_retains_cell_local_page_and_column_break_runs() {
     let bytes = body_table_source("\u{c}\u{7}\u{7}\r");
     let document = super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000)

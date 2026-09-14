@@ -619,6 +619,91 @@ mod tests {
     }
 
     #[test]
+    fn merged_raw_tc80_preference_projects_from_the_primary_source_only() {
+        fn projected(tc80_cell: Option<usize>, autofit: bool) -> Box<DocTable> {
+            let mut end = cell(1);
+            end.row_end = true;
+            end.inner_row = true;
+            let mut definition = vec![70, 0, 3];
+            for boundary in [0i16, 1500, 6000, 9000] {
+                definition.extend_from_slice(&boundary.to_le_bytes());
+            }
+            for source_cell in 0..3 {
+                let (flags, preferred) = if tc80_cell == Some(source_cell) {
+                    (3u16 << 9, 3000u16)
+                } else {
+                    (0, 0)
+                };
+                definition.extend_from_slice(&flags.to_le_bytes());
+                definition.extend_from_slice(&preferred.to_le_bytes());
+                definition.extend_from_slice(&[0; 16]);
+            }
+            end.row.apply(0xd608, &definition).unwrap();
+            end.row.apply(0xf614, &[3, 0x70, 0x17]).unwrap();
+            end.row.apply(0x3615, &[u8::from(autofit)]).unwrap();
+            // Keep merge ownership independent from the TC80 formatting bits.
+            end.row.apply(0x5624, &[0, 2]).unwrap();
+
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            for text in ["a", "b", "c"] {
+                writer
+                    .push(cell(1), '\u{7}', paragraph(text), &mut budget)
+                    .unwrap();
+            }
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = body.0.into_iter().next().unwrap() else {
+                panic!()
+            };
+            table
+        }
+
+        for autofit in [false, true] {
+            for tc80_cell in [None, Some(0), Some(1)] {
+                let table = projected(tc80_cell, autofit);
+                assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+                assert_eq!(table.width_pt, Some(300.0));
+                assert_eq!(
+                    table.layout.as_deref(),
+                    Some(if autofit { "autofit" } else { "fixed" })
+                );
+                assert_eq!(
+                    table
+                        .table_layout
+                        .preferred_width
+                        .as_ref()
+                        .and_then(|width| width.value.as_deref()),
+                    Some("6000")
+                );
+                assert_eq!(
+                    table
+                        .table_layout
+                        .layout
+                        .as_ref()
+                        .and_then(|layout| layout.kind.as_deref()),
+                    Some(if autofit { "autofit" } else { "fixed" })
+                );
+                assert_eq!(table.rows[0].cells.len(), 2);
+                assert_eq!(table.rows[0].cells[0].col_span, 2);
+                let primary = &table.rows[0].cells[0];
+                assert_eq!(primary.width_pt, (tc80_cell == Some(0)).then_some(150.0));
+                assert_eq!(
+                    primary
+                        .table_cell_layout
+                        .preferred_width
+                        .as_ref()
+                        .and_then(|width| width.value.as_deref()),
+                    (tc80_cell == Some(0)).then_some("3000")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn row_nil_preference_projects_an_auto_exception_to_clear_table_width() {
         let mut first = row(1, &[1000]);
         first.row.preferred_width = Some(PreferredWidth::Dxa(2000));

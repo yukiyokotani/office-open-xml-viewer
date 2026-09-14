@@ -9,6 +9,10 @@ pub(in crate::doc) use shading::Shading;
 pub(in crate::doc) use shading::{Color, DirectShadingFacts};
 mod position;
 pub(in crate::doc) use position::Position;
+#[cfg(feature = "direct-doc")]
+mod geometry;
+#[cfg(feature = "direct-doc")]
+pub(in crate::doc) use geometry::{NativeGeometry, NativeGeometryApply};
 mod width;
 pub(crate) use width::PreferredWidth;
 

@@ -538,7 +538,13 @@ impl<'a> Formatting<'a> {
             effective_nfib: self.effective_nfib,
             interpret_table_styles,
         };
+        #[cfg(feature = "direct-doc")]
+        let mut native_geometry = table::NativeGeometry::default();
         for bytes in [direct, piece] {
+            #[cfg(feature = "direct-doc")]
+            if interpret_table_styles {
+                native_geometry.begin_source();
+            }
             sprm::paragraph_properties(bytes, self.data, &mut self.budget, |code, operand, _| {
                 #[cfg(feature = "direct-doc")]
                 if interpret_table_styles {
@@ -577,6 +583,17 @@ impl<'a> Formatting<'a> {
                         return Ok(());
                     }
                     table::StyleAwareShadingApply::Unhandled => {}
+                }
+                #[cfg(feature = "direct-doc")]
+                if interpret_table_styles {
+                    match native_geometry.apply(&mut properties.row, code, operand)? {
+                        table::NativeGeometryApply::Handled => return Ok(()),
+                        table::NativeGeometryApply::HandledUnsupported => {
+                            self.unsupported_table_properties = true;
+                            return Ok(());
+                        }
+                        table::NativeGeometryApply::Unhandled => {}
+                    }
                 }
                 if !properties.apply(code, operand)? && (code >> 10) & 7 == 5 {
                     self.unsupported_table_properties = true;
@@ -4129,45 +4146,208 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
-    fn native_table_acquisition_gates_unresolved_tdxacol_tdef_order() {
-        // Exact unmerged native countercontrols save 3000/3000/3000 in both
-        // orders. MS-DOC 2.6.3 defines TDxaCol but does not establish a general
-        // precedence rule for this repeated-TDefTable sequence.
-        let mut definition_operand = vec![0x46, 0, 3];
-        for boundary in [0i16, 1500, 6000, 9000] {
-            definition_operand.extend_from_slice(&boundary.to_le_bytes());
+    fn native_table_acquisition_preserves_tdxacol_across_same_count_tdef() {
+        fn definition(boundaries: &[i16]) -> Vec<u8> {
+            let count = boundaries.len() - 1;
+            let mut operand = vec![0, 0, count as u8];
+            for boundary in boundaries {
+                operand.extend_from_slice(&boundary.to_le_bytes());
+            }
+            operand.resize(operand.len() + count * 20, 0);
+            let cb = (operand.len() - 1) as u16;
+            operand[..2].copy_from_slice(&cb.to_le_bytes());
+            test_prl(0xd608, &operand)
         }
-        definition_operand.extend_from_slice(&[0; 60]);
-        let definition = test_prl(0xd608, &definition_operand);
-        let width = test_prl(0x7623, &[0, 3, 0xb8, 0x0b]);
+        let first = definition(&[0, 1500, 6000, 9000]);
         let tistd = test_prl(0x563a, &21u16.to_le_bytes());
 
-        for ordered in [
-            [
-                definition.clone(),
-                width.clone(),
-                definition.clone(),
-                tistd.clone(),
-            ]
-            .concat(),
-            [
-                definition.clone(),
-                definition.clone(),
-                width.clone(),
-                tistd.clone(),
-            ]
-            .concat(),
+        for (width, second, expected) in [
+            (
+                test_prl(0x7623, &[1, 2, 0xdc, 5]),
+                definition(&[0, 1500, 3000, 6000]),
+                [1500, 1500, 3000],
+            ),
+            (
+                test_prl(0x7623, &[1, 2, 0xb8, 0xb]),
+                definition(&[0, 2500, 4000, 9000]),
+                [2500, 3000, 5000],
+            ),
         ] {
+            for ordered in [
+                [
+                    first.clone(),
+                    width.clone(),
+                    second.clone(),
+                    test_prl(0x3615, &[0]),
+                ]
+                .concat(),
+                [
+                    first.clone(),
+                    second.clone(),
+                    width.clone(),
+                    test_prl(0x3615, &[0]),
+                ]
+                .concat(),
+            ] {
+                let papx = [vec![0, 0], ordered.clone()].concat();
+                let mut formatting = with_direct_paragraph(&papx);
+                formatting.configure_table_styles(0x0112, true);
+                let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
+                assert_eq!(
+                    properties
+                        .row
+                        .cells
+                        .iter()
+                        .map(|cell| cell.width)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert!(
+                    !formatting.unsupported_table_properties,
+                    "the proven geometry profile has its own open gate"
+                );
+
+                let papx = [vec![0, 0], [ordered, tistd.clone()].concat()].concat();
+                let mut formatting = with_direct_paragraph(&papx);
+                formatting.configure_table_styles(0x0112, true);
+                let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
+                assert_eq!(properties.row.table_style, Some(21));
+                assert!(
+                    formatting.unsupported_table_properties,
+                    "the independent TIstd admission gate remains"
+                );
+            }
+        }
+
+        let papx = [
+            vec![0, 0],
+            [
+                first,
+                test_prl(0x7623, &[1, 2, 0xb8, 0xb]),
+                definition(&[0, 2500, 4000, 9000]),
+            ]
+            .concat(),
+        ]
+        .concat();
+        let mut xml = with_direct_paragraph(&papx);
+        let properties = xml.table_properties(109, 0, &[]).unwrap();
+        assert_eq!(
+            properties
+                .row
+                .cells
+                .iter()
+                .map(|cell| cell.width)
+                .collect::<Vec<_>>(),
+            [2500, 1500, 5000],
+            "legacy XML acquisition retains raw Prl ordering"
+        );
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_table_acquisition_preserves_varied_tdxacol_ranges_and_order() {
+        fn definition(boundaries: &[i16]) -> Vec<u8> {
+            let count = boundaries.len() - 1;
+            let mut operand = vec![0, 0, count as u8];
+            for boundary in boundaries {
+                operand.extend_from_slice(&boundary.to_le_bytes());
+            }
+            operand.resize(operand.len() + count * 20, 0);
+            let cb = (operand.len() - 1) as u16;
+            operand[..2].copy_from_slice(&cb.to_le_bytes());
+            test_prl(0xd608, &operand)
+        }
+        let first = definition(&[0, 1500, 6000, 9000]);
+        let second = definition(&[0, 2500, 4000, 9000]);
+        let width = |first: u8, limit: u8, value: u16| {
+            let [lo, hi] = value.to_le_bytes();
+            test_prl(0x7623, &[first, limit, lo, hi])
+        };
+
+        for (widths, expected) in [
+            (vec![width(0, 1, 1200)], [1200, 1500, 5000]),
+            (vec![width(2, 3, 4800)], [2500, 1500, 4800]),
+            (
+                vec![width(0, 1, 1200), width(2, 3, 4800)],
+                [1200, 1500, 4800],
+            ),
+            (
+                vec![width(0, 2, 2000), width(1, 3, 4000)],
+                [2000, 4000, 4000],
+            ),
+            (
+                vec![width(1, 3, 4000), width(0, 2, 2000)],
+                [2000, 2000, 4000],
+            ),
+        ] {
+            for before_second_definition in [true, false] {
+                let mut ordered = vec![first.clone()];
+                if before_second_definition {
+                    ordered.extend(widths.clone());
+                    ordered.push(second.clone());
+                } else {
+                    ordered.push(second.clone());
+                    ordered.extend(widths.clone());
+                }
+                ordered.push(test_prl(0x3615, &[0]));
+                let papx = [vec![0, 0], ordered.concat()].concat();
+                let mut formatting = with_direct_paragraph(&papx);
+                formatting.configure_table_styles(0x0112, true);
+                let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
+                assert_eq!(
+                    properties
+                        .row
+                        .cells
+                        .iter()
+                        .map(|cell| cell.width)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert!(!formatting.unsupported_table_properties);
+            }
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
+    fn native_geometry_gate_tracks_only_competitors_to_persisted_widths() {
+        fn definition() -> Vec<u8> {
+            let mut operand = vec![0x46, 0, 3];
+            for boundary in [0i16, 1000, 2000, 3000] {
+                operand.extend(boundary.to_le_bytes());
+            }
+            operand.extend([0; 60]);
+            test_prl(0xd608, &operand)
+        }
+        let width = test_prl(0x7623, &[0, 1, 0xd0, 7]);
+        let merge = test_prl(0x5624, &[0, 2]);
+        let autofit = test_prl(0x3615, &[1]);
+        let bidi = test_prl(0x560b, &1u16.to_le_bytes());
+        let preferred = test_prl(0xd635, &[5, 0, 1, 3, 100, 0]);
+        let acquire = |ordered: Vec<u8>| {
             let papx = [vec![0, 0], ordered].concat();
             let mut formatting = with_direct_paragraph(&papx);
             formatting.configure_table_styles(0x0112, true);
-            let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
-            assert_eq!(properties.row.table_style, Some(21));
-            assert_eq!(properties.row.cells.len(), 3);
-            assert!(
-                formatting.unsupported_table_properties,
-                "native unmerged controls disagree with raw data-order widths; keep the admission gate"
-            );
+            formatting.table_properties_native(109, 0, &[]).unwrap();
+            formatting.unsupported_table_properties
+        };
+
+        assert!(!acquire(
+            [definition(), width.clone(), merge.clone()].concat()
+        ));
+        assert!(!acquire(
+            [definition(), preferred.clone(), definition()].concat()
+        ));
+        assert!(acquire(
+            [definition(), width.clone(), preferred.clone(), definition()].concat()
+        ));
+        assert!(acquire(
+            [bidi.clone(), definition(), width.clone(), definition()].concat()
+        ));
+        for late in [merge, autofit, bidi, preferred] {
+            assert!(acquire(
+                [definition(), width.clone(), definition(), late].concat()
+            ));
         }
     }
 

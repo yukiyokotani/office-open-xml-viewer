@@ -1848,7 +1848,7 @@ account for competing cell definitions and width properties.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-193 | Resolve TDxaCol versus repeated TDefTable in native acquisition | Refined by twelve varied native controls, including omitted preferred table width: explicit TDxaCol survives later same-count TDef in the tested fixed unmerged scope. Production acquisition remains unresolved; DOC-216 tracks implementation limits, and TIstd admission stays gated |
+| DOC-193 | Resolve TDxaCol versus repeated TDefTable in native acquisition | Refined by twelve varied native controls, including omitted preferred table width: explicit TDxaCol survives later same-count TDef in the tested fixed unmerged scope. DOC-216 now implements bounded native acquisition; DOC-240 and DOC-241 track remaining source and structural limits, and TIstd admission stays gated |
 | DOC-194 | Resolve D635 preferred width with merges and table constraints | Refined by eight native controls separating merge ownership and preferred table width with nil TC80 and fixed layout. Primary-only model projection is regression-tested; general allocation, other TC80 and autofit remain open under DOC-217 |
 | DOC-195 | Extend probe acquisition to nonzero simple PCD PRMs when required | Implemented the closed MS-DOC Prm0 mapping for acquired paragraph traces, with exact two-byte origin, recognized character-only provenance, reserved-index rejection and native alignment controls |
 
@@ -1940,8 +1940,8 @@ comparison and are hash-bound before export.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-216 | Model persistent TDxaCol overrides across cell redefinition | Open: separate explicit width changes from TDef default geometry in native acquisition. Same-count fixed unmerged controls support survival across later definitions, including unequal definitions. Define behavior and limits for insert/delete, changed cell counts and cross-source records before widening admission |
-| DOC-217 | Resolve normalized preferred-width allocation independently | Open: preferred table width changes native totals and introduces nontrivial cell allocation. Reconcile the acquired model with the existing renderer using varied constraints, TC80 and autofit controls; do not infer a generic scale or rounding constant from the current grids |
+| DOC-216 | Model persistent TDxaCol overrides across cell redefinition | Partially implemented: call-local native acquisition preserves explicit ranges across same-count definitions in the fixed LTR/default-TC80 profile. Full-CFB and native controls cover the admitted rule. Changed count, insert/delete, preferred-width and cross-source competition remain gated; parent style admission remains open |
+| DOC-217 | Resolve normalized preferred-width allocation independently | Open: ten additional native controls isolate primary/continuation TC80, preferred totals and AutoFit. The model preserves these independent facts; native allocation still differs in constraint-dependent ways. Reconcile the existing layout algorithm without a guessed scale or rounding constant |
 
 ### Cell-width and simple-PRM evidence checkpoint
 
@@ -1985,3 +1985,100 @@ worker, XLS or PPT behavior changed. Whole-branch architecture, browser and
 visual acceptance remains outstanding. DOC-216 and DOC-217 separate the two
 remaining width problems; this finite checkpoint does not complete their parent
 features or automatically start another batch.
+
+### Selected persistent-width acquisition checkpoint: about 30 items
+
+This finite batch selects existing DOC-26, DOC-80, DOC-129, DOC-150,
+DOC-172, DOC-193, DOC-216 and DOC-217, together with the twenty-two bounded
+slices below. Parent items remain partial until their actual admission and
+native acceptance requirements are satisfied. Each slice reports its own
+implementation or evidence boundary; a completed experiment does not complete
+the corresponding format feature.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-218 | Define explicit TDxaCol acquisition separately from TDef defaults | Reviewed MS-DOC 2.6.3 creation defaults and TDxaCol overrides against native order controls; no general raw-Prl-order assumption |
+| DOC-219 | Keep native geometry acquisition separate from XML compatibility | Implemented call-local native state; shared Row application and XML compatibility remain unchanged |
+| DOC-220 | Preserve explicit widths across same-count cell redefinition | Implemented bounded same-count persistence in the native production acquisition path |
+| DOC-221 | Compose full valid cell ranges with last-write ownership | Implemented per-cell last-write composition for every valid range, with first/last/disjoint/overlap regressions |
+| DOC-222 | Contain unresolved merge interactions with repeated definitions | Repeated-definition merge competition gates, including late changes; simple pre-existing TDxa-plus-merge remains unchanged |
+| DOC-223 | Contain unresolved TC80 width interactions | Repeated-definition TC80 and direct preferred-width competition gates; unrelated D635-only sequences retain existing behavior |
+| DOC-224 | Gate unresolved insert/delete combinations | Insert/delete competition requiring persistence remains gated |
+| DOC-225 | Gate unresolved cell-count changes | Changed-count competition remains gated rather than remapping cell ownership by inference |
+| DOC-226 | Preserve source boundaries and gate unresolved cross-source changes | Direct-PAPX and later PCD competition remains gated; no global state or source carry by inference |
+| DOC-227 | Protect the existing compatibility acquisition path | Verified a discriminating XML raw-order regression, separate from native acquisition |
+| DOC-228 | Bound temporary width state and repeated acquisition work | Verified fixed call-local 63-slot storage, full-range boundary tests and strict range validation; no retained Row/cache growth |
+| DOC-229 | Verify first/last TDxaCol ranges in native Word | Verified native first/last pairs across unequal same-count definitions |
+| DOC-230 | Verify disjoint/overlapping TDxaCol ranges in native Word | Verified native disjoint and both overlapping orders; later TDxaCol wins within the shared range |
+| DOC-231 | Isolate primary/continuation TC80 width preferences | Verified raw TC80 primary/continuation ownership in native controls and focused Writer projection tests |
+| DOC-232 | Isolate fixed versus automatic table layout | Verified fixed/AutoFit native controls; content-dependent differences remain a separate layout problem |
+| DOC-233 | Isolate preferred table totals from cell preferences | Verified live preferred totals with nil/primary/continuation cell preferences; no normalization formula inferred |
+| DOC-234 | Audit preferred-width facts through the existing model and layout | Reviewed parser-to-model-to-layout ownership and preserved independent physical-grid, cell-preference and table-constraint facts |
+| DOC-235 | Check shared model and main/worker boundaries | Verified full-CFB direct-model wiring, cell text and trailing paragraph preservation, plus unchanged source-owner/runtime tests |
+| DOC-236 | Compare independently built final release models | Verified all 376 inputs match across separate release builds, including errors and streamed models; four of 59 private inputs admitted |
+| DOC-237 | Recheck architecture gates and unresolved branch-level acceptance | Rechecked structural, compatibility and API gates; final package/type checks and branch-level scope recorded below |
+| DOC-238 | Review the final diff and native evidence adversarially | Reviewed state-machine ordering, native evidence, bounds, module separation and actual admission; corrected bidi and false-rejection findings |
+| DOC-239 | Record bounded results and additional dependencies | Recorded bounded implementation and remaining source/structural/layout dependencies |
+
+### Persistent-width acquisition acceptance
+
+Native DOC acquisition now retains explicit TDxaCol changes separately from
+TDefTable creation defaults. A later definition with the same cell count
+preserves those changes within one direct-property source. The implementation
+uses a fixed 63-slot array local to acquisition; it does not enlarge retained
+rows or caches. XML compatibility acquisition keeps its previous behavior.
+
+The supported persistence profile is fixed, left-to-right, unmerged cells with
+default TC80 flags and no competing cell preference. Nonzero TC80 flags are a
+coverage boundary, not a claim of malformed input. Cell-count changes,
+insertion/deletion, preferred-width and cross-source interactions remain gated
+when persistence would require an unsupported inference. A later incompatible
+change also gates an already-used persistence result. Existing simple
+noncompeting sequences and the independent TIstd admission gate are preserved.
+
+Twenty-six new native controls cover ten varied range/order inputs, ten
+TC80/AutoFit/total-width inputs and six controls with TIstd removed. Exact
+source edits, complete acquired row chains and source hashes preceded export.
+The five range pairs match in native PDF geometry and pixels; reversing
+overlapping TDxaCol operations changes the shared range as expected.
+
+Removing TIstd also removes the test table's inherited borders. In those six
+controls, native PDF marker starts independently confirm equal first, middle
+and overlapping-range advances before and after the later definition. Saved
+DOCX grids corroborate acquisition; they do not independently prove the absent
+rightmost visible edge. These controls close the omission-equivalence question
+within this bounded scope without claiming whole-document fidelity.
+
+Raw TC80 controls confirm that the primary source preference affects a merged
+region while continuation preferences are not promoted. Preferred table total
+and AutoFit remain independent facts. AutoFit changes the observed allocation
+for one nil-preference constraint case; this does not justify a general scaling
+or rounding rule. A focused Writer test protects the projection, and a
+full-CFB regression verifies corrected grid widths, cell text, trailing content
+and late unsupported-state rejection through the actual direct-model path.
+
+Adversarial review corrected an early bidi setting that reopened eligibility,
+a late incompatible-state admission gap, and unnecessary D635-only rejection.
+It also replaced a nondiscriminating compatibility test and required native
+TIstd-omission controls. No renderer formula, sample-specific count/range
+branch, empirical constant or shared-model extension was introduced.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-240 | Establish native precedence across direct PAPX and complex PCD | Open: build valid PTableProps-based cross-source controls with certified CLX/PCD ownership; raw table records in PCD are not sufficient evidence |
+| DOC-241 | Establish width ownership across structural cell changes | Open: vary changed counts and insertion/deletion around repeated definitions with valid cell markers; do not infer index remapping from fixed-count controls |
+| DOC-242 | Extend persistence beyond default TC80 and horizontal LTR cells | Open: isolate relevant TC80 flags and preferred-width interactions before widening the current coverage boundary; coordinate final allocation with DOC-217 |
+
+Fresh final checks passed 891 unit and nine integration tests, with six existing
+ignores; feature-off compilation, 22 PAPX-probe and 44 target-probe tests, and
+59 source-owner/runtime/renderer tests also passed. Independently rebuilt
+release WASMs match all 376 identical inputs, including streamed models and
+errors. Four of 59 private inputs remain admitted; unchanged rejections do not
+establish display fidelity.
+
+All deterministic architecture commands passed: final layout boundaries,
+boundary tests, compatibility evidence tests, public API tests, package builds
+and type checking. Missing generated WASM was rebuilt before accepting these
+results. Whole-branch semantic architecture, browser and visual acceptance
+remains open. This finite checkpoint fixes native acquisition within its stated
+scope; it does not complete table-style support or begin another batch.
