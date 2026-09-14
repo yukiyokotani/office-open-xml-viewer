@@ -3,11 +3,12 @@
 
 This read-only tool follows [MS-DOC] 2.4.6.1 direct paragraph formatting,
 2.6.2 PHugePapx/PTableProps replacement, 2.9.174/2.9.175 PAP FKP framing,
-and 2.9.210 PrcData bounds. It validates effective scalar TIstd and TTlp
-targets only; other SPRMs are retained as ordered provenance for manual review.
+and 2.9.210 PrcData bounds. It validates mutation plans for scalar TIstd and
+TTlp targets and can separately assert acquired serialized SPRM traces.
 """
 
 import argparse
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from hashlib import sha256
 import importlib
@@ -39,6 +40,7 @@ MAX_TARGET_LOOKUP_WORK = 1_000_000
 MAX_EDITS = 4_096
 MAX_PLAN_EDIT_BYTES = 4 * 1024 * 1024
 MAX_PLAN_BYTES = 8 * 1024 * 1024
+TRACE_ASSERTION_SCHEMA = "legacy-doc-property-trace/v1"
 
 FIB_IDENT = 0xA5EC
 FIB_WORD_97 = 0x00C1
@@ -640,6 +642,269 @@ def _effective_target(parts, fc, code, trace_budget, lookup_budget, trace_cache)
     return _active_operand(trace, code)
 
 
+def _strict_keys(value, required, optional, label):
+    if not isinstance(value, Mapping):
+        raise ProbeError(f"{label} must be an object")
+    keys = set(value)
+    if required - keys:
+        raise ProbeError(f"{label} is missing required fields")
+    if keys - required - optional:
+        raise ProbeError(f"{label} contains unknown fields")
+
+
+def _trace_code(value, label="property code"):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{4}", value):
+        raise ProbeError(f"{label} must be four lowercase hexadecimal digits")
+    return int(value, 16)
+
+
+class AcquiredPropertyTraceSession:
+    """Bounded per-document lookup and trace cache for acquired PAP properties."""
+
+    def __init__(self, document):
+        if not isinstance(document, LoadedDocument):
+            raise ProbeError("LoadedDocument is required for acquired property traces")
+        self.document = document
+        self.parts = _document_parts(document)
+        self.streams, _fib_data, self.runs, self.prcs, self.pieces = self.parts
+        self.run_index = self._interval_index(self.runs)
+        self.piece_index = self._interval_index(self.pieces)
+        self.trace_budget = _TraceBudget(
+            _WorkBudget(MAX_INSPECT_WORK, MAX_INSPECT_PAYLOAD_BYTES)
+        )
+        self.lookup_budget = _WorkBudget(MAX_TARGET_LOOKUP_WORK)
+        self.acquire_budget = _WorkBudget(MAX_INSPECT_WORK)
+        self.trace_cache = {}
+
+    @staticmethod
+    def _interval_index(items):
+        ordered = sorted(items, key=lambda item: (item["fc_start"], item["fc_end"]))
+        size = 1
+        while size < len(ordered):
+            size *= 2
+        maxima = [-1] * (size * 2)
+        for index, item in enumerate(ordered):
+            maxima[size + index] = item["fc_end"]
+        for index in range(size - 1, 0, -1):
+            maxima[index] = max(maxima[index * 2], maxima[index * 2 + 1])
+        return ordered, [item["fc_start"] for item in ordered], maxima, size
+
+    def _containing(self, interval_index, fc, label):
+        items, starts, maxima, size = interval_index
+        upper = bisect_right(starts, fc)
+        matches = []
+
+        def visit(node, left, right):
+            self.lookup_budget.charge(1)
+            if left >= upper or maxima[node] <= fc or len(matches) > 1:
+                return
+            if right - left == 1:
+                if left < len(items) and items[left]["fc_start"] <= fc < items[left]["fc_end"]:
+                    matches.append(items[left])
+                return
+            middle = (left + right) // 2
+            visit(node * 2, left, middle)
+            visit(node * 2 + 1, middle, right)
+
+        if items:
+            visit(1, 0, size)
+        if len(matches) != 1:
+            raise ProbeError(f"target FC does not select exactly one {label}")
+        return matches[0]
+
+    def _trace(self, key):
+        if key not in self.trace_cache:
+            self.trace_cache[key] = _trace_properties(
+                self.streams, *key, self.trace_budget
+            )
+        return self.trace_cache[key]
+
+    def acquire(self, fc, owner):
+        if type(fc) is not int or fc < 0:
+            raise ProbeError("target fc must be a nonnegative integer physical FC")
+        if owner not in ("ttp", "paragraph"):
+            raise ProbeError("target owner must be ttp or paragraph")
+        run = self._containing(self.run_index, fc, "PAPX run")
+        piece = self._containing(self.piece_index, fc, "CLX piece")
+        width = 1 if piece["compressed"] else 2
+        if (fc - piece["fc_start"]) % width:
+            raise ProbeError("target FC is not at a character boundary")
+        marker = _range(
+            self.streams["WordDocument"], fc, width,
+            "target character outside WordDocument",
+        )
+        trace = []
+        papx = run["papx"]
+        if papx is not None:
+            trace.extend(self._trace(("WordDocument", papx["offset"] + 2, papx["end"])))
+        if piece["complex_index"] is not None:
+            prc = self.prcs[piece["complex_index"]]
+            trace.extend(self._trace((prc["stream"], prc["offset"], prc["end"])))
+        elif piece["prm"] != "0000":
+            raise ProbeError("acquired traces do not support a nonzero simple PCD PRM")
+        self.acquire_budget.charge(len(trace))
+
+        depth, _ = _active_operand(trace, 0x6649)
+        row_end, _ = _active_operand(trace, 0x2417)
+        in_table, _ = _active_operand(trace, 0x2416)
+        inner_ttp, _ = _active_operand(trace, 0x244C)
+        is_u07 = marker == (b"\x07" if width == 1 else b"\x07\x00")
+        is_ttp = (
+            is_u07 and depth == "01000000"
+            and row_end == "01" and in_table == "01"
+        )
+        if owner == "ttp" and not is_ttp:
+            raise ProbeError("target FC lacks acquired top-level TTP ownership")
+        has_ttp_marker = row_end == "01" or (
+            marker == (b"\x0d" if width == 1 else b"\x0d\x00")
+            and inner_ttp == "01"
+        )
+        if owner == "paragraph" and has_ttp_marker:
+            raise ProbeError("paragraph owner rejects a TTP character")
+        if owner == "paragraph" and depth not in (None, "00000000") and in_table != "01":
+            raise ProbeError("paragraph target has inconsistent acquired in-table ownership")
+        return {
+            "fc": fc,
+            "owner": owner,
+            "character": marker.hex(),
+            "entries": [dict(item) for item in trace],
+        }
+
+
+def acquire_property_trace(document, fc, owner):
+    """Acquire FKP/Data then PCD serialized property provenance for one owner."""
+    session = (
+        document if isinstance(document, AcquiredPropertyTraceSession)
+        else AcquiredPropertyTraceSession(document)
+    )
+    return session.acquire(fc, owner)
+
+
+def validate_trace_assertions(document, assertion_manifest, session=None):
+    """Validate hash-bound, read-only acquired serialized property assertions."""
+    if not isinstance(document, LoadedDocument):
+        raise ProbeError("LoadedDocument is required to validate source_sha256")
+    _strict_keys(
+        assertion_manifest, {"schema", "source_sha256", "targets"}, set(),
+        "trace assertion manifest",
+    )
+    if assertion_manifest["schema"] != TRACE_ASSERTION_SCHEMA:
+        raise ProbeError("unsupported trace assertion schema")
+    expected_hash = assertion_manifest["source_sha256"]
+    if (not isinstance(expected_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+            or expected_hash != document.source_sha256):
+        raise ProbeError("source_sha256 does not match the serialized source")
+    targets = assertion_manifest["targets"]
+    if not isinstance(targets, list) or not targets:
+        raise ProbeError("trace assertion manifest requires targets")
+    if len(targets) > MAX_TARGETS:
+        raise ProbeError("target count exceeds policy")
+    if session is None:
+        context = AcquiredPropertyTraceSession(document)
+    elif (not isinstance(session, AcquiredPropertyTraceSession)
+            or session.document is not document):
+        raise ProbeError("trace session is not bound to this LoadedDocument")
+    else:
+        context = session
+    seen = set()
+    results = []
+    retained = 0
+    for target in targets:
+        _strict_keys(target, {"fc", "owner", "properties"}, {"order"}, "trace target")
+        fc = target["fc"]
+        owner = target["owner"]
+        if type(fc) is not int or fc < 0:
+            raise ProbeError("target fc must be a nonnegative integer physical FC")
+        if owner not in ("ttp", "paragraph"):
+            raise ProbeError("target owner must be ttp or paragraph")
+        identity = (fc, owner)
+        if identity in seen:
+            raise ProbeError("duplicate trace target")
+        seen.add(identity)
+        properties = target["properties"]
+        if not isinstance(properties, Mapping) or not properties:
+            raise ProbeError("trace target properties must be a nonempty object")
+        expected = {}
+        retained += 64
+        for code_text, operands in properties.items():
+            context.acquire_budget.charge(1)
+            _trace_code(code_text)
+            retained += len(code_text) + 8
+            if retained > MAX_TRACE_BYTES:
+                raise ProbeError("trace assertion retained output exceeds policy")
+            if not isinstance(operands, list):
+                raise ProbeError("property assertion must be an operand array")
+            normalized = []
+            for operand in operands:
+                context.acquire_budget.charge(1)
+                if (not isinstance(operand, str)
+                        or not re.fullmatch(r"(?:[0-9a-f]{2})*", operand)):
+                    raise ProbeError("asserted operand must be lowercase whole-byte hex")
+                if retained + len(operand) + 8 > MAX_TRACE_BYTES:
+                    raise ProbeError("trace assertion retained output exceeds policy")
+                operand_bytes = bytes.fromhex(operand)
+                probe_budget = _TraceBudget()
+                try:
+                    _item, end, parsed_code, parsed_operand = _read_prl(
+                        int(code_text, 16).to_bytes(2, "little") + operand_bytes,
+                        0, 2 + len(operand_bytes), "assertion", probe_budget,
+                    )
+                except ProbeError as error:
+                    raise ProbeError("asserted operand does not match SPRM framing") from error
+                if (end != 2 + len(operand_bytes)
+                        or parsed_code != int(code_text, 16)
+                        or parsed_operand != operand_bytes):
+                    raise ProbeError("asserted operand does not match SPRM framing")
+                retained += len(operand) + 8
+                normalized.append(operand)
+            expected[code_text] = normalized
+        order = target.get("order")
+        if order is not None:
+            if not isinstance(order, list):
+                raise ProbeError("trace target order must be an array")
+            if len(order) > MAX_TRACE_PRLS:
+                raise ProbeError("trace target order exceeds policy")
+            for code_text in order:
+                context.acquire_budget.charge(1)
+                _trace_code(code_text, "order code")
+                if code_text not in expected:
+                    raise ProbeError("order may contain only asserted property codes")
+                retained += len(code_text) + 4
+                if retained > MAX_TRACE_BYTES:
+                    raise ProbeError("trace assertion retained output exceeds policy")
+        acquired = context.acquire(fc, owner)
+        context.acquire_budget.charge(len(acquired["entries"]))
+        applied = [
+            item for item in acquired["entries"]
+            if item.get("kind") == "prl" and item.get("applied") is True
+        ]
+        actual = {code_text: [] for code_text in expected}
+        actual_order = []
+        for item in applied:
+            code_text = item["code"]
+            if code_text in actual:
+                actual[code_text].append(item["operand"])
+                actual_order.append(code_text)
+        if actual != expected:
+            raise ProbeError("acquired property operand assertion does not match")
+        if order is not None and actual_order != order:
+            raise ProbeError("acquired property order assertion does not match")
+        results.append({
+            "fc": fc,
+            "owner": owner,
+            "properties": actual,
+            **({"order": actual_order} if order is not None else {}),
+        })
+    return {
+        "valid": True,
+        "schema": TRACE_ASSERTION_SCHEMA,
+        "scope": "acquired serialized property trace only; not Word property-family precedence",
+        "source_sha256": document.source_sha256,
+        "targets": results,
+    }
+
+
 def _hex_edit(value, field_name):
     if not isinstance(value, str) or not value or not re.fullmatch(r"[0-9a-fA-F]+", value):
         raise ProbeError(f"edit {field_name} must be nonempty hex")
@@ -780,7 +1045,20 @@ def validate_plan(before_streams, after_streams, plan):
 def _load_plan(path):
     if path.stat().st_size > MAX_PLAN_BYTES:
         raise ProbeError("plan exceeds the size policy")
-    return json.loads(path.read_text(encoding="utf-8"))
+    def no_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ProbeError(f"duplicate JSON field {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys
+        )
+    except json.JSONDecodeError as error:
+        raise ProbeError("invalid JSON plan") from error
 
 
 def main(argv=None):
@@ -792,16 +1070,25 @@ def main(argv=None):
     validate.add_argument("source", type=Path)
     validate.add_argument("candidate", type=Path)
     validate.add_argument("plan", type=Path)
+    check_trace = commands.add_parser(
+        "check-trace", help="check hash-bound acquired property trace assertions"
+    )
+    check_trace.add_argument("source", type=Path)
+    check_trace.add_argument("assertions", type=Path)
     args = parser.parse_args(argv)
     if args.command == "inspect":
         loaded = load_document(args.source)
         result = inspect_document(loaded)
         result["source_sha256"] = loaded.source_sha256
-    else:
+    elif args.command == "validate":
         source = load_document(args.source)
         candidate = load_document(args.candidate)
         plan = _load_plan(args.plan)
         result = validate_plan(source, candidate, plan)
+    else:
+        source = load_document(args.source)
+        assertions = _load_plan(args.assertions)
+        result = validate_trace_assertions(source, assertions)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

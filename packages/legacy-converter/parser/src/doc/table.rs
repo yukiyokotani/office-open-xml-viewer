@@ -733,10 +733,10 @@ impl Row {
                 // sprmTIstd replaces table properties except for the explicit
                 // preserved list in [MS-DOC] 2.6.3. Prepared direct cell
                 // shading is not on that list; geometry remains independent.
-                // Current Word's paired saved-model controls retain authored
-                // D635 serialization across TIstd. Their identical PDFs do not
-                // establish a live layout effect; keep this bounded state fact
-                // distinct from TDefTable/TC80 geometry.
+                // Clean current-Word controls with varied D635 Dxa widths show
+                // a visible merged-width effect whether D635 is before or after
+                // TIstd. They do not resolve the broader interaction with
+                // TDefTable/TC80 geometry, so retain only this bounded state.
                 for cell in &mut self.cells {
                     cell.prepared_shading = None;
                     cell.compatibility_shading = None;

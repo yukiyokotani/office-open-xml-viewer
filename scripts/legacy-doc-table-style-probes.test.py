@@ -17,6 +17,244 @@ spec.loader.exec_module(probes)
 
 
 class TableStyleProbeTests(unittest.TestCase):
+    def _target_fixture(self, marker_trace=None, row_trace=None):
+        marker_trace = marker_trace if marker_trace is not None else []
+        row_trace = row_trace if row_trace is not None else []
+        base = SimpleNamespace(istd=6, name="Base", kind=3, property_ranges=((), (), ()))
+        plain = SimpleNamespace(istd=9, name="Plain", kind=3, property_ranges=((), (), ()))
+        rows = []
+        for index, style in enumerate(probes.ROW_STYLES):
+            istd = base.istd if style == "Base" else plain.istd
+            rows.append({"fc": 100 + index, "trace": row_trace,
+                         "tistd": {"operand": istd.to_bytes(2, "little").hex()}})
+        markers = [{"fc": 10 + index, "trace": [], "papx_run": (0, 50),
+                    "owned_fcs": (10 + index,)}
+                   for index in range(16)]
+        markers[5]["trace"] = marker_trace
+        loaded = SimpleNamespace(source_sha256="a" * 64)
+        layout = {"markers": tuple(markers), "ttp": tuple(rows)}
+        def acquire(fc, owner):
+            if owner == "ttp":
+                row = next(item for item in rows if item["fc"] == fc)
+                entries = [{
+                    "kind": "prl", "applied": True, "code": "563a",
+                    "operand": row["tistd"]["operand"],
+                }] + list(row["trace"])
+            else:
+                marker = next(item for item in markers if fc in item["owned_fcs"])
+                entries = [
+                    {"kind": "prl", "applied": True, "code": "6649",
+                     "operand": "01000000"},
+                    {"kind": "prl", "applied": True, "code": "2416", "operand": "01"},
+                ] + marker.get("trace_by_fc", {}).get(fc, marker["trace"])
+            return {"fc": fc, "owner": owner, "entries": entries}
+        loaded.trace_session = SimpleNamespace(acquire=acquire)
+        styles = {"Base": base, "Plain": plain}
+        return loaded, layout, styles
+
+    def test_check_target_requires_exact_t06_base_membership(self):
+        loaded, layout, styles = self._target_fixture()
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [{
+                        "marker": "T06R1C1 Ω", "style": "Base", "direct_pjc": None,
+                        "acquired": {"properties": {"d609": []}},
+                    }]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session), \
+                mock.patch.object(papx, "validate_trace_assertions",
+                                  return_value={"targets": [{"properties": {"d609": []}}]}):
+            result = probes.check_target_assertions(loaded, manifest)
+            self.assertEqual(result["targets"][0]["style"], "Base")
+            manifest["targets"][0]["style"] = "Plain"
+            with self.assertRaisesRegex(probes.ProbeError, "exact member"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_check_target_compares_effective_direct_pjc_operand(self):
+        center_then_right = [
+            {"kind": "prl", "applied": True, "code": "2461", "operand": "01"},
+            {"kind": "prl", "applied": True, "code": "2403", "operand": "02"},
+        ]
+        loaded, layout, styles = self._target_fixture(marker_trace=center_then_right)
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [{
+                        "marker": "T06R1C1 Ω", "style": "Base",
+                        "direct_pjc": {"code": "2403", "operand": "02"},
+                        "acquired": {"properties": {"d609": []}},
+                    }]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session), \
+                mock.patch.object(papx, "validate_trace_assertions",
+                                  return_value={"targets": [{"properties": {"d609": []}}]}):
+            self.assertEqual(probes.check_target_assertions(loaded, manifest)["targets"][0]["direct_pjc"],
+                             {"code": "2403", "operand": "02"})
+            manifest["targets"][0]["direct_pjc"] = {"code": "2461", "operand": "01"}
+            with self.assertRaisesRegex(probes.ProbeError, "PJc operand"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_later_acquired_tistd_overrides_layout_direct_trace(self):
+        later_plain = [{"kind": "prl", "applied": True, "code": "563a",
+                        "operand": "0900"}]
+        loaded, layout, styles = self._target_fixture(row_trace=later_plain)
+        target = {"table": "T06", "row": 1, "style": "Base", "direct_pjc": None,
+                  "acquired": {"properties": {"d609": []}}}
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [target]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session):
+            with self.assertRaisesRegex(probes.ProbeError, "exact member"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_marker_and_ttp_targets_keep_distinct_trace_owners(self):
+        loaded, layout, styles = self._target_fixture()
+        assertions = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                      "source_sha256": "a" * 64, "targets": [
+                          {"marker": "T06R1C1 Ω", "style": "Base", "direct_pjc": None,
+                           "acquired": {"properties": {"d608": [], "d609": []},
+                                        "order": []}},
+                          {"table": "T06", "row": 1, "style": "Base",
+                           "direct_pjc": None,
+                           "acquired": {"properties": {"d60c": []}}},
+                      ]}
+        trace_report = {"targets": [{"which": "cell"}, {"which": "ttp"}]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session), \
+                mock.patch.object(papx, "validate_trace_assertions", return_value=trace_report) as validate:
+            result = probes.check_target_assertions(loaded, assertions)
+        sent = validate.call_args.args[1]["targets"]
+        self.assertEqual([(item["fc"], item["owner"]) for item in sent],
+                         [(15, "paragraph"), (105, "ttp")])
+        self.assertEqual(sent[0]["properties"], {"d608": [], "d609": []})
+        self.assertEqual(result["targets"][1]["acquired"], {"which": "ttp"})
+
+    def test_check_target_rejects_hash_and_unbounded_target_lists(self):
+        loaded, _layout, _styles = self._target_fixture()
+        base = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                "source_sha256": "A" * 64, "targets": [{}]}
+        with self.assertRaisesRegex(probes.ProbeError, "lowercase SHA-256"):
+            probes.check_target_assertions(loaded, base)
+        base["source_sha256"] = "a" * 64
+        base["targets"] = [{}] * (probes.MAX_TARGET_ASSERTIONS + 1)
+        with self.assertRaisesRegex(probes.ProbeError, "nonempty and bounded"):
+            probes.check_target_assertions(loaded, base)
+
+    def test_check_target_rejects_non_string_style_and_duplicate_selector(self):
+        loaded, layout, styles = self._target_fixture()
+        target = {"marker": "T06R1C1 Ω", "style": [], "direct_pjc": None,
+                  "acquired": {"properties": {"d609": []}}}
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [target]}
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(probes._papx_module(), "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session):
+            with self.assertRaisesRegex(probes.ProbeError, "exactly name one parsed table style"):
+                probes.check_target_assertions(loaded, manifest)
+            target["style"] = "Base"
+            manifest["targets"] = [target, dict(target)]
+            with self.assertRaisesRegex(probes.ProbeError, "duplicate semantic"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_marker_target_rejects_inconsistent_paragraph_papx_owner(self):
+        loaded, layout, styles = self._target_fixture()
+        layout["markers"][5]["papx_run"] = (20, 30)
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [{
+                        "marker": "T06R1C1 Ω", "style": "Base", "direct_pjc": None,
+                        "acquired": {"properties": {"d609": []}},
+                    }]}
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(probes._papx_module(), "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session):
+            with self.assertRaisesRegex(probes.ProbeError, "owned by.*paragraph PAPX"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_target_style_uses_exact_arbitrary_name_and_rejects_bad_records(self):
+        loaded, layout, _styles = self._target_fixture()
+        exact_name = "Plain_4c0420cfe794_____________________________________"
+        exact = SimpleNamespace(istd=6, name=exact_name, kind=3,
+                                property_ranges=((), (), ()))
+        target = {"table": "T06", "row": 1, "style": exact_name,
+                  "direct_pjc": None, "acquired": {"properties": {"d609": []}}}
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [target]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session), \
+                mock.patch.object(papx, "validate_trace_assertions",
+                                  return_value={"targets": [{"properties": {"d609": []}}]}):
+            with mock.patch.object(probes, "parse_styles",
+                                   return_value=("1Table", (exact,), (0, 1))):
+                self.assertEqual(probes.check_target_assertions(loaded, manifest)["targets"][0]["style"],
+                                 exact_name)
+            with mock.patch.object(probes, "parse_styles",
+                                   return_value=("1Table", (exact, exact), (0, 1))):
+                with self.assertRaisesRegex(probes.ProbeError, "duplicated"):
+                    probes.check_target_assertions(loaded, manifest)
+            wrong_kind = SimpleNamespace(istd=6, name=exact_name, kind=1,
+                                         property_ranges=((), (), ()))
+            with mock.patch.object(probes, "parse_styles",
+                                   return_value=("1Table", (wrong_kind,), (0, 1))):
+                with self.assertRaisesRegex(probes.ProbeError, "three-UPX table style"):
+                    probes.check_target_assertions(loaded, manifest)
+
+    def test_marker_body_and_terminator_must_share_acquired_pjc(self):
+        loaded, layout, styles = self._target_fixture()
+        marker = layout["markers"][5]
+        marker["owned_fcs"] = (15, 55)
+        marker["papx_run"] = (0, 60)
+        marker["trace_by_fc"] = {
+            15: [{"kind": "prl", "applied": True, "code": "2461", "operand": "01"}],
+            55: [{"kind": "prl", "applied": True, "code": "2461", "operand": "02"}],
+        }
+        manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                    "source_sha256": "a" * 64, "targets": [{
+                        "marker": "T06R1C1 Ω", "style": "Base",
+                        "direct_pjc": {"code": "2461", "operand": "01"},
+                        "acquired": {"properties": {"d609": []}},
+                    }]}
+        papx = probes._papx_module()
+        with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                mock.patch.object(probes, "parse_styles", return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                  return_value=loaded.trace_session):
+            with self.assertRaisesRegex(probes.ProbeError, "body and terminator"):
+                probes.check_target_assertions(loaded, manifest)
+
+    def test_marker_rejects_later_acquired_depth_or_in_table_override(self):
+        for code, operand in (("6649", "02000000"), ("2416", "00")):
+            with self.subTest(code=code):
+                loaded, layout, styles = self._target_fixture(marker_trace=[
+                    {"kind": "prl", "applied": True, "code": code, "operand": operand},
+                ])
+                manifest = {"schema": probes.TARGET_ASSERTIONS_SCHEMA,
+                            "source_sha256": "a" * 64, "targets": [{
+                                "marker": "T06R1C1 Ω", "style": "Base",
+                                "direct_pjc": None,
+                                "acquired": {"properties": {"d609": []}},
+                            }]}
+                papx = probes._papx_module()
+                with mock.patch.object(probes, "_probe_layout", return_value=layout), \
+                        mock.patch.object(probes, "parse_styles",
+                                          return_value=("1Table", tuple(styles.values()), (0, 1))), \
+                        mock.patch.object(papx, "AcquiredPropertyTraceSession",
+                                          return_value=loaded.trace_session):
+                    with self.assertRaisesRegex(probes.ProbeError, "top-level table ownership"):
+                        probes.check_target_assertions(loaded, manifest)
+
     def test_generator_has_full_table_matrix_seven_styles_and_one_direct_override(self):
         value = probes.build_docx()
         with zipfile.ZipFile(BytesIO(value)) as archive:

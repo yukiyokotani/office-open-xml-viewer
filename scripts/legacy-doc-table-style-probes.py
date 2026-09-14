@@ -38,12 +38,14 @@ import zipfile
 
 SCHEMA = "legacy-doc-table-style-probes/v1"
 RECIPE_SCHEMA = "legacy-doc-table-style-recipe/v1"
+TARGET_ASSERTIONS_SCHEMA = "legacy-doc-table-style-target-assertions/v1"
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_REWRITE_BYTES = 1024 * 1024
 MAX_PROBE_CFB_BYTES = 16 * 1024 * 1024
 MAX_PROBE_STORY_UNITS = 4096
 MAX_RECIPE_VALIDATION_BYTES = 1024 * 1024
 MAX_RECIPE_VALIDATION_PRLS = 4096
+MAX_TARGET_ASSERTIONS = 64
 TABLE_COUNT = 8
 DIRECT_COLOR_TABLE = 6
 
@@ -641,6 +643,7 @@ def _probe_layout(loaded):
             )
         marker_targets.append({
             "ordinal": ordinal,
+            "fc": characters[start]["fc"],
             "span": (start, end),
             "chpx": tuple(sorted(selected_chpx)),
             "chpx_runs": tuple(sorted(selected_chpx_runs)),
@@ -648,6 +651,11 @@ def _probe_layout(loaded):
             "cell_mark_chpx_run": cell_mark_chpx_run,
             "papx": pap_run["papx"],
             "papx_run": (pap_run["fc_start"], pap_run["fc_end"]),
+            "trace": cell_trace,
+            "owned_fcs": tuple(
+                [characters[position]["fc"] for position in range(start, end)]
+                + [cell_mark["fc"]]
+            ),
             "preserve_direct": ordinal == DIRECT_COLOR_TABLE,
         })
     return {
@@ -659,6 +667,173 @@ def _probe_layout(loaded):
         "chpx_runs": chpx_runs,
         "papx_runs": inspected["papx_runs"],
         "markers": tuple(marker_targets),
+    }
+
+
+def _target_row_index(marker_ordinal):
+    """Map the fixed marker inventory to its owning top-level row."""
+    if not 1 <= marker_ordinal <= len(MARKERS):
+        raise ProbeError("marker ordinal is outside the fixed probe")
+    if marker_ordinal <= 6:
+        return marker_ordinal - 1
+    if marker_ordinal <= 15:
+        return 6 + (marker_ordinal - 7) // 3
+    return 9
+
+
+def _resolve_target(layout, assertion):
+    selector_keys = set(assertion) & {"marker", "table", "row"}
+    if "marker" in assertion:
+        if selector_keys != {"marker"} or assertion["marker"] not in MARKERS:
+            raise ProbeError("target marker must name exactly one fixed probe marker")
+        ordinal = MARKERS.index(assertion["marker"]) + 1
+        marker = layout["markers"][ordinal - 1]
+        if not marker["papx_run"][0] <= marker["fc"] < marker["papx_run"][1]:
+            raise ProbeError("target marker FC is not owned by its checked paragraph PAPX")
+        row_index = _target_row_index(ordinal)
+        return ({"marker": assertion["marker"]}, marker["fc"], "paragraph",
+                marker["owned_fcs"], row_index)
+    if selector_keys != {"table", "row"}:
+        raise ProbeError("target must select either marker or table and row")
+    table = assertion["table"]
+    row = assertion["row"]
+    if (not isinstance(table, str) or type(row) is not int or row < 1
+            or table not in {f"T{value:02d}" for value in range(1, 9)}):
+        raise ProbeError("target table and row are outside the fixed probe")
+    candidates = [index for index, name in enumerate(ROW_TABLES) if name == table]
+    if row > len(candidates):
+        raise ProbeError("target table and row are outside the fixed probe")
+    row_index = candidates[row - 1]
+    selected = layout["ttp"][row_index]
+    return ({"table": table, "row": row}, selected["fc"], "ttp",
+            (selected["fc"],), row_index)
+
+
+def _direct_pjc(trace):
+    """Return the last applied serialized PJc opcode and operand."""
+    selected = [item for item in trace if item.get("kind") == "prl"
+                and item.get("applied")
+                and int(item["code"], 16) in (P_JC_80, P_JC)]
+    if not selected:
+        return None
+    operand = selected[-1].get("operand")
+    if not isinstance(operand, str) or len(operand) != 2:
+        raise ProbeError("direct PJc has invalid operand framing")
+    return {"code": selected[-1]["code"], "operand": operand}
+
+
+def check_target_assertions(loaded, manifest):
+    """Check bounded ownership/style facts for the fixed eight-table fixture.
+
+    This reports encoded fixture membership and acquired property provenance. It
+    does not claim Word style-family resolution or rendered/display behavior.
+    """
+    if not isinstance(manifest, Mapping) or set(manifest) != {
+            "schema", "source_sha256", "targets"}:
+        raise ProbeError("target assertions must contain exactly schema, source_sha256, targets")
+    if manifest["schema"] != TARGET_ASSERTIONS_SCHEMA:
+        raise ProbeError("unsupported target assertions schema")
+    source_hash = manifest["source_sha256"]
+    if (not isinstance(source_hash, str) or len(source_hash) != 64
+            or any(character not in "0123456789abcdef" for character in source_hash)):
+        raise ProbeError("target assertions source_sha256 must be lowercase SHA-256")
+    if source_hash != loaded.source_sha256:
+        raise ProbeError("target assertions source hash does not match input")
+    targets = manifest["targets"]
+    if (not isinstance(targets, list) or not targets
+            or len(targets) > MAX_TARGET_ASSERTIONS):
+        raise ProbeError("target assertions list must be nonempty and bounded")
+
+    layout = _probe_layout(loaded)
+    _table_stream, style_records, _stylesheet = parse_styles(loaded)
+    styles = {}
+    for record in style_records:
+        styles.setdefault(record.name, []).append(record)
+    trace_session = _papx_module().AcquiredPropertyTraceSession(loaded)
+    reports = []
+    trace_targets = []
+    resolved = []
+    selectors = set()
+    for assertion in targets:
+        if not isinstance(assertion, Mapping):
+            raise ProbeError("each target assertion must be an object")
+        allowed = {"marker", "table", "row", "style", "direct_pjc", "acquired"}
+        if set(assertion) - allowed or not {"style", "direct_pjc", "acquired"} <= set(assertion):
+            raise ProbeError("target assertion has missing or unknown fields")
+        selector, fc, owner, owned_fcs, row_index = _resolve_target(layout, assertion)
+        style_name = assertion["style"]
+        if not isinstance(style_name, str) or style_name not in styles:
+            raise ProbeError("target style must exactly name one parsed table style")
+        matches = styles[style_name]
+        if len(matches) != 1:
+            raise ProbeError("target style name is duplicated in the stylesheet")
+        style = matches[0]
+        if style.kind != 3 or len(style.property_ranges) != 3:
+            raise ProbeError("target style is not a three-UPX table style")
+        selector_identity = (("marker", selector["marker"]) if "marker" in selector
+                             else ("row", selector["table"], selector["row"]))
+        if selector_identity in selectors:
+            raise ProbeError("duplicate semantic target selector")
+        selectors.add(selector_identity)
+        row_acquired = trace_session.acquire(layout["ttp"][row_index]["fc"], "ttp")
+        style_item = _active(row_acquired["entries"], TI_STD)
+        actual_istd = None if style_item is None else style_item["operand"]
+        expected_istd = style.istd.to_bytes(2, "little").hex()
+        if actual_istd != expected_istd:
+            raise ProbeError(f"target {selector} is not an exact member of style {style_name}")
+        expected_pjc = assertion["direct_pjc"]
+        if expected_pjc is not None:
+            if (not isinstance(expected_pjc, Mapping)
+                    or set(expected_pjc) != {"code", "operand"}
+                    or expected_pjc["code"] not in (f"{P_JC_80:04x}", f"{P_JC:04x}")
+                    or not isinstance(expected_pjc["operand"], str)
+                    or len(expected_pjc["operand"]) != 2
+                    or any(c not in "0123456789abcdef" for c in expected_pjc["operand"])):
+                raise ProbeError("direct_pjc must be null or an exact PJc opcode and byte operand")
+        actual_pjc = None
+        for target_index, target_fc in enumerate(owned_fcs):
+            acquired_target = trace_session.acquire(target_fc, owner)
+            if owner == "paragraph":
+                depth = _active(acquired_target["entries"], P_ITAP)
+                in_table = _active(acquired_target["entries"], 0x2416)
+                if ((depth or {}).get("operand") != "01000000"
+                        or (in_table or {}).get("operand") != "01"):
+                    raise ProbeError(
+                        "target marker body or terminator lacks acquired top-level table ownership"
+                    )
+            acquired_pjc = _direct_pjc(acquired_target["entries"])
+            if target_index == 0:
+                actual_pjc = acquired_pjc
+            elif acquired_pjc != actual_pjc:
+                raise ProbeError("target marker body and terminator have inconsistent acquired PJc")
+        if actual_pjc != expected_pjc:
+            raise ProbeError(f"target {selector} direct PJc operand does not match")
+        acquired = assertion["acquired"]
+        if not isinstance(acquired, Mapping) or set(acquired) - {"properties", "order"} \
+                or "properties" not in acquired:
+            raise ProbeError("acquired assertion must contain properties and optional order")
+        trace_target = {"fc": fc, "owner": owner, **dict(acquired)}
+        trace_targets.append(trace_target)
+        resolved.append((selector, fc, owner, style_name, expected_istd, actual_pjc))
+
+    trace_report = _papx_module().validate_trace_assertions(loaded, {
+        "schema": "legacy-doc-property-trace/v1",
+        "source_sha256": source_hash,
+        "targets": trace_targets,
+    }, session=trace_session)
+    for (selector, fc, owner, style_name, istd, pjc), acquired_report in zip(
+            resolved, trace_report["targets"]):
+        report = {**selector, "fc": fc, "owner": owner, "style": style_name,
+                  "istd": istd, "direct_pjc": pjc}
+        report["acquired"] = acquired_report
+        reports.append(report)
+    return {
+        "schema": TARGET_ASSERTIONS_SCHEMA,
+        "source_sha256": source_hash,
+        "scope": ("fixed eight-table encoded target ownership, exact style membership, "
+                  "acquired serialized PJc opcode/operand and property provenance; "
+                  "not bidi-aware alignment, Word style-family semantics, or display"),
+        "targets": reports,
     }
 
 
@@ -1655,6 +1830,12 @@ def _command_inspect(args):
     }, indent=2, sort_keys=True))
 
 
+def _command_check_target(args):
+    loaded = _load_probe_document(args.source)
+    assertions = _load_plan(args.assertions)
+    print(json.dumps(check_target_assertions(loaded, assertions), indent=2, sort_keys=True))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1664,6 +1845,12 @@ def main(argv=None):
     inspect = commands.add_parser("inspect", help="inspect retained probe styles in a DOC")
     inspect.add_argument("source")
     inspect.set_defaults(run=_command_inspect)
+    check_target = commands.add_parser(
+        "check-target", help="check bounded fixed-fixture ownership and style assertions"
+    )
+    check_target.add_argument("source")
+    check_target.add_argument("assertions")
+    check_target.set_defaults(run=_command_check_target)
     prepare = commands.add_parser(
         "prepare", help="write same-length negative and style-connected DOC variants"
     )

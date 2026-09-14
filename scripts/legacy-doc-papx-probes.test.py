@@ -31,6 +31,10 @@ def top_level_row(grpprl):
     )
 
 
+def owned_top_level_row(grpprl):
+    return prl(0x2416, b"\x01") + top_level_row(grpprl)
+
+
 def fixture(papx, data=b"", prcs=(), prm=0):
     word = bytearray(1024)
     word[0:2] = probes.FIB_IDENT.to_bytes(2, "little")
@@ -97,6 +101,203 @@ def changed(streams, stream, offset, replacement):
 
 
 class PapxProbeTests(unittest.TestCase):
+    def trace_manifest(self, document, targets):
+        return {
+            "schema": probes.TRACE_ASSERTION_SCHEMA,
+            "source_sha256": document.source_sha256,
+            "targets": targets,
+        }
+
+    def test_trace_assertions_require_exact_operands_absence_and_order(self):
+        props = owned_top_level_row(
+            prl(0xD635, b"\x02ab")
+            + prl(0x7621, b"\x01\0\0\0")
+            + prl(0xD635, b"\x02cd")
+        )
+        document = loaded(fixture(b"\0\0" + props))
+        target = {
+            "fc": 105,
+            "owner": "ttp",
+            "properties": {
+                "d635": ["026162", "026364"],
+                "7621": ["01000000"],
+                "7623": [],
+            },
+            "order": ["d635", "7621", "d635"],
+        }
+        report = probes.validate_trace_assertions(
+            document, self.trace_manifest(document, [target])
+        )
+        self.assertEqual(report["targets"], [target])
+        false_bit_presence = {**target, "properties": {
+            **target["properties"], "7621": ["00000000"],
+        }}
+        with self.assertRaisesRegex(probes.ProbeError, "operand assertion"):
+            probes.validate_trace_assertions(
+                document, self.trace_manifest(document, [false_bit_presence])
+            )
+        with self.assertRaisesRegex(probes.ProbeError, "order assertion"):
+            probes.validate_trace_assertions(
+                document, self.trace_manifest(document, [{**target, "order": [
+                    "7621", "d635", "d635",
+                ]}])
+            )
+
+    def test_trace_assertions_append_later_pcd_and_ignore_replaced_tail(self):
+        ignored = prl(0x7623, b"\x03\0\0\0")
+        indirect = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + ignored
+        data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
+        pcd = prl(0x7621, b"\x02\0\0\0") + prl(0x7623, b"\x04\0\0\0")
+        document = loaded(fixture(b"\0\0" + indirect, data, [pcd], prm=1))
+        target = {
+            "fc": 105,
+            "owner": "ttp",
+            "properties": {
+                "7621": ["01000000", "02000000"],
+                "7623": ["04000000"],
+            },
+            "order": ["7621", "7621", "7623"],
+        }
+        probes.validate_trace_assertions(
+            document, self.trace_manifest(document, [target])
+        )
+        acquired = probes.acquire_property_trace(document, 105, "ttp")
+        ignored_items = [item for item in acquired["entries"] if item["kind"] == "ignored_tail"]
+        self.assertEqual(len(ignored_items), 1)
+        self.assertIn(ignored.hex(), ignored_items[0]["bytes"])
+
+    def test_trace_owner_distinguishes_cell_mark_from_top_level_ttp(self):
+        cell_props = (
+            prl(0x2416, b"\x01")
+            + prl(0x6649, (2).to_bytes(4, "little"))
+        )
+        cell = loaded(fixture(b"\0\0" + cell_props))
+        probes.validate_trace_assertions(cell, self.trace_manifest(cell, [{
+            "fc": 105, "owner": "paragraph", "properties": {"6649": ["02000000"]},
+        }]))
+        with self.assertRaisesRegex(probes.ProbeError, "top-level TTP ownership"):
+            probes.validate_trace_assertions(cell, self.trace_manifest(cell, [{
+                "fc": 105, "owner": "ttp", "properties": {"6649": ["02000000"]},
+            }]))
+        ttp = loaded(fixture(b"\0\0" + owned_top_level_row(b"")))
+        with self.assertRaisesRegex(probes.ProbeError, "paragraph owner rejects"):
+            probes.validate_trace_assertions(ttp, self.trace_manifest(ttp, [{
+                "fc": 105, "owner": "paragraph", "properties": {"2417": ["01"]},
+            }]))
+
+    def test_trace_schema_fc_boundaries_duplicates_and_budgets_fail_closed(self):
+        document = loaded(fixture(b"\0\0" + owned_top_level_row(b"")))
+        target = {"fc": 105, "owner": "ttp", "properties": {"2417": ["01"]}}
+        manifest = self.trace_manifest(document, [target])
+        for bad, message in [
+            ({**manifest, "extra": 1}, "unknown fields"),
+            ({**manifest, "targets": []}, "requires targets"),
+            ({**manifest, "targets": [{**target, "fc": True}]}, "nonnegative integer"),
+            ({**manifest, "targets": [{**target, "fc": -1}]}, "nonnegative integer"),
+            ({**manifest, "targets": [target, target]}, "duplicate trace target"),
+            ({**manifest, "targets": [{**target, "properties": {"2417": ["1"]}}]},
+             "whole-byte hex"),
+            ({**manifest, "targets": [{**target, "properties": {"7621": ["01"]}}]},
+             "SPRM framing"),
+            ({**manifest, "targets": [{**target, "fc": 110}]}, "PAPX run"),
+        ]:
+            with self.assertRaisesRegex(probes.ProbeError, message):
+                probes.validate_trace_assertions(document, bad)
+
+        uncompressed = dict(document.streams)
+        table = bytearray(uncompressed["0Table"])
+        table[27:31] = (100).to_bytes(4, "little")
+        uncompressed["0Table"] = bytes(table)
+        wide = loaded(uncompressed)
+        with self.assertRaisesRegex(probes.ProbeError, "character boundary"):
+            probes.validate_trace_assertions(wide, self.trace_manifest(wide, [{
+                **target, "fc": 105,
+            }]))
+        with patch.object(probes, "MAX_TARGETS", 1):
+            with self.assertRaisesRegex(probes.ProbeError, "target count"):
+                probes.validate_trace_assertions(document, {
+                    **manifest, "targets": [target, {**target, "fc": 106}],
+                })
+        with patch.object(probes, "MAX_TRACE_BYTES", 1):
+            with self.assertRaisesRegex(probes.ProbeError, "retained output"):
+                probes.validate_trace_assertions(document, manifest)
+
+        no_in_table = loaded(fixture(b"\0\0" + top_level_row(b"")))
+        with self.assertRaisesRegex(probes.ProbeError, "top-level TTP ownership"):
+            probes.validate_trace_assertions(no_in_table, self.trace_manifest(
+                no_in_table, [target]
+            ))
+        with patch.object(probes, "MAX_TRACE_BYTES", 128):
+            oversized = {**target, "properties": {"d635": ["00" * 129]}}
+            with self.assertRaisesRegex(probes.ProbeError, "retained output"):
+                probes.validate_trace_assertions(
+                    document, self.trace_manifest(document, [oversized])
+                )
+
+    def test_repeated_cached_trace_acquisition_is_aggregate_work_bounded(self):
+        streams = fixture(b"\0\0" + owned_top_level_row(b""))
+        word = bytearray(streams["WordDocument"])
+        word[100:110] = b"\x07" * 10
+        document = loaded({**streams, "WordDocument": bytes(word)})
+        targets = [
+            {"fc": fc, "owner": "ttp", "properties": {"2417": ["01"]}}
+            for fc in range(100, 110)
+        ]
+        with patch.object(probes, "MAX_INSPECT_WORK", 40):
+            with self.assertRaisesRegex(probes.ProbeError, "work budget"):
+                probes.validate_trace_assertions(
+                    document, self.trace_manifest(document, targets)
+                )
+
+    def test_validator_can_reuse_a_document_bound_trace_session(self):
+        document = loaded(fixture(b"\0\0" + owned_top_level_row(b"")))
+        target = {"fc": 105, "owner": "ttp", "properties": {"2417": ["01"]}}
+        session = probes.AcquiredPropertyTraceSession(document)
+        probes.validate_trace_assertions(
+            document, self.trace_manifest(document, [target]), session=session
+        )
+        other = loaded(dict(document.streams), source=b"other source")
+        with self.assertRaisesRegex(probes.ProbeError, "not bound"):
+            probes.validate_trace_assertions(
+                other, self.trace_manifest(other, [target]), session=session
+            )
+
+    def test_acquired_trace_rejects_unsupported_simple_pcd_prm(self):
+        streams = fixture(b"\0\0" + owned_top_level_row(b""))
+        table = bytearray(streams["0Table"])
+        table[31:33] = (2).to_bytes(2, "little")
+        document = loaded({**streams, "0Table": bytes(table)})
+        target = {"fc": 105, "owner": "ttp", "properties": {"2417": ["01"]}}
+        with self.assertRaisesRegex(probes.ProbeError, "simple PCD PRM"):
+            probes.validate_trace_assertions(
+                document, self.trace_manifest(document, [target])
+            )
+
+    def test_physical_interval_lookup_accepts_reordered_and_detects_overlap(self):
+        session = probes.AcquiredPropertyTraceSession.__new__(
+            probes.AcquiredPropertyTraceSession
+        )
+        session.lookup_budget = probes._WorkBudget(probes.MAX_TARGET_LOOKUP_WORK)
+        reordered = [
+            {"fc_start": 200, "fc_end": 210, "name": "later"},
+            {"fc_start": 100, "fc_end": 110, "name": "earlier"},
+        ]
+        index = session._interval_index(reordered)
+        self.assertEqual(session._containing(index, 105, "piece")["name"], "earlier")
+        overlapping = [
+            {"fc_start": 100, "fc_end": 300},
+            {"fc_start": 200, "fc_end": 210},
+        ]
+        with self.assertRaisesRegex(probes.ProbeError, "exactly one piece"):
+            session._containing(session._interval_index(overlapping), 205, "piece")
+
+    def test_trace_json_loader_rejects_duplicate_object_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "assertions.json")
+            path.write_text('{"schema":"a","schema":"b"}', encoding="utf-8")
+            with self.assertRaisesRegex(probes.ProbeError, "duplicate JSON field schema"):
+                probes._load_plan(path)
+
     def test_inspector_records_both_papx_encodings_and_ignored_tail_provenance(self):
         indirect = prl(probes.P_TABLE_PROPS, (0).to_bytes(4, "little"))
         compatibility = prl(0xD608, bytes([6, 0, 1, 0, 0, 0xD0, 7]))

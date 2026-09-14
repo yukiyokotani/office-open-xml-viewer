@@ -4129,6 +4129,50 @@ mod tests {
 
     #[cfg(feature = "direct-doc")]
     #[test]
+    fn native_table_acquisition_gates_unresolved_tdxacol_tdef_order() {
+        // Exact unmerged native countercontrols save 3000/3000/3000 in both
+        // orders. MS-DOC 2.6.3 defines TDxaCol but does not establish a general
+        // precedence rule for this repeated-TDefTable sequence.
+        let mut definition_operand = vec![0x46, 0, 3];
+        for boundary in [0i16, 1500, 6000, 9000] {
+            definition_operand.extend_from_slice(&boundary.to_le_bytes());
+        }
+        definition_operand.extend_from_slice(&[0; 60]);
+        let definition = test_prl(0xd608, &definition_operand);
+        let width = test_prl(0x7623, &[0, 3, 0xb8, 0x0b]);
+        let tistd = test_prl(0x563a, &21u16.to_le_bytes());
+
+        for ordered in [
+            [
+                definition.clone(),
+                width.clone(),
+                definition.clone(),
+                tistd.clone(),
+            ]
+            .concat(),
+            [
+                definition.clone(),
+                definition.clone(),
+                width.clone(),
+                tistd.clone(),
+            ]
+            .concat(),
+        ] {
+            let papx = [vec![0, 0], ordered].concat();
+            let mut formatting = with_direct_paragraph(&papx);
+            formatting.configure_table_styles(0x0112, true);
+            let properties = formatting.table_properties_native(109, 0, &[]).unwrap();
+            assert_eq!(properties.row.table_style, Some(21));
+            assert_eq!(properties.row.cells.len(), 3);
+            assert!(
+                formatting.unsupported_table_properties,
+                "native unmerged controls disagree with raw data-order widths; keep the admission gate"
+            );
+        }
+    }
+
+    #[cfg(feature = "direct-doc")]
+    #[test]
     fn native_tistd_resets_only_independently_authored_row_properties_in_data_order() {
         let before_tistd = [
             test_prl(0x2416, &[1]),

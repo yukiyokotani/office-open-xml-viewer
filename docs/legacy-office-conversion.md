@@ -1634,7 +1634,7 @@ runtime and native Office acceptance, not only helper tests.
 | Additional item | Scope | Status |
 | --- | --- | --- |
 | DOC-128 | Reset row-level D660 shading at TIstd | Normative preceding-D660 reset implemented from the TIstd preservation list; native trio is inconclusive because none visibly paints the expected fill. Reverse order remains gated |
-| DOC-129 | Resolve preferred cell width at TIstd | Before/after TIstd retains D635 in diagnostics and matched native display. Interactions with cell-edit geometry are not isolated; no general preferred-width layout policy is established |
+| DOC-129 | Resolve preferred cell width at TIstd | Clean sole-TDef controls now show a live D635 width effect in both TIstd orders and at varied magnitudes. This establishes preservation, not a general preferred-width/merge layout algorithm; see DOC-194 |
 | DOC-130 | Verify visible anchors in margin controls | Corrected controls contain visible borders. Review also corrected use of one PDF's border coordinate for another: measure each grid independently. Margin origin and D634/D63E composition remain unresolved |
 | DOC-131 | Resolve compatibility shading after authored Raw Nil | Implemented bounded clear-RGB reverse replacement after native full/empty/short countercontrols. Authored Raw Nil is updated across the entire segment; unsupported patterns/ranges/style cases remain gated |
 
@@ -1774,8 +1774,8 @@ results do not substitute for fresh acceptance of the final source.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-171 | Validate the effective experimental target across property families | Add reusable probe assertions for operand values, selected style membership, and masking/competing properties across complete FKP/Data/PCD acquisition. Exact byte edits alone do not establish an effective native control; current corrected controls retain local assertions |
-| DOC-172 | Resolve cell-edit and preferred-width family precedence | Isolate TInsert/TDxaCol/D635 against a sole TDefTable and then implement only an evidenced rule. Earlier cell-edit properties can alter native merged widths despite later byte-order TDefTable; keep DOC-150 geometry admission gated |
+| DOC-171 | Validate the effective experimental target across property families | Implemented source-bound acquired-trace and fixed-fixture target assertions, including full FKP/Data/complex-PCD acquisition, exact style names, PJc opcodes/operands, ordering, absence and ownership. Nonzero simple PCD PRMs fail explicitly; checks do not infer Word family precedence |
+| DOC-172 | Resolve cell-edit and preferred-width family precedence | Refined with clean D635 controls and unmerged repeated-TDef/TDxaCol countercontrols. Native TDxaCol effects survive the later TDef in the tested pair, contradicting naive raw-order geometry. Keep DOC-150 gated; resolve DOC-193 and DOC-194 before generalizing |
 
 
 ### Margin and geometry follow-up acceptance
@@ -1813,3 +1813,93 @@ verified the remaining admission gates, and confirmed unchanged fixed four-side
 and 63-cell storage. No renderer, shared model, worker or XLS/PPT behavior changed.
 Whole-branch architecture/browser/visual acceptance remains outstanding before
 integration. New DOC-171 and DOC-172 retain the concrete follow-up work.
+
+
+### Selected probe assertions and width precedence batch: 30 items
+
+This finite batch selects DOC-26, DOC-80, DOC-129, DOC-150, DOC-163,
+DOC-164, DOC-166, DOC-167, DOC-171 and DOC-172, plus the twenty slices
+below. Probe checks establish acquired records and declared ownership, not an
+inferred Word layout algorithm. Native width controls must remove or explicitly
+account for competing cell definitions and width properties.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-173 | Bind read-only trace assertions to source hashes | Implemented exact serialized-source SHA-256 binding and read-only check-trace CLI |
+| DOC-174 | Share complete FKP/Data/PCD trace acquisition | Implemented one shared acquisition session for FKP/Data and later complex PCD; unsupported nonzero simple PRMs fail explicitly |
+| DOC-175 | Assert exact operand lists and absent competitors | Implemented exact framed operand arrays and empty arrays for absent competitors |
+| DOC-176 | Assert ordered acquired property sequences | Implemented exact filtered acquired order, including repeated property records |
+| DOC-177 | Validate paragraph versus row-mark ownership | Implemented character-boundary and top-level row ownership checks; fixed-probe marker bodies and terminators must retain table depth one |
+| DOC-178 | Check direct alignment operands rather than opcode presence | Implemented exact serialized PJc opcode and operand checks, including later PCD overrides; no bidi-aware alignment claim |
+| DOC-179 | Check the selected table-style identity at the measured target | Implemented exact authored style-name/istd matching, including cache-isolated names; rejects duplicate names and wrong kinds |
+| DOC-180 | Expose fixed-probe marker and row assertion commands | Implemented bounded check-target CLI for the fixed eight-table marker and row inventory |
+| DOC-181 | Bound assertion input, lookup, trace and output resources | Verified interval overlap/reordering, shared-cache work, trace/payload/output budgets, strict JSON and schema rejection |
+| DOC-182 | Preserve historical mutation-plan validation | Verified historical mutation-plan tests remain passing; duplicate JSON keys now fail explicitly |
+| DOC-183 | Certify new native controls with reusable assertions | Certified ten frozen controls with source hashes, exact edits, full ordered rows, actual TDelete absence and exact style/alignment assertions |
+| DOC-184 | Isolate clean D635 before/after TIstd | Verified clean D635 before/after TIstd controls preserve the same native width effect |
+| DOC-185 | Verify opposing preferred-width magnitudes | Verified varied D635 values change the visible split: left merged controls show 4500/4500 and 3000/6000 in either TIstd order |
+| DOC-186 | Isolate valid TDxaCol and TDefTable redefinition order | Verified unmerged repeated-TDef/TDxaCol controls show 3000/3000/3000 in both orders. The merged pair alone was nondiscriminating; generic precedence remains unresolved |
+| DOC-187 | Verify width effects across both merge positions | Verified clean D635 effects in left and right merge positions; no arbitrary width equalization rule added |
+| DOC-188 | Determine supported width facts without a guessed layout rule | Established bounded native facts and rejected the proposed raw-order width expectation; general geometry remains gated |
+| DOC-189 | Exercise supported acquisition facts and preserve admission gates | Verified a focused native-acquisition regression retains the TIstd gate for both unresolved repeated-TDef/TDxaCol orders |
+| DOC-190 | Review ownership and resource costs of the final changes | Reviewed bounded physical interval indices, one document-bound session, sequential marker checks and aggregate cached-trace work |
+| DOC-191 | Compare final independently built release models | Verified all 327 results match exactly in independently built release WASMs; production WASM bytes are identical |
+| DOC-192 | Adversarially review source and native evidence | Scoped adversarial review and proportionate final checks complete; parent geometry and whole-branch architecture/browser/visual acceptance remain outstanding |
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-193 | Resolve TDxaCol versus repeated TDefTable in native acquisition | Open: an unmerged counterpair yields equal 3000-twip cells in both serialized orders, while current acquisition resets earlier TDxaCol with later TDef. Vary ranges, widths, redefinitions and source families before choosing a general rule; keep TIstd admission gated |
+| DOC-194 | Resolve D635 preferred width with merges and table constraints | Open: clean varied controls establish a live effect across TIstd, but not the general allocation algorithm. Isolate merge ownership, preferred table width, TC80 and autofit without cell-edit competitors |
+| DOC-195 | Extend probe acquisition to nonzero simple PCD PRMs when required | Deferred: the new assertion commands reject unsupported Prm0 explicitly. Add specification-based decoding and countertests before certifying such inputs |
+
+### Probe assertion contracts
+
+The read-only `check-trace INPUT ASSERTIONS` command in
+`scripts/legacy-doc-papx-probes.py` accepts `legacy-doc-property-trace/v1`.
+Each source-hash-bound target declares a physical `fc`, `owner` (`ttp` or
+`paragraph`), and nonempty `properties` mapping lowercase four-digit SPRM codes
+to exact framed operand arrays. An empty array asserts absence. Optional `order`
+asserts the complete acquired sequence filtered to those property codes.
+
+The fixed-fixture `check-target INPUT ASSERTIONS` command in
+`scripts/legacy-doc-table-style-probes.py` accepts
+`legacy-doc-table-style-target-assertions/v1`. It requires an exact marker or
+table/row selector, an exact authored `style` name, `direct_pjc` as null or an
+exact `{code, operand}` object, and `acquired` property assertions. Despite the
+field name, PJc checks include later complex PCD records and identify serialized
+opcodes/operands only. They do not resolve bidi alignment, style-family
+precedence or displayed geometry. Both commands reject unsupported nonzero
+simple PCD PRMs and ambiguous ownership rather than certifying incomplete traces.
+
+### Probe assertions and width precedence acceptance
+
+This thirty-item checkpoint delivers read-only probe assertions and a focused
+admission-gate regression. The eight fresh merged controls and two discriminating
+unmerged controls were exported by local Word, with exact source edits/hashes
+and 130 target checks. Independent PDF border measurements and visual inspection
+support the bounded width facts above. The saved DOCX output is corroborating
+diagnostic evidence. No production width algorithm or admission gate changed.
+
+The merged TDxaCol pair initially hid the distinction being tested. Unmerged
+countercontrols exposed a mismatch with the current raw-order expectation.
+Adversarial review rejected the proposed width assertion and retained an explicit
+gate test instead. Clean varied D635 controls establish a live width effect
+across TIstd, but do not establish a general merge/preferred-width allocation
+rule. Existing DOC-26, DOC-80, DOC-129, DOC-150, DOC-163, DOC-164, DOC-166 and
+DOC-167 remain partial within these limits; DOC-171 is implemented in the stated
+probe scope and DOC-172 has new counterevidence. DOC-193 through DOC-195 record
+the additional unresolved work.
+
+Fresh checks passed 879 unit tests and nine integration tests, with six existing
+ignores; feature-off compilation, 44 target-probe tests, 18 PAPX-probe tests,
+33 unchanged renderer-border tests, static layout boundaries and diff checks
+also passed. All 327 identical inputs match in independently built release
+WASMs, including errors and streamed models. The release WASM bytes themselves
+are identical. Four of 59 private inputs remain admitted; equal rejections are
+not visual fidelity.
+
+Final review corrected incomplete later-PCD checks, physical-range ambiguity,
+marker/terminator ownership and cached-trace work amplification. No renderer,
+shared-model, worker, XLS or PPT behavior changed. Whole-branch architecture,
+browser and visual acceptance remains outstanding. This checkpoint does not
+complete table-style support or start another batch automatically.
