@@ -80,9 +80,43 @@ impl NativeGeometry {
                     NativeGeometryApply::Handled
                 })
             }
-            0x7621 | 0x5622 | 0x5624 | 0x5625 | 0xd62b | 0x3615 | 0x560b | 0x5664 => {
+            0xd62b => {
+                if !row.apply(code, operand)? {
+                    return Ok(NativeGeometryApply::HandledUnsupported);
+                }
+                Ok(self.finish_structural_change(true))
+            }
+            0xd62c => {
+                if operand.is_empty() {
+                    return Err(unsupported("short Word cell alignment"));
+                }
+                // Current-Word controls show nondefault vertical alignment
+                // persisting before, between, and after TDxaCol/repeated TDef;
+                // explicit top matches the default. Until that separate cell-
+                // flag cascade is represented, only semantic no-ops remain in
+                // this width-persistence profile.
+                let changed = if operand.first() == Some(&3) {
+                    let cells = range(&operand[1..], row.cells.len())?;
+                    let alignment = *operand
+                        .get(3)
+                        .ok_or_else(|| unsupported("short Word cell alignment"))?;
+                    alignment <= 2
+                        && row.cells[cells]
+                            .iter()
+                            .any(|cell| (cell.flags >> 7) & 3 != u16::from(alignment))
+                } else {
+                    false
+                };
+                if !row.apply(code, operand)? {
+                    return Ok(NativeGeometryApply::HandledUnsupported);
+                }
+                Ok(self.finish_structural_change(changed))
+            }
+            0x7621 | 0x5622 | 0x5624 | 0x5625 | 0x3615 | 0x560b | 0x5664 => {
                 let had_overrides = self.overrides.iter().any(Option::is_some);
-                row.apply(code, operand)?;
+                if !row.apply(code, operand)? {
+                    return Ok(NativeGeometryApply::HandledUnsupported);
+                }
                 self.overrides.fill(None);
                 self.eligible = false;
                 self.unresolved_width |= had_overrides;
@@ -93,6 +127,21 @@ impl NativeGeometry {
                 })
             }
             _ => Ok(NativeGeometryApply::Unhandled),
+        }
+    }
+
+    fn finish_structural_change(&mut self, changed: bool) -> NativeGeometryApply {
+        if !changed {
+            return NativeGeometryApply::Handled;
+        }
+        let had_overrides = self.overrides.iter().any(Option::is_some);
+        self.overrides.fill(None);
+        self.eligible = false;
+        self.unresolved_width |= had_overrides;
+        if self.persistence_used {
+            NativeGeometryApply::HandledUnsupported
+        } else {
+            NativeGeometryApply::Handled
         }
     }
 
@@ -296,6 +345,38 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn vertical_alignment_accepts_only_semantic_noops_in_the_persistence_profile() {
+        let mut row = Row::default();
+        let mut geometry = NativeGeometry::default();
+        geometry.begin_source();
+        geometry
+            .apply(&mut row, 0xd608, &definition(&[0, 1000, 2000]))
+            .unwrap();
+        geometry.apply(&mut row, 0x7623, &[0, 1, 0xd0, 7]).unwrap();
+
+        assert_eq!(
+            geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 0]).unwrap(),
+            NativeGeometryApply::Handled
+        );
+        assert_eq!(
+            geometry.apply(&mut row, 0xd62c, &[3, 1, 1, 1]).unwrap(),
+            NativeGeometryApply::Handled
+        );
+        assert_eq!(
+            geometry
+                .apply(&mut row, 0xd608, &definition(&[0, 1500, 3000]))
+                .unwrap(),
+            NativeGeometryApply::Handled
+        );
+
+        assert_eq!(
+            geometry.apply(&mut row, 0xd62c, &[2, 0, 1]).unwrap(),
+            NativeGeometryApply::HandledUnsupported
+        );
+        assert!(geometry.apply(&mut row, 0xd62c, &[3, 0, 1, 3]).is_err());
     }
 
     #[test]

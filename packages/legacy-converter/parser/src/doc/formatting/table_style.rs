@@ -559,6 +559,7 @@ impl Formatting<'_> {
                     &sets.papx[2..],
                     self.data,
                     &mut self.budget,
+                    sprm::TopLevelFilter::All,
                     |code, operand, budget| {
                         if code == 0x2461 {
                             let alignment = paragraph::AlignmentPatch::from_sprm(code, operand)?

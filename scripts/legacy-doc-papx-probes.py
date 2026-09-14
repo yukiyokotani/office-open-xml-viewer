@@ -283,13 +283,15 @@ def _read_prl(data, position, end, stream, budget):
     }, operand_end, code, operand)
 
 
-def _trace_properties(streams, stream, start, end, budget):
+def _trace_properties(streams, stream, start, end, budget,
+                      filter_initial_paragraph=False):
     if stream not in streams:
         raise ProbeError(f"missing stream {stream}")
     _range(streams[stream], start, end - start, "property range outside stream")
     trace = []
     current_stream, current_start, current_end = stream, start, end
     visited = set()
+    filter_paragraph = filter_initial_paragraph
     while True:
         data = streams[current_stream]
         budget.array(current_end - current_start)
@@ -300,11 +302,16 @@ def _trace_properties(streams, stream, start, end, budget):
             item, next_position, code, operand = _read_prl(
                 data, position, current_end, current_stream, budget
             )
+            is_paragraph = ((code >> 10) & 7) == 1
+            if filter_paragraph and not is_paragraph:
+                item["applied"] = False
+                item["reason"] = "non-paragraph-complex-PCD"
             if code == PHUGE_PAPX and not first:
                 item["applied"] = False
                 item["reason"] = "non-first-PHugePapx"
             trace.append(item)
-            if code == P_TABLE_PROPS or (code == PHUGE_PAPX and first):
+            if (not filter_paragraph or is_paragraph) and (
+                    code == P_TABLE_PROPS or (code == PHUGE_PAPX and first)):
                 reference = _u32(operand, 0, "short paragraph data reference")
                 item["followed"] = True
                 if next_position < current_end:
@@ -325,7 +332,8 @@ def _trace_properties(streams, stream, start, end, budget):
                     })
                 break
             position = next_position
-            first = False
+            if not filter_paragraph or is_paragraph:
+                first = False
         if reference is None:
             return trace
         if reference in visited:
@@ -355,6 +363,14 @@ def _trace_properties(streams, stream, start, end, budget):
             "grpprl_end": group_end,
         })
         current_stream, current_start, current_end = "Data", group_start, group_end
+        filter_paragraph = False
+
+
+def _trace_piece_paragraph_properties(streams, stream, start, end, budget):
+    """Trace a complex Pcd.Prm1 after its normative paragraph-SPRM filter."""
+    return _trace_properties(
+        streams, stream, start, end, budget, filter_initial_paragraph=True
+    )
 
 
 def trace_properties(streams, stream, start, end):
@@ -693,9 +709,11 @@ def _effective_target(parts, fc, code, trace_budget, lookup_budget, trace_cache)
     index = piece["complex_index"]
     if index is not None:
         prc = prcs[index]
-        key = (prc["stream"], prc["offset"], prc["end"])
+        key = ("complexPCD", prc["stream"], prc["offset"], prc["end"])
         if key not in trace_cache:
-            trace_cache[key] = _trace_properties(streams, *key, trace_budget)
+            trace_cache[key] = _trace_piece_paragraph_properties(
+                streams, *key[1:], trace_budget
+            )
         trace.extend(trace_cache[key])
 
     depth, _ = _active_operand(trace, 0x6649)
@@ -782,6 +800,14 @@ class AcquiredPropertyTraceSession:
             )
         return self.trace_cache[key]
 
+    def _piece_trace(self, key):
+        cache_key = ("complexPCD", *key)
+        if cache_key not in self.trace_cache:
+            self.trace_cache[cache_key] = _trace_piece_paragraph_properties(
+                self.streams, *key, self.trace_budget
+            )
+        return self.trace_cache[cache_key]
+
     def acquire(self, fc, owner):
         if type(fc) is not int or fc < 0:
             raise ProbeError("target fc must be a nonnegative integer physical FC")
@@ -802,7 +828,7 @@ class AcquiredPropertyTraceSession:
             trace.extend(self._trace(("WordDocument", papx["offset"] + 2, papx["end"])))
         if piece["complex_index"] is not None:
             prc = self.prcs[piece["complex_index"]]
-            trace.extend(self._trace((prc["stream"], prc["offset"], prc["end"])))
+            trace.extend(self._piece_trace((prc["stream"], prc["offset"], prc["end"])))
         else:
             prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
             if prm0_entry is not None:

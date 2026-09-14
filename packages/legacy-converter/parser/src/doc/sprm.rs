@@ -7,20 +7,34 @@ use std::collections::BTreeSet;
 /// [MS-DOC] 2.9.210 PrcData limits cbGrpprl to this many bytes.
 const MAX_PRC_DATA_GRPPRL_BYTES: usize = 0x3fa2;
 
+#[derive(Clone, Copy)]
+pub enum TopLevelFilter {
+    All,
+    Paragraph,
+}
+
 /// PHugePapx/PTableProps replace the remaining property array with PrcData.
 /// Share the traversal so paragraph layout and table structure see the same data.
 pub fn paragraph_properties<'a>(
     mut bytes: &'a [u8],
     data: &'a [u8],
     budget: &mut Budget,
+    top_level_filter: TopLevelFilter,
     mut apply: impl FnMut(u16, &[u8], &mut Budget) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut visited = BTreeSet::new();
+    let mut top_level = true;
     loop {
         let mut sprms = Sprms::new(bytes);
         let mut first = true;
         let mut next = None;
         while let Some((code, operand)) = sprms.next(budget)? {
+            if matches!(top_level_filter, TopLevelFilter::Paragraph)
+                && top_level
+                && (code >> 10) & 7 != 1
+            {
+                continue;
+            }
             if code == 0x646b || (code == 0x6646 && first) {
                 let offset = u32_at(operand, 0)? as usize;
                 if visited.len() >= 64 || !visited.insert(offset) {
@@ -48,7 +62,10 @@ pub fn paragraph_properties<'a>(
             first = false;
         }
         match next {
-            Some(value) => bytes = value,
+            Some(value) => {
+                bytes = value;
+                top_level = false;
+            }
             None => return Ok(()),
         }
     }
@@ -179,20 +196,32 @@ mod tests {
         for size in [0x3fa1, 0x3fa2] {
             let data = prc_data(size);
             let mut applied = 0;
-            paragraph_properties(&reference, &data, &mut Budget::default(), |_, _, _| {
-                applied += 1;
-                Ok(())
-            })
+            paragraph_properties(
+                &reference,
+                &data,
+                &mut Budget::default(),
+                TopLevelFilter::All,
+                |_, _, _| {
+                    applied += 1;
+                    Ok(())
+                },
+            )
             .unwrap();
             assert!(applied > 0);
         }
 
         let data = prc_data(0x3fa3);
         let mut applied = 0;
-        let error = paragraph_properties(&reference, &data, &mut Budget::default(), |_, _, _| {
-            applied += 1;
-            Ok(())
-        })
+        let error = paragraph_properties(
+            &reference,
+            &data,
+            &mut Budget::default(),
+            TopLevelFilter::All,
+            |_, _, _| {
+                applied += 1;
+                Ok(())
+            },
+        )
         .unwrap_err();
         assert!(error.contains("oversized Word paragraph data"));
         assert_eq!(applied, 0);
@@ -210,6 +239,52 @@ mod tests {
         let mut budget = Budget(77);
         assert!(Sprms::new(&bytes).next(&mut budget).unwrap().is_some());
         assert_eq!(budget.0, 0);
+    }
+
+    #[test]
+    fn paragraph_filter_preserves_first_indirection_and_data_guards() {
+        let data = [
+            12, 0, 0x03, 0x24, 2, 0x07, 0x24, 0, 0x07, 0x24, 0, 0x07, 0x24, 0,
+        ];
+        let source = [
+            0x08, 0xd6, 1, 0, // filtered table SPRM
+            0x46, 0x66, 0, 0, 0, 0, // PHugePapx remains first
+            0x03, 0x24, 1, // ignored tail
+        ];
+        let mut applied = Vec::new();
+        paragraph_properties(
+            &source,
+            &data,
+            &mut Budget(6),
+            TopLevelFilter::Paragraph,
+            |code, _, _| {
+                applied.push(code);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(applied, [0x2403, 0x2407, 0x2407, 0x2407]);
+
+        assert!(paragraph_properties(
+            &source,
+            &data,
+            &mut Budget(5),
+            TopLevelFilter::Paragraph,
+            |_, _, _| Ok(())
+        )
+        .unwrap_err()
+        .contains("budget"));
+
+        let cycle = [12, 0, 0x6b, 0x64, 0, 0, 0, 0, 0x07, 0x24, 0, 0x07, 0x24, 0];
+        assert!(paragraph_properties(
+            &[0x46, 0x66, 0, 0, 0, 0],
+            &cycle,
+            &mut Budget::default(),
+            TopLevelFilter::Paragraph,
+            |_, _, _| Ok(())
+        )
+        .unwrap_err()
+        .contains("cyclic"));
     }
     #[test]
     fn extended_tabs_are_framed_without_consuming_the_following_sprm() {

@@ -151,16 +151,16 @@ class PapxProbeTests(unittest.TestCase):
         ignored = prl(0x7623, b"\x03\0\0\0")
         indirect = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + ignored
         data = prc_data(owned_top_level_row(prl(0x7621, b"\x01\0\0\0")))
-        pcd = prl(0x7621, b"\x02\0\0\0") + prl(0x7623, b"\x04\0\0\0")
+        pcd = prl(probes.P_TABLE_PROPS, b"\0\0\0\0")
         document = loaded(fixture(b"\0\0" + indirect, data, [pcd], prm=1))
         target = {
             "fc": 105,
             "owner": "ttp",
             "properties": {
-                "7621": ["01000000", "02000000"],
-                "7623": ["04000000"],
+                "7621": ["01000000", "01000000"],
+                "7623": [],
             },
-            "order": ["7621", "7621", "7623"],
+            "order": ["7621", "7621"],
         }
         probes.validate_trace_assertions(
             document, self.trace_manifest(document, [target])
@@ -169,6 +169,69 @@ class PapxProbeTests(unittest.TestCase):
         ignored_items = [item for item in acquired["entries"] if item["kind"] == "ignored_tail"]
         self.assertEqual(len(ignored_items), 1)
         self.assertIn(ignored.hex(), ignored_items[0]["bytes"])
+
+    def test_complex_pcd_filter_preserves_indirection_first_element_rules(self):
+        table = prl(0x7623, b"\0\x01\xe8\x03")
+        huge = prl(probes.PHUGE_PAPX, b"\0\0\0\0")
+        data = prc_data(owned_top_level_row(prl(0x7621, b"\0\x01\xe8\x03")))
+        streams = fixture(b"\0\0", data, [table + huge], prm=1)
+        record = probes.inspect_document(streams)["prcs"][0]
+        trace = probes._trace_piece_paragraph_properties(
+            streams, record["stream"], record["offset"], record["end"],
+            probes._TraceBudget(),
+        )
+        self.assertEqual(
+            [(entry.get("code"), entry.get("applied"), entry.get("followed"))
+             for entry in trace if entry["kind"] == "prl"][:2],
+            [("7623", False, None), ("6646", True, True)],
+        )
+        self.assertTrue(any(entry["kind"] == "prc_data" for entry in trace))
+
+        paragraph = prl(0x2461, b"\x01")
+        streams = fixture(b"\0\0", data, [paragraph + huge], prm=1)
+        record = probes.inspect_document(streams)["prcs"][0]
+        trace = probes._trace_piece_paragraph_properties(
+            streams, record["stream"], record["offset"], record["end"],
+            probes._TraceBudget(),
+        )
+        self.assertFalse(any(entry["kind"] == "prc_data" for entry in trace))
+        huge_entry = next(entry for entry in trace if entry.get("code") == "6646")
+        self.assertEqual(
+            (huge_entry["applied"], huge_entry["reason"]),
+            (False, "non-first-PHugePapx"),
+        )
+
+    def test_complex_pcd_ptableprops_expands_data_and_ignores_its_tail(self):
+        widths = prl(0x7623, b"\0\x01\xe8\x03") + prl(0x7623, b"\x02\x03\xd0\x07")
+        data = prc_data(widths)
+        tail = prl(0x2461, b"\x02")
+        pcd = prl(probes.P_TABLE_PROPS, b"\0\0\0\0") + tail
+        streams = fixture(b"\0\0", data, [pcd], prm=1)
+        record = probes.inspect_document(streams)["prcs"][0]
+        trace = probes._trace_piece_paragraph_properties(
+            streams, record["stream"], record["offset"], record["end"],
+            probes._TraceBudget(),
+        )
+        self.assertEqual(
+            [entry["operand"] for entry in trace
+             if entry.get("code") == "7623" and entry.get("applied")],
+            ["0001e803", "0203d007"],
+        )
+        ignored = [entry for entry in trace if entry["kind"] == "ignored_tail"]
+        self.assertEqual([(entry["bytes"], entry["reason"]) for entry in ignored], [
+            (tail.hex(), "after-PTableProps"),
+        ])
+
+    def test_raw_and_complex_piece_trace_cache_entries_do_not_alias(self):
+        streams = fixture(b"\0\0", prcs=[prl(0x7623, b"\0\x01\xe8\x03")], prm=1)
+        session = probes.AcquiredPropertyTraceSession(loaded(streams))
+        record = session.prcs[0]
+        key = (record["stream"], record["offset"], record["end"])
+        raw = session._trace(key)
+        filtered = session._piece_trace(key)
+        self.assertTrue(raw[0]["applied"])
+        self.assertFalse(filtered[0]["applied"])
+        self.assertEqual(len(session.trace_cache), 2)
 
     def test_trace_owner_distinguishes_cell_mark_from_top_level_ttp(self):
         cell_props = (
@@ -449,7 +512,7 @@ class PapxProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(probes.ProbeError, "effective target"):
             probes.validate_plan(source, after, plan)
 
-    def test_later_complex_pcd_shadow_prevents_a_false_data_target(self):
+    def test_raw_table_sprm_in_complex_pcd_does_not_shadow_paragraph_data(self):
         before_value = b"\0\0 \0"
         after_value = b"\0\0@\0"
         pcd_value = b"\0\0\x80\0"
@@ -465,6 +528,39 @@ class PapxProbeTests(unittest.TestCase):
         plan = {
             "source_sha256": source.source_sha256,
             "edits": [{"stream": "Data", "offset": offset,
+                       "before": before_value.hex(), "after": after_value.hex()}],
+            "targets": [{"fc": 105, "code": 0x740A,
+                         "before": before_value.hex(), "after": after_value.hex()}],
+        }
+        result = probes.validate_plan(source, after, plan)
+        self.assertTrue(result["valid"])
+        inspected = probes.inspect_document(before)
+        record = inspected["prcs"][0]
+        raw = probes._trace_piece_paragraph_properties(
+            before, record["stream"], record["offset"], record["end"],
+            probes._TraceBudget(),
+        )[-1]
+        self.assertEqual(
+            (raw["code"], raw["applied"], raw["reason"]),
+            ("740a", False, "non-paragraph-complex-PCD"),
+        )
+
+    def test_wrapped_table_sprm_in_complex_pcd_still_shadows_paragraph_data(self):
+        before_value = b"\0\0 \0"
+        after_value = b"\0\0@\0"
+        pcd_value = b"\0\0\x80\0"
+        direct = prc_data(owned_top_level_row(prl(0x740A, before_value)))
+        pcd_offset = len(direct)
+        pcd_data = prc_data(owned_top_level_row(prl(0x740A, pcd_value)))
+        papx = b"\0\0" + prl(probes.P_TABLE_PROPS, b"\0\0\0\0")
+        pcd = prl(probes.P_TABLE_PROPS, pcd_offset.to_bytes(4, "little"))
+        before = fixture(papx, direct + pcd_data, [pcd], prm=1)
+        operand_offset = 2 + len(prl(0x2416, b"\x01")) + 2
+        after = changed(before, "Data", operand_offset, after_value)
+        source = loaded(before)
+        plan = {
+            "source_sha256": source.source_sha256,
+            "edits": [{"stream": "Data", "offset": operand_offset,
                        "before": before_value.hex(), "after": after_value.hex()}],
             "targets": [{"fc": 105, "code": 0x740A,
                          "before": before_value.hex(), "after": after_value.hex()}],

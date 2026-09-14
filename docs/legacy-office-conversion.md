@@ -2082,3 +2082,104 @@ and type checking. Missing generated WASM was rebuilt before accepting these
 results. Whole-branch semantic architecture, browser and visual acceptance
 remains open. This finite checkpoint fixes native acquisition within its stated
 scope; it does not complete table-style support or begin another batch.
+
+### Selected source and structural acquisition checkpoint: about 30 items
+
+This finite batch advances DOC-193, DOC-216, DOC-217 and DOC-240 through
+DOC-242, together with the twenty-four bounded slices below. Parent features
+remain partial. An experiment or admission check does not complete the
+corresponding table-style or layout feature.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-243 | Select paragraph properties from complex PCD sources | Implemented the MS-DOC 2.4.6.1 step 5 filter in native acquisition and the diagnostic probe |
+| DOC-244 | Preserve referenced Data traversal after source selection | Verified paragraph indirection preserves its referenced property records; unresolved native table effects remain gated |
+| DOC-245 | Evaluate PHugePapx after selecting eligible source records | Verified ignored non-paragraph records do not consume the first eligible position; preceding paragraph records do |
+| DOC-246 | Separate raw and interpreted diagnostic caches | Implemented source-tagged cache keys; raw inspection remains serialized provenance |
+| DOC-247 | Apply source selection to mutation-target validation | Verified raw table records do not shadow paragraph sources, while interpreted indirect records remain in the acquisition trace |
+| DOC-248 | Keep native paragraph and table acquisition consistent | Connected both paths to the same bounded traversal; XML compatibility retains its existing policy |
+| DOC-249 | Preserve unsupported vertical-merge results | Fixed intercepted TVertMerge records whose unsupported result was previously discarded |
+| DOC-250 | Bound vertical-alignment interactions with persistent widths | Added admission checks for nondefault TVertAlign before, between and after width persistence |
+| DOC-251 | Preserve supported alignment no-ops | Verified explicit default alignment and empty ranges; malformed and reserved operands remain rejected |
+| DOC-252 | Verify actual binary model admission | Added full-CFB regressions for malformed vertical merge, unsupported alignment combinations, and raw versus redirected complex-PCD properties |
+| DOC-253 | Test insertion followed by removal of the inserted definition | Native paired controls retain the earlier width on the surviving original cell |
+| DOC-254 | Test deletion and reinsertion of the width-bearing definition | Native paired controls distinguish the deleted override from a later width assignment |
+| DOC-255 | Test movement to a higher cell index | Native leading-insertion controls retain the override on the surviving original definition |
+| DOC-256 | Test movement to a lower cell index | Native leading-deletion controls retain the override on the surviving original definition |
+| DOC-257 | Test repeated definitions with increasing and decreasing counts | Native three-to-four-to-three controls retain the tested override; general count-change admission remains closed |
+| DOC-258 | Test a shorter definition followed by insertion | Native three-to-two-plus-insert controls retain the tested surviving override; removed-slot behavior remains a dependency |
+| DOC-259 | Test direct vertical alignment around cell redefinition | Native center/bottom controls preserve alignment in all three tested positions; no alignment cascade implemented |
+| DOC-260 | Compare explicit top alignment with omission | Native pixels and glyph positions match with the same minimum-height constraint |
+| DOC-261 | Construct valid cross-source property references | Certified single-character PCD ownership, CLX relocation, Data references and exact binary changes |
+| DOC-262 | Check native activation before inferring precedence | Direct complex-PCD paragraph alignment is active; wrapped table-width effects remain unresolved |
+| DOC-263 | Verify shared traversal failure containment | Covered filtered-record work, cycles, ignored tails, malformed framing and feature-off compilation |
+| DOC-264 | Compare separate release builds on the extended corpus | Final comparison and admission counts are recorded below |
+| DOC-265 | Recheck package and architecture boundaries | Deterministic checks are recorded below; whole-branch semantic and visual acceptance remains open |
+| DOC-266 | Review bounded claims and record additional dependencies | Final diff and native evidence reviewed separately from broad feature completion |
+
+### Source selection and unsupported-state acceptance
+
+Native complex-PCD acquisition selects top-level paragraph SPRMs before
+processing paragraph indirection. Non-paragraph records remain visible as
+unapplied diagnostic provenance and still consume framing/work budgets.
+Filtering stops at referenced Data: the shared traversal preserves those
+records, its cycle/depth limits, and the rule that indirection discards the
+remaining array tail. Native paragraph and table readers use the same policy;
+style, direct-PAPX and XML compatibility paths retain their existing behavior.
+The diagnostic probe applies source selection consistently to acquired traces
+and mutation-target validation, without rewriting raw inspection.
+
+This selection rule does not prove how indirect table properties from a
+complex PCD affect Word's table model. Four native controls using valid
+PTableProps references show only the direct-PAPX widths in the target row.
+Two independent paragraph-alignment controls confirm that complex-PCD
+activation works. These results isolate an unresolved table-acquisition
+question; they do not establish a universal precedence rule. Native table
+properties reached through that complex-PCD source are retained for diagnosis
+but close admission. Ordinary complex-PCD paragraph properties remain enabled.
+
+Intercepted unsupported TVertMerge and TVertAlign records can no longer bypass
+the native table-format gate. Direct nondefault vertical alignment also closes
+admission when it competes with the bounded persistent-width profile. Eight
+native controls, with identical minimum row height and no table-style
+selection, show that center/bottom alignment survives the tested later
+same-count definition. Widths alone would therefore be an incomplete result.
+Explicit top and empty-range no-ops retain existing supported behavior.
+
+Twelve structural controls independently vary operations around a width
+assignment. Their native borders show that insertion/deletion can move a
+surviving definition's override to another index, while deletion and reinsertion
+of the target loses that override. Two changed-count sequences retain the
+tested surviving override. These controls retain table-style selection for
+visible borders. They do not justify admitting arbitrary changed counts,
+removed/reintroduced slots, multiple-cell operations, merges, preferred-width
+constraints or other source combinations.
+
+No renderer, shared model, public option or worker protocol changed. No
+empirical width formula, sample-specific branch or extra retained row/cache
+state was introduced. Broader table-style support, DOC-217 allocation and
+whole-branch architecture/visual acceptance remain incomplete.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-267 | Model explicit vertical-alignment persistence | Open: preserve the independently observed direct cell-flag cascade; vary default/reset and range conflicts before widening admission |
+| DOC-268 | Generalize surviving-cell width ownership | Open: test removed/reintroduced slots, range boundaries, multiple-cell edits and style omission before extending DOC-241 |
+| DOC-269 | Resolve indirect table-property application from complex PCD | Open: paragraph activation is proven, but wrapped table-property effects need further normative/Office investigation; do not infer general source precedence |
+| DOC-270 | Revisit conservative structural no-op admission | Open: existing vertical-merge and merge/split no-op invalidation is retained; any admission expansion needs independent coverage |
+
+Fresh final checks passed 897 unit and nine integration tests, with six existing
+ignores; feature-off compilation, 26 PAPX-probe and 44 target-probe tests, and
+59 source-owner/runtime/renderer tests also passed. Separate release builds
+match all 402 identical inputs, including streamed models and errors. A final
+test-only full-CFB addition was followed by another all-features test run and
+release build; its WASM is byte-identical to the compared candidate. Four of
+59 private inputs remain admitted; unchanged rejections do not establish
+display fidelity.
+
+All deterministic architecture checks, package builds and type checking passed
+with freshly generated WASM. Independent final review accepted the scoped
+source-selection and admission fixes after the full-CFB coverage gap was
+closed. The 26 native controls provide bounded evidence for the open alignment,
+structural and source-acquisition questions. Whole-branch semantic, browser
+and visual acceptance remains open. This finite checkpoint does not complete
+table-style support or start another batch.

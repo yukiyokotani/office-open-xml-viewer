@@ -104,6 +104,66 @@ fn body_table_source(text: &str) -> Vec<u8> {
     )
 }
 
+fn with_piece_prc(source: &[u8], prc: &[u8], data: &[u8]) -> Vec<u8> {
+    let cfb = CompoundFile::open(source).unwrap();
+    let mut word = cfb.stream("WordDocument").unwrap();
+    let table = cfb.stream("0Table").unwrap();
+    let clx_offset = u32::from_le_bytes(word[0x1a2..0x1a6].try_into().unwrap()) as usize;
+    let clx_size = u32::from_le_bytes(word[0x1a6..0x1aa].try_into().unwrap()) as usize;
+    let mut replacement = table.clone();
+    let replacement_offset = replacement.len();
+    replacement.push(1);
+    replacement.extend(u16::try_from(prc.len()).unwrap().to_le_bytes());
+    replacement.extend(prc);
+    let prefix = 3 + prc.len();
+    replacement.extend_from_slice(&table[clx_offset..clx_offset + clx_size]);
+    replacement[replacement_offset + prefix + 19..replacement_offset + prefix + 21]
+        .copy_from_slice(&1u16.to_le_bytes());
+    word[0x1a2..0x1a6].copy_from_slice(&(replacement_offset as u32).to_le_bytes());
+    word[0x1a6..0x1aa].copy_from_slice(&((prefix + clx_size) as u32).to_le_bytes());
+    build_cfb(&[
+        ("WordDocument", word),
+        ("0Table", replacement),
+        ("Data", data.to_vec()),
+    ])
+}
+
+#[test]
+fn full_cfb_complex_piece_filters_raw_table_sprms_and_gates_redirected_table_data() {
+    let source = body_table_source("a\u{7}\u{7}\r");
+    let definition = sprm(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3], false);
+    let width = sprm(0x7623, &[0, 1, 0xdc, 5], false);
+
+    let raw = with_piece_prc(&source, &[definition.clone(), width.clone()].concat(), &[]);
+    let document = super::super::direct_model(&CompoundFile::open(&raw).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    let Some(BodyElement::Table(table)) = document.body.first() else {
+        panic!("table")
+    };
+    assert_eq!(table.col_widths, [50.0]);
+    let CellElement::Paragraph(cell) = &table.rows[0].cells[0].content[0] else {
+        panic!("cell paragraph")
+    };
+    assert!(matches!(&cell.runs[0], DocRun::Text(text) if text.text == "a"));
+    assert!(matches!(
+        document.body.get(1),
+        Some(BodyElement::Paragraph(_))
+    ));
+
+    let mut data = Vec::new();
+    let redirected = [definition, width].concat();
+    data.extend(u16::try_from(redirected.len()).unwrap().to_le_bytes());
+    data.extend(redirected);
+    for redirect in [0x646b, 0x6646] {
+        let prc = sprm(redirect, &0u32.to_le_bytes(), false);
+        let wrapped = with_piece_prc(&source, &prc, &data);
+        let error = super::super::direct_model(&CompoundFile::open(&wrapped).unwrap(), 1_000_000)
+            .unwrap_err();
+        assert!(error.contains("unsupported formatting"), "{error}");
+    }
+}
+
 #[test]
 fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
     fn definition(boundaries: &[i16]) -> Vec<u8> {
@@ -193,9 +253,9 @@ fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
     let late_autofit = [
         cell(),
         sprm(0x2417, &[1], false),
-        first,
-        middle,
-        second,
+        first.clone(),
+        middle.clone(),
+        second.clone(),
         sprm(0x3615, &[1], false),
     ]
     .concat();
@@ -211,6 +271,65 @@ fn full_cfb_table_keeps_tdxacol_ranges_across_a_later_same_count_definition() {
     );
     let error =
         super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
+    assert!(error.contains("unsupported formatting"), "{error}");
+
+    let alignment_before_definition = [
+        cell(),
+        sprm(0x2417, &[1], false),
+        first,
+        sprm(0xd62c, &[0, 1, 1], true),
+        middle,
+        second,
+        sprm(0x3615, &[0], false),
+    ]
+    .concat();
+    let bytes = with_papx(
+        &source,
+        &[
+            (0, 2, cell()),
+            (2, 4, cell()),
+            (4, 6, cell()),
+            (6, 7, alignment_before_definition),
+            (7, units, Vec::new()),
+        ],
+    );
+    let error =
+        super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1_000_000).unwrap_err();
+    assert!(error.contains("unsupported formatting"), "{error}");
+}
+
+#[test]
+fn full_cfb_variable_vertical_merge_length_keeps_the_native_gate_closed() {
+    let text = "a\u{7}\u{7}\r";
+    let units = text.encode_utf16().count();
+    let source = source_with_typography(
+        text,
+        &[(units, 2, 12240, 15840, 1, 720)],
+        None,
+        None,
+        None,
+        None,
+    );
+    let build = |vertical_merge: Vec<u8>| {
+        let mut row = [row(1000), vertical_merge].concat();
+        if row.len() % 2 == 0 {
+            row.extend(sprm(0x2416, &[1], false));
+        }
+        with_papx(
+            &source,
+            &[(0, 2, cell()), (2, 3, row), (3, units, Vec::new())],
+        )
+    };
+
+    let valid = build(sprm(0xd62b, &[0, 3], true));
+    let document = super::super::direct_model(&CompoundFile::open(&valid).unwrap(), 1_000_000)
+        .unwrap()
+        .document;
+    assert!(matches!(document.body.first(), Some(BodyElement::Table(_))));
+
+    let malformed = build(sprm(0xd62b, &[0], true));
+    let error = super::super::direct_model(&CompoundFile::open(&malformed).unwrap(), 1_000_000)
+        .unwrap_err();
     assert!(error.contains("unsupported formatting"), "{error}");
 }
 
