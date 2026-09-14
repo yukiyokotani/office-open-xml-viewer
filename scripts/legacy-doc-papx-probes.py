@@ -56,6 +56,28 @@ P_TABLE_PROPS = 0x646B
 TARGET_CODES = {"TIstd": 0x563A, "TTlp": 0x740A}
 TARGET_OPERAND_SIZES = {0x563A: 2, 0x740A: 4}
 
+# [MS-DOC] 2.9.215. Keep this closed table separate from the general SPRM
+# decoder: every Prm0 operand is one byte, and unlisted isprm values are
+# reserved rather than alternate encodings that can be inferred from ispmd.
+PRM0_PARAGRAPH_SPRMS = {
+    0x04: 0x2602, 0x05: 0x2461, 0x07: 0x2405, 0x08: 0x2406,
+    0x09: 0x2407, 0x0C: 0x260A, 0x0D: 0x2470, 0x0E: 0x240C,
+    0x0F: 0x2471, 0x18: 0x2416, 0x19: 0x2417, 0x1D: 0x261B,
+    0x25: 0x2423, 0x2C: 0x242A, 0x32: 0x2430, 0x33: 0x2431,
+    0x35: 0x2433, 0x36: 0x2434, 0x37: 0x2435, 0x38: 0x2436,
+    0x39: 0x2437, 0x3A: 0x2438, 0x78: 0x2640, 0x7E: 0x2443,
+}
+PRM0_CHARACTER_SPRMS = {
+    0x00: 0x2879, 0x41: 0x0800, 0x42: 0x0801, 0x43: 0x0802,
+    0x47: 0x0806, 0x4B: 0x080A, 0x4D: 0x2A0C, 0x4E: 0x0858,
+    0x4F: 0x2859, 0x50: 0x0811, 0x51: 0x0818, 0x53: 0x2A33,
+    0x55: 0x0835, 0x56: 0x0836, 0x57: 0x0837, 0x58: 0x0838,
+    0x59: 0x0839, 0x5A: 0x083A, 0x5B: 0x083B, 0x5C: 0x083C,
+    0x5E: 0x2A3E, 0x62: 0x2A42, 0x68: 0x2A48, 0x73: 0x2A53,
+    0x74: 0x0854, 0x75: 0x0855, 0x76: 0x0856, 0x7B: 0x2A90,
+    0x7C: 0x2A86,
+}
+
 
 class ProbeError(ValueError):
     """A malformed document, trace request, or mutation plan."""
@@ -602,6 +624,47 @@ def _active_operand(trace, code):
     return (None, None) if not matches else (matches[-1]["operand"], matches[-1])
 
 
+def _paragraph_prm0_entry(piece, budget):
+    """Decode one closed-table Prm0 for paragraph-property acquisition."""
+    prm = int(piece["prm"], 16)
+    if prm & 1:
+        raise ProbeError("internal Prm0 decoder received a complex PCD PRM")
+    isprm = (prm >> 1) & 0x7F
+    value = prm >> 8
+    if isprm == 0 and value == 0:
+        return None
+    budget.array(2)
+    budget.prl()
+    if budget.work is not None:
+        budget.work.payload(2)
+    code = PRM0_PARAGRAPH_SPRMS.get(isprm)
+    applied = code is not None
+    reason = None
+    if not applied:
+        code = PRM0_CHARACTER_SPRMS.get(isprm)
+        if code is None:
+            raise ProbeError("reserved or unknown Prm0 isprm")
+        reason = "non-paragraph-Prm0"
+    entry = {
+        "kind": "prl",
+        "stream": piece["stream"],
+        # The canonical three-byte Prl below is synthesized from the actual
+        # two-byte Pcd.Prm. This range therefore identifies origin, not Prl bytes.
+        "offset": piece["offset"] + 6,
+        "end": piece["offset"] + 8,
+        "code": f"{code:04x}",
+        "operand": f"{value:02x}",
+        "applied": applied,
+        "origin": "Pcd.Prm0",
+        "framing": "synthetic-Prl-from-2-byte-Prm0",
+        "prm": f"{prm:04x}",
+        "isprm": f"{isprm:02x}",
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
 def _effective_target(parts, fc, code, trace_budget, lookup_budget, trace_cache):
     streams, _fib_data, all_runs, prcs, all_pieces = parts
     lookup_budget.charge(len(all_runs))
@@ -740,8 +803,10 @@ class AcquiredPropertyTraceSession:
         if piece["complex_index"] is not None:
             prc = self.prcs[piece["complex_index"]]
             trace.extend(self._trace((prc["stream"], prc["offset"], prc["end"])))
-        elif piece["prm"] != "0000":
-            raise ProbeError("acquired traces do not support a nonzero simple PCD PRM")
+        else:
+            prm0_entry = _paragraph_prm0_entry(piece, self.trace_budget)
+            if prm0_entry is not None:
+                trace.append(prm0_entry)
         self.acquire_budget.charge(len(trace))
 
         depth, _ = _active_operand(trace, 0x6649)

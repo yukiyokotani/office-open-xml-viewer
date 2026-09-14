@@ -549,6 +549,76 @@ mod tests {
     }
 
     #[test]
+    fn merged_cell_preference_projects_from_the_primary_source_only() {
+        fn projected(d635_cell: u8, preferred: u16) -> Box<DocTable> {
+            let mut end = cell(1);
+            end.row_end = true;
+            end.inner_row = true;
+            let mut definition = vec![70, 0, 3];
+            for boundary in [0i16, 1500, 6000, 9000] {
+                definition.extend_from_slice(&boundary.to_le_bytes());
+            }
+            definition.extend_from_slice(&[0; 60]); // Three ftsNil TC80 records.
+            end.row.apply(0xd608, &definition).unwrap();
+            let [low, high] = preferred.to_le_bytes();
+            end.row
+                .apply(0xd635, &[5, d635_cell, d635_cell + 1, 3, low, high])
+                .unwrap();
+            // MS-DOC 2.6.3 sprmTMerge: cell 0 is the primary; formatting of
+            // continuation cell 1 is not applied to the merged layout region.
+            end.row.apply(0x5624, &[0, 2]).unwrap();
+
+            let mut sequence = 0;
+            let mut writer = Writer::new(&mut sequence);
+            let mut budget = ModelBudget::new(1_000_000);
+            for text in ["a", "b", "c"] {
+                writer
+                    .push(cell(1), '\u{7}', paragraph(text), &mut budget)
+                    .unwrap();
+            }
+            writer
+                .push(end, '\u{7}', Blocks::default(), &mut budget)
+                .unwrap();
+            let body = writer.finish(&mut budget).unwrap();
+            let Block::Table(table) = body.0.into_iter().next().unwrap() else {
+                panic!()
+            };
+            table
+        }
+
+        for preferred in [1500, 3000] {
+            let table = projected(0, preferred);
+            let expected = preferred.to_string();
+            assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+            assert_eq!(table.rows[0].cells.len(), 2);
+            assert_eq!(table.rows[0].cells[0].col_span, 2);
+            assert_eq!(
+                table.rows[0].cells[0].width_pt,
+                Some(f64::from(preferred) / 20.0)
+            );
+            assert_eq!(
+                table.rows[0].cells[0]
+                    .table_cell_layout
+                    .preferred_width
+                    .as_ref()
+                    .and_then(|width| width.value.as_deref()),
+                Some(expected.as_str())
+            );
+        }
+        for continuation_preferred in [1500, 6000] {
+            let table = projected(1, continuation_preferred);
+            assert_eq!(table.col_widths, [75.0, 225.0, 150.0]);
+            assert_eq!(table.rows[0].cells.len(), 2);
+            assert_eq!(table.rows[0].cells[0].col_span, 2);
+            assert_eq!(table.rows[0].cells[0].width_pt, None);
+            assert!(table.rows[0].cells[0]
+                .table_cell_layout
+                .preferred_width
+                .is_none());
+        }
+    }
+
+    #[test]
     fn row_nil_preference_projects_an_auto_exception_to_clear_table_width() {
         let mut first = row(1, &[1000]);
         first.row.preferred_width = Some(PreferredWidth::Dxa(2000));

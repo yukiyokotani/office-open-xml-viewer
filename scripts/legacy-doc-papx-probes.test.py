@@ -23,6 +23,10 @@ def prc_data(grpprl):
     return len(grpprl).to_bytes(2, "little") + grpprl
 
 
+def prm0(isprm, value):
+    return (isprm << 1) | (value << 8)
+
+
 def top_level_row(grpprl):
     return (
         grpprl
@@ -262,15 +266,92 @@ class PapxProbeTests(unittest.TestCase):
                 other, self.trace_manifest(other, [target]), session=session
             )
 
-    def test_acquired_trace_rejects_unsupported_simple_pcd_prm(self):
-        streams = fixture(b"\0\0" + owned_top_level_row(b""))
-        table = bytearray(streams["0Table"])
-        table[31:33] = (2).to_bytes(2, "little")
-        document = loaded({**streams, "0Table": bytes(table)})
-        target = {"fc": 105, "owner": "ttp", "properties": {"2417": ["01"]}}
-        with self.assertRaisesRegex(probes.ProbeError, "simple PCD PRM"):
-            probes.validate_trace_assertions(
-                document, self.trace_manifest(document, [target])
+    def test_paragraph_prm0_appends_canonical_pjc_with_exact_origin(self):
+        direct = prl(0x2461, b"\x01")
+        document = loaded(fixture(b"\0\0" + direct, prm=prm0(0x05, 2)))
+        acquired = probes.acquire_property_trace(document, 105, "paragraph")
+        pjc = [item for item in acquired["entries"] if item["code"] == "2461"]
+        self.assertEqual([item["operand"] for item in pjc], ["01", "02"])
+        synthetic = pjc[-1]
+        piece = probes.inspect_document(document)["pieces"][0]
+        self.assertEqual(synthetic, {
+            "kind": "prl", "stream": "0Table",
+            "offset": piece["offset"] + 6, "end": piece["offset"] + 8,
+            "code": "2461", "operand": "02", "applied": True,
+            "origin": "Pcd.Prm0",
+            "framing": "synthetic-Prl-from-2-byte-Prm0",
+            "prm": f"{prm0(0x05, 2):04x}", "isprm": "05",
+        })
+        probes.validate_trace_assertions(document, self.trace_manifest(document, [{
+            "fc": 105, "owner": "paragraph",
+            "properties": {"2461": ["01", "02"]},
+            "order": ["2461", "2461"],
+        }]))
+
+    def test_paragraph_prm0_structural_flags_participate_in_ownership(self):
+        base = prl(0x6649, (1).to_bytes(4, "little")) + prl(0x2416, b"\x01")
+        ttp = loaded(fixture(b"\0\0" + base, prm=prm0(0x19, 1)))
+        acquired = probes.acquire_property_trace(ttp, 105, "ttp")
+        self.assertEqual(acquired["entries"][-1]["code"], "2417")
+
+        inconsistent = loaded(fixture(
+            b"\0\0" + base, prm=prm0(0x18, 0)
+        ))
+        with self.assertRaisesRegex(probes.ProbeError, "inconsistent acquired in-table"):
+            probes.acquire_property_trace(inconsistent, 105, "paragraph")
+
+    def test_nonparagraph_and_no_effect_prm0_do_not_become_paragraph_properties(self):
+        character = loaded(fixture(b"\0\0", prm=prm0(0x55, 1)))
+        entry = probes.acquire_property_trace(character, 105, "paragraph")["entries"][-1]
+        self.assertEqual(
+            (entry["code"], entry["operand"], entry["applied"], entry["reason"]),
+            ("0835", "01", False, "non-paragraph-Prm0"),
+        )
+        probes.validate_trace_assertions(character, self.trace_manifest(character, [{
+            "fc": 105, "owner": "paragraph", "properties": {"0835": []},
+        }]))
+        line_break = loaded(fixture(b"\0\0", prm=prm0(0x00, 1)))
+        entry = probes.acquire_property_trace(line_break, 105, "paragraph")["entries"][-1]
+        self.assertEqual((entry["code"], entry["applied"]), ("2879", False))
+
+        no_effect = loaded(fixture(b"\0\0", prm=prm0(0x00, 0)))
+        self.assertEqual(
+            probes.acquire_property_trace(no_effect, 105, "paragraph")["entries"], []
+        )
+
+    def test_prm0_tables_match_the_documented_closed_mapping(self):
+        self.assertEqual(probes.PRM0_PARAGRAPH_SPRMS, {
+            0x04: 0x2602, 0x05: 0x2461, 0x07: 0x2405, 0x08: 0x2406,
+            0x09: 0x2407, 0x0C: 0x260A, 0x0D: 0x2470, 0x0E: 0x240C,
+            0x0F: 0x2471, 0x18: 0x2416, 0x19: 0x2417, 0x1D: 0x261B,
+            0x25: 0x2423, 0x2C: 0x242A, 0x32: 0x2430, 0x33: 0x2431,
+            0x35: 0x2433, 0x36: 0x2434, 0x37: 0x2435, 0x38: 0x2436,
+            0x39: 0x2437, 0x3A: 0x2438, 0x78: 0x2640, 0x7E: 0x2443,
+        })
+        self.assertEqual(probes.PRM0_CHARACTER_SPRMS, {
+            0x00: 0x2879, 0x41: 0x0800, 0x42: 0x0801, 0x43: 0x0802,
+            0x47: 0x0806, 0x4B: 0x080A, 0x4D: 0x2A0C, 0x4E: 0x0858,
+            0x4F: 0x2859, 0x50: 0x0811, 0x51: 0x0818, 0x53: 0x2A33,
+            0x55: 0x0835, 0x56: 0x0836, 0x57: 0x0837, 0x58: 0x0838,
+            0x59: 0x0839, 0x5A: 0x083A, 0x5B: 0x083B, 0x5C: 0x083C,
+            0x5E: 0x2A3E, 0x62: 0x2A42, 0x68: 0x2A48, 0x73: 0x2A53,
+            0x74: 0x0854, 0x75: 0x0855, 0x76: 0x0856, 0x7B: 0x2A90,
+            0x7C: 0x2A86,
+        })
+
+    def test_prm0_reserved_indices_and_budgets_fail_closed(self):
+        reserved = loaded(fixture(b"\0\0", prm=prm0(0x01, 1)))
+        with self.assertRaisesRegex(probes.ProbeError, "reserved or unknown Prm0"):
+            probes.acquire_property_trace(reserved, 105, "paragraph")
+
+        paragraph = loaded(fixture(b"\0\0", prm=prm0(0x05, 1)))
+        with patch.object(probes, "MAX_TRACE_BYTES", 1):
+            with self.assertRaisesRegex(probes.ProbeError, "byte budget"):
+                probes.acquire_property_trace(paragraph, 105, "paragraph")
+
+        with self.assertRaisesRegex(probes.ProbeError, "complex PCD property index"):
+            probes.acquire_property_trace(
+                loaded(fixture(b"\0\0", prcs=[b""], prm=3)), 105, "paragraph"
             )
 
     def test_physical_interval_lookup_accepts_reordered_and_detects_overlap(self):

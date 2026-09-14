@@ -1848,9 +1848,9 @@ account for competing cell definitions and width properties.
 
 | Additional item | Scope | Status |
 | --- | --- | --- |
-| DOC-193 | Resolve TDxaCol versus repeated TDefTable in native acquisition | Open: an unmerged counterpair yields equal 3000-twip cells in both serialized orders, while current acquisition resets earlier TDxaCol with later TDef. Vary ranges, widths, redefinitions and source families before choosing a general rule; keep TIstd admission gated |
-| DOC-194 | Resolve D635 preferred width with merges and table constraints | Open: clean varied controls establish a live effect across TIstd, but not the general allocation algorithm. Isolate merge ownership, preferred table width, TC80 and autofit without cell-edit competitors |
-| DOC-195 | Extend probe acquisition to nonzero simple PCD PRMs when required | Deferred: the new assertion commands reject unsupported Prm0 explicitly. Add specification-based decoding and countertests before certifying such inputs |
+| DOC-193 | Resolve TDxaCol versus repeated TDefTable in native acquisition | Refined by twelve varied native controls, including omitted preferred table width: explicit TDxaCol survives later same-count TDef in the tested fixed unmerged scope. Production acquisition remains unresolved; DOC-216 tracks implementation limits, and TIstd admission stays gated |
+| DOC-194 | Resolve D635 preferred width with merges and table constraints | Refined by eight native controls separating merge ownership and preferred table width with nil TC80 and fixed layout. Primary-only model projection is regression-tested; general allocation, other TC80 and autofit remain open under DOC-217 |
+| DOC-195 | Extend probe acquisition to nonzero simple PCD PRMs when required | Implemented the closed MS-DOC Prm0 mapping for acquired paragraph traces, with exact two-byte origin, recognized character-only provenance, reserved-index rejection and native alignment controls |
 
 ### Probe assertion contracts
 
@@ -1868,8 +1868,10 @@ table/row selector, an exact authored `style` name, `direct_pjc` as null or an
 exact `{code, operand}` object, and `acquired` property assertions. Despite the
 field name, PJc checks include later complex PCD records and identify serialized
 opcodes/operands only. They do not resolve bidi alignment, style-family
-precedence or displayed geometry. Both commands reject unsupported nonzero
-simple PCD PRMs and ambiguous ownership rather than certifying incomplete traces.
+precedence or displayed geometry. Both commands decode documented paragraph Prm0 values,
+retain recognized character Prm0 records as unapplied paragraph-trace provenance, and reject
+reserved indices and ambiguous ownership. A synthesized Prl identifies its
+actual two-byte Pcd.Prm source range explicitly.
 
 ### Probe assertions and width precedence acceptance
 
@@ -1903,3 +1905,83 @@ marker/terminator ownership and cached-trace work amplification. No renderer,
 shared-model, worker, XLS or PPT behavior changed. Whole-branch architecture,
 browser and visual acceptance remains outstanding. This checkpoint does not
 complete table-style support or start another batch automatically.
+
+### Selected cell-width and simple-PRM follow-up: about 30 items
+
+This finite batch selects DOC-26, DOC-80, DOC-129, DOC-150, DOC-163,
+DOC-164, DOC-172 and DOC-193 through DOC-195, plus the twenty bounded
+slices below. Existing parent items remain partial until their implementation
+and native evidence support admission; inspecting an unresolved dependency is
+not completion of that feature. Native controls keep one intended variable per
+comparison and are hash-bound before export.
+
+| Item | Scope | Status |
+| --- | --- | --- |
+| DOC-196 | Decode the documented Prm0 index table | Implemented the closed MS-DOC 2.9.215 mapping; PJc uses 0x2461 |
+| DOC-197 | Separate paragraph Prm0 from character/no-op provenance | Implemented paragraph application, character-only unapplied provenance and zero no-op |
+| DOC-198 | Apply simple PCD overrides to marker and row ownership checks | Verified later PJc and structural Prm0 flags participate in ownership and target assertions |
+| DOC-199 | Retain truthful two-byte PCD provenance for expanded Prls | Implemented explicit synthesized-Prl framing with the actual two-byte Pcd.Prm origin |
+| DOC-200 | Bound simple-PRM decoding and preserve historical probe contracts | Verified reserved-index, work/payload bounds and historical probe tests; inspection and mutation contracts remain unchanged |
+| DOC-201 | Check simple-PRM assertions against native controls | Verified native left/right Prm0 alignment and unchanged paragraph alignment for character-only bold in three controls |
+| DOC-202 | Vary TDxaCol cell ranges around repeated TDefTable | Verified middle-cell TDxaCol before/after repeated TDef in matched unmerged controls |
+| DOC-203 | Reverse TDxaCol magnitudes in matched native controls | Verified 1500/6000 width variations; no single-sample scale factor inferred |
+| DOC-204 | Use distinct first and second TDefTable definitions | Verified unequal definitions with second-definition outer widths and surviving TDxaCol middle width in both orders |
+| DOC-205 | Test repeated width operations within the same property family | Verified 6000 then 1500 matches single final 1500 within the tested TDxaCol family |
+| DOC-206 | Certify unmerged geometry and absence of competing width records | Certified all width controls with complete row traces, exact style identity and absent competing insert/delete/merge/width properties as applicable |
+| DOC-207 | Review native TDxaCol evidence independently | Verified twelve native TDxaCol controls independently; four omit preferred table width to isolate physical acquisition |
+| DOC-208 | Compare D635 with and without merging | Verified D635 differs between unmerged and merged layouts while source cell definitions remain fixed |
+| DOC-209 | Isolate primary versus continuation-cell preferred widths | Verified continuation-only D635 1500/6000 has no visible effect on the merged region; primary width ownership is covered by focused projection tests |
+| DOC-210 | Vary preferred table width with fixed cell preferences | Verified omitted/6000 preferred table width yields 3000/3000 while 9000 yields 4500/4500 for the same primary preference |
+| DOC-211 | Hold TC80 and autofit constant across width controls | Verified controls hold nil TC80 and fixed layout constant; broader TC80/autofit behavior remains unresolved |
+| DOC-212 | Apply only supported behavior and retain unresolved admission gates | Retained existing geometry/admission limits and added a primary-source preference projection regression; no inferred width allocation rule |
+| DOC-213 | Compare final independent release models | Verified all 350 inputs match in independently built release WASMs, including errors and streamed models; release WASM bytes are identical |
+| DOC-214 | Review final source and native evidence adversarially | Accepted the diagnostic and focused-test diff after specification, native-evidence, resource, ownership and regression review; broader architecture and visual acceptance remains open |
+| DOC-215 | Record bounded conclusions and new unresolved dependencies | Recorded distinct acquisition and normalized-layout dependencies as DOC-216 and DOC-217 |
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-216 | Model persistent TDxaCol overrides across cell redefinition | Open: separate explicit width changes from TDef default geometry in native acquisition. Same-count fixed unmerged controls support survival across later definitions, including unequal definitions. Define behavior and limits for insert/delete, changed cell counts and cross-source records before widening admission |
+| DOC-217 | Resolve normalized preferred-width allocation independently | Open: preferred table width changes native totals and introduces nontrivial cell allocation. Reconcile the acquired model with the existing renderer using varied constraints, TC80 and autofit controls; do not infer a generic scale or rounding constant from the current grids |
+
+### Cell-width and simple-PRM evidence checkpoint
+
+The native set contains 23 new inputs: twelve TDxaCol controls, eight D635
+controls and three Prm0 controls. Exact mutation and acquired-target assertions
+preceded export. One initial Word automation timeout produced a delayed PDF;
+a successful separate re-export matched its pixels. All accepted native
+results have complete exports, independent PDF measurements and corroborating
+saved-DOCX diagnostics.
+
+With preferred table width omitted, middle-cell TDxaCol 1500 survives either
+side of a later identical TDef, giving native widths 1500/1500/3000. With a
+different second definition, its outer widths survive while TDxaCol supplies
+the middle 3000, giving 2500/3000/5000 in both orders. This separates the
+acquisition mismatch from normalization. The tested scope remains fixed,
+unmerged rows without insertion/deletion or changing cell counts.
+
+For D635, only the primary source cell supplies the merged region's projected
+preference, consistent with MS-DOC 2.6.3 TMerge. Changing only a continuation
+cell preference between 1500 and 6000 does not change its native merged
+geometry. Preferred table width remains a separate constraint. The added
+projection test protects this ownership distinction without treating raw
+physical grid edges as the final native layout.
+
+Prm0 acquisition follows MS-DOC 2.4.6.1 and 2.9.215. Native left/right controls
+confirm the mapped PJc override; a character-only bold control preserves
+paragraph alignment. This extends diagnostic paragraph acquisition and does
+not claim complete direct-character acquisition.
+
+Fresh final checks passed 880 unit and nine integration tests, with six existing
+ignores; feature-off compilation, 22 PAPX-probe and 44 target-probe tests,
+33 unchanged renderer-border tests, static layout boundaries and diff checks
+also passed. Independent release builds match all 350 inputs exactly and
+produce identical WASM bytes. Four of 59 private inputs remain admitted; equal
+rejections do not establish display fidelity.
+
+Adversarial review accepted the closed Prm0 mapping, explicit synthetic
+provenance and bounded trace accounting. The Rust change is a projection test
+only. No production width algorithm, admission gate, renderer, shared model,
+worker, XLS or PPT behavior changed. Whole-branch architecture, browser and
+visual acceptance remains outstanding. DOC-216 and DOC-217 separate the two
+remaining width problems; this finite checkpoint does not complete their parent
+features or automatically start another batch.
