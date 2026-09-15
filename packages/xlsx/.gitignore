@@ -7,7 +7,6 @@ src/wasm/*.wasm
 src/wasm/*.js
 src/wasm/*.ts
 !src/wasm/.gitkeep
-public/private/
 tests/visual/references/private/
 tests/visual/screenshots/
 tests/visual/diffs/
