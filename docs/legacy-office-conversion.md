@@ -2252,6 +2252,56 @@ admission gates.
 | TOOL-1 | Office export restoration | Open: `scripts/legacy-office-export.applescript` cannot restore Word/Excel settings when `open` returns no value; it also adopts an unrestored ForceDisable baseline |
 | LEGACY-OOXML | Remove the OOXML-generation path | Open: legacy support is unreleased, so delete the byte converter, its WASM/TS entry points and XML writers instead of deprecating them; direct paths must not depend on them |
 
+### Direct-model table-style admission checkpoint
+
+The direct DOC model now admits table-style selection instead of rejecting
+every table that carries sprmTIstd or sprmTTlp. The table-style profile
+(TAPX/PAPX/CHPX, conditional selection, borders, margins, shading) keeps its
+own per-property gates; the XML conversion path is unchanged. The decisions
+and their evidence are recorded next to the code in
+`doc/table/native_admission.rs`, `doc/table/position.rs`,
+`doc/direct_model/tables.rs` and `doc/direct_model/story/borders.rs` and
+`preferences.rs`.
+
+- sprmTIstd is admitted when every table property authored before it in the
+  row chain is on the MS-DOC 2.6.3 preserved list, is reset by an implemented
+  applier, or is cell geometry that the earlier Word controls (DOC-44,
+  DOC-129, DOC-184, DOC-193) show surviving the selection. Any other earlier
+  table property keeps the row gated.
+- sprmTTlp feeds conditional selection; its itl is historical metadata.
+  sprmTRsid has no presentation semantics.
+- sprmTWidthIndent (direct or inherited from the style) is validated but not
+  projected: TDxaLeft/TDxaGapHalf/TDefTable define the physical origin. In
+  two Word PDF exports of left-to-right documents whose preference differs
+  from that origin, the borders sit at the physical origin; the paired OOXML
+  documents carry the preference as `w:tblInd`. RTL rows are admitted only
+  when the effective preference equals the origin.
+- sprmTWidthBefore/sprmTWidthAfter (direct, or the default style's required
+  zero width-before) are admitted only when ftsNil or equal to the physical
+  leading/trailing grid width that the projection emits.
+- sprmTFCellNoWrap is admitted only for cells with an ftsDxa preferred
+  width, where MS-DOC 2.9.28 says it is ignored.
+- Direct NilBrc borders are projected as explicit no-border edges under a
+  table style, and Nil diagonals as absent diagonals (MS-DOC 2.9.20,
+  2.9.157). Style borders on RTL rows, TC80/Brc80 borders with styles,
+  repeated TIstd border resets and drawn diagonals remain gated.
+- Main-story tables with nondefault position or wrapping properties
+  (MS-DOC 2.6.3, 2.7.13) leave the ordinary flow as floating tables.
+
+Separate release-candidate builds were not compared for this checkpoint.
+The local private census admits ten of 59 DOC inputs (previously four); the
+positioned-table and border-interaction gates no longer fire for any input.
+Admission is not visual fidelity.
+
+| Additional item | Scope | Status |
+| --- | --- | --- |
+| DOC-TBL-1 | Replacement of other pre-TIstd table properties | Open: needs Word controls that author e.g. TVertAlign, TSetBrc80, TMerge or TCellFHideMark before TIstd and compare with the same record after it |
+| DOC-TBL-2 | RTL preferred indent | Open: vary sprmTWidthIndent against TDxaLeft/TDxaGapHalf in right-to-left tables (styled and unstyled) and measure the border position in Word's PDF |
+| DOC-TBL-3 | Width-before/after disagreement | Open: vary sprmTWidthBefore/After against the physical leading/trailing grid slot (fixed and AutoFit) and measure the row edges |
+| DOC-TBL-4 | Positioned-table exceptions | Open: controls for sprmTDyaAbs 0 (inline) and for left/zero X with zero Y and column/margin anchors (the MS-OI29500 2.1.162 counterpart), plus positioned tables in headers, footers and notes |
+| DOC-TBL-5 | Hide-mark, cell text flow, no-wrap | Open: the shared cell model has no hideMark, cell text direction or no-wrap facts; MS-DOC 2.6.3 (all cells empty) and ECMA-376 17.4.21 (per-cell end mark) describe hideMark differently, so Word controls are needed before a model capability is designed |
+| DOC-TBL-6 | Compatibility shading without a table style | Open: current Word's use of sprmTDefTableShd in rows without sprmTIstd, which the specification says style-capable readers ignore |
+
 ### Local direct-render survey
 
 `packages/{docx,pptx,xlsx}/tests/visual/legacy-corpus.spec.ts` render each
