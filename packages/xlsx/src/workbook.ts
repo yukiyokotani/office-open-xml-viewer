@@ -583,7 +583,7 @@ export class XlsxWorkbook {
       await this.retainFontsInSet(document.fonts);
       await this.retainWorksheetOfficeFonts(worksheet);
       const office = this.retainedFontSets.get(document.fonts)?.loaded?.office;
-      bindXlsxWorksheetOfficeFontRoutes(worksheet, office?.routes, this.googleSubstitutes, office?.checked);
+      bindXlsxWorksheetOfficeFontRoutes(worksheet, office?.routes, this.googleSubstitutes);
     }
   }
 
@@ -832,7 +832,7 @@ export class XlsxWorkbook {
       this.sheetCache.set(sheetIndex, terminal);
       const mainOffice = typeof document !== 'undefined'
         ? this.retainedFontSets.get(document.fonts)?.loaded?.office : undefined;
-      bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes, mainOffice?.checked);
+      bindXlsxWorksheetOfficeFontRoutes(terminal, mainOffice?.routes, this.googleSubstitutes);
       return terminal;
     } catch (error) {
       if (error instanceof OoxmlResourceLimitError) this.resourceFailure ??= error;

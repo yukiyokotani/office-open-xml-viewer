@@ -5,8 +5,18 @@ import { createSheetViewModel } from './internal/sheet-viewer-runtime.js';
 beforeEach(() => vi.stubGlobal('navigator', { platform: 'Win32', userAgent: 'Windows' }));
 afterEach(() => vi.unstubAllGlobals());
 
+function measuringContext(width: number): CanvasRenderingContext2D {
+  let savedFont = '';
+  return {
+    font: '',
+    save(this: { font: string }) { savedFont = this.font; },
+    restore(this: { font: string }) { this.font = savedFont; },
+    measureText: () => ({ width }),
+  } as unknown as CanvasRenderingContext2D;
+}
+
 describe('ECMA-376 maximum digit width authority', () => {
-  it('uses the authored Normal face digit scalar when Calibri is unavailable', () => {
+  it('keeps the painted fallback face authoritative after a missing Calibri preflight', () => {
     vi.stubGlobal('OffscreenCanvas', undefined);
     vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
     vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
@@ -20,13 +30,14 @@ describe('ECMA-376 maximum digit width authority', () => {
     // preflight may omit it. Canvas remains authoritative until it completes.
     bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {});
     expect(getMdwForWorksheet(worksheet)).toBe(9);
-    // Once the exact tuple was attempted without a retained route, use the
-    // authored face's digit scalar rather than substituted Canvas digits.
-    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {}, false, ['calibri']);
-    expect(getMdwForWorksheet(worksheet)).toBe(8);
+    // A completed lookup cannot make the unavailable Calibri face paint text.
+    // Narrowing columns to its catalog digit width would newly clip fallback
+    // glyphs, so the same painted fallback remains authoritative.
+    bindXlsxOfficeFontRoutes(measuringContext(9), worksheet as Parameters<typeof bindXlsxOfficeFontRoutes>[1], {}, false, ['calibri']);
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
   });
 
-  it('rebuilds cached column geometry when the Normal tuple completes preflight', () => {
+  it('keeps cached column geometry stable when a failed lookup changes no paint face', () => {
     vi.stubGlobal('OffscreenCanvas', undefined);
     vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
     vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
@@ -37,13 +48,14 @@ describe('ECMA-376 maximum digit width authority', () => {
       defaultColWidth: 10, defaultRowHeight: 15, colWidths: {}, rowHeights: {},
     } as Parameters<typeof getGridGeometryForWorksheet>[0];
     const routes = {};
-    bindXlsxWorksheetOfficeFontRoutes(worksheet, routes, false, []);
+    const ctx = measuringContext(9);
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, false, []);
     const before = getGridGeometryForWorksheet(worksheet);
-    bindXlsxWorksheetOfficeFontRoutes(worksheet, routes, false, ['calibri']);
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, false, ['calibri']);
     const after = getGridGeometryForWorksheet(worksheet);
     expect(before.maximumDigitWidth).toBe(9);
-    expect(after.maximumDigitWidth).toBe(8);
-    expect(after).not.toBe(before);
+    expect(after.maximumDigitWidth).toBe(9);
+    expect(after.col.sizeOf(1)).toBe(before.col.sizeOf(1));
   });
 
   it('keeps two viewer-owned worksheet projections independent', () => {
@@ -59,11 +71,11 @@ describe('ECMA-376 maximum digit width authority', () => {
     } as unknown as Parameters<typeof createSheetViewModel>[0];
     const first = createSheetViewModel(source);
     const second = createSheetViewModel(source);
-    bindXlsxWorksheetOfficeFontRoutes(first, {}, false, ['calibri']);
-    bindXlsxWorksheetOfficeFontRoutes(second, {}, false, []);
-    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(8);
-    expect(getGridGeometryForWorksheet(second).maximumDigitWidth).toBe(9);
-    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(8);
+    bindXlsxOfficeFontRoutes(measuringContext(9), first, {}, false, ['calibri']);
+    bindXlsxOfficeFontRoutes(measuringContext(12), second, {}, false, []);
+    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(9);
+    expect(getGridGeometryForWorksheet(second).maximumDigitWidth).toBe(12);
+    expect(getGridGeometryForWorksheet(first).maximumDigitWidth).toBe(9);
   });
 
   it('measures a popup-owned application face on its own Canvas context', () => {
@@ -108,15 +120,19 @@ describe('ECMA-376 maximum digit width authority', () => {
     expect(getMdwForWorksheet(worksheet)).toBe(9);
   });
 
-  it('uses the authored bold Normal tuple rather than regular digit widths', () => {
+  it('uses the painted fallback rather than an authored bold Normal tuple that is unavailable', () => {
     vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: 'Macintosh' });
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    vi.stubGlobal('document', { createElement: () => ({ getContext: () => ({
+      font: '', measureText: () => ({ width: 9 }),
+    }) }) });
     const worksheet = {
       defaultFontFamily: 'Meiryo UI', defaultFontSize: 12,
       defaultFontBold: true,
     };
-    bindXlsxWorksheetOfficeFontRoutes(worksheet as Parameters<typeof bindXlsxWorksheetOfficeFontRoutes>[0], {}, false, ['meiryo ui:700:normal']);
-    // Office hmtx: 1386/2048 for bold vs 1272/2048 for regular.
-    expect(getMdwForWorksheet(worksheet)).toBe(11);
+    bindXlsxOfficeFontRoutes(measuringContext(9), worksheet as Parameters<typeof bindXlsxOfficeFontRoutes>[1], {}, false, ['meiryo ui:700:normal']);
+    // The catalogued bold face would quantize to 11px, but cannot paint.
+    expect(getMdwForWorksheet(worksheet)).toBe(9);
   });
 
   it('uses Mac Excel point-quantized widths across a font-size boundary', () => {

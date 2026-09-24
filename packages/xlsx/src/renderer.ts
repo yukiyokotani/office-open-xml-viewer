@@ -1,6 +1,6 @@
 import type { CjkLang } from '@silurus/ooxml-core';
 import { containsHanScript } from '@silurus/ooxml-core/internal/script-preload-accumulator';
-import { activeFontSet, findReferenceFontMetrics, referenceFontMaxDigitAdvanceRatio } from '@silurus/ooxml-core';
+import { activeFontSet, findReferenceFontMetrics } from '@silurus/ooxml-core';
 import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
@@ -99,12 +99,10 @@ const officeRoutesByContext = new WeakMap<object, OfficeRoutes>();
 const officeRoutesByWorksheet = new WeakMap<Worksheet, OfficeRoutes>();
 const EMPTY_CHECKED_FONT_TUPLES: ReadonlySet<string> = new Set();
 const checkedOfficeTuplesByContext = new WeakMap<object, ReadonlySet<string>>();
-const checkedOfficeTuplesByWorksheet = new WeakMap<Worksheet, ReadonlySet<string>>();
 const declaredCalibriByContext = new WeakMap<object, boolean>();
 const calibriWrapWidthsByContext = new WeakMap<object, Map<number, (value: string) => number>>();
 type NormalFontBinding = {
   tupleKey: string | null;
-  checked: boolean;
   route: import('@silurus/ooxml-core').OfficeFontFallbackRoute | undefined;
   hasDeclaredFace: boolean;
   canvasMdw?: number;
@@ -118,8 +116,8 @@ const themeCellFontByWorksheet = new WeakMap<Worksheet, Map<string, ResolvedThem
 
 function bindNormalFontState(
   worksheet: Worksheet, routes: OfficeRoutes | undefined,
-  checked: ReadonlySet<string> | undefined, fontSet: FontFaceSet | null,
-  googleSubstitutes: boolean, measureCtx?: CanvasRenderingContext2D,
+  fontSet: FontFaceSet | null, googleSubstitutes: boolean,
+  measureCtx?: CanvasRenderingContext2D,
 ): void {
   const tupleKey = worksheet.defaultFontFamily
     ? officeRequestKey({ family: worksheet.defaultFontFamily,
@@ -134,13 +132,12 @@ function bindNormalFontState(
       googleSubstitutes, worksheet.defaultFontBold ? 700 : 400,
       worksheet.defaultFontItalic ? 'italic' : 'normal', measureCtx)
     : undefined;
-  const next = { tupleKey, checked: tupleKey !== null && checked?.has(tupleKey) === true,
-    route, hasDeclaredFace, canvasMdw };
+  const next = { tupleKey, route, hasDeclaredFace, canvasMdw };
   const old = normalFontBindingByWorksheet.get(worksheet);
   // Retained route maps can gain entries in place, and a popup can use another
   // FontFaceSet for the same worksheet. Either change can alter MDW while the
   // worksheet's cached grid geometry still has the previous column widths.
-  if (!old || old.tupleKey !== next.tupleKey || old.checked !== next.checked
+  if (!old || old.tupleKey !== next.tupleKey
       || old.route !== next.route || old.hasDeclaredFace !== next.hasDeclaredFace
       || old.canvasMdw !== next.canvasMdw) GridGeometry.invalidate(worksheet);
   normalFontBindingByWorksheet.set(worksheet, next);
@@ -164,13 +161,10 @@ export function bindXlsxOfficeFontRoutes(
   if (checkedOfficeTuples) {
     const checked = new Set(checkedOfficeTuples);
     checkedOfficeTuplesByContext.set(ctx, checked);
-    checkedOfficeTuplesByWorksheet.set(worksheet, checked);
-    bindNormalFontState(worksheet, routes, checked, fontSet, googleSubstitutes, ctx);
   } else {
     checkedOfficeTuplesByContext.delete(ctx);
-    checkedOfficeTuplesByWorksheet.delete(worksheet);
-    bindNormalFontState(worksheet, routes, undefined, fontSet, googleSubstitutes, ctx);
   }
+  bindNormalFontState(worksheet, routes, fontSet, googleSubstitutes, ctx);
   calibriWrapWidthsByContext.delete(ctx);
   declaredCalibriByContext.set(ctx, hasDeclaredFamilyFace('Calibri', fontSet));
   googleSubstitutesByWorksheet.set(worksheet, googleSubstitutes);
@@ -185,17 +179,13 @@ export function bindXlsxOfficeFontRoutes(
 
 export function bindXlsxWorksheetOfficeFontRoutes(
   worksheet: Worksheet, routes?: OfficeRoutes, googleSubstitutes = false,
-  checkedOfficeTuples?: readonly string[],
 ): void {
   if (officeRoutesByWorksheet.get(worksheet) !== routes ||
       googleSubstitutesByWorksheet.get(worksheet) !== googleSubstitutes) GridGeometry.invalidate(worksheet);
   if (routes) officeRoutesByWorksheet.set(worksheet, routes);
   else officeRoutesByWorksheet.delete(worksheet);
   googleSubstitutesByWorksheet.set(worksheet, googleSubstitutes);
-  const checked = checkedOfficeTuples ? new Set(checkedOfficeTuples) : undefined;
-  if (checked) checkedOfficeTuplesByWorksheet.set(worksheet, checked);
-  else checkedOfficeTuplesByWorksheet.delete(worksheet);
-  bindNormalFontState(worksheet, routes, checked, activeFontSet(), googleSubstitutes);
+  bindNormalFontState(worksheet, routes, activeFontSet(), googleSubstitutes);
 }
 
 function officeRoute(
@@ -431,9 +421,12 @@ function calibriWrapReferenceWidth(
   return width;
 }
 
-/** Resolve the Max Digit Width for a worksheet's Normal-style font. Falls
- *  back to the Calibri 11 pt baseline (~8 px) when the parser couldn't
- *  determine the workbook's default font. */
+/** Resolve the Max Digit Width from the face that paints this worksheet's
+ *  Normal-style text. ECMA-376 §18.3.1.13 defines the source digit metric;
+ *  when that face is unavailable, its catalog hmtx digit width cannot be used
+ *  alongside a wider Canvas fallback without clipping cell text. The retained
+ *  exact local/application face still wins when available. If the parser did
+ *  not identify a Normal font, use the conventional 8 px fallback. */
 export function getMdwForWorksheet(ws: Pick<Worksheet,
   'defaultFontFamily' | 'defaultFontSize' | 'defaultFontBold' | 'defaultFontItalic'>): number {
   if (!ws.defaultFontFamily || !ws.defaultFontSize) return MDW_FALLBACK;
@@ -441,24 +434,7 @@ export function getMdwForWorksheet(ws: Pick<Worksheet,
   const style = ws.defaultFontItalic ? 'italic' : 'normal';
   const tupleKey = officeRequestKey({ family: ws.defaultFontFamily, weight, style });
   const route = officeRoutesByWorksheet.get(ws as Worksheet)?.[tupleKey];
-  // ECMA-376 §18.3.1.13 bases every stored column width on the Normal face's
-  // widest digit. Canvas silently substitutes another face when the authored
-  // one is missing. After exact-local preflight, use the pinned OpenType hmtx
-  // scalar for that missing face so column geometry follows the document's
-  // authored Normal style. A positively loaded local face or application
-  // @font-face retains Canvas measurement authority. The checked-in scalar
-  // covers every static catalog face with a complete Unicode digit cmap;
-  // ambiguous/missing catalog data falls back to ordinary Canvas measurement.
-  // An unbound worksheet has not completed local-font preflight. In that
-  // direct rendering path, a missing route does not prove a missing face.
   const boundFont = normalFontBindingByWorksheet.get(ws as Worksheet);
-  if (checkedOfficeTuplesByWorksheet.get(ws as Worksheet)?.has(tupleKey)
-      && !route && !(boundFont?.hasDeclaredFace
-        ?? hasDeclaredFamilyFace(ws.defaultFontFamily, activeFontSet()))) {
-    const ratio = referenceFontMaxDigitAdvanceRatio(
-      ws.defaultFontFamily, weight, style, isMacDesktop());
-    if (ratio !== undefined) return quantizeMdw(ratio * ws.defaultFontSize * PT_TO_PX);
-  }
   return boundFont?.canvasMdw ?? computeMdw(
     ws.defaultFontFamily, ws.defaultFontSize,
     route,
