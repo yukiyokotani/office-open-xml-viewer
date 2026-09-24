@@ -4,21 +4,38 @@
 //! stories. A zero-width slot inherits its prior entry; an authored blank range
 //! is a real replacement and therefore projects to an empty paragraph.
 
-use super::{story, ModelBudget};
+use super::{fields::StoryFields, story, ModelBudget};
 use crate::doc::{formatting, headers, numbering, pictures, tokenize_with_fields, Fields};
 use docx_model::{HeaderFooter, HeadersFooters};
 
 pub(super) struct Resolver<'a, 'h> {
     source: Option<&'h headers::Headers<'a>>,
+    fields: Option<StoryFields>,
     inherited: [Option<&'h headers::Entry>; 6],
 }
 
 impl<'a, 'h> Resolver<'a, 'h> {
-    pub(super) fn new(source: Option<&'h headers::Headers<'a>>) -> Self {
-        Self {
+    pub(super) fn new(source: Option<&'h headers::Headers<'a>>) -> Result<Self, String> {
+        // Validate the aggregate header document once. Every projected story
+        // is an independent part, so no field may cross an entry boundary.
+        let fields = source
+            .map(|source| {
+                let mut partitions = Vec::with_capacity(source.entries.len() * 2);
+                for entry in &source.entries {
+                    let length = source.entry_text(entry).encode_utf16().count();
+                    partitions.push(entry.cp);
+                    // The entry excludes its guard paragraph mark.
+                    partitions.push(entry.cp + length + 1);
+                }
+                partitions.sort_unstable();
+                StoryFields::analyze(&source.story.text, source.fields(), &partitions)
+            })
+            .transpose()?;
+        Ok(Self {
             source,
+            fields,
             inherited: [None; 6],
-        }
+        })
     }
 
     /// Advance to one section, retaining source-entry identity rather than
@@ -81,7 +98,10 @@ impl<'a, 'h> Resolver<'a, 'h> {
         // scanning and temporary allocation by the section count.
         budget.charge(text.len())?;
         let mut paragraphs = tokenize_with_fields(text, &mut Fields::default(), entry.cp, true);
-        source.restore_fields(text, entry.cp, &mut paragraphs);
+        self.fields
+            .as_ref()
+            .expect("header fields accompany their source")
+            .apply(entry.cp, &mut paragraphs)?;
         let mut body = Vec::new();
         let mut numbering = numbering::direct::Store::default();
         numbering.begin_story()?;

@@ -6,7 +6,20 @@ use std::collections::{BTreeMap, VecDeque};
 pub(super) struct Table(BTreeMap<usize, (u8, u8)>);
 impl Table {
     pub fn read(word: &[u8], table: &[u8], length: usize) -> Result<Self, String> {
-        let size = u32_at(word, 0x126)? as usize;
+        Self::read_at(word, table, 0x122, length)
+    }
+
+    /// MS-DOC 2.8.25: each document part has its own Plcfld with CPs relative
+    /// to that part. `fib_offset` selects the FibRgFcLcb97 fc/lcb pair
+    /// (fcPlcfFldMom 0x11A, fcPlcfFldHdr 0x122, fcPlcfFldFtn 0x12A,
+    /// fcPlcfFldEdn 0x21A).
+    pub fn read_at(
+        word: &[u8],
+        table: &[u8],
+        fib_offset: usize,
+        length: usize,
+    ) -> Result<Self, String> {
+        let size = u32_at(word, fib_offset + 4)? as usize;
         let mut entries = BTreeMap::new();
         if size == 0 {
             return Ok(Self(entries));
@@ -14,7 +27,7 @@ impl Table {
         if size < 4 || !(size - 4).is_multiple_of(6) || (size - 4) / 6 > MAX_STORY_CONTROLS {
             return Err(unsupported("invalid Word header field table length"));
         }
-        let offset = u32_at(word, 0x122)? as usize;
+        let offset = u32_at(word, fib_offset)? as usize;
         let plc = table
             .get(offset..)
             .and_then(|b| b.get(..size))
@@ -39,6 +52,27 @@ impl Table {
             }
         }
         Ok(Self(entries))
+    }
+
+    /// The field character and its Fld.grffld byte at `cp`, if listed.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn get(&self, cp: usize) -> Option<(u8, u8)> {
+        self.0.get(&cp).copied()
+    }
+
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[cfg(all(test, feature = "direct-doc"))]
+    pub(in crate::doc) fn for_test(entries: &[(u32, u8, u8)], _final_cp: u32) -> Self {
+        Self(
+            entries
+                .iter()
+                .map(|(cp, ch, grffld)| (*cp as usize, (*ch, *grffld)))
+                .collect(),
+        )
     }
 
     pub fn restore(&self, text: &str, base_cp: usize, paragraphs: &mut [Paragraph]) {

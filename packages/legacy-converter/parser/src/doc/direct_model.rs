@@ -8,6 +8,7 @@ use docx_model::{
     HeadersFooters,
 };
 
+pub(in crate::doc) mod fields;
 mod headers;
 mod payload;
 mod story;
@@ -74,8 +75,12 @@ pub(super) fn build(
     {
         return Err(unsupported("Word story structure budget exceeded"));
     }
+    let main_fields = match &facts.main_fields {
+        Ok(table) => fields::StoryFields::analyze(&facts.story.text, table, &[])?,
+        Err(error) => return Err(error.clone()),
+    };
     let mut body = Vec::new();
-    let mut header_resolver = headers::Resolver::new(facts.headers.as_ref());
+    let mut header_resolver = headers::Resolver::new(facts.headers.as_ref())?;
     let mut final_headers = None;
     let mut final_footers = None;
     let chunks = super::sections::split_story(&facts.story.text, &facts.sections)?;
@@ -98,6 +103,7 @@ pub(super) fn build(
             base_cp,
             section_index + 1 == chunks.len(),
         );
+        main_fields.apply(base_cp, &mut paragraphs)?;
         if section_index + 1 < chunks.len() {
             // split_story consumed the section-break form feed. The paragraph
             // mark formatting remains owned by the preceding physical CP.
@@ -535,24 +541,10 @@ mod tests {
             }
             append_table_part(&mut word, &mut table, 0xf2, &hdd);
         }
-        let mut field_positions = Vec::new();
-        let mut cp = 0u32;
-        for character in header.chars() {
-            if matches!(character, '\u{13}'..='\u{15}') {
-                field_positions.push((cp, character as u8));
+        for (story, fib_offset) in [(text, 0x11a), (header.as_str(), 0x122)] {
+            if let Some(field_table) = field_plc(story) {
+                append_table_part(&mut word, &mut table, fib_offset, &field_table);
             }
-            cp += character.len_utf16() as u32;
-        }
-        if !field_positions.is_empty() {
-            let mut field_table = Vec::new();
-            for (position, _) in &field_positions {
-                field_table.extend(position.to_le_bytes());
-            }
-            field_table.extend(cp.to_le_bytes());
-            for (_, marker) in field_positions {
-                field_table.extend([marker, 0]);
-            }
-            append_table_part(&mut word, &mut table, 0x122, &field_table);
         }
 
         let mut font_table = vec![1, 0, 0, 0];
@@ -611,6 +603,59 @@ mod tests {
             append_table_part(&mut word, &mut table, fib_offset, &bte);
         }
         build_cfb(&[("WordDocument", word), ("0Table", table)])
+    }
+
+    /// MS-DOC 2.8.25 Plcfld for every field character in `story`: flt from
+    /// the instruction keyword and grffldEnd fHasSep/fNested from structure.
+    pub(super) fn field_plc(story: &str) -> Option<Vec<u8>> {
+        let units: Vec<u16> = story.encode_utf16().collect();
+        let mut entries: Vec<(u32, u8, u8)> = Vec::new();
+        let mut open: Vec<(usize, bool)> = Vec::new();
+        for (cp, unit) in units.iter().enumerate() {
+            match unit {
+                0x13 => {
+                    let keyword: String = char::decode_utf16(units[cp + 1..].iter().copied())
+                        .map(|value| value.unwrap_or(' '))
+                        .skip_while(|value| *value == ' ')
+                        .take_while(|value| value.is_ascii_alphabetic())
+                        .collect();
+                    let flt = match keyword.to_ascii_uppercase().as_str() {
+                        "PAGE" => 0x21,
+                        "NUMPAGES" => 0x1a,
+                        "DATE" => 0x1f,
+                        "TIME" => 0x20,
+                        "REF" => 0x03,
+                        "IF" => 0x07,
+                        _ => 0x01,
+                    };
+                    open.push((entries.len(), false));
+                    entries.push((cp as u32, 0x13, flt));
+                }
+                0x14 => {
+                    open.last_mut().unwrap().1 = true;
+                    entries.push((cp as u32, 0x14, 0));
+                }
+                0x15 => {
+                    let (_, separator) = open.pop().unwrap();
+                    let flags =
+                        if separator { 0x80 } else { 0 } | if open.is_empty() { 0 } else { 0x40 };
+                    entries.push((cp as u32, 0x15, flags));
+                }
+                _ => {}
+            }
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        let mut plc = Vec::new();
+        for (cp, ..) in &entries {
+            plc.extend(cp.to_le_bytes());
+        }
+        plc.extend((units.len() as u32).to_le_bytes());
+        for (_, marker, grffld) in entries {
+            plc.extend([marker, grffld]);
+        }
+        Some(plc)
     }
 
     fn append_table_part(word: &mut [u8], table: &mut Vec<u8>, fib_offset: usize, part: &[u8]) {
@@ -906,7 +951,7 @@ mod tests {
 
     #[test]
     fn source_story_projects_directly_with_controls_and_cached_field_result() {
-        let bytes = source("A\tB\u{b}C\r\u{13}PAGE\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
+        let bytes = source("A\tB\u{b}C\r\u{13}REF x\u{14}42\u{15}\r\u{c}\r\u{e}\rA\u{c}B\u{e}C\r");
         let cfb = CompoundFile::open(&bytes).unwrap();
         let direct = super::super::direct_model(&cfb, 1024 * 1024)
             .unwrap()
@@ -1326,12 +1371,10 @@ mod tests {
         assert!(run.bold);
 
         let baseline_bytes = source_with_proofing("Proof\r", false);
-        let baseline = super::super::direct_model(
-            &CompoundFile::open(&baseline_bytes).unwrap(),
-            1024 * 1024,
-        )
-        .unwrap()
-        .document;
+        let baseline =
+            super::super::direct_model(&CompoundFile::open(&baseline_bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
         let BodyElement::Paragraph(baseline_paragraph) = &baseline.body[0] else {
             panic!("expected baseline paragraph");
         };
@@ -1507,11 +1550,54 @@ mod tests {
     }
 
     #[test]
-    fn restored_page_field_is_rejected_instead_of_exposing_cached_digits_as_text() {
+    fn header_page_fields_project_renderer_evaluated_field_runs() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
         let slots = [
             None,
-            Some("\u{13}PAGE\u{14}42\u{15}\r"),
+            Some("P\u{13} PAGE \\* roman \u{14}42\u{15}/\u{13}NUMPAGES\u{15}\r"),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
+        let document =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
+        let header = document.headers.default.as_ref().unwrap();
+        let BodyElement::Paragraph(paragraph) = &header.body[0] else {
+            panic!("header paragraph");
+        };
+        let runs: Vec<_> = paragraph
+            .runs
+            .iter()
+            .map(|run| match run {
+                DocRun::Text(text) => format!("text:{}", text.text),
+                DocRun::Field(field) => format!(
+                    "{}:{}:{}",
+                    field.field_type, field.instruction, field.fallback_text
+                ),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                "text:P",
+                "page:PAGE \\* roman:42",
+                "text:/",
+                "numPages:NUMPAGES:"
+            ]
+        );
+    }
+
+    #[test]
+    fn unverified_private_field_results_are_rejected_not_hidden() {
+        let sections = [(5, 2, 12_240, 15_840, 1, 720)];
+        let slots = [
+            None,
+            Some("\u{13}IF\u{14}x\u{15}\r"),
             None,
             None,
             None,
@@ -1519,9 +1605,13 @@ mod tests {
         ];
         let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
         assert!(
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).is_ok()
+        );
+        let bytes = mark_header_field_results_private(&bytes);
+        assert!(
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .unwrap_err()
-                .contains("field structures")
+                .contains("private field result")
         );
     }
 
@@ -1538,11 +1628,10 @@ mod tests {
             });
             sections.push((section + 1, 2, 12_240, 15_840, 1, 720));
         }
-        let hidden = format!("\u{13}IF\u{14}{}\u{15}\r", "x".repeat(16 * 1024));
+        let hidden = format!("\u{13}IF {}\u{15}\r", "x".repeat(16 * 1024));
         let mut slots = vec![None; section_count * 6];
         slots[1] = Some(hidden.as_str());
         let bytes = source_with_typography(&story, &sections, None, None, None, Some(&slots));
-        let bytes = mark_header_field_results_private(&bytes);
         let projected =
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .unwrap()

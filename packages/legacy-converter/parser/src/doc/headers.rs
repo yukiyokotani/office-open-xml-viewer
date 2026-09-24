@@ -36,14 +36,10 @@ impl Headers<'_> {
         &self.story.text[entry.text.clone()]
     }
 
+    /// MS-DOC 2.8.25 PlcfFldHdr, with CPs relative to the header document.
     #[cfg(feature = "direct-doc")]
-    pub(in crate::doc) fn restore_fields(
-        &self,
-        text: &str,
-        base_cp: usize,
-        paragraphs: &mut [super::Paragraph],
-    ) {
-        self.fields.restore(text, base_cp, paragraphs);
+    pub(in crate::doc) fn fields(&self) -> &header_fields::Table {
+        &self.fields
     }
 }
 

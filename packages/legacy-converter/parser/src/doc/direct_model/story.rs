@@ -284,7 +284,17 @@ pub(super) fn project(
                         "direct DOC model does not yet support note content",
                     ));
                 }
+                Token::EvaluatedField(field) => {
+                    let run = evaluated_field_run(story, formatting, style, table_style, &field)?;
+                    budget.charge(
+                        std::mem::size_of::<docx_model::FieldRun>()
+                            .checked_add(super::payload::field_run(&run)?)
+                            .ok_or("OUTPUT_TOO_LARGE")?,
+                    )?;
+                    budget.push(&mut paragraph.runs, DocRun::Field(Box::new(run)))?;
+                }
                 Token::FieldBegin(_) | Token::FieldEnd => {
+                    // Only the byte converter's header restoration emits these.
                     return Err(unsupported(
                         "direct DOC model does not retain field structures yet",
                     ));
@@ -443,6 +453,82 @@ fn push_control_text(
         budget.text(&mut paragraph.runs, &mut run, text)?;
     }
     Ok(())
+}
+
+/// Project one Word-evaluated field onto the DOCX parser's `FieldRun`
+/// (`make_field_run`): the same retained character-property subset, the
+/// trimmed instruction and the stored result as fallback text.
+fn evaluated_field_run(
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    field: &super::fields::Evaluated,
+) -> Result<docx_model::FieldRun, String> {
+    let mut properties = |cp: usize| -> Result<docx_model::FieldRun, String> {
+        let (_, fc, piece) = story
+            .position(cp)
+            .ok_or_else(|| unsupported("Word field outside piece table"))?;
+        let run = formatting
+            .direct_text_run(
+                style,
+                table_style,
+                fc,
+                piece.prm,
+                &story.prcs,
+                String::new(),
+            )?
+            .ok_or_else(|| unsupported("hidden Word evaluated field is not supported"))?;
+        Ok(docx_model::FieldRun {
+            field_type: field.field_type.to_string(),
+            instruction: field.instruction.clone(),
+            fallback_text: field.cached_result.clone(),
+            bold: run.bold,
+            italic: run.italic,
+            underline: run.underline,
+            strikethrough: run.strikethrough,
+            font_size: run.font_size,
+            color: run.color,
+            font_family: run.font_family,
+            font_family_high_ansi: run.font_family_high_ansi,
+            font_slots: run.font_slots,
+            font_family_east_asia: run.font_family_east_asia,
+            font_hint: run.font_hint,
+            rtl: run.rtl,
+            cs: run.cs,
+            font_family_cs: run.font_family_cs,
+            font_size_cs: run.font_size_cs,
+            bold_cs: run.bold_cs,
+            italic_cs: run.italic_cs,
+            lang_default: run.lang_default,
+            lang_bidi: run.lang_bidi,
+            lang_east_asia: run.lang_east_asia,
+            background: run.background,
+            vert_align: run.vert_align,
+            all_caps: run.all_caps,
+            small_caps: run.small_caps,
+            double_strikethrough: run.double_strikethrough,
+            highlight: run.highlight,
+            emphasis_mark: run.emphasis_mark,
+            typography_acquisition: run.typography_acquisition,
+        })
+    };
+    let run = properties(field.format_cp)?;
+    if let Some(result_cp) = field.agreeing_result_cp {
+        // Without MERGEFORMAT/CHARFORMAT, ECMA-376 17.16.4.3.3 leaves the
+        // formatting of a regenerated result to the application. The DOCX
+        // parser uses the first instruction run; accept that only when the
+        // stored result agrees, including every typography acquisition fact.
+        let stored = properties(result_cp)?;
+        let same = serde_json::to_value(&run).map_err(|error| error.to_string())?
+            == serde_json::to_value(&stored).map_err(|error| error.to_string())?;
+        if !same {
+            return Err(unsupported(
+                "Word evaluated field result formatting differs from its instruction",
+            ));
+        }
+    }
+    Ok(run)
 }
 
 #[cfg(test)]

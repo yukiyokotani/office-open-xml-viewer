@@ -66,6 +66,9 @@ struct AcquiredDoc<'a> {
     sections: Vec<sections::Section>,
     headers: Option<headers::Headers<'a>>,
     formatting: formatting::Formatting<'a>,
+    /// MS-DOC 2.8.25 PlcfFldMom. Only the direct model consumes it, so a
+    /// malformed table does not change the byte converter's behavior.
+    main_fields: Result<header_fields::Table, String>,
     note_references: notes::References,
     pictures: pictures::Store<'a>,
     floating: floating::Store<'a>,
@@ -84,6 +87,9 @@ enum Token {
     FieldEnd,
     NoteMarker,
     NoteReference(notes::Reference),
+    /// A field Word evaluates for display, projected by the direct model only.
+    #[cfg(feature = "direct-doc")]
+    EvaluatedField(Box<direct_model::fields::Evaluated>),
 }
 
 #[derive(Default)]
@@ -173,6 +179,7 @@ fn with_acquired_doc<T>(
     let note_references = notes::References::read(&note_stories, &story, &mut formatting)?;
     let pictures = pictures::Store::new(&data);
     let floating = floating::Store::read(&word, &table, ccp_text)?;
+    let main_fields = header_fields::Table::read_at(&word, &table, 0x11a, ccp_text);
     visit(AcquiredDoc {
         document_settings,
         story,
@@ -180,6 +187,7 @@ fn with_acquired_doc<T>(
         sections,
         headers,
         formatting,
+        main_fields,
         note_references,
         pictures,
         floating,
@@ -200,6 +208,7 @@ fn build_conversion(
         note_references,
         mut pictures,
         mut floating,
+        main_fields: _,
     } = facts;
     let document_xml = build_formatted_story(
         &story,
@@ -937,6 +946,8 @@ fn build_formatted_story(
                                 unreachable!()
                             }
                             Token::NoteMarker | Token::NoteReference(_) => unreachable!(),
+                            #[cfg(feature = "direct-doc")]
+                            Token::EvaluatedField(_) => unreachable!(),
                         });
                         xml.push_str("</w:r>");
                     }

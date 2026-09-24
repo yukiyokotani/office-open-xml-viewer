@@ -140,6 +140,37 @@ pub(super) fn text_run(run: &TextRun) -> Result<usize, String> {
     Ok(total.0)
 }
 
+pub(super) fn field_run(run: &docx_model::FieldRun) -> Result<usize, String> {
+    let mut total = Total::default();
+    for value in [&run.field_type, &run.instruction, &run.fallback_text] {
+        total.string(value)?;
+    }
+    for value in [
+        &run.color,
+        &run.font_family,
+        &run.font_family_high_ansi,
+        &run.font_family_east_asia,
+        &run.font_hint,
+        &run.font_family_cs,
+        &run.lang_default,
+        &run.lang_bidi,
+        &run.lang_east_asia,
+        &run.background,
+        &run.vert_align,
+        &run.highlight,
+        &run.emphasis_mark,
+    ] {
+        total.option_string(value)?;
+    }
+    if let Some(slots) = &run.font_slots {
+        total.font_slots(slots)?;
+    }
+    if let Some(wire) = &run.typography_acquisition {
+        total.run_typography(wire)?;
+    }
+    Ok(total.0)
+}
+
 pub(super) fn paragraph(value: &DocParagraph) -> Result<usize, String> {
     if value.runs.capacity() != 0 {
         return Err(unsupported("unaccounted direct DOC paragraph run payload"));
