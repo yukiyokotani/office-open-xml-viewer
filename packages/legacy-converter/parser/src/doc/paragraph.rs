@@ -9,6 +9,8 @@ mod direct;
 mod frame;
 #[cfg(feature = "direct-doc")]
 mod shading;
+#[cfg(all(test, feature = "direct-doc"))]
+pub(in crate::doc) use direct::byte_adapter_line_spacing_parity;
 #[cfg(feature = "direct-doc")]
 pub(super) use frame::FrameGap;
 #[cfg(feature = "direct-doc")]
@@ -49,6 +51,9 @@ pub struct Properties {
     tabs: super::tabs::Stops,
     flags: BTreeMap<&'static str, bool>,
     line: (u16, &'static str),
+    /// sprmPDyaLine was applied by a paragraph style or the direct PAPX.
+    /// Without it the MS-DOC 2.6.2 default single spacing is unauthored.
+    line_authored: bool,
     before: u16,
     after: u16,
     before_lines: Option<i16>,
@@ -96,6 +101,7 @@ impl Default for Properties {
                 ("adjustRightInd", true),
             ]),
             line: (240, "auto"),
+            line_authored: false,
             before: 0,
             after: 0,
             before_lines: None,
@@ -214,6 +220,7 @@ impl Properties {
                 } else {
                     (line as u16, if multiple == 1 { "auto" } else { "atLeast" })
                 };
+                self.line_authored = true;
             }
             0xa413 | 0xa414 => {
                 let value = u16_at(operand, 0)?;

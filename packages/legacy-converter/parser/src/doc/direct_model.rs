@@ -54,6 +54,10 @@ pub(super) fn build(
         .map(|settings| DocumentSettings {
             default_tab_stop: Some(f64::from(settings.default_tab_twips) / 20.0),
             adjust_line_height_in_table: Some(settings.adjust_line_height_in_table),
+            balance_single_byte_double_byte_width: Some(
+                settings.balance_single_byte_double_byte_width,
+            ),
+            character_spacing_control: settings.character_spacing_control.map(str::to_string),
             ..DocumentSettings::default()
         });
     let document_typography_settings = Some(DocumentTypographySettingsWire {
@@ -1595,6 +1599,7 @@ mod tests {
                     value.as_object_mut().unwrap().remove("styleId");
                 }
             }
+            crate::doc::paragraph::byte_adapter_line_spacing_parity(body);
         }
         assert_eq!(actual_body, expected_body);
         assert_eq!(actual["section"], expected["section"]);
@@ -2091,6 +2096,7 @@ mod tests {
                 }
             }
         }
+        crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut value);
         value
     }
 
@@ -2438,6 +2444,7 @@ mod tests {
                     value.as_object_mut().unwrap().remove("styleId");
                 }
             }
+            crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
             body
         };
         assert_eq!(normalize(&actual["body"]), normalize(&expected["body"]));
@@ -2475,6 +2482,7 @@ mod tests {
                         value.as_object_mut().unwrap().remove("styleId");
                     }
                 }
+                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
                 body
             };
             assert_eq!(
@@ -2523,6 +2531,7 @@ mod tests {
                         value.as_object_mut().unwrap().remove("styleId");
                     }
                 }
+                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
                 body
             };
             assert_eq!(
@@ -2570,6 +2579,7 @@ mod tests {
                         value.as_object_mut().unwrap().remove("styleId");
                     }
                 }
+                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
                 body
             };
             assert_eq!(
@@ -2615,6 +2625,7 @@ mod tests {
                         value.as_object_mut().unwrap().remove("styleId");
                     }
                 }
+                crate::doc::paragraph::byte_adapter_line_spacing_parity(&mut body);
                 body
             };
             assert_eq!(
