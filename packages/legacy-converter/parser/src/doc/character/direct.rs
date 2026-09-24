@@ -672,12 +672,40 @@ mod tests {
             );
         }
 
-        for lid in [u16::MAX, 0x1000, 0x0400, 0x007f, 0x0467, 0x040a] {
+        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
             let unresolved = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
             assert!(unresolved.xml(&[]).is_err(), "LID {lid:04x}");
             assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
             assert!(unresolved.direct_font_facts(&[]).is_err());
         }
+
+        // Word's DOCX-to-DOC evidence: 0x0000 is "x-none" on the default and
+        // East Asian axes, 0x1000 (no LCID) is no language, and a complex-script
+        // 0x0400 sets nothing.
+        let none = applied(&[
+            (0x4873, 0x0000u16.to_le_bytes().to_vec()),
+            (0x4874, 0x0000u16.to_le_bytes().to_vec()),
+            (0x485f, 0x1000u16.to_le_bytes().to_vec()),
+        ])
+        .direct_text_run("x".into(), &[])
+        .unwrap()
+        .unwrap();
+        assert_eq!(none.lang_default.as_deref(), Some("x-none"));
+        assert_eq!(none.lang_east_asia.as_deref(), Some("x-none"));
+        assert_eq!(none.lang_bidi, None);
+        let custom = applied(&[(0x4873, 0x1000u16.to_le_bytes().to_vec())])
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.lang_default, None);
+        assert!(applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
+            .direct_text_run("x".into(), &[])
+            .is_err());
+        let inherited = applied(&[(0x485f, 0x0400u16.to_le_bytes().to_vec())])
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(inherited.lang_bidi, None);
 
         // Projection validates the retained language before visibility, just as
         // the XML writer validates run properties before the DOCX parser drops

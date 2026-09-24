@@ -72,7 +72,11 @@ test.describe('legacy XLS corpus survey', () => {
         try {
           const { XlsxWorkbook } = await import('/src/workbook.ts');
           const { createLegacyXlsSource } = await import(/* @vite-ignore */ module);
-          const bytes = await (await fetch(`/private/xls/${encodeURIComponent(file)}`)).arrayBuffer();
+          // The dev server decodes paths with decodeURI, which keeps reserved
+          // escapes such as %2B; encodeURI leaves those characters literal.
+          const response = await fetch(`/private/xls/${encodeURI(file)}`);
+          if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+          const bytes = await response.arrayBuffer();
           // Excel column widths depend on the Normal font's maximum digit
           // width in whole pixels (ECMA-376 §18.3.1.13). The library default
           // measures only an installed face; this survey measures whatever
