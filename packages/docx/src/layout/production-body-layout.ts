@@ -49,6 +49,7 @@ import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasuremen
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
+import { bodyRootFloatingTablePlacementKey } from './source-key.js';
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
@@ -1246,6 +1247,26 @@ function buildConcreteBodyLayoutKernel(
               tableWidthPt,
               retained.layout.advancePt,
             );
+            const ownPrescanOccurrenceId = bodyRootFloatingTablePlacementKey(
+              request.input.source,
+              request.location.pageIndex,
+              cursor.rowIndex,
+              cursor.rowFragmentIndex,
+            );
+            // The advance registration is for text before this table. Its
+            // nested contents must acquire against other floats, not against
+            // the table that owns them.
+            const hasOwnPrescan = (positioning.vertAnchor === 'page'
+              || positioning.vertAnchor === 'margin')
+              && floatRegistry.entries.some((entry) =>
+                entry.occurrenceId === ownPrescanOccurrenceId);
+            const nestedAcquisitionRegistry = hasOwnPrescan
+              ? Object.freeze({
+                  ...floatRegistry,
+                  entries: Object.freeze(floatRegistry.entries.filter((entry) =>
+                    entry.occurrenceId !== ownPrescanOccurrenceId)),
+                })
+              : floatRegistry;
             const pageAnchoredCollision = request.cursor?.kind !== 'table'
               && (positioning.vertAnchor === 'page' || positioning.vertAnchor === 'margin')
               && resolvePageAnchoredTableDeferral({
@@ -1255,7 +1276,9 @@ function buildConcreteBodyLayoutKernel(
                   widthPt: raw.w,
                   heightPt: raw.h,
                 },
-                blockers: floatRegistry.entries.map(floatRegistryParticipant),
+                blockers: floatRegistry.entries
+                  .filter((entry) => entry.occurrenceId !== ownPrescanOccurrenceId)
+                  .map(floatRegistryParticipant),
                 overlapEpsilonPt: FLOAT_OVERLAP_EPS,
               }).defer;
             if (pageAnchoredCollision) {
@@ -1360,7 +1383,7 @@ function buildConcreteBodyLayoutKernel(
                       margin: frames.margin,
                       column: frames.text,
                     },
-                    floatingTableRegistry: floatRegistry,
+                    floatingTableRegistry: nestedAcquisitionRegistry,
                     finalPlacementTranslationPt: parentFrame,
                     reacquirePageDependentBlock: reacquireTableBlock,
                   });
@@ -1372,7 +1395,12 @@ function buildConcreteBodyLayoutKernel(
                   }
                   const sourcePlacement: FloatingTablePlacementLayout = Object.freeze({
                     kind: 'floating-table-placement',
-                    occurrenceId: `${retained.input.id}:root:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
+                    occurrenceId: bodyRootFloatingTablePlacementKey(
+                      request.input.source,
+                      request.location.pageIndex,
+                      cursor.rowIndex,
+                      cursor.rowFragmentIndex,
+                    ),
                     ownership: 'source',
                     physicalPageIndex: request.location.pageIndex,
                     displayPageNumber: state.displayPageNumber
@@ -1893,6 +1921,40 @@ function buildConcreteBodyLayoutKernel(
             return paragraphIds.get(key)!;
           };
           const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
+            if (anchor.kind === 'floating-table') {
+              // §17.4.57 topFromText is the minimum gap above a positioned
+              // table. In controlled Word output, a page-positioned table
+              // keeps its authored y while preceding paragraph lines that
+              // intersect its exclusion move below it. This holds with and
+              // without an intervening empty mark; increasing topFromText
+              // can move even the first line. Reuse the first pass's actual
+              // page/fragment bounds rather than guessing table height here.
+              const table = sourceElement(anchor.tableSource);
+              if (table.type !== 'table') {
+                throw new Error('Page-positioned table prescan source kind mismatch');
+              }
+              const positioning = state.acquisitionInputs.tableFormatInput(table).positioning;
+              if (!positioning || (positioning.vertAnchor !== 'page'
+                && positioning.vertAnchor !== 'margin')) {
+                throw new Error('Page-positioned table prescan requires a page-owned vertical axis');
+              }
+              const { bounds } = anchor;
+              return [Object.freeze({
+                kind: 'table' as const,
+                occurrenceId: anchor.occurrenceId,
+                overlap: table.overlap === 'never' ? 'never' as const : 'overlap' as const,
+                paragraphId: paragraphIdFor(anchor.tableSource),
+                bounds,
+                exclusionBounds: Object.freeze({
+                  xPt: bounds.xPt - positioning.leftFromTextPt,
+                  yPt: bounds.yPt - positioning.topFromTextPt,
+                  widthPt: bounds.widthPt + positioning.leftFromTextPt
+                    + positioning.rightFromTextPt,
+                  heightPt: bounds.heightPt + positioning.topFromTextPt
+                    + positioning.bottomFromTextPt,
+                }),
+              })];
+            }
             const paragraph = sourceElement(anchor.paragraphSource);
             if (paragraph.type !== 'paragraph') {
               throw new Error('Page-anchor prescan source kind mismatch');

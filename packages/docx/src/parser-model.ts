@@ -834,10 +834,14 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
   });
 }
 
-function acquiredBodyTable(source: SourceRef) {
+function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
+  const positioning = effectiveTablePositioning(table);
   return Object.freeze({
     kind: 'table' as const,
     source,
+    ...(positioning?.vertAnchor === 'page' || positioning?.vertAnchor === 'margin'
+      ? { pageOwnedFloatingTable: true }
+      : {}),
   });
 }
 
@@ -855,7 +859,7 @@ function bodyLayoutSequenceInput(
         logicalSequenceId: entry.logicalSequenceId,
         source: bodySourceAt(firstIndex),
         tables: Object.freeze(entry.tables.map((table, tableIndex) => Object.freeze({
-          ...acquiredBodyTable(bodySourceAt(firstIndex + tableIndex)),
+          ...acquiredBodyTable(bodySourceAt(firstIndex + tableIndex), table),
           rowCount: table.rows.length,
         }))),
       });
@@ -874,7 +878,7 @@ function bodyLayoutSequenceInput(
     if (element.type === 'table') {
       return Object.freeze({
         kind: 'body-block' as const,
-        block: acquiredBodyTable(source),
+        block: acquiredBodyTable(source, element),
       });
     }
     if (element.type === 'pageBreak' || element.type === 'columnBreak') {

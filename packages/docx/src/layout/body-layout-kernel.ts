@@ -150,10 +150,19 @@ export interface FollowingBodyBlockMeasurement {
 }
 
 export interface PageAnchorPrescanInput {
-  readonly anchors: readonly Readonly<{
-    occurrenceId: string;
-    paragraphSource: SourceRef;
-  }>[];
+  readonly anchors: readonly (
+    | Readonly<{
+        kind: 'drawing';
+        occurrenceId: string;
+        paragraphSource: SourceRef;
+      }>
+    | Readonly<{
+        kind: 'floating-table';
+        occurrenceId: string;
+        tableSource: SourceRef;
+        bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
+      }>
+  )[];
   readonly location: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
 }

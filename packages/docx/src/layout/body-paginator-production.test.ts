@@ -3164,7 +3164,9 @@ describe('canonical body producer', () => {
         measureFootnoteReserve: () => 0,
         measureFollowingBlock: () => ({ fullExtentPt: 20, leadContentExtentPt: 20 }),
         prescanPageAnchors: ({ anchors, location }) => {
-          events.push(`prescan:${anchors.map((anchor) => anchor.paragraphSource.path[0]).join(',')}`);
+          events.push(`prescan:${anchors.map((anchor) => (
+            anchor.kind === 'drawing' ? anchor.paragraphSource : anchor.tableSource
+          ).path[0]).join(',')}`);
           return {
             floats: {
               coordinateSpace: 'logical-page-points', flowDomainId: location.flowDomainId,

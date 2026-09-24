@@ -36,6 +36,8 @@ export interface BodyTableSourceInput {
   readonly kind: 'table';
   readonly source: SourceRef;
   readonly rowCount?: number;
+  /** §17.4.57 page/margin-positioned table whose exclusion can affect earlier text. */
+  readonly pageOwnedFloatingTable?: boolean;
 }
 
 export interface BodyAdjacentTableGroupInput {

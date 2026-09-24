@@ -86,7 +86,7 @@ import {
   wordContinuousSectionRestartDisplayNumber,
   wordTrailingEmptyMarkAdmissionAllowancePt,
 } from './section-compatibility.js';
-import { bodyOccurrenceKey } from './source-key.js';
+import { bodyOccurrenceKey, bodyRootFloatingTablePlacementKey, sourceKey } from './source-key.js';
 import {
   convergeHeaderFooterReserveSteps,
   headerStoryBodyReserveExtentPt,
@@ -820,17 +820,28 @@ export function drainPagination<T>(steps: PaginationSteps<T>): T {
   return step.value;
 }
 
+type PageWrapDestination = Readonly<{
+  kind: 'drawing';
+  occurrenceId: string;
+  paragraphSource: SourceRef;
+  pageIndex: number;
+  flowDomainId: string;
+}> | Readonly<{
+  kind: 'floating-table';
+  occurrenceId: string;
+  tableSource: SourceRef;
+  bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
+  pageIndex: number;
+  flowDomainId: string;
+}>;
+
 function* paginateBodyPassSteps(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
   reserves: readonly HeaderFooterReserve[],
-  anchorDestinations: ReadonlyMap<string, Readonly<{
-    occurrenceId: string;
-    paragraphSource: SourceRef;
-    pageIndex: number;
-    flowDomainId: string;
-  }>> | null,
+  anchorDestinations: ReadonlyMap<string, PageWrapDestination> | null,
+  minimumTablePageBySource: ReadonlyMap<string, number> | null,
   balancePlan: BodyBalancePlan,
   observer?: BodyPaginationPassObserver,
 ): PaginationSteps<BodyPaginationPassResult> {
@@ -890,12 +901,22 @@ function* paginateBodyPassSteps(
           destination.pageIndex === location.pageIndex
           && destination.flowDomainId === location.flowDomainId
         ))
-        .map(({ occurrenceId, paragraphSource }) => Object.freeze({
-          occurrenceId,
-          paragraphSource,
-        })));
+        .map((destination) => destination.kind === 'drawing'
+          ? Object.freeze({
+              kind: 'drawing' as const,
+              occurrenceId: destination.occurrenceId,
+              paragraphSource: destination.paragraphSource,
+            })
+          : Object.freeze({
+              kind: 'floating-table' as const,
+              occurrenceId: destination.occurrenceId,
+              tableSource: destination.tableSource,
+              bounds: destination.bounds,
+            })));
     }
-    const anchors: Array<Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>> = [];
+    const anchors: Array<Readonly<{
+      kind: 'drawing'; occurrenceId: string; paragraphSource: SourceRef;
+    }>> = [];
     for (let index = startIndex; index < input.sequence.length; index += 1) {
       const entry = input.sequence[index]!;
       if (entry.kind === 'authored-break' && entry.break !== 'column') break;
@@ -903,7 +924,7 @@ function* paginateBodyPassSteps(
       if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') continue;
       if (index > startIndex && entry.block.pageBreakBefore) break;
       entry.block.pageOwnedAnchorOccurrenceIds?.forEach((occurrenceId) => anchors.push(
-        Object.freeze({ occurrenceId, paragraphSource: entry.block.source }),
+        Object.freeze({ kind: 'drawing', occurrenceId, paragraphSource: entry.block.source }),
       ));
     }
     return Object.freeze(anchors);
@@ -1511,6 +1532,23 @@ function* paginateBodyPassSteps(
       previousParagraph = block;
     } else {
       previousParagraph = null;
+      if (block.kind === 'table') {
+        const minimumPage = minimumTablePageBySource?.get(`table:${sourceKey(block.source)}`);
+        if (minimumPage !== undefined) {
+          // §17.4.57 gives the page-owned table a fixed position and a minimum
+          // distance from adjacent text. Word controls show that a table whose
+          // own exclusion sends its preceding text past candidate page p is
+          // instead tried on p+1. Do not jump to the observed source page:
+          // intermediate pages may still admit the table. This floor belongs
+          // only to this exact convergence run.
+          while (state.flow.pageIndex < minimumPage) {
+            commitTransition(
+              advanceToPage(state.flow, state.flow.section, 'overflow'),
+              entryIndex,
+            );
+          }
+        }
+      }
       let cursor: import('./body-layout-kernel.js').BodyTableContinuationCursor | undefined;
       let complete = false;
       while (!complete) {
@@ -2181,14 +2219,32 @@ function appendUnsupportedNotePositionDiagnostic(
 }
 
 function pageAnchorDestinationPlan(layout: DocumentLayout) {
-  const destinations = new Map<string, Readonly<{
-    occurrenceId: string;
-    paragraphSource: SourceRef;
-    pageIndex: number;
-    flowDomainId: string;
-  }>>();
+  const destinations = new Map<string, PageWrapDestination>();
   for (const page of layout.pages) {
     for (const node of page.layers.body) {
+      if (node.kind === 'table' && !node.ordinaryFlow
+        && node.sectionFlowOwnership === 'page') {
+        // §17.4.57 permits a page-positioned table to exclude text that
+        // precedes it in source order. The first pass owns its actual page and
+        // fragment extent; the next pass reserves exactly that page-local box.
+        // Continuations switch to text-owned flow, so only the first root
+        // fragment has page ownership and cursor (row 0, fragment 0).
+        // Scope: this resolves an accepted page/margin root's collision with
+        // preceding visible lines. It does not yet reinterpret §17.4.57's
+        // logical anchor at the following regular paragraph when that owner
+        // differs from the table's current source-page assignment.
+        const occurrenceId = bodyRootFloatingTablePlacementKey(node.source, page.pageIndex, 0, 0);
+        destinations.set(`table:${sourceKey(node.source)}`,
+          Object.freeze({
+            kind: 'floating-table',
+            occurrenceId,
+            tableSource: node.source,
+            bounds: Object.freeze({ ...node.flowBounds }),
+            pageIndex: page.pageIndex,
+            flowDomainId: node.flowDomainId,
+          }));
+        continue;
+      }
       if (node.kind !== 'paragraph') continue;
       for (const drawing of node.drawings) {
         const anchor = drawing.anchorLayer;
@@ -2197,6 +2253,7 @@ function pageAnchorDestinationPlan(layout: DocumentLayout) {
           || anchor.verticalOwnership !== 'page') continue;
         const occurrenceId = anchor.acquisitionOccurrenceId ?? anchor.occurrenceId;
         destinations.set(occurrenceId, Object.freeze({
+          kind: 'drawing',
           occurrenceId,
           paragraphSource: node.source,
           pageIndex: page.pageIndex,
@@ -2212,6 +2269,20 @@ function anchorPlanIdentity(plan: ReadonlyMap<string, unknown>): string {
   return JSON.stringify([...plan].sort(([left], [right]) => left.localeCompare(right)));
 }
 
+function changedAnchorKeys(
+  applied: ReadonlyMap<string, PageWrapDestination>,
+  observed: ReadonlyMap<string, PageWrapDestination>,
+): ReadonlySet<string> {
+  const changed = new Set<string>();
+  for (const [key, destination] of applied) {
+    if (JSON.stringify(destination) !== JSON.stringify(observed.get(key))) changed.add(key);
+  }
+  for (const key of observed.keys()) {
+    if (!applied.has(key)) changed.add(key);
+  }
+  return changed;
+}
+
 function* paginateBodyWithAnchorConvergenceSteps(
   input: BodyLayoutInput,
   services: LayoutServices,
@@ -2219,40 +2290,80 @@ function* paginateBodyWithAnchorConvergenceSteps(
   reserves: readonly HeaderFooterReserve[],
   balancePlan: BodyBalancePlan,
   observer?: BodyPaginationPassObserver,
+  seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
 ): PaginationSteps<BodyPaginationPassResult> {
   const hasPageOwnedAnchors = input.sequence.some((entry) => (
     entry.kind === 'body-block'
-    && entry.block.kind === 'paragraph'
-    && (entry.block.pageOwnedAnchorOccurrenceIds?.length ?? 0) > 0
+    && (entry.block.kind === 'paragraph'
+      ? (entry.block.pageOwnedAnchorOccurrenceIds?.length ?? 0) > 0
+      : entry.block.pageOwnedFloatingTable === true)
   ));
   if (!hasPageOwnedAnchors) {
     return yield* paginateBodyPassSteps(
-      input, services, options, reserves, null, balancePlan, observer,
+      input, services, options, reserves, null, null, balancePlan, observer,
     );
   }
-  try {
+  const converge = function* (initialPlan?: ReturnType<typeof pageAnchorDestinationPlan>) {
     return (yield* convergeExactStateSteps<Readonly<{
       pass: BodyPaginationPassResult;
       plan: ReturnType<typeof pageAnchorDestinationPlan>;
+      minimumTablePageBySource: ReadonlyMap<string, number>;
     }>, number>({
+      ...(initialPlan ? { seedState: anchorPlanIdentity(initialPlan) } : {}),
       step: function* anchorPass(previous) {
+        const appliedPlan = previous?.plan ?? initialPlan ?? null;
         const pass = yield* paginateBodyPassSteps(
           input,
           services,
           options,
           reserves,
-          previous?.plan ?? null,
+          appliedPlan,
+          previous?.minimumTablePageBySource ?? null,
           balancePlan,
           previous === undefined ? observer : undefined,
         );
+        const plan = pageAnchorDestinationPlan(pass.layout);
+        const minimumTablePageBySource = new Map<string, number>();
+        // Compare all destinations once. Testing every table against a fresh
+        // copy of the full plan would make table-heavy documents quadratic.
+        const changedKeys = previous && appliedPlan
+          ? changedAnchorKeys(appliedPlan, plan)
+          : null;
+        for (const [key, destination] of plan) {
+          if (destination.kind !== 'floating-table') continue;
+          const prior = appliedPlan?.get(key);
+          if (prior?.kind !== 'floating-table' || !changedKeys
+            || (changedKeys.size > 1 || (changedKeys.size === 1 && !changedKeys.has(key)))) {
+            continue;
+          }
+          // Only this table's changed exclusion can have moved its source in
+          // this run: input, reserves, and every other page anchor are fixed.
+          // Recheck the next candidate page, not the observed source page.
+          const provenPage = destination.pageIndex > prior.pageIndex
+            ? prior.pageIndex + 1
+            : previous?.minimumTablePageBySource.get(key);
+          if (provenPage !== undefined) minimumTablePageBySource.set(key, provenPage);
+        }
         return Object.freeze({
           pass,
-          plan: pageAnchorDestinationPlan(pass.layout),
+          plan,
+          minimumTablePageBySource,
         });
       },
       stateOf: (value) => anchorPlanIdentity(value.plan),
       limit: 16,
     })).value.pass;
+  };
+  try {
+    try {
+      return yield* converge(seedPlan);
+    } catch (error) {
+      if (!seedPlan || !(error instanceof ExactConvergenceError)) throw error;
+      // A plan carried from another reserve/balance run is only a starting
+      // estimate. Its former page ownership may be invalid in this run; retry
+      // once from the unseeded source order before reporting non-convergence.
+      return yield* converge();
+    }
   } catch (error) {
     if (error instanceof ExactConvergenceError) {
       throw new LayoutInvariantError(
@@ -2312,6 +2423,7 @@ function* paginateBodyWithColumnBalancingSteps(
   options: LayoutOptions,
   reserves: readonly HeaderFooterReserve[],
   observer?: BodyPaginationPassObserver,
+  seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
 ): PaginationSteps<BodyPaginationPassResult> {
   let plan: BodyBalancePlan = new Map();
   let pass = yield* paginateBodyWithAnchorConvergenceSteps(
@@ -2321,6 +2433,7 @@ function* paginateBodyWithColumnBalancingSteps(
     reserves,
     plan,
     observer,
+    seedPlan,
   );
   if (pass.terminalDiagnostic !== null) return pass;
   for (const boundary of continuousBalanceBoundaries(input)) {
@@ -2350,6 +2463,8 @@ function* paginateBodyWithColumnBalancingSteps(
       options,
       reserves,
       plan,
+      undefined,
+      pageAnchorDestinationPlan(pass.layout),
     );
     if (pass.terminalDiagnostic !== null) return pass;
   }
@@ -2511,6 +2626,11 @@ export function* paginateBodySteps(
         iterationServices,
         options,
         reserves,
+        undefined,
+        // Page-owned tables need one geometry-discovery pass and one exclusion
+        // pass. Reuse the accepted geometry for this later reserve iteration
+        // when stable; changed ownership still runs exact convergence anew.
+        pageAnchorDestinationPlan(current.layout),
       );
     },
     identity: (pass) => paginationFieldPageContexts(pass.layout),

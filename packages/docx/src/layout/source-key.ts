@@ -21,6 +21,16 @@ export function bodyOccurrenceKey(
   ].join('/');
 }
 
+/** Acquisition identity shared by the page prescan and the accepted root table. */
+export function bodyRootFloatingTablePlacementKey(
+  source: SourceRef,
+  pageIndex: number,
+  rowIndex: number,
+  rowFragmentIndex: number,
+): string {
+  return `table:${source.path.join('.')}:root:${pageIndex}:${rowIndex}:${rowFragmentIndex}`;
+}
+
 export function imageResourceKey(source: SourceRef, partPath: string): string {
   return `image:${sourceKey(source)}:${encodeURIComponent(partPath)}`;
 }
