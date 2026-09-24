@@ -2305,12 +2305,17 @@ fn run_shd_display_color(shd: roxmltree::Node) -> Option<String> {
     // PDF color operands reveal an 8-bit foreground coverage before mixing:
     // pct50 over white is 127/255 (not the 128 from a direct 50% gray round).
     let alpha = ((u32::from(percent_tenths) * 255 + 500) / 1000) as u16;
-    let blend = |index: usize| -> u8 {
-        let bg = u8::from_str_radix(&fill[index..index + 2], 16).unwrap();
-        let fg = u8::from_str_radix(&foreground[index..index + 2], 16).unwrap();
-        ((u16::from(bg) * (255 - alpha) + u16::from(fg) * alpha + 127) / 255) as u8
+    let blend = |index: usize| -> Option<u8> {
+        let bg = u8::from_str_radix(fill.get(index..index + 2)?, 16).ok()?;
+        let fg = u8::from_str_radix(foreground.get(index..index + 2)?, 16).ok()?;
+        Some(((u16::from(bg) * (255 - alpha) + u16::from(fg) * alpha + 127) / 255) as u8)
     };
-    Some(format!("{:02x}{:02x}{:02x}", blend(0), blend(2), blend(4)))
+    Some(format!(
+        "{:02x}{:02x}{:02x}",
+        blend(0)?,
+        blend(2)?,
+        blend(4)?
+    ))
 }
 
 fn parse_edge_border(node: roxmltree::Node) -> EdgeBorder {
