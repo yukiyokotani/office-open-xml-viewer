@@ -196,6 +196,8 @@ export interface DrawingLayout extends LayoutNodeBase {
     sourceOrder: number;
     horizontalOwnership: 'page' | 'host';
     verticalOwnership: 'page' | 'host';
+    /** Authored §20.4.2.3 cell ownership, independent of row-height containment. */
+    layoutInCell?: true;
     /** @internal This occurrence contributes to its owning table-cell extent. */
     cellContainment?: true;
   }>;

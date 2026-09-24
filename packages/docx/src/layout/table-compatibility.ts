@@ -98,6 +98,31 @@ export const WORD_AUTHORED_ROW_HEIGHT_PAGE_BOUNDARY = defineCompatibilityRule({
   description: 'Word relocates an ordinary splittable exact-height row, or an atLeast row whose authored minimum governs its complete height, when that height exceeds the remaining page band and fits a fresh page. A shorter atLeast minimum permits content fragmentation; an auto row may fragment. Tested with cantSplit on/off, fitting/overflow bands, and keepLines/widow controls. Repeated headers and atLeast rows expanded by content are outside this observation.',
 });
 
+export const WORD_CELL_OWNED_ANCHOR_PAGE_CUT = defineCompatibilityRule({
+  id: 'word-cell-owned-anchor-page-cut',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'cell-owned-anchor-page-band-boundary',
+    application: 'Microsoft Word',
+    version: '16.113.2',
+    platform: 'macOS 27.0',
+  },
+  description: 'For an atLeast row without cantSplit containing a layoutInCell, allowOverlap wrapNone image, Word permits the image past its row border while the image stays in the page body band. Controlled preceding-spacing cases at 0pt and 40pt kept the row; at 80pt Word moved the complete row to the next page. A separate near-edge control confirmed that trailing empty cell paragraphs may still form an empty row continuation. Other anchor wrap/row-height combinations and over-page images are outside this observation.',
+});
+
+/** Compatibility choice governed by {@link WORD_CELL_OWNED_ANCHOR_PAGE_CUT}.
+ * Geometry detection remains in the table paginator; this gate only chooses
+ * the observed Word page cut when a fresh page offers more room. */
+export function wordDefersCellOwnedAnchorPastPageBand(input: Readonly<{
+  compatibility: 'word' | 'standard';
+  availableHeightPt: number;
+  freshPageHeightPt: number;
+  epsilonPt: number;
+}>): boolean {
+  return input.compatibility === 'word'
+    && input.availableHeightPt + input.epsilonPt < input.freshPageHeightPt;
+}
+
 export const WORD_PARALLEL_PARAGRAPH_ROW_CUT = defineCompatibilityRule({
   id: 'word-parallel-paragraph-row-cut',
   evidence: {

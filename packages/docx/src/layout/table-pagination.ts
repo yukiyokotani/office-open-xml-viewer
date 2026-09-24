@@ -19,6 +19,7 @@ import {
 } from './table.js';
 import {
   wordClipsOverPageCantSplitRow,
+  wordDefersCellOwnedAnchorPastPageBand,
   wordRelocatesAuthoredHeightRowAtPageBoundary,
   wordRelocatesParallelParagraphRowCut,
 } from './table-compatibility.js';
@@ -1119,6 +1120,32 @@ function materializeFragment(
   });
 }
 
+function firstCellAnchorPastPageBand(
+  fragment: TableFragmentLayout,
+  pageBottomPt: number,
+): number {
+  for (let rowIndex = 0; rowIndex < fragment.rows.length; rowIndex += 1) {
+    const row = fragment.rows[rowIndex]!;
+    for (const cell of row.cells) {
+      for (const block of cell.blocks) {
+        const paragraph = block.layout;
+        if (paragraph.kind !== 'paragraph') continue;
+        for (const drawing of paragraph.drawings) {
+          if (drawing.anchorLayer?.layoutInCell !== true
+            || drawing.anchorLayer.cellContainment === true
+            || drawing.anchorLayer.verticalOwnership !== 'host'
+            || drawing.orientation === 'upright-physical') continue;
+          const bottomPt = cell.contentBounds.yPt + block.offsetPt
+            + drawing.flowBounds.yPt - paragraph.flowBounds.yPt
+            + drawing.flowBounds.heightPt;
+          if (bottomPt > pageBottomPt + EPSILON_PT) return rowIndex;
+        }
+      }
+    }
+  }
+  return -1;
+}
+
 export function takeTableFragment(
   source: RetainedTableAcquisition,
   cursor: TableFragmentCursor,
@@ -1414,6 +1441,34 @@ export function takeTableFragment(
     };
   }
   let fragment = materializeFragment(source, selected, context);
+  // §20.4.2.3 identifies the drawing as cell-owned; it does not specify this
+  // page-cut choice. An overlapping drawing need not enlarge row flow height,
+  // so a legal text cut can leave its image outside the body band. The bounded
+  // Word choice and counterexamples are owned by WORD_CELL_OWNED_ANCHOR_PAGE_CUT.
+  const pageBottomPt = context.placement.cursor.yPt + context.availableHeightPt;
+  while (wordDefersCellOwnedAnchorPastPageBand({
+    compatibility: context.compatibility,
+    availableHeightPt: context.availableHeightPt,
+    freshPageHeightPt: context.freshPageHeightPt,
+    epsilonPt: EPSILON_PT,
+  })) {
+    const conflictIndex = firstCellAnchorPastPageBand(fragment, pageBottomPt);
+    if (conflictIndex < 0) break;
+    const conflict = selected[conflictIndex];
+    const authoredRow = conflict && source.input.rows[conflict.logicalRowIndex];
+    if (conflict?.ownership !== 'source' || conflict.fragmentIndex !== 0
+      || authoredRow?.heightRule !== 'atLeast' || authoredRow.cantSplit) break;
+    if (selected.slice(0, conflictIndex).every((item) => item.ownership !== 'source')) {
+      return { fragment: null, nextCursor: cursor, requiresFreshPage: true };
+    }
+    selected.splice(conflictIndex);
+    nextCursor = Object.freeze({
+      rowIndex: conflict.logicalRowIndex,
+      rowFragmentIndex: 0,
+      cells: Object.freeze([]),
+    });
+    fragment = materializeFragment(source, selected, context);
+  }
   while (fragment.advancePt > context.availableHeightPt + EPSILON_PT) {
     const last = selected.at(-1);
     const sourceCount = selected.filter((row) => row.ownership === 'source').length;

@@ -3302,6 +3302,9 @@ function acquireAnchorOccurrence(
         'vertical',
         behavior.layoutInCell && options.anchorCellBounds !== undefined,
       ),
+      ...(behavior.layoutInCell && options.anchorCellBounds
+        ? { layoutInCell: true as const }
+        : {}),
       ...(behavior.layoutInCell
         && wordLayoutInCellOwnsRowContainment(
           behavior.allowOverlap,
