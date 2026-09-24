@@ -59,6 +59,38 @@ a native failure. ZIP resource metrics and Markdown export are unsupported for
 this source. Node document APIs do not yet support the direct DOC source;
 continue using byte conversion there. Neither route executes macros.
 
+Fields in the direct DOC source are checked against each story's own field
+table: the main document, headers and footers, footnotes, endnotes and
+textboxes (MS-DOC 2.8.25). They map onto the fields the DOCX reader already
+supports:
+
+- PAGE, NUMPAGES, DATE and TIME are computed when the document is laid out,
+  as for DOCX. Word does the same: a DOC header DATE field prints the export
+  date in Word's PDF, not the date stored in the file. Only switches the
+  renderer interprets exactly are accepted: numeric page formats,
+  MERGEFORMAT or CHARFORMAT, and date pictures that need no language data.
+- Form check boxes show their stored state and size.
+- Every other field shows its stored result. Fields are never executed.
+  HYPERLINK fields and REF or PAGEREF fields with `\h` become links. Inside a
+  table of contents, link text keeps the paragraph's color and underline,
+  which matches Word's PDF. Stored results are not recomputed, so a
+  PAGEREF number can differ from a PDF that Word produced after updating it.
+- Some fields reject the document. These include equations (EQ, often used
+  for phonetic guides), macro buttons, drop-down form fields and SYMBOL
+  fields without a stored result. Others are fields shown as codes, locked
+  or edited page and date fields, and nested hyperlinks. A private result
+  with content is rejected unless it is an INCLUDEPICTURE picture, which
+  Word's PDF shows.
+
+Footnotes and endnotes become DOCX notes. Automatic reference marks and the
+numbers inside each note use the document-wide note format and starting
+value. Arabic, Roman and letter formats are supported, with Word's
+lowercase-Roman default for endnotes in later Word versions. Footnotes must be
+at the page bottom and endnotes at the end of the document. Documents are
+rejected if they use custom reference marks, number restarts per section or
+per page, sections with different note numbering, or custom separator
+stories.
+
 ## Experimental direct PPT source
 
 Import `createLegacyPptSource` from the separate
