@@ -84,6 +84,34 @@ impl Position {
         (position, self.no_overlap.then(|| "never".into()))
     }
 
+    /// Reject the active positions whose DOC display is not established.
+    ///
+    /// * A vertical position of zero is the ST_YAlign `inline` value
+    ///   ([MS-DOC] 2.6.3 sprmTDyaAbs). Its meaning for an absolutely
+    ///   positioned table is not specified.
+    /// * Word ignores an OOXML `tblpPr` whose offsets are zero with a text
+    ///   horizontal anchor and a non-text vertical anchor ([MS-OI29500]
+    ///   2.1.162). Whether Word's DOC reader applies the same exception to the
+    ///   equivalent DOC values (left or zero X, zero Y, column and margin/page
+    ///   anchors) has not been observed.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn check_direct_floating(&self) -> Result<(), String> {
+        let Some((horizontal, vertical)) = self.active_anchors() else {
+            return Ok(());
+        };
+        if self.y == 0 {
+            return Err(super::unsupported(
+                "direct DOC model cannot position a table with inline vertical alignment",
+            ));
+        }
+        if horizontal == 0 && vertical != 2 && matches!(self.x, 0 | 1) && self.y == 1 {
+            return Err(super::unsupported(
+                "direct DOC model cannot classify a zero-offset positioned table",
+            ));
+        }
+        Ok(())
+    }
+
     /// MS-DOC 2.7.13 Copts: nondefault position/wrapping facts create tblpPr;
     /// no-overlap alone does not. Reserved anchor values suppress placement.
     fn active_anchors(&self) -> Option<(u8, u8)> {

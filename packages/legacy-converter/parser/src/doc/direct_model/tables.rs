@@ -2,8 +2,8 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{Color, PreferredWidth, Properties},
-    table_structure::{Assembler, Event, LogicalTable, Payload},
+    table::{Color, PreferredIndent, PreferredWidth, Properties},
+    table_structure::{Assembler, Event, LogicalTable, Payload, PlannedRow},
     unsupported,
 };
 use docx_model::{
@@ -44,13 +44,26 @@ impl Payload for Blocks {
 pub(super) struct Writer<'a> {
     structure: Assembler<Blocks>,
     sequence: &'a mut usize,
+    positioned_tables: bool,
 }
 
 impl<'a> Writer<'a> {
+    /// A writer that rejects absolutely positioned tables.
+    #[cfg(test)]
     pub(super) fn new(sequence: &'a mut usize) -> Self {
+        Self::with_positioned_tables(sequence, false)
+    }
+
+    /// `positioned_tables` admits [MS-DOC] 2.6.3 table positioning as a
+    /// floating table. Only the main document story enables it: Word ignores
+    /// OOXML table positioning in notes, comments and text boxes
+    /// ([MS-OI29500] 2.1.162), and DOC header/footer or note positioning has
+    /// not been observed, so those stories keep positioned tables gated.
+    pub(super) fn with_positioned_tables(sequence: &'a mut usize, positioned_tables: bool) -> Self {
         Self {
             structure: Assembler::new(),
             sequence,
+            positioned_tables,
         }
     }
 
@@ -63,11 +76,12 @@ impl<'a> Writer<'a> {
     ) -> Result<(), String> {
         let remaining = std::cell::Cell::new(budget.remaining_bytes);
         let sequence = &mut *self.sequence;
+        let positioned_tables = self.positioned_tables;
         self.structure.push(
             props,
             mark,
             paragraph,
-            |Event(plans)| project_tables(plans, sequence, &remaining),
+            |Event(plans)| project_tables(plans, sequence, positioned_tables, &remaining),
             &mut |bytes| charge_cell(&remaining, bytes),
         )?;
         budget.remaining_bytes = remaining.get();
@@ -76,8 +90,9 @@ impl<'a> Writer<'a> {
 
     pub(super) fn finish(self, budget: &mut ModelBudget) -> Result<Blocks, String> {
         let remaining = std::cell::Cell::new(budget.remaining_bytes);
+        let positioned_tables = self.positioned_tables;
         let blocks = self.structure.finish(
-            |Event(plans)| project_tables(plans, self.sequence, &remaining),
+            |Event(plans)| project_tables(plans, self.sequence, positioned_tables, &remaining),
             &mut |bytes| charge_cell(&remaining, bytes),
         )?;
         budget.remaining_bytes = remaining.get();
@@ -88,11 +103,12 @@ impl<'a> Writer<'a> {
 fn project_tables(
     plans: Vec<LogicalTable<Blocks>>,
     sequence: &mut usize,
+    positioned_tables: bool,
     remaining: &std::cell::Cell<usize>,
 ) -> Result<Blocks, String> {
     let mut output = Blocks::default();
     for plan in plans {
-        let table = project_table(plan, *sequence, remaining)?;
+        let table = project_table(plan, *sequence, positioned_tables, remaining)?;
         *sequence = sequence.checked_add(1).ok_or("OUTPUT_TOO_LARGE")?;
         reserve(&mut output.0, 1, &mut |n| charge_cell(remaining, n))?;
         output.0.push(Block::Table(Box::new(table)));
@@ -103,6 +119,7 @@ fn project_tables(
 fn project_table(
     plan: LogicalTable<Blocks>,
     sequence: usize,
+    positioned_tables: bool,
     remaining: &std::cell::Cell<usize>,
 ) -> Result<DocTable, String> {
     let first = &plan.rows[0].source;
@@ -112,10 +129,17 @@ fn project_table(
         ));
     }
     let (tblp_pr, overlap) = first.position.direct();
-    if tblp_pr.is_some() {
-        return Err(unsupported(
-            "direct DOC model cannot yet classify positioned table flow",
-        ));
+    // [MS-DOC] 2.6.3/2.7.13: nondefault position or wrapping properties make
+    // the table absolutely positioned; the shared model lays such a table
+    // out of the ordinary flow (ECMA-376 Part 1 17.4.57).
+    let ordinary_flow = tblp_pr.is_none();
+    if !ordinary_flow {
+        if !positioned_tables {
+            return Err(unsupported(
+                "direct DOC model cannot position a table outside the main story",
+            ));
+        }
+        first.position.check_direct_floating()?;
     }
     let (alignment, physical) = first.alignment;
     let first_bidi = first.bidi;
@@ -147,6 +171,7 @@ fn project_table(
                 "direct DOC model cannot retain row table-property shading",
             ));
         }
+        check_row_preferences(&planned)?;
         let mut cells = Vec::new();
         reserve(&mut cells, planned.cells.len(), &mut |n| {
             charge_cell(remaining, n)
@@ -174,9 +199,19 @@ fn project_table(
                     ));
                 }
             };
+            if source.no_wrap && !matches!(source.preferred, Some(PreferredWidth::Dxa(_))) {
+                // [MS-DOC] 2.9.28: fNoWrap is ignored only when the cell's
+                // preferred width is ftsDxa. Otherwise it changes autofit
+                // wrapping, which the shared cell model does not represent.
+                return Err(unsupported(
+                    "direct DOC model cannot retain no-wrap cells without an absolute preferred width",
+                ));
+            }
             if source.flags & ((1 << 12) | (1 << 14)) != 0
-                || source.borders[4].is_some()
-                || source.borders[5].is_some()
+                || source.borders[4..]
+                    .iter()
+                    .flatten()
+                    .any(|border| !border.is_cleared())
             {
                 return Err(unsupported(
                     "direct DOC model cannot retain cell fit/hide/diagonal facts",
@@ -340,7 +375,7 @@ fn project_table(
         overlap,
         table_layout: TableLayoutAcquisitionWire {
             effective_style_id: None,
-            ordinary_flow: true,
+            ordinary_flow,
             logical_sequence_id: format!("legacy-doc/table/{sequence}"),
             logical_row_offset: 0,
             logical_total_rows: row_count,
@@ -362,6 +397,57 @@ fn project_table(
         std::mem::size_of::<DocTable>() + payload::table(&table)?,
     )?;
     Ok(table)
+}
+
+/// Validate the row preferences that the projection represents through the
+/// physical row geometry instead of a separate model field.
+fn check_row_preferences(planned: &PlannedRow<Blocks>) -> Result<(), String> {
+    let source = &planned.source;
+    if source.bidi
+        && source.preferred_indent.is_some()
+        && !matches!(
+            source.preferred_indent,
+            Some(PreferredIndent::Dxa(value)) if i32::from(value) == source.origin()
+        )
+    {
+        // The preferred-indent evidence (see table::PreferredIndent) covers
+        // left-to-right tables only. The effective value includes the one
+        // inherited from the selected table style (story::preferences). A
+        // preference equal to the projected origin gives the same placement
+        // under either reading.
+        return Err(unsupported(
+            "direct DOC model cannot place a right-to-left table with a preferred indent",
+        ));
+    }
+    // [MS-DOC] 2.6.3 sprmTWidthBefore/sprmTWidthAfter are the preferred widths
+    // of the same leading/trailing row parts whose physical widths the grid
+    // projection emits as wBefore/wAfter. Admit them only where both agree, so
+    // the projection is the same whichever one Word lays out from. ftsNil is
+    // the documented absence of a preference.
+    for (preference, grid, physical) in [
+        (
+            source.preferred_before,
+            planned.grid_before,
+            planned.width_before,
+        ),
+        (
+            source.preferred_after,
+            planned.grid_after,
+            planned.width_after,
+        ),
+    ] {
+        match preference {
+            None | Some(None) => {}
+            Some(Some(PreferredWidth::Dxa(value)))
+                if i32::from(value) == if grid == 0 { 0 } else { physical } => {}
+            Some(Some(_)) => {
+                return Err(unsupported(
+                    "direct DOC model cannot reconcile a preferred row part width with its grid",
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn physical_width(value: i32) -> TableWidthAcquisitionWire {
@@ -504,7 +590,76 @@ mod tests {
             .finish(&mut budget)
             .err()
             .unwrap()
-            .contains("classify positioned"));
+            .contains("outside the main story"));
+    }
+
+    fn positioned(sprms: &[(u16, &[u8])]) -> Result<DocTable, String> {
+        let mut end = row(1, &[1000]);
+        for (code, operand) in sprms {
+            end.row.apply(*code, operand).unwrap();
+        }
+        let mut sequence = 0;
+        let mut writer = Writer::with_positioned_tables(&mut sequence, true);
+        let mut budget = ModelBudget::new(1_000_000);
+        writer.push(cell(1), '\u{7}', paragraph("a"), &mut budget)?;
+        writer.push(end, '\u{7}', Blocks::default(), &mut budget)?;
+        let mut body = writer.finish(&mut budget)?;
+        let Some(Block::Table(table)) = body.0.pop() else {
+            panic!("table")
+        };
+        Ok(*table)
+    }
+
+    #[test]
+    fn main_story_positioned_table_leaves_the_ordinary_flow() {
+        // Paragraph-relative vertical and margin-relative horizontal anchors,
+        // a centered X and a 219-twip Y offset (YAS_plusOne 220).
+        let table = positioned(&[
+            (0x360d, &[0x60]),
+            (0x940e, &(-4i16).to_le_bytes()),
+            (0x940f, &220i16.to_le_bytes()),
+            (0x9410, &180u16.to_le_bytes()),
+            (0x941e, &180u16.to_le_bytes()),
+            (0x3465, &[1]),
+        ])
+        .unwrap();
+        assert!(!table.table_layout.ordinary_flow);
+        let position = table.tblp_pr.unwrap();
+        assert_eq!(position.vert_anchor, "text");
+        assert_eq!(position.horz_anchor, "margin");
+        assert_eq!(position.tblp_x_spec.as_deref(), Some("center"));
+        assert_eq!(position.tblp_y, 10.95);
+        assert_eq!(position.left_from_text, 9.0);
+        assert_eq!(position.right_from_text, 9.0);
+        assert_eq!(table.overlap.as_deref(), Some("never"));
+
+        // Reserved anchors mean "not absolutely positioned".
+        let table = positioned(&[(0x360d, &[0xf0]), (0x940f, &220i16.to_le_bytes())]).unwrap();
+        assert!(table.tblp_pr.is_none());
+        assert!(table.table_layout.ordinary_flow);
+    }
+
+    #[test]
+    fn positioned_tables_without_established_doc_display_fail_closed() {
+        // sprmTDyaAbs zero is the inline vertical alignment value.
+        let error = positioned(&[(0x360d, &[0x50]), (0x940e, &721i16.to_le_bytes())])
+            .err()
+            .unwrap();
+        assert!(error.contains("inline vertical"), "{error}");
+        // The DOC counterpart of the MS-OI29500 2.1.162 ignored tblpPr.
+        for x in [0i16, 1] {
+            let error = positioned(&[
+                (0x360d, &[0x10]),
+                (0x940e, &x.to_le_bytes()),
+                (0x940f, &1i16.to_le_bytes()),
+                (0x9410, &180u16.to_le_bytes()),
+            ])
+            .err()
+            .unwrap();
+            assert!(error.contains("zero-offset"), "{error}");
+        }
+        // A paragraph-relative vertical anchor is outside that exception.
+        assert!(positioned(&[(0x360d, &[0x20]), (0x940f, &1i16.to_le_bytes())]).is_ok());
     }
 
     #[test]

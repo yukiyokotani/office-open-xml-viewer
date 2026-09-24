@@ -170,6 +170,15 @@ impl Border {
         )
     }
 
+    /// True for the documented no-border values: NilBrc/Brc80MayBeNil and a
+    /// border type of zero (none). A cleared diagonal equals its absence.
+    #[cfg(feature = "direct-doc")]
+    pub(in crate::doc) fn is_cleared(&self) -> bool {
+        self.facts
+            .as_ref()
+            .is_none_or(|facts| matches!(facts.style.as_str(), "none" | "nil"))
+    }
+
     /// Table/cell border projection matching the current DOCX parser's
     /// `BorderSpec` contract. Spacing, shadow and frame remain available to
     /// paragraph typography, but `BorderSpec` has no fields for them.

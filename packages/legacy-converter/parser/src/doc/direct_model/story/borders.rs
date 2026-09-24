@@ -316,23 +316,31 @@ fn resolve_row(
         .flatten()
         .copied();
     let has_old_direct = direct.clone().any(table::PreparedBorder::is_old);
-    let has_nil_direct = direct.clone().any(table::PreparedBorder::is_nil);
-    let has_diagonal_direct = row
-        .cells
-        .iter()
-        .any(|cell| cell.prepared_borders[4].is_some() || cell.prepared_borders[5].is_some());
+    // [MS-DOC] 2.9.20/2.9.157: a direct NilBrc states that the cells have no
+    // border on that side. It is an ordinary direct value above the table
+    // style (projected as an explicit "nil" edge), and a Nil diagonal is the
+    // same as the default absence of a diagonal. Only drawn diagonals, which
+    // the cell model cannot carry, stay gated.
+    let has_diagonal_direct = row.cells.iter().any(|cell| {
+        cell.prepared_borders[4..]
+            .iter()
+            .flatten()
+            .any(|border| !border.is_nil())
+    });
     let has_tc80 = row
         .cells
         .iter()
         .any(|cell| cell.borders.iter().any(Option::is_some));
     let selected = context.table_style.is_some();
     let border_style_interaction = has_style || row.border_tistd_count > 0;
+    // A selected style without border values leaves right-to-left rows with
+    // the same direct-border cascade as an unstyled row; only style borders
+    // under RTL remain unverified.
     if border_style_interaction
         && (has_tc80
             || has_old_direct
-            || has_nil_direct
             || has_diagonal_direct
-            || ((has_style || has_direct) && row.bidi)
+            || (has_style && row.bidi)
             || ((has_style || has_direct) && row.border_tistd_count > 1))
     {
         formatting.unsupported_table_properties = true;
