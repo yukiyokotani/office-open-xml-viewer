@@ -132,6 +132,36 @@ describe('native reference font vertical layout', () => {
     }
   });
 
+  it('uses a loaded application CSS weight range only for the weights it covers', () => {
+    const loadedFace = {
+      family: 'Calibri', weight: '100 600', style: 'normal', status: 'loaded',
+    } as FontFace;
+    vi.stubGlobal('document', {
+      fonts: { [Symbol.iterator]: function* () { yield loadedFace; } },
+    });
+    try {
+      const layoutServices = services(undefined, context, 'Calibri');
+      const regular = layoutServices.text.resolve({
+        fonts: { ascii: 'Calibri' }, slot: 'ascii', weight: 400, style: 'normal',
+      });
+      const bold = layoutServices.text.resolve({
+        fonts: { ascii: 'Calibri' }, slot: 'ascii', weight: 700, style: 'normal',
+      });
+      expect(regular.source).toBe('css');
+      expect(bold.source).toBe('native');
+      const segment = buildSegments([{
+        type: 'text', text: 'A', fontFamily: 'Calibri', fontSize: 10,
+        bold: false, italic: false, underline: false, strikethrough: false,
+      }] as DocRun[], { pageIndex: 0, totalPages: 1, layoutServices })[0] as LayoutTextSeg;
+      expect(segment.referenceFontVerticalMetric).toBeUndefined();
+      const line = layoutLines(context, [segment], 100, 0, 1)[0]!;
+      expect(line.ascent).toBe(8);
+      expect(line.descent).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not treat an unloaded CSS declaration as a selected face', () => {
     const unloadedFace = {
       family: 'Calibri', weight: '400', style: 'normal', status: 'unloaded',

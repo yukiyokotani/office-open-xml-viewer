@@ -2,6 +2,7 @@ import { type CjkLang } from '@silurus/ooxml-core';
 import {
   activeFontSet,
   canvasFontString,
+  fontFaceWeightCovers,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { OfficeFontFallbackRoute } from '@silurus/ooxml-core';
@@ -73,24 +74,27 @@ export function createProductionLayoutServices(
     const style = face.style.trim().toLocaleLowerCase('en-US');
     return style === 'normal' || style === 'italic' ? style : null;
   };
-  const loadedFaceWeight = (face: LoadedFontFaceRecord): number | null => {
+  const loadedFaceWeights = (face: LoadedFontFaceRecord): number[] => {
     const weight = face.weight.trim().toLocaleLowerCase('en-US');
-    if (weight === 'normal') return 400;
-    if (weight === 'bold') return 700;
-    if (!/^\d+$/.test(weight)) return null;
-    const numeric = Number(weight);
-    return numeric >= 100 && numeric <= 900 ? numeric : null;
+    if (weight === 'normal') return [400];
+    if (weight === 'bold') return [700];
+    if (/^\d+$/.test(weight)) {
+      const numeric = Number(weight);
+      return numeric >= 100 && numeric <= 900 ? [numeric] : [];
+    }
+    // WML exposes regular/bold tuples. A loaded CSS variable face may cover
+    // both; use the same descriptor rule as the local-face preflight.
+    return [400, 700].filter((tupleWeight) => fontFaceWeightCovers(weight, tupleWeight));
   };
   const loadedFaces = (faces: readonly LoadedFontFaceRecord[]) => faces.flatMap((face) => {
     if (face.status !== 'loaded') return [];
-    const weight = loadedFaceWeight(face);
     const style = loadedFaceStyle(face);
-    return weight == null || style == null ? [] : [{
+    return style == null ? [] : loadedFaceWeights(face).map((weight) => ({
       family: normalizedFaceFamily(face.family),
       displayFamily: displayFaceFamily(face.family),
       weight,
       style,
-    }];
+    }));
   });
   const inventory: FontInventoryFace[] = (options.embeddedRoutes ?? []).map((route) => ({
       requestedFamily: route.requestedFamily,

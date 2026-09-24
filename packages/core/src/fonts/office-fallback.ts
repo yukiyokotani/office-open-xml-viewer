@@ -80,19 +80,25 @@ function routeKey(tuple: Tuple): string {
     ? family : `${family}:${tuple.weight}:${tuple.style}`;
 }
 
+/** Whether a loaded CSS face advertises the requested numeric weight. A
+ * variable face may cover several WML tuples, while a scalar face covers one. */
+export function fontFaceWeightCovers(descriptor: string, weight: number): boolean {
+  const normalized = descriptor.trim().toLowerCase();
+  if (normalized === 'normal') return weight === 400;
+  if (normalized === 'bold') return weight === 700;
+  const range = /^(\d+)(?:\s+(\d+))?$/u.exec(normalized);
+  if (!range) return false;
+  const lower = Number(range[1]);
+  const upper = Number(range[2] ?? range[1]);
+  return lower <= weight && weight <= upper;
+}
+
 function loadedFaceCoversTuple(face: FontFace, tuple: Tuple): boolean {
   if (face.status !== 'loaded'
     || normalizeLocalFontMetricFamily(face.family.replace(/^(['"])(.*)\1$/u, '$2'))
       !== normalizeLocalFontMetricFamily(tuple.family)
     || face.style.trim().toLowerCase() !== tuple.style) return false;
-  const descriptor = face.weight.trim().toLowerCase();
-  if (descriptor === 'normal') return tuple.weight === 400;
-  if (descriptor === 'bold') return tuple.weight === 700;
-  const range = /^(\d+)(?:\s+(\d+))?$/u.exec(descriptor);
-  if (!range) return false;
-  const lower = Number(range[1]);
-  const upper = Number(range[2] ?? range[1]);
-  return lower <= tuple.weight && tuple.weight <= upper;
+  return fontFaceWeightCovers(face.weight, tuple.weight);
 }
 
 /** ECMA-376 font names identify requested families, not transferable font

@@ -16,6 +16,8 @@ type InternalRenderedFontAxes = Readonly<{
   langEastAsia?: string;
   fontFamilyEastAsia?: string | null;
   fontFamilyCs?: string | null;
+  boldCs?: boolean;
+  italicCs?: boolean;
 }>;
 
 /** One rendered string and every authored font family that can supply it.
@@ -92,8 +94,10 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
       text: run.text,
       eastAsiaLanguage: text.langEastAsia,
       fontFamilies: [run.fontFamilyCs],
-      bold: run.bold,
-      italic: run.italic,
+      // ECMA-376 §17.3.2.3/§17.3.2.17: bCs/iCs are independent of b/i.
+      // Probe the tuple that complex-script paint actually requests.
+      bold: run.boldCs ?? false,
+      italic: run.italicCs ?? false,
     };
   } else if (run.type === 'field') {
     const field = run as FieldRun & InternalRenderedFontAxes;
@@ -109,8 +113,8 @@ function* runUsages(run: DocRun): Generator<DocxRenderedTextUsage> {
       text: field.fallbackText,
       eastAsiaLanguage: field.langEastAsia,
       fontFamilies: [field.fontFamilyCs],
-      bold: field.bold,
-      italic: field.italic,
+      bold: field.boldCs ?? false,
+      italic: field.italicCs ?? false,
     };
   } else if (run.type === 'shape') {
     yield* shapeTextUsages(run);

@@ -158,6 +158,7 @@ export {
 // SCRIPT_GOOGLE_FONTS below.
 export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
 export {
+  fontFaceWeightCovers,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type OfficeFontFallbackRequest,
