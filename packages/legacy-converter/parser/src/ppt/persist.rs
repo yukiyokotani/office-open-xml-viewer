@@ -15,6 +15,7 @@ pub(super) struct PresentationStorage<R, S, B> {
     pub fonts: Vec<String>,
     pub schemes: Vec<Option<scheme::Scheme>>,
     pub image_entries: Vec<R>,
+    pub ole_objects: media::OleCatalog,
     pub backgrounds: Vec<Option<B>>,
     pub object_masters: Vec<std::rc::Rc<[RecordSpan]>>,
     pub size: (u32, u32),
@@ -36,6 +37,7 @@ impl OwnedPresentation {
                     .map(|style| style.map(|span| span.view(document)).transpose())
                     .collect::<Result<_, _>>())
                 .collect::<Result<_, _>>()?,
+            ole_objects: self.ole_objects,
             image_entries: self.image_entries.into_iter()
                 .map(|record| record.view(document)).collect::<Result<_, _>>()?,
             shape_masters: self.shape_masters,
@@ -322,6 +324,7 @@ pub(super) fn resolve_owned(
             .map(|(slide, _)| schemes.background(document, slide, budget))
             .collect::<Result<_, _>>()?,
         image_entries: media::catalog_spans(document, &child_spans, budget)?,
+        ole_objects: media::ole_catalog(document, &child_spans, budget),
         text_masters: slides
             .iter()
             .map(|(slide, _)| schemes.text_master(slide.view(document)?, budget))

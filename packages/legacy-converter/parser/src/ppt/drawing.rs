@@ -342,6 +342,8 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
         let mut style9 = None;
         let mut tags_seen = false;
         let mut placeholder = None;
+        let mut ole_ref = None;
+        let mut recolor = None;
         let mut tertiary_seen = false;
         let mut props = PropertiesStorage::<C>::default();
         for child in source.children(&record, budget)? {
@@ -403,6 +405,28 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
                             tags_seen = true;
                             style9 = source.style(&atom, budget)?;
                         }
+                        if atom_kind == 0x0bc1 {
+                            // MS-PPT 2.7.7: recVer 0, recLen 4. The reference is
+                            // only an identifier; it is resolved, never followed
+                            // into object storage.
+                            if ole_ref.is_some() || atom_version != 0 || atom_len != 4 {
+                                return Err(unsupported("invalid PowerPoint ExObjRefAtom"));
+                            }
+                            ole_ref =
+                                Some(source.with_record(&atom, |view| u32_at(view.payload, 0))?);
+                            continue;
+                        }
+                        if atom_kind == 0x0fe7 {
+                            // MS-PPT 2.7.9: a 12-byte fixed part precedes the
+                            // entries; bit 0 of the first field is fShouldRecolor.
+                            if recolor.is_some() || atom_version != 0 || atom_len < 12 {
+                                return Err(unsupported("invalid PowerPoint RecolorInfoAtom"));
+                            }
+                            recolor = Some(
+                                source.with_record(&atom, |view| Ok(view.payload[0] & 1 != 0))?,
+                            );
+                            continue;
+                        }
                         if atom_kind != 3011 {
                             continue;
                         }
@@ -432,7 +456,11 @@ impl<R: Clone, C: Default + Clone, S> ShapeStorage<R, C, S> {
             textbox,
             style9,
             placeholder,
-            props,
+            props: PropertiesStorage {
+                ole_ref,
+                recolor: recolor.unwrap_or(false),
+                ..props
+            },
         })
     }
 }
@@ -451,6 +479,16 @@ impl<'a> Shape<'a> {
 impl<R, C, S> ShapeStorage<R, C, S> {
     fn omitted(&self) -> bool {
         self.flags & (8 | 16 | 1024) != 0 || self.props.script
+    }
+    /// Direct-model omission. Unlike the byte converter, an OLE shape
+    /// (fOleShape, MS-ODRAW 2.2.40) is not omitted: it is a picture frame whose
+    /// pib names the BLIP to display (MS-ODRAW 2.3.23.5), and the direct model
+    /// either shows that stored presentation picture or rejects the shape.
+    fn direct_omitted(&self) -> bool {
+        self.flags & (8 | 1024) != 0 || self.props.script
+    }
+    fn is_ole(&self) -> bool {
+        self.flags & 16 != 0
     }
     fn master(&self) -> Option<u32> {
         (self.flags & 0x20 != 0).then_some(self.props.master.unwrap_or(0))
@@ -484,6 +522,18 @@ struct PropertiesStorage<T> {
     script: bool,
     master: Option<u32>,
     picture: u32,
+    /// pib_complex (MS-ODRAW 2.3.23.6): a picture named by file, not a BLIP.
+    picture_linked: bool,
+    /// First non-default MS-ODRAW 2.3.23 display adjustment, if any. The
+    /// presentation model has no brightness, contrast, transparent-color,
+    /// recolor or gray/bilevel picture effects, so the direct model rejects it.
+    picture_adjustment: Option<&'static str>,
+    /// MS-PPT 2.7.7 ExObjRefAtom from the shape's client data: the external
+    /// object behind an OLE shape.
+    ole_ref: Option<u32>,
+    /// MS-PPT 2.7.9 RecolorInfoAtom.fShouldRecolor from the shape's client
+    /// data: metafile color remapping of the displayed picture.
+    recolor: bool,
     crop: [i64; 4],
     paint: paint::Paint,
     rotation: i64,
@@ -506,6 +556,10 @@ impl<T> Default for PropertiesStorage<T> {
             script: false,
             master: None,
             picture: 0,
+            picture_linked: false,
+            picture_adjustment: None,
+            ole_ref: None,
+            recolor: false,
             crop: [0; 4],
             paint: paint::Paint::default(),
             rotation: 0,
@@ -523,7 +577,22 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         if opid == 0x01bf && complex.is_none() {
             self.paint.tertiary_fill_boolean_property(value)?;
         }
+        if opid == 0x013f && complex.is_none() {
+            self.blip_booleans(value);
+        }
         Ok(())
+    }
+
+    /// MS-ODRAW 2.3.23.35: fPictureGray is bit 2 and fPictureBiLevel bit 1,
+    /// each honored only with its use bit (18 and 17). Other Blip Booleans
+    /// (hit testing, looping, active OLE server) do not change the display.
+    fn blip_booleans(&mut self, value: u32) {
+        if value & (1 << 18) != 0 && value & (1 << 2) != 0 {
+            self.picture_adjustment.get_or_insert("grayscale");
+        }
+        if value & (1 << 17) != 0 && value & (1 << 1) != 0 {
+            self.picture_adjustment.get_or_insert("black-and-white");
+        }
     }
 
     fn apply_primary(&mut self, opid: u16, value: u32, complex: Option<T>) -> Result<(), String> {
@@ -550,6 +619,10 @@ impl<T: Default + Clone> PropertiesStorage<T> {
         if let Some(complex) = complex {
             if opid & 0x3fff == 0x197 {
                 self.gradient.set(complex);
+                return Ok(());
+            }
+            if opid & 0x3fff == 0x104 {
+                self.picture_linked = true;
                 return Ok(());
             }
             if matches!(opid & 0x3fff, 0x145..=0x150) {
@@ -585,6 +658,27 @@ impl<T: Default + Clone> PropertiesStorage<T> {
             }
             // MS-ODRAW hspMaster is a scalar MSOSPID, not a BLIP index.
             0x301 => self.master = Some(value),
+            // MS-ODRAW 2.3.23.10-12 and 24-32: defaults are no transparent
+            // color, contrast 0x10000, brightness 0, no recolor color and an
+            // MSOTINTSHADE of 0x20000000 for the Ext modifiers.
+            0x107 | 0x115 | 0x11a | 0x11b if value != 0xffff_ffff => {
+                self.picture_adjustment
+                    .get_or_insert(if opid == 0x107 || opid == 0x115 {
+                        "transparent color"
+                    } else {
+                        "recolor"
+                    });
+            }
+            0x117 | 0x11d if value != 0x2000_0000 => {
+                self.picture_adjustment.get_or_insert("color modification");
+            }
+            0x108 if value != 0x10000 => {
+                self.picture_adjustment.get_or_insert("contrast");
+            }
+            0x109 if value != 0 => {
+                self.picture_adjustment.get_or_insert("brightness");
+            }
+            0x13f => self.blip_booleans(value),
             // MS-ODRAW crop order: top, bottom, left, right. Signed 16.16
             // fractions become DrawingML 1/1000 percentages without clamping.
             0x100..=0x103 => {

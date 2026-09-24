@@ -127,6 +127,18 @@ margin or indentation and positive paragraph before/after percentages. Its
 explicit unsupported diagnostics are authoritative; conversion support does
 not imply direct-reader support.
 
+The direct reader shows an embedded OLE object, such as an Excel or Graph
+chart, as the presentation picture the file stores for it: an OLE shape is a
+picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
+2.3.23.5), resolved through the shape's `ExObjRefAtom` to the document's
+external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
+read or activated. PowerPoint's own PDF exports show that stored picture
+unchanged for embedded objects drawn as content. Icon or thumbnail aspects,
+linked objects and ActiveX controls, pictures without a supported BLIP,
+picture brightness/contrast/transparent-color/recolor/grayscale/black-and-white
+adjustments, and pattern, texture or non-stretched picture fills are rejected
+instead of being drawn without them.
+
 ## Experimental direct XLS source
 
 Like DOC and PPT, XLS is a per-format opt-in. XLS applications can import
@@ -2289,14 +2301,14 @@ be closed before an experimental release.
 | XLS | Formula text is not decompiled from Ptg tokens, so volatile functions are not recalculated as Excel does at export | 2 |
 | XLS | Clip-art pictures, text boxes, strikethrough and one vertical merge are missing | 1 to 3 each |
 | PPT | Only seven MS-ODRAW shape types map to presets; other autoshapes render as unfilled rectangles | several |
-| PPT | Native/OLE charts are missing | 3 |
+| PPT | ~~Native/OLE charts are missing~~ Resolved: embedded OLE objects show their stored presentation picture (bfc835d3) | 3 |
 | PPT | ~~Rotation by multiples of 90 degrees and combined flips use the wrong bounds or order~~ Resolved from the 120-case PowerPoint control (aa9dc5c1) | 1 |
 | PPT | ~~Slide gradient backgrounds~~ linear/scaled/two-colour/translucent shades resolved (95b74d19); path (5, 6) and title (8) shades now fail closed. Bullets, letter spacing and autofit are missing | several |
+| PPT | ~~Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour~~ Resolved (ef41f03a) | several |
 | PPT | Custom geometry with per-path fill/stroke flags is rejected; the PPTX model has no per-path `fill`/`stroke` (ECMA-376 §20.1.9.15), a generic PPTX gap | 1 |
 | PPT | Unmapped shape types without text are dropped silently and with text lose their fill; must fail closed once the preset mapping lands | several |
-| PPT | Gradients on rotated shapes (or inside rotated/flipped groups) are replaced by the solid fill colour | several |
+| PPT | Picture adjustments (washout, grayscale, black-and-white, transparent color), pattern/texture fills, and OLE icons, links and controls are rejected | several |
 | PPT | Implicit paragraph margin/indent and percentage spacing are rejected | 12 of 34 load failures |
-| PPT | A spurious striped artifact is drawn near a slide edge | 1 |
 | DOC | 55 of 59 samples are rejected (formatting, notes, fields, positioned tables, drawings, header pictures, non-PNG/JPEG images, list ancestry, FIB version, language ID) | 55 |
 | DOC | Picture washout/brightness and space-before after a page break differ from Word | 2 |
 
