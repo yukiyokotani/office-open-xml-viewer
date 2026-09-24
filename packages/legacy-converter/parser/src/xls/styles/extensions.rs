@@ -77,22 +77,28 @@ impl Extensions {
                     // evidence. Keep those four colors' original BIFF fallback
                     // until varied Office probes establish an approved mapping.
                     // Do not guess a swap or let unresolved indices inflate ZIPs.
-                    if owned
-                        && color_type == 3
-                        && u16_at(value, 2)? == 0
-                        && (4..=11).contains(&u32_at(value, 4)?)
-                    {
+                    // nTintShade has no stated scale in 2.5.155. Excel writes
+                    // its standard tints as n/32767 (26213, 13106, 19660, -8191
+                    // and 16383 are 0.8, 0.4, 0.6, -0.25 and 0.5, the dominant
+                    // values in a local corpus of Excel-saved workbooks), and
+                    // the SpreadsheetML tint algorithm (ECMA-376 §18.8.19)
+                    // then applies to the base color.
+                    let tint = f64::from(u16_at(value, 2)? as i16) / 32767.0;
+                    if owned && color_type == 3 && (4..=11).contains(&u32_at(value, 4)?) {
                         if theme.is_none() {
                             theme = Some(super::super::theme::Colors::parse(records)?);
                         }
                         if let Some(argb) = theme.as_ref().unwrap().argb(u32_at(value, 4)?) {
-                            colors.insert(kind, ColorIdentity::Argb(argb));
+                            colors.insert(kind, ColorIdentity::Argb(tinted(argb, tint)));
                         }
                     }
-                    if color_type == 2 && u16_at(value, 2)? == 0 {
+                    if color_type == 2 {
                         colors.insert(
                             kind,
-                            ColorIdentity::Argb([value[7], value[4], value[5], value[6]]),
+                            ColorIdentity::Argb(tinted(
+                                [value[7], value[4], value[5], value[6]],
+                                tint,
+                            )),
                         );
                     }
                 } else if kind == 0x000f {
@@ -128,6 +134,23 @@ impl Extensions {
     pub(super) fn indent(&self, index: usize) -> Option<u16> {
         self.indents.get(&index).copied()
     }
+}
+
+/// Apply a SpreadsheetML tint (ECMA-376 §18.8.19) through the shared resolver.
+fn tinted(argb: [u8; 4], tint: f64) -> [u8; 4] {
+    use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
+    if tint == 0.0 {
+        return argb;
+    }
+    let Some(hex) = resolve_color(SpreadsheetColor::Argb(argb), Some(tint), &[]) else {
+        return argb;
+    };
+    let hex = hex.trim_start_matches('#');
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap_or(0);
+    if hex.len() < 6 {
+        return argb;
+    }
+    [argb[0], channel(0), channel(2), channel(4)]
 }
 
 // MS-OSHARED 2.4.3 MsoCrc32Compute: non-reflected MSB-first polynomial

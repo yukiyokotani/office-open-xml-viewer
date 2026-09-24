@@ -1164,6 +1164,50 @@ mod tests {
         assert_eq!(xml.matches("fontId=\"1\"").count(), 1);
     }
     #[test]
+    fn extended_color_tint_uses_the_spreadsheetml_tint_algorithm() {
+        let font = font();
+        let mut xf = [0; 20];
+        xf[17] = 6; // Solid fill and CellXF.fHasXFExt.
+        let mut crc = [0; 20];
+        crc[..2].copy_from_slice(&0x087cu16.to_le_bytes());
+        crc[14..16].copy_from_slice(&16u16.to_le_bytes());
+        crc[16..].copy_from_slice(&0x344d21a3u32.to_le_bytes());
+        let mut ext = vec![0; 20];
+        ext[..2].copy_from_slice(&0x087du16.to_le_bytes());
+        ext[14] = 1;
+        ext[18] = 1;
+        ext.extend_from_slice(&4u16.to_le_bytes());
+        ext.extend_from_slice(&20u16.to_le_bytes());
+        // RGB 808080 with nTintShade 16383 (tint 0.5, lighten toward white).
+        ext.extend_from_slice(&[2, 0]);
+        ext.extend_from_slice(&16383i16.to_le_bytes());
+        ext.extend_from_slice(&[0x80, 0x80, 0x80, 0xff]);
+        ext.extend_from_slice(&[0; 8]);
+        let mut records = vec![Record {
+            kind: 0x31,
+            offset: 0,
+            data: &font,
+        }];
+        records.extend((0..16).map(|_| Record {
+            kind: 0xe0,
+            offset: 0,
+            data: &xf,
+        }));
+        records.push(Record {
+            kind: 0x87c,
+            offset: 0,
+            data: &crc,
+        });
+        records.push(Record {
+            kind: 0x87d,
+            offset: 0,
+            data: &ext,
+        });
+        let xml = Styles::parse(&records).unwrap().xml().unwrap();
+        // HLS luminance 0.502 -> 0.502 * 0.5 + 0.5 = 0.751 (ECMA-376 §18.8.19).
+        assert!(xml.contains("<fgColor rgb=\"FFBFBFBF\"/>"), "{xml}");
+    }
+    #[test]
     fn checksum_bound_extended_indent_overrides_only_the_owned_cell_xf() {
         for value in [0u16, 15, 16, 250] {
             let font = font();
